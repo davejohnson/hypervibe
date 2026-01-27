@@ -1,0 +1,244 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
+import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
+import { getSecretStore } from '../adapters/secrets/secret-store.js';
+import { providerRegistry } from '../domain/registry/provider.registry.js';
+
+const connectionRepo = new ConnectionRepository();
+const auditRepo = new AuditRepository();
+
+/**
+ * Helper function to create an error response
+ */
+function errorResponse(error: string) {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({ success: false, error }),
+      },
+    ],
+  };
+}
+
+/**
+ * Helper function to create a success response
+ */
+function successResponse(data: Record<string, unknown>) {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({ success: true, ...data }),
+      },
+    ],
+  };
+}
+
+export function registerConnectionTools(server: McpServer): void {
+  // Get all registered provider names for the enum
+  const providerNames = providerRegistry.names();
+  if (providerNames.length === 0) {
+    throw new Error('No providers registered. Ensure adapters are imported before registering tools.');
+  }
+
+  server.tool(
+    'connection_create',
+    'Create or update a provider connection (e.g., Railway API token, Stripe keys, Cloudflare, SendGrid)',
+    {
+      provider: z.enum(providerNames as [string, ...string[]]).describe('Provider name'),
+      credentials: z.record(z.unknown()).describe('Provider-specific credentials object'),
+    },
+    async ({ provider, credentials }) => {
+      const secretStore = getSecretStore();
+
+      // Validate credentials using the provider's schema
+      const validation = providerRegistry.validateCredentials(provider, credentials);
+      if (!validation.success) {
+        return errorResponse(validation.error!);
+      }
+
+      // Encrypt credentials
+      const credentialsEncrypted = secretStore.encryptObject(validation.data);
+
+      // Upsert connection
+      const connection = connectionRepo.upsert({
+        provider,
+        credentialsEncrypted,
+      });
+
+      auditRepo.create({
+        action: 'connection.created',
+        resourceType: 'connection',
+        resourceId: connection.id,
+        details: { provider },
+      });
+
+      return successResponse({
+        message: `Connection for ${provider} saved. Use connection_verify to test it.`,
+        connection: {
+          id: connection.id,
+          provider: connection.provider,
+          status: connection.status,
+          createdAt: connection.createdAt,
+        },
+      });
+    }
+  );
+
+  server.tool(
+    'connection_verify',
+    'Verify that a provider connection works',
+    {
+      provider: z.enum(providerNames as [string, ...string[]]).describe('Provider name'),
+    },
+    async ({ provider }) => {
+      const connection = connectionRepo.findByProvider(provider);
+
+      if (!connection) {
+        return errorResponse(`No connection found for provider: ${provider}. Use connection_create first.`);
+      }
+
+      const secretStore = getSecretStore();
+      const registeredProvider = providerRegistry.get(provider);
+
+      if (!registeredProvider) {
+        return errorResponse(`Unknown provider: ${provider}`);
+      }
+
+      try {
+        const decryptedCreds = secretStore.decryptObject(connection.credentialsEncrypted);
+        const adapter = registeredProvider.factory(decryptedCreds);
+
+        // Check if adapter has a verify method
+        if (typeof (adapter as { verify?: () => Promise<unknown> }).verify !== 'function') {
+          // For providers without verify (like local, tunnel), just mark as verified
+          connectionRepo.updateStatus(connection.id, 'verified');
+          return successResponse({
+            message: `${provider} connection saved`,
+            status: 'verified',
+          });
+        }
+
+        // Call verify on the adapter
+        const result = await (adapter as { verify: () => Promise<{ success: boolean; error?: string; email?: string; accountId?: string }> }).verify();
+
+        if (result.success) {
+          connectionRepo.updateStatus(connection.id, 'verified');
+          auditRepo.create({
+            action: 'connection.verified',
+            resourceType: 'connection',
+            resourceId: connection.id,
+            details: { provider, email: result.email, accountId: result.accountId },
+          });
+
+          const displayName = registeredProvider.metadata.displayName;
+          let message = `${displayName} connection verified successfully`;
+          if (result.email) {
+            message += ` for ${result.email}`;
+          }
+
+          return successResponse({
+            message,
+            status: 'verified',
+            ...(result.email && { email: result.email }),
+            ...(result.accountId && { accountId: result.accountId }),
+          });
+        } else {
+          connectionRepo.updateStatus(connection.id, 'failed');
+          auditRepo.create({
+            action: 'connection.failed',
+            resourceType: 'connection',
+            resourceId: connection.id,
+            details: { provider, reason: result.error },
+          });
+
+          const helpUrl = registeredProvider.metadata.setupHelpUrl;
+          let errorMsg = `${registeredProvider.metadata.displayName} verification failed: ${result.error}`;
+          if (helpUrl) {
+            errorMsg += `. See ${helpUrl} for setup instructions.`;
+          }
+
+          return errorResponse(errorMsg);
+        }
+      } catch (error) {
+        connectionRepo.updateStatus(connection.id, 'failed');
+        auditRepo.create({
+          action: 'connection.failed',
+          resourceType: 'connection',
+          resourceId: connection.id,
+          details: { provider, error: String(error) },
+        });
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `Verification failed: ${error}`,
+                status: 'failed',
+              }),
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'connection_list',
+    'List all provider connections and available providers',
+    {},
+    async () => {
+      const connections = connectionRepo.findAll();
+      const allProviders = providerRegistry.all();
+
+      return successResponse({
+        count: connections.length,
+        connections: connections.map((c) => ({
+          id: c.id,
+          provider: c.provider,
+          status: c.status,
+          lastVerifiedAt: c.lastVerifiedAt,
+          createdAt: c.createdAt,
+        })),
+        availableProviders: allProviders.map((p) => ({
+          name: p.metadata.name,
+          displayName: p.metadata.displayName,
+          category: p.metadata.category,
+          setupHelpUrl: p.metadata.setupHelpUrl,
+        })),
+      });
+    }
+  );
+
+  server.tool(
+    'connection_delete',
+    'Delete a provider connection',
+    {
+      provider: z.enum(providerNames as [string, ...string[]]).describe('Provider name'),
+    },
+    async ({ provider }) => {
+      const connection = connectionRepo.findByProvider(provider);
+
+      if (!connection) {
+        return errorResponse(`No connection found for provider: ${provider}`);
+      }
+
+      connectionRepo.delete(connection.id);
+
+      auditRepo.create({
+        action: 'connection.deleted',
+        resourceType: 'connection',
+        resourceId: connection.id,
+        details: { provider },
+      });
+
+      return successResponse({
+        message: `Connection for ${provider} deleted`,
+      });
+    }
+  );
+}

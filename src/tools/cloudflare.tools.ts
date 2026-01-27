@@ -1,0 +1,597 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
+import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
+import { getSecretStore } from '../adapters/secrets/secret-store.js';
+import { CloudflareAdapter } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
+import type { CloudflareCredentials } from '../domain/entities/connection.entity.js';
+
+const connectionRepo = new ConnectionRepository();
+const auditRepo = new AuditRepository();
+
+function getCloudflareAdapter(): { adapter: CloudflareAdapter } | { error: string } {
+  const connection = connectionRepo.findByProvider('cloudflare');
+  if (!connection) {
+    return { error: 'No Cloudflare connection found. Use connection_create with provider=cloudflare first.' };
+  }
+
+  const secretStore = getSecretStore();
+  const credentials = secretStore.decryptObject<CloudflareCredentials>(connection.credentialsEncrypted);
+  const adapter = new CloudflareAdapter();
+  adapter.connect(credentials);
+
+  return { adapter };
+}
+
+export function registerCloudflareTools(server: McpServer): void {
+  server.tool(
+    'cloudflare_setup_help',
+    'Get instructions for creating a Cloudflare API token with the correct permissions',
+    {},
+    async () => {
+      const instructions = `# Cloudflare API Token Setup
+
+## Quick Setup (Recommended)
+
+1. Go to https://dash.cloudflare.com/profile/api-tokens
+2. Click **"Create Token"**
+3. Find **"Edit zone DNS"** template and click **"Use template"**
+4. Configure zone resources:
+   - **Zone Resources**: Select specific zones or "All zones"
+   - For production, scope to specific zones (e.g., example.com)
+5. Click **"Continue to summary"** → **"Create Token"**
+6. Copy the token (shown only once!)
+
+## What the Template Provides
+
+The "Edit zone DNS" template includes:
+
+| Permission | Level | Purpose |
+|------------|-------|---------|
+| Zone:Zone:Read | Zone | List zones, find zone by domain name |
+| Zone:DNS:Edit | Zone | Create, read, update, delete DNS records |
+
+## Manual Setup (If Needed)
+
+If you need to create the token manually:
+
+1. Click **"Create Custom Token"**
+2. Add these permissions:
+   - Zone → Zone → Read
+   - Zone → DNS → Edit
+3. Under **Zone Resources**, select which zones to grant access to
+4. (Optional) Add IP filtering or TTL for additional security
+
+## Token Security Tips
+
+- **Scope to specific zones** in production (don't use "All zones" unless necessary)
+- **Set a TTL** if the token is temporary (e.g., for testing)
+- **Add IP restrictions** if you have a static IP
+- Store the token securely - it's shown only once!
+
+## Verification
+
+After creating the token, verify it works:
+
+  connection_create provider=cloudflare apiToken=your_token_here
+  connection_verify provider=cloudflare`;
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            instructions,
+          }),
+        }],
+      };
+    }
+  );
+
+  server.tool(
+    'cloudflare_zones_list',
+    'List all domains (zones) in the Cloudflare account',
+    {},
+    async () => {
+      const result = getCloudflareAdapter();
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+
+      try {
+        const zones = await adapter.listZones();
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              count: zones.length,
+              zones: zones.map((z) => ({
+                id: z.id,
+                name: z.name,
+                status: z.status,
+                paused: z.paused,
+                nameServers: z.name_servers,
+              })),
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'cloudflare_dns_list',
+    'List DNS records for a domain. Provide either zoneId or domain name.',
+    {
+      zoneId: z.string().optional().describe('Cloudflare zone ID'),
+      domain: z.string().optional().describe('Domain name (e.g., example.com)'),
+      type: z.string().optional().describe('Filter by record type (A, AAAA, CNAME, TXT, MX, etc.)'),
+    },
+    async ({ zoneId, domain, type }) => {
+      if (!zoneId && !domain) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'Either zoneId or domain is required' }),
+          }],
+        };
+      }
+
+      const result = getCloudflareAdapter();
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+
+      try {
+        let resolvedZoneId = zoneId;
+
+        if (!resolvedZoneId && domain) {
+          const zone = await adapter.findZoneByName(domain);
+          if (!zone) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found in Cloudflare account` }),
+              }],
+            };
+          }
+          resolvedZoneId = zone.id;
+        }
+
+        const records = await adapter.listDnsRecords(resolvedZoneId!, type);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              zoneId: resolvedZoneId,
+              count: records.length,
+              records: records.map((r) => ({
+                id: r.id,
+                name: r.name,
+                type: r.type,
+                content: r.content,
+                proxied: r.proxied,
+                ttl: r.ttl,
+                priority: r.priority,
+              })),
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'cloudflare_dns_create',
+    'Create a DNS record',
+    {
+      zoneId: z.string().optional().describe('Cloudflare zone ID'),
+      domain: z.string().optional().describe('Domain name (e.g., example.com)'),
+      type: z.string().describe('Record type (A, AAAA, CNAME, TXT, MX, etc.)'),
+      name: z.string().describe('Record name (e.g., "www" or "mail.example.com")'),
+      content: z.string().describe('Record content (IP address, hostname, or text value)'),
+      ttl: z.number().optional().describe('TTL in seconds (1 = automatic)'),
+      proxied: z.boolean().optional().describe('Whether to proxy through Cloudflare (default: false)'),
+      priority: z.number().optional().describe('Priority (for MX records)'),
+    },
+    async ({ zoneId, domain, type, name, content, ttl, proxied, priority }) => {
+      if (!zoneId && !domain) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'Either zoneId or domain is required' }),
+          }],
+        };
+      }
+
+      const result = getCloudflareAdapter();
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+
+      try {
+        let resolvedZoneId = zoneId;
+
+        if (!resolvedZoneId && domain) {
+          const zone = await adapter.findZoneByName(domain);
+          if (!zone) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found in Cloudflare account` }),
+              }],
+            };
+          }
+          resolvedZoneId = zone.id;
+        }
+
+        const record = await adapter.createDnsRecord(resolvedZoneId!, {
+          type,
+          name,
+          content,
+          ttl,
+          proxied,
+          priority,
+        });
+
+        auditRepo.create({
+          action: 'cloudflare.dns_created',
+          resourceType: 'dns_record',
+          resourceId: record.id,
+          details: { name: record.name, type: record.type, content: record.content },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              message: `Created ${type} record for ${name}`,
+              record: {
+                id: record.id,
+                name: record.name,
+                type: record.type,
+                content: record.content,
+                proxied: record.proxied,
+                ttl: record.ttl,
+              },
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'cloudflare_dns_update',
+    'Update an existing DNS record',
+    {
+      zoneId: z.string().optional().describe('Cloudflare zone ID'),
+      domain: z.string().optional().describe('Domain name (e.g., example.com)'),
+      recordId: z.string().describe('DNS record ID to update'),
+      type: z.string().optional().describe('New record type'),
+      name: z.string().optional().describe('New record name'),
+      content: z.string().optional().describe('New record content'),
+      ttl: z.number().optional().describe('New TTL in seconds'),
+      proxied: z.boolean().optional().describe('Whether to proxy through Cloudflare'),
+      priority: z.number().optional().describe('New priority (for MX records)'),
+    },
+    async ({ zoneId, domain, recordId, type, name, content, ttl, proxied, priority }) => {
+      if (!zoneId && !domain) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'Either zoneId or domain is required' }),
+          }],
+        };
+      }
+
+      const result = getCloudflareAdapter();
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+
+      try {
+        let resolvedZoneId = zoneId;
+
+        if (!resolvedZoneId && domain) {
+          const zone = await adapter.findZoneByName(domain);
+          if (!zone) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found in Cloudflare account` }),
+              }],
+            };
+          }
+          resolvedZoneId = zone.id;
+        }
+
+        const updates: Record<string, unknown> = {};
+        if (type !== undefined) updates.type = type;
+        if (name !== undefined) updates.name = name;
+        if (content !== undefined) updates.content = content;
+        if (ttl !== undefined) updates.ttl = ttl;
+        if (proxied !== undefined) updates.proxied = proxied;
+        if (priority !== undefined) updates.priority = priority;
+
+        const record = await adapter.updateDnsRecord(resolvedZoneId!, recordId, updates);
+
+        auditRepo.create({
+          action: 'cloudflare.dns_updated',
+          resourceType: 'dns_record',
+          resourceId: record.id,
+          details: { name: record.name, type: record.type, content: record.content },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              message: `Updated DNS record ${recordId}`,
+              record: {
+                id: record.id,
+                name: record.name,
+                type: record.type,
+                content: record.content,
+                proxied: record.proxied,
+                ttl: record.ttl,
+              },
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'cloudflare_dns_delete',
+    'Delete a DNS record',
+    {
+      zoneId: z.string().optional().describe('Cloudflare zone ID'),
+      domain: z.string().optional().describe('Domain name (e.g., example.com)'),
+      recordId: z.string().describe('DNS record ID to delete'),
+    },
+    async ({ zoneId, domain, recordId }) => {
+      if (!zoneId && !domain) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'Either zoneId or domain is required' }),
+          }],
+        };
+      }
+
+      const result = getCloudflareAdapter();
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+
+      try {
+        let resolvedZoneId = zoneId;
+
+        if (!resolvedZoneId && domain) {
+          const zone = await adapter.findZoneByName(domain);
+          if (!zone) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found in Cloudflare account` }),
+              }],
+            };
+          }
+          resolvedZoneId = zone.id;
+        }
+
+        await adapter.deleteDnsRecord(resolvedZoneId!, recordId);
+
+        auditRepo.create({
+          action: 'cloudflare.dns_deleted',
+          resourceType: 'dns_record',
+          resourceId: recordId,
+          details: { zoneId: resolvedZoneId },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              message: `Deleted DNS record ${recordId}`,
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'cloudflare_dns_upsert',
+    'Create or update a DNS record by name and type (idempotent operation)',
+    {
+      zoneId: z.string().optional().describe('Cloudflare zone ID'),
+      domain: z.string().optional().describe('Domain name (e.g., example.com)'),
+      type: z.string().describe('Record type (A, AAAA, CNAME, TXT, MX, etc.)'),
+      name: z.string().describe('Record name (e.g., "www" or "mail.example.com")'),
+      content: z.string().describe('Record content (IP address, hostname, or text value)'),
+      ttl: z.number().optional().describe('TTL in seconds (1 = automatic)'),
+      proxied: z.boolean().optional().describe('Whether to proxy through Cloudflare (default: false)'),
+      priority: z.number().optional().describe('Priority (for MX records)'),
+    },
+    async ({ zoneId, domain, type, name, content, ttl, proxied, priority }) => {
+      if (!zoneId && !domain) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'Either zoneId or domain is required' }),
+          }],
+        };
+      }
+
+      const result = getCloudflareAdapter();
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+
+      try {
+        let resolvedZoneId = zoneId;
+
+        if (!resolvedZoneId && domain) {
+          const zone = await adapter.findZoneByName(domain);
+          if (!zone) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found in Cloudflare account` }),
+              }],
+            };
+          }
+          resolvedZoneId = zone.id;
+        }
+
+        const { record, action } = await adapter.upsertDnsRecord(
+          resolvedZoneId!,
+          name,
+          type,
+          content,
+          { ttl, proxied, priority }
+        );
+
+        auditRepo.create({
+          action: `cloudflare.dns_${action}`,
+          resourceType: 'dns_record',
+          resourceId: record.id,
+          details: { name: record.name, type: record.type, content: record.content },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              action,
+              message: action === 'created'
+                ? `Created ${type} record for ${name}`
+                : `Updated ${type} record for ${name}`,
+              record: {
+                id: record.id,
+                name: record.name,
+                type: record.type,
+                content: record.content,
+                proxied: record.proxied,
+                ttl: record.ttl,
+              },
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+}

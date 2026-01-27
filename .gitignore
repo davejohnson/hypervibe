@@ -137,3 +137,11 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Project-specific
+.devbox/
+data/*.db
+data/*.db-journal
+data/*.db-shm
+data/*.db-wal
+data/.secret-key
