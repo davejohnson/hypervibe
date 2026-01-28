@@ -136,6 +136,40 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_integration_keys_provider ON integration_keys(provider);
     `,
   },
+  {
+    version: 3,
+    name: 'scoped_connections',
+    up: `
+      -- Add scope column to connections table for scoped tokens
+      -- Scope allows fine-grained tokens for specific repos/domains with global fallback
+      -- Examples: "davejohnson/infraprint", "clientorg/*", "infraprint.dev"
+
+      -- Create new table with scope column and updated unique constraint
+      CREATE TABLE IF NOT EXISTS connections_new (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        scope TEXT DEFAULT NULL,
+        credentials_encrypted TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        last_verified_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(provider, scope)
+      );
+
+      -- Copy existing data (all existing connections become global with scope = NULL)
+      INSERT INTO connections_new (id, provider, scope, credentials_encrypted, status, last_verified_at, created_at, updated_at)
+      SELECT id, provider, NULL, credentials_encrypted, status, last_verified_at, created_at, updated_at
+      FROM connections;
+
+      -- Drop old table and rename new one
+      DROP TABLE connections;
+      ALTER TABLE connections_new RENAME TO connections;
+
+      -- Create index for efficient scope lookups
+      CREATE INDEX IF NOT EXISTS idx_connections_provider_scope ON connections(provider, scope);
+    `,
+  },
 ];
 
 export class SqliteAdapter {

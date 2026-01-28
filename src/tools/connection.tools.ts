@@ -49,8 +49,9 @@ export function registerConnectionTools(server: McpServer): void {
     {
       provider: z.enum(providerNames as [string, ...string[]]).describe('Provider name'),
       credentials: z.record(z.unknown()).describe('Provider-specific credentials object'),
+      scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global fallback.'),
     },
-    async ({ provider, credentials }) => {
+    async ({ provider, credentials, scope }) => {
       const secretStore = getSecretStore();
 
       // Validate credentials using the provider's schema
@@ -65,6 +66,7 @@ export function registerConnectionTools(server: McpServer): void {
       // Upsert connection
       const connection = connectionRepo.upsert({
         provider,
+        scope: scope || null,
         credentialsEncrypted,
       });
 
@@ -72,14 +74,16 @@ export function registerConnectionTools(server: McpServer): void {
         action: 'connection.created',
         resourceType: 'connection',
         resourceId: connection.id,
-        details: { provider },
+        details: { provider, scope: scope || null },
       });
 
+      const scopeDisplay = scope || 'global';
       return successResponse({
-        message: `Connection for ${provider} saved. Use connection_verify to test it.`,
+        message: `Connection for ${provider} (${scopeDisplay}) saved. Use connection_verify to test it.`,
         connection: {
           id: connection.id,
           provider: connection.provider,
+          scope: connection.scope,
           status: connection.status,
           createdAt: connection.createdAt,
         },
@@ -92,12 +96,14 @@ export function registerConnectionTools(server: McpServer): void {
     'Verify that a provider connection works',
     {
       provider: z.enum(providerNames as [string, ...string[]]).describe('Provider name'),
+      scope: z.string().optional().describe('Optional scope to verify a specific scoped connection. Leave empty to verify the global connection.'),
     },
-    async ({ provider }) => {
-      const connection = connectionRepo.findByProvider(provider);
+    async ({ provider, scope }) => {
+      const connection = connectionRepo.findByProviderAndScope(provider, scope || null);
 
+      const scopeDisplay = scope || 'global';
       if (!connection) {
-        return errorResponse(`No connection found for provider: ${provider}. Use connection_create first.`);
+        return errorResponse(`No connection found for provider: ${provider} (${scopeDisplay}). Use connection_create first.`);
       }
 
       const secretStore = getSecretStore();
@@ -116,7 +122,7 @@ export function registerConnectionTools(server: McpServer): void {
           // For providers without verify (like local, tunnel), just mark as verified
           connectionRepo.updateStatus(connection.id, 'verified');
           return successResponse({
-            message: `${provider} connection saved`,
+            message: `${provider} connection (${scopeDisplay}) saved`,
             status: 'verified',
           });
         }
@@ -130,11 +136,11 @@ export function registerConnectionTools(server: McpServer): void {
             action: 'connection.verified',
             resourceType: 'connection',
             resourceId: connection.id,
-            details: { provider, email: result.email, accountId: result.accountId },
+            details: { provider, scope: scope || null, email: result.email, accountId: result.accountId },
           });
 
           const displayName = registeredProvider.metadata.displayName;
-          let message = `${displayName} connection verified successfully`;
+          let message = `${displayName} connection (${scopeDisplay}) verified successfully`;
           if (result.email) {
             message += ` for ${result.email}`;
           }
@@ -151,7 +157,7 @@ export function registerConnectionTools(server: McpServer): void {
             action: 'connection.failed',
             resourceType: 'connection',
             resourceId: connection.id,
-            details: { provider, reason: result.error },
+            details: { provider, scope: scope || null, reason: result.error },
           });
 
           const helpUrl = registeredProvider.metadata.setupHelpUrl;
@@ -168,7 +174,7 @@ export function registerConnectionTools(server: McpServer): void {
           action: 'connection.failed',
           resourceType: 'connection',
           resourceId: connection.id,
-          details: { provider, error: String(error) },
+          details: { provider, scope: scope || null, error: String(error) },
         });
 
         return {
@@ -200,6 +206,7 @@ export function registerConnectionTools(server: McpServer): void {
         connections: connections.map((c) => ({
           id: c.id,
           provider: c.provider,
+          scope: c.scope ?? 'global',
           status: c.status,
           lastVerifiedAt: c.lastVerifiedAt,
           createdAt: c.createdAt,
@@ -219,12 +226,14 @@ export function registerConnectionTools(server: McpServer): void {
     'Delete a provider connection',
     {
       provider: z.enum(providerNames as [string, ...string[]]).describe('Provider name'),
+      scope: z.string().optional().describe('Optional scope to delete a specific scoped connection. Leave empty to delete the global connection.'),
     },
-    async ({ provider }) => {
-      const connection = connectionRepo.findByProvider(provider);
+    async ({ provider, scope }) => {
+      const connection = connectionRepo.findByProviderAndScope(provider, scope || null);
 
+      const scopeDisplay = scope || 'global';
       if (!connection) {
-        return errorResponse(`No connection found for provider: ${provider}`);
+        return errorResponse(`No connection found for provider: ${provider} (${scopeDisplay})`);
       }
 
       connectionRepo.delete(connection.id);
@@ -233,11 +242,11 @@ export function registerConnectionTools(server: McpServer): void {
         action: 'connection.deleted',
         resourceType: 'connection',
         resourceId: connection.id,
-        details: { provider },
+        details: { provider, scope: scope || null },
       });
 
       return successResponse({
-        message: `Connection for ${provider} deleted`,
+        message: `Connection for ${provider} (${scopeDisplay}) deleted`,
       });
     }
   );

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'tunnel' | 'local' | 'security';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'tunnel' | 'local' | 'security' | 'database' | 'appstore';
 
 export interface ProviderMetadata {
   name: string;

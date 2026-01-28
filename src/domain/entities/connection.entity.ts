@@ -5,6 +5,7 @@ export type ProviderType = 'railway' | 'local' | string;
 export interface Connection {
   id: string;
   provider: ProviderType;
+  scope: string | null;
   credentialsEncrypted: string;
   status: ConnectionStatus;
   lastVerifiedAt: Date | null;
@@ -14,6 +15,7 @@ export interface Connection {
 
 export interface CreateConnectionInput {
   provider: ProviderType;
+  scope?: string | null;
   credentialsEncrypted: string;
 }
 

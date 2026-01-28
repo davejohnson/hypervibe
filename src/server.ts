@@ -8,6 +8,9 @@ import './adapters/providers/sendgrid/sendgrid.adapter.js';
 import './adapters/providers/tunnel/tunnel.manager.js';
 import './adapters/providers/local/compose.generator.js';
 import './adapters/providers/recaptcha/recaptcha.adapter.js';
+import './adapters/providers/github/github.adapter.js';
+import './adapters/providers/database/database.adapter.js';
+import './adapters/providers/fastlane/fastlane.adapter.js';
 
 import { registerProjectTools } from './tools/project.tools.js';
 import { registerEnvironmentTools } from './tools/environment.tools.js';
@@ -25,6 +28,8 @@ import { registerRecaptchaTools } from './tools/recaptcha.tools.js';
 import { registerEnvTools } from './tools/env.tools.js';
 import { registerDbTools } from './tools/db.tools.js';
 import { registerSetupTools } from './tools/setup.tools.js';
+import { registerGitHubTools } from './tools/github.tools.js';
+import { registerFastlaneTools } from './tools/fastlane.tools.js';
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -49,6 +54,8 @@ export function createServer(): McpServer {
   registerEnvTools(server);
   registerDbTools(server);
   registerSetupTools(server);
+  registerGitHubTools(server);
+  registerFastlaneTools(server);
 
   return server;
 }

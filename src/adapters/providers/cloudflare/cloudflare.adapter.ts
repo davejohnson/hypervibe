@@ -229,6 +229,67 @@ export class CloudflareAdapter implements IDnsProvider {
     }
   }
 
+  /**
+   * Ensure a set of DNS records exist for a name+type combination.
+   * Creates missing records, deletes extra records, leaves matching records unchanged.
+   * Useful for multi-value records like GitHub Pages A records.
+   */
+  async ensureRecords(
+    zoneId: string,
+    name: string,
+    type: string,
+    contents: string[],
+    options?: { ttl?: number; proxied?: boolean }
+  ): Promise<{ created: string[]; deleted: string[]; unchanged: string[] }> {
+    // Get existing records for this name+type
+    const allRecords = await this.listDnsRecords(zoneId, type);
+    const existingRecords = allRecords.filter(
+      (r) => r.name === name || r.name === `${name}.${r.zone_name}`
+    );
+
+    const existingContents = new Set(existingRecords.map((r) => r.content));
+    const desiredContents = new Set(contents);
+
+    const created: string[] = [];
+    const deleted: string[] = [];
+    const unchanged: string[] = [];
+
+    // Create missing records
+    for (const content of contents) {
+      if (!existingContents.has(content)) {
+        try {
+          await this.createDnsRecord(zoneId, {
+            type,
+            name,
+            content,
+            ttl: options?.ttl,
+            proxied: options?.proxied,
+          });
+          created.push(content);
+        } catch (error) {
+          // Handle race condition where record was created between list and create
+          if (error instanceof Error && error.message.includes('already exists')) {
+            unchanged.push(content);
+          } else {
+            throw error;
+          }
+        }
+      } else {
+        unchanged.push(content);
+      }
+    }
+
+    // Delete extra records
+    for (const record of existingRecords) {
+      if (!desiredContents.has(record.content)) {
+        await this.deleteDnsRecord(zoneId, record.id);
+        deleted.push(record.content);
+      }
+    }
+
+    return { created, deleted, unchanged };
+  }
+
   // IDnsProvider interface methods (wrapping Cloudflare-specific methods)
 
   async listRecords(zoneId: string, type?: string): Promise<DnsRecord[]> {

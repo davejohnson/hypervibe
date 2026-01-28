@@ -9,8 +9,12 @@ import type { CloudflareCredentials } from '../domain/entities/connection.entity
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
 
-function getCloudflareAdapter(): { adapter: CloudflareAdapter } | { error: string } {
-  const connection = connectionRepo.findByProvider('cloudflare');
+/**
+ * Get a Cloudflare adapter, using scoped connection if available.
+ * @param scopeHint - Optional domain hint (e.g., "example.com") for finding scoped tokens
+ */
+function getCloudflareAdapter(scopeHint?: string): { adapter: CloudflareAdapter } | { error: string } {
+  const connection = connectionRepo.findBestMatch('cloudflare', scopeHint);
   if (!connection) {
     return { error: 'No Cloudflare connection found. Use connection_create with provider=cloudflare first.' };
   }
@@ -156,7 +160,7 @@ After creating the token, verify it works:
         };
       }
 
-      const result = getCloudflareAdapter();
+      const result = getCloudflareAdapter(domain);
       if ('error' in result) {
         return {
           content: [{
@@ -242,7 +246,7 @@ After creating the token, verify it works:
         };
       }
 
-      const result = getCloudflareAdapter();
+      const result = getCloudflareAdapter(domain);
       if ('error' in result) {
         return {
           content: [{
@@ -341,7 +345,7 @@ After creating the token, verify it works:
         };
       }
 
-      const result = getCloudflareAdapter();
+      const result = getCloudflareAdapter(domain);
       if ('error' in result) {
         return {
           content: [{
@@ -435,7 +439,7 @@ After creating the token, verify it works:
         };
       }
 
-      const result = getCloudflareAdapter();
+      const result = getCloudflareAdapter(domain);
       if ('error' in result) {
         return {
           content: [{
@@ -507,8 +511,9 @@ After creating the token, verify it works:
       ttl: z.number().optional().describe('TTL in seconds (1 = automatic)'),
       proxied: z.boolean().optional().describe('Whether to proxy through Cloudflare (default: false)'),
       priority: z.number().optional().describe('Priority (for MX records)'),
+      wwwRedirect: z.string().optional().describe('When setting up an apex domain, also create a www CNAME pointing to this target (e.g., user.github.io)'),
     },
-    async ({ zoneId, domain, type, name, content, ttl, proxied, priority }) => {
+    async ({ zoneId, domain, type, name, content, ttl, proxied, priority, wwwRedirect }) => {
       if (!zoneId && !domain) {
         return {
           content: [{
@@ -518,7 +523,7 @@ After creating the token, verify it works:
         };
       }
 
-      const result = getCloudflareAdapter();
+      const result = getCloudflareAdapter(domain);
       if ('error' in result) {
         return {
           content: [{
@@ -561,23 +566,75 @@ After creating the token, verify it works:
           details: { name: record.name, type: record.type, content: record.content },
         });
 
+        // Handle www redirect for apex domains
+        let wwwRecord = null;
+        let wwwAction = null;
+        if (wwwRedirect) {
+          // Check if this is an apex domain (only one dot, e.g., example.com)
+          const isApexDomain = name.split('.').length === 2;
+          if (isApexDomain) {
+            const wwwName = `www.${name}`;
+            const wwwResult = await adapter.upsertDnsRecord(
+              resolvedZoneId!,
+              wwwName,
+              'CNAME',
+              wwwRedirect,
+              { ttl, proxied: false } // www CNAME should not be proxied for proper redirect
+            );
+            wwwRecord = wwwResult.record;
+            wwwAction = wwwResult.action;
+
+            auditRepo.create({
+              action: `cloudflare.dns_${wwwAction}`,
+              resourceType: 'dns_record',
+              resourceId: wwwRecord.id,
+              details: { name: wwwRecord.name, type: wwwRecord.type, content: wwwRecord.content },
+            });
+          }
+        }
+
+        const records = [{
+          id: record.id,
+          name: record.name,
+          type: record.type,
+          content: record.content,
+          proxied: record.proxied,
+          ttl: record.ttl,
+        }];
+
+        if (wwwRecord) {
+          records.push({
+            id: wwwRecord.id,
+            name: wwwRecord.name,
+            type: wwwRecord.type,
+            content: wwwRecord.content,
+            proxied: wwwRecord.proxied,
+            ttl: wwwRecord.ttl,
+          });
+        }
+
+        const messages = [
+          action === 'created'
+            ? `Created ${type} record for ${name}`
+            : `Updated ${type} record for ${name}`,
+        ];
+        if (wwwRecord) {
+          messages.push(
+            wwwAction === 'created'
+              ? `Created www CNAME redirect to ${wwwRedirect}`
+              : `Updated www CNAME redirect to ${wwwRedirect}`
+          );
+        }
+
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: true,
               action,
-              message: action === 'created'
-                ? `Created ${type} record for ${name}`
-                : `Updated ${type} record for ${name}`,
-              record: {
-                id: record.id,
-                name: record.name,
-                type: record.type,
-                content: record.content,
-                proxied: record.proxied,
-                ttl: record.ttl,
-              },
+              message: messages.join('. '),
+              record: records.length === 1 ? records[0] : undefined,
+              records: records.length > 1 ? records : undefined,
             }),
           }],
         };
