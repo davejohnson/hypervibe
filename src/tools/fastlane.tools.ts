@@ -42,8 +42,6 @@ export function registerFastlaneTools(server: McpServer): void {
 
 1. **Install Fastlane** (if not already installed):
    \`\`\`bash
-   gem install fastlane
-   # or with Homebrew
    brew install fastlane
    \`\`\`
 
@@ -72,21 +70,14 @@ connection_create provider=fastlane credentials={
 For multiple apps/teams, use scoped connections:
 \`\`\`
 connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
-connection_create provider=fastlane scope="com.client.app" credentials={...}
 \`\`\`
 
-## Usage
+## Typical Workflow
 
-After setup, you can:
-- Upload builds: \`fastlane_upload ipaPath="./build/MyApp.ipa"\`
-- List builds: \`fastlane_builds\`
-- Submit for review: \`fastlane_submit\`
-
-## Tips
-
-- Store your .p8 file securely - you can't re-download it
-- API keys never expire, but you can revoke them anytime
-- Use separate keys for different projects/teams for better security`;
+1. Archive in Xcode
+2. Upload: \`fastlane_upload ipaPath="./build/MyApp.ipa"\`
+3. Set compliance + distribute: \`fastlane_compliance\` (waits for processing, sets export compliance, ready for testers)
+4. Submit for review: \`fastlane_submit\``;
 
       return {
         content: [{
@@ -99,7 +90,7 @@ After setup, you can:
 
   server.tool(
     'fastlane_upload',
-    'Upload an IPA to TestFlight',
+    'Upload an IPA to TestFlight. After uploading, use fastlane_compliance to set export compliance and make the build available to testers.',
     {
       ipaPath: z.string().describe('Path to the IPA file'),
       changelog: z.string().optional().describe('What\'s new in this build (shown to testers)'),
@@ -120,17 +111,6 @@ After setup, you can:
       }
 
       const { adapter } = result;
-
-      // Verify fastlane is installed
-      const verifyResult = await adapter.verify();
-      if (!verifyResult.success) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: verifyResult.error }),
-          }],
-        };
-      }
 
       try {
         const uploadResult = await adapter.uploadToTestFlight({
@@ -158,11 +138,9 @@ After setup, you can:
               type: 'text' as const,
               text: JSON.stringify({
                 success: true,
-                message: 'Build uploaded to TestFlight successfully',
+                message: 'Build uploaded to App Store Connect',
                 ipaPath,
-                distributeExternal: distributeExternal ?? false,
-                groups: groups ?? [],
-                note: 'Build is processing. It may take 15-30 minutes to appear in TestFlight.',
+                nextStep: 'Run fastlane_compliance to set export compliance and make the build available to testers.',
               }),
             }],
           };
@@ -193,13 +171,17 @@ After setup, you can:
   );
 
   server.tool(
-    'fastlane_builds',
-    'List recent TestFlight builds',
+    'fastlane_compliance',
+    'Wait for a build to finish processing, set export compliance, and optionally distribute to testers. This is required before a build appears in TestFlight.',
     {
-      appIdentifier: z.string().optional().describe('App bundle identifier'),
-      cwd: z.string().optional().describe('Working directory for fastlane'),
+      appIdentifier: z.string().optional().describe('App bundle identifier (for scoped connection lookup)'),
+      appId: z.string().optional().describe('App Store Connect app ID (numeric)'),
+      buildNumber: z.string().optional().describe('Specific build number (default: most recent build)'),
+      usesNonExemptEncryption: z.boolean().optional().describe('Does the app use non-exempt encryption? (default: false - standard HTTPS only)'),
+      distributeToGroups: z.array(z.string()).optional().describe('Beta group names to distribute to after compliance is set'),
+      submitForBetaReview: z.boolean().optional().describe('Submit for external beta review after compliance (default: false)'),
     },
-    async ({ appIdentifier, cwd }) => {
+    async ({ appIdentifier, appId, buildNumber, usesNonExemptEncryption, distributeToGroups, submitForBetaReview }) => {
       const result = getFastlaneAdapter(appIdentifier);
       if ('error' in result) {
         return {
@@ -213,32 +195,158 @@ After setup, you can:
       const { adapter } = result;
 
       try {
-        const listResult = await adapter.listTestFlightBuilds({
-          appIdentifier,
-          cwd,
+        // Wait for processing and set compliance
+        const complianceResult = await adapter.waitForProcessingAndSetCompliance({
+          appId,
+          buildNumber,
+          usesNonExemptEncryption: usesNonExemptEncryption ?? false,
         });
 
-        if (listResult.success) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                output: listResult.output,
-              }),
-            }],
-          };
-        } else {
+        if (complianceResult.error) {
           return {
             content: [{
               type: 'text' as const,
               text: JSON.stringify({
                 success: false,
-                error: listResult.error,
+                error: complianceResult.error,
+                build: complianceResult.build ? {
+                  id: complianceResult.build.id,
+                  buildNumber: complianceResult.build.buildNumber,
+                  version: complianceResult.build.version,
+                  processingState: complianceResult.build.processingState,
+                } : null,
               }),
             }],
           };
         }
+
+        const build = complianceResult.build!;
+        const actions: string[] = [];
+
+        if (complianceResult.complianceSet) {
+          actions.push(`Export compliance set (usesNonExemptEncryption: ${usesNonExemptEncryption ?? false})`);
+        } else if (build.usesNonExemptEncryption !== null) {
+          actions.push('Export compliance was already set');
+        }
+
+        // Distribute to beta groups if requested
+        if (distributeToGroups?.length && build.appId) {
+          try {
+            const groups = await adapter.listBetaGroups(build.appId);
+            for (const groupName of distributeToGroups) {
+              const group = groups.find(g =>
+                g.name.toLowerCase() === groupName.toLowerCase()
+              );
+              if (group) {
+                await adapter.addBuildToBetaGroup(build.id, group.id);
+                actions.push(`Added to beta group: ${group.name}`);
+              } else {
+                actions.push(`Beta group not found: ${groupName} (available: ${groups.map(g => g.name).join(', ')})`);
+              }
+            }
+          } catch (error) {
+            actions.push(`Failed to distribute to groups: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+
+        // Submit for beta review if requested
+        if (submitForBetaReview) {
+          try {
+            await adapter.submitForBetaReview(build.id);
+            actions.push('Submitted for external beta review');
+          } catch (error) {
+            actions.push(`Failed to submit for beta review: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+
+        auditRepo.create({
+          action: 'fastlane.compliance',
+          resourceType: 'testflight',
+          resourceId: build.id,
+          details: {
+            buildNumber: build.buildNumber,
+            version: build.version,
+            complianceSet: complianceResult.complianceSet,
+            actions,
+          },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              build: {
+                id: build.id,
+                version: build.version,
+                buildNumber: build.buildNumber,
+                processingState: build.processingState,
+                usesNonExemptEncryption: build.usesNonExemptEncryption,
+              },
+              actions,
+              message: 'Build is ready for TestFlight distribution',
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'fastlane_builds',
+    'List recent builds on App Store Connect with their processing and compliance status',
+    {
+      appIdentifier: z.string().optional().describe('App bundle identifier (for scoped connection lookup)'),
+      appId: z.string().optional().describe('App Store Connect app ID to filter by'),
+      limit: z.number().optional().describe('Number of builds to return (default: 10)'),
+    },
+    async ({ appIdentifier, appId, limit }) => {
+      const result = getFastlaneAdapter(appIdentifier);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+
+      try {
+        const builds = await adapter.listBuilds({ appId, limit });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              count: builds.length,
+              builds: builds.map(b => ({
+                id: b.id,
+                version: b.version,
+                buildNumber: b.buildNumber,
+                processingState: b.processingState,
+                exportCompliance: b.usesNonExemptEncryption === null
+                  ? 'MISSING'
+                  : b.usesNonExemptEncryption
+                    ? 'uses non-exempt encryption'
+                    : 'no non-exempt encryption',
+                uploadedDate: b.uploadedDate,
+              })),
+            }),
+          }],
+        };
       } catch (error) {
         return {
           content: [{
@@ -261,7 +369,7 @@ After setup, you can:
       buildNumber: z.string().optional().describe('Specific build number to submit'),
       skipMetadata: z.boolean().optional().describe('Skip metadata upload (default: false)'),
       skipScreenshots: z.boolean().optional().describe('Skip screenshots upload (default: false)'),
-      submitForReview: z.boolean().optional().describe('Actually submit for review (default: false - just uploads)'),
+      submitForReview: z.boolean().optional().describe('Actually submit for review (default: false - just uploads metadata)'),
       automaticRelease: z.boolean().optional().describe('Automatically release after approval (default: false)'),
       cwd: z.string().optional().describe('Working directory for fastlane'),
     },

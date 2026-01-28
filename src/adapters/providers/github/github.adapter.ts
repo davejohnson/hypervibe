@@ -204,6 +204,57 @@ export class GitHubAdapter {
   }
 
   /**
+   * Create or update the CNAME file in the repo's Pages source directory.
+   * This file is required for GitHub to provision a Let's Encrypt certificate.
+   */
+  async ensureCnameFile(
+    owner: string,
+    repo: string,
+    domain: string,
+    sourcePath: string = '/docs'
+  ): Promise<{ created: boolean; updated: boolean }> {
+    const filePath = sourcePath === '/'
+      ? 'CNAME'
+      : `${sourcePath.replace(/^\//, '')}/CNAME`;
+
+    const content = btoa(`${domain}\n`);
+
+    // Check if file already exists
+    try {
+      const existing = await this.request<{
+        sha: string;
+        content: string;
+      }>('GET', `/repos/${owner}/${repo}/contents/${filePath}`);
+
+      // File exists - check if content matches
+      const existingContent = atob(existing.content.replace(/\n/g, ''));
+      if (existingContent.trim() === domain) {
+        return { created: false, updated: false };
+      }
+
+      // Update with correct domain
+      await this.request<unknown>('PUT', `/repos/${owner}/${repo}/contents/${filePath}`, {
+        message: `Update CNAME to ${domain}`,
+        content,
+        sha: existing.sha,
+      });
+
+      return { created: false, updated: true };
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) {
+        // File doesn't exist - create it
+        await this.request<unknown>('PUT', `/repos/${owner}/${repo}/contents/${filePath}`, {
+          message: `Add CNAME for ${domain}`,
+          content,
+        });
+
+        return { created: true, updated: false };
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Request a GitHub Pages build to trigger certificate provisioning.
    */
   async requestPagesBuild(owner: string, repo: string): Promise<void> {

@@ -292,6 +292,14 @@ export function registerGitHubTools(server: McpServer): void {
           });
         }
 
+        const sourcePath = pagesConfig.source?.path || '/docs';
+        const cnameFilePath = sourcePath === '/' ? 'CNAME' : `${sourcePath.replace(/^\//, '')}/CNAME`;
+        plannedGitHubChanges.push({
+          setting: `CNAME file (${cnameFilePath})`,
+          currentValue: '(will check)',
+          newValue: domain,
+        });
+
         // Preview mode - return planned changes
         if (!confirm) {
           return {
@@ -432,6 +440,25 @@ export function registerGitHubTools(server: McpServer): void {
         } catch (error) {
           githubResults.push({
             setting: 'Custom domain',
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+
+        // Step 2b: Ensure CNAME file exists in the repo's Pages source directory
+        // Without this file, GitHub won't provision a Let's Encrypt certificate
+        try {
+          const sourcePath = pagesConfig.source?.path || '/docs';
+          const cnameResult = await githubAdapter.ensureCnameFile(owner, repo, domain, sourcePath);
+          if (cnameResult.created) {
+            githubResults.push({ setting: 'CNAME file', success: true });
+          } else if (cnameResult.updated) {
+            githubResults.push({ setting: 'CNAME file (updated)', success: true });
+          }
+          // If neither created nor updated, file already had correct content - no action needed
+        } catch (error) {
+          githubResults.push({
+            setting: 'CNAME file',
             success: false,
             error: error instanceof Error ? error.message : String(error),
           });

@@ -70,6 +70,13 @@ export function registerConnectionTools(server: McpServer): void {
         credentialsEncrypted,
       });
 
+      // Run provider dependency installation if needed
+      const registeredProvider = providerRegistry.get(provider);
+      let depsResult: { installed: string[]; errors: string[] } | undefined;
+      if (registeredProvider?.ensureDependencies) {
+        depsResult = await registeredProvider.ensureDependencies();
+      }
+
       auditRepo.create({
         action: 'connection.created',
         resourceType: 'connection',
@@ -78,7 +85,7 @@ export function registerConnectionTools(server: McpServer): void {
       });
 
       const scopeDisplay = scope || 'global';
-      return successResponse({
+      const response: Record<string, unknown> = {
         message: `Connection for ${provider} (${scopeDisplay}) saved. Use connection_verify to test it.`,
         connection: {
           id: connection.id,
@@ -87,7 +94,16 @@ export function registerConnectionTools(server: McpServer): void {
           status: connection.status,
           createdAt: connection.createdAt,
         },
-      });
+      };
+
+      if (depsResult?.installed.length) {
+        response.dependenciesInstalled = depsResult.installed;
+      }
+      if (depsResult?.errors.length) {
+        response.dependencyErrors = depsResult.errors;
+      }
+
+      return successResponse(response);
     }
   );
 

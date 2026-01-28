@@ -13,6 +13,8 @@ export interface ProviderMetadata {
 export interface RegisteredProvider {
   metadata: ProviderMetadata;
   factory: (credentials: unknown) => unknown;
+  /** Optional hook to install CLI tools or other dependencies when a connection is created. */
+  ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
 }
 
 /**

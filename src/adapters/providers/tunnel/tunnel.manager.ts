@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { spawn } from 'child_process';
 import type { TunnelInfo, TunnelAdapter } from './tunnel.types.js';
 import { CloudflaredAdapter } from './cloudflared.adapter.js';
 import { NgrokAdapter } from './ngrok.adapter.js';
@@ -85,6 +86,28 @@ class TunnelManager {
 // Export singleton instance
 export const tunnelManager = new TunnelManager();
 
+async function commandExists(cmd: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn('which', [cmd], { shell: true });
+    child.on('close', (code) => resolve(code === 0));
+    child.on('error', () => resolve(false));
+  });
+}
+
+async function brewInstall(pkg: string): Promise<{ success: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn('brew', ['install', pkg], { shell: true });
+    let stderr = '';
+    child.stderr?.on('data', (data) => { stderr += data.toString(); });
+    child.on('close', (code) => {
+      resolve(code === 0
+        ? { success: true }
+        : { success: false, error: stderr || `brew install exited with code ${code}` });
+    });
+    child.on('error', (err) => resolve({ success: false, error: err.message }));
+  });
+}
+
 // Self-register with provider registry
 providerRegistry.register({
   metadata: {
@@ -98,5 +121,25 @@ providerRegistry.register({
     // Tunnel doesn't create a traditional adapter - it just stores preferences
     // The tunnelManager handles actual tunnel creation
     return credentials;
+  },
+  ensureDependencies: async () => {
+    const installed: string[] = [];
+    const errors: string[] = [];
+    const hasBrew = await commandExists('brew');
+
+    if (!await commandExists('cloudflared')) {
+      if (hasBrew) {
+        const result = await brewInstall('cloudflared');
+        if (result.success) {
+          installed.push('cloudflared (via Homebrew)');
+        } else {
+          errors.push(`Failed to install cloudflared: ${result.error}`);
+        }
+      } else {
+        errors.push('cloudflared is not installed and Homebrew is not available. Install manually: brew install cloudflared');
+      }
+    }
+
+    return { installed, errors };
   },
 });
