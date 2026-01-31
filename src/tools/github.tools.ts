@@ -576,4 +576,186 @@ export function registerGitHubTools(server: McpServer): void {
       }
     }
   );
+
+  server.tool(
+    'github_ai_review_setup',
+    'Create a GitHub Actions workflow for AI-powered PR code review using Claude. Two-step: preview shows planned changes, confirm creates workflow + sets secret.',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+      apiKey: z.string().describe('Anthropic API key for Claude'),
+      model: z.string().optional().describe('Claude model to use (default: claude-sonnet-4-20250514)'),
+      confirm: z.boolean().optional().describe('Set to true to actually create the workflow and set the secret'),
+    },
+    async ({ owner, repo, apiKey, model, confirm }) => {
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+      const claudeModel = model ?? 'claude-sonnet-4-20250514';
+
+      const workflowContent = `name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/github-script@v7
+        env:
+          ANTHROPIC_API_KEY: \${{ secrets.ANTHROPIC_API_KEY }}
+        with:
+          script: |
+            const diff = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              mediaType: { format: 'diff' },
+            });
+
+            const response = await fetch('https://api.anthropic.com/v1/messages', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': process.env.ANTHROPIC_API_KEY,
+                'anthropic-version': '2023-06-01',
+              },
+              body: JSON.stringify({
+                model: '${claudeModel}',
+                max_tokens: 4096,
+                messages: [{
+                  role: 'user',
+                  content: \`Review this pull request diff. Provide a concise code review focusing on bugs, security issues, and significant improvements. Be constructive and specific. If the code looks good, say so briefly.\\n\\nDiff:\\n\${diff.data.substring(0, 100000)}\`,
+                }],
+              }),
+            });
+
+            const result = await response.json();
+            const review = result.content?.[0]?.text ?? 'Unable to generate review.';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: \`## 🤖 AI Code Review\\n\\n\${review}\\n\\n---\\n*Powered by Claude (${claudeModel})*\`,
+            });
+`;
+
+      const workflowPath = '.github/workflows/ai-code-review.yml';
+
+      // Preview mode
+      if (!confirm) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              mode: 'preview',
+              message: 'Review the planned changes and call again with confirm=true to apply.',
+              repository: `${owner}/${repo}`,
+              plannedChanges: [
+                {
+                  action: 'create/update',
+                  path: workflowPath,
+                  description: `GitHub Actions workflow that reviews PRs using Claude (${claudeModel})`,
+                },
+                {
+                  action: 'set',
+                  type: 'repository_secret',
+                  name: 'ANTHROPIC_API_KEY',
+                  description: 'Anthropic API key for Claude API calls',
+                },
+              ],
+              workflowTriggers: ['pull_request: opened', 'pull_request: synchronize'],
+            }),
+          }],
+        };
+      }
+
+      // Confirm mode — create workflow and set secret
+      try {
+        const fileResult = await adapter.createOrUpdateFile(
+          owner,
+          repo,
+          workflowPath,
+          workflowContent,
+          'Add AI code review workflow'
+        );
+
+        let secretSet = false;
+        let secretError: string | undefined;
+        try {
+          await adapter.setRepositorySecret(owner, repo, 'ANTHROPIC_API_KEY', apiKey);
+          secretSet = true;
+        } catch (error) {
+          secretError = error instanceof Error ? error.message : String(error);
+        }
+
+        auditRepo.create({
+          action: 'github.ai_review_setup',
+          resourceType: 'github_workflow',
+          resourceId: `${owner}/${repo}`,
+          details: {
+            workflowCreated: fileResult.created,
+            workflowUpdated: fileResult.updated,
+            secretSet,
+            model: claudeModel,
+          },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              mode: 'executed',
+              repository: `${owner}/${repo}`,
+              workflow: {
+                path: workflowPath,
+                created: fileResult.created,
+                updated: fileResult.updated,
+              },
+              secret: {
+                name: 'ANTHROPIC_API_KEY',
+                set: secretSet,
+                error: secretError,
+              },
+              model: claudeModel,
+              message: secretSet
+                ? `AI code review workflow created. PRs will be reviewed by Claude (${claudeModel}).`
+                : `Workflow created but failed to set ANTHROPIC_API_KEY secret: ${secretError}. Set it manually in repo Settings > Secrets.`,
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
 }

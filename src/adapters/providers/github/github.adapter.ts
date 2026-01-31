@@ -255,6 +255,105 @@ export class GitHubAdapter {
   }
 
   /**
+   * Create or update a file in a repository via the Contents API.
+   */
+  async createOrUpdateFile(
+    owner: string,
+    repo: string,
+    path: string,
+    content: string,
+    commitMessage: string
+  ): Promise<{ created: boolean; updated: boolean }> {
+    const contentBase64 = btoa(content);
+
+    // Check if file already exists
+    try {
+      const existing = await this.request<{ sha: string; content: string }>(
+        'GET',
+        `/repos/${owner}/${repo}/contents/${path}`
+      );
+
+      // Update existing file
+      await this.request<unknown>('PUT', `/repos/${owner}/${repo}/contents/${path}`, {
+        message: commitMessage,
+        content: contentBase64,
+        sha: existing.sha,
+      });
+
+      return { created: false, updated: true };
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) {
+        // Create new file
+        await this.request<unknown>('PUT', `/repos/${owner}/${repo}/contents/${path}`, {
+          message: commitMessage,
+          content: contentBase64,
+        });
+
+        return { created: true, updated: false };
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Set a repository secret for GitHub Actions.
+   * Uses the repo public key to encrypt the value via libsodium sealed box.
+   * Requires tweetnacl and tweetnacl-sealedbox-js to be available.
+   */
+  async setRepositorySecret(
+    owner: string,
+    repo: string,
+    secretName: string,
+    secretValue: string
+  ): Promise<void> {
+    // Get the repo public key for encrypting secrets
+    const publicKeyResponse = await this.request<{
+      key_id: string;
+      key: string;
+    }>('GET', `/repos/${owner}/${repo}/actions/secrets/public-key`);
+
+    // GitHub expects libsodium sealed box encryption.
+    // Shell out to a Node script that uses tweetnacl + tweetnacl-sealedbox-js.
+    const { spawn: spawnChild } = await import('child_process');
+    const encrypted = await new Promise<string>((resolve, reject) => {
+      // Pass the public key as arg, secret via stdin to avoid shell escaping issues
+      const child = spawnChild('node', ['-e', `
+const nacl = require('tweetnacl');
+const sealedBox = require('tweetnacl-sealedbox-js');
+const pubKey = Buffer.from(process.argv[1], 'base64');
+let input = '';
+process.stdin.on('data', d => input += d);
+process.stdin.on('end', () => {
+  const enc = sealedBox.seal(Buffer.from(input), pubKey);
+  process.stdout.write(Buffer.from(enc).toString('base64'));
+});
+      `, publicKeyResponse.key], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+      child.on('close', (code: number | null) => {
+        if (code === 0 && stdout) {
+          resolve(stdout);
+        } else {
+          reject(new Error(stderr || `Encryption failed (exit ${code}). Install dependencies: npm install tweetnacl tweetnacl-sealedbox-js`));
+        }
+      });
+      child.on('error', reject);
+
+      child.stdin?.write(secretValue);
+      child.stdin?.end();
+    });
+
+    // Set the secret
+    await this.request<unknown>('PUT', `/repos/${owner}/${repo}/actions/secrets/${secretName}`, {
+      encrypted_value: encrypted,
+      key_id: publicKeyResponse.key_id,
+    });
+  }
+
+  /**
    * Request a GitHub Pages build to trigger certificate provisioning.
    */
   async requestPagesBuild(owner: string, repo: string): Promise<void> {

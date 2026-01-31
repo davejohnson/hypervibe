@@ -144,7 +144,7 @@ export function registerConnectionTools(server: McpServer): void {
         }
 
         // Call verify on the adapter
-        const result = await (adapter as { verify: () => Promise<{ success: boolean; error?: string; email?: string; accountId?: string }> }).verify();
+        const result = await (adapter as { verify: (scope?: string) => Promise<{ success: boolean; error?: string; email?: string; accountId?: string; zones?: string[] }> }).verify(scope || undefined);
 
         if (result.success) {
           connectionRepo.updateStatus(connection.id, 'verified');

@@ -35,6 +35,7 @@ export interface CreateDnsRecordInput {
   ttl?: number;
   proxied?: boolean;
   priority?: number;
+  data?: Record<string, unknown>;
 }
 
 export interface UpdateDnsRecordInput {
@@ -108,12 +109,34 @@ export class CloudflareAdapter implements IDnsProvider {
     return data;
   }
 
-  async verify(): Promise<{ success: boolean; error?: string; email?: string }> {
+  async verify(domain?: string): Promise<{ success: boolean; error?: string; zones?: string[] }> {
     try {
-      const response = await this.request<{ id: string; email: string }>('GET', '/user/tokens/verify');
+      await this.request<{ id: string }>('GET', '/user/tokens/verify');
+
+      if (domain) {
+        const zone = await this.findZoneByName(domain);
+        if (!zone) {
+          const zones = await this.listZones();
+          const zoneNames = zones.map(z => z.name);
+          return {
+            success: false,
+            error: `Token is valid but does not have access to "${domain}". Accessible zones: ${zoneNames.join(', ') || 'none'}`,
+            zones: zoneNames,
+          };
+        }
+      }
+
       return { success: true };
     } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
+      const msg = error instanceof Error ? error.message : String(error);
+      // Global API Keys return 401 on /user/tokens/verify since that endpoint only works with API Tokens
+      if (msg.includes('Authentication') || msg.includes('401') || msg.includes('Invalid access token')) {
+        return {
+          success: false,
+          error: `Token verification failed — this may be a legacy Global API Key, which is not supported. Please create an API Token instead at https://dash.cloudflare.com/profile/api-tokens (use the "Edit zone DNS" template for DNS management).`,
+        };
+      }
+      return { success: false, error: msg };
     }
   }
 
@@ -177,6 +200,10 @@ export class CloudflareAdapter implements IDnsProvider {
 
     if (record.priority !== undefined) {
       body.priority = record.priority;
+    }
+
+    if (record.data) {
+      body.data = record.data;
     }
 
     const response = await this.request<CloudflareDnsRecord>('POST', `/zones/${zoneId}/dns_records`, body);

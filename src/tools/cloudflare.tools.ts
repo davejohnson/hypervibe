@@ -13,7 +13,7 @@ const auditRepo = new AuditRepository();
  * Get a Cloudflare adapter, using scoped connection if available.
  * @param scopeHint - Optional domain hint (e.g., "example.com") for finding scoped tokens
  */
-function getCloudflareAdapter(scopeHint?: string): { adapter: CloudflareAdapter } | { error: string } {
+function getCloudflareAdapter(scopeHint?: string): { adapter: CloudflareAdapter; scope: string | null } | { error: string } {
   const connection = connectionRepo.findBestMatch('cloudflare', scopeHint);
   if (!connection) {
     return { error: 'No Cloudflare connection found. Use connection_create with provider=cloudflare first.' };
@@ -24,7 +24,7 @@ function getCloudflareAdapter(scopeHint?: string): { adapter: CloudflareAdapter 
   const adapter = new CloudflareAdapter();
   adapter.connect(credentials);
 
-  return { adapter };
+  return { adapter, scope: connection.scope };
 }
 
 export function registerCloudflareTools(server: McpServer): void {
@@ -107,7 +107,7 @@ After creating the token, verify it works:
         };
       }
 
-      const { adapter } = result;
+      const { adapter, scope } = result;
 
       try {
         const zones = await adapter.listZones();
@@ -125,6 +125,8 @@ After creating the token, verify it works:
                 paused: z.paused,
                 nameServers: z.name_servers,
               })),
+              tokenScope: scope ?? 'global',
+              note: 'These are only the zones accessible to the current API token. If a domain is missing, the token may not have permission for it. Use connection_create with provider=cloudflare and a scope parameter to add a token for a specific domain.',
             }),
           }],
         };
@@ -181,7 +183,7 @@ After creating the token, verify it works:
             return {
               content: [{
                 type: 'text' as const,
-                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found in Cloudflare account` }),
+                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found. This may mean the current API token doesn't have permission for this domain. You can add a new Cloudflare token scoped to "${domain}" using: connection_create provider=cloudflare scope=${domain} credentials={apiToken: "..."}` }),
               }],
             };
           }
@@ -267,11 +269,20 @@ After creating the token, verify it works:
             return {
               content: [{
                 type: 'text' as const,
-                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found in Cloudflare account` }),
+                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found. This may mean the current API token doesn't have permission for this domain. You can add a new Cloudflare token scoped to "${domain}" using: connection_create provider=cloudflare scope=${domain} credentials={apiToken: "..."}` }),
               }],
             };
           }
           resolvedZoneId = zone.id;
+        }
+
+        // CAA records require structured data for the Cloudflare API
+        let data: Record<string, unknown> | undefined;
+        if (type.toUpperCase() === 'CAA') {
+          const match = content.match(/^(\d+)\s+(\w+)\s+"?([^"]+)"?$/);
+          if (match) {
+            data = { flags: parseInt(match[1], 10), tag: match[2], value: match[3] };
+          }
         }
 
         const record = await adapter.createDnsRecord(resolvedZoneId!, {
@@ -281,6 +292,7 @@ After creating the token, verify it works:
           ttl,
           proxied,
           priority,
+          data,
         });
 
         auditRepo.create({
@@ -366,7 +378,7 @@ After creating the token, verify it works:
             return {
               content: [{
                 type: 'text' as const,
-                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found in Cloudflare account` }),
+                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found. This may mean the current API token doesn't have permission for this domain. You can add a new Cloudflare token scoped to "${domain}" using: connection_create provider=cloudflare scope=${domain} credentials={apiToken: "..."}` }),
               }],
             };
           }
@@ -460,7 +472,7 @@ After creating the token, verify it works:
             return {
               content: [{
                 type: 'text' as const,
-                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found in Cloudflare account` }),
+                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found. This may mean the current API token doesn't have permission for this domain. You can add a new Cloudflare token scoped to "${domain}" using: connection_create provider=cloudflare scope=${domain} credentials={apiToken: "..."}` }),
               }],
             };
           }
@@ -544,7 +556,7 @@ After creating the token, verify it works:
             return {
               content: [{
                 type: 'text' as const,
-                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found in Cloudflare account` }),
+                text: JSON.stringify({ success: false, error: `Domain "${domain}" not found. This may mean the current API token doesn't have permission for this domain. You can add a new Cloudflare token scoped to "${domain}" using: connection_create provider=cloudflare scope=${domain} credentials={apiToken: "..."}` }),
               }],
             };
           }
