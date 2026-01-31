@@ -254,6 +254,143 @@ export class FastlaneAdapter {
     }));
   }
 
+  // ---------------------------------------------------------------------------
+  // Bundle IDs & Capabilities
+  // ---------------------------------------------------------------------------
+
+  /**
+   * List all registered Bundle IDs (App IDs).
+   */
+  async listBundleIds(): Promise<Array<{ id: string; identifier: string; name: string; platform: string }>> {
+    const results: Array<{ id: string; identifier: string; name: string; platform: string }> = [];
+    type BundleIdListResponse = {
+      data: Array<{
+        id: string;
+        attributes: { identifier: string; name: string; platform: string };
+      }>;
+      links?: { next?: string };
+    };
+
+    let url: string | null = '/bundleIds?limit=200&fields[bundleIds]=identifier,name,platform';
+
+    while (url) {
+      const response: BundleIdListResponse = await this.apiRequest<BundleIdListResponse>('GET', url);
+
+      for (const item of response.data) {
+        results.push({
+          id: item.id,
+          identifier: item.attributes.identifier,
+          name: item.attributes.name,
+          platform: item.attributes.platform,
+        });
+      }
+
+      url = response.links?.next ?? null;
+    }
+
+    return results;
+  }
+
+  /**
+   * Find a Bundle ID by its identifier string (e.g., "com.example.app").
+   */
+  async findBundleIdByIdentifier(identifier: string): Promise<{ id: string; identifier: string; name: string; platform: string } | null> {
+    const all = await this.listBundleIds();
+    return all.find(b => b.identifier === identifier) ?? null;
+  }
+
+  /**
+   * Register a new Bundle ID (App ID).
+   */
+  async registerBundleId(
+    identifier: string,
+    name: string,
+    platform: string = 'IOS',
+  ): Promise<{ id: string; identifier: string; name: string; platform: string }> {
+    const response = await this.apiRequest<{
+      data: {
+        id: string;
+        attributes: { identifier: string; name: string; platform: string };
+      };
+    }>('POST', '/bundleIds', {
+      data: {
+        type: 'bundleIds',
+        attributes: { identifier, name, platform },
+      },
+    });
+
+    return {
+      id: response.data.id,
+      identifier: response.data.attributes.identifier,
+      name: response.data.attributes.name,
+      platform: response.data.attributes.platform,
+    };
+  }
+
+  /**
+   * Get capabilities enabled on a Bundle ID.
+   */
+  async getBundleIdCapabilities(bundleIdId: string): Promise<Array<{ id: string; type: string }>> {
+    const response = await this.apiRequest<{
+      data: Array<{
+        id: string;
+        attributes: { capabilityType: string };
+      }>;
+    }>('GET', `/bundleIds/${bundleIdId}/bundleIdCapabilities`);
+
+    return response.data.map(c => ({
+      id: c.id,
+      type: c.attributes.capabilityType,
+    }));
+  }
+
+  /**
+   * Enable capabilities on a Bundle ID. Skips already-enabled ones.
+   */
+  async enableCapabilities(
+    bundleIdId: string,
+    capabilityTypes: string[],
+  ): Promise<{ enabled: string[]; alreadyEnabled: string[]; errors: Array<{ type: string; error: string }> }> {
+    const existing = await this.getBundleIdCapabilities(bundleIdId);
+    const existingTypes = new Set(existing.map(c => c.type));
+
+    const enabled: string[] = [];
+    const alreadyEnabled: string[] = [];
+    const errors: Array<{ type: string; error: string }> = [];
+
+    for (const capType of capabilityTypes) {
+      if (existingTypes.has(capType)) {
+        alreadyEnabled.push(capType);
+        continue;
+      }
+      try {
+        await this.apiRequest('POST', '/bundleIdCapabilities', {
+          data: {
+            type: 'bundleIdCapabilities',
+            attributes: { capabilityType: capType },
+            relationships: {
+              bundleId: {
+                data: { type: 'bundleIds', id: bundleIdId },
+              },
+            },
+          },
+        });
+        enabled.push(capType);
+      } catch (error) {
+        errors.push({ type: capType, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    return { enabled, alreadyEnabled, errors };
+  }
+
+  /**
+   * Disable (remove) a capability by its capability ID.
+   */
+  async disableCapability(capabilityId: string): Promise<void> {
+    await this.apiRequest('DELETE', `/bundleIdCapabilities/${capabilityId}`);
+  }
+
   /**
    * Wait for a build to finish processing, then set compliance.
    * Returns the build once it's ready.

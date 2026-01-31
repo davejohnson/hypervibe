@@ -362,6 +362,150 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
   );
 
   server.tool(
+    'appid_register',
+    'Register a new App ID (Bundle ID) on App Store Connect and optionally enable capabilities',
+    {
+      identifier: z.string().describe('Bundle identifier (e.g., com.example.myapp)'),
+      name: z.string().describe('Human-readable name for the App ID'),
+      platform: z.enum(['IOS', 'MAC_OS']).optional().describe('Platform (default: IOS)'),
+      capabilities: z.array(z.string()).optional().describe('Capability types to enable (e.g., PUSH_NOTIFICATIONS, ICLOUD, SIGN_IN_WITH_APPLE)'),
+      appIdentifier: z.string().optional().describe('Scope hint for connection lookup'),
+    },
+    async ({ identifier, name, platform, capabilities, appIdentifier }) => {
+      const result = getFastlaneAdapter(appIdentifier);
+      if ('error' in result) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: result.error }) }] };
+      }
+      const { adapter } = result;
+
+      try {
+        const bundleId = await adapter.registerBundleId(identifier, name, platform ?? 'IOS');
+
+        let capabilityResults: { enabled: string[]; alreadyEnabled: string[]; errors: Array<{ type: string; error: string }> } | undefined;
+        if (capabilities?.length) {
+          capabilityResults = await adapter.enableCapabilities(bundleId.id, capabilities);
+        }
+
+        auditRepo.create({
+          action: 'appid.register',
+          resourceType: 'bundleId',
+          resourceId: bundleId.id,
+          details: { identifier, name, platform: platform ?? 'IOS', capabilities: capabilityResults },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              bundleId,
+              ...(capabilityResults ? { capabilities: capabilityResults } : {}),
+            }),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }) }] };
+      }
+    }
+  );
+
+  server.tool(
+    'appid_capabilities',
+    'List, enable, or disable capabilities on an existing App ID (Bundle ID)',
+    {
+      identifier: z.string().describe('Bundle identifier (e.g., com.example.myapp)'),
+      action: z.enum(['list', 'enable', 'disable']).describe('Action to perform'),
+      capabilities: z.array(z.string()).optional().describe('Capability types for enable/disable actions'),
+      appIdentifier: z.string().optional().describe('Scope hint for connection lookup'),
+    },
+    async ({ identifier, action, capabilities, appIdentifier }) => {
+      const result = getFastlaneAdapter(appIdentifier);
+      if ('error' in result) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: result.error }) }] };
+      }
+      const { adapter } = result;
+
+      try {
+        const bundleId = await adapter.findBundleIdByIdentifier(identifier);
+        if (!bundleId) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: `Bundle ID not found: ${identifier}` }) }] };
+        }
+
+        if (action === 'list') {
+          const caps = await adapter.getBundleIdCapabilities(bundleId.id);
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ success: true, bundleId, capabilities: caps }),
+            }],
+          };
+        }
+
+        if (action === 'enable') {
+          if (!capabilities?.length) {
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: 'capabilities array is required for enable action' }) }] };
+          }
+          const results = await adapter.enableCapabilities(bundleId.id, capabilities);
+          auditRepo.create({
+            action: 'appid.capabilities.enable',
+            resourceType: 'bundleId',
+            resourceId: bundleId.id,
+            details: { identifier, results },
+          });
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ success: true, bundleId, results }),
+            }],
+          };
+        }
+
+        if (action === 'disable') {
+          if (!capabilities?.length) {
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: 'capabilities array is required for disable action' }) }] };
+          }
+          const currentCaps = await adapter.getBundleIdCapabilities(bundleId.id);
+          const disabled: string[] = [];
+          const notFound: string[] = [];
+          const errors: Array<{ type: string; error: string }> = [];
+
+          for (const capType of capabilities) {
+            const cap = currentCaps.find(c => c.type === capType);
+            if (!cap) {
+              notFound.push(capType);
+              continue;
+            }
+            try {
+              await adapter.disableCapability(cap.id);
+              disabled.push(capType);
+            } catch (error) {
+              errors.push({ type: capType, error: error instanceof Error ? error.message : String(error) });
+            }
+          }
+
+          auditRepo.create({
+            action: 'appid.capabilities.disable',
+            resourceType: 'bundleId',
+            resourceId: bundleId.id,
+            details: { identifier, disabled, notFound, errors },
+          });
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ success: true, bundleId, disabled, notFound, errors }),
+            }],
+          };
+        }
+
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: `Unknown action: ${action}` }) }] };
+      } catch (error) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }) }] };
+      }
+    }
+  );
+
+  server.tool(
     'fastlane_submit',
     'Submit app for App Store review',
     {
