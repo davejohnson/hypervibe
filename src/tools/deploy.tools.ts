@@ -1,6 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
@@ -10,17 +9,12 @@ import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js
 import { DeployOrchestrator } from '../domain/services/deploy.orchestrator.js';
 import type { RailwayCredentials } from '../domain/entities/connection.entity.js';
 
-const projectRepo = new ProjectRepository();
+import { resolveProject } from './resolve-project.js';
+
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const connectionRepo = new ConnectionRepository();
 const runRepo = new RunRepository();
-
-function resolveProject(projectId?: string, projectName?: string) {
-  if (projectId) return projectRepo.findById(projectId);
-  if (projectName) return projectRepo.findByName(projectName);
-  return null;
-}
 
 function resolveEnvironment(
   projectId: string,
@@ -47,7 +41,7 @@ export function registerDeployTools(server: McpServer): void {
     },
     async ({ projectId, projectName, environmentId, environmentName, services, envVars }) => {
       // Resolve project
-      const project = resolveProject(projectId, projectName);
+      const project = resolveProject({ projectId, projectName });
       if (!project) {
         return {
           content: [
@@ -201,7 +195,7 @@ export function registerDeployTools(server: McpServer): void {
       dockerfilePath: z.string().optional().describe('Path to Dockerfile if using dockerfile builder'),
     },
     async ({ projectId, projectName, name, builder, dockerfilePath }) => {
-      const project = resolveProject(projectId, projectName);
+      const project = resolveProject({ projectId, projectName });
       if (!project) {
         return {
           content: [
@@ -265,7 +259,7 @@ export function registerDeployTools(server: McpServer): void {
       projectName: z.string().optional().describe('Project name'),
     },
     async ({ projectId, projectName }) => {
-      const project = resolveProject(projectId, projectName);
+      const project = resolveProject({ projectId, projectName });
       if (!project) {
         return {
           content: [

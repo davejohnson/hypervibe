@@ -1,6 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
@@ -12,8 +11,8 @@ import { parseEnvFile, maskSecretValue } from '../utils/env-parser.js';
 import type { RailwayCredentials } from '../domain/entities/connection.entity.js';
 import type { IntegrationKeyMode, StoredKeys } from '../domain/entities/integration.entity.js';
 import type { StripeCredentials } from '../adapters/providers/stripe/stripe.adapter.js';
+import { resolveProject } from './resolve-project.js';
 
-const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const connectionRepo = new ConnectionRepository();
@@ -68,7 +67,7 @@ export function registerIntegrationTools(server: McpServer): void {
       }
 
       // Find project
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{
@@ -524,7 +523,7 @@ export function registerIntegrationTools(server: McpServer): void {
     },
     async ({ provider, projectName, environmentName, serviceName, expectedMode }) => {
       // Find project
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{

@@ -1,7 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
@@ -13,8 +12,9 @@ import type { SendGridCredentials } from '../adapters/providers/sendgrid/sendgri
 import type { CloudflareCredentials } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
 
+import { resolveProject } from './resolve-project.js';
+
 const connectionRepo = new ConnectionRepository();
-const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const auditRepo = new AuditRepository();
@@ -858,7 +858,7 @@ export function registerSendGridTools(server: McpServer): void {
       }
 
       // Find project and environment
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{

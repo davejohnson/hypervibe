@@ -1,6 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
@@ -9,8 +8,8 @@ import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js
 import { ComposeGenerator } from '../adapters/providers/local/compose.generator.js';
 import { integrationRegistry } from '../domain/registry/integration.registry.js';
 import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
+import { resolveProject } from './resolve-project.js';
 
-const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const connectionRepo = new ConnectionRepository();
@@ -33,7 +32,7 @@ export function registerEnvTools(server: McpServer): void {
       serviceName: z.string().optional().describe('Specific service (for deployed envs)'),
     },
     async ({ projectName, vars, scope = 'all', serviceName }) => {
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{
@@ -159,7 +158,7 @@ export function registerEnvTools(server: McpServer): void {
       serviceName: z.string().optional().describe('Service name (for deployed envs)'),
     },
     async ({ projectName, environmentName, serviceName }) => {
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{
@@ -412,7 +411,7 @@ export function registerEnvTools(server: McpServer): void {
         };
       }
 
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{

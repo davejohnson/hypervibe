@@ -2,6 +2,7 @@ export interface Project {
   id: string;
   name: string;
   defaultPlatform: string;
+  gitRemoteUrl?: string;
   policies: Record<string, unknown>;
   createdAt: Date;
   updatedAt: Date;
@@ -10,5 +11,6 @@ export interface Project {
 export interface CreateProjectInput {
   name: string;
   defaultPlatform?: string;
+  gitRemoteUrl?: string;
   policies?: Record<string, unknown>;
 }

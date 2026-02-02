@@ -170,6 +170,13 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_connections_provider_scope ON connections(provider, scope);
     `,
   },
+  {
+    version: 4,
+    name: 'project_git_remote',
+    up: `
+      ALTER TABLE projects ADD COLUMN git_remote_url TEXT;
+    `,
+  },
 ];
 
 export class SqliteAdapter {

@@ -1,6 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
@@ -8,7 +7,8 @@ import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import type { RailwayCredentials, RailwayProjectDetails } from '../adapters/providers/railway/railway.adapter.js';
 
-const projectRepo = new ProjectRepository();
+import { resolveProject } from './resolve-project.js';
+
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const connectionRepo = new ConnectionRepository();
@@ -61,7 +61,7 @@ export function registerSetupTools(server: McpServer): void {
       if (railwayProjectId) {
         railwayProject = await adapter.getProjectDetails(railwayProjectId);
       } else if (projectName) {
-        const project = projectRepo.findByName(projectName);
+        const project = resolveProject({ projectName });
         if (project) {
           const envs = envRepo.findByProjectId(project.id);
           for (const env of envs) {

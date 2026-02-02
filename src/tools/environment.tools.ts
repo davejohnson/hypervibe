@@ -1,22 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
+import { resolveProject } from './resolve-project.js';
 
 const envRepo = new EnvironmentRepository();
-const projectRepo = new ProjectRepository();
 const auditRepo = new AuditRepository();
-
-function resolveProject(projectId?: string, projectName?: string) {
-  if (projectId) {
-    return projectRepo.findById(projectId);
-  }
-  if (projectName) {
-    return projectRepo.findByName(projectName);
-  }
-  return null;
-}
 
 export function registerEnvironmentTools(server: McpServer): void {
   server.tool(
@@ -28,7 +17,7 @@ export function registerEnvironmentTools(server: McpServer): void {
       name: z.string().min(1).describe('Environment name (local, staging, production, or custom)'),
     },
     async ({ projectId, projectName, name }) => {
-      const project = resolveProject(projectId, projectName);
+      const project = resolveProject({ projectId, projectName });
 
       if (!project) {
         return {
@@ -98,7 +87,7 @@ export function registerEnvironmentTools(server: McpServer): void {
       projectName: z.string().optional().describe('Project name'),
     },
     async ({ projectId, projectName }) => {
-      const project = resolveProject(projectId, projectName);
+      const project = resolveProject({ projectId, projectName });
 
       if (!project) {
         return {
@@ -147,7 +136,7 @@ export function registerEnvironmentTools(server: McpServer): void {
       if (environmentId) {
         environment = envRepo.findById(environmentId);
       } else if (environmentName) {
-        const project = resolveProject(projectId, projectName);
+        const project = resolveProject({ projectId, projectName });
         if (!project) {
           return {
             content: [
@@ -207,7 +196,7 @@ export function registerEnvironmentTools(server: McpServer): void {
       if (environmentId) {
         environment = envRepo.findById(environmentId);
       } else if (environmentName) {
-        const project = resolveProject(projectId, projectName);
+        const project = resolveProject({ projectId, projectName });
         if (!project) {
           return {
             content: [

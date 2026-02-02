@@ -1,20 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
+import { resolveProject } from './resolve-project.js';
 
-const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
 const runRepo = new RunRepository();
 const auditRepo = new AuditRepository();
-
-function resolveProject(projectId?: string, projectName?: string) {
-  if (projectId) return projectRepo.findById(projectId);
-  if (projectName) return projectRepo.findByName(projectName);
-  return null;
-}
 
 export function registerRunTools(server: McpServer): void {
   server.tool(
@@ -31,7 +24,7 @@ export function registerRunTools(server: McpServer): void {
       let runs;
 
       if (projectId || projectName) {
-        const project = resolveProject(projectId, projectName);
+        const project = resolveProject({ projectId, projectName });
         if (!project) {
           return {
             content: [
@@ -71,7 +64,7 @@ export function registerRunTools(server: McpServer): void {
 
       // Enrich runs with project/environment names
       const enrichedRuns = runs.map((run) => {
-        const project = projectRepo.findById(run.projectId);
+        const project = resolveProject({ projectId: run.projectId });
         const environment = envRepo.findById(run.environmentId);
         return {
           id: run.id,
@@ -123,7 +116,7 @@ export function registerRunTools(server: McpServer): void {
         };
       }
 
-      const project = projectRepo.findById(run.projectId);
+      const project = resolveProject({ projectId: run.projectId });
       const environment = envRepo.findById(run.environmentId);
 
       return {

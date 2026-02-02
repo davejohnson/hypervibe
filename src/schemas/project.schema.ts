@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const createProjectSchema = z.object({
   name: z.string().min(1).max(100),
   defaultPlatform: z.string().default('railway'),
+  gitRemoteUrl: z.string().optional(),
   policies: z.record(z.unknown()).optional(),
 });
 

@@ -1,6 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
@@ -9,8 +8,8 @@ import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js
 import { DatabaseAdapter } from '../adapters/providers/database/database.adapter.js';
 import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
 import type { DatabaseCredentials } from '../adapters/providers/database/database.adapter.js';
+import { resolveProject, resolveProjectOrError } from './resolve-project.js';
 
-const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const connectionRepo = new ConnectionRepository();
@@ -45,42 +44,9 @@ export function registerDbTools(server: McpServer): void {
     },
     async ({ projectName, environment = 'staging', command, preset, serviceName, dryRun }) => {
       // Resolve project
-      let project;
-      if (projectName) {
-        project = projectRepo.findByName(projectName);
-      } else {
-        const allProjects = projectRepo.findAll();
-        if (allProjects.length === 1) {
-          project = allProjects[0];
-        } else if (allProjects.length === 0) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({ success: false, error: 'No projects found' }),
-            }],
-          };
-        } else {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: false,
-                error: 'Multiple projects found. Specify projectName.',
-                projects: allProjects.map((p) => p.name),
-              }),
-            }],
-          };
-        }
-      }
-
-      if (!project) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: `Project not found: ${projectName}` }),
-          }],
-        };
-      }
+      const result = resolveProjectOrError({ projectName });
+      if ('error' in result) return result.error;
+      const project = result.project;
 
       // Resolve environment
       const env = envRepo.findByProjectAndName(project.id, environment);
@@ -251,34 +217,9 @@ export function registerDbTools(server: McpServer): void {
     },
     async ({ projectName, environment = 'staging', serviceName }) => {
       // Resolve project
-      let project;
-      if (projectName) {
-        project = projectRepo.findByName(projectName);
-      } else {
-        const allProjects = projectRepo.findAll();
-        if (allProjects.length === 1) {
-          project = allProjects[0];
-        } else {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: false,
-                error: 'Specify projectName',
-              }),
-            }],
-          };
-        }
-      }
-
-      if (!project) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: `Project not found: ${projectName}` }),
-          }],
-        };
-      }
+      const result2 = resolveProjectOrError({ projectName });
+      if ('error' in result2) return result2.error;
+      const project = result2.project;
 
       const env = envRepo.findByProjectAndName(project.id, environment);
       if (!env) {
@@ -444,7 +385,7 @@ export function registerDbTools(server: McpServer): void {
         source = `connection: ${connectionName}`;
       } else if (projectName) {
         // Resolve from project/environment (existing logic)
-        const project = projectRepo.findByName(projectName);
+        const project = resolveProject({ projectName });
         if (!project) {
           return {
             content: [{

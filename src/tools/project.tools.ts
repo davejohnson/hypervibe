@@ -12,6 +12,7 @@ import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { createProjectSchema } from '../schemas/project.schema.js';
 import type { RailwayCredentials } from '../domain/entities/connection.entity.js';
 import type { ComponentType } from '../domain/entities/component.entity.js';
+import { resolveProject, detectGitRemoteUrl } from './resolve-project.js';
 
 const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
@@ -27,8 +28,9 @@ export function registerProjectTools(server: McpServer): void {
     {
       name: z.string().min(1).max(100).describe('Project name'),
       defaultPlatform: z.string().optional().describe('Default deployment platform (default: railway)'),
+      gitRemoteUrl: z.string().optional().describe('Git remote URL to scope this project to (auto-detected from cwd if not provided)'),
     },
-    async ({ name, defaultPlatform }) => {
+    async ({ name, defaultPlatform, gitRemoteUrl }) => {
       // Check if project already exists
       const existing = projectRepo.findByName(name);
       if (existing) {
@@ -46,8 +48,11 @@ export function registerProjectTools(server: McpServer): void {
         };
       }
 
+      // Auto-detect git remote if not provided
+      const resolvedGitRemoteUrl = gitRemoteUrl ?? detectGitRemoteUrl() ?? undefined;
+
       // Validate input
-      const input = createProjectSchema.parse({ name, defaultPlatform });
+      const input = createProjectSchema.parse({ name, defaultPlatform, gitRemoteUrl: resolvedGitRemoteUrl });
 
       // Create project
       const project = projectRepo.create(input);
@@ -105,23 +110,7 @@ export function registerProjectTools(server: McpServer): void {
       projectName: z.string().optional().describe('Project name'),
     },
     async ({ projectId, projectName }) => {
-      if (!projectId && !projectName) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: false,
-                error: 'Either projectId or projectName must be provided',
-              }),
-            },
-          ],
-        };
-      }
-
-      const project = projectId
-        ? projectRepo.findById(projectId)
-        : projectRepo.findByName(projectName!);
+      const project = resolveProject({ projectId, projectName });
 
       if (!project) {
         return {
@@ -159,23 +148,7 @@ export function registerProjectTools(server: McpServer): void {
       projectName: z.string().optional().describe('Project name'),
     },
     async ({ projectId, projectName }) => {
-      if (!projectId && !projectName) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: false,
-                error: 'Either projectId or projectName must be provided',
-              }),
-            },
-          ],
-        };
-      }
-
-      const project = projectId
-        ? projectRepo.findById(projectId)
-        : projectRepo.findByName(projectName!);
+      const project = resolveProject({ projectId, projectName });
 
       if (!project) {
         return {
@@ -469,10 +442,17 @@ async function performImport(
     };
   }
 
+  // Extract git remote URL from service repo triggers
+  const repoUrl = services.find((s) => s.repo)?.repo ?? undefined;
+  const gitRemoteUrl = repoUrl
+    ? `https://github.com/${repoUrl}`
+    : detectGitRemoteUrl() ?? undefined;
+
   // Create the project
   const project = projectRepo.create({
     name: details.name,
     defaultPlatform: 'railway',
+    gitRemoteUrl,
   });
 
   // Create environments with Railway bindings

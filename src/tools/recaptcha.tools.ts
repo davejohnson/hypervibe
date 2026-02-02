@@ -1,7 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
@@ -10,8 +9,9 @@ import { RecaptchaAdapter } from '../adapters/providers/recaptcha/recaptcha.adap
 import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
 import type { RecaptchaCredentials } from '../adapters/providers/recaptcha/recaptcha.adapter.js';
 
+import { resolveProject } from './resolve-project.js';
+
 const connectionRepo = new ConnectionRepository();
-const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 
@@ -93,7 +93,7 @@ export function registerRecaptchaTools(server: McpServer): void {
       }
 
       // Get project and environment
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{

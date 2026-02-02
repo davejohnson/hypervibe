@@ -1,7 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
@@ -9,9 +8,9 @@ import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js
 import { StripeAdapter } from '../adapters/providers/stripe/stripe.adapter.js';
 import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
 import type { StripeCredentials, StripeMode } from '../adapters/providers/stripe/stripe.adapter.js';
+import { resolveProject, resolveProjectOrError } from './resolve-project.js';
 
 const connectionRepo = new ConnectionRepository();
-const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 
@@ -27,43 +26,9 @@ export function registerLogsTools(server: McpServer): void {
     },
     async ({ projectName, environment, limit = 20 }) => {
       // Auto-detect project if not specified
-      let project;
-      if (projectName) {
-        project = projectRepo.findByName(projectName);
-      } else {
-        const allProjects = projectRepo.findAll();
-        if (allProjects.length === 0) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({ success: false, error: 'No projects found' }),
-            }],
-          };
-        }
-        if (allProjects.length === 1) {
-          project = allProjects[0];
-        } else {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: false,
-                error: 'Multiple projects found. Specify projectName.',
-                projects: allProjects.map((p) => p.name),
-              }),
-            }],
-          };
-        }
-      }
-
-      if (!project) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: `Project not found: ${projectName}` }),
-          }],
-        };
-      }
+      const result = resolveProjectOrError({ projectName });
+      if ('error' in result) return result.error;
+      const project = result.project;
 
       // Find production environment (try common names)
       const envNames = environment
@@ -201,7 +166,7 @@ export function registerLogsTools(server: McpServer): void {
       limit: z.number().optional().describe('Number of deployments to show (default 10)'),
     },
     async ({ projectName, environmentName, serviceName, limit = 10 }) => {
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{
@@ -307,7 +272,7 @@ export function registerLogsTools(server: McpServer): void {
       errorsOnly: z.boolean().optional().describe('Show only error/warning logs'),
     },
     async ({ projectName, environmentName, serviceName, lines = 100, errorsOnly = false }) => {
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{
@@ -441,7 +406,7 @@ export function registerLogsTools(server: McpServer): void {
       deploymentId: z.string().optional().describe('Specific deployment ID (defaults to latest)'),
     },
     async ({ projectName, environmentName, serviceName, deploymentId }) => {
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{
@@ -560,7 +525,7 @@ export function registerLogsTools(server: McpServer): void {
       environmentName: z.string().describe('Environment name'),
     },
     async ({ projectName, environmentName }) => {
-      const project = projectRepo.findByName(projectName);
+      const project = resolveProject({ projectName });
       if (!project) {
         return {
           content: [{

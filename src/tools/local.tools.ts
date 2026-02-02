@@ -2,23 +2,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ComponentRepository } from '../adapters/db/repositories/component.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
 import { ComposeGenerator } from '../adapters/providers/local/compose.generator.js';
 import type { ComponentType } from '../domain/entities/component.entity.js';
+import { resolveProject } from './resolve-project.js';
 
-const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
 const componentRepo = new ComponentRepository();
 const auditRepo = new AuditRepository();
-
-function resolveProject(projectId?: string, projectName?: string) {
-  if (projectId) return projectRepo.findById(projectId);
-  if (projectName) return projectRepo.findByName(projectName);
-  return null;
-}
 
 export function registerLocalTools(server: McpServer): void {
   server.tool(
@@ -34,7 +27,7 @@ export function registerLocalTools(server: McpServer): void {
         .describe('Components to include (default: postgres)'),
     },
     async ({ projectId, projectName, outputDir, components }) => {
-      const project = resolveProject(projectId, projectName);
+      const project = resolveProject({ projectId, projectName });
       if (!project) {
         return {
           content: [
@@ -154,7 +147,7 @@ export function registerLocalTools(server: McpServer): void {
       type: z.enum(['postgres', 'redis', 'mysql', 'mongodb']).describe('Component type'),
     },
     async ({ projectId, projectName, environmentName, type }) => {
-      const project = resolveProject(projectId, projectName);
+      const project = resolveProject({ projectId, projectName });
       if (!project) {
         return {
           content: [
@@ -229,7 +222,7 @@ export function registerLocalTools(server: McpServer): void {
       environmentName: z.string().optional().describe('Environment name'),
     },
     async ({ projectId, projectName, environmentName }) => {
-      const project = resolveProject(projectId, projectName);
+      const project = resolveProject({ projectId, projectName });
       if (!project) {
         return {
           content: [
