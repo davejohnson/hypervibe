@@ -8,6 +8,94 @@ import { CloudflareAdapter } from '../adapters/providers/cloudflare/cloudflare.a
 import type { GitHubCredentials } from '../adapters/providers/github/github.adapter.js';
 import type { CloudflareCredentials } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
 
+// ============= Workflow Templates =============
+
+const WORKFLOW_TEMPLATES: Record<string, {
+  name: string;
+  filename: string;
+  content: string;
+}> = {
+  'node-test': {
+    name: 'Node.js Tests',
+    filename: 'test.yml',
+    content: `name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test
+`,
+  },
+  'python-test': {
+    name: 'Python Tests',
+    filename: 'test.yml',
+    content: `name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - run: pytest
+`,
+  },
+  'deploy-railway': {
+    name: 'Deploy to Railway',
+    filename: 'deploy.yml',
+    content: `name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: railwayapp/railway-github-action@v0.1.0
+        with:
+          railway_token: \${{ secrets.RAILWAY_TOKEN }}
+`,
+  },
+  'lint': {
+    name: 'Lint',
+    filename: 'lint.yml',
+    content: `name: Lint
+
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+`,
+  },
+};
+
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
 
@@ -742,6 +830,635 @@ jobs:
               message: secretSet
                 ? `AI code review workflow created. PRs will be reviewed by Claude (${claudeModel}).`
                 : `Workflow created but failed to set ANTHROPIC_API_KEY secret: ${secretError}. Set it manually in repo Settings > Secrets.`,
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  // ============= Repository Secrets Tools =============
+
+  server.tool(
+    'github_secrets_list',
+    'List repository secret names (values are never exposed)',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+    },
+    async ({ owner, repo }) => {
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      try {
+        const secrets = await result.adapter.listSecrets(owner, repo);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              repository: `${owner}/${repo}`,
+              total_count: secrets.total_count,
+              secrets: secrets.secrets.map(s => ({
+                name: s.name,
+                created_at: s.created_at,
+                updated_at: s.updated_at,
+              })),
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'github_secret_set',
+    'Set or update a repository secret',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+      secretName: z.string().describe('Secret name (uppercase with underscores, e.g., API_KEY)'),
+      secretValue: z.string().describe('Secret value'),
+    },
+    async ({ owner, repo, secretName, secretValue }) => {
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      try {
+        // Check if secret exists before setting to determine action
+        const existingSecrets = await result.adapter.listSecrets(owner, repo);
+        const exists = existingSecrets.secrets.some(s => s.name === secretName);
+
+        await result.adapter.setRepositorySecret(owner, repo, secretName, secretValue);
+
+        auditRepo.create({
+          action: exists ? 'github.secret_updated' : 'github.secret_created',
+          resourceType: 'github_secret',
+          resourceId: `${owner}/${repo}/${secretName}`,
+          details: { secretName },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              repository: `${owner}/${repo}`,
+              secretName,
+              action: exists ? 'updated' : 'created',
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'github_secret_delete',
+    'Delete a repository secret',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+      secretName: z.string().describe('Secret name to delete'),
+    },
+    async ({ owner, repo, secretName }) => {
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      try {
+        await result.adapter.deleteSecret(owner, repo, secretName);
+
+        auditRepo.create({
+          action: 'github.secret_deleted',
+          resourceType: 'github_secret',
+          resourceId: `${owner}/${repo}/${secretName}`,
+          details: { secretName },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              repository: `${owner}/${repo}`,
+              secretName,
+              deleted: true,
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  // ============= Workflow Tools =============
+
+  server.tool(
+    'github_workflows_list',
+    'List workflows in a repository',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+    },
+    async ({ owner, repo }) => {
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      try {
+        const workflows = await result.adapter.listWorkflows(owner, repo);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              repository: `${owner}/${repo}`,
+              total_count: workflows.total_count,
+              workflows: workflows.workflows.map(w => ({
+                id: w.id,
+                name: w.name,
+                path: w.path,
+                state: w.state,
+                created_at: w.created_at,
+              })),
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'github_workflow_runs',
+    'Get recent runs for a workflow',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+      workflowId: z.string().describe('Workflow ID (number) or filename (e.g., "test.yml")'),
+      status: z.string().optional().describe('Filter by status (queued, in_progress, completed)'),
+      limit: z.number().optional().describe('Maximum number of runs to return (default: 10)'),
+    },
+    async ({ owner, repo, workflowId, status, limit }) => {
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      try {
+        const runs = await result.adapter.listWorkflowRuns(owner, repo, workflowId, {
+          status,
+          per_page: limit ?? 10,
+        });
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              repository: `${owner}/${repo}`,
+              workflowId,
+              total_count: runs.total_count,
+              runs: runs.workflow_runs.map(r => ({
+                id: r.id,
+                name: r.name,
+                status: r.status,
+                conclusion: r.conclusion,
+                created_at: r.created_at,
+                head_sha: r.head_sha.substring(0, 7),
+                head_branch: r.head_branch,
+                event: r.event,
+                url: r.html_url,
+              })),
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'github_workflow_trigger',
+    'Manually trigger a workflow (requires workflow_dispatch trigger)',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+      workflowId: z.string().describe('Workflow ID (number) or filename (e.g., "deploy.yml")'),
+      ref: z.string().optional().describe('Git ref to run workflow on (default: main)'),
+      inputs: z.record(z.string()).optional().describe('Workflow inputs as key-value pairs'),
+    },
+    async ({ owner, repo, workflowId, ref, inputs }) => {
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      try {
+        await result.adapter.triggerWorkflow(owner, repo, workflowId, ref ?? 'main', inputs);
+
+        auditRepo.create({
+          action: 'github.workflow_triggered',
+          resourceType: 'github_workflow',
+          resourceId: `${owner}/${repo}/${workflowId}`,
+          details: { workflowId, ref: ref ?? 'main', inputs },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              repository: `${owner}/${repo}`,
+              workflowId,
+              ref: ref ?? 'main',
+              message: 'Workflow dispatch event triggered. Use github_workflow_runs to check status.',
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'github_workflow_create',
+    'Create a workflow from common templates (two-step: preview then confirm)',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+      template: z.enum(['node-test', 'python-test', 'deploy-railway', 'lint']).describe('Workflow template to use'),
+      confirm: z.boolean().optional().describe('Set to true to create the workflow'),
+    },
+    async ({ owner, repo, template, confirm }) => {
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const tmpl = WORKFLOW_TEMPLATES[template];
+      if (!tmpl) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `Unknown template: ${template}. Available: ${Object.keys(WORKFLOW_TEMPLATES).join(', ')}`,
+            }),
+          }],
+        };
+      }
+
+      const workflowPath = `.github/workflows/${tmpl.filename}`;
+
+      // Preview mode
+      if (!confirm) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              mode: 'preview',
+              message: 'Review the workflow and call again with confirm=true to create.',
+              repository: `${owner}/${repo}`,
+              template,
+              templateName: tmpl.name,
+              path: workflowPath,
+              content: tmpl.content,
+              requiredSecrets: template === 'deploy-railway' ? ['RAILWAY_TOKEN'] : [],
+            }),
+          }],
+        };
+      }
+
+      try {
+        const fileResult = await result.adapter.createOrUpdateFile(
+          owner,
+          repo,
+          workflowPath,
+          tmpl.content,
+          `Add ${tmpl.name} workflow`
+        );
+
+        auditRepo.create({
+          action: 'github.workflow_created',
+          resourceType: 'github_workflow',
+          resourceId: `${owner}/${repo}/${workflowPath}`,
+          details: { template, path: workflowPath, created: fileResult.created, updated: fileResult.updated },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              mode: 'executed',
+              repository: `${owner}/${repo}`,
+              template,
+              templateName: tmpl.name,
+              path: workflowPath,
+              created: fileResult.created,
+              updated: fileResult.updated,
+              requiredSecrets: template === 'deploy-railway' ? ['RAILWAY_TOKEN'] : [],
+              message: fileResult.created
+                ? `Workflow "${tmpl.name}" created at ${workflowPath}.`
+                : `Workflow "${tmpl.name}" updated at ${workflowPath}.`,
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  // ============= Branch Protection Tools =============
+
+  server.tool(
+    'github_branch_protection_get',
+    'Get branch protection rules for a branch',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+      branch: z.string().describe('Branch name (e.g., main)'),
+    },
+    async ({ owner, repo, branch }) => {
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      try {
+        const protection = await result.adapter.getBranchProtection(owner, repo, branch);
+
+        if (!protection) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                repository: `${owner}/${repo}`,
+                branch,
+                protected: false,
+                message: `Branch "${branch}" has no protection rules.`,
+              }),
+            }],
+          };
+        }
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              repository: `${owner}/${repo}`,
+              branch,
+              protected: true,
+              rules: {
+                requireReviews: !!protection.required_pull_request_reviews,
+                requiredReviewers: protection.required_pull_request_reviews?.required_approving_review_count ?? 0,
+                dismissStaleReviews: protection.required_pull_request_reviews?.dismiss_stale_reviews ?? false,
+                requireCodeOwnerReviews: protection.required_pull_request_reviews?.require_code_owner_reviews ?? false,
+                requireStatusChecks: !!protection.required_status_checks,
+                statusChecks: protection.required_status_checks?.contexts ?? [],
+                strictStatusChecks: protection.required_status_checks?.strict ?? false,
+                enforceAdmins: protection.enforce_admins?.enabled ?? false,
+                requireLinearHistory: protection.required_linear_history?.enabled ?? false,
+                allowForcePushes: protection.allow_force_pushes?.enabled ?? false,
+                allowDeletions: protection.allow_deletions?.enabled ?? false,
+              },
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'github_branch_protection_set',
+    'Create or update branch protection rules (two-step: preview then confirm)',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+      branch: z.string().describe('Branch name (e.g., main)'),
+      requireReviews: z.boolean().optional().describe('Require pull request reviews'),
+      requiredReviewers: z.number().optional().describe('Number of required reviewers (default: 1)'),
+      dismissStaleReviews: z.boolean().optional().describe('Dismiss stale reviews on new commits'),
+      requireCodeOwnerReviews: z.boolean().optional().describe('Require code owner reviews'),
+      requireStatusChecks: z.boolean().optional().describe('Require status checks to pass'),
+      statusChecks: z.array(z.string()).optional().describe('List of required status check contexts'),
+      strictStatusChecks: z.boolean().optional().describe('Require branches to be up to date (default: true)'),
+      enforceAdmins: z.boolean().optional().describe('Enforce rules for admins too'),
+      requireLinearHistory: z.boolean().optional().describe('Require linear commit history'),
+      allowForcePushes: z.boolean().optional().describe('Allow force pushes'),
+      allowDeletions: z.boolean().optional().describe('Allow branch deletion'),
+      confirm: z.boolean().optional().describe('Set to true to apply the changes'),
+    },
+    async (params) => {
+      const { owner, repo, branch, confirm, ...rules } = params;
+
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      // Get current protection for comparison
+      const currentProtection = await result.adapter.getBranchProtection(owner, repo, branch);
+
+      // Preview mode
+      if (!confirm) {
+        const plannedRules = {
+          requireReviews: rules.requireReviews ?? false,
+          requiredReviewers: rules.requiredReviewers ?? 1,
+          dismissStaleReviews: rules.dismissStaleReviews ?? false,
+          requireCodeOwnerReviews: rules.requireCodeOwnerReviews ?? false,
+          requireStatusChecks: rules.requireStatusChecks ?? false,
+          statusChecks: rules.statusChecks ?? [],
+          strictStatusChecks: rules.strictStatusChecks ?? true,
+          enforceAdmins: rules.enforceAdmins ?? false,
+          requireLinearHistory: rules.requireLinearHistory ?? false,
+          allowForcePushes: rules.allowForcePushes ?? false,
+          allowDeletions: rules.allowDeletions ?? false,
+        };
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              mode: 'preview',
+              message: 'Review the planned rules and call again with confirm=true to apply.',
+              repository: `${owner}/${repo}`,
+              branch,
+              currentlyProtected: !!currentProtection,
+              currentRules: currentProtection ? {
+                requireReviews: !!currentProtection.required_pull_request_reviews,
+                requiredReviewers: currentProtection.required_pull_request_reviews?.required_approving_review_count ?? 0,
+                requireStatusChecks: !!currentProtection.required_status_checks,
+                statusChecks: currentProtection.required_status_checks?.contexts ?? [],
+                enforceAdmins: currentProtection.enforce_admins?.enabled ?? false,
+              } : null,
+              plannedRules,
+            }),
+          }],
+        };
+      }
+
+      try {
+        await result.adapter.updateBranchProtection(owner, repo, branch, rules);
+
+        auditRepo.create({
+          action: 'github.branch_protection_updated',
+          resourceType: 'github_branch',
+          resourceId: `${owner}/${repo}/${branch}`,
+          details: { branch, rules },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              mode: 'executed',
+              repository: `${owner}/${repo}`,
+              branch,
+              message: `Branch protection rules updated for "${branch}".`,
+              appliedRules: rules,
             }),
           }],
         };

@@ -353,6 +353,216 @@ process.stdin.on('end', () => {
     });
   }
 
+  // ============= Repository Secrets =============
+
+  /**
+   * List repository secrets (names only - values are never exposed).
+   */
+  async listSecrets(owner: string, repo: string): Promise<{
+    total_count: number;
+    secrets: Array<{ name: string; created_at: string; updated_at: string }>;
+  }> {
+    return await this.request<{
+      total_count: number;
+      secrets: Array<{ name: string; created_at: string; updated_at: string }>;
+    }>('GET', `/repos/${owner}/${repo}/actions/secrets`);
+  }
+
+  /**
+   * Delete a repository secret.
+   */
+  async deleteSecret(owner: string, repo: string, secretName: string): Promise<void> {
+    await this.request<void>('DELETE', `/repos/${owner}/${repo}/actions/secrets/${secretName}`);
+  }
+
+  // ============= Workflows =============
+
+  /**
+   * List workflows in a repository.
+   */
+  async listWorkflows(owner: string, repo: string): Promise<{
+    total_count: number;
+    workflows: Array<{
+      id: number;
+      name: string;
+      path: string;
+      state: string;
+      created_at: string;
+      updated_at: string;
+    }>;
+  }> {
+    return await this.request<{
+      total_count: number;
+      workflows: Array<{
+        id: number;
+        name: string;
+        path: string;
+        state: string;
+        created_at: string;
+        updated_at: string;
+      }>;
+    }>('GET', `/repos/${owner}/${repo}/actions/workflows`);
+  }
+
+  /**
+   * List workflow runs for a specific workflow.
+   */
+  async listWorkflowRuns(
+    owner: string,
+    repo: string,
+    workflowId: string | number,
+    options?: { status?: string; per_page?: number }
+  ): Promise<{
+    total_count: number;
+    workflow_runs: Array<{
+      id: number;
+      name: string;
+      status: string;
+      conclusion: string | null;
+      created_at: string;
+      updated_at: string;
+      head_sha: string;
+      head_branch: string;
+      event: string;
+      html_url: string;
+    }>;
+  }> {
+    const params = new URLSearchParams();
+    if (options?.status) params.set('status', options.status);
+    if (options?.per_page) params.set('per_page', String(options.per_page));
+    const query = params.toString() ? `?${params.toString()}` : '';
+
+    return await this.request<{
+      total_count: number;
+      workflow_runs: Array<{
+        id: number;
+        name: string;
+        status: string;
+        conclusion: string | null;
+        created_at: string;
+        updated_at: string;
+        head_sha: string;
+        head_branch: string;
+        event: string;
+        html_url: string;
+      }>;
+    }>('GET', `/repos/${owner}/${repo}/actions/workflows/${workflowId}/runs${query}`);
+  }
+
+  /**
+   * Trigger a workflow dispatch event.
+   */
+  async triggerWorkflow(
+    owner: string,
+    repo: string,
+    workflowId: string | number,
+    ref: string,
+    inputs?: Record<string, string>
+  ): Promise<void> {
+    await this.request<void>('POST', `/repos/${owner}/${repo}/actions/workflows/${workflowId}/dispatches`, {
+      ref,
+      inputs: inputs ?? {},
+    });
+  }
+
+  // ============= Branch Protection =============
+
+  /**
+   * Get branch protection rules.
+   */
+  async getBranchProtection(owner: string, repo: string, branch: string): Promise<{
+    required_status_checks: {
+      strict: boolean;
+      contexts: string[];
+      checks: Array<{ context: string; app_id: number | null }>;
+    } | null;
+    required_pull_request_reviews: {
+      required_approving_review_count: number;
+      dismiss_stale_reviews: boolean;
+      require_code_owner_reviews: boolean;
+    } | null;
+    enforce_admins: { enabled: boolean } | null;
+    required_linear_history: { enabled: boolean } | null;
+    allow_force_pushes: { enabled: boolean } | null;
+    allow_deletions: { enabled: boolean } | null;
+  } | null> {
+    try {
+      return await this.request<{
+        required_status_checks: {
+          strict: boolean;
+          contexts: string[];
+          checks: Array<{ context: string; app_id: number | null }>;
+        } | null;
+        required_pull_request_reviews: {
+          required_approving_review_count: number;
+          dismiss_stale_reviews: boolean;
+          require_code_owner_reviews: boolean;
+        } | null;
+        enforce_admins: { enabled: boolean } | null;
+        required_linear_history: { enabled: boolean } | null;
+        allow_force_pushes: { enabled: boolean } | null;
+        allow_deletions: { enabled: boolean } | null;
+      }>('GET', `/repos/${owner}/${repo}/branches/${branch}/protection`);
+    } catch (error) {
+      // 404 means no protection rules
+      if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found') || error.message.includes('Branch not protected'))) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Update branch protection rules.
+   */
+  async updateBranchProtection(
+    owner: string,
+    repo: string,
+    branch: string,
+    rules: {
+      requireReviews?: boolean;
+      requiredReviewers?: number;
+      dismissStaleReviews?: boolean;
+      requireCodeOwnerReviews?: boolean;
+      requireStatusChecks?: boolean;
+      statusChecks?: string[];
+      strictStatusChecks?: boolean;
+      enforceAdmins?: boolean;
+      requireLinearHistory?: boolean;
+      allowForcePushes?: boolean;
+      allowDeletions?: boolean;
+    }
+  ): Promise<void> {
+    const body: Record<string, unknown> = {
+      enforce_admins: rules.enforceAdmins ?? false,
+      required_linear_history: rules.requireLinearHistory ?? false,
+      allow_force_pushes: rules.allowForcePushes ?? false,
+      allow_deletions: rules.allowDeletions ?? false,
+      restrictions: null, // We don't restrict who can push
+    };
+
+    if (rules.requireStatusChecks && rules.statusChecks && rules.statusChecks.length > 0) {
+      body.required_status_checks = {
+        strict: rules.strictStatusChecks ?? true,
+        contexts: rules.statusChecks,
+      };
+    } else {
+      body.required_status_checks = null;
+    }
+
+    if (rules.requireReviews) {
+      body.required_pull_request_reviews = {
+        required_approving_review_count: rules.requiredReviewers ?? 1,
+        dismiss_stale_reviews: rules.dismissStaleReviews ?? false,
+        require_code_owner_reviews: rules.requireCodeOwnerReviews ?? false,
+      };
+    } else {
+      body.required_pull_request_reviews = null;
+    }
+
+    await this.request<void>('PUT', `/repos/${owner}/${repo}/branches/${branch}/protection`, body);
+  }
+
   /**
    * Request a GitHub Pages build to trigger certificate provisioning.
    */
