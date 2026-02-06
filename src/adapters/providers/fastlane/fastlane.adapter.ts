@@ -521,6 +521,8 @@ export class FastlaneAdapter {
       });
 
       child.on('close', (code) => {
+        const combinedOutput = stderr + stdout;
+
         if (code === 0) {
           resolve({
             success: true,
@@ -528,10 +530,12 @@ export class FastlaneAdapter {
             exitCode: code,
           });
         } else {
+          // Check for known error patterns and provide helpful messages
+          const knownError = detectKnownFastlaneError(combinedOutput);
           resolve({
             success: false,
             output: stdout,
-            error: stderr || stdout,
+            error: knownError || stderr || stdout,
             exitCode: code ?? undefined,
           });
         }
@@ -615,23 +619,104 @@ export class FastlaneAdapter {
   }
 
   /**
-   * Check if fastlane is installed
+   * Verify fastlane is installed and API key works
    */
-  async verify(): Promise<{ success: boolean; error?: string; version?: string }> {
-    try {
-      const result = await this.run(['--version']);
-      if (result.success) {
-        const version = result.output?.match(/fastlane (\d+\.\d+\.\d+)/)?.[1] || 'unknown';
-        return { success: true, version };
-      }
-      return { success: false, error: result.error };
-    } catch (error) {
+  async verify(): Promise<{ success: boolean; error?: string; version?: string; warning?: string }> {
+    // Step 1: Check if fastlane is installed
+    const versionResult = await this.run(['--version']);
+    if (!versionResult.success) {
       return {
         success: false,
-        error: 'Fastlane not found. Install with: gem install fastlane',
+        error: 'Fastlane not found. Install with: brew install fastlane',
+      };
+    }
+
+    const version = versionResult.output?.match(/fastlane (\d+\.\d+\.\d+)/)?.[1] || 'unknown';
+
+    // Step 2: Test the API key by listing apps (requires valid credentials)
+    if (!this.credentials) {
+      return { success: true, version, error: 'No credentials to verify' };
+    }
+
+    // Try to list bundle IDs - this will fail fast if API key doesn't work
+    try {
+      await this.listBundleIds();
+
+      // Check for known problematic fastlane versions
+      const warning = checkFastlaneVersionWarning(version);
+
+      return { success: true, version, ...(warning && { warning }) };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const knownError = detectKnownFastlaneError(errorMessage);
+      return {
+        success: false,
+        version,
+        error: knownError || errorMessage,
       };
     }
   }
+}
+
+/**
+ * Check if the fastlane version has known issues
+ */
+function checkFastlaneVersionWarning(version: string): string | undefined {
+  // Versions 2.225.0 - 2.231.x have OpenSSL compatibility issues on some systems
+  const match = version.match(/^2\.(\d+)/);
+  if (match) {
+    const minor = parseInt(match[1], 10);
+    if (minor >= 225 && minor <= 231) {
+      return `Fastlane ${version} may have OpenSSL issues on some systems. If uploads fail with "No value found for 'username'" or "invalid curve name", run: brew upgrade fastlane`;
+    }
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Error Detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Known fastlane error patterns and their user-friendly messages
+ */
+const KNOWN_ERRORS: Array<{ pattern: RegExp; message: string }> = [
+  {
+    pattern: /invalid curve name/i,
+    message: 'OpenSSL compatibility issue with fastlane. Fix: brew upgrade fastlane (or brew reinstall openssl@3)',
+  },
+  {
+    pattern: /No value found for 'username'/i,
+    message: 'API key not recognized by fastlane. This usually means an OpenSSL issue. Fix: brew upgrade fastlane',
+  },
+  {
+    pattern: /Could not find App Store Connect API key/i,
+    message: 'API key credentials are invalid or malformed. Re-create the connection with valid credentials.',
+  },
+  {
+    pattern: /invalid.*private.*key/i,
+    message: 'Private key format is invalid. Ensure you\'re using the full .p8 file contents including BEGIN/END markers.',
+  },
+  {
+    pattern: /Authentication.*failed/i,
+    message: 'API key authentication failed. Verify keyId, issuerId, and privateKey are correct.',
+  },
+  {
+    pattern: /The request was not authorized/i,
+    message: 'API key lacks required permissions. Ensure the key has App Manager or Admin role in App Store Connect.',
+  },
+];
+
+/**
+ * Detect known fastlane errors and return a helpful message
+ */
+function detectKnownFastlaneError(output: string): string | null {
+  for (const { pattern, message } of KNOWN_ERRORS) {
+    if (pattern.test(output)) {
+      return message;
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

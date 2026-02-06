@@ -144,7 +144,7 @@ export function registerConnectionTools(server: McpServer): void {
         }
 
         // Call verify on the adapter
-        const result = await (adapter as { verify: (scope?: string) => Promise<{ success: boolean; error?: string; email?: string; accountId?: string; zones?: string[] }> }).verify(scope || undefined);
+        const result = await (adapter as { verify: (scope?: string) => Promise<{ success: boolean; error?: string; email?: string; accountId?: string; zones?: string[]; version?: string; warning?: string }> }).verify(scope || undefined);
 
         if (result.success) {
           connectionRepo.updateStatus(connection.id, 'verified');
@@ -152,7 +152,7 @@ export function registerConnectionTools(server: McpServer): void {
             action: 'connection.verified',
             resourceType: 'connection',
             resourceId: connection.id,
-            details: { provider, scope: scope || null, email: result.email, accountId: result.accountId },
+            details: { provider, scope: scope || null, email: result.email, accountId: result.accountId, version: result.version },
           });
 
           const displayName = registeredProvider.metadata.displayName;
@@ -160,12 +160,17 @@ export function registerConnectionTools(server: McpServer): void {
           if (result.email) {
             message += ` for ${result.email}`;
           }
+          if (result.version) {
+            message += ` (v${result.version})`;
+          }
 
           return successResponse({
             message,
             status: 'verified',
             ...(result.email && { email: result.email }),
             ...(result.accountId && { accountId: result.accountId }),
+            ...(result.version && { version: result.version }),
+            ...(result.warning && { warning: result.warning }),
           });
         } else {
           connectionRepo.updateStatus(connection.id, 'failed');
