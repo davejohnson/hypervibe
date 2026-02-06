@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { spawn } from 'child_process';
 import { createSign, createPrivateKey } from 'crypto';
+import { writeFile, unlink, mkdir } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 
 // Credentials schema for App Store Connect API (used by fastlane)
@@ -465,7 +468,153 @@ export class FastlaneAdapter {
   }
 
   // ---------------------------------------------------------------------------
-  // Fastlane CLI wrappers
+  // Native Upload via xcrun altool (no fastlane dependency)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Upload an IPA to App Store Connect using xcrun altool.
+   * This avoids fastlane CLI dependencies and OpenSSL issues.
+   */
+  async uploadViaAltool(ipaPath: string): Promise<{ success: boolean; output?: string; error?: string }> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    // altool requires the private key as a file path
+    const apiKeyPath = await this.writeApiKeyToTempFile();
+
+    try {
+      return await new Promise((resolve) => {
+        const args = [
+          'altool',
+          '--upload-app',
+          '-t', 'ios',
+          '-f', ipaPath,
+          '--apiKey', this.credentials!.keyId,
+          '--apiIssuer', this.credentials!.issuerId,
+        ];
+
+        const child = spawn('xcrun', args, {
+          env: {
+            ...process.env,
+            // altool looks for .p8 files in specific locations
+            // ~/.appstoreconnect/private_keys/ or ~/.private_keys/
+            // We wrote our key to ~/.appstoreconnect/private_keys/AuthKey_<keyId>.p8
+          },
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        child.stdout?.on('data', (data) => {
+          stdout += data.toString();
+        });
+
+        child.stderr?.on('data', (data) => {
+          stderr += data.toString();
+        });
+
+        child.on('error', (error) => {
+          this.cleanupApiKeyFile(apiKeyPath).catch(() => {});
+          resolve({
+            success: false,
+            error: `Failed to run xcrun altool: ${error.message}. Ensure Xcode Command Line Tools are installed.`,
+          });
+        });
+
+        child.on('close', (code) => {
+          this.cleanupApiKeyFile(apiKeyPath).catch(() => {});
+
+          const combinedOutput = stdout + stderr;
+
+          if (code === 0) {
+            resolve({
+              success: true,
+              output: combinedOutput,
+            });
+          } else {
+            // Parse altool error messages
+            const errorMessage = this.parseAltoolError(combinedOutput) || stderr || stdout;
+            resolve({
+              success: false,
+              output: combinedOutput,
+              error: errorMessage,
+            });
+          }
+        });
+      });
+    } catch (error) {
+      await this.cleanupApiKeyFile(apiKeyPath).catch(() => {});
+      throw error;
+    }
+  }
+
+  /**
+   * Write the API key to a temp file in the format altool expects.
+   * altool looks for AuthKey_<keyId>.p8 in ~/.appstoreconnect/private_keys/ or ~/.private_keys/
+   */
+  private async writeApiKeyToTempFile(): Promise<string> {
+    if (!this.credentials) {
+      throw new Error('Not connected');
+    }
+
+    // altool expects keys in specific directories
+    const keyDir = join(process.env.HOME || tmpdir(), '.appstoreconnect', 'private_keys');
+    await mkdir(keyDir, { recursive: true });
+
+    const keyFileName = `AuthKey_${this.credentials.keyId}.p8`;
+    const keyPath = join(keyDir, keyFileName);
+
+    // Normalize the key format
+    let keyContent = this.credentials.privateKey;
+    if (!keyContent.includes('-----BEGIN')) {
+      keyContent = `-----BEGIN PRIVATE KEY-----\n${keyContent}\n-----END PRIVATE KEY-----`;
+    }
+
+    await writeFile(keyPath, keyContent, { mode: 0o600 });
+    return keyPath;
+  }
+
+  /**
+   * Clean up the temporary API key file.
+   */
+  private async cleanupApiKeyFile(keyPath: string): Promise<void> {
+    try {
+      await unlink(keyPath);
+    } catch {
+      // Ignore errors - file might not exist
+    }
+  }
+
+  /**
+   * Parse altool error output to provide helpful error messages.
+   */
+  private parseAltoolError(output: string): string | null {
+    // Common altool error patterns
+    if (output.includes('Unable to authenticate')) {
+      return 'API key authentication failed. Verify keyId, issuerId, and privateKey are correct.';
+    }
+    if (output.includes('Could not find the API key')) {
+      return 'API key file not found. The private key may be malformed.';
+    }
+    if (output.includes('ERROR ITMS-')) {
+      // Extract ITMS error
+      const match = output.match(/ERROR ITMS-\d+:\s*"([^"]+)"/);
+      if (match) {
+        return `App Store Connect: ${match[1]}`;
+      }
+    }
+    if (output.includes('The app is invalid')) {
+      return 'The IPA is invalid. Check that it was built for distribution (not development).';
+    }
+    if (output.includes('No suitable application records were found')) {
+      return 'App not found on App Store Connect. Create the app record first in App Store Connect.';
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Fastlane CLI wrappers (deprecated - prefer uploadViaAltool)
   // ---------------------------------------------------------------------------
 
   /**
@@ -781,36 +930,16 @@ providerRegistry.register({
     return adapter;
   },
   ensureDependencies: async () => {
-    const installed: string[] = [];
     const errors: string[] = [];
 
-    if (await commandExists('fastlane')) {
-      return { installed: [], errors: [] };
+    // xcrun (Xcode Command Line Tools) is required for native altool uploads
+    if (!(await commandExists('xcrun'))) {
+      errors.push('Xcode Command Line Tools not found. Install with: xcode-select --install');
     }
 
-    // Try brew install
-    if (await commandExists('brew')) {
-      const result = await new Promise<{ success: boolean; error?: string }>((resolve) => {
-        const child = spawn('brew', ['install', 'fastlane'], { shell: true });
-        let stderr = '';
-        child.stderr?.on('data', (data) => { stderr += data.toString(); });
-        child.on('close', (code) => {
-          resolve(code === 0
-            ? { success: true }
-            : { success: false, error: stderr || `brew install exited with code ${code}` });
-        });
-        child.on('error', (err) => resolve({ success: false, error: err.message }));
-      });
+    // fastlane is optional (only needed if useFastlane=true)
+    // We don't auto-install it since altool is the default now
 
-      if (result.success) {
-        installed.push('fastlane (via Homebrew)');
-      } else {
-        errors.push(`Failed to install fastlane via Homebrew: ${result.error}`);
-      }
-    } else {
-      errors.push('fastlane is not installed and Homebrew is not available. Install manually: brew install fastlane');
-    }
-
-    return { installed, errors };
+    return { installed: [], errors };
   },
 });

@@ -90,16 +90,17 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
 
   server.tool(
     'fastlane_upload',
-    'Upload an IPA to TestFlight. After uploading, use fastlane_compliance to set export compliance and make the build available to testers.',
+    'Upload an IPA to TestFlight. Uses native xcrun altool by default (no fastlane CLI required). After uploading, use fastlane_compliance to set export compliance and make the build available to testers.',
     {
       ipaPath: z.string().describe('Path to the IPA file'),
       changelog: z.string().optional().describe('What\'s new in this build (shown to testers)'),
       distributeExternal: z.boolean().optional().describe('Distribute to external testers (default: false)'),
       groups: z.array(z.string()).optional().describe('TestFlight group names to distribute to'),
       appIdentifier: z.string().optional().describe('App bundle identifier (for scoped connection lookup)'),
-      cwd: z.string().optional().describe('Working directory for fastlane'),
+      useFastlane: z.boolean().optional().describe('Use fastlane CLI instead of native altool (default: false)'),
+      cwd: z.string().optional().describe('Working directory for fastlane CLI (only used with useFastlane=true)'),
     },
-    async ({ ipaPath, changelog, distributeExternal, groups, appIdentifier, cwd }) => {
+    async ({ ipaPath, changelog, distributeExternal, groups, appIdentifier, useFastlane, cwd }) => {
       const result = getFastlaneAdapter(appIdentifier);
       if ('error' in result) {
         return {
@@ -113,13 +114,21 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
       const { adapter } = result;
 
       try {
-        const uploadResult = await adapter.uploadToTestFlight({
-          ipaPath,
-          changelog,
-          distributeExternal,
-          groups,
-          cwd,
-        });
+        let uploadResult: { success: boolean; output?: string; error?: string };
+
+        if (useFastlane) {
+          // Legacy: use fastlane CLI
+          uploadResult = await adapter.uploadToTestFlight({
+            ipaPath,
+            changelog,
+            distributeExternal,
+            groups,
+            cwd,
+          });
+        } else {
+          // Default: use native xcrun altool
+          uploadResult = await adapter.uploadViaAltool(ipaPath);
+        }
 
         auditRepo.create({
           action: 'fastlane.upload',
@@ -127,6 +136,7 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
           resourceId: ipaPath,
           details: {
             success: uploadResult.success,
+            method: useFastlane ? 'fastlane' : 'altool',
             distributeExternal,
             groups,
           },
@@ -139,6 +149,7 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
               text: JSON.stringify({
                 success: true,
                 message: 'Build uploaded to App Store Connect',
+                method: useFastlane ? 'fastlane' : 'altool',
                 ipaPath,
                 nextStep: 'Run fastlane_compliance to set export compliance and make the build available to testers.',
               }),
