@@ -9,6 +9,36 @@ export interface Receipt {
   error?: string;
 }
 
+/**
+ * Capabilities that a deployment provider supports.
+ * Used to determine what features are available and how to configure deployments.
+ */
+export interface ProviderCapabilities {
+  /** Build methods the platform supports */
+  supportedBuilders: Array<'nixpacks' | 'dockerfile' | 'buildpack' | 'static'>;
+
+  /** Component types the platform can provision (databases, caches) */
+  supportedComponents: ComponentType[];
+
+  /** Whether the platform can auto-wire database connections */
+  supportsAutoWiring: boolean;
+
+  /** Whether health check endpoints are configurable */
+  supportsHealthChecks: boolean;
+
+  /** Whether cron/scheduled jobs are supported */
+  supportsCronSchedule: boolean;
+
+  /** Whether release commands (run before deploy) are supported */
+  supportsReleaseCommand: boolean;
+
+  /** Whether multiple environments per project are supported natively */
+  supportsMultiEnvironment: boolean;
+
+  /** Whether the platform manages TLS certificates automatically */
+  managedTls: boolean;
+}
+
 export interface ComponentResult {
   component: Component;
   receipt: Receipt;
@@ -43,6 +73,9 @@ export interface VerifyResult {
 
 export interface IProviderAdapter {
   readonly name: string;
+
+  /** Platform capabilities - describes what features this provider supports */
+  readonly capabilities: ProviderCapabilities;
 
   connect(credentials: unknown): Promise<void>;
   verify(): Promise<VerifyResult>;

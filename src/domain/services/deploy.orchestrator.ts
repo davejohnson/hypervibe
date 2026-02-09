@@ -3,6 +3,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type { Run, RunPlan, RunStep, RunReceipt } from '../entities/run.entity.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
+import type { IHostingAdapter, HostingBindings } from '../ports/hosting.port.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
@@ -13,7 +14,8 @@ export interface DeployOptions {
   environment: Environment;
   services?: Service[];
   envVars?: Record<string, string>;
-  adapter: IProviderAdapter;
+  /** The hosting adapter to use for deployment (can be IProviderAdapter or IHostingAdapter) */
+  adapter: IProviderAdapter | IHostingAdapter;
 }
 
 export interface DeployResult {
@@ -168,10 +170,19 @@ export class DeployOrchestrator {
           );
 
           // Update environment bindings if we got a project ID
+          // Use platform-agnostic keys that work with any hosting provider
           if (receipt.success && receipt.data?.projectId) {
-            this.envRepo.updatePlatformBindings(options.environment.id, {
-              railwayProjectId: receipt.data.projectId,
-            });
+            const bindings: Partial<HostingBindings> = {
+              provider: options.adapter.name,
+              projectId: receipt.data.projectId as string,
+            };
+
+            // Also store environment ID if provided
+            if (receipt.data.environmentId) {
+              bindings.environmentId = receipt.data.environmentId as string;
+            }
+
+            this.envRepo.updatePlatformBindings(options.environment.id, bindings);
           }
 
           return {
@@ -210,13 +221,14 @@ export class DeployOrchestrator {
             options.envVars ?? {}
           );
 
-          // Update environment bindings with service info
+          // Update environment bindings with service info using platform-agnostic structure
           if (result.externalId) {
-            const currentBindings = options.environment.platformBindings as {
-              services?: Record<string, { serviceId: string }>;
-            };
+            const currentBindings = options.environment.platformBindings as Partial<HostingBindings>;
             const services = currentBindings.services ?? {};
-            services[service.name] = { serviceId: result.externalId };
+            services[service.name] = {
+              serviceId: result.externalId,
+              url: result.url,
+            };
             this.envRepo.updatePlatformBindings(options.environment.id, { services });
           }
 

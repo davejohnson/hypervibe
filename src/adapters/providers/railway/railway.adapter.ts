@@ -1,6 +1,6 @@
 import { GraphQLClient, gql } from 'graphql-request';
 import { z } from 'zod';
-import type { IProviderAdapter, Receipt, ComponentResult, DeployResult, JobResult } from '../../../domain/ports/provider.port.js';
+import type { IProviderAdapter, Receipt, ComponentResult, DeployResult, JobResult, ProviderCapabilities } from '../../../domain/ports/provider.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
@@ -18,6 +18,18 @@ const RAILWAY_API_URL = 'https://backboard.railway.app/graphql/v2';
 
 export class RailwayAdapter implements IProviderAdapter {
   readonly name = 'railway';
+
+  readonly capabilities: ProviderCapabilities = {
+    supportedBuilders: ['nixpacks', 'dockerfile'],
+    supportedComponents: ['postgres', 'redis', 'mysql', 'mongodb'],
+    supportsAutoWiring: true,
+    supportsHealthChecks: true,
+    supportsCronSchedule: true,
+    supportsReleaseCommand: false, // Railway uses start commands
+    supportsMultiEnvironment: true,
+    managedTls: true,
+  };
+
   private client: GraphQLClient | null = null;
   private credentials: RailwayCredentials | null = null;
 
@@ -66,9 +78,13 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     try {
-      // Check if we already have a Railway project ID bound
-      const bindings = environment.platformBindings as { railwayProjectId?: string };
-      if (bindings.railwayProjectId) {
+      // Check if we already have a project ID bound (check both new and legacy keys)
+      const bindings = environment.platformBindings as {
+        projectId?: string;
+        railwayProjectId?: string;
+      };
+      const existingProjectId = bindings.projectId || bindings.railwayProjectId;
+      if (existingProjectId) {
         // Verify project still exists
         const query = gql`
           query GetProject($id: String!) {
@@ -80,7 +96,7 @@ export class RailwayAdapter implements IProviderAdapter {
         `;
         try {
           const result = await this.client.request<{ project: { id: string; name: string } }>(query, {
-            id: bindings.railwayProjectId,
+            id: existingProjectId,
           });
           if (result.project) {
             return {
@@ -131,8 +147,14 @@ export class RailwayAdapter implements IProviderAdapter {
       throw new Error('Not connected. Call connect() first.');
     }
 
-    const bindings = environment.platformBindings as { railwayProjectId?: string; railwayEnvironmentId?: string };
-    if (!bindings.railwayProjectId) {
+    const bindings = environment.platformBindings as {
+      projectId?: string;
+      railwayProjectId?: string;
+      environmentId?: string;
+      railwayEnvironmentId?: string;
+    };
+    const projectId = bindings.projectId || bindings.railwayProjectId;
+    if (!projectId) {
       throw new Error('No Railway project bound to this environment');
     }
 
@@ -166,7 +188,7 @@ export class RailwayAdapter implements IProviderAdapter {
       `;
 
       const result = await this.client.request<{ pluginCreate: { id: string; name: string } }>(mutation, {
-        projectId: bindings.railwayProjectId,
+        projectId: projectId,
         name: pluginType,
       });
 
@@ -220,12 +242,16 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     const bindings = environment.platformBindings as {
+      projectId?: string;
       railwayProjectId?: string;
+      environmentId?: string;
       railwayEnvironmentId?: string;
       services?: Record<string, { serviceId: string }>;
     };
+    const projectId = bindings.projectId || bindings.railwayProjectId;
+    const environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
 
-    if (!bindings.railwayProjectId) {
+    if (!projectId) {
       return {
         serviceId: service.id,
         status: 'failed',
@@ -254,7 +280,7 @@ export class RailwayAdapter implements IProviderAdapter {
         const createResult = await this.client.request<{ serviceCreate: { id: string; name: string } }>(
           createMutation,
           {
-            projectId: bindings.railwayProjectId,
+            projectId: projectId,
             name: service.name,
           }
         );
@@ -263,7 +289,7 @@ export class RailwayAdapter implements IProviderAdapter {
       }
 
       // Auto-wire database and cache connections from Railway plugins
-      const pluginVars = await this.getPluginVariableReferences(bindings.railwayProjectId);
+      const pluginVars = await this.getPluginVariableReferences(projectId);
       const allEnvVars = { ...pluginVars, ...envVars }; // User vars override auto-detected
 
       // Set environment variables (including auto-wired plugin connections)
@@ -279,7 +305,7 @@ export class RailwayAdapter implements IProviderAdapter {
       `;
 
       // Get or create environment
-      let railwayEnvId = bindings.railwayEnvironmentId;
+      let railwayEnvId = environmentId;
       if (!railwayEnvId) {
         // Use default environment
         const envQuery = gql`
@@ -299,7 +325,7 @@ export class RailwayAdapter implements IProviderAdapter {
 
         const envResult = await this.client.request<{
           project: { environments: { edges: Array<{ node: { id: string; name: string } }> } };
-        }>(envQuery, { projectId: bindings.railwayProjectId });
+        }>(envQuery, { projectId: projectId });
 
         railwayEnvId = envResult.project.environments.edges[0]?.node.id;
       }
@@ -344,12 +370,16 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     const bindings = environment.platformBindings as {
+      projectId?: string;
       railwayProjectId?: string;
+      environmentId?: string;
       railwayEnvironmentId?: string;
       services?: Record<string, { serviceId: string }>;
     };
+    const projectId = bindings.projectId || bindings.railwayProjectId;
+    const environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
 
-    if (!bindings.railwayProjectId) {
+    if (!projectId) {
       return {
         success: false,
         message: 'No Railway project bound to this environment',
@@ -379,9 +409,9 @@ export class RailwayAdapter implements IProviderAdapter {
       `;
 
       await this.client.request(mutation, {
-        projectId: bindings.railwayProjectId,
+        projectId: projectId,
         serviceId: railwayServiceId,
-        environmentId: bindings.railwayEnvironmentId,
+        environmentId: environmentId,
         variables: vars,
       });
 

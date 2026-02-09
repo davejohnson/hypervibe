@@ -2,18 +2,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
-import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
-import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import { DeployOrchestrator } from '../domain/services/deploy.orchestrator.js';
-import type { RailwayCredentials } from '../domain/entities/connection.entity.js';
+import { adapterFactory } from '../domain/services/adapter.factory.js';
 
 import { resolveProject } from './resolve-project.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
-const connectionRepo = new ConnectionRepository();
 const runRepo = new RunRepository();
 
 function resolveEnvironment(
@@ -67,27 +63,24 @@ export function registerDeployTools(server: McpServer): void {
         });
       }
 
-      // Get Railway connection
-      const connection = connectionRepo.findByProvider('railway');
-      if (!connection || connection.status !== 'verified') {
+      // Get hosting adapter for project's platform
+      const platform = project.defaultPlatform || 'railway';
+      const adapterResult = await adapterFactory.getHostingAdapter(project);
+      if (!adapterResult.success || !adapterResult.adapter) {
         return {
           content: [
             {
               type: 'text' as const,
               text: JSON.stringify({
                 success: false,
-                error: 'No verified Railway connection. Use connection_create and connection_verify first.',
+                error: adapterResult.error || `No verified ${platform} connection. Use connection_create and connection_verify first.`,
               }),
             },
           ],
         };
       }
 
-      // Get credentials and create adapter
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
+      const adapter = adapterResult.adapter;
 
       // Resolve services
       let servicesToDeploy = serviceRepo.findByProjectId(project.id);
