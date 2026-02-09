@@ -24,12 +24,19 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 - **SendGrid** - Email authentication, domain verification
 - **reCAPTCHA** - Bot protection setup
 
+**Secret Managers**
+- **HashiCorp Vault** - KV secrets with versioning
+- **AWS Secrets Manager** - Native rotation support
+- **Doppler** - Simple config management
+
 **Developer Experience**
 - **Natural language** - No YAML, no clicking through dashboards
 - **Auto-wiring** - DATABASE_URL, REDIS_URL connected automatically
 - **Environment management** - Staging, production, PR previews
 - **Migration support** - Run Prisma, Drizzle, TypeORM migrations
 - **Local development** - Generate Docker Compose for local parity
+- **Secret rotation** - Rotate once, propagate to all environments
+- **Audit trail** - Track secret access across deploys
 
 ## Quick Start
 
@@ -78,6 +85,22 @@ You: "Add a custom domain api.myapp.com"
 You: "Run database migrations"
 ```
 
+### 5. Manage Secrets (Optional)
+
+Connect a secret manager and let infraprint inject secrets at deploy time:
+
+```
+You: "Connect to Vault at https://vault.mycompany.com"
+You: "Map DATABASE_URL to vault://secret/data/myapp/db#url"
+You: "Deploy to production"
+Claude: Resolves secrets from Vault, injects into Railway, deploys.
+
+You: "Rotate the database secret and sync everywhere"
+Claude: Rotates in Vault, updates all mapped environments.
+```
+
+Secret references use the format: `provider://path[#key][@version]`
+
 ## Architecture
 
 ```
@@ -87,20 +110,20 @@ You: "Run database migrations"
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │              Infraprint MCP Server                   │   │
 │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐          │   │
-│  │  │ Project  │  │  Deploy  │  │   DNS    │  ...     │   │
+│  │  │ Project  │  │  Deploy  │  │ Secrets  │  ...     │   │
 │  │  │  Tools   │  │  Tools   │  │  Tools   │          │   │
 │  │  └────┬─────┘  └────┬─────┘  └────┬─────┘          │   │
 │  │       └──────────────┼──────────────┘               │   │
 │  │                      ▼                               │   │
-│  │  ┌─────────────────────────────────────────────┐   │   │
-│  │  │           Provider Registry                  │   │   │
-│  │  │   Railway │ Cloudflare │ Stripe │ SendGrid  │   │   │
-│  │  └─────────────────────────────────────────────┘   │   │
+│  │  ┌──────────────────────┐  ┌────────────────────┐  │   │
+│  │  │  Provider Registry   │  │ Secret Mgr Registry│  │   │
+│  │  │ Railway │ Cloudflare │  │ Vault│AWS│Doppler  │  │   │
+│  │  └──────────────────────┘  └────────────────────┘  │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                          ▼                                   │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │ Railway  │  │Cloudflare│  │  Stripe  │  │ SendGrid │   │
-│  │   API    │  │   API    │  │   API    │  │   API    │   │
+│  │ Railway  │  │Cloudflare│  │  Vault   │  │   AWS    │   │
+│  │   API    │  │   API    │  │   API    │  │ Secrets  │   │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -130,6 +153,15 @@ You: "Run database migrations"
 - `stripe_*` - Products, prices, webhooks
 - `sendgrid_*` - Domain authentication, email
 - `recaptcha_*` - Site key management
+
+### Secret Management
+- `secrets_list` - List secrets from Vault/AWS/Doppler
+- `secrets_get` - Get a secret value (masked)
+- `secrets_set` - Create or update secrets
+- `secrets_map` - Map secrets to env vars for deploy
+- `secrets_sync` - Resolve and push to environments
+- `secrets_rotate` - Rotate and propagate everywhere
+- `secrets_audit` - View access audit log
 
 ### Setup & Debugging
 - `setup_scan` - Scan for configuration issues

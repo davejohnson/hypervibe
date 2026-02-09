@@ -8,6 +8,8 @@ import { RunRepository } from '../../adapters/db/repositories/run.repository.js'
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
+import { SecretMappingRepository } from '../../adapters/db/repositories/secret-mapping.repository.js';
+import { SecretResolver } from './secret.resolver.js';
 
 export interface DeployOptions {
   project: Project;
@@ -30,6 +32,8 @@ export class DeployOrchestrator {
   private envRepo = new EnvironmentRepository();
   private serviceRepo = new ServiceRepository();
   private auditRepo = new AuditRepository();
+  private mappingRepo = new SecretMappingRepository();
+  private secretResolver = new SecretResolver();
 
   buildPlan(options: DeployOptions): RunPlan {
     const steps: RunStep[] = [];
@@ -42,7 +46,25 @@ export class DeployOrchestrator {
       params: { projectId: options.project.id },
     });
 
-    // Step 2: Set environment variables if provided
+    // Step 2: Resolve secrets from secret managers
+    // Check if there are any secret mappings for this project/environment
+    const mappings = this.mappingRepo.findByProjectAndEnvironment(
+      options.project.id,
+      options.environment.name
+    );
+    if (mappings.length > 0) {
+      steps.push({
+        name: 'resolve_secrets',
+        action: 'resolveSecrets',
+        params: {
+          projectId: options.project.id,
+          environmentName: options.environment.name,
+          mappingCount: mappings.length,
+        },
+      });
+    }
+
+    // Step 3: Set environment variables if provided
     if (options.envVars && Object.keys(options.envVars).length > 0) {
       steps.push({
         name: 'set_env_vars',
@@ -51,7 +73,7 @@ export class DeployOrchestrator {
       });
     }
 
-    // Step 3: Deploy each service
+    // Step 4: Deploy each service
     const services = options.services ?? this.serviceRepo.findByProjectId(options.project.id);
     for (const service of services) {
       steps.push({
@@ -62,7 +84,7 @@ export class DeployOrchestrator {
       });
     }
 
-    // Step 4: Verify health
+    // Step 5: Verify health
     steps.push({
       name: 'verify_health',
       action: 'verifyHealth',
@@ -190,6 +212,43 @@ export class DeployOrchestrator {
             status: receipt.success ? 'success' : 'failure',
             result: receipt.data,
             error: receipt.error,
+            timestamp,
+          };
+        }
+
+        case 'resolveSecrets': {
+          // Resolve secret references from secret managers
+          const resolved = await this.secretResolver.resolveForEnvironment({
+            projectId: step.params?.projectId as string,
+            environmentName: step.params?.environmentName as string,
+          });
+
+          if (resolved.failed > 0 && resolved.resolved === 0) {
+            // All secrets failed - this is a deployment blocker
+            return {
+              step: step.name,
+              status: 'failure',
+              error: `Failed to resolve secrets: ${resolved.errors.map((e) => `${e.envVar}: ${e.error}`).join('; ')}`,
+              result: { resolved: resolved.resolved, failed: resolved.failed },
+              timestamp,
+            };
+          }
+
+          // Merge resolved secrets into envVars for subsequent steps
+          Object.assign(options.envVars ?? {}, resolved.vars);
+          if (!options.envVars) {
+            options.envVars = resolved.vars;
+          }
+
+          return {
+            step: step.name,
+            // Mark as success even with partial failures - individual errors are logged
+            status: 'success',
+            result: {
+              resolved: resolved.resolved,
+              failed: resolved.failed,
+              errors: resolved.errors,
+            },
             timestamp,
           };
         }

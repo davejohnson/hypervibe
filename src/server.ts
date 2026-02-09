@@ -27,6 +27,11 @@ import './adapters/providers/database/database.adapter.js';
 import './adapters/providers/fastlane/fastlane.adapter.js';
 import './adapters/providers/xcode/xcode.adapter.js';
 
+// Secret manager providers
+import './adapters/providers/secretmanagers/vault.adapter.js';
+import './adapters/providers/secretmanagers/aws-secrets.adapter.js';
+import './adapters/providers/secretmanagers/doppler.adapter.js';
+
 import { registerProjectTools } from './tools/project.tools.js';
 import { registerEnvironmentTools } from './tools/environment.tools.js';
 import { registerConnectionTools } from './tools/connection.tools.js';
@@ -48,6 +53,7 @@ import { registerFastlaneTools } from './tools/fastlane.tools.js';
 import { registerXcodeTools } from './tools/xcode.tools.js';
 import { registerVisualizeTools } from './tools/visualize.tools.js';
 import { registerAutoFixTools } from './tools/autofix.tools.js';
+import { registerSecretsTools } from './tools/secrets.tools.js';
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -77,6 +83,7 @@ export function createServer(): McpServer {
   registerXcodeTools(server);
   registerVisualizeTools(server);
   registerAutoFixTools(server);
+  registerSecretsTools(server);
 
   return server;
 }

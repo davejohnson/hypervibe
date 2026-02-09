@@ -177,6 +177,44 @@ const migrations: Migration[] = [
       ALTER TABLE projects ADD COLUMN git_remote_url TEXT;
     `,
   },
+  {
+    version: 5,
+    name: 'secret_mappings',
+    up: `
+      -- Secret mappings: map env vars to secret manager references
+      CREATE TABLE IF NOT EXISTS secret_mappings (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        env_var TEXT NOT NULL,
+        secret_ref TEXT NOT NULL,
+        environments TEXT DEFAULT '[]',
+        service_name TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(project_id, env_var, service_name)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_secret_mappings_project ON secret_mappings(project_id);
+      CREATE INDEX IF NOT EXISTS idx_secret_mappings_secret_ref ON secret_mappings(secret_ref);
+
+      -- Secret access audit log
+      CREATE TABLE IF NOT EXISTS secret_access_log (
+        id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+        action TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        secret_path TEXT NOT NULL,
+        project_id TEXT,
+        environment_name TEXT,
+        success INTEGER NOT NULL,
+        error TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_secret_access_log_timestamp ON secret_access_log(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_secret_access_log_project ON secret_access_log(project_id);
+      CREATE INDEX IF NOT EXISTS idx_secret_access_log_path ON secret_access_log(secret_path);
+    `,
+  },
 ];
 
 export class SqliteAdapter {
