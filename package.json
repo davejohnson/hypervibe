@@ -12,10 +12,15 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "autofix": "node dist/agent/index.js",
     "prepublish-check": "bash scripts/prepublish-check.sh",
     "prepublishOnly": "npm run prepublish-check && npm run build"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^11.0.0",
     "graphql": "^16.9.0",
@@ -28,7 +33,9 @@
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.16.0",
-    "typescript": "^5.6.0"
+    "@vitest/coverage-v8": "^4.0.18",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.18"
   },
   "files": [
     "dist/",

@@ -1,0 +1,67 @@
+# Auto-Fix Agent: Monitors production logs, analyzes errors with Claude, creates PRs with fixes
+name: Auto-Fix Agent
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Every 5 minutes
+  workflow_dispatch:        # Manual trigger
+    inputs:
+      dry_run:
+        description: 'Dry run (analyze but do not create PRs)'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  autofix:
+    runs-on: ubuntu-latest
+    # Prevent concurrent runs to avoid duplicate PRs
+    concurrency:
+      group: autofix-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Need full history for proper git operations
+          fetch-depth: 0
+          # Use a PAT for pushing commits (GITHUB_TOKEN can't trigger workflows)
+          token: ${{ secrets.AUTOFIX_PAT || github.token }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run auto-fix agent
+        id: autofix
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUTOFIX_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: npm run autofix
+
+      - name: Commit state changes
+        if: always()
+        run: |
+          git config user.name "Auto-Fix Agent"
+          git config user.email "autofix@infraprint.dev"
+
+          # Only commit if state file exists and has changes
+          if [ -f autofix-state.json ]; then
+            git add autofix-state.json
+            if ! git diff --staged --quiet; then
+              git commit -m "chore: update autofix state [skip ci]"
+              git push
+            fi
+          fi
