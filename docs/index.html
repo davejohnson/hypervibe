@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%2300fff9'/%3E%3Cstop offset='50%25' stop-color='%23ff00ff'/%3E%3Cstop offset='100%25' stop-color='%23ff6b35'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' fill='%230a0a0f'/%3E%3Cg fill='none' stroke='url(%23g)' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M32 8 C18 8 10 18 10 32 C10 42 14 48 20 52' opacity='.4'/%3E%3Cpath d='M32 14 C22 14 16 22 16 32 C16 40 19 45 24 48'/%3E%3Cpath d='M32 20 C26 20 22 26 22 32 C22 37 24 41 28 44' opacity='.8'/%3E%3Cpath d='M32 26 C29 26 28 29 28 32 C28 35 29 38 32 40'/%3E%3Cpath d='M32 14 C42 14 48 22 48 32 C48 40 45 45 40 48'/%3E%3Cpath d='M32 20 C38 20 42 26 42 32 C42 37 40 41 36 44' opacity='.8'/%3E%3Cpath d='M32 26 C35 26 36 29 36 32 C36 35 35 38 32 40'/%3E%3Cline x1='30' y1='30' x2='34' y2='34' stroke='%2300fff9' stroke-width='3' opacity='.9'/%3E%3Ccircle cx='32' cy='32' r='2' fill='%2300fff9' stroke='none' opacity='.8'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g1' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2300fff9'/%3E%3Cstop offset='100%25' stop-color='%23ff00ff'/%3E%3C/linearGradient%3E%3ClinearGradient id='g2' x1='100%25' y1='0%25' x2='0%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%23ff00ff'/%3E%3Cstop offset='100%25' stop-color='%2300fff9'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' fill='%230a0a0f'/%3E%3Cg fill='none' stroke-linecap='round'%3E%3Cpath d='M4 58 Q4 10 32 4 Q60 10 60 58' stroke='url(%23g1)' stroke-width='2.5' opacity='.4'/%3E%3Cpath d='M8 58 Q8 14 32 8 Q56 14 56 58' stroke='url(%23g1)' stroke-width='2.5' opacity='.5'/%3E%3Cpath d='M12 58 Q12 18 32 12 Q52 18 52 58' stroke='url(%23g1)' stroke-width='2.5' opacity='.6'/%3E%3Cpath d='M16 58 Q16 22 32 16 Q48 22 48 58' stroke='url(%23g1)' stroke-width='2.5' opacity='.7'/%3E%3Cpath d='M20 56 Q20 26 32 20 Q44 26 44 56' stroke='url(%23g2)' stroke-width='2.5' opacity='.8'/%3E%3Cpath d='M24 54 Q24 30 32 24 Q40 30 40 54' stroke='url(%23g2)' stroke-width='2.5' opacity='.9'/%3E%3Cpath d='M27 52 Q27 34 32 28 Q37 34 37 52' stroke='%2300fff9' stroke-width='2.5'/%3E%3Cellipse cx='32' cy='38' rx='4' ry='7' stroke='%2300fff9' stroke-width='2.5' opacity='.9'/%3E%3Cellipse cx='32' cy='38' rx='2' ry='4' stroke='url(%23g2)' stroke-width='2'/%3E%3Ccircle cx='32' cy='38' r='1.5' fill='%2300fff9'/%3E%3C/g%3E%3C/svg%3E">
   <style>
     :root {
       --neon-cyan: #00fff9;
@@ -136,9 +136,9 @@
     }
 
     .logo-icon {
-      width: 36px;
-      height: 36px;
-      filter: drop-shadow(0 0 6px var(--neon-cyan)) drop-shadow(0 0 12px rgba(255, 0, 255, 0.4));
+      width: 48px;
+      height: 48px;
+      filter: drop-shadow(0 0 8px var(--neon-cyan)) drop-shadow(0 0 16px rgba(255, 0, 255, 0.5));
     }
 
     nav a {
@@ -157,15 +157,15 @@
 
     /* Hero */
     .hero {
-      padding: 6rem 0 6rem;
+      padding: 3rem 0 6rem;
       text-align: center;
     }
 
     .hero-fingerprint {
-      width: 120px;
-      height: 120px;
+      width: 200px;
+      height: 200px;
       margin: 0 auto 2rem;
-      filter: drop-shadow(0 0 20px var(--neon-cyan)) drop-shadow(0 0 40px rgba(255, 0, 255, 0.3));
+      filter: drop-shadow(0 0 25px var(--neon-cyan)) drop-shadow(0 0 50px rgba(255, 0, 255, 0.4));
       animation: fpPulse 4s ease-in-out infinite alternate;
     }
 
@@ -529,7 +529,7 @@
     /* Responsive */
     @media (max-width: 768px) {
       .hero {
-        padding: 4rem 0 3rem;
+        padding: 2rem 0 3rem;
       }
 
       .hero-fingerprint {
@@ -565,37 +565,37 @@
   <!-- Fingerprint SVG (referenced by logo and hero) -->
   <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
     <defs>
-      <linearGradient id="fp-gradient" x1="0" y1="0" x2="1" y2="1">
+      <linearGradient id="fp-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
         <stop offset="0%" stop-color="#00fff9"/>
-        <stop offset="50%" stop-color="#ff00ff"/>
-        <stop offset="100%" stop-color="#ff6b35"/>
+        <stop offset="100%" stop-color="#ff00ff"/>
       </linearGradient>
+      <linearGradient id="fp-gradient-alt" x1="100%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#ff00ff"/>
+        <stop offset="100%" stop-color="#00fff9"/>
+      </linearGradient>
+      <filter id="glow">
+        <feGaussianBlur stdDeviation="1" result="coloredBlur"/>
+        <feMerge>
+          <feMergeNode in="coloredBlur"/>
+          <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+      </filter>
     </defs>
     <symbol id="fingerprint" viewBox="0 0 64 64">
-      <g fill="none" stroke="url(#fp-gradient)" stroke-width="1.8" stroke-linecap="round">
-        <!-- Outer arcs -->
-        <path d="M32 8 C18 8 10 18 10 32 C10 42 14 48 20 52" opacity=".35"/>
-        <path d="M32 8 C46 8 54 18 54 32 C54 42 50 48 44 52" opacity=".35"/>
-        <!-- Mid arcs -->
-        <path d="M32 14 C22 14 16 22 16 32 C16 40 19 45 24 48"/>
-        <path d="M32 14 C42 14 48 22 48 32 C48 40 45 45 40 48"/>
-        <!-- Inner arcs -->
-        <path d="M32 20 C26 20 22 26 22 32 C22 37 24 41 28 44" opacity=".8"/>
-        <path d="M32 20 C38 20 42 26 42 32 C42 37 40 41 36 44" opacity=".8"/>
-        <!-- Core -->
-        <path d="M32 26 C29 26 28 29 28 32 C28 35 29 38 32 40"/>
-        <path d="M32 26 C35 26 36 29 36 32 C36 35 35 38 32 40"/>
-        <!-- Center node / circuit dot -->
-        <circle cx="32" cy="32" r="2.5" fill="#00fff9" stroke="none" opacity=".9"/>
-        <!-- Circuit traces -->
-        <line x1="34.5" y1="32" x2="42" y2="32" stroke="#00fff9" stroke-width="1" opacity=".5"/>
-        <line x1="32" y1="29.5" x2="32" y2="22" stroke="#ff00ff" stroke-width="1" opacity=".4"/>
-        <line x1="29.5" y1="32" x2="22" y2="32" stroke="#00fff9" stroke-width="1" opacity=".5"/>
-        <line x1="32" y1="34.5" x2="32" y2="40" stroke="#ff00ff" stroke-width="1" opacity=".4"/>
-        <!-- Corner circuit nodes -->
-        <circle cx="42" cy="32" r="1.5" fill="none" stroke="#00fff9" stroke-width="1" opacity=".5"/>
-        <circle cx="22" cy="32" r="1.5" fill="none" stroke="#00fff9" stroke-width="1" opacity=".5"/>
-        <circle cx="32" cy="22" r="1.5" fill="none" stroke="#ff00ff" stroke-width="1" opacity=".4"/>
+      <g fill="none" stroke-linecap="round" filter="url(#glow)">
+        <!-- Outer ridges - wider arch pattern -->
+        <path d="M4 58 Q4 10 32 4 Q60 10 60 58" stroke="url(#fp-gradient)" stroke-width="2.5" opacity=".4"/>
+        <path d="M8 58 Q8 14 32 8 Q56 14 56 58" stroke="url(#fp-gradient)" stroke-width="2.5" opacity=".5"/>
+        <path d="M12 58 Q12 18 32 12 Q52 18 52 58" stroke="url(#fp-gradient)" stroke-width="2.5" opacity=".6"/>
+        <path d="M16 58 Q16 22 32 16 Q48 22 48 58" stroke="url(#fp-gradient)" stroke-width="2.5" opacity=".7"/>
+        <path d="M20 56 Q20 26 32 20 Q44 26 44 56" stroke="url(#fp-gradient-alt)" stroke-width="2.5" opacity=".8"/>
+        <path d="M24 54 Q24 30 32 24 Q40 30 40 54" stroke="url(#fp-gradient-alt)" stroke-width="2.5" opacity=".9"/>
+
+        <!-- Inner loop/whorl pattern -->
+        <path d="M27 52 Q27 34 32 28 Q37 34 37 52" stroke="#00fff9" stroke-width="2.5"/>
+        <ellipse cx="32" cy="38" rx="4" ry="7" stroke="#00fff9" stroke-width="2.5" opacity=".9"/>
+        <ellipse cx="32" cy="38" rx="2" ry="4" stroke="url(#fp-gradient-alt)" stroke-width="2"/>
+        <circle cx="32" cy="38" r="1.5" fill="#00fff9"/>
       </g>
     </symbol>
   </svg>
