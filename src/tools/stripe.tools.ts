@@ -537,7 +537,7 @@ export function registerStripeTools(server: McpServer): void {
     {
       mode: z.enum(['sandbox', 'live']).describe('Stripe mode (sandbox or live)'),
       webhookUrl: z.string().url().describe('Webhook endpoint URL (e.g., https://myapp.railway.app/api/webhooks/stripe)'),
-      projectName: z.string().describe('Infraprint project name'),
+      projectName: z.string().describe('Hypervibe project name'),
       environmentName: z.string().describe('Environment to sync the webhook secret to'),
       serviceName: z.string().describe('Service to set the STRIPE_WEBHOOK_SECRET on'),
       events: z.array(z.string()).optional().describe('Events to listen for (defaults to common SaaS events)'),

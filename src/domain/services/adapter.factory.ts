@@ -5,6 +5,7 @@ import type { Project } from '../entities/project.entity.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import type { IHostingAdapter } from '../ports/hosting.port.js';
 import type { IDatabaseAdapter } from '../ports/database.port.js';
+import { getProjectScopeHints } from './project-scope.js';
 
 /**
  * Result of resolving an adapter
@@ -29,23 +30,37 @@ export class AdapterFactory {
    */
   async getHostingAdapter(project: Project): Promise<AdapterResult<IHostingAdapter>> {
     const platform = project.defaultPlatform || 'railway';
-    return this.getAdapter<IHostingAdapter>(platform, 'deployment');
+    return this.getAdapter<IHostingAdapter>(platform, 'deployment', getProjectScopeHints(project));
   }
 
   /**
    * Get a database adapter by provider name.
    * Used when a component specifies a specific database provider.
    */
-  async getDatabaseAdapter(providerName: string): Promise<AdapterResult<IDatabaseAdapter>> {
-    return this.getAdapter<IDatabaseAdapter>(providerName, 'database');
+  async getDatabaseAdapter(
+    providerName: string,
+    project?: Project
+  ): Promise<AdapterResult<IDatabaseAdapter>> {
+    return this.getAdapter<IDatabaseAdapter>(
+      providerName,
+      'database',
+      project ? getProjectScopeHints(project) : undefined
+    );
   }
 
   /**
    * Get any provider adapter by name.
    * Generic method that works with any registered provider.
    */
-  async getProviderAdapter(providerName: string): Promise<AdapterResult<IProviderAdapter>> {
-    return this.getAdapter<IProviderAdapter>(providerName);
+  async getProviderAdapter(
+    providerName: string,
+    project?: Project
+  ): Promise<AdapterResult<IProviderAdapter>> {
+    return this.getAdapter<IProviderAdapter>(
+      providerName,
+      undefined,
+      project ? getProjectScopeHints(project) : undefined
+    );
   }
 
   /**
@@ -81,7 +96,8 @@ export class AdapterFactory {
    */
   private async getAdapter<T>(
     providerName: string,
-    expectedCategory?: string
+    expectedCategory?: string,
+    scopeHints?: string[]
   ): Promise<AdapterResult<T>> {
     // Check if provider is registered
     const provider = providerRegistry.get(providerName);
@@ -101,7 +117,7 @@ export class AdapterFactory {
     }
 
     // Look up connection
-    const connection = this.connectionRepo.findByProvider(providerName);
+    const connection = this.connectionRepo.findBestMatchFromHints(providerName, scopeHints);
     if (!connection) {
       return {
         success: false,

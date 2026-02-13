@@ -13,6 +13,7 @@ import { SecretRotator } from '../domain/services/secret.rotator.js';
 import { parseSecretRef, type SecretManagerProvider } from '../domain/ports/secretmanager.port.js';
 import { resolveProject } from './resolve-project.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { getProjectScopeHints } from '../domain/services/project-scope.js';
 
 const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
@@ -300,7 +301,8 @@ export function registerSecretsTools(server: McpServer): void {
       }
 
       // Check that we have a connection for this provider
-      const connection = connectionRepo.findByProvider(ref.provider);
+      const scopeHints = getProjectScopeHints(project);
+      const connection = connectionRepo.findBestMatchFromHints(ref.provider, scopeHints);
       if (!connection) {
         return {
           content: [{

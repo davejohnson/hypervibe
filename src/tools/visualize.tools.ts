@@ -56,7 +56,7 @@ export function registerVisualizeTools(server: McpServer): void {
 
       const html = generateVisualizationHtml(data);
       const safeName = project.name.replace(/[^a-zA-Z0-9-_]/g, '-');
-      const filePath = path.join(os.tmpdir(), `infraprint-viz-${safeName}.html`);
+      const filePath = path.join(os.tmpdir(), `hypervibe-viz-${safeName}.html`);
       fs.writeFileSync(filePath, html, 'utf-8');
 
       return {

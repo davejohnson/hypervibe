@@ -88,7 +88,7 @@ export interface IntegrationPlugin {
   };
 
   // Optional: Zod schema for API credentials (for managed features)
-  // If provided, infraprint can make API calls to this service
+  // If provided, hypervibe can make API calls to this service
   apiCredentialsSchema?: z.ZodTypeAny;
 
   // Factory to create an adapter (for managed integrations)

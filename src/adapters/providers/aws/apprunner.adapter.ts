@@ -131,7 +131,7 @@ export class AppRunnerAdapter implements IProviderAdapter {
       services?: Record<string, { serviceId: string; serviceArn?: string }>;
     };
 
-    const prefix = bindings.projectId || 'infraprint';
+    const prefix = bindings.projectId || 'hypervibe';
     const serviceName = `${prefix}-${service.name}`;
 
     try {

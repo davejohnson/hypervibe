@@ -254,11 +254,46 @@ export class DeployOrchestrator {
         }
 
         case 'setEnvVars': {
-          // This requires knowing which service to set vars for
-          // For now, we'll skip this step as vars are set during deploy
+          const vars = (step.params?.vars as Record<string, string> | undefined) ?? {};
+          if (Object.keys(vars).length === 0) {
+            return {
+              step: step.name,
+              status: 'skipped',
+              timestamp,
+            };
+          }
+
+          const environment = this.envRepo.findById(options.environment.id) ?? options.environment;
+          const bindings = environment.platformBindings as Partial<HostingBindings>;
+          const boundServices = bindings.services ?? {};
+          const services = options.services ?? this.serviceRepo.findByProjectId(options.project.id);
+          const alreadyDeployed = services.filter((s) => Boolean(boundServices[s.name]?.serviceId));
+
+          if (alreadyDeployed.length === 0) {
+            return {
+              step: step.name,
+              status: 'skipped',
+              result: { reason: 'No existing deployed services to pre-sync env vars' },
+              timestamp,
+            };
+          }
+
+          const failures: string[] = [];
+          for (const service of alreadyDeployed) {
+            const receipt = await options.adapter.setEnvVars(environment, service, vars);
+            if (!receipt.success) {
+              failures.push(`${service.name}: ${receipt.error ?? receipt.message}`);
+            }
+          }
+
           return {
             step: step.name,
-            status: 'skipped',
+            status: failures.length > 0 ? 'failure' : 'success',
+            result: {
+              serviceCount: alreadyDeployed.length,
+              variableCount: Object.keys(vars).length,
+            },
+            error: failures.length > 0 ? failures.join('; ') : undefined,
             timestamp,
           };
         }
@@ -282,7 +317,8 @@ export class DeployOrchestrator {
 
           // Update environment bindings with service info using platform-agnostic structure
           if (result.externalId) {
-            const currentBindings = options.environment.platformBindings as Partial<HostingBindings>;
+            const latestEnvironment = this.envRepo.findById(options.environment.id) ?? options.environment;
+            const currentBindings = latestEnvironment.platformBindings as Partial<HostingBindings>;
             const services = currentBindings.services ?? {};
             services[service.name] = {
               serviceId: result.externalId,
@@ -301,11 +337,41 @@ export class DeployOrchestrator {
         }
 
         case 'verifyHealth': {
-          // Placeholder for health check logic
-          // In a real implementation, we'd poll deployment status
+          if (typeof options.adapter.getDeployStatus !== 'function') {
+            return {
+              step: step.name,
+              status: 'skipped',
+              result: { reason: 'Provider does not support deploy status checks' },
+              timestamp,
+            };
+          }
+
+          const environment = this.envRepo.findById(options.environment.id) ?? options.environment;
+          const bindings = environment.platformBindings as Partial<HostingBindings>;
+          const services = options.services ?? this.serviceRepo.findByProjectId(options.project.id);
+
+          const failures: string[] = [];
+          const health: Array<{ service: string; status: string; url?: string }> = [];
+
+          for (const service of services) {
+            const deployTarget = bindings.services?.[service.name]?.serviceId;
+            if (!deployTarget) {
+              continue;
+            }
+
+            const check = await this.waitForHealthyDeployment(options, environment, deployTarget);
+            health.push({ service: service.name, status: check.status, url: check.url });
+
+            if (check.status !== 'deployed') {
+              failures.push(`${service.name}: status=${check.status}`);
+            }
+          }
+
           return {
             step: step.name,
-            status: 'success',
+            status: failures.length > 0 ? 'failure' : 'success',
+            result: { services: health },
+            error: failures.length > 0 ? `Health check failed for ${failures.join(', ')}` : undefined,
             timestamp,
           };
         }
@@ -326,5 +392,34 @@ export class DeployOrchestrator {
         timestamp,
       };
     }
+  }
+
+  private async waitForHealthyDeployment(
+    options: DeployOptions,
+    environment: Environment,
+    deployTarget: string
+  ): Promise<{ status: string; url?: string | undefined }> {
+    if (typeof options.adapter.getDeployStatus !== 'function') {
+      return { status: 'unknown' };
+    }
+
+    const maxAttempts = 8;
+    const pollDelayMs = 2000;
+    let last: { status: string; url?: string | undefined } = { status: 'unknown', url: undefined };
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      last = await options.adapter.getDeployStatus(environment, deployTarget);
+
+      if (last.status === 'deployed') {
+        return last;
+      }
+      if (last.status === 'failed' || last.status === 'canceled' || last.status === 'cancelled') {
+        return last;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollDelayMs));
+    }
+
+    return last;
   }
 }

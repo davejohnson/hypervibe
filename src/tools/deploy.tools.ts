@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
+import { ApprovalRepository } from '../adapters/db/repositories/approval.repository.js';
 import { DeployOrchestrator } from '../domain/services/deploy.orchestrator.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 
@@ -11,6 +12,7 @@ import { resolveProject } from './resolve-project.js';
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const runRepo = new RunRepository();
+const approvalRepo = new ApprovalRepository();
 
 function resolveEnvironment(
   projectId: string,
@@ -21,6 +23,21 @@ function resolveEnvironment(
   if (environmentName) return envRepo.findByProjectAndName(projectId, environmentName);
   // Default to staging if no environment specified
   return envRepo.findByProjectAndName(projectId, 'staging');
+}
+
+function requiresProductionConfirm(project: { policies: Record<string, unknown> }, environmentName: string): boolean {
+  const policies = project.policies ?? {};
+  const protectedEnvs = Array.isArray(policies.protectedEnvironments)
+    ? (policies.protectedEnvironments as unknown[]).map((v) => String(v).toLowerCase())
+    : [];
+  return protectedEnvs.includes(environmentName.toLowerCase());
+}
+
+function approvalsRequired(project: { policies: Record<string, unknown> }, environmentName: string): boolean {
+  if (!requiresProductionConfirm(project, environmentName)) return false;
+  const explicit = project.policies?.requireApprovalForProtectedEnvironments;
+  if (explicit === false) return false;
+  return true;
 }
 
 export function registerDeployTools(server: McpServer): void {
@@ -34,8 +51,10 @@ export function registerDeployTools(server: McpServer): void {
       environmentName: z.string().optional().describe('Environment name (default: staging)'),
       services: z.array(z.string()).optional().describe('Specific services to deploy (default: all)'),
       envVars: z.record(z.string()).optional().describe('Additional environment variables'),
+      confirmProduction: z.boolean().optional().describe('Required when deploying to protected environments'),
+      approvalId: z.string().uuid().optional().describe('Approval ID (required when policy requires approvals for protected environments)'),
     },
-    async ({ projectId, projectName, environmentId, environmentName, services, envVars }) => {
+    async ({ projectId, projectName, environmentId, environmentName, services, envVars, confirmProduction, approvalId }) => {
       // Resolve project
       const project = resolveProject({ projectId, projectName });
       if (!project) {
@@ -61,6 +80,43 @@ export function registerDeployTools(server: McpServer): void {
           projectId: project.id,
           name: envName,
         });
+      }
+
+      if (requiresProductionConfirm(project, environment.name) && !confirmProduction) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `Environment "${environment.name}" is protected by project policy. Re-run with confirmProduction=true.`,
+            }),
+          }],
+        };
+      }
+
+      if (approvalsRequired(project, environment.name)) {
+        if (!approvalId) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `Approval required for protected environment "${environment.name}". Create one with approval_request_create and re-run with approvalId.`,
+                requiredAction: 'deploy',
+              }),
+            }],
+          };
+        }
+
+        const validation = approvalRepo.validateForAction(approvalId, project.id, environment.name, 'deploy');
+        if (!validation.ok) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ success: false, error: validation.error }),
+            }],
+          };
+        }
       }
 
       // Get hosting adapter for project's platform
@@ -111,6 +167,10 @@ export function registerDeployTools(server: McpServer): void {
         envVars,
         adapter,
       });
+
+      if (approvalsRequired(project, environment.name) && approvalId) {
+        approvalRepo.consume(approvalId);
+      }
 
       return {
         content: [
@@ -173,6 +233,166 @@ export function registerDeployTools(server: McpServer): void {
             }),
           },
         ],
+      };
+    }
+  );
+
+  server.tool(
+    'deploy_rollback',
+    'Rollback by redeploying services from the most recent successful deploy run.',
+    {
+      projectId: z.string().uuid().optional().describe('Project ID'),
+      projectName: z.string().optional().describe('Project name'),
+      environmentName: z.string().optional().describe('Environment name (default: staging)'),
+      toRunId: z.string().uuid().optional().describe('Specific successful deploy run ID to roll back to'),
+      services: z.array(z.string()).optional().describe('Specific services to rollback (default: all in target run)'),
+      confirmProduction: z.boolean().optional().describe('Required when rolling back protected environments'),
+      approvalId: z.string().uuid().optional().describe('Approval ID (required when policy requires approvals for protected environments)'),
+    },
+    async ({ projectId, projectName, environmentName = 'staging', toRunId, services, confirmProduction, approvalId }) => {
+      const project = resolveProject({ projectId, projectName });
+      if (!project) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'Project not found. Provide projectId or projectName.' }),
+          }],
+        };
+      }
+
+      const environment = resolveEnvironment(project.id, undefined, environmentName);
+      if (!environment) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: `Environment not found: ${environmentName}` }),
+          }],
+        };
+      }
+
+      if (requiresProductionConfirm(project, environment.name) && !confirmProduction) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `Environment "${environment.name}" is protected by project policy. Re-run with confirmProduction=true.`,
+            }),
+          }],
+        };
+      }
+
+      if (approvalsRequired(project, environment.name)) {
+        if (!approvalId) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `Approval required for protected environment "${environment.name}". Create one with approval_request_create and re-run with approvalId.`,
+                requiredAction: 'deploy.rollback',
+              }),
+            }],
+          };
+        }
+
+        const validation = approvalRepo.validateForAction(approvalId, project.id, environment.name, 'deploy.rollback');
+        if (!validation.ok) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ success: false, error: validation.error }),
+            }],
+          };
+        }
+      }
+
+      let targetRun = toRunId ? runRepo.findById(toRunId) : null;
+      if (toRunId && (!targetRun || targetRun.status !== 'succeeded' || targetRun.type !== 'deploy')) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: `Run ${toRunId} is not a successful deploy run` }),
+          }],
+        };
+      }
+
+      if (!targetRun) {
+        const runs = runRepo.findByEnvironmentId(environment.id, 50);
+        targetRun = runs.find((r) => r.type === 'deploy' && r.status === 'succeeded') ?? null;
+      }
+
+      if (!targetRun) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'No successful deploy run found to rollback to' }),
+          }],
+        };
+      }
+
+      const rollbackServiceNames = targetRun.receipts
+        .map((r) => r.step)
+        .filter((step) => step.startsWith('deploy_'))
+        .map((step) => step.replace(/^deploy_/, ''));
+
+      const allServices = serviceRepo.findByProjectId(project.id);
+      let servicesToDeploy = allServices.filter((s) => rollbackServiceNames.includes(s.name));
+      if (services && services.length > 0) {
+        servicesToDeploy = servicesToDeploy.filter((s) => services.includes(s.name));
+      }
+
+      if (servicesToDeploy.length === 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: 'No services resolved for rollback. Check run contents or provided services.',
+            }),
+          }],
+        };
+      }
+
+      const adapterResult = await adapterFactory.getHostingAdapter(project);
+      if (!adapterResult.success || !adapterResult.adapter) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: adapterResult.error || 'No hosting adapter available for rollback',
+            }),
+          }],
+        };
+      }
+
+      const orchestrator = new DeployOrchestrator();
+      const rollback = await orchestrator.execute({
+        project,
+        environment,
+        services: servicesToDeploy,
+        adapter: adapterResult.adapter,
+      });
+
+      if (approvalsRequired(project, environment.name) && approvalId) {
+        approvalRepo.consume(approvalId);
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: rollback.success,
+            rollbackFromRunId: targetRun.id,
+            rollbackRunId: rollback.run.id,
+            status: rollback.run.status,
+            services: servicesToDeploy.map((s) => s.name),
+            urls: rollback.urls,
+            errors: rollback.errors.length ? rollback.errors : undefined,
+            note: 'This rollback re-triggers deployment for the last known-good service set. It does not restore provider-side manual config outside hypervibe state.',
+          }),
+        }],
       };
     }
   );

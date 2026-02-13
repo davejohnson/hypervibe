@@ -14,7 +14,7 @@ export function generateVisualizationHtml(data: VisualizationData): string {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${data.project.name} — Infraprint Visualization</title>
+<title>${data.project.name} — Hypervibe Visualization</title>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }

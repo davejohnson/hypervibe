@@ -18,7 +18,7 @@ async function main() {
   await server.connect(transport);
 
   // Log to stderr (stdout is for MCP communication)
-  console.error('Infraprint MCP server running on stdio');
+  console.error('Hypervibe MCP server running on stdio');
 }
 
 main().catch((error) => {

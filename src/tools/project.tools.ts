@@ -141,6 +141,99 @@ export function registerProjectTools(server: McpServer): void {
   );
 
   server.tool(
+    'project_policy_get',
+    'Get project policy settings',
+    {
+      projectId: z.string().uuid().optional().describe('Project ID'),
+      projectName: z.string().optional().describe('Project name'),
+    },
+    async ({ projectId, projectName }) => {
+      const project = resolveProject({ projectId, projectName });
+      if (!project) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'Project not found' }),
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            project: { id: project.id, name: project.name },
+            policies: project.policies ?? {},
+          }),
+        }],
+      };
+    }
+  );
+
+  server.tool(
+    'project_policy_set',
+    'Set project policy controls (protected environments, approval requirements, desired state).',
+    {
+      projectId: z.string().uuid().optional().describe('Project ID'),
+      projectName: z.string().optional().describe('Project name'),
+      protectedEnvironments: z.array(z.string()).optional().describe('Environments requiring confirm flags (e.g., production)'),
+      requireApprovalForDestructive: z.boolean().optional().describe('Require explicit confirm for destructive actions'),
+      requireApprovalForProtectedEnvironments: z.boolean().optional().describe('Require approval IDs for deploy/rollback/apply in protected environments (default: true)'),
+      desiredState: z.record(z.unknown()).optional().describe('Optional desired-state object for infra_apply'),
+    },
+    async ({ projectId, projectName, protectedEnvironments, requireApprovalForDestructive, requireApprovalForProtectedEnvironments, desiredState }) => {
+      const project = resolveProject({ projectId, projectName });
+      if (!project) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'Project not found' }),
+          }],
+        };
+      }
+
+      const nextPolicies = { ...(project.policies ?? {}) } as Record<string, unknown>;
+      if (protectedEnvironments !== undefined) {
+        nextPolicies.protectedEnvironments = protectedEnvironments;
+      }
+      if (requireApprovalForDestructive !== undefined) {
+        nextPolicies.requireApprovalForDestructive = requireApprovalForDestructive;
+      }
+      if (requireApprovalForProtectedEnvironments !== undefined) {
+        nextPolicies.requireApprovalForProtectedEnvironments = requireApprovalForProtectedEnvironments;
+      }
+      if (desiredState !== undefined) {
+        nextPolicies.desiredState = desiredState;
+      }
+
+      const updated = projectRepo.update(project.id, { policies: nextPolicies });
+      auditRepo.create({
+        action: 'project.policies_updated',
+        resourceType: 'project',
+        resourceId: project.id,
+        details: {
+          protectedEnvironments,
+          requireApprovalForDestructive,
+          requireApprovalForProtectedEnvironments,
+          desiredStateSet: desiredState !== undefined,
+        },
+      });
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            project: { id: updated?.id ?? project.id, name: updated?.name ?? project.name },
+            policies: updated?.policies ?? nextPolicies,
+          }),
+        }],
+      };
+    }
+  );
+
+  server.tool(
     'project_delete',
     'Delete an infrastructure project',
     {
@@ -189,13 +282,13 @@ export function registerProjectTools(server: McpServer): void {
 
   server.tool(
     'project_import',
-    'Import an existing Railway project into Infraprint',
+    'Import an existing Railway project into Hypervibe',
     {
       name: z.string().optional().describe('Railway project name to import. If omitted, lists available projects.'),
       environmentMappings: z
         .record(z.string(), z.string())
         .optional()
-        .describe('Map Railway environment names to Infraprint types (e.g., {"prod-us-east": "production", "blue": "staging"})'),
+        .describe('Map Railway environment names to Hypervibe types (e.g., {"prod-us-east": "production", "blue": "staging"})'),
     },
     async ({ name, environmentMappings }) => {
       // Get Railway connection
@@ -435,7 +528,7 @@ async function performImport(
           type: 'text' as const,
           text: JSON.stringify({
             success: false,
-            error: `Project "${details.name}" already exists in Infraprint`,
+            error: `Project "${details.name}" already exists in Hypervibe`,
           }),
         },
       ],

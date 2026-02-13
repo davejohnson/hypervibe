@@ -6,7 +6,7 @@
   ],
   "shell": {
     "init_hook": [
-      "echo 'Infraprint dev environment ready'"
+      "echo 'Hypervibe dev environment ready'"
     ],
     "scripts": {
       "build": "npm run build",

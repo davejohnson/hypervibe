@@ -36,7 +36,7 @@ export function registerSetupTools(server: McpServer): void {
     'setup_scan',
     'Scan an existing Railway project and identify configuration issues',
     {
-      projectName: z.string().optional().describe('Infraprint project name'),
+      projectName: z.string().optional().describe('Hypervibe project name'),
       railwayProjectId: z.string().optional().describe('Railway project ID (if not linked yet)'),
     },
     async ({ projectName, railwayProjectId }) => {

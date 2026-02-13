@@ -48,7 +48,7 @@ export function loadConfig(): AutoFixConfig {
     // Git
     workingDirectory: process.env.AUTOFIX_WORKING_DIR || process.cwd(),
     gitUserName: process.env.AUTOFIX_GIT_USER_NAME || 'Auto-Fix Agent',
-    gitUserEmail: process.env.AUTOFIX_GIT_USER_EMAIL || 'autofix@infraprint.dev',
+    gitUserEmail: process.env.AUTOFIX_GIT_USER_EMAIL || 'autofix@hypervibe.dev',
 
     // Dry run mode
     dryRun: process.env.AUTOFIX_DRY_RUN === 'true',

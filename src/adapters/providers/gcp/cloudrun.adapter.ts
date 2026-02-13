@@ -158,7 +158,7 @@ export class CloudRunAdapter implements IProviderAdapter {
       services?: Record<string, { serviceId: string }>;
     };
 
-    const prefix = bindings.projectId || 'infraprint';
+    const prefix = bindings.projectId || 'hypervibe';
     const serviceName = this.sanitizeName(`${prefix}-${service.name}`);
 
     try {
@@ -197,7 +197,7 @@ export class CloudRunAdapter implements IProviderAdapter {
           name: serviceName,
           namespace: projectId,
           labels: {
-            'infraprint.io/environment': environment.name,
+            'hypervibe.io/environment': environment.name,
           },
         },
         spec: {
@@ -283,7 +283,7 @@ export class CloudRunAdapter implements IProviderAdapter {
       services?: Record<string, { serviceId: string }>;
     };
 
-    const prefix = bindings.projectId || 'infraprint';
+    const prefix = bindings.projectId || 'hypervibe';
     const serviceName = this.sanitizeName(`${prefix}-${service.name}`);
 
     try {

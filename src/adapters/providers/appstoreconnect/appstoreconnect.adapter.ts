@@ -6,21 +6,14 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 
-// Credentials schema for App Store Connect API (used by fastlane)
-export const FastlaneCredentialsSchema = z.object({
+// Credentials schema for App Store Connect API
+export const AppStoreConnectCredentialsSchema = z.object({
   keyId: z.string().min(1, 'Key ID is required'),
   issuerId: z.string().min(1, 'Issuer ID is required'),
   privateKey: z.string().min(1, 'Private key (p8 contents) is required'),
 });
 
-export type FastlaneCredentials = z.infer<typeof FastlaneCredentialsSchema>;
-
-export interface FastlaneResult {
-  success: boolean;
-  output?: string;
-  error?: string;
-  exitCode?: number;
-}
+export type AppStoreConnectCredentials = z.infer<typeof AppStoreConnectCredentialsSchema>;
 
 export interface AppStoreConnectBuild {
   id: string;
@@ -32,17 +25,24 @@ export interface AppStoreConnectBuild {
   appId: string;
 }
 
+export interface AppStoreVersion {
+  id: string;
+  versionString: string;
+  appStoreState: string;
+  platform: string;
+}
+
 const APP_STORE_CONNECT_API = 'https://api.appstoreconnect.apple.com/v1';
 
-export class FastlaneAdapter {
-  private credentials: FastlaneCredentials | null = null;
+export class AppStoreConnectAdapter {
+  private credentials: AppStoreConnectCredentials | null = null;
 
-  connect(credentials: FastlaneCredentials): void {
+  connect(credentials: AppStoreConnectCredentials): void {
     this.credentials = credentials;
   }
 
   // ---------------------------------------------------------------------------
-  // App Store Connect API (direct)
+  // App Store Connect API - Authentication
   // ---------------------------------------------------------------------------
 
   /**
@@ -131,6 +131,29 @@ export class FastlaneAdapter {
 
     return response.json() as Promise<T>;
   }
+
+  /**
+   * Verify the API key works by listing bundle IDs.
+   */
+  async verify(): Promise<{ success: boolean; error?: string }> {
+    if (!this.credentials) {
+      return { success: false, error: 'No credentials to verify' };
+    }
+
+    try {
+      await this.listBundleIds();
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Builds
+  // ---------------------------------------------------------------------------
 
   /**
    * List recent builds, optionally filtered by app ID or bundle ID.
@@ -255,6 +278,79 @@ export class FastlaneAdapter {
       name: g.attributes.name,
       isInternal: g.attributes.isInternalGroup,
     }));
+  }
+
+  /**
+   * Wait for a build to finish processing, then set compliance.
+   * Returns the build once it's ready.
+   */
+  async waitForProcessingAndSetCompliance(options: {
+    appId?: string;
+    buildNumber?: string;
+    usesNonExemptEncryption?: boolean;
+    maxWaitMs?: number;
+    pollIntervalMs?: number;
+  }): Promise<{
+    build: AppStoreConnectBuild | null;
+    complianceSet: boolean;
+    error?: string;
+  }> {
+    const maxWait = options.maxWaitMs ?? 600000; // 10 minutes
+    const pollInterval = options.pollIntervalMs ?? 15000; // 15 seconds
+    const usesEncryption = options.usesNonExemptEncryption ?? false;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWait) {
+      const builds = await this.listBuilds({ appId: options.appId, limit: 5 });
+
+      // Find the target build
+      let build: AppStoreConnectBuild | undefined;
+      if (options.buildNumber) {
+        build = builds.find(b => b.buildNumber === options.buildNumber);
+      } else {
+        // Most recent build
+        build = builds[0];
+      }
+
+      if (!build) {
+        // Build might not have appeared yet
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+        continue;
+      }
+
+      if (build.processingState === 'PROCESSING') {
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+        continue;
+      }
+
+      if (build.processingState === 'FAILED') {
+        return { build, complianceSet: false, error: 'Build processing failed' };
+      }
+
+      if (build.processingState === 'INVALID') {
+        return { build, complianceSet: false, error: 'Build is invalid' };
+      }
+
+      // Build is VALID - set compliance if not already set
+      if (build.usesNonExemptEncryption === null) {
+        try {
+          await this.setExportCompliance(build.id, usesEncryption);
+          build.usesNonExemptEncryption = usesEncryption;
+          return { build, complianceSet: true };
+        } catch (error) {
+          return {
+            build,
+            complianceSet: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+
+      // Compliance already set
+      return { build, complianceSet: false };
+    }
+
+    return { build: null, complianceSet: false, error: 'Timeout waiting for build processing' };
   }
 
   // ---------------------------------------------------------------------------
@@ -394,86 +490,147 @@ export class FastlaneAdapter {
     await this.apiRequest('DELETE', `/bundleIdCapabilities/${capabilityId}`);
   }
 
+  // ---------------------------------------------------------------------------
+  // Apps
+  // ---------------------------------------------------------------------------
+
   /**
-   * Wait for a build to finish processing, then set compliance.
-   * Returns the build once it's ready.
+   * List apps.
    */
-  async waitForProcessingAndSetCompliance(options: {
-    appId?: string;
-    buildNumber?: string;
-    usesNonExemptEncryption?: boolean;
-    maxWaitMs?: number;
-    pollIntervalMs?: number;
-  }): Promise<{
-    build: AppStoreConnectBuild | null;
-    complianceSet: boolean;
-    error?: string;
-  }> {
-    const maxWait = options.maxWaitMs ?? 600000; // 10 minutes
-    const pollInterval = options.pollIntervalMs ?? 15000; // 15 seconds
-    const usesEncryption = options.usesNonExemptEncryption ?? false;
-    const startTime = Date.now();
+  async listApps(): Promise<Array<{ id: string; bundleId: string; name: string }>> {
+    const result = await this.apiRequest<{
+      data: Array<{
+        id: string;
+        attributes: { bundleId: string; name: string };
+      }>;
+    }>('GET', '/apps?limit=200&fields[apps]=bundleId,name');
 
-    while (Date.now() - startTime < maxWait) {
-      const builds = await this.listBuilds({ appId: options.appId, limit: 5 });
+    return result.data.map(app => ({
+      id: app.id,
+      bundleId: app.attributes.bundleId,
+      name: app.attributes.name,
+    }));
+  }
 
-      // Find the target build
-      let build: AppStoreConnectBuild | undefined;
-      if (options.buildNumber) {
-        build = builds.find(b => b.buildNumber === options.buildNumber);
-      } else {
-        // Most recent build
-        build = builds[0];
-      }
-
-      if (!build) {
-        // Build might not have appeared yet
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
-        continue;
-      }
-
-      if (build.processingState === 'PROCESSING') {
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
-        continue;
-      }
-
-      if (build.processingState === 'FAILED') {
-        return { build, complianceSet: false, error: 'Build processing failed' };
-      }
-
-      if (build.processingState === 'INVALID') {
-        return { build, complianceSet: false, error: 'Build is invalid' };
-      }
-
-      // Build is VALID - set compliance if not already set
-      if (build.usesNonExemptEncryption === null) {
-        try {
-          await this.setExportCompliance(build.id, usesEncryption);
-          build.usesNonExemptEncryption = usesEncryption;
-          return { build, complianceSet: true };
-        } catch (error) {
-          return {
-            build,
-            complianceSet: false,
-            error: error instanceof Error ? error.message : String(error),
-          };
-        }
-      }
-
-      // Compliance already set
-      return { build, complianceSet: false };
-    }
-
-    return { build: null, complianceSet: false, error: 'Timeout waiting for build processing' };
+  /**
+   * Find an app by bundle ID.
+   */
+  async findAppByBundleId(bundleId: string): Promise<{ id: string; bundleId: string; name: string } | null> {
+    const apps = await this.listApps();
+    return apps.find(a => a.bundleId === bundleId) ?? null;
   }
 
   // ---------------------------------------------------------------------------
-  // Native Upload via xcrun altool (no fastlane dependency)
+  // App Store Versions & Submission
+  // ---------------------------------------------------------------------------
+
+  /**
+   * List App Store versions for an app.
+   */
+  async listAppStoreVersions(
+    appId: string,
+    options?: { platform?: 'IOS' | 'MAC_OS' | 'TV_OS'; limit?: number }
+  ): Promise<AppStoreVersion[]> {
+    const params = new URLSearchParams();
+    params.set('limit', String(options?.limit ?? 10));
+    params.set('fields[appStoreVersions]', 'versionString,appStoreState,platform');
+    params.set('sort', '-createdDate');
+    if (options?.platform) {
+      params.set('filter[platform]', options.platform);
+    }
+
+    const result = await this.apiRequest<{
+      data: Array<{
+        id: string;
+        attributes: {
+          versionString: string;
+          appStoreState: string;
+          platform: string;
+        };
+      }>;
+    }>('GET', `/apps/${appId}/appStoreVersions?${params.toString()}`);
+
+    return result.data.map(v => ({
+      id: v.id,
+      versionString: v.attributes.versionString,
+      appStoreState: v.attributes.appStoreState,
+      platform: v.attributes.platform,
+    }));
+  }
+
+  /**
+   * Get the latest editable App Store version for an app.
+   * Returns versions in states that can be submitted (PREPARE_FOR_SUBMISSION, etc.)
+   */
+  async getEditableAppStoreVersion(
+    appId: string,
+    platform?: 'IOS' | 'MAC_OS' | 'TV_OS'
+  ): Promise<AppStoreVersion | null> {
+    const versions = await this.listAppStoreVersions(appId, { platform, limit: 10 });
+
+    // Editable states
+    const editableStates = [
+      'PREPARE_FOR_SUBMISSION',
+      'DEVELOPER_REJECTED',
+      'REJECTED',
+      'METADATA_REJECTED',
+      'INVALID_BINARY',
+    ];
+
+    return versions.find(v => editableStates.includes(v.appStoreState)) ?? null;
+  }
+
+  /**
+   * Submit an App Store version for review.
+   * The version must be in PREPARE_FOR_SUBMISSION state with a valid build attached.
+   */
+  async submitForReview(appStoreVersionId: string): Promise<void> {
+    await this.apiRequest('POST', '/appStoreVersionSubmissions', {
+      data: {
+        type: 'appStoreVersionSubmissions',
+        relationships: {
+          appStoreVersion: {
+            data: {
+              type: 'appStoreVersions',
+              id: appStoreVersionId,
+            },
+          },
+        },
+      },
+    });
+  }
+
+  /**
+   * Get the build attached to an App Store version.
+   */
+  async getAppStoreVersionBuild(appStoreVersionId: string): Promise<{ id: string; version: string } | null> {
+    try {
+      const result = await this.apiRequest<{
+        data: {
+          id: string;
+          attributes: { version: string };
+        } | null;
+      }>('GET', `/appStoreVersions/${appStoreVersionId}/build?fields[builds]=version`);
+
+      if (!result.data) {
+        return null;
+      }
+
+      return {
+        id: result.data.id,
+        version: result.data.attributes.version,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Native Upload via xcrun altool
   // ---------------------------------------------------------------------------
 
   /**
    * Upload an IPA to App Store Connect using xcrun altool.
-   * This avoids fastlane CLI dependencies and OpenSSL issues.
    */
   async uploadViaAltool(ipaPath: string): Promise<{ success: boolean; output?: string; error?: string }> {
     if (!this.credentials) {
@@ -497,9 +654,6 @@ export class FastlaneAdapter {
         const child = spawn('xcrun', args, {
           env: {
             ...process.env,
-            // altool looks for .p8 files in specific locations
-            // ~/.appstoreconnect/private_keys/ or ~/.private_keys/
-            // We wrote our key to ~/.appstoreconnect/private_keys/AuthKey_<keyId>.p8
           },
         });
 
@@ -612,260 +766,6 @@ export class FastlaneAdapter {
     }
     return null;
   }
-
-  // ---------------------------------------------------------------------------
-  // Fastlane CLI wrappers (deprecated - prefer uploadViaAltool)
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Get environment variables for fastlane commands
-   */
-  getEnv(): Record<string, string> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    return {
-      APP_STORE_CONNECT_API_KEY_KEY_ID: this.credentials.keyId,
-      APP_STORE_CONNECT_API_KEY_ISSUER_ID: this.credentials.issuerId,
-      APP_STORE_CONNECT_API_KEY_KEY: this.credentials.privateKey,
-      FASTLANE_SKIP_UPDATE_CHECK: '1',
-      FASTLANE_HIDE_CHANGELOG: '1',
-      FASTLANE_DISABLE_COLORS: '1',
-    };
-  }
-
-  /**
-   * Run a fastlane command
-   */
-  async run(args: string[], cwd?: string): Promise<FastlaneResult> {
-    return new Promise((resolve) => {
-      const env = {
-        ...process.env,
-        ...this.getEnv(),
-      };
-
-      const child = spawn('fastlane', args, {
-        cwd,
-        env,
-        shell: true,
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      child.stdout?.on('data', (data) => {
-        stdout += data.toString();
-      });
-
-      child.stderr?.on('data', (data) => {
-        stderr += data.toString();
-      });
-
-      child.on('error', (error) => {
-        resolve({
-          success: false,
-          error: `Failed to run fastlane: ${error.message}. Is fastlane installed? (gem install fastlane)`,
-        });
-      });
-
-      child.on('close', (code) => {
-        const combinedOutput = stderr + stdout;
-
-        if (code === 0) {
-          resolve({
-            success: true,
-            output: stdout,
-            exitCode: code,
-          });
-        } else {
-          // Check for known error patterns and provide helpful messages
-          const knownError = detectKnownFastlaneError(combinedOutput);
-          resolve({
-            success: false,
-            output: stdout,
-            error: knownError || stderr || stdout,
-            exitCode: code ?? undefined,
-          });
-        }
-      });
-    });
-  }
-
-  /**
-   * Upload an IPA to TestFlight using pilot
-   */
-  async uploadToTestFlight(options: {
-    ipaPath: string;
-    changelog?: string;
-    distributeExternal?: boolean;
-    groups?: string[];
-    cwd?: string;
-  }): Promise<FastlaneResult> {
-    const args = ['pilot', 'upload'];
-
-    args.push('--ipa', options.ipaPath);
-
-    if (options.changelog) {
-      args.push('--changelog', options.changelog);
-    }
-
-    if (options.distributeExternal) {
-      args.push('--distribute_external', 'true');
-    }
-
-    if (options.groups && options.groups.length > 0) {
-      args.push('--groups', options.groups.join(','));
-    }
-
-    // Skip waiting for processing - we handle compliance via the API
-    args.push('--skip_waiting_for_build_processing', 'true');
-
-    return this.run(args, options.cwd);
-  }
-
-  /**
-   * Submit app for App Store review using deliver
-   */
-  async submitForReview(options: {
-    appIdentifier?: string;
-    buildNumber?: string;
-    skipMetadata?: boolean;
-    skipScreenshots?: boolean;
-    submitForReview?: boolean;
-    automaticRelease?: boolean;
-    cwd?: string;
-  }): Promise<FastlaneResult> {
-    const args = ['deliver'];
-
-    if (options.appIdentifier) {
-      args.push('--app_identifier', options.appIdentifier);
-    }
-
-    if (options.buildNumber) {
-      args.push('--build_number', options.buildNumber);
-    }
-
-    if (options.skipMetadata) {
-      args.push('--skip_metadata', 'true');
-    }
-
-    if (options.skipScreenshots) {
-      args.push('--skip_screenshots', 'true');
-    }
-
-    if (options.submitForReview) {
-      args.push('--submit_for_review', 'true');
-    }
-
-    if (options.automaticRelease) {
-      args.push('--automatic_release', 'true');
-    }
-
-    args.push('--force');
-
-    return this.run(args, options.cwd);
-  }
-
-  /**
-   * Verify fastlane is installed and API key works
-   */
-  async verify(): Promise<{ success: boolean; error?: string; version?: string; warning?: string }> {
-    // Step 1: Check if fastlane is installed
-    const versionResult = await this.run(['--version']);
-    if (!versionResult.success) {
-      return {
-        success: false,
-        error: 'Fastlane not found. Install with: brew install fastlane',
-      };
-    }
-
-    const version = versionResult.output?.match(/fastlane (\d+\.\d+\.\d+)/)?.[1] || 'unknown';
-
-    // Step 2: Test the API key by listing apps (requires valid credentials)
-    if (!this.credentials) {
-      return { success: true, version, error: 'No credentials to verify' };
-    }
-
-    // Try to list bundle IDs - this will fail fast if API key doesn't work
-    try {
-      await this.listBundleIds();
-
-      // Check for known problematic fastlane versions
-      const warning = checkFastlaneVersionWarning(version);
-
-      return { success: true, version, ...(warning && { warning }) };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const knownError = detectKnownFastlaneError(errorMessage);
-      return {
-        success: false,
-        version,
-        error: knownError || errorMessage,
-      };
-    }
-  }
-}
-
-/**
- * Check if the fastlane version has known issues
- */
-function checkFastlaneVersionWarning(version: string): string | undefined {
-  // Versions 2.225.0 - 2.231.x have OpenSSL compatibility issues on some systems
-  const match = version.match(/^2\.(\d+)/);
-  if (match) {
-    const minor = parseInt(match[1], 10);
-    if (minor >= 225 && minor <= 231) {
-      return `Fastlane ${version} may have OpenSSL issues on some systems. If uploads fail with "No value found for 'username'" or "invalid curve name", run: brew upgrade fastlane`;
-    }
-  }
-  return undefined;
-}
-
-// ---------------------------------------------------------------------------
-// Error Detection
-// ---------------------------------------------------------------------------
-
-/**
- * Known fastlane error patterns and their user-friendly messages
- */
-const KNOWN_ERRORS: Array<{ pattern: RegExp; message: string }> = [
-  {
-    pattern: /invalid curve name/i,
-    message: 'OpenSSL compatibility issue with fastlane. Fix: brew upgrade fastlane (or brew reinstall openssl@3)',
-  },
-  {
-    pattern: /No value found for 'username'/i,
-    message: 'API key not recognized by fastlane. This usually means an OpenSSL issue. Fix: brew upgrade fastlane',
-  },
-  {
-    pattern: /Could not find App Store Connect API key/i,
-    message: 'API key credentials are invalid or malformed. Re-create the connection with valid credentials.',
-  },
-  {
-    pattern: /invalid.*private.*key/i,
-    message: 'Private key format is invalid. Ensure you\'re using the full .p8 file contents including BEGIN/END markers.',
-  },
-  {
-    pattern: /Authentication.*failed/i,
-    message: 'API key authentication failed. Verify keyId, issuerId, and privateKey are correct.',
-  },
-  {
-    pattern: /The request was not authorized/i,
-    message: 'API key lacks required permissions. Ensure the key has App Manager or Admin role in App Store Connect.',
-  },
-];
-
-/**
- * Detect known fastlane errors and return a helpful message
- */
-function detectKnownFastlaneError(output: string): string | null {
-  for (const { pattern, message } of KNOWN_ERRORS) {
-    if (pattern.test(output)) {
-      return message;
-    }
-  }
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -918,15 +818,15 @@ async function commandExists(cmd: string): Promise<boolean> {
 // Self-register with provider registry
 providerRegistry.register({
   metadata: {
-    name: 'fastlane',
-    displayName: 'Fastlane (App Store Connect)',
+    name: 'appstoreconnect',
+    displayName: 'App Store Connect',
     category: 'appstore',
-    credentialsSchema: FastlaneCredentialsSchema,
-    setupHelpUrl: 'https://docs.fastlane.tools/app-store-connect-api/',
+    credentialsSchema: AppStoreConnectCredentialsSchema,
+    setupHelpUrl: 'https://developer.apple.com/documentation/appstoreconnectapi',
   },
   factory: (credentials) => {
-    const adapter = new FastlaneAdapter();
-    adapter.connect(credentials as FastlaneCredentials);
+    const adapter = new AppStoreConnectAdapter();
+    adapter.connect(credentials as AppStoreConnectCredentials);
     return adapter;
   },
   ensureDependencies: async () => {
@@ -936,9 +836,6 @@ providerRegistry.register({
     if (!(await commandExists('xcrun'))) {
       errors.push('Xcode Command Line Tools not found. Install with: xcode-select --install');
     }
-
-    // fastlane is optional (only needed if useFastlane=true)
-    // We don't auto-install it since altool is the default now
 
     return { installed: [], errors };
   },

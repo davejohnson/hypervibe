@@ -1,9 +1,9 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import fs from 'fs';
+import { getDataDir } from '../storage/paths.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.resolve(__dirname, '../../../data');
+const DATA_DIR = getDataDir();
 
 export interface Migration {
   version: number;
@@ -142,7 +142,7 @@ const migrations: Migration[] = [
     up: `
       -- Add scope column to connections table for scoped tokens
       -- Scope allows fine-grained tokens for specific repos/domains with global fallback
-      -- Examples: "davejohnson/infraprint", "clientorg/*", "infraprint.dev"
+      -- Examples: "davejohnson/hypervibe", "clientorg/*", "hypervibe.dev"
 
       -- Create new table with scope column and updated unique constraint
       CREATE TABLE IF NOT EXISTS connections_new (
@@ -215,6 +215,31 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_secret_access_log_path ON secret_access_log(secret_path);
     `,
   },
+  {
+    version: 6,
+    name: 'approvals',
+    up: `
+      CREATE TABLE IF NOT EXISTS approvals (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        environment_name TEXT NOT NULL,
+        action TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', -- pending | approved | rejected | cancelled | consumed
+        requested_by TEXT NOT NULL DEFAULT 'system',
+        approved_by TEXT,
+        rejected_by TEXT,
+        reason TEXT,
+        payload TEXT DEFAULT '{}',
+        expires_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_approvals_project ON approvals(project_id);
+      CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+      CREATE INDEX IF NOT EXISTS idx_approvals_env ON approvals(environment_name);
+    `,
+  },
 ];
 
 export class SqliteAdapter {
@@ -222,7 +247,11 @@ export class SqliteAdapter {
   private static instance: SqliteAdapter | null = null;
 
   private constructor(dbPath?: string) {
-    const finalPath = dbPath ?? path.join(DATA_DIR, 'infraprint.db');
+    const finalPath = dbPath ?? path.join(DATA_DIR, 'hypervibe.db');
+    const dir = path.dirname(finalPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
     this.db = new Database(finalPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');

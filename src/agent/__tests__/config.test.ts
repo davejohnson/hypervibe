@@ -35,7 +35,7 @@ describe('config', () => {
       expect(config.maxPRsPerHour).toBe(5);
       expect(config.cooldownSeconds).toBe(3600);
       expect(config.gitUserName).toBe('Auto-Fix Agent');
-      expect(config.gitUserEmail).toBe('autofix@infraprint.dev');
+      expect(config.gitUserEmail).toBe('autofix@hypervibe.dev');
       expect(config.dryRun).toBe(false);
     });
 

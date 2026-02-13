@@ -249,7 +249,7 @@ export class RailwayAdapter implements IProviderAdapter {
       services?: Record<string, { serviceId: string }>;
     };
     const projectId = bindings.projectId || bindings.railwayProjectId;
-    const environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
+    let environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
 
     if (!projectId) {
       return {
@@ -377,7 +377,7 @@ export class RailwayAdapter implements IProviderAdapter {
       services?: Record<string, { serviceId: string }>;
     };
     const projectId = bindings.projectId || bindings.railwayProjectId;
-    const environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
+    let environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
 
     if (!projectId) {
       return {
@@ -407,6 +407,33 @@ export class RailwayAdapter implements IProviderAdapter {
           )
         }
       `;
+
+      if (!environmentId) {
+        const envQuery = gql`
+          query GetEnvironments($projectId: String!) {
+            project(id: $projectId) {
+              environments {
+                edges {
+                  node {
+                    id
+                  }
+                }
+              }
+            }
+          }
+        `;
+        const envResult = await this.client.request<{
+          project: { environments: { edges: Array<{ node: { id: string } }> } };
+        }>(envQuery, { projectId: projectId });
+        environmentId = envResult.project.environments.edges[0]?.node.id;
+      }
+
+      if (!environmentId) {
+        return {
+          success: false,
+          message: 'No Railway environment ID available for variable update',
+        };
+      }
 
       await this.client.request(mutation, {
         projectId: projectId,
@@ -438,27 +465,88 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     try {
-      const query = gql`
-        query GetDeployment($id: String!) {
-          deployment(id: $id) {
+      // First attempt: deployment ID lookup (legacy behavior)
+      try {
+        const deploymentQuery = gql`
+          query GetDeployment($id: String!) {
+            deployment(id: $id) {
+              id
+              status
+              staticUrl
+            }
+          }
+        `;
+
+        const deploymentResult = await this.client.request<{
+          deployment: { id: string; status: string; staticUrl?: string };
+        }>(deploymentQuery, { id: deploymentId });
+
+        if (deploymentResult.deployment) {
+          return {
+            status: this.normalizeStatus(deploymentResult.deployment.status),
+            url: deploymentResult.deployment.staticUrl,
+          };
+        }
+      } catch {
+        // Fall through to service-based status lookup.
+      }
+
+      // Second attempt: treat deploymentId as a service ID (current deploy flow)
+      const serviceQuery = gql`
+        query GetServiceStatus($id: String!) {
+          service(id: $id) {
             id
-            status
-            staticUrl
+            serviceInstances {
+              edges {
+                node {
+                  id
+                  latestDeployment {
+                    id
+                    status
+                    staticUrl
+                  }
+                }
+              }
+            }
           }
         }
       `;
 
-      const result = await this.client.request<{
-        deployment: { id: string; status: string; staticUrl?: string };
-      }>(query, { id: deploymentId });
+      const serviceResult = await this.client.request<{
+        service: {
+          serviceInstances: {
+            edges: Array<{
+              node: {
+                latestDeployment?: { id: string; status: string; staticUrl?: string };
+              };
+            }>;
+          };
+        } | null;
+      }>(serviceQuery, { id: deploymentId });
+
+      const latestDeployment = serviceResult.service?.serviceInstances.edges[0]?.node.latestDeployment;
+      if (!latestDeployment) {
+        return { status: 'unknown' };
+      }
 
       return {
-        status: result.deployment.status,
-        url: result.deployment.staticUrl,
+        status: this.normalizeStatus(latestDeployment.status),
+        url: latestDeployment.staticUrl,
       };
-    } catch (error) {
+    } catch {
       return { status: 'unknown' };
     }
+  }
+
+  private normalizeStatus(status: string): string {
+    const normalized = status.toUpperCase();
+    if (normalized.includes('SUCCESS')) return 'deployed';
+    if (normalized.includes('FAIL')) return 'failed';
+    if (normalized.includes('CANCEL')) return 'canceled';
+    if (normalized.includes('BUILD') || normalized.includes('QUEUED') || normalized.includes('DEPLOY')) {
+      return 'deploying';
+    }
+    return status.toLowerCase();
   }
 
   async runJob(

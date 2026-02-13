@@ -3,52 +3,52 @@ import { z } from 'zod';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { FastlaneAdapter } from '../adapters/providers/fastlane/fastlane.adapter.js';
-import type { FastlaneCredentials } from '../adapters/providers/fastlane/fastlane.adapter.js';
+import { AppStoreConnectAdapter } from '../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
+import type { AppStoreConnectCredentials } from '../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
 
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
 
 /**
- * Get a Fastlane adapter, using scoped connection if available.
+ * Get an App Store Connect adapter, using scoped connection if available.
  * @param scopeHint - Optional scope hint (e.g., app bundle ID) for finding scoped tokens
  */
-function getFastlaneAdapter(scopeHint?: string): { adapter: FastlaneAdapter } | { error: string } {
-  const connection = connectionRepo.findBestMatch('fastlane', scopeHint);
+function getAppStoreConnectAdapter(scopeHint?: string): { adapter: AppStoreConnectAdapter } | { error: string } {
+  const connection = connectionRepo.findBestMatch('appstoreconnect', scopeHint);
   if (!connection) {
     return {
-      error: 'No Fastlane connection found. Use connection_create with provider=fastlane first. ' +
+      error: 'No App Store Connect connection found. Use connection_create with provider=appstoreconnect first. ' +
         'You need an App Store Connect API key: https://appstoreconnect.apple.com/access/api',
     };
   }
 
   const secretStore = getSecretStore();
-  const credentials = secretStore.decryptObject<FastlaneCredentials>(connection.credentialsEncrypted);
-  const adapter = new FastlaneAdapter();
+  const credentials = secretStore.decryptObject<AppStoreConnectCredentials>(connection.credentialsEncrypted);
+  const adapter = new AppStoreConnectAdapter();
   adapter.connect(credentials);
 
   return { adapter };
 }
 
-export function registerFastlaneTools(server: McpServer): void {
+export function registerAppStoreTools(server: McpServer): void {
   server.tool(
-    'fastlane_setup_help',
-    'Get instructions for setting up Fastlane with App Store Connect API',
+    'appstore_setup_help',
+    'Get instructions for setting up App Store Connect API',
     {},
     async () => {
-      const instructions = `# Fastlane App Store Connect Setup
+      const instructions = `# App Store Connect API Setup
 
 ## Prerequisites
 
-1. **Install Fastlane** (if not already installed):
+1. **Xcode Command Line Tools** (required for uploads):
    \`\`\`bash
-   brew install fastlane
+   xcode-select --install
    \`\`\`
 
 2. **Create an App Store Connect API Key**:
    - Go to https://appstoreconnect.apple.com/access/api
    - Click the "+" button to create a new key
-   - Name it (e.g., "Infraprint CI")
+   - Name it (e.g., "Hypervibe CI")
    - Select "Admin" role (or appropriate permissions)
    - Download the .p8 file (you can only download it once!)
 
@@ -60,7 +60,7 @@ export function registerFastlaneTools(server: McpServer): void {
 ## Store the Connection
 
 \`\`\`
-connection_create provider=fastlane credentials={
+connection_create provider=appstoreconnect credentials={
   "keyId": "YOUR_KEY_ID",
   "issuerId": "YOUR_ISSUER_ID",
   "privateKey": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"
@@ -69,15 +69,15 @@ connection_create provider=fastlane credentials={
 
 For multiple apps/teams, use scoped connections:
 \`\`\`
-connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
+connection_create provider=appstoreconnect scope="com.mycompany.app1" credentials={...}
 \`\`\`
 
 ## Typical Workflow
 
 1. Archive in Xcode
-2. Upload: \`fastlane_upload ipaPath="./build/MyApp.ipa"\`
-3. Set compliance + distribute: \`fastlane_compliance\` (waits for processing, sets export compliance, ready for testers)
-4. Submit for review: \`fastlane_submit\``;
+2. Upload: \`testflight_upload ipaPath="./build/MyApp.ipa"\`
+3. Set compliance + distribute: \`testflight_compliance\` (waits for processing, sets export compliance, ready for testers)
+4. Submit for review: \`appstore_submit\``;
 
       return {
         content: [{
@@ -89,19 +89,14 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
   );
 
   server.tool(
-    'fastlane_upload',
-    'Upload an IPA to TestFlight. Uses native xcrun altool by default (no fastlane CLI required). After uploading, use fastlane_compliance to set export compliance and make the build available to testers.',
+    'testflight_upload',
+    'Upload an IPA to TestFlight using xcrun altool. After uploading, use testflight_compliance to set export compliance and make the build available to testers.',
     {
       ipaPath: z.string().describe('Path to the IPA file'),
-      changelog: z.string().optional().describe('What\'s new in this build (shown to testers)'),
-      distributeExternal: z.boolean().optional().describe('Distribute to external testers (default: false)'),
-      groups: z.array(z.string()).optional().describe('TestFlight group names to distribute to'),
       appIdentifier: z.string().optional().describe('App bundle identifier (for scoped connection lookup)'),
-      useFastlane: z.boolean().optional().describe('Use fastlane CLI instead of native altool (default: false)'),
-      cwd: z.string().optional().describe('Working directory for fastlane CLI (only used with useFastlane=true)'),
     },
-    async ({ ipaPath, changelog, distributeExternal, groups, appIdentifier, useFastlane, cwd }) => {
-      const result = getFastlaneAdapter(appIdentifier);
+    async ({ ipaPath, appIdentifier }) => {
+      const result = getAppStoreConnectAdapter(appIdentifier);
       if ('error' in result) {
         return {
           content: [{
@@ -114,31 +109,14 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
       const { adapter } = result;
 
       try {
-        let uploadResult: { success: boolean; output?: string; error?: string };
-
-        if (useFastlane) {
-          // Legacy: use fastlane CLI
-          uploadResult = await adapter.uploadToTestFlight({
-            ipaPath,
-            changelog,
-            distributeExternal,
-            groups,
-            cwd,
-          });
-        } else {
-          // Default: use native xcrun altool
-          uploadResult = await adapter.uploadViaAltool(ipaPath);
-        }
+        const uploadResult = await adapter.uploadViaAltool(ipaPath);
 
         auditRepo.create({
-          action: 'fastlane.upload',
+          action: 'testflight.upload',
           resourceType: 'testflight',
           resourceId: ipaPath,
           details: {
             success: uploadResult.success,
-            method: useFastlane ? 'fastlane' : 'altool',
-            distributeExternal,
-            groups,
           },
         });
 
@@ -149,9 +127,8 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
               text: JSON.stringify({
                 success: true,
                 message: 'Build uploaded to App Store Connect',
-                method: useFastlane ? 'fastlane' : 'altool',
                 ipaPath,
-                nextStep: 'Run fastlane_compliance to set export compliance and make the build available to testers.',
+                nextStep: 'Run testflight_compliance to set export compliance and make the build available to testers.',
               }),
             }],
           };
@@ -182,7 +159,7 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
   );
 
   server.tool(
-    'fastlane_compliance',
+    'testflight_compliance',
     'Wait for a build to finish processing, set export compliance, and optionally distribute to testers. This is required before a build appears in TestFlight.',
     {
       appIdentifier: z.string().optional().describe('App bundle identifier (for scoped connection lookup)'),
@@ -193,7 +170,7 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
       submitForBetaReview: z.boolean().optional().describe('Submit for external beta review after compliance (default: false)'),
     },
     async ({ appIdentifier, appId, buildNumber, usesNonExemptEncryption, distributeToGroups, submitForBetaReview }) => {
-      const result = getFastlaneAdapter(appIdentifier);
+      const result = getAppStoreConnectAdapter(appIdentifier);
       if ('error' in result) {
         return {
           content: [{
@@ -271,7 +248,7 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
         }
 
         auditRepo.create({
-          action: 'fastlane.compliance',
+          action: 'testflight.compliance',
           resourceType: 'testflight',
           resourceId: build.id,
           details: {
@@ -314,7 +291,7 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
   );
 
   server.tool(
-    'fastlane_builds',
+    'testflight_builds',
     'List recent builds on App Store Connect with their processing and compliance status',
     {
       appIdentifier: z.string().optional().describe('App bundle identifier (for scoped connection lookup)'),
@@ -322,7 +299,7 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
       limit: z.number().optional().describe('Number of builds to return (default: 10)'),
     },
     async ({ appIdentifier, appId, limit }) => {
-      const result = getFastlaneAdapter(appIdentifier);
+      const result = getAppStoreConnectAdapter(appIdentifier);
       if ('error' in result) {
         return {
           content: [{
@@ -383,7 +360,7 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
       appIdentifier: z.string().optional().describe('Scope hint for connection lookup'),
     },
     async ({ identifier, name, platform, capabilities, appIdentifier }) => {
-      const result = getFastlaneAdapter(appIdentifier);
+      const result = getAppStoreConnectAdapter(appIdentifier);
       if ('error' in result) {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: result.error }) }] };
       }
@@ -430,7 +407,7 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
       appIdentifier: z.string().optional().describe('Scope hint for connection lookup'),
     },
     async ({ identifier, action, capabilities, appIdentifier }) => {
-      const result = getFastlaneAdapter(appIdentifier);
+      const result = getAppStoreConnectAdapter(appIdentifier);
       if ('error' in result) {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: result.error }) }] };
       }
@@ -517,19 +494,14 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
   );
 
   server.tool(
-    'fastlane_submit',
-    'Submit app for App Store review',
+    'appstore_submit',
+    'Submit an app version for App Store review. The app must have a version in PREPARE_FOR_SUBMISSION state with a valid build attached.',
     {
-      appIdentifier: z.string().optional().describe('App bundle identifier'),
-      buildNumber: z.string().optional().describe('Specific build number to submit'),
-      skipMetadata: z.boolean().optional().describe('Skip metadata upload (default: false)'),
-      skipScreenshots: z.boolean().optional().describe('Skip screenshots upload (default: false)'),
-      submitForReview: z.boolean().optional().describe('Actually submit for review (default: false - just uploads metadata)'),
-      automaticRelease: z.boolean().optional().describe('Automatically release after approval (default: false)'),
-      cwd: z.string().optional().describe('Working directory for fastlane'),
+      appIdentifier: z.string().describe('App bundle identifier (e.g., com.example.myapp)'),
+      platform: z.enum(['IOS', 'MAC_OS', 'TV_OS']).optional().describe('Platform (default: IOS)'),
     },
-    async ({ appIdentifier, buildNumber, skipMetadata, skipScreenshots, submitForReview, automaticRelease, cwd }) => {
-      const result = getFastlaneAdapter(appIdentifier);
+    async ({ appIdentifier, platform }) => {
+      const result = getAppStoreConnectAdapter(appIdentifier);
       if ('error' in result) {
         return {
           content: [{
@@ -542,54 +514,96 @@ connection_create provider=fastlane scope="com.mycompany.app1" credentials={...}
       const { adapter } = result;
 
       try {
-        const submitResult = await adapter.submitForReview({
-          appIdentifier,
-          buildNumber,
-          skipMetadata,
-          skipScreenshots,
-          submitForReview,
-          automaticRelease,
-          cwd,
-        });
-
-        auditRepo.create({
-          action: 'fastlane.submit',
-          resourceType: 'appstore',
-          resourceId: appIdentifier ?? 'unknown',
-          details: {
-            success: submitResult.success,
-            buildNumber,
-            submitForReview,
-          },
-        });
-
-        if (submitResult.success) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                message: submitForReview
-                  ? 'App submitted for App Store review'
-                  : 'App metadata uploaded successfully',
-                appIdentifier,
-                buildNumber,
-                submittedForReview: submitForReview ?? false,
-              }),
-            }],
-          };
-        } else {
+        // Find the app by bundle ID
+        const app = await adapter.findAppByBundleId(appIdentifier);
+        if (!app) {
           return {
             content: [{
               type: 'text' as const,
               text: JSON.stringify({
                 success: false,
-                error: submitResult.error,
-                output: submitResult.output?.substring(0, 2000),
+                error: `App not found for bundle ID: ${appIdentifier}. Create the app in App Store Connect first.`,
               }),
             }],
           };
         }
+
+        // Get the editable App Store version
+        const version = await adapter.getEditableAppStoreVersion(app.id, platform as 'IOS' | 'MAC_OS' | 'TV_OS' | undefined);
+        if (!version) {
+          // List versions to help user understand state
+          const versions = await adapter.listAppStoreVersions(app.id, { platform: platform as 'IOS' | 'MAC_OS' | 'TV_OS' | undefined, limit: 5 });
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: 'No version ready for submission. Create a new version in App Store Connect with state PREPARE_FOR_SUBMISSION.',
+                currentVersions: versions.map(v => ({
+                  version: v.versionString,
+                  state: v.appStoreState,
+                  platform: v.platform,
+                })),
+              }),
+            }],
+          };
+        }
+
+        // Check if a build is attached
+        const build = await adapter.getAppStoreVersionBuild(version.id);
+        if (!build) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `Version ${version.versionString} has no build attached. Select a build in App Store Connect first.`,
+                version: {
+                  versionString: version.versionString,
+                  state: version.appStoreState,
+                },
+              }),
+            }],
+          };
+        }
+
+        // Submit for review
+        await adapter.submitForReview(version.id);
+
+        auditRepo.create({
+          action: 'appstore.submit',
+          resourceType: 'appstore',
+          resourceId: app.id,
+          details: {
+            appIdentifier,
+            version: version.versionString,
+            buildNumber: build.version,
+          },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              message: 'App submitted for App Store review',
+              app: {
+                id: app.id,
+                bundleId: app.bundleId,
+                name: app.name,
+              },
+              version: {
+                id: version.id,
+                versionString: version.versionString,
+                previousState: version.appStoreState,
+              },
+              build: {
+                id: build.id,
+                buildNumber: build.version,
+              },
+            }),
+          }],
+        };
       } catch (error) {
         return {
           content: [{

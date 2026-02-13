@@ -1,4 +1,4 @@
-# Infraprint - Claude Code Guidelines
+# Hypervibe - Claude Code Guidelines
 
 ## Behavioral Guidelines
 

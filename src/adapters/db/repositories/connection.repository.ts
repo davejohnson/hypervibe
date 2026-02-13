@@ -69,7 +69,7 @@ export class ConnectionRepository {
   /**
    * Find the best matching connection for a provider and scope hint.
    * Priority:
-   * 1. Exact match (scope = "davejohnson/infraprint")
+   * 1. Exact match (scope = "davejohnson/hypervibe")
    * 2. Wildcard match (scope = "clientorg/*" matches "clientorg/repo")
    * 3. Global fallback (scope = NULL)
    */
@@ -103,6 +103,25 @@ export class ConnectionRepository {
     }
 
     // Fall back to global
+    return this.findByProvider(provider);
+  }
+
+  /**
+   * Find the best matching connection using multiple scope hints.
+   * Tries each hint in order, then falls back to global.
+   */
+  findBestMatchFromHints(provider: string, scopeHints?: string[]): Connection | null {
+    if (!scopeHints || scopeHints.length === 0) {
+      return this.findByProvider(provider);
+    }
+
+    for (const hint of scopeHints) {
+      const match = this.findBestMatch(provider, hint);
+      if (match) {
+        return match;
+      }
+    }
+
     return this.findByProvider(provider);
   }
 

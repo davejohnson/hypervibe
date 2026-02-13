@@ -133,7 +133,7 @@ export class RenderAdapter implements IProviderAdapter {
     }
 
     const bindings = environment.platformBindings as { projectId?: string };
-    const prefix = bindings.projectId || 'infraprint';
+    const prefix = bindings.projectId || 'hypervibe';
 
     try {
       // Get owner ID
@@ -255,7 +255,7 @@ export class RenderAdapter implements IProviderAdapter {
       services?: Record<string, { serviceId: string }>;
     };
 
-    const prefix = bindings.projectId || 'infraprint';
+    const prefix = bindings.projectId || 'hypervibe';
 
     try {
       const ownerId = await this.getOwnerId();

@@ -24,7 +24,7 @@ import './adapters/providers/local/compose.generator.js';
 import './adapters/providers/recaptcha/recaptcha.adapter.js';
 import './adapters/providers/github/github.adapter.js';
 import './adapters/providers/database/database.adapter.js';
-import './adapters/providers/fastlane/fastlane.adapter.js';
+import './adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
 import './adapters/providers/xcode/xcode.adapter.js';
 
 // Secret manager providers
@@ -49,15 +49,17 @@ import { registerEnvTools } from './tools/env.tools.js';
 import { registerDbTools } from './tools/db.tools.js';
 import { registerSetupTools } from './tools/setup.tools.js';
 import { registerGitHubTools } from './tools/github.tools.js';
-import { registerFastlaneTools } from './tools/fastlane.tools.js';
+import { registerAppStoreTools } from './tools/appstore.tools.js';
 import { registerXcodeTools } from './tools/xcode.tools.js';
 import { registerVisualizeTools } from './tools/visualize.tools.js';
 import { registerAutoFixTools } from './tools/autofix.tools.js';
 import { registerSecretsTools } from './tools/secrets.tools.js';
+import { registerInfraTools } from './tools/infra.tools.js';
+import { registerApprovalTools } from './tools/approval.tools.js';
 
 export function createServer(): McpServer {
   const server = new McpServer({
-    name: 'infraprint',
+    name: 'hypervibe',
     version: '0.1.0',
   });
 
@@ -79,11 +81,13 @@ export function createServer(): McpServer {
   registerDbTools(server);
   registerSetupTools(server);
   registerGitHubTools(server);
-  registerFastlaneTools(server);
+  registerAppStoreTools(server);
   registerXcodeTools(server);
   registerVisualizeTools(server);
   registerAutoFixTools(server);
   registerSecretsTools(server);
+  registerInfraTools(server);
+  registerApprovalTools(server);
 
   return server;
 }

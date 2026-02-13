@@ -145,3 +145,6 @@ data/*.db-journal
 data/*.db-shm
 data/*.db-wal
 data/.secret-key
+
+# Local agent state
+autofix-state.json

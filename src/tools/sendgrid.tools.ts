@@ -11,6 +11,7 @@ import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js
 import type { SendGridCredentials } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
 import type { CloudflareCredentials } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
+import { getProjectScopeHints } from '../domain/services/project-scope.js';
 
 import { resolveProject } from './resolve-project.js';
 
@@ -19,8 +20,8 @@ const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const auditRepo = new AuditRepository();
 
-function getSendGridAdapter(): { adapter: SendGridAdapter } | { error: string } {
-  const connection = connectionRepo.findByProvider('sendgrid');
+function getSendGridAdapter(scopeHints?: string[]): { adapter: SendGridAdapter } | { error: string } {
+  const connection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
   if (!connection) {
     return { error: 'No SendGrid connection found. Use connection_create with provider=sendgrid first.' };
   }
@@ -33,8 +34,8 @@ function getSendGridAdapter(): { adapter: SendGridAdapter } | { error: string } 
   return { adapter };
 }
 
-function getCloudflareAdapter(): { adapter: CloudflareAdapter } | { error: string } {
-  const connection = connectionRepo.findByProvider('cloudflare');
+function getCloudflareAdapter(scopeHints?: string[]): { adapter: CloudflareAdapter } | { error: string } {
+  const connection = connectionRepo.findBestMatchFromHints('cloudflare', scopeHints);
   if (!connection) {
     return { error: 'No Cloudflare connection found. Use connection_create with provider=cloudflare first.' };
   }
@@ -362,18 +363,6 @@ export function registerSendGridTools(server: McpServer): void {
       const { adapter: sendgridAdapter } = sgResult;
 
       // Get Cloudflare adapter
-      const cfResult = getCloudflareAdapter();
-      if ('error' in cfResult) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: cfResult.error }),
-          }],
-        };
-      }
-
-      const { adapter: cloudflareAdapter } = cfResult;
-
       try {
         // Get SendGrid domain authentication details
         const domain = await sendgridAdapter.getDomainAuthentication(domainId);
@@ -385,6 +374,17 @@ export function registerSendGridTools(server: McpServer): void {
             }],
           };
         }
+
+        const cfResult = getCloudflareAdapter([domain.domain]);
+        if ('error' in cfResult) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ success: false, error: cfResult.error }),
+            }],
+          };
+        }
+        const { adapter: cloudflareAdapter } = cfResult;
 
         // Find the Cloudflare zone for this domain
         const zone = await cloudflareAdapter.findZoneByName(domain.domain);
@@ -822,15 +822,27 @@ export function registerSendGridTools(server: McpServer): void {
     'sendgrid_setup',
     'Set up SendGrid for an environment: sync API key to Railway and optionally configure webhook',
     {
-      projectName: z.string().describe('Infraprint project name'),
+      projectName: z.string().describe('Hypervibe project name'),
       environmentName: z.string().describe('Environment to configure'),
       serviceName: z.string().describe('Service to set env vars on'),
       webhookUrl: z.string().url().optional().describe('Webhook URL for email events (optional)'),
       apiKeyEnvVar: z.string().optional().describe('Env var name for API key (default: SENDGRID_API_KEY)'),
     },
     async ({ projectName, environmentName, serviceName, webhookUrl, apiKeyEnvVar = 'SENDGRID_API_KEY' }) => {
+      // Find project first so we can resolve scoped connections
+      const project = resolveProject({ projectName });
+      if (!project) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: `Project not found: ${projectName}` }),
+          }],
+        };
+      }
+      const scopeHints = getProjectScopeHints(project);
+
       // Get SendGrid connection
-      const sgConnection = connectionRepo.findByProvider('sendgrid');
+      const sgConnection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
       if (!sgConnection) {
         return {
           content: [{
@@ -844,7 +856,7 @@ export function registerSendGridTools(server: McpServer): void {
       }
 
       // Get Railway connection
-      const railwayConnection = connectionRepo.findByProvider('railway');
+      const railwayConnection = connectionRepo.findBestMatchFromHints('railway', scopeHints);
       if (!railwayConnection) {
         return {
           content: [{
@@ -853,17 +865,6 @@ export function registerSendGridTools(server: McpServer): void {
               success: false,
               error: 'No Railway connection found. Use connection_create with provider=railway first.',
             }),
-          }],
-        };
-      }
-
-      // Find project and environment
-      const project = resolveProject({ projectName });
-      if (!project) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: `Project not found: ${projectName}` }),
           }],
         };
       }

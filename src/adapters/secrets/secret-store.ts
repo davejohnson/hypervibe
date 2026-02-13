@@ -1,11 +1,9 @@
 import sodium from 'sodium-native';
-import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { getDataDir } from '../storage/paths.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.resolve(__dirname, '../../../data');
+const DATA_DIR = getDataDir();
 const KEY_FILE = path.join(DATA_DIR, '.secret-key');
 
 export class SecretStore {

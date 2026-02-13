@@ -134,7 +134,7 @@ export class RdsAdapter implements IDatabaseAdapter {
           StorageType: 'gp2',
           Tags: [
             { Key: 'Environment', Value: environment.name },
-            { Key: 'ManagedBy', Value: 'Infraprint' },
+            { Key: 'ManagedBy', Value: 'Hypervibe' },
           ],
         }
       );

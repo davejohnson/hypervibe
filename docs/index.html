@@ -1,827 +1,544 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>infraprint - AI-Native Infrastructure</title>
-  <meta name="description" content="Tell Claude what you need. Watch it deploy. AI-native infrastructure management through natural conversation.">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g1' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2300fff9'/%3E%3Cstop offset='100%25' stop-color='%23ff00ff'/%3E%3C/linearGradient%3E%3ClinearGradient id='g2' x1='100%25' y1='0%25' x2='0%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%23ff00ff'/%3E%3Cstop offset='100%25' stop-color='%2300fff9'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' fill='%230a0a0f'/%3E%3Cg fill='none' stroke-linecap='round'%3E%3Cpath d='M4 58 Q4 10 32 4 Q60 10 60 58' stroke='url(%23g1)' stroke-width='2.5' opacity='.4'/%3E%3Cpath d='M8 58 Q8 14 32 8 Q56 14 56 58' stroke='url(%23g1)' stroke-width='2.5' opacity='.5'/%3E%3Cpath d='M12 58 Q12 18 32 12 Q52 18 52 58' stroke='url(%23g1)' stroke-width='2.5' opacity='.6'/%3E%3Cpath d='M16 58 Q16 22 32 16 Q48 22 48 58' stroke='url(%23g1)' stroke-width='2.5' opacity='.7'/%3E%3Cpath d='M20 56 Q20 26 32 20 Q44 26 44 56' stroke='url(%23g2)' stroke-width='2.5' opacity='.8'/%3E%3Cpath d='M24 54 Q24 30 32 24 Q40 30 40 54' stroke='url(%23g2)' stroke-width='2.5' opacity='.9'/%3E%3Cpath d='M27 52 Q27 34 32 28 Q37 34 37 52' stroke='%2300fff9' stroke-width='2.5'/%3E%3Cellipse cx='32' cy='38' rx='4' ry='7' stroke='%2300fff9' stroke-width='2.5' opacity='.9'/%3E%3Cellipse cx='32' cy='38' rx='2' ry='4' stroke='url(%23g2)' stroke-width='2'/%3E%3Ccircle cx='32' cy='38' r='1.5' fill='%2300fff9'/%3E%3C/g%3E%3C/svg%3E">
-  <style>
-    :root {
-      --neon-cyan: #00fff9;
-      --neon-pink: #ff00ff;
-      --neon-orange: #ff6b35;
-      --neon-blue: #00d4ff;
-      --dark-bg: #0a0a0f;
-      --dark-surface: #12121a;
-      --dark-elevated: #1a1a25;
-      --text-primary: #e0e0e0;
-      --text-dim: #666680;
-    }
-
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    html {
-      scroll-behavior: smooth;
-    }
-
-    body {
-      font-family: 'Share Tech Mono', monospace;
-      background: var(--dark-bg);
-      color: var(--text-primary);
-      min-height: 100vh;
-      overflow-x: hidden;
-      line-height: 1.6;
-    }
-
-    /* Rain effect */
-    .rain {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      pointer-events: none;
-      z-index: 1;
-      opacity: 0.3;
-    }
-
-    .rain::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background-image:
-        linear-gradient(transparent 0%, transparent 50%, var(--neon-cyan) 50%, transparent 51%),
-        linear-gradient(transparent 0%, transparent 50%, var(--neon-blue) 50%, transparent 51%);
-      background-size: 1px 30px, 2px 45px;
-      background-position: 0 0, 50px 20px;
-      animation: rain 0.8s linear infinite;
-    }
-
-    @keyframes rain {
-      0% { background-position: 0 0, 50px 20px; }
-      100% { background-position: 0 30px, 50px 65px; }
-    }
-
-    /* Scanlines overlay */
-    .scanlines {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      pointer-events: none;
-      z-index: 2;
-      background: repeating-linear-gradient(
-        0deg,
-        rgba(0, 0, 0, 0.15),
-        rgba(0, 0, 0, 0.15) 1px,
-        transparent 1px,
-        transparent 2px
-      );
-    }
-
-    /* Fog/gradient overlay */
-    .fog {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      pointer-events: none;
-      z-index: 0;
-      background:
-        radial-gradient(ellipse at 20% 80%, rgba(255, 0, 255, 0.1) 0%, transparent 50%),
-        radial-gradient(ellipse at 80% 20%, rgba(0, 255, 249, 0.08) 0%, transparent 50%),
-        radial-gradient(ellipse at 50% 50%, rgba(0, 212, 255, 0.05) 0%, transparent 70%);
-    }
-
-    /* Main content */
-    .container {
-      position: relative;
-      z-index: 10;
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 0 2rem;
-    }
-
-    /* Header */
-    header {
-      padding: 2rem 0;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .logo {
-      font-family: 'Orbitron', sans-serif;
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--neon-cyan);
-      text-shadow: 0 0 10px var(--neon-cyan), 0 0 20px var(--neon-cyan), 0 0 40px var(--neon-cyan);
-      letter-spacing: 0.1em;
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-    }
-
-    .logo-icon {
-      width: 48px;
-      height: 48px;
-      filter: drop-shadow(0 0 8px var(--neon-cyan)) drop-shadow(0 0 16px rgba(255, 0, 255, 0.5));
-    }
-
-    nav a {
-      color: var(--text-dim);
-      text-decoration: none;
-      margin-left: 2rem;
-      font-size: 0.9rem;
-      letter-spacing: 0.05em;
-      transition: all 0.3s ease;
-    }
-
-    nav a:hover {
-      color: var(--neon-cyan);
-      text-shadow: 0 0 10px var(--neon-cyan);
-    }
-
-    /* Hero */
-    .hero {
-      padding: 3rem 0 6rem;
-      text-align: center;
-    }
-
-    .hero-fingerprint {
-      width: 200px;
-      height: 200px;
-      margin: 0 auto 2rem;
-      filter: drop-shadow(0 0 25px var(--neon-cyan)) drop-shadow(0 0 50px rgba(255, 0, 255, 0.4));
-      animation: fpPulse 4s ease-in-out infinite alternate;
-    }
-
-    @keyframes fpPulse {
-      0% { filter: drop-shadow(0 0 20px var(--neon-cyan)) drop-shadow(0 0 40px rgba(255, 0, 255, 0.3)); }
-      100% { filter: drop-shadow(0 0 30px rgba(255, 0, 255, 0.6)) drop-shadow(0 0 60px rgba(0, 255, 249, 0.4)); }
-    }
-
-    .hero-badge {
-      display: inline-block;
-      padding: 0.5rem 1rem;
-      background: rgba(0, 255, 249, 0.1);
-      border: 1px solid var(--neon-cyan);
-      color: var(--neon-cyan);
-      font-size: 0.75rem;
-      letter-spacing: 0.2em;
-      text-transform: uppercase;
-      margin-bottom: 2rem;
-    }
-
-    h1 {
-      font-family: 'Orbitron', sans-serif;
-      font-size: clamp(3rem, 10vw, 6rem);
-      font-weight: 900;
-      line-height: 1.1;
-      margin-bottom: 1.5rem;
-      background: linear-gradient(135deg, var(--neon-cyan) 0%, var(--neon-pink) 50%, var(--neon-orange) 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-      animation: glow 3s ease-in-out infinite alternate;
-    }
-
-    @keyframes glow {
-      0% { filter: drop-shadow(0 0 20px rgba(0, 255, 249, 0.5)); }
-      100% { filter: drop-shadow(0 0 40px rgba(255, 0, 255, 0.5)); }
-    }
-
-    .hero-tagline {
-      font-size: 1.25rem;
-      color: var(--text-dim);
-      max-width: 600px;
-      margin: 0 auto 3rem;
-    }
-
-    .hero-tagline strong {
-      color: var(--neon-cyan);
-    }
-
-    /* Terminal demo */
-    .terminal {
-      background: var(--dark-surface);
-      border: 1px solid var(--dark-elevated);
-      border-radius: 8px;
-      max-width: 700px;
-      margin: 0 auto;
-      text-align: left;
-      overflow: hidden;
-      box-shadow:
-        0 0 0 1px rgba(0, 255, 249, 0.1),
-        0 20px 50px rgba(0, 0, 0, 0.5),
-        0 0 100px rgba(0, 255, 249, 0.1);
-    }
-
-    .terminal-header {
-      background: var(--dark-elevated);
-      padding: 0.75rem 1rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .terminal-dot {
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-    }
-    .terminal-dot.red { background: #ff5f56; }
-    .terminal-dot.yellow { background: #ffbd2e; }
-    .terminal-dot.green { background: #27c93f; }
-
-    .terminal-body {
-      padding: 1.5rem;
-      font-size: 0.9rem;
-    }
-
-    .terminal-line {
-      margin-bottom: 0.75rem;
-      opacity: 0;
-      animation: typeIn 0.5s ease forwards;
-    }
-
-    .terminal-line:nth-child(1) { animation-delay: 0.5s; }
-    .terminal-line:nth-child(2) { animation-delay: 1.5s; }
-    .terminal-line:nth-child(3) { animation-delay: 2s; }
-    .terminal-line:nth-child(4) { animation-delay: 2.5s; }
-    .terminal-line:nth-child(5) { animation-delay: 3s; }
-    .terminal-line:nth-child(6) { animation-delay: 4s; }
-
-    @keyframes typeIn {
-      0% { opacity: 0; transform: translateY(5px); }
-      100% { opacity: 1; transform: translateY(0); }
-    }
-
-    .prompt {
-      color: var(--neon-pink);
-    }
-
-    .command {
-      color: var(--text-primary);
-    }
-
-    .output {
-      color: var(--neon-cyan);
-      padding-left: 1rem;
-      border-left: 2px solid var(--dark-elevated);
-      margin: 0.5rem 0;
-    }
-
-    /* CTA Buttons */
-    .cta-group {
-      display: flex;
-      gap: 1rem;
-      justify-content: center;
-      margin-top: 3rem;
-      flex-wrap: wrap;
-    }
-
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 1rem 2rem;
-      font-family: 'Share Tech Mono', monospace;
-      font-size: 0.9rem;
-      text-decoration: none;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      transition: all 0.3s ease;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .btn-primary {
-      background: transparent;
-      color: var(--neon-cyan);
-      border: 2px solid var(--neon-cyan);
-      box-shadow: 0 0 20px rgba(0, 255, 249, 0.3), inset 0 0 20px rgba(0, 255, 249, 0.1);
-    }
-
-    .btn-primary:hover {
-      background: var(--neon-cyan);
-      color: var(--dark-bg);
-      box-shadow: 0 0 40px rgba(0, 255, 249, 0.6), 0 0 80px rgba(0, 255, 249, 0.3);
-    }
-
-    .btn-secondary {
-      background: transparent;
-      color: var(--text-dim);
-      border: 1px solid var(--text-dim);
-    }
-
-    .btn-secondary:hover {
-      color: var(--neon-pink);
-      border-color: var(--neon-pink);
-      box-shadow: 0 0 20px rgba(255, 0, 255, 0.3);
-    }
-
-    /* Features grid */
-    .features {
-      padding: 6rem 0;
-    }
-
-    .section-title {
-      font-family: 'Orbitron', sans-serif;
-      font-size: 0.9rem;
-      color: var(--neon-pink);
-      letter-spacing: 0.3em;
-      text-transform: uppercase;
-      margin-bottom: 1rem;
-      text-shadow: 0 0 10px var(--neon-pink);
-    }
-
-    .section-heading {
-      font-family: 'Orbitron', sans-serif;
-      font-size: 2.5rem;
-      margin-bottom: 3rem;
-    }
-
-    .feature-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-      gap: 2rem;
-    }
-
-    .feature-card {
-      background: var(--dark-surface);
-      border: 1px solid var(--dark-elevated);
-      padding: 2rem;
-      position: relative;
-      transition: all 0.3s ease;
-    }
-
-    .feature-card::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 2px;
-      background: linear-gradient(90deg, var(--neon-cyan), var(--neon-pink));
-      transform: scaleX(0);
-      transform-origin: left;
-      transition: transform 0.3s ease;
-    }
-
-    .feature-card:hover::before {
-      transform: scaleX(1);
-    }
-
-    .feature-card:hover {
-      border-color: rgba(0, 255, 249, 0.3);
-      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-    }
-
-    .feature-icon {
-      font-size: 2rem;
-      margin-bottom: 1rem;
-    }
-
-    .feature-card h3 {
-      font-family: 'Orbitron', sans-serif;
-      font-size: 1.1rem;
-      margin-bottom: 0.75rem;
-      color: var(--neon-cyan);
-    }
-
-    .feature-card p {
-      color: var(--text-dim);
-      font-size: 0.9rem;
-    }
-
-    /* Providers */
-    .providers {
-      padding: 4rem 0;
-      text-align: center;
-    }
-
-    .provider-grid {
-      display: flex;
-      justify-content: center;
-      flex-wrap: wrap;
-      gap: 2.5rem;
-      margin-top: 2rem;
-    }
-
-    .provider {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--text-dim);
-      font-size: 0.8rem;
-      transition: all 0.3s ease;
-      width: 80px;
-    }
-
-    .provider:hover {
-      color: var(--neon-cyan);
-    }
-
-    .provider-icon {
-      width: 48px;
-      height: 48px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: var(--dark-surface);
-      border: 1px solid var(--dark-elevated);
-      font-size: 1.5rem;
-      transition: all 0.3s ease;
-    }
-
-    .provider:hover .provider-icon {
-      border-color: var(--neon-cyan);
-      box-shadow: 0 0 20px rgba(0, 255, 249, 0.3);
-    }
-
-    /* Code block */
-    .code-section {
-      padding: 4rem 0;
-    }
-
-    .code-block {
-      background: var(--dark-surface);
-      border: 1px solid var(--dark-elevated);
-      border-radius: 4px;
-      overflow-x: auto;
-      margin-top: 2rem;
-    }
-
-    .code-header {
-      background: var(--dark-elevated);
-      padding: 0.75rem 1rem;
-      font-size: 0.8rem;
-      color: var(--text-dim);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    }
-
-    .code-block pre {
-      padding: 1.5rem;
-      margin: 0;
-      font-size: 0.85rem;
-      line-height: 1.8;
-    }
-
-    .code-block code {
-      color: var(--text-primary);
-    }
-
-    .code-comment { color: var(--text-dim); }
-    .code-string { color: var(--neon-orange); }
-    .code-keyword { color: var(--neon-pink); }
-    .code-property { color: var(--neon-cyan); }
-
-    /* Footer */
-    footer {
-      padding: 4rem 0 2rem;
-      text-align: center;
-      border-top: 1px solid var(--dark-elevated);
-      margin-top: 4rem;
-    }
-
-    .footer-links {
-      display: flex;
-      justify-content: center;
-      gap: 2rem;
-      margin-bottom: 2rem;
-    }
-
-    .footer-links a {
-      color: var(--text-dim);
-      text-decoration: none;
-      font-size: 0.85rem;
-      transition: color 0.3s ease;
-    }
-
-    .footer-links a:hover {
-      color: var(--neon-cyan);
-    }
-
-    .footer-tagline {
-      color: var(--text-dim);
-      font-size: 0.8rem;
-    }
-
-    .footer-tagline .highlight {
-      color: var(--neon-pink);
-    }
-
-    /* Responsive */
-    @media (max-width: 768px) {
-      .hero {
-        padding: 2rem 0 3rem;
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hypervibe</title>
+    <meta
+      name="description"
+      content="Hypervibe is an MCP server for deploying apps, databases, DNS, and email in one conversational workflow."
+    />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Unbounded:wght@300;400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      :root {
+        --bg0: #07060a;
+        --bg1: #0d0b12;
+        --ink: #f6f3ff;
+        --muted: rgba(246, 243, 255, 0.72);
+        --faint: rgba(246, 243, 255, 0.12);
+        --card: rgba(255, 255, 255, 0.06);
+        --card2: rgba(255, 255, 255, 0.085);
+
+        --lime: #b7ff4a;
+        --aqua: #4df7ff;
+        --ember: #ff6b4a;
+        --gold: #ffd36b;
+
+        --shadow: rgba(0, 0, 0, 0.55);
+        --mono: "Spline Sans Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          "Courier New", monospace;
+        --display: "Unbounded", system-ui, -apple-system, Segoe UI, sans-serif;
       }
 
-      .hero-fingerprint {
-        width: 80px;
-        height: 80px;
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: radial-gradient(1200px 800px at 10% 10%, rgba(183, 255, 74, 0.08), transparent 55%),
+          radial-gradient(1100px 900px at 85% 20%, rgba(77, 247, 255, 0.07), transparent 52%),
+          radial-gradient(900px 700px at 60% 85%, rgba(255, 107, 74, 0.06), transparent 60%),
+          linear-gradient(180deg, var(--bg0), var(--bg1));
+        min-height: 100vh;
+        overflow-x: hidden;
+      }
+
+      .noise {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.07;
+        z-index: 0;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E");
+        mix-blend-mode: overlay;
+      }
+
+      .wrap {
+        position: relative;
+        z-index: 1;
+        max-width: 1180px;
+        padding: 28px 22px 84px;
+        margin: 0 auto;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 14px 0 20px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        text-decoration: none;
+        color: inherit;
+      }
+
+      .mark {
+        width: 42px;
+        height: 42px;
+        border-radius: 14px;
+        background: conic-gradient(from 210deg, var(--lime), var(--aqua), var(--ember), var(--gold), var(--lime));
+        box-shadow: 0 18px 45px var(--shadow);
+        position: relative;
+        overflow: hidden;
+      }
+
+      .mark::after {
+        content: "";
+        position: absolute;
+        inset: -60%;
+        background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.6), transparent 40%);
+        transform: rotate(20deg);
+        opacity: 0.35;
+      }
+
+      .brand span {
+        font-family: var(--display);
+        letter-spacing: -0.02em;
+        font-weight: 600;
       }
 
       nav {
-        display: none;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
       }
 
-      .cta-group {
-        flex-direction: column;
+      nav a {
+        font-family: var(--mono);
+        font-size: 13px;
+        color: var(--muted);
+        text-decoration: none;
+        padding: 8px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        background: rgba(0, 0, 0, 0.14);
+        transition: transform 120ms ease, border-color 120ms ease, color 120ms ease;
+      }
+
+      nav a:hover {
+        transform: translateY(-1px);
+        color: var(--ink);
+        border-color: rgba(255, 255, 255, 0.22);
+      }
+
+      .hero {
+        padding: 34px 0 26px;
+        display: grid;
+        grid-template-columns: 1.15fr 0.85fr;
+        gap: 18px;
+        align-items: stretch;
+      }
+
+      .hero h1 {
+        font-family: var(--display);
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        line-height: 1.02;
+        font-size: clamp(44px, 5vw, 72px);
+        margin: 0;
+      }
+
+      .hero p {
+        margin: 14px 0 0;
+        font-family: var(--mono);
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.7;
+        max-width: 56ch;
+      }
+
+      .ctaRow {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 18px;
         align-items: center;
       }
 
-      .footer-links {
-        flex-direction: column;
-        gap: 1rem;
+      .btn {
+        font-family: var(--mono);
+        font-size: 13px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--ink);
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
       }
 
-      .provider-grid {
-        gap: 1.5rem;
+      .btn:hover {
+        transform: translateY(-1px);
+        border-color: rgba(255, 255, 255, 0.24);
+        background: rgba(255, 255, 255, 0.085);
       }
+
+      .btnPrimary {
+        border: 1px solid rgba(183, 255, 74, 0.38);
+        background: linear-gradient(135deg, rgba(183, 255, 74, 0.16), rgba(77, 247, 255, 0.09));
+      }
+
+      .chip {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: rgba(246, 243, 255, 0.82);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(0, 0, 0, 0.22);
+        border-radius: 999px;
+        padding: 7px 10px;
+      }
+
+      .panel {
+        border-radius: 18px;
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.04));
+        box-shadow: 0 26px 70px rgba(0, 0, 0, 0.42);
+        overflow: hidden;
+        position: relative;
+      }
+
+      .panel::before {
+        content: "";
+        position: absolute;
+        inset: -1px;
+        background: radial-gradient(600px 220px at 10% 0%, rgba(183, 255, 74, 0.18), transparent 60%),
+          radial-gradient(520px 240px at 90% 10%, rgba(77, 247, 255, 0.14), transparent 55%),
+          radial-gradient(520px 220px at 70% 100%, rgba(255, 107, 74, 0.12), transparent 55%);
+        pointer-events: none;
+        opacity: 0.85;
+      }
+
+      .panelInner {
+        position: relative;
+        padding: 16px 16px 18px;
+      }
+
+      .panelTitle {
+        font-family: var(--mono);
+        color: rgba(246, 243, 255, 0.85);
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin: 2px 0 12px;
+      }
+
+      pre {
+        margin: 0;
+        padding: 14px 14px 14px;
+        border-radius: 14px;
+        background: rgba(0, 0, 0, 0.30);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        overflow: auto;
+      }
+
+      code {
+        font-family: var(--mono);
+        font-size: 12.5px;
+        line-height: 1.6;
+        color: rgba(246, 243, 255, 0.92);
+        white-space: pre;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 14px;
+        margin-top: 22px;
+      }
+
+      .card {
+        grid-column: span 4;
+        padding: 16px 16px 18px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        box-shadow: 0 20px 55px rgba(0, 0, 0, 0.33);
+        position: relative;
+        overflow: hidden;
+      }
+
+      .card::after {
+        content: "";
+        position: absolute;
+        inset: -120px -80px auto auto;
+        width: 240px;
+        height: 240px;
+        background: radial-gradient(circle at 30% 30%, rgba(183, 255, 74, 0.20), transparent 60%);
+        opacity: 0.9;
+        pointer-events: none;
+      }
+
+      .card:nth-child(2)::after {
+        background: radial-gradient(circle at 30% 30%, rgba(77, 247, 255, 0.18), transparent 60%);
+      }
+
+      .card:nth-child(3)::after {
+        background: radial-gradient(circle at 30% 30%, rgba(255, 107, 74, 0.18), transparent 60%);
+      }
+
+      .card h3 {
+        margin: 0 0 10px;
+        font-family: var(--display);
+        letter-spacing: -0.02em;
+        font-size: 18px;
+        font-weight: 600;
+      }
+
+      .card p {
+        margin: 0;
+        font-family: var(--mono);
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.7;
+      }
+
+      .section {
+        margin-top: 36px;
+      }
+
+      .section h2 {
+        font-family: var(--display);
+        font-weight: 650;
+        letter-spacing: -0.02em;
+        margin: 0 0 10px;
+        font-size: 26px;
+      }
+
+      .section .sub {
+        font-family: var(--mono);
+        color: var(--muted);
+        margin: 0 0 14px;
+        font-size: 13px;
+      }
+
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 14px;
+      }
+
+      .step {
+        grid-column: span 6;
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.04));
+      }
+
+      .step .k {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: rgba(246, 243, 255, 0.78);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .step .v {
+        margin-top: 10px;
+        font-family: var(--mono);
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.7;
+      }
+
+      footer {
+        margin-top: 46px;
+        padding-top: 18px;
+        border-top: 1px solid rgba(255, 255, 255, 0.10);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 10px;
+        color: rgba(246, 243, 255, 0.62);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      .fadeUp {
+        opacity: 0;
+        transform: translateY(10px);
+        animation: fadeUp 720ms cubic-bezier(0.2, 0.85, 0.2, 1) forwards;
+      }
+
+      .delay1 {
+        animation-delay: 80ms;
+      }
+      .delay2 {
+        animation-delay: 160ms;
+      }
+      .delay3 {
+        animation-delay: 240ms;
+      }
+
+      @keyframes fadeUp {
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @media (max-width: 980px) {
+        .hero {
+          grid-template-columns: 1fr;
+        }
+        .card {
+          grid-column: span 12;
+        }
+        .step {
+          grid-column: span 12;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="noise"></div>
+    <div class="wrap">
+      <header class="fadeUp">
+        <a class="brand" href="#top" aria-label="Hypervibe home">
+          <div class="mark" aria-hidden="true"></div>
+          <span>Hypervibe</span>
+        </a>
+        <nav>
+          <a href="#features">Features</a>
+          <a href="#install">Install</a>
+          <a href="#workflow">Workflow</a>
+          <a href="https://github.com/davejohnson/hypervibe">GitHub</a>
+        </nav>
+      </header>
+
+      <main id="top" class="hero">
+        <section class="fadeUp delay1">
+          <h1>Ship infrastructure at the speed of a sentence.</h1>
+          <p>
+            Hypervibe is an MCP server that turns app delivery into a single conversational workflow:
+            deploy, provision a database, set DNS, wire email, manage secrets, and keep it auditable.
+          </p>
+
+          <div class="ctaRow">
+            <a class="btn btnPrimary" href="#install">Install as MCP</a>
+            <a class="btn" href="#workflow">See the flow</a>
+            <span class="chip">Railway + Supabase + Cloudflare + SendGrid</span>
+          </div>
+        </section>
+
+        <aside class="panel fadeUp delay2" aria-label="Quick install">
+          <div class="panelInner">
+            <div class="panelTitle">Codex MCP Install</div>
+            <pre><code>codex mcp add hypervibe -- npx hypervibe
+codex mcp list</code></pre>
+            <p style="margin: 10px 2px 0; font-family: var(--mono); color: var(--muted); font-size: 12.5px;">
+              Hypervibe runs as an MCP server via <code>npx hypervibe</code>.
+            </p>
+          </div>
+        </aside>
+      </main>
+
+      <section class="section fadeUp delay1" aria-label="Claude Code install">
+        <h2>Claude Code MCP Install</h2>
+        <p class="sub">Add this to <code>~/.claude/settings.json</code>.</p>
+        <pre><code>{
+  "mcpServers": {
+    "hypervibe": {
+      "command": "npx",
+      "args": ["hypervibe"]
     }
-  </style>
-</head>
-<body>
-  <div class="rain"></div>
-  <div class="scanlines"></div>
-  <div class="fog"></div>
+  }
+}</code></pre>
+      </section>
 
-  <!-- Fingerprint SVG (referenced by logo and hero) -->
-  <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
-    <defs>
-      <linearGradient id="fp-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stop-color="#00fff9"/>
-        <stop offset="100%" stop-color="#ff00ff"/>
-      </linearGradient>
-      <linearGradient id="fp-gradient-alt" x1="100%" y1="0%" x2="0%" y2="100%">
-        <stop offset="0%" stop-color="#ff00ff"/>
-        <stop offset="100%" stop-color="#00fff9"/>
-      </linearGradient>
-      <filter id="glow">
-        <feGaussianBlur stdDeviation="1" result="coloredBlur"/>
-        <feMerge>
-          <feMergeNode in="coloredBlur"/>
-          <feMergeNode in="SourceGraphic"/>
-        </feMerge>
-      </filter>
-    </defs>
-    <symbol id="fingerprint" viewBox="0 0 64 64">
-      <g fill="none" stroke-linecap="round" filter="url(#glow)">
-        <!-- Outer ridges - wider arch pattern -->
-        <path d="M4 58 Q4 10 32 4 Q60 10 60 58" stroke="url(#fp-gradient)" stroke-width="2.5" opacity=".4"/>
-        <path d="M8 58 Q8 14 32 8 Q56 14 56 58" stroke="url(#fp-gradient)" stroke-width="2.5" opacity=".5"/>
-        <path d="M12 58 Q12 18 32 12 Q52 18 52 58" stroke="url(#fp-gradient)" stroke-width="2.5" opacity=".6"/>
-        <path d="M16 58 Q16 22 32 16 Q48 22 48 58" stroke="url(#fp-gradient)" stroke-width="2.5" opacity=".7"/>
-        <path d="M20 56 Q20 26 32 20 Q44 26 44 56" stroke="url(#fp-gradient-alt)" stroke-width="2.5" opacity=".8"/>
-        <path d="M24 54 Q24 30 32 24 Q40 30 40 54" stroke="url(#fp-gradient-alt)" stroke-width="2.5" opacity=".9"/>
-
-        <!-- Inner loop/whorl pattern -->
-        <path d="M27 52 Q27 34 32 28 Q37 34 37 52" stroke="#00fff9" stroke-width="2.5"/>
-        <ellipse cx="32" cy="38" rx="4" ry="7" stroke="#00fff9" stroke-width="2.5" opacity=".9"/>
-        <ellipse cx="32" cy="38" rx="2" ry="4" stroke="url(#fp-gradient-alt)" stroke-width="2"/>
-        <circle cx="32" cy="38" r="1.5" fill="#00fff9"/>
-      </g>
-    </symbol>
-  </svg>
-
-  <div class="container">
-    <header>
-      <div class="logo">
-        <svg class="logo-icon" viewBox="0 0 64 64"><use href="#fingerprint"/></svg>
-        INFRAPRINT
-      </div>
-      <nav>
-        <a href="https://github.com/davejohnson/infraprint">GitHub</a>
-        <a href="#setup">Docs</a>
-        <a href="https://modelcontextprotocol.io/">MCP</a>
-      </nav>
-    </header>
-
-    <section class="hero">
-      <svg class="hero-fingerprint" viewBox="0 0 64 64"><use href="#fingerprint"/></svg>
-      <span class="hero-badge">MCP Server for Claude Code</span>
-      <h1>INFRAPRINT</h1>
-      <p class="hero-tagline">
-        <strong>Tell Claude what you need.</strong> Watch it deploy.<br>
-        AI-native infrastructure through natural conversation.
-      </p>
-
-      <div class="terminal">
-        <div class="terminal-header">
-          <span class="terminal-dot red"></span>
-          <span class="terminal-dot yellow"></span>
-          <span class="terminal-dot green"></span>
+      <section id="features" class="grid section">
+        <div class="card fadeUp delay1">
+          <h3>Deploy</h3>
+          <p>
+            Railway-first orchestration with env var sync and health checks. Runs and receipts are persisted for traceability.
+          </p>
         </div>
-        <div class="terminal-body">
-          <div class="terminal-line">
-            <span class="prompt">you:</span> <span class="command">Deploy my app to staging with postgres</span>
+        <div class="card fadeUp delay2">
+          <h3>Data</h3>
+          <p>
+            Provision Postgres (Supabase, RDS, Cloud SQL) and migrate between providers with staged copy and cutover guardrails.
+          </p>
+        </div>
+        <div class="card fadeUp delay3">
+          <h3>DNS + Email</h3>
+          <p>
+            Cloudflare DNS + SendGrid domain auth + webhook wiring, with preview and explicit apply steps.
+          </p>
+        </div>
+      </section>
+
+      <section id="install" class="section fadeUp delay1">
+        <h2>Install</h2>
+        <p class="sub">Register the MCP server with your client.</p>
+        <pre><code>codex mcp add hypervibe -- npx hypervibe
+codex mcp list</code></pre>
+      </section>
+
+      <section id="workflow" class="section fadeUp delay2">
+        <h2>Workflow</h2>
+        <p class="sub">A predictable, auditable pattern. Preview first. Confirm when you mean it.</p>
+
+        <div class="steps">
+          <div class="step">
+            <div class="k">1. Connect providers</div>
+            <div class="v">
+              Store credentials encrypted locally. Scope tokens by domain/repo when you can.
+              Use <code>connection_create</code> + <code>connection_verify</code>.
+            </div>
           </div>
-          <div class="terminal-line output">
-            Creating Railway project...<br>
-            Provisioning Postgres database...<br>
-            Wiring DATABASE_URL...<br>
-            Deploying from main branch...
+          <div class="step">
+            <div class="k">2. Plan and bootstrap</div>
+            <div class="v">
+              Preview with <code>infra_plan</code>, then run <code>stack_bootstrap confirm=true</code> to converge.
+            </div>
           </div>
-          <div class="terminal-line">
-            <span class="prompt">claude:</span> <span class="command">Done. Your app is live at:</span>
+          <div class="step">
+            <div class="k">3. Protected production</div>
+            <div class="v">
+              Add policy gates with <code>project_policy_set</code>. For protected envs, use approvals:
+              <code>approval_request_create</code> → <code>approval_request_approve</code> → deploy with <code>approvalId</code>.
+            </div>
           </div>
-          <div class="terminal-line output" style="color: var(--neon-orange);">
-            https://my-app-staging.up.railway.app
-          </div>
-          <div class="terminal-line">
-            <span class="prompt">you:</span> <span class="command">Build and install on my iPhone</span>
-          </div>
-          <div class="terminal-line output">
-            Building MyApp (Debug)...<br>
-            Installing on Dave's iPhone via Wi-Fi...<br>
-            Done. App is running on device.
+          <div class="step">
+            <div class="k">4. Move your database</div>
+            <div class="v">
+              Use <code>db_migrate_provider</code> phases (<code>plan</code>, <code>copy</code>, <code>cutover</code>),
+              then rollback with <code>db_migrate_provider_rollback</code> if needed.
+            </div>
           </div>
         </div>
-      </div>
+      </section>
 
-      <div class="cta-group">
-        <a href="#setup" class="btn btn-primary">
-          Get Started
-        </a>
-        <a href="https://github.com/davejohnson/infraprint" class="btn btn-secondary">
-          View on GitHub
-        </a>
-      </div>
-    </section>
-
-    <section class="features">
-      <span class="section-title">Capabilities</span>
-      <h2 class="section-heading">Everything you need. Nothing you don't.</h2>
-
-      <div class="feature-grid">
-        <div class="feature-card">
-          <div class="feature-icon">&#x1F680;</div>
-          <h3>Natural Language Deploy</h3>
-          <p>No YAML. No clicking through dashboards. Just tell Claude what you want and it happens.</p>
+      <footer class="fadeUp delay3">
+        <div>Hypervibe, an MCP server for web app infrastructure.</div>
+        <div>
+          <a style="color: rgba(246,243,255,.7);" href="https://github.com/davejohnson/hypervibe">Source</a>
         </div>
-        <div class="feature-card">
-          <div class="feature-icon">&#x1F50C;</div>
-          <h3>Auto-Wiring</h3>
-          <p>DATABASE_URL, REDIS_URL, API keys &mdash; automatically connected between services.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">&#x1F30D;</div>
-          <h3>Multi-Environment</h3>
-          <p>Staging, production, PR previews. Manage them all through conversation.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">&#x1F4F1;</div>
-          <h3>Device Deploy</h3>
-          <p>Build Xcode projects and install to wirelessly-connected iPhones &mdash; one command.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">&#x1F916;</div>
-          <h3>AI Code Review</h3>
-          <p>Set up Claude-powered PR reviews on any GitHub repo with a single tool call.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">&#x1F5C3;</div>
-          <h3>Database Ops</h3>
-          <p>Run migrations, query databases, manage schemas across Prisma, Drizzle, Rails, and more.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">&#x1F510;</div>
-          <h3>Secret Manager Integration</h3>
-          <p>Pull secrets from Vault, AWS, or Doppler at deploy time. Rotate once, sync everywhere.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">&#x1F512;</div>
-          <h3>Secure by Default</h3>
-          <p>Credentials encrypted locally. Nothing leaves your machine except API calls to your providers.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">&#x1F9E9;</div>
-          <h3>Extensible</h3>
-          <p>Add new providers with ~100 lines. Self-registering plugin architecture.</p>
-        </div>
-      </div>
-    </section>
-
-    <section class="providers">
-      <span class="section-title">Integrations</span>
-      <h2 class="section-heading">Connect your stack</h2>
-
-      <div class="provider-grid">
-        <div class="provider">
-          <div class="provider-icon">&#x1F682;</div>
-          <span>Railway</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x2601;&#xFE0F;</div>
-          <span>Cloudflare</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x1F4B3;</div>
-          <span>Stripe</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x1F4E7;</div>
-          <span>SendGrid</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x1F4BB;</div>
-          <span>GitHub</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x1F4F1;</div>
-          <span>Xcode</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x1F3CE;&#xFE0F;</div>
-          <span>Fastlane</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x1F916;</div>
-          <span>reCAPTCHA</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x1F5C4;&#xFE0F;</div>
-          <span>Postgres</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x1F510;</div>
-          <span>Vault</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x1F512;</div>
-          <span>AWS Secrets</span>
-        </div>
-        <div class="provider">
-          <div class="provider-icon">&#x1F511;</div>
-          <span>Doppler</span>
-        </div>
-      </div>
-    </section>
-
-    <section class="code-section" id="setup">
-      <span class="section-title">Setup</span>
-      <h2 class="section-heading">Get started</h2>
-
-      <p style="color: var(--text-dim); margin-bottom: 2rem; max-width: 640px;">
-        Infraprint is an <a href="https://modelcontextprotocol.io/" style="color: var(--neon-cyan); text-decoration: none;">MCP server</a> that gives Claude Code direct access to your infrastructure providers. One command to install, then manage everything through conversation.
-      </p>
-
-      <p style="color: var(--text-dim); margin-bottom: 0.5rem; font-size: 0.85rem;">
-        Requires <span style="color: var(--neon-cyan);">Node 20+</span> and <a href="https://docs.anthropic.com/en/docs/claude-code" style="color: var(--neon-cyan); text-decoration: none;">Claude Code</a>.
-      </p>
-
-      <div class="code-block">
-        <div class="code-header">Terminal</div>
-        <pre><code>claude mcp add infraprint -- npx infraprint</code></pre>
-      </div>
-
-      <p style="color: var(--text-dim); margin: 2rem 0 1rem; font-size: 0.9rem;">
-        That's it. Start a Claude Code session and connect your first provider:
-      </p>
-
-      <div class="code-block">
-        <div class="code-header">Claude Code</div>
-        <pre><code><span class="code-comment"># Just ask Claude in natural language:</span>
-
-<span class="code-string">"Connect my Railway account"</span>
-<span class="code-comment"># Claude will walk you through creating a token and connecting it.</span>
-
-<span class="code-string">"Create a new project called my-app with postgres"</span>
-<span class="code-comment"># Claude provisions everything and wires up DATABASE_URL.</span>
-
-<span class="code-string">"Deploy to staging"</span>
-<span class="code-comment"># Your app is live.</span></code></pre>
-      </div>
-
-    </section>
-
-    <footer>
-      <div class="footer-links">
-        <a href="https://github.com/davejohnson/infraprint">GitHub</a>
-        <a href="#setup">Documentation</a>
-        <a href="https://github.com/davejohnson/infraprint/issues">Issues</a>
-        <a href="https://modelcontextprotocol.io/">MCP Protocol</a>
-      </div>
-      <p class="footer-tagline">
-        Built for <span class="highlight">Claude Code</span>. Apache 2.0 License.
-      </p>
-    </footer>
-  </div>
-</body>
+      </footer>
+    </div>
+  </body>
 </html>

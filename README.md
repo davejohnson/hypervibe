@@ -1,4 +1,4 @@
-# infraprint
+# hypervibe
 
 > AI-native infrastructure management. Tell Claude what you need, watch it deploy.
 
@@ -6,7 +6,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-20+-green.svg)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io/)
 
-Infraprint is an [MCP server](https://modelcontextprotocol.io/) that gives Claude Code the ability to manage your entire infrastructure through natural conversation. Connect your providers once, then deploy, configure, and manage everything by just asking.
+Hypervibe is an [MCP server](https://modelcontextprotocol.io/) that gives Codex/Claude the ability to manage your infrastructure through natural conversation. Connect your providers once, then deploy, configure, and manage everything by just asking.
 
 ```
 You: "Deploy my app to staging with a postgres database"
@@ -40,25 +40,23 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 
 ## Quick Start
 
-### 1. Install
+### 1. Install As Codex MCP
 
 ```bash
-git clone https://github.com/davejohnson/infraprint.git
-cd infraprint
-npm install
-npm run build
+codex mcp add hypervibe -- npx hypervibe
+codex mcp list
 ```
 
-### 2. Configure Claude Code
+### 2. Install As Claude Code MCP
 
 Add to `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
-    "infraprint": {
-      "command": "node",
-      "args": ["/path/to/infraprint/dist/index.js"]
+    "hypervibe": {
+      "command": "npx",
+      "args": ["hypervibe"]
     }
   }
 }
@@ -87,7 +85,7 @@ You: "Run database migrations"
 
 ### 5. Manage Secrets (Optional)
 
-Connect a secret manager and let infraprint inject secrets at deploy time:
+Connect a secret manager and let hypervibe inject secrets at deploy time:
 
 ```
 You: "Connect to Vault at https://vault.mycompany.com"
@@ -108,7 +106,7 @@ Secret references use the format: `provider://path[#key][@version]`
 │                      Claude Code                             │
 │                          ▼                                   │
 │  ┌─────────────────────────────────────────────────────┐   │
-│  │              Infraprint MCP Server                   │   │
+│  │              Hypervibe MCP Server                    │   │
 │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐          │   │
 │  │  │ Project  │  │  Deploy  │  │ Secrets  │  ...     │   │
 │  │  │  Tools   │  │  Tools   │  │  Tools   │          │   │
@@ -170,11 +168,13 @@ Secret references use the format: `provider://path[#key][@version]`
 
 ## Configuration
 
-Infraprint stores data locally:
-- **Database**: `~/.infraprint/infraprint.db` (SQLite)
-- **Secrets**: Encrypted with `~/.infraprint/.secret-key`
+Hypervibe stores data locally:
+- **Database**: `~/.hypervibe/hypervibe.db` (SQLite)
+- **Secrets**: Encrypted with `~/.hypervibe/.secret-key`
 
 No data is sent to external servers except the providers you connect.
+
+You can override the storage location by setting `HYPERVIBE_DATA_DIR` when launching the MCP server.
 
 ## Adding New Providers
 
@@ -206,7 +206,7 @@ import './adapters/providers/example/example.adapter.js';
 
 ## Philosophy
 
-**Let LLMs handle the fuzzy stuff.** Infraprint returns raw data and lets Claude interpret it. No complex pattern matching or hardcoded rules—Claude figures out that "prod-us-east" means production.
+**Let LLMs handle the fuzzy stuff.** Hypervibe returns raw data and lets your agent interpret it. No complex pattern matching or hardcoded rules—your agent figures out that "prod-us-east" means production.
 
 **Simple shortcuts are fine.** Exact matches for `production`, `staging`, `development` work instantly. Everything else? Claude handles it.
 

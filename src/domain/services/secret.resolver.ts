@@ -1,4 +1,5 @@
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { SecretMappingRepository, SecretAccessLogRepository } from '../../adapters/db/repositories/secret-mapping.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { secretManagerRegistry } from '../registry/secretmanager.registry.js';
@@ -8,6 +9,7 @@ import {
   type ISecretManagerAdapter,
   type SecretManagerProvider,
 } from '../ports/secretmanager.port.js';
+import { getProjectScopeHints } from './project-scope.js';
 
 export interface ResolveOptions {
   projectId: string;
@@ -28,6 +30,7 @@ export interface ResolvedEnvVars {
  */
 export class SecretResolver {
   private mappingRepo = new SecretMappingRepository();
+  private projectRepo = new ProjectRepository();
   private accessLogRepo = new SecretAccessLogRepository();
   private connectionRepo = new ConnectionRepository();
   private secretStore = getSecretStore();
@@ -78,7 +81,9 @@ export class SecretResolver {
     // Resolve secrets from each provider
     for (const [provider, items] of byProvider) {
       try {
-        const adapter = await this.getAdapter(provider);
+        const project = this.projectRepo.findById(options.projectId);
+        const scopeHints = project ? getProjectScopeHints(project) : undefined;
+        const adapter = await this.getAdapter(provider, scopeHints);
         const refs = items.map((i) => i.ref);
         const secrets = await adapter.getSecrets(refs);
 
@@ -149,7 +154,9 @@ export class SecretResolver {
     }
 
     try {
-      const adapter = await this.getAdapter(ref.provider);
+      const project = context?.projectId ? this.projectRepo.findById(context.projectId) : null;
+      const scopeHints = project ? getProjectScopeHints(project) : undefined;
+      const adapter = await this.getAdapter(ref.provider, scopeHints);
       const secret = await adapter.getSecret(ref.path, ref.key, ref.version);
 
       this.accessLogRepo.create({
@@ -182,13 +189,17 @@ export class SecretResolver {
   /**
    * Get or create a connected adapter for a provider.
    */
-  private async getAdapter(provider: SecretManagerProvider): Promise<ISecretManagerAdapter> {
-    if (this.adapterCache.has(provider)) {
-      return this.adapterCache.get(provider)!;
+  private async getAdapter(
+    provider: SecretManagerProvider,
+    scopeHints?: string[]
+  ): Promise<ISecretManagerAdapter> {
+    const cacheKey = `${provider}|${(scopeHints ?? []).join('|')}`;
+    if (this.adapterCache.has(cacheKey)) {
+      return this.adapterCache.get(cacheKey)!;
     }
 
     // Find connection for this provider
-    const connection = this.connectionRepo.findByProvider(provider);
+    const connection = this.connectionRepo.findBestMatchFromHints(provider, scopeHints);
     if (!connection) {
       throw new Error(`No connection found for secret manager '${provider}'. Use connection_create first.`);
     }
@@ -202,7 +213,7 @@ export class SecretResolver {
     const adapter = secretManagerRegistry.createAdapter(provider, credentials);
     await adapter.connect(credentials);
 
-    this.adapterCache.set(provider, adapter);
+    this.adapterCache.set(cacheKey, adapter);
     return adapter;
   }
 
