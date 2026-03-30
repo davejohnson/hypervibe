@@ -14,6 +14,8 @@ const WORKFLOW_TEMPLATES: Record<string, {
   name: string;
   filename: string;
   content: string;
+  requiredSecrets?: string[];
+  requiredVariables?: string[];
 }> = {
   'node-test': {
     name: 'Node.js Tests',
@@ -73,6 +75,233 @@ jobs:
         with:
           railway_token: \${{ secrets.RAILWAY_TOKEN }}
 `,
+    requiredSecrets: ['RAILWAY_TOKEN'],
+  },
+  'deploy-railway-staging': {
+    name: 'Deploy Railway (staging)',
+    filename: 'deploy-railway-staging.yml',
+    content: `name: Deploy Railway (staging)
+
+on:
+  push:
+    branches: [staging]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run migrations (optional)
+        if: \${{ vars.MIGRATION_COMMAND != '' }}
+        run: \${{ vars.MIGRATION_COMMAND }}
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+      - uses: railwayapp/railway-github-action@v0.1.0
+        with:
+          railway_token: \${{ secrets.RAILWAY_TOKEN }}
+`,
+    requiredSecrets: ['RAILWAY_TOKEN'],
+    requiredVariables: ['MIGRATION_COMMAND (optional)'],
+  },
+  'deploy-railway-production': {
+    name: 'Deploy Railway (production)',
+    filename: 'deploy-railway-production.yml',
+    content: `name: Deploy Railway (production)
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run migrations (optional)
+        if: \${{ vars.MIGRATION_COMMAND != '' }}
+        run: \${{ vars.MIGRATION_COMMAND }}
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+      - uses: railwayapp/railway-github-action@v0.1.0
+        with:
+          railway_token: \${{ secrets.RAILWAY_TOKEN }}
+`,
+    requiredSecrets: ['RAILWAY_TOKEN'],
+    requiredVariables: ['MIGRATION_COMMAND (optional)'],
+  },
+  'deploy-vercel-staging': {
+    name: 'Deploy Vercel (staging)',
+    filename: 'deploy-vercel-staging.yml',
+    content: `name: Deploy Vercel (staging)
+
+on:
+  push:
+    branches: [staging]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run migrations (optional)
+        if: \${{ vars.MIGRATION_COMMAND != '' }}
+        run: \${{ vars.MIGRATION_COMMAND }}
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+      - name: Deploy (preview)
+        run: vercel deploy --token \${{ secrets.VERCEL_TOKEN }} --yes
+`,
+    requiredSecrets: ['VERCEL_TOKEN'],
+    requiredVariables: ['MIGRATION_COMMAND (optional)'],
+  },
+  'deploy-vercel-production': {
+    name: 'Deploy Vercel (production)',
+    filename: 'deploy-vercel-production.yml',
+    content: `name: Deploy Vercel (production)
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run migrations (optional)
+        if: \${{ vars.MIGRATION_COMMAND != '' }}
+        run: \${{ vars.MIGRATION_COMMAND }}
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+      - name: Deploy (production)
+        run: vercel deploy --token \${{ secrets.VERCEL_TOKEN }} --prod --yes
+`,
+    requiredSecrets: ['VERCEL_TOKEN'],
+    requiredVariables: ['MIGRATION_COMMAND (optional)'],
+  },
+  'deploy-render-staging': {
+    name: 'Deploy Render (staging)',
+    filename: 'deploy-render-staging.yml',
+    content: `name: Deploy Render (staging)
+
+on:
+  push:
+    branches: [staging]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run migrations (optional)
+        if: \${{ vars.MIGRATION_COMMAND != '' }}
+        run: \${{ vars.MIGRATION_COMMAND }}
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+      - name: Trigger Render deploy hook
+        run: curl -fsSL -X POST "\${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+`,
+    requiredSecrets: ['RENDER_DEPLOY_HOOK_URL'],
+    requiredVariables: ['MIGRATION_COMMAND (optional)'],
+  },
+  'deploy-render-production': {
+    name: 'Deploy Render (production)',
+    filename: 'deploy-render-production.yml',
+    content: `name: Deploy Render (production)
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run migrations (optional)
+        if: \${{ vars.MIGRATION_COMMAND != '' }}
+        run: \${{ vars.MIGRATION_COMMAND }}
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+      - name: Trigger Render deploy hook
+        run: curl -fsSL -X POST "\${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+`,
+    requiredSecrets: ['RENDER_DEPLOY_HOOK_URL'],
+    requiredVariables: ['MIGRATION_COMMAND (optional)'],
+  },
+  'deploy-digitalocean-staging': {
+    name: 'Deploy DigitalOcean App Platform (staging)',
+    filename: 'deploy-digitalocean-staging.yml',
+    content: `name: Deploy DigitalOcean (staging)
+
+on:
+  push:
+    branches: [staging]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run migrations (optional)
+        if: \${{ vars.MIGRATION_COMMAND != '' }}
+        run: \${{ vars.MIGRATION_COMMAND }}
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+      - uses: digitalocean/action-doctl@v2
+        with:
+          token: \${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: Trigger App Platform deployment
+        run: doctl apps create-deployment \${{ secrets.DO_APP_ID }}
+`,
+    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'DO_APP_ID'],
+    requiredVariables: ['MIGRATION_COMMAND (optional)'],
+  },
+  'deploy-digitalocean-production': {
+    name: 'Deploy DigitalOcean App Platform (production)',
+    filename: 'deploy-digitalocean-production.yml',
+    content: `name: Deploy DigitalOcean (production)
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run migrations (optional)
+        if: \${{ vars.MIGRATION_COMMAND != '' }}
+        run: \${{ vars.MIGRATION_COMMAND }}
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+      - uses: digitalocean/action-doctl@v2
+        with:
+          token: \${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: Trigger App Platform deployment
+        run: doctl apps create-deployment \${{ secrets.DO_APP_ID }}
+`,
+    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'DO_APP_ID'],
+    requiredVariables: ['MIGRATION_COMMAND (optional)'],
   },
   'lint': {
     name: 'Lint',
@@ -93,6 +322,25 @@ jobs:
       - run: npm ci
       - run: npm run lint
 `,
+  },
+};
+
+const BRANCH_DEPLOY_TEMPLATES: Record<string, { staging: string; production: string }> = {
+  railway: {
+    staging: 'deploy-railway-staging',
+    production: 'deploy-railway-production',
+  },
+  vercel: {
+    staging: 'deploy-vercel-staging',
+    production: 'deploy-vercel-production',
+  },
+  render: {
+    staging: 'deploy-render-staging',
+    production: 'deploy-render-production',
+  },
+  digitalocean: {
+    staging: 'deploy-digitalocean-staging',
+    production: 'deploy-digitalocean-production',
   },
 };
 
@@ -160,6 +408,77 @@ function getApexDomain(domain: string): string {
 }
 
 export function registerGitHubTools(server: McpServer): void {
+  server.tool(
+    'github_setup_help',
+    'Get instructions for creating a GitHub personal access token with the correct permissions',
+    {},
+    async () => {
+      const instructions = `# GitHub Personal Access Token Setup
+
+## Fine-Grained Token (Recommended)
+
+Fine-grained tokens let you scope access to specific repositories with minimal permissions.
+
+1. Go to https://github.com/settings/tokens?type=beta
+2. Click **"Generate new token"**
+3. Set a **Token name** (e.g., "Hypervibe")
+4. Set **Expiration** (90 days recommended, or custom)
+5. Under **Repository access**, select **"Only select repositories"** and pick your repos
+6. Under **Permissions → Repository permissions**, enable:
+
+| Permission | Access | Used by |
+|------------|--------|---------|
+| Actions | Read and write | Workflows: list, trigger, create |
+| Administration | Read and write | Branch protection rules |
+| Contents | Read and write | Workflow files, CNAME file for Pages |
+| Pages | Read and write | GitHub Pages setup and status |
+| Secrets | Read and write | Repository secrets management |
+
+7. Click **"Generate token"**
+8. Copy the token (shown only once!)
+
+## Classic Token (Simpler Alternative)
+
+If you prefer a simpler setup or need org-wide access:
+
+1. Go to https://github.com/settings/tokens
+2. Click **"Generate new token (classic)"**
+3. Set a **Note** (e.g., "Hypervibe")
+4. Select the **\`repo\`** scope (grants full repository access)
+5. Click **"Generate token"**
+6. Copy the token (shown only once!)
+
+## What Each Hypervibe Feature Needs
+
+| Feature | Fine-grained permission | Classic scope |
+|---------|------------------------|---------------|
+| Secrets (list, set, delete) | Secrets: Read and write | repo |
+| Workflows (list, create, trigger) | Actions: Read and write, Contents: Read and write | repo |
+| Branch protection | Administration: Read and write | repo |
+| GitHub Pages setup | Pages: Read and write, Contents: Read and write | repo |
+| AI code review setup | Actions: Read and write, Contents: Read and write, Secrets: Read and write | repo |
+
+## Verification
+
+After creating the token, connect and verify it:
+
+\`\`\`
+connection_create provider=github credentials={"token":"ghp_your_token_here"}
+connection_verify provider=github
+\`\`\``;
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            instructions,
+          }),
+        }],
+      };
+    }
+  );
+
   server.tool(
     'github_pages_status',
     'Get the GitHub Pages status for a repository',
@@ -1184,12 +1503,219 @@ jobs:
   );
 
   server.tool(
+    'deploy_branch_setup',
+    'Set up branch-based deploy workflows (staging->staging, main->production) for a provider',
+    {
+      owner: z.string().describe('Repository owner (user or organization)'),
+      repo: z.string().describe('Repository name'),
+      provider: z.enum(['railway', 'vercel', 'render', 'digitalocean']).describe('Deployment provider'),
+      protectBranches: z.boolean().optional().describe('DEPRECATED: branch protection is now enabled by default. Set false to opt out'),
+      ignoreBranchProtection: z.boolean().optional().describe('Set true to skip branch protection setup'),
+      statusChecks: z.array(z.string()).optional().describe('Required status checks for branch protection'),
+      requiredReviewers: z.number().optional().describe('Number of required PR reviewers (default: 1)'),
+      confirm: z.boolean().optional().describe('Set to true to create/update the workflows'),
+    },
+    async ({ owner, repo, provider, protectBranches, ignoreBranchProtection, statusChecks, requiredReviewers, confirm }) => {
+      const result = getGitHubAdapter(`${owner}/${repo}`);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const mapping = BRANCH_DEPLOY_TEMPLATES[provider];
+      const stagingTemplate = WORKFLOW_TEMPLATES[mapping.staging];
+      const productionTemplate = WORKFLOW_TEMPLATES[mapping.production];
+      const templates = [
+        { key: mapping.staging, branch: 'staging', tmpl: stagingTemplate },
+        { key: mapping.production, branch: 'main', tmpl: productionTemplate },
+      ];
+
+      const uniqueRequiredSecrets = Array.from(new Set(templates.flatMap(({ tmpl }) => tmpl.requiredSecrets ?? [])));
+      const uniqueRequiredVariables = Array.from(new Set(templates.flatMap(({ tmpl }) => tmpl.requiredVariables ?? [])));
+      // Conservative default: enforce protection unless explicitly ignored/disabled.
+      const shouldProtectBranches = !(ignoreBranchProtection === true || protectBranches === false);
+      const branchProtectionPlan = shouldProtectBranches
+        ? {
+            branches: ['staging', 'main'],
+            rules: {
+              requireReviews: true,
+              requiredReviewers: requiredReviewers ?? 1,
+              dismissStaleReviews: true,
+              requireCodeOwnerReviews: false,
+              requireStatusChecks: (statusChecks?.length ?? 0) > 0,
+              statusChecks: statusChecks ?? [],
+              strictStatusChecks: true,
+              enforceAdmins: true,
+              requireLinearHistory: false,
+              allowForcePushes: false,
+              allowDeletions: false,
+            },
+          }
+        : null;
+
+      if (!confirm) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              mode: 'preview',
+              provider,
+              repository: `${owner}/${repo}`,
+              branchMapping: {
+                staging: 'staging',
+                production: 'main',
+              },
+              message: 'Review planned workflows and call again with confirm=true to apply.',
+              workflows: templates.map(({ key, branch, tmpl }) => ({
+                template: key,
+                templateName: tmpl.name,
+                branch,
+                path: `.github/workflows/${tmpl.filename}`,
+                content: tmpl.content,
+                requiredSecrets: tmpl.requiredSecrets ?? [],
+                requiredVariables: tmpl.requiredVariables ?? [],
+              })),
+              requiredSecrets: uniqueRequiredSecrets,
+              requiredVariables: uniqueRequiredVariables,
+              branchProtection: branchProtectionPlan,
+              notes: [
+                'Set secret DATABASE_URL in each GitHub Environment only if using migrations.',
+                'Set variable MIGRATION_COMMAND in each GitHub Environment to enable migration step.',
+              ],
+            }),
+          }],
+        };
+      }
+
+      const workflowResults: Array<{
+        template: string;
+        templateName: string;
+        branch: string;
+        path: string;
+        created: boolean;
+        updated: boolean;
+      }> = [];
+      const errors: Array<{ template: string; path: string; error: string }> = [];
+      const branchProtectionResults: Array<{
+        branch: string;
+        success: boolean;
+        error?: string;
+      }> = [];
+
+      for (const { key, branch, tmpl } of templates) {
+        const workflowPath = `.github/workflows/${tmpl.filename}`;
+        try {
+          const fileResult = await result.adapter.createOrUpdateFile(
+            owner,
+            repo,
+            workflowPath,
+            tmpl.content,
+            `Add ${tmpl.name} workflow`
+          );
+
+          workflowResults.push({
+            template: key,
+            templateName: tmpl.name,
+            branch,
+            path: workflowPath,
+            created: fileResult.created,
+            updated: fileResult.updated,
+          });
+        } catch (error) {
+          errors.push({
+            template: key,
+            path: workflowPath,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      if (shouldProtectBranches && branchProtectionPlan) {
+        for (const branch of branchProtectionPlan.branches) {
+          try {
+            await result.adapter.updateBranchProtection(owner, repo, branch, branchProtectionPlan.rules);
+            branchProtectionResults.push({ branch, success: true });
+          } catch (error) {
+            branchProtectionResults.push({
+              branch,
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
+
+      auditRepo.create({
+        action: 'github.workflow_created',
+        resourceType: 'github_workflow',
+        resourceId: `${owner}/${repo}/branch-deploy/${provider}`,
+        details: {
+          provider,
+          branchMapping: { staging: 'staging', production: 'main' },
+          workflows: workflowResults,
+          errors,
+          branchProtection: branchProtectionResults,
+        },
+      });
+
+      const protectionFailures = branchProtectionResults.filter((r) => !r.success);
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: errors.length === 0 && protectionFailures.length === 0,
+            mode: 'executed',
+            provider,
+            repository: `${owner}/${repo}`,
+            branchMapping: {
+              staging: 'staging',
+              production: 'main',
+            },
+            workflows: workflowResults,
+            errors,
+            branchProtection: {
+              enabled: shouldProtectBranches,
+              results: branchProtectionResults,
+              rules: branchProtectionPlan?.rules ?? null,
+            },
+            requiredSecrets: uniqueRequiredSecrets,
+            requiredVariables: uniqueRequiredVariables,
+            notes: [
+              'Set secret DATABASE_URL in each GitHub Environment only if using migrations.',
+              'Set variable MIGRATION_COMMAND in each GitHub Environment to enable migration step.',
+            ],
+          }),
+        }],
+      };
+    }
+  );
+
+  server.tool(
     'github_workflow_create',
     'Create a workflow from common templates (two-step: preview then confirm)',
     {
       owner: z.string().describe('Repository owner (user or organization)'),
       repo: z.string().describe('Repository name'),
-      template: z.enum(['node-test', 'python-test', 'deploy-railway', 'lint']).describe('Workflow template to use'),
+      template: z.enum([
+        'node-test',
+        'python-test',
+        'deploy-railway',
+        'deploy-railway-staging',
+        'deploy-railway-production',
+        'deploy-vercel-staging',
+        'deploy-vercel-production',
+        'deploy-render-staging',
+        'deploy-render-production',
+        'deploy-digitalocean-staging',
+        'deploy-digitalocean-production',
+        'lint',
+      ]).describe('Workflow template to use'),
       confirm: z.boolean().optional().describe('Set to true to create the workflow'),
     },
     async ({ owner, repo, template, confirm }) => {
@@ -1232,7 +1758,8 @@ jobs:
               templateName: tmpl.name,
               path: workflowPath,
               content: tmpl.content,
-              requiredSecrets: template === 'deploy-railway' ? ['RAILWAY_TOKEN'] : [],
+              requiredSecrets: tmpl.requiredSecrets ?? [],
+              requiredVariables: tmpl.requiredVariables ?? [],
             }),
           }],
         };
@@ -1266,7 +1793,8 @@ jobs:
               path: workflowPath,
               created: fileResult.created,
               updated: fileResult.updated,
-              requiredSecrets: template === 'deploy-railway' ? ['RAILWAY_TOKEN'] : [],
+              requiredSecrets: tmpl.requiredSecrets ?? [],
+              requiredVariables: tmpl.requiredVariables ?? [],
               message: fileResult.created
                 ? `Workflow "${tmpl.name}" created at ${workflowPath}.`
                 : `Workflow "${tmpl.name}" updated at ${workflowPath}.`,

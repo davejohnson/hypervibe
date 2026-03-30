@@ -1,5 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { readdir, stat } from 'fs/promises';
+import path from 'path';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
@@ -8,6 +10,7 @@ import type { AppStoreConnectCredentials } from '../adapters/providers/appstorec
 
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg']);
 
 /**
  * Get an App Store Connect adapter, using scoped connection if available.
@@ -332,6 +335,322 @@ connection_create provider=appstoreconnect scope="com.mycompany.app1" credential
                     : 'no non-exempt encryption',
                 uploadedDate: b.uploadedDate,
               })),
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'appstore_submission_readiness',
+    'Check App Store submission readiness (build, localization metadata, screenshots) for the editable app version.',
+    {
+      appIdentifier: z.string().describe('App bundle identifier (e.g., com.example.myapp)'),
+      platform: z.enum(['IOS', 'MAC_OS', 'TV_OS']).optional().describe('Platform (default: IOS)'),
+      locale: z.string().optional().describe('Localization to inspect (default: en-US)'),
+      screenshotDisplayType: z.string().optional().describe('Screenshot display type to inspect (default: APP_IPHONE_65)'),
+    },
+    async ({ appIdentifier, platform, locale = 'en-US', screenshotDisplayType = 'APP_IPHONE_65' }) => {
+      const result = getAppStoreConnectAdapter(appIdentifier);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+
+      try {
+        const app = await adapter.findAppByBundleId(appIdentifier);
+        if (!app) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `App not found for bundle ID: ${appIdentifier}`,
+              }),
+            }],
+          };
+        }
+
+        const version = await adapter.getEditableAppStoreVersion(
+          app.id,
+          platform as 'IOS' | 'MAC_OS' | 'TV_OS' | undefined
+        );
+        if (!version) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: 'No editable App Store version found (expected PREPARE_FOR_SUBMISSION or similar state).',
+              }),
+            }],
+          };
+        }
+
+        const build = await adapter.getAppStoreVersionBuild(version.id);
+        const localizations = await adapter.listAppStoreVersionLocalizations(version.id);
+        const localization = localizations.find((l) => l.locale.toLowerCase() === locale.toLowerCase()) ?? null;
+
+        let screenshotSet = null as { id: string; screenshotDisplayType: string } | null;
+        let screenshots = [] as Array<{ id: string; fileName?: string; state?: string }>;
+        if (localization) {
+          const sets = await adapter.listAppScreenshotSets(localization.id);
+          screenshotSet = sets.find((s) => s.screenshotDisplayType === screenshotDisplayType) ?? null;
+          if (screenshotSet) {
+            const items = await adapter.listAppScreenshots(screenshotSet.id);
+            screenshots = items.map((s) => ({
+              id: s.id,
+              fileName: s.fileName,
+              state: s.assetDeliveryState?.state,
+            }));
+          }
+        }
+
+        const readinessChecks = {
+          hasBuildAttached: !!build,
+          hasLocalization: !!localization,
+          hasDescription: !!localization?.description,
+          hasWhatsNew: !!localization?.whatsNew,
+          hasScreenshotSet: !!screenshotSet,
+          screenshotCount: screenshots.length,
+        };
+
+        const missing: string[] = [];
+        if (!readinessChecks.hasBuildAttached) missing.push('Attach a build to the App Store version');
+        if (!readinessChecks.hasLocalization) missing.push(`Create localization ${locale}`);
+        if (readinessChecks.hasLocalization && !readinessChecks.hasDescription) missing.push(`Set description for ${locale}`);
+        if (readinessChecks.hasLocalization && !readinessChecks.hasWhatsNew) missing.push(`Set what's new for ${locale}`);
+        if (readinessChecks.hasLocalization && !readinessChecks.hasScreenshotSet) {
+          missing.push(`Create screenshot set ${screenshotDisplayType} for ${locale}`);
+        }
+        if (readinessChecks.hasScreenshotSet && readinessChecks.screenshotCount === 0) {
+          missing.push(`Upload at least one screenshot for ${locale}/${screenshotDisplayType}`);
+        }
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              app: { id: app.id, name: app.name, bundleId: app.bundleId },
+              version,
+              locale,
+              screenshotDisplayType,
+              readinessChecks,
+              missing,
+              localizations: localizations.map((l) => ({
+                id: l.id,
+                locale: l.locale,
+                hasDescription: !!l.description,
+                hasWhatsNew: !!l.whatsNew,
+              })),
+              screenshotSet,
+              screenshots,
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'appstore_prepare_submission_assets',
+    'Create/update App Store localization metadata and upload screenshots for submission readiness.',
+    {
+      appIdentifier: z.string().describe('App bundle identifier (e.g., com.example.myapp)'),
+      platform: z.enum(['IOS', 'MAC_OS', 'TV_OS']).optional().describe('Platform (default: IOS)'),
+      locale: z.string().optional().describe('Localization locale (default: en-US)'),
+      screenshotDisplayType: z.string().optional().describe('Screenshot display type (default: APP_IPHONE_65)'),
+      screenshotDir: z.string().optional().describe('Directory containing screenshots (.png/.jpg/.jpeg), uploaded in filename sort order'),
+      replaceScreenshots: z.boolean().optional().describe('Delete existing screenshots in the set before uploading (default: false)'),
+      description: z.string().optional().describe('Localized App Store description'),
+      keywords: z.string().optional().describe('Localized keywords (comma-separated)'),
+      promotionalText: z.string().optional().describe('Localized promotional text'),
+      marketingUrl: z.string().optional().describe('Localized marketing URL'),
+      supportUrl: z.string().optional().describe('Localized support URL'),
+      whatsNew: z.string().optional().describe('Localized what’s new text'),
+    },
+    async ({
+      appIdentifier,
+      platform,
+      locale = 'en-US',
+      screenshotDisplayType = 'APP_IPHONE_65',
+      screenshotDir,
+      replaceScreenshots,
+      description,
+      keywords,
+      promotionalText,
+      marketingUrl,
+      supportUrl,
+      whatsNew,
+    }) => {
+      const result = getAppStoreConnectAdapter(appIdentifier);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+
+      try {
+        const app = await adapter.findAppByBundleId(appIdentifier);
+        if (!app) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `App not found for bundle ID: ${appIdentifier}`,
+              }),
+            }],
+          };
+        }
+
+        const version = await adapter.getEditableAppStoreVersion(
+          app.id,
+          platform as 'IOS' | 'MAC_OS' | 'TV_OS' | undefined
+        );
+        if (!version) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: 'No editable App Store version found (expected PREPARE_FOR_SUBMISSION or similar state).',
+              }),
+            }],
+          };
+        }
+
+        const localization = await adapter.getOrCreateAppStoreVersionLocalization(version.id, locale);
+        await adapter.updateAppStoreVersionLocalization(localization.id, {
+          description,
+          keywords,
+          promotionalText,
+          marketingUrl,
+          supportUrl,
+          whatsNew,
+        });
+
+        let uploadedScreenshots: Array<{ fileName: string; screenshotId: string }> = [];
+        let deletedScreenshotIds: string[] = [];
+        let screenshotSet: { id: string; screenshotDisplayType: string } | null = null;
+
+        if (screenshotDir) {
+          const entries = await readdir(screenshotDir);
+          const files = entries
+            .filter((name) => IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase()))
+            .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+          if (files.length === 0) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: `No screenshot files found in ${screenshotDir}. Expected .png/.jpg/.jpeg files.`,
+                }),
+              }],
+            };
+          }
+
+          for (const file of files) {
+            const fullPath = path.join(screenshotDir, file);
+            const info = await stat(fullPath);
+            if (!info.isFile()) {
+              return {
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify({
+                    success: false,
+                    error: `Path is not a file: ${fullPath}`,
+                  }),
+                }],
+              };
+            }
+          }
+
+          screenshotSet = await adapter.getOrCreateAppScreenshotSet(localization.id, screenshotDisplayType);
+          if (replaceScreenshots) {
+            const existing = await adapter.listAppScreenshots(screenshotSet.id);
+            for (const item of existing) {
+              await adapter.deleteAppScreenshot(item.id);
+              deletedScreenshotIds.push(item.id);
+            }
+          }
+
+          for (const file of files) {
+            const fullPath = path.join(screenshotDir, file);
+            const uploaded = await adapter.uploadAppScreenshot(screenshotSet.id, fullPath, file);
+            uploadedScreenshots.push({ fileName: file, screenshotId: uploaded.screenshotId });
+          }
+        }
+
+        auditRepo.create({
+          action: 'appstore.assets.prepare',
+          resourceType: 'appstore',
+          resourceId: app.id,
+          details: {
+            appIdentifier,
+            version: version.versionString,
+            locale,
+            screenshotDisplayType,
+            metadataUpdated: {
+              description: description !== undefined,
+              keywords: keywords !== undefined,
+              promotionalText: promotionalText !== undefined,
+              marketingUrl: marketingUrl !== undefined,
+              supportUrl: supportUrl !== undefined,
+              whatsNew: whatsNew !== undefined,
+            },
+            screenshotUploads: uploadedScreenshots.length,
+            screenshotReplaced: replaceScreenshots ?? false,
+          },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              message: 'App Store submission assets prepared',
+              app: { id: app.id, bundleId: app.bundleId, name: app.name },
+              version: { id: version.id, versionString: version.versionString, state: version.appStoreState },
+              localization: { id: localization.id, locale },
+              screenshotSet,
+              deletedScreenshotIds,
+              uploadedScreenshots,
             }),
           }],
         };

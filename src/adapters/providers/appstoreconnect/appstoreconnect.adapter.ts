@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { spawn } from 'child_process';
-import { createSign, createPrivateKey } from 'crypto';
-import { writeFile, unlink, mkdir } from 'fs/promises';
+import { createSign, createPrivateKey, createHash } from 'crypto';
+import { writeFile, unlink, mkdir, readFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
@@ -30,6 +30,28 @@ export interface AppStoreVersion {
   versionString: string;
   appStoreState: string;
   platform: string;
+}
+
+export interface AppStoreVersionLocalization {
+  id: string;
+  locale: string;
+  description?: string;
+  keywords?: string;
+  promotionalText?: string;
+  marketingUrl?: string;
+  supportUrl?: string;
+  whatsNew?: string;
+}
+
+export interface AppScreenshotSet {
+  id: string;
+  screenshotDisplayType: string;
+}
+
+export interface AppScreenshot {
+  id: string;
+  fileName?: string;
+  assetDeliveryState?: { state?: string; errors?: Array<{ code?: string; detail?: string }> };
 }
 
 const APP_STORE_CONNECT_API = 'https://api.appstoreconnect.apple.com/v1';
@@ -623,6 +645,300 @@ export class AppStoreConnectAdapter {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * List localizations for an App Store version.
+   */
+  async listAppStoreVersionLocalizations(appStoreVersionId: string): Promise<AppStoreVersionLocalization[]> {
+    const result = await this.apiRequest<{
+      data: Array<{
+        id: string;
+        attributes: {
+          locale: string;
+          description?: string;
+          keywords?: string;
+          promotionalText?: string;
+          marketingUrl?: string;
+          supportUrl?: string;
+          whatsNew?: string;
+        };
+      }>;
+    }>(
+      'GET',
+      `/appStoreVersions/${appStoreVersionId}/appStoreVersionLocalizations?limit=200`
+    );
+
+    return result.data.map((item) => ({
+      id: item.id,
+      locale: item.attributes.locale,
+      description: item.attributes.description,
+      keywords: item.attributes.keywords,
+      promotionalText: item.attributes.promotionalText,
+      marketingUrl: item.attributes.marketingUrl,
+      supportUrl: item.attributes.supportUrl,
+      whatsNew: item.attributes.whatsNew,
+    }));
+  }
+
+  /**
+   * Get a localization by locale, creating it if needed.
+   */
+  async getOrCreateAppStoreVersionLocalization(
+    appStoreVersionId: string,
+    locale: string
+  ): Promise<AppStoreVersionLocalization> {
+    const existing = await this.listAppStoreVersionLocalizations(appStoreVersionId);
+    const found = existing.find((l) => l.locale.toLowerCase() === locale.toLowerCase());
+    if (found) return found;
+
+    const created = await this.apiRequest<{
+      data: {
+        id: string;
+        attributes: {
+          locale: string;
+          description?: string;
+          keywords?: string;
+          promotionalText?: string;
+          marketingUrl?: string;
+          supportUrl?: string;
+          whatsNew?: string;
+        };
+      };
+    }>('POST', '/appStoreVersionLocalizations', {
+      data: {
+        type: 'appStoreVersionLocalizations',
+        attributes: { locale },
+        relationships: {
+          appStoreVersion: {
+            data: {
+              type: 'appStoreVersions',
+              id: appStoreVersionId,
+            },
+          },
+        },
+      },
+    });
+
+    return {
+      id: created.data.id,
+      locale: created.data.attributes.locale,
+      description: created.data.attributes.description,
+      keywords: created.data.attributes.keywords,
+      promotionalText: created.data.attributes.promotionalText,
+      marketingUrl: created.data.attributes.marketingUrl,
+      supportUrl: created.data.attributes.supportUrl,
+      whatsNew: created.data.attributes.whatsNew,
+    };
+  }
+
+  /**
+   * Update version localization metadata.
+   */
+  async updateAppStoreVersionLocalization(
+    localizationId: string,
+    fields: {
+      description?: string;
+      keywords?: string;
+      promotionalText?: string;
+      marketingUrl?: string;
+      supportUrl?: string;
+      whatsNew?: string;
+    }
+  ): Promise<void> {
+    const attributes = Object.fromEntries(
+      Object.entries(fields).filter(([, value]) => value !== undefined)
+    );
+
+    if (Object.keys(attributes).length === 0) return;
+
+    await this.apiRequest('PATCH', `/appStoreVersionLocalizations/${localizationId}`, {
+      data: {
+        type: 'appStoreVersionLocalizations',
+        id: localizationId,
+        attributes,
+      },
+    });
+  }
+
+  /**
+   * List screenshot sets for a localization.
+   */
+  async listAppScreenshotSets(localizationId: string): Promise<AppScreenshotSet[]> {
+    const result = await this.apiRequest<{
+      data: Array<{
+        id: string;
+        attributes: { screenshotDisplayType: string };
+      }>;
+    }>(
+      'GET',
+      `/appStoreVersionLocalizations/${localizationId}/appScreenshotSets?limit=200`
+    );
+
+    return result.data.map((set) => ({
+      id: set.id,
+      screenshotDisplayType: set.attributes.screenshotDisplayType,
+    }));
+  }
+
+  /**
+   * Get or create screenshot set for a display type.
+   */
+  async getOrCreateAppScreenshotSet(
+    localizationId: string,
+    screenshotDisplayType: string
+  ): Promise<AppScreenshotSet> {
+    const sets = await this.listAppScreenshotSets(localizationId);
+    const found = sets.find((s) => s.screenshotDisplayType === screenshotDisplayType);
+    if (found) return found;
+
+    const created = await this.apiRequest<{
+      data: {
+        id: string;
+        attributes: { screenshotDisplayType: string };
+      };
+    }>('POST', '/appScreenshotSets', {
+      data: {
+        type: 'appScreenshotSets',
+        attributes: { screenshotDisplayType },
+        relationships: {
+          appStoreVersionLocalization: {
+            data: {
+              type: 'appStoreVersionLocalizations',
+              id: localizationId,
+            },
+          },
+        },
+      },
+    });
+
+    return {
+      id: created.data.id,
+      screenshotDisplayType: created.data.attributes.screenshotDisplayType,
+    };
+  }
+
+  /**
+   * List screenshots in a screenshot set.
+   */
+  async listAppScreenshots(appScreenshotSetId: string): Promise<AppScreenshot[]> {
+    const result = await this.apiRequest<{
+      data: Array<{
+        id: string;
+        attributes: {
+          fileName?: string;
+          assetDeliveryState?: { state?: string; errors?: Array<{ code?: string; detail?: string }> };
+        };
+      }>;
+    }>('GET', `/appScreenshotSets/${appScreenshotSetId}/appScreenshots?limit=200`);
+
+    return result.data.map((s) => ({
+      id: s.id,
+      fileName: s.attributes.fileName,
+      assetDeliveryState: s.attributes.assetDeliveryState,
+    }));
+  }
+
+  /**
+   * Delete a screenshot from a screenshot set.
+   */
+  async deleteAppScreenshot(appScreenshotId: string): Promise<void> {
+    await this.apiRequest('DELETE', `/appScreenshots/${appScreenshotId}`);
+  }
+
+  /**
+   * Upload a screenshot file to a screenshot set.
+   */
+  async uploadAppScreenshot(
+    appScreenshotSetId: string,
+    filePath: string,
+    fileName: string
+  ): Promise<{ screenshotId: string }> {
+    const file = await readFile(filePath);
+    const fileSize = file.length;
+
+    const reservation = await this.apiRequest<{
+      data: {
+        id: string;
+        attributes?: {
+          uploadOperations?: Array<{
+            method?: string;
+            url: string;
+            offset?: number;
+            length?: number;
+            requestHeaders?: Array<{ name: string; value: string }>;
+          }>;
+        };
+      };
+    }>('POST', '/appScreenshots', {
+      data: {
+        type: 'appScreenshots',
+        attributes: {
+          fileName,
+          fileSize,
+        },
+        relationships: {
+          appScreenshotSet: {
+            data: {
+              type: 'appScreenshotSets',
+              id: appScreenshotSetId,
+            },
+          },
+        },
+      },
+    });
+
+    const screenshotId = reservation.data.id;
+    const uploadOperations = reservation.data.attributes?.uploadOperations ?? [];
+    if (uploadOperations.length === 0) {
+      throw new Error('No upload operations returned by App Store Connect');
+    }
+
+    for (const op of uploadOperations) {
+      const offset = op.offset ?? 0;
+      const length = op.length ?? file.length;
+      const chunk = file.subarray(offset, offset + length);
+      const headers: Record<string, string> = {};
+      for (const h of op.requestHeaders ?? []) {
+        headers[h.name] = h.value;
+      }
+      const method = (op.method ?? 'PUT').toUpperCase();
+      const response = await fetch(op.url, {
+        method,
+        headers,
+        body: chunk,
+      });
+      if (!response.ok) {
+        throw new Error(`Screenshot upload failed (${response.status})`);
+      }
+    }
+
+    // Commit upload. Include checksum first; retry without checksum for ASC compatibility edge cases.
+    const checksum = createHash('md5').update(file).digest('hex');
+    try {
+      await this.apiRequest('PATCH', `/appScreenshots/${screenshotId}`, {
+        data: {
+          type: 'appScreenshots',
+          id: screenshotId,
+          attributes: {
+            uploaded: true,
+            sourceFileChecksum: checksum,
+          },
+        },
+      });
+    } catch {
+      await this.apiRequest('PATCH', `/appScreenshots/${screenshotId}`, {
+        data: {
+          type: 'appScreenshots',
+          id: screenshotId,
+          attributes: {
+            uploaded: true,
+          },
+        },
+      });
+    }
+
+    return { screenshotId };
   }
 
   // ---------------------------------------------------------------------------
