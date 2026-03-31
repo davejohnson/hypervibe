@@ -16,7 +16,7 @@ const secretMappingRepo = new SecretMappingRepository();
 const connectionRepo = new ConnectionRepository();
 const integrationRepo = new IntegrationRepository();
 
-const INTENT_SCHEMA_VERSION = '1';
+const INTENT_SCHEMA_VERSION = '2';
 
 interface IntentEnvironmentSummary {
   name: string;
@@ -48,6 +48,49 @@ interface ProjectIntentSchema {
     gitRemoteUrl?: string;
   };
   desiredState: Record<string, unknown> | null;
+  desired: {
+    state: Record<string, unknown> | null;
+    environmentName?: string;
+    serviceName?: string;
+    domain?: string;
+    databaseProvider?: string;
+    setupEmail?: boolean;
+  };
+  observed: {
+    overview: {
+      environments: number;
+      services: number;
+      components: number;
+      secretMappings: number;
+    };
+    hosting: {
+      platform: string;
+      environments: IntentEnvironmentSummary[];
+    };
+    integrations: {
+      connections: Array<{
+        provider: string;
+        status: string;
+        scope: string | null;
+      }>;
+      storedKeys: Array<{
+        provider: string;
+        mode: string;
+        updatedAt: string;
+      }>;
+      secretMappings: Array<{
+        envVar: string;
+        provider: string;
+        service: string | 'all';
+        environments: string[] | 'all';
+      }>;
+    };
+  };
+  drift: Array<{
+    check: string;
+    status: 'ok' | 'warning';
+    message: string;
+  }>;
   overview: {
     environments: number;
     services: number;
@@ -76,6 +119,59 @@ interface ProjectIntentSchema {
       environments: string[] | 'all';
     }>;
   };
+}
+
+function hasVerifiedConnection(
+  connections: Array<{ provider: string; status: string; scope: string | null }>,
+  provider: string
+): boolean {
+  return connections.some((c) => c.provider === provider && c.status === 'verified');
+}
+
+export function buildDriftSignals(
+  desiredState: Record<string, unknown> | null,
+  connections: Array<{ provider: string; status: string; scope: string | null }>
+): Array<{ check: string; status: 'ok' | 'warning'; message: string }> {
+  const drift: Array<{ check: string; status: 'ok' | 'warning'; message: string }> = [];
+  if (!desiredState) return drift;
+
+  const desiredDbProvider = typeof desiredState.databaseProvider === 'string' ? desiredState.databaseProvider : undefined;
+  if (desiredDbProvider) {
+    const ok = hasVerifiedConnection(connections, desiredDbProvider);
+    drift.push({
+      check: 'databaseProvider.connection',
+      status: ok ? 'ok' : 'warning',
+      message: ok
+        ? `Desired database provider "${desiredDbProvider}" has a verified connection`
+        : `Desired database provider "${desiredDbProvider}" is missing a verified connection`,
+    });
+  }
+
+  const desiredDomain = typeof desiredState.domain === 'string' ? desiredState.domain : undefined;
+  if (desiredDomain) {
+    const ok = hasVerifiedConnection(connections, 'cloudflare');
+    drift.push({
+      check: 'domain.dnsConnection',
+      status: ok ? 'ok' : 'warning',
+      message: ok
+        ? `Desired domain "${desiredDomain}" has a verified Cloudflare connection`
+        : `Desired domain "${desiredDomain}" is set but no verified Cloudflare connection was found`,
+    });
+  }
+
+  const setupEmail = desiredState.setupEmail;
+  if (setupEmail === true) {
+    const ok = hasVerifiedConnection(connections, 'sendgrid');
+    drift.push({
+      check: 'email.connection',
+      status: ok ? 'ok' : 'warning',
+      message: ok
+        ? 'Desired email setup has a verified SendGrid connection'
+        : 'Desired email setup is enabled but no verified SendGrid connection was found',
+    });
+  }
+
+  return drift;
 }
 
 function classifyEnvironment(name: string): 'local' | 'staging' | 'production' | 'custom' {
@@ -163,6 +259,32 @@ function buildIntent(project: Project): ProjectIntentSchema {
 
   const componentCount = environmentSummaries.reduce((sum, env) => sum + env.components.length, 0);
   const desiredState = (project.policies?.desiredState as Record<string, unknown> | undefined) ?? null;
+  const drift = buildDriftSignals(desiredState, connectionSummaries);
+  const desired = {
+    state: desiredState,
+    environmentName: typeof desiredState?.environmentName === 'string' ? desiredState.environmentName : undefined,
+    serviceName: typeof desiredState?.serviceName === 'string' ? desiredState.serviceName : undefined,
+    domain: typeof desiredState?.domain === 'string' ? desiredState.domain : undefined,
+    databaseProvider: typeof desiredState?.databaseProvider === 'string' ? desiredState.databaseProvider : undefined,
+    setupEmail: typeof desiredState?.setupEmail === 'boolean' ? desiredState.setupEmail : undefined,
+  };
+  const observed = {
+    overview: {
+      environments: environmentSummaries.length,
+      services: services.length,
+      components: componentCount,
+      secretMappings: mappings.length,
+    },
+    hosting: {
+      platform: project.defaultPlatform,
+      environments: environmentSummaries,
+    },
+    integrations: {
+      connections: connectionSummaries,
+      storedKeys: integrationSummaries,
+      secretMappings: secretMappingSummaries,
+    },
+  };
 
   return {
     schemaVersion: INTENT_SCHEMA_VERSION,
@@ -175,6 +297,9 @@ function buildIntent(project: Project): ProjectIntentSchema {
       gitRemoteUrl: project.gitRemoteUrl,
     },
     desiredState,
+    desired,
+    observed,
+    drift,
     overview: {
       environments: environmentSummaries.length,
       services: services.length,
