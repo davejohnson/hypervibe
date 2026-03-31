@@ -12,6 +12,7 @@ import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { createProjectSchema } from '../schemas/project.schema.js';
 import type { RailwayCredentials } from '../domain/entities/connection.entity.js';
 import type { ComponentType } from '../domain/entities/component.entity.js';
+import { getProjectIntent, syncProjectIntent } from '../domain/services/intent.service.js';
 import { resolveProject, detectGitRemoteUrl } from './resolve-project.js';
 
 const projectRepo = new ProjectRepository();
@@ -64,6 +65,7 @@ export function registerProjectTools(server: McpServer): void {
         resourceId: project.id,
         details: { name: project.name },
       });
+      const intent = syncProjectIntent(project.id);
 
       return {
         content: [
@@ -73,6 +75,7 @@ export function registerProjectTools(server: McpServer): void {
               success: true,
               message: `Project "${name}" created successfully`,
               project,
+              intent,
             }),
           },
         ],
@@ -133,9 +136,43 @@ export function registerProjectTools(server: McpServer): void {
             text: JSON.stringify({
               success: true,
               project,
+              intent: getProjectIntent(project.id),
             }),
           },
         ],
+      };
+    }
+  );
+
+  server.tool(
+    'project_intent_get',
+    'Get intent overview (hosting + integrations) derived from current project data.',
+    {
+      projectId: z.string().uuid().optional().describe('Project ID'),
+      projectName: z.string().optional().describe('Project name'),
+      refresh: z.boolean().optional().describe('Regenerate intent before returning (default: true)'),
+    },
+    async ({ projectId, projectName, refresh = true }) => {
+      const project = resolveProject({ projectId, projectName });
+      if (!project) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'Project not found' }),
+          }],
+        };
+      }
+
+      const intent = getProjectIntent(project.id, refresh);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            project: { id: project.id, name: project.name },
+            intent,
+          }),
+        }],
       };
     }
   );
@@ -208,6 +245,7 @@ export function registerProjectTools(server: McpServer): void {
       }
 
       const updated = projectRepo.update(project.id, { policies: nextPolicies });
+      const intent = syncProjectIntent(project.id);
       auditRepo.create({
         action: 'project.policies_updated',
         resourceType: 'project',
@@ -227,6 +265,7 @@ export function registerProjectTools(server: McpServer): void {
             success: true,
             project: { id: updated?.id ?? project.id, name: updated?.name ?? project.name },
             policies: updated?.policies ?? nextPolicies,
+            intent,
           }),
         }],
       };
@@ -659,6 +698,7 @@ async function performImport(
           environments: createdEnvironments,
           services: createdServices,
           components: createdComponents,
+          intent: syncProjectIntent(project.id),
         }),
       },
     ],

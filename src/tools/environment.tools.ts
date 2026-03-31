@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
+import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { resolveProject } from './resolve-project.js';
 
 const envRepo = new EnvironmentRepository();
@@ -72,6 +73,7 @@ export function registerEnvironmentTools(server: McpServer): void {
               success: true,
               message: `Environment "${name}" created for project "${project.name}"`,
               environment,
+              intent: syncProjectIntent(project.id),
             }),
           },
         ],
@@ -243,6 +245,7 @@ export function registerEnvironmentTools(server: McpServer): void {
             text: JSON.stringify({
               success: true,
               message: `Environment "${environment.name}" deleted successfully`,
+              intent: syncProjectIntent(environment.projectId),
             }),
           },
         ],

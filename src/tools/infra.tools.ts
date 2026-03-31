@@ -11,6 +11,7 @@ import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import { DeployOrchestrator } from '../domain/services/deploy.orchestrator.js';
 import { CloudflareAdapter, type CloudflareCredentials } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { SendGridAdapter, type SendGridCredentials } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
+import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { resolveProject } from './resolve-project.js';
 
 const projectRepo = new ProjectRepository();
@@ -282,6 +283,7 @@ async function executeBootstrap(params: {
     }
   }
 
+  summary.intent = syncProjectIntent(project.id);
   return { success: deploy.success, summary };
 }
 
@@ -491,6 +493,7 @@ export function registerInfraTools(server: McpServer): void {
       };
       const nextPolicies = { ...(project.policies ?? {}), desiredState };
       const updated = projectRepo.update(project.id, { policies: nextPolicies });
+      const intent = syncProjectIntent(project.id);
 
       return {
         content: [{
@@ -499,6 +502,7 @@ export function registerInfraTools(server: McpServer): void {
             success: true,
             project: updated?.name ?? project.name,
             desiredState,
+            intent,
           }),
         }],
       };

@@ -11,6 +11,7 @@ import { parseEnvFile, maskSecretValue } from '../utils/env-parser.js';
 import type { RailwayCredentials } from '../domain/entities/connection.entity.js';
 import type { IntegrationKeyMode, StoredKeys } from '../domain/entities/integration.entity.js';
 import type { StripeCredentials } from '../adapters/providers/stripe/stripe.adapter.js';
+import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { resolveProject } from './resolve-project.js';
 
 const envRepo = new EnvironmentRepository();
@@ -375,6 +376,7 @@ export function registerIntegrationTools(server: McpServer): void {
             },
             results,
             storedKeys: storedKeysInfo,
+            intent: syncProjectIntent(project.id),
           }),
         }],
       };

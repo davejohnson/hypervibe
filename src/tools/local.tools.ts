@@ -7,6 +7,7 @@ import { ComponentRepository } from '../adapters/db/repositories/component.repos
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
 import { ComposeGenerator } from '../adapters/providers/local/compose.generator.js';
 import type { ComponentType } from '../domain/entities/component.entity.js';
+import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { resolveProject } from './resolve-project.js';
 
 const envRepo = new EnvironmentRepository();
@@ -121,6 +122,7 @@ export function registerLocalTools(server: McpServer): void {
                 env: envFilePath,
               },
               components: componentTypes,
+              intent: syncProjectIntent(project.id),
               instructions: [
                 'To start local services:',
                 '  docker compose up -d',
@@ -206,6 +208,7 @@ export function registerLocalTools(server: McpServer): void {
               success: true,
               message: `Component "${type}" added to environment "${envName}"`,
               component,
+              intent: syncProjectIntent(project.id),
             }),
           },
         ],

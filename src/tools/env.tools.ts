@@ -8,6 +8,7 @@ import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js
 import { ComposeGenerator } from '../adapters/providers/local/compose.generator.js';
 import { integrationRegistry } from '../domain/registry/integration.registry.js';
 import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
+import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { resolveProject } from './resolve-project.js';
 
 const envRepo = new EnvironmentRepository();
@@ -134,6 +135,7 @@ export function registerEnvTools(server: McpServer): void {
       }
 
       const successCount = results.filter((r) => r.success).length;
+      const intent = syncProjectIntent(project.id);
 
       return {
         content: [{
@@ -143,6 +145,7 @@ export function registerEnvTools(server: McpServer): void {
             message: `Set ${Object.keys(vars).length} variable(s) in ${successCount}/${results.length} environment(s)`,
             variables: Object.keys(vars),
             results,
+            intent,
           }),
         }],
       };

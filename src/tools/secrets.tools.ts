@@ -10,6 +10,7 @@ import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { SecretResolver } from '../domain/services/secret.resolver.js';
 import { SecretRotator } from '../domain/services/secret.rotator.js';
+import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { parseSecretRef, type SecretManagerProvider } from '../domain/ports/secretmanager.port.js';
 import { resolveProject } from './resolve-project.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
@@ -343,6 +344,7 @@ export function registerSecretsTools(server: McpServer): void {
                 environments: mapping.environments,
                 serviceName: mapping.serviceName,
               },
+              intent: syncProjectIntent(project.id),
             }),
           }],
         };
@@ -447,6 +449,7 @@ export function registerSecretsTools(server: McpServer): void {
           text: JSON.stringify({
             success: deleted,
             message: deleted ? 'Mapping deleted' : 'Mapping not found',
+            intent: syncProjectIntent(project.id),
           }),
         }],
       };

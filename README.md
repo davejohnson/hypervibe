@@ -132,6 +132,7 @@ Secret references use the format: `provider://path[#key][@version]`
 - `project_create` - Create new projects
 - `project_list` - List all projects
 - `project_import` - Import existing Railway projects
+- `project_intent_get` - View current hosting + integration intent overview
 
 ### Deployment
 - `deploy` - Deploy to an environment
