@@ -43,6 +43,13 @@ interface VercelDeployment {
   createdAt: number;
 }
 
+interface VercelDeploymentEvent {
+  created?: number;
+  text?: string;
+  type?: string;
+  level?: string;
+}
+
 interface VercelEnvVar {
   id?: string;
   key: string;
@@ -523,6 +530,31 @@ export class VercelAdapter implements IProviderAdapter {
       .replace(/-+/g, '-')
       .replace(/^-|-$/g, '')
       .substring(0, 100);
+  }
+
+  async listDeployments(projectId: string, limit = 10): Promise<VercelDeployment[]> {
+    const response = await this.request<{ deployments?: VercelDeployment[] }>(
+      'GET',
+      `/v6/deployments?projectId=${encodeURIComponent(projectId)}&limit=${limit}`
+    );
+    return response.deployments ?? [];
+  }
+
+  async getDeploymentEvents(
+    deploymentId: string,
+    limit = 100
+  ): Promise<Array<{ timestamp: string; severity: string; message: string }>> {
+    const response = await this.request<{ events?: VercelDeploymentEvent[] } | VercelDeploymentEvent[]>(
+      'GET',
+      `/v2/deployments/${deploymentId}/events?limit=${limit}`
+    );
+    const events = Array.isArray(response) ? response : (response.events ?? []);
+
+    return events.map((event) => ({
+      timestamp: new Date(event.created ?? Date.now()).toISOString(),
+      severity: event.level ?? event.type ?? 'info',
+      message: event.text ?? '',
+    }));
   }
 }
 

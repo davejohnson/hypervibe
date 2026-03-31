@@ -64,6 +64,12 @@ interface RenderDeploy {
   finishedAt?: string;
 }
 
+interface RenderLogEntry {
+  timestamp?: string;
+  message?: string;
+  level?: string;
+}
+
 export class RenderAdapter implements IProviderAdapter {
   readonly name = 'render';
 
@@ -487,6 +493,29 @@ export class RenderAdapter implements IProviderAdapter {
     } catch {
       return null;
     }
+  }
+
+  async getServiceLogs(
+    serviceId: string,
+    limit = 100
+  ): Promise<Array<{ timestamp: string; severity: string; message: string }>> {
+    const params = new URLSearchParams({
+      resource: 'service',
+      resourceId: serviceId,
+      limit: String(limit),
+    });
+
+    const response = await this.request<{ logs?: RenderLogEntry[] } | RenderLogEntry[]>(
+      'GET',
+      `/logs?${params.toString()}`
+    );
+
+    const rawLogs = Array.isArray(response) ? response : (response.logs ?? []);
+    return rawLogs.map((entry) => ({
+      timestamp: entry.timestamp ?? new Date().toISOString(),
+      severity: entry.level ?? 'info',
+      message: entry.message ?? '',
+    }));
   }
 }
 

@@ -8,11 +8,142 @@ import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js
 import { StripeAdapter } from '../adapters/providers/stripe/stripe.adapter.js';
 import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
 import type { StripeCredentials, StripeMode } from '../adapters/providers/stripe/stripe.adapter.js';
+import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { resolveProject, resolveProjectOrError } from './resolve-project.js';
 
 const connectionRepo = new ConnectionRepository();
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
+
+type UnifiedLog = {
+  timestamp: string;
+  severity: string;
+  message: string;
+};
+
+export function detectProviderName(projectDefaultPlatform: string | undefined, bindingsProvider: string | undefined): string {
+  return (bindingsProvider || projectDefaultPlatform || 'railway').toLowerCase();
+}
+
+export function isErrorLike(log: UnifiedLog): boolean {
+  const message = log.message.toLowerCase();
+  const severity = (log.severity || '').toLowerCase();
+  return (
+    severity === 'error' ||
+    severity === 'warn' ||
+    message.includes('error') ||
+    message.includes('exception') ||
+    message.includes('failed') ||
+    message.includes('crash') ||
+    message.includes('fatal')
+  );
+}
+
+async function fetchProviderLogs(
+  provider: string,
+  environment: {
+    platformBindings: unknown;
+    name: string;
+  },
+  serviceName: string,
+  lines: number
+): Promise<{ deploymentStatus?: string; deploymentId?: string; logs: UnifiedLog[] }> {
+  const bindings = environment.platformBindings as {
+    projectId?: string;
+    railwayProjectId?: string;
+    railwayEnvironmentId?: string;
+    services?: Record<string, { serviceId: string }>;
+  };
+
+  if (provider === 'railway') {
+    if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId || !bindings.services?.[serviceName]) {
+      throw new Error('Environment/service not fully bound to Railway');
+    }
+    const connection = connectionRepo.findByProvider('railway');
+    if (!connection) {
+      throw new Error('No Railway connection found');
+    }
+
+    const secretStore = getSecretStore();
+    const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
+    const adapter = new RailwayAdapter();
+    await adapter.connect(credentials);
+
+    const deployments = await adapter.getDeployments(
+      bindings.railwayProjectId,
+      bindings.railwayEnvironmentId,
+      bindings.services[serviceName].serviceId,
+      1
+    );
+    if (deployments.length === 0) {
+      return { logs: [] };
+    }
+
+    const latestDeployment = deployments[0];
+    const logs = await adapter.getDeploymentLogs(latestDeployment.id, lines);
+    return {
+      deploymentStatus: latestDeployment.status,
+      deploymentId: latestDeployment.id,
+      logs: logs.map((l) => ({
+        timestamp: l.timestamp,
+        severity: l.severity || 'info',
+        message: l.message,
+      })),
+    };
+  }
+
+  if (provider === 'render') {
+    const serviceId = bindings.services?.[serviceName]?.serviceId;
+    if (!serviceId) {
+      throw new Error(`Service ${serviceName} is not bound to Render`);
+    }
+
+    const result = await adapterFactory.getProviderAdapter('render');
+    if (!result.success || !result.adapter) {
+      throw new Error(result.error || 'Failed to create Render adapter');
+    }
+    const adapter = result.adapter as unknown as {
+      getServiceLogs: (serviceId: string, limit?: number) => Promise<UnifiedLog[]>;
+    };
+    if (typeof adapter.getServiceLogs !== 'function') {
+      throw new Error('Render logs are not supported by this adapter version');
+    }
+    const logs = await adapter.getServiceLogs(serviceId, lines);
+    return { deploymentStatus: 'unknown', logs };
+  }
+
+  if (provider === 'vercel') {
+    const projectId = bindings.projectId;
+    if (!projectId) {
+      throw new Error('Environment is not bound to Vercel projectId');
+    }
+
+    const result = await adapterFactory.getProviderAdapter('vercel');
+    if (!result.success || !result.adapter) {
+      throw new Error(result.error || 'Failed to create Vercel adapter');
+    }
+    const adapter = result.adapter as unknown as {
+      listDeployments: (projectId: string, limit?: number) => Promise<Array<{ id: string; readyState?: string }>>;
+      getDeploymentEvents: (deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
+    };
+    if (typeof adapter.listDeployments !== 'function' || typeof adapter.getDeploymentEvents !== 'function') {
+      throw new Error('Vercel logs are not supported by this adapter version');
+    }
+    const deployments = await adapter.listDeployments(projectId, 1);
+    if (deployments.length === 0) {
+      return { logs: [] };
+    }
+    const latestDeployment = deployments[0];
+    const logs = await adapter.getDeploymentEvents(latestDeployment.id, lines);
+    return {
+      deploymentStatus: latestDeployment.readyState ?? 'unknown',
+      deploymentId: latestDeployment.id,
+      logs,
+    };
+  }
+
+  throw new Error(`Logs are not yet supported for provider: ${provider}`);
+}
 
 export function registerLogsTools(server: McpServer): void {
   // Simple error fetching - minimal parameters needed
@@ -56,34 +187,19 @@ export function registerLogsTools(server: McpServer): void {
       }
 
       const bindings = env.platformBindings as {
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
+        provider?: string;
         services?: Record<string, { serviceId: string }>;
       };
+      const provider = detectProviderName(project.defaultPlatform, bindings.provider);
 
-      if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId || !bindings.services) {
+      if (!bindings.services || Object.keys(bindings.services).length === 0) {
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
+            text: JSON.stringify({ success: false, error: 'No bound services found in environment' }),
           }],
         };
       }
-
-      const connection = connectionRepo.findByProvider('railway');
-      if (!connection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No Railway connection found' }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
 
       try {
         const allErrors: Array<{
@@ -94,27 +210,9 @@ export function registerLogsTools(server: McpServer): void {
         }> = [];
 
         // Fetch logs from all services
-        for (const [serviceName, serviceBinding] of Object.entries(bindings.services)) {
-          const deployments = await adapter.getDeployments(
-            bindings.railwayProjectId,
-            bindings.railwayEnvironmentId,
-            serviceBinding.serviceId,
-            1
-          );
-
-          if (deployments.length === 0) continue;
-
-          const logs = await adapter.getDeploymentLogs(deployments[0].id, 500);
-
-          // Filter to errors
-          const errors = logs.filter((l) =>
-            l.severity === 'error' ||
-            l.message.toLowerCase().includes('error') ||
-            l.message.toLowerCase().includes('exception') ||
-            l.message.toLowerCase().includes('failed') ||
-            l.message.toLowerCase().includes('crash') ||
-            l.message.toLowerCase().includes('fatal')
-          );
+        for (const serviceName of Object.keys(bindings.services)) {
+          const { logs } = await fetchProviderLogs(provider, env, serviceName, 500);
+          const errors = logs.filter(isErrorLike);
 
           for (const error of errors) {
             allErrors.push({
@@ -137,6 +235,7 @@ export function registerLogsTools(server: McpServer): void {
               success: true,
               project: project.name,
               environment: env.name,
+              provider,
               errorCount: recentErrors.length,
               totalFound: allErrors.length,
               errors: recentErrors,
@@ -187,10 +286,25 @@ export function registerLogsTools(server: McpServer): void {
       }
 
       const bindings = environment.platformBindings as {
+        provider?: string;
         railwayProjectId?: string;
         railwayEnvironmentId?: string;
         services?: Record<string, { serviceId: string }>;
       };
+      const provider = detectProviderName(project.defaultPlatform, bindings.provider);
+
+      if (provider !== 'railway') {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `logs_deployments currently supports Railway only. Use logs_service for ${provider}.`,
+              provider,
+            }),
+          }],
+        };
+      }
 
       if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
         return {
@@ -293,19 +407,10 @@ export function registerLogsTools(server: McpServer): void {
       }
 
       const bindings = environment.platformBindings as {
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
+        provider?: string;
         services?: Record<string, { serviceId: string }>;
       };
-
-      if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
-          }],
-        };
-      }
+      const provider = detectProviderName(project.defaultPlatform, bindings.provider);
 
       if (!bindings.services?.[serviceName]) {
         return {
@@ -316,51 +421,13 @@ export function registerLogsTools(server: McpServer): void {
         };
       }
 
-      const connection = connectionRepo.findByProvider('railway');
-      if (!connection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No Railway connection found' }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
-
       try {
-        // Get the latest deployment
-        const deployments = await adapter.getDeployments(
-          bindings.railwayProjectId,
-          bindings.railwayEnvironmentId,
-          bindings.services[serviceName].serviceId,
-          1
-        );
-
-        if (deployments.length === 0) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({ success: false, error: 'No deployments found for service' }),
-            }],
-          };
-        }
-
-        const latestDeployment = deployments[0];
-        let logs = await adapter.getDeploymentLogs(latestDeployment.id, lines);
+        const { deploymentId, deploymentStatus, logs: allLogs } = await fetchProviderLogs(provider, environment, serviceName, lines);
+        let logs = allLogs;
 
         // Filter to errors only if requested
         if (errorsOnly) {
-          logs = logs.filter((l) =>
-            l.severity === 'error' ||
-            l.severity === 'warn' ||
-            l.message.toLowerCase().includes('error') ||
-            l.message.toLowerCase().includes('exception') ||
-            l.message.toLowerCase().includes('failed')
-          );
+          logs = logs.filter(isErrorLike);
         }
 
         return {
@@ -370,9 +437,10 @@ export function registerLogsTools(server: McpServer): void {
               success: true,
               project: projectName,
               environment: environmentName,
+              provider,
               service: serviceName,
-              deploymentId: latestDeployment.id,
-              deploymentStatus: latestDeployment.status,
+              deploymentId: deploymentId ?? null,
+              deploymentStatus: deploymentStatus ?? 'unknown',
               logCount: logs.length,
               logs: logs.map((l) => ({
                 timestamp: l.timestamp,
@@ -427,10 +495,25 @@ export function registerLogsTools(server: McpServer): void {
       }
 
       const bindings = environment.platformBindings as {
+        provider?: string;
         railwayProjectId?: string;
         railwayEnvironmentId?: string;
         services?: Record<string, { serviceId: string }>;
       };
+      const provider = detectProviderName(project.defaultPlatform, bindings.provider);
+
+      if (provider !== 'railway') {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `logs_build currently supports Railway only (provider: ${provider}).`,
+              provider,
+            }),
+          }],
+        };
+      }
 
       if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
         return {
@@ -546,34 +629,19 @@ export function registerLogsTools(server: McpServer): void {
       }
 
       const bindings = environment.platformBindings as {
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
+        provider?: string;
         services?: Record<string, { serviceId: string }>;
       };
+      const provider = detectProviderName(project.defaultPlatform, bindings.provider);
 
-      if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId || !bindings.services) {
+      if (!bindings.services || Object.keys(bindings.services).length === 0) {
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
+            text: JSON.stringify({ success: false, error: 'No bound services found in environment' }),
           }],
         };
       }
-
-      const connection = connectionRepo.findByProvider('railway');
-      if (!connection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No Railway connection found' }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
 
       try {
         const serviceErrors: Array<{
@@ -583,30 +651,13 @@ export function registerLogsTools(server: McpServer): void {
           recentErrors: Array<{ timestamp: string; message: string }>;
         }> = [];
 
-        for (const [serviceName, serviceBinding] of Object.entries(bindings.services)) {
-          const deployments = await adapter.getDeployments(
-            bindings.railwayProjectId,
-            bindings.railwayEnvironmentId,
-            serviceBinding.serviceId,
-            1
-          );
-
-          if (deployments.length === 0) continue;
-
-          const deployment = deployments[0];
-          const logs = await adapter.getDeploymentLogs(deployment.id, 200);
-
-          const errors = logs.filter((l) =>
-            l.severity === 'error' ||
-            l.message.toLowerCase().includes('error') ||
-            l.message.toLowerCase().includes('exception') ||
-            l.message.toLowerCase().includes('failed') ||
-            l.message.toLowerCase().includes('crash')
-          );
+        for (const serviceName of Object.keys(bindings.services)) {
+          const { deploymentStatus, logs } = await fetchProviderLogs(provider, environment, serviceName, 200);
+          const errors = logs.filter(isErrorLike);
 
           serviceErrors.push({
             service: serviceName,
-            deploymentStatus: deployment.status,
+            deploymentStatus: deploymentStatus ?? 'unknown',
             errorCount: errors.length,
             recentErrors: errors.slice(0, 5).map((e) => ({
               timestamp: e.timestamp,
@@ -627,6 +678,7 @@ export function registerLogsTools(server: McpServer): void {
               success: true,
               project: projectName,
               environment: environmentName,
+              provider,
               summary: {
                 totalServices: serviceErrors.length,
                 totalErrors,
