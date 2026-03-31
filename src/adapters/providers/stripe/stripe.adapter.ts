@@ -45,6 +45,13 @@ export interface SyncResult {
   };
 }
 
+export interface StripeCustomer {
+  id: string;
+  name: string | null;
+  email: string | null;
+  created: number;
+}
+
 export interface StripeWebhookEndpoint {
   id: string;
   url: string;
@@ -396,6 +403,58 @@ export class StripeAdapter {
     }
 
     return result;
+  }
+
+  // Customer Management
+
+  async listCustomers(mode: StripeMode, limit = 100): Promise<StripeCustomer[]> {
+    const customers: StripeCustomer[] = [];
+    let hasMore = true;
+    let startingAfter: string | undefined;
+
+    while (hasMore && customers.length < limit) {
+      const endpoint = startingAfter
+        ? `/customers?limit=100&starting_after=${startingAfter}`
+        : '/customers?limit=100';
+
+      const response = await this.request<{ data: StripeCustomer[]; has_more: boolean }>(mode, 'GET', endpoint);
+      customers.push(...response.data);
+      hasMore = response.has_more;
+
+      if (response.data.length > 0) {
+        startingAfter = response.data[response.data.length - 1].id;
+      }
+    }
+
+    return customers;
+  }
+
+  async deleteCustomer(mode: StripeMode, customerId: string): Promise<{ id: string; deleted: boolean }> {
+    return this.request<{ id: string; deleted: boolean }>(mode, 'DELETE', `/customers/${customerId}`);
+  }
+
+  async clearCustomers(mode: StripeMode): Promise<{ deleted: number; errors: Array<{ id: string; error: string }> }> {
+    if (mode === 'live') {
+      throw new Error('Refusing to clear customers in live mode. This operation is only allowed in sandbox.');
+    }
+
+    const customers = await this.listCustomers(mode, 10000);
+    const errors: Array<{ id: string; error: string }> = [];
+    let deleted = 0;
+
+    for (const customer of customers) {
+      try {
+        await this.deleteCustomer(mode, customer.id);
+        deleted++;
+      } catch (error) {
+        errors.push({
+          id: customer.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return { deleted, errors };
   }
 
   // Webhook Management

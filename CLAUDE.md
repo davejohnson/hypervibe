@@ -126,3 +126,15 @@ Environments store Railway bindings in `platformBindings`:
 ```
 
 This links local entities to their Railway counterparts.
+
+## Environment Variables: Local Dev Exceptions
+
+Some env vars should **not** be synced from prod/staging to local. Leave them empty (or unset) locally:
+
+| Variable | Why |
+|----------|-----|
+| `RECAPTCHA_SITE_KEY` | reCAPTCHA blocks localhost; skip verification locally |
+| `RECAPTCHA_SECRET_KEY` | Not needed without the site key |
+| `NEXT_PUBLIC_RECAPTCHA_SITE_KEY` | Frontend reCAPTCHA; skip locally |
+
+These use the real encrypted keys in production and staging (synced via `recaptcha_sync`). Locally, the app should detect missing keys and bypass reCAPTCHA validation.

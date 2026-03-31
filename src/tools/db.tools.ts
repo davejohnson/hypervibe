@@ -6,6 +6,7 @@ import { EnvironmentRepository } from '../adapters/db/repositories/environment.r
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../adapters/db/repositories/component.repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
+import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import { DatabaseAdapter } from '../adapters/providers/database/database.adapter.js';
@@ -20,6 +21,7 @@ const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const componentRepo = new ComponentRepository();
 const connectionRepo = new ConnectionRepository();
+const auditRepo = new AuditRepository();
 const { Client } = pg;
 
 // Common migration commands for popular ORMs
@@ -1063,6 +1065,179 @@ export function registerDbTools(server: McpServer): void {
               ? `Rollback complete on ${targetService.name}`
               : `Rollback failed: ${receipt.error || receipt.message}`,
             restoredDatabaseUrl: maskDatabaseUrl(rollbackUrl),
+          }),
+        }],
+      };
+    }
+  );
+
+  server.tool(
+    'db_reset',
+    'Reset a database by dropping all tables. Preview mode shows tables and row counts; confirm=true executes the reset. Terminates active connections first.',
+    {
+      connectionUrl: z.string().optional().describe('Direct postgres:// connection URL'),
+      connectionName: z.string().optional().describe('Named database connection'),
+      projectName: z.string().optional().describe('Resolve database URL from project'),
+      environment: z.string().optional().describe('Environment name (default: local)'),
+      serviceName: z.string().optional().describe('Service name (when resolving from project)'),
+      confirm: z.boolean().optional().describe('Preview first (default), set true to execute reset'),
+    },
+    async ({ connectionUrl, connectionName, projectName, environment = 'local', serviceName, confirm = false }) => {
+      const secretStore = getSecretStore();
+
+      // Resolve the database URL
+      // Priority: direct URL > named connection > project/environment (component bindings first, then Railway)
+      let resolvedUrl: string | null = null;
+      let source: string = '';
+
+      if (connectionUrl) {
+        resolvedUrl = connectionUrl;
+        source = 'direct URL';
+      } else if (connectionName) {
+        const connection = connectionRepo.findBestMatch('database', connectionName);
+        if (!connection) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `No database connection found for: ${connectionName}. Use connection_create provider=database scope="${connectionName}" to create one.`,
+              }),
+            }],
+          };
+        }
+        const creds = secretStore.decryptObject<DatabaseCredentials>(connection.credentialsEncrypted);
+        resolvedUrl = creds.connectionUrl;
+        source = `connection: ${connectionName}`;
+      } else {
+        // Resolve from project/environment — checks component bindings first (local), then Railway
+        const result = resolveProjectOrError({ projectName });
+        if ('error' in result) return result.error;
+        const project = result.project;
+
+        const env = envRepo.findByProjectAndName(project.id, environment);
+        if (!env) {
+          const allEnvs = envRepo.findByProjectId(project.id);
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `Environment not found: ${environment}`,
+                available: allEnvs.map((e) => e.name),
+                hint: 'Run local_bootstrap first to create a local environment, or specify environment="staging"',
+              }),
+            }],
+          };
+        }
+
+        resolvedUrl = await resolveEnvironmentDatabaseUrl(project, env, serviceName);
+        source = `${project.name}/${environment}`;
+      }
+
+      if (!resolvedUrl) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: 'Could not resolve database URL',
+              hint: environment === 'local'
+                ? 'Run local_bootstrap first to set up the local database, or provide connectionUrl directly'
+                : 'Ensure the environment has a database component or Railway bindings',
+            }),
+          }],
+        };
+      }
+
+      // Preview: show tables and row counts
+      const tableEstimates = await getTableEstimates(resolvedUrl);
+      const tableList = Object.entries(tableEstimates)
+        .sort((a, b) => b[1] - a[1])
+        .map(([table, rows]) => ({ table, estimatedRows: rows }));
+
+      if (!confirm) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              mode: 'preview',
+              source,
+              connectionUrl: maskDatabaseUrl(resolvedUrl),
+              tableCount: tableList.length,
+              tables: tableList,
+              message: 'Call again with confirm=true to drop all tables and reset the database.',
+              warning: 'This will permanently delete all data.',
+            }),
+          }],
+        };
+      }
+
+      // Execute reset
+      const parsedUrl = new URL(resolvedUrl);
+      const dbName = parsedUrl.pathname.replace(/^\//, '');
+
+      // Try DROP DATABASE approach first
+      let resetMethod: string;
+      const maintenanceUrl = new URL(resolvedUrl);
+      maintenanceUrl.pathname = '/postgres';
+      const maintenanceClient = new Client({ connectionString: maintenanceUrl.toString(), connectionTimeoutMillis: 10000 });
+
+      try {
+        await maintenanceClient.connect();
+
+        // Terminate other connections
+        await maintenanceClient.query(
+          'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
+          [dbName]
+        );
+
+        await maintenanceClient.query(`DROP DATABASE ${quoteIdentifier(dbName)}`);
+        await maintenanceClient.query(`CREATE DATABASE ${quoteIdentifier(dbName)}`);
+        resetMethod = 'drop_database';
+      } catch {
+        // Fallback: drop schema cascade
+        await maintenanceClient.end().catch(() => {});
+
+        const fallbackClient = new Client({ connectionString: resolvedUrl, connectionTimeoutMillis: 10000 });
+        try {
+          await fallbackClient.connect();
+          await fallbackClient.query('DROP SCHEMA public CASCADE');
+          await fallbackClient.query('CREATE SCHEMA public');
+          resetMethod = 'drop_schema';
+        } finally {
+          await fallbackClient.end().catch(() => {});
+        }
+      } finally {
+        await maintenanceClient.end().catch(() => {});
+      }
+
+      // Verify connectivity post-reset
+      const postCheck = await canConnect(resolvedUrl);
+
+      auditRepo.create({
+        action: 'db_reset',
+        resourceType: 'database',
+        resourceId: source || maskDatabaseUrl(resolvedUrl),
+        details: {
+          method: resetMethod,
+          tablesDropped: tableList.length,
+          tables: tableList.map((t) => t.table),
+        },
+      });
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            source,
+            connectionUrl: maskDatabaseUrl(resolvedUrl),
+            method: resetMethod,
+            tablesDropped: tableList.length,
+            postResetConnectivity: postCheck.success,
+            message: `Database reset complete. ${tableList.length} table(s) dropped via ${resetMethod}.`,
           }),
         }],
       };
