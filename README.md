@@ -128,44 +128,10 @@ Secret references use the format: `provider://path[#key][@version]`
 
 ## Available Tools
 
-### Project Management
-- `project_create` - Create new projects
-- `project_list` - List all projects
-- `project_import` - Import existing Railway projects
-- `project_intent_get` - View current hosting + integration intent overview
+Hypervibe exposes a large MCP surface area (project/env/deploy/db/dns/integrations/secrets/logs/mobile/appstore).
 
-### Deployment
-- `deploy` - Deploy to an environment
-- `deploy_status` - Check deployment status
-- `deploy_logs` - View deployment logs
-
-### Database
-- `db_migrate` - Run migrations (Prisma, Drizzle, TypeORM, etc.)
-- `db_url` - Get database connection URL
-
-### DNS (Cloudflare)
-- `dns_zones` - List DNS zones
-- `dns_records` - Manage DNS records
-- `dns_add_domain` - Add custom domains
-
-### Integrations
-- `stripe_*` - Products, prices, webhooks
-- `sendgrid_*` - Domain authentication, email
-- `recaptcha_*` - Site key management
-
-### Secret Management
-- `secrets_list` - List secrets from Vault/AWS/Doppler
-- `secrets_get` - Get a secret value (masked)
-- `secrets_set` - Create or update secrets
-- `secrets_map` - Map secrets to env vars for deploy
-- `secrets_sync` - Resolve and push to environments
-- `secrets_rotate` - Rotate and propagate everywhere
-- `secrets_audit` - View access audit log
-
-### Setup & Debugging
-- `setup_scan` - Scan for configuration issues
-- `setup_fix` - Auto-fix common problems
-- `errors_recent` - View recent errors from logs
+- Full generated catalog: `docs/TOOLS.md`
+- Regenerate after tool changes: `npm run docs:tools`
 
 ## Configuration
 
