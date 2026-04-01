@@ -24,6 +24,24 @@ const mappingRepo = new SecretMappingRepository();
 const accessLogRepo = new SecretAccessLogRepository();
 const auditRepo = new AuditRepository();
 
+export function filterEnvironmentsByName<T extends { name: string }>(
+  environments: T[],
+  environmentName?: string
+): T[] {
+  if (!environmentName) return environments;
+  return environments.filter((e) => e.name === environmentName);
+}
+
+export function summarizeSecretSyncResults(
+  results: Array<{ resolved: number; failed: number; synced: boolean }>
+): { totalResolved: number; totalFailed: number; totalSynced: number } {
+  return {
+    totalResolved: results.reduce((sum, r) => sum + r.resolved, 0),
+    totalFailed: results.reduce((sum, r) => sum + r.failed, 0),
+    totalSynced: results.filter((r) => r.synced).length,
+  };
+}
+
 // Mask a secret value for display
 function maskValue(value: string): string {
   if (value.length <= 8) return '****';
@@ -483,7 +501,7 @@ export function registerSecretsTools(server: McpServer): void {
       // Get environments to sync
       let environments = envRepo.findByProjectId(project.id);
       if (environmentName) {
-        environments = environments.filter((e) => e.name === environmentName);
+        environments = filterEnvironmentsByName(environments, environmentName);
         if (environments.length === 0) {
           return {
             content: [{
@@ -580,11 +598,7 @@ export function registerSecretsTools(server: McpServer): void {
             success: true,
             dryRun: dryRun ?? false,
             environments: results,
-            summary: {
-              totalResolved: results.reduce((sum, r) => sum + r.resolved, 0),
-              totalFailed: results.reduce((sum, r) => sum + r.failed, 0),
-              totalSynced: results.filter((r) => r.synced).length,
-            },
+            summary: summarizeSecretSyncResults(results),
           }),
         }],
       };

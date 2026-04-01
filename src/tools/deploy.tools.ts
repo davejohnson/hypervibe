@@ -26,7 +26,7 @@ function resolveEnvironment(
   return envRepo.findByProjectAndName(projectId, 'staging');
 }
 
-function requiresProductionConfirm(project: { policies: Record<string, unknown> }, environmentName: string): boolean {
+export function requiresProductionConfirm(project: { policies: Record<string, unknown> }, environmentName: string): boolean {
   const policies = project.policies ?? {};
   const protectedEnvs = Array.isArray(policies.protectedEnvironments)
     ? (policies.protectedEnvironments as unknown[]).map((v) => String(v).toLowerCase())
@@ -34,7 +34,7 @@ function requiresProductionConfirm(project: { policies: Record<string, unknown> 
   return protectedEnvs.includes(environmentName.toLowerCase());
 }
 
-function approvalsRequired(project: { policies: Record<string, unknown> }, environmentName: string): boolean {
+export function approvalsRequired(project: { policies: Record<string, unknown> }, environmentName: string): boolean {
   if (!requiresProductionConfirm(project, environmentName)) return false;
   const explicit = project.policies?.requireApprovalForProtectedEnvironments;
   if (explicit === false) return false;

@@ -22,6 +22,31 @@ const componentRepo = new ComponentRepository();
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
 
+export function mergeProjectPolicies(
+  currentPolicies: Record<string, unknown> | undefined,
+  updates: {
+    protectedEnvironments?: string[];
+    requireApprovalForDestructive?: boolean;
+    requireApprovalForProtectedEnvironments?: boolean;
+    desiredState?: Record<string, unknown>;
+  }
+): Record<string, unknown> {
+  const nextPolicies = { ...(currentPolicies ?? {}) } as Record<string, unknown>;
+  if (updates.protectedEnvironments !== undefined) {
+    nextPolicies.protectedEnvironments = updates.protectedEnvironments;
+  }
+  if (updates.requireApprovalForDestructive !== undefined) {
+    nextPolicies.requireApprovalForDestructive = updates.requireApprovalForDestructive;
+  }
+  if (updates.requireApprovalForProtectedEnvironments !== undefined) {
+    nextPolicies.requireApprovalForProtectedEnvironments = updates.requireApprovalForProtectedEnvironments;
+  }
+  if (updates.desiredState !== undefined) {
+    nextPolicies.desiredState = updates.desiredState;
+  }
+  return nextPolicies;
+}
+
 export function registerProjectTools(server: McpServer): void {
   server.tool(
     'project_create',
@@ -230,19 +255,12 @@ export function registerProjectTools(server: McpServer): void {
         };
       }
 
-      const nextPolicies = { ...(project.policies ?? {}) } as Record<string, unknown>;
-      if (protectedEnvironments !== undefined) {
-        nextPolicies.protectedEnvironments = protectedEnvironments;
-      }
-      if (requireApprovalForDestructive !== undefined) {
-        nextPolicies.requireApprovalForDestructive = requireApprovalForDestructive;
-      }
-      if (requireApprovalForProtectedEnvironments !== undefined) {
-        nextPolicies.requireApprovalForProtectedEnvironments = requireApprovalForProtectedEnvironments;
-      }
-      if (desiredState !== undefined) {
-        nextPolicies.desiredState = desiredState;
-      }
+      const nextPolicies = mergeProjectPolicies(project.policies ?? {}, {
+        protectedEnvironments,
+        requireApprovalForDestructive,
+        requireApprovalForProtectedEnvironments,
+        desiredState,
+      });
 
       const updated = projectRepo.update(project.id, { policies: nextPolicies });
       const intent = syncProjectIntent(project.id);
