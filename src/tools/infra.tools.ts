@@ -32,7 +32,50 @@ interface DesiredState {
   domain?: string;
   databaseProvider: 'supabase' | 'rds' | 'cloudsql';
   setupEmail: boolean;
+  deploy?: {
+    strategy?: 'branch' | 'manual';
+    branches?: {
+      staging?: string;
+      production?: string;
+    };
+  };
+  migrations?: {
+    mode?: 'none' | 'releaseCommand' | 'tool';
+    runInDeploy?: boolean;
+    command?: string;
+  };
 }
+
+export function resolveDesiredState(
+  policyState: Partial<DesiredState> | undefined,
+  overrides: Partial<DesiredState>
+): DesiredState {
+  return {
+    environmentName: overrides.environmentName ?? policyState?.environmentName ?? 'staging',
+    serviceName: overrides.serviceName ?? policyState?.serviceName ?? 'web',
+    domain: overrides.domain ?? policyState?.domain,
+    databaseProvider: overrides.databaseProvider ?? policyState?.databaseProvider ?? 'supabase',
+    setupEmail: overrides.setupEmail ?? policyState?.setupEmail ?? true,
+    deploy: overrides.deploy ?? policyState?.deploy,
+    migrations: overrides.migrations ?? policyState?.migrations,
+  };
+}
+
+const deployDesiredSchema = z.object({
+  strategy: z.enum(['branch', 'manual']).optional(),
+  branches: z
+    .object({
+      staging: z.string().min(1).optional(),
+      production: z.string().min(1).optional(),
+    })
+    .optional(),
+});
+
+const migrationDesiredSchema = z.object({
+  mode: z.enum(['none', 'releaseCommand', 'tool']).optional(),
+  runInDeploy: z.boolean().optional(),
+  command: z.string().min(1).optional(),
+});
 
 function buildPlan(params: {
   projectName: string;
@@ -465,6 +508,8 @@ export function registerInfraTools(server: McpServer): void {
       domain: z.string().optional().describe('Optional desired domain'),
       databaseProvider: z.enum(['supabase', 'rds', 'cloudsql']).optional().describe('Desired DB provider (default: supabase)'),
       setupEmail: z.boolean().optional().describe('Include SendGrid setup (default: true)'),
+      deploy: deployDesiredSchema.optional().describe('Desired deploy strategy and branch mapping'),
+      migrations: migrationDesiredSchema.optional().describe('Desired migration behavior during deploy'),
     },
     async ({
       projectName,
@@ -473,6 +518,8 @@ export function registerInfraTools(server: McpServer): void {
       domain,
       databaseProvider = 'supabase',
       setupEmail = true,
+      deploy,
+      migrations,
     }) => {
       const project = resolveProject({ projectName });
       if (!project) {
@@ -490,6 +537,8 @@ export function registerInfraTools(server: McpServer): void {
         domain,
         databaseProvider,
         setupEmail,
+        deploy,
+        migrations,
       };
       const nextPolicies = { ...(project.policies ?? {}), desiredState };
       const updated = projectRepo.update(project.id, { policies: nextPolicies });
@@ -549,10 +598,12 @@ export function registerInfraTools(server: McpServer): void {
       domain: z.string().optional().describe('Override desired domain'),
       databaseProvider: z.enum(['supabase', 'rds', 'cloudsql']).optional().describe('Override desired DB provider'),
       setupEmail: z.boolean().optional().describe('Override desired email setup'),
+      deploy: deployDesiredSchema.optional().describe('Override desired deploy strategy and branches'),
+      migrations: migrationDesiredSchema.optional().describe('Override desired migration behavior'),
       confirm: z.boolean().optional().describe('Set true to apply'),
       approvalId: z.string().uuid().optional().describe('Approval ID for protected environments (action: infra.apply)'),
     },
-    async ({ projectName, environmentName, serviceName, domain, databaseProvider, setupEmail, confirm = false, approvalId }) => {
+    async ({ projectName, environmentName, serviceName, domain, databaseProvider, setupEmail, deploy, migrations, confirm = false, approvalId }) => {
       const project = resolveProject({ projectName });
       if (!project) {
         return {
@@ -564,13 +615,15 @@ export function registerInfraTools(server: McpServer): void {
       }
 
       const policyState = (project.policies?.desiredState as Partial<DesiredState> | undefined) ?? {};
-      const desired: DesiredState = {
-        environmentName: environmentName ?? policyState.environmentName ?? 'staging',
-        serviceName: serviceName ?? policyState.serviceName ?? 'web',
-        domain: domain ?? policyState.domain,
-        databaseProvider: databaseProvider ?? policyState.databaseProvider ?? 'supabase',
-        setupEmail: setupEmail ?? policyState.setupEmail ?? true,
-      };
+      const desired = resolveDesiredState(policyState, {
+        environmentName,
+        serviceName,
+        domain,
+        databaseProvider,
+        setupEmail,
+        deploy,
+        migrations,
+      });
 
       const plan = buildPlan({
         projectName,

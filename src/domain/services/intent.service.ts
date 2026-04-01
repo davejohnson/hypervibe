@@ -338,6 +338,14 @@ function buildIntent(project: Project): ProjectIntentSchema {
   const desiredDeployBranches = asRecord(desiredDeploy?.branches);
   const desiredMigrations = asRecord(desiredState?.migrations);
   const protectedEnvironments = toStringArray(project.policies?.protectedEnvironments);
+  const desiredDeployStrategy: 'branch' | 'manual' | undefined =
+    desiredDeploy?.strategy === 'branch' || desiredDeploy?.strategy === 'manual' ? desiredDeploy.strategy : undefined;
+  const desiredMigrationMode: 'none' | 'releaseCommand' | 'tool' | undefined =
+    desiredMigrations?.mode === 'none' ||
+    desiredMigrations?.mode === 'releaseCommand' ||
+    desiredMigrations?.mode === 'tool'
+      ? desiredMigrations.mode
+      : undefined;
   const desired = {
     state: desiredState,
     environmentName: typeof desiredState?.environmentName === 'string' ? desiredState.environmentName : undefined,
@@ -347,7 +355,7 @@ function buildIntent(project: Project): ProjectIntentSchema {
     setupEmail: typeof desiredState?.setupEmail === 'boolean' ? desiredState.setupEmail : undefined,
     deploy: desiredDeploy
       ? {
-          strategy: desiredDeploy.strategy === 'branch' || desiredDeploy.strategy === 'manual' ? desiredDeploy.strategy : undefined,
+          strategy: desiredDeployStrategy,
           branches: desiredDeployBranches
             ? {
                 staging: typeof desiredDeployBranches.staging === 'string' ? desiredDeployBranches.staging : undefined,
@@ -358,12 +366,7 @@ function buildIntent(project: Project): ProjectIntentSchema {
       : undefined,
     migrations: desiredMigrations
       ? {
-          mode:
-            desiredMigrations.mode === 'none' ||
-            desiredMigrations.mode === 'releaseCommand' ||
-            desiredMigrations.mode === 'tool'
-              ? desiredMigrations.mode
-              : undefined,
+          mode: desiredMigrationMode,
           runInDeploy: typeof desiredMigrations.runInDeploy === 'boolean' ? desiredMigrations.runInDeploy : undefined,
           command: typeof desiredMigrations.command === 'string' ? desiredMigrations.command : undefined,
         }

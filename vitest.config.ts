@@ -10,7 +10,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
-      include: ['src/agent/**/*.ts'],
+      include: ['src/**/*.ts'],
       exclude: ['**/*.test.ts', '**/index.ts'],
     },
     testTimeout: 10000,

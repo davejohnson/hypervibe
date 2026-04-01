@@ -287,77 +287,131 @@ export function registerLogsTools(server: McpServer): void {
 
       const bindings = environment.platformBindings as {
         provider?: string;
+        projectId?: string;
         railwayProjectId?: string;
         railwayEnvironmentId?: string;
         services?: Record<string, { serviceId: string }>;
       };
       const provider = detectProviderName(project.defaultPlatform, bindings.provider);
 
-      if (provider !== 'railway') {
+      try {
+        if (provider === 'railway') {
+          if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
+              }],
+            };
+          }
+
+          const connection = connectionRepo.findByProvider('railway');
+          if (!connection) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: 'No Railway connection found' }),
+              }],
+            };
+          }
+
+          const secretStore = getSecretStore();
+          const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
+          const adapter = new RailwayAdapter();
+          await adapter.connect(credentials);
+
+          let serviceId: string | undefined;
+          if (serviceName && bindings.services?.[serviceName]) {
+            serviceId = bindings.services[serviceName].serviceId;
+          }
+
+          const deployments = await adapter.getDeployments(
+            bindings.railwayProjectId,
+            bindings.railwayEnvironmentId,
+            serviceId,
+            limit
+          );
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                project: projectName,
+                environment: environmentName,
+                provider,
+                service: serviceName || 'all',
+                count: deployments.length,
+                deployments: deployments.map((d) => ({
+                  id: d.id,
+                  status: d.status,
+                  createdAt: d.createdAt,
+                  url: d.staticUrl,
+                })),
+              }),
+            }],
+          };
+        }
+
+        if (provider === 'vercel') {
+          if (!bindings.projectId) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: 'Environment is not bound to Vercel projectId' }),
+              }],
+            };
+          }
+
+          const result = await adapterFactory.getProviderAdapter('vercel', project);
+          if (!result.success || !result.adapter) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: result.error || 'Failed to create Vercel adapter' }),
+              }],
+            };
+          }
+          const adapter = result.adapter as unknown as {
+            listDeployments: (projectId: string, limit?: number) => Promise<Array<{
+              id: string;
+              readyState?: string;
+              createdAt?: number;
+              url?: string;
+              name?: string;
+            }>>;
+          };
+          const deployments = await adapter.listDeployments(bindings.projectId, limit);
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                project: projectName,
+                environment: environmentName,
+                provider,
+                service: serviceName || 'all',
+                count: deployments.length,
+                deployments: deployments.map((d) => ({
+                  id: d.id,
+                  status: d.readyState ?? 'unknown',
+                  createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : undefined,
+                  url: d.url ? `https://${d.url}` : undefined,
+                  service: d.name,
+                })),
+              }),
+            }],
+          };
+        }
+
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `logs_deployments currently supports Railway only. Use logs_service for ${provider}.`,
+              error: `logs_deployments currently supports Railway and Vercel only (provider: ${provider}).`,
               provider,
-            }),
-          }],
-        };
-      }
-
-      if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
-          }],
-        };
-      }
-
-      const connection = connectionRepo.findByProvider('railway');
-      if (!connection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No Railway connection found' }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
-
-      try {
-        let serviceId: string | undefined;
-        if (serviceName && bindings.services?.[serviceName]) {
-          serviceId = bindings.services[serviceName].serviceId;
-        }
-
-        const deployments = await adapter.getDeployments(
-          bindings.railwayProjectId,
-          bindings.railwayEnvironmentId,
-          serviceId,
-          limit
-        );
-
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: true,
-              project: projectName,
-              environment: environmentName,
-              service: serviceName || 'all',
-              count: deployments.length,
-              deployments: deployments.map((d) => ({
-                id: d.id,
-                status: d.status,
-                createdAt: d.createdAt,
-                url: d.staticUrl,
-              })),
             }),
           }],
         };
@@ -496,33 +550,12 @@ export function registerLogsTools(server: McpServer): void {
 
       const bindings = environment.platformBindings as {
         provider?: string;
+        projectId?: string;
         railwayProjectId?: string;
         railwayEnvironmentId?: string;
         services?: Record<string, { serviceId: string }>;
       };
       const provider = detectProviderName(project.defaultPlatform, bindings.provider);
-
-      if (provider !== 'railway') {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: `logs_build currently supports Railway only (provider: ${provider}).`,
-              provider,
-            }),
-          }],
-        };
-      }
-
-      if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
-          }],
-        };
-      }
 
       if (!bindings.services?.[serviceName]) {
         return {
@@ -533,56 +566,135 @@ export function registerLogsTools(server: McpServer): void {
         };
       }
 
-      const connection = connectionRepo.findByProvider('railway');
-      if (!connection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No Railway connection found' }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
-
       try {
-        let targetDeploymentId = deploymentId;
-
-        if (!targetDeploymentId) {
-          const deployments = await adapter.getDeployments(
-            bindings.railwayProjectId,
-            bindings.railwayEnvironmentId,
-            bindings.services[serviceName].serviceId,
-            1
-          );
-
-          if (deployments.length === 0) {
+        if (provider === 'railway') {
+          if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
             return {
               content: [{
                 type: 'text' as const,
-                text: JSON.stringify({ success: false, error: 'No deployments found for service' }),
+                text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
               }],
             };
           }
 
-          targetDeploymentId = deployments[0].id;
+          const connection = connectionRepo.findByProvider('railway');
+          if (!connection) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: 'No Railway connection found' }),
+              }],
+            };
+          }
+
+          const secretStore = getSecretStore();
+          const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
+          const adapter = new RailwayAdapter();
+          await adapter.connect(credentials);
+
+          let targetDeploymentId = deploymentId;
+
+          if (!targetDeploymentId) {
+            const deployments = await adapter.getDeployments(
+              bindings.railwayProjectId,
+              bindings.railwayEnvironmentId,
+              bindings.services[serviceName].serviceId,
+              1
+            );
+
+            if (deployments.length === 0) {
+              return {
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify({ success: false, error: 'No deployments found for service' }),
+                }],
+              };
+            }
+
+            targetDeploymentId = deployments[0].id;
+          }
+
+          const buildLogs = await adapter.getBuildLogs(targetDeploymentId);
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                project: projectName,
+                environment: environmentName,
+                provider,
+                service: serviceName,
+                deploymentId: targetDeploymentId,
+                buildLogs: buildLogs || 'No build logs available',
+              }),
+            }],
+          };
         }
 
-        const buildLogs = await adapter.getBuildLogs(targetDeploymentId);
+        if (provider === 'vercel') {
+          if (!bindings.projectId) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: 'Environment is not bound to Vercel projectId' }),
+              }],
+            };
+          }
+          const result = await adapterFactory.getProviderAdapter('vercel', project);
+          if (!result.success || !result.adapter) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: result.error || 'Failed to create Vercel adapter' }),
+              }],
+            };
+          }
+          const adapter = result.adapter as unknown as {
+            listDeployments: (projectId: string, limit?: number) => Promise<Array<{ id: string }>>;
+            getDeploymentEvents: (deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
+          };
+
+          let targetDeploymentId = deploymentId;
+          if (!targetDeploymentId) {
+            const deployments = await adapter.listDeployments(bindings.projectId, 1);
+            if (deployments.length === 0) {
+              return {
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify({ success: false, error: 'No deployments found for service' }),
+                }],
+              };
+            }
+            targetDeploymentId = deployments[0].id;
+          }
+
+          const events = await adapter.getDeploymentEvents(targetDeploymentId, 200);
+          const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                project: projectName,
+                environment: environmentName,
+                provider,
+                service: serviceName,
+                deploymentId: targetDeploymentId,
+                buildLogs: buildLogs || 'No build logs available',
+              }),
+            }],
+          };
+        }
 
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
-              success: true,
-              project: projectName,
-              environment: environmentName,
-              service: serviceName,
-              deploymentId: targetDeploymentId,
-              buildLogs: buildLogs || 'No build logs available',
+              success: false,
+              error: `logs_build currently supports Railway and Vercel only (provider: ${provider}).`,
+              provider,
             }),
           }],
         };
