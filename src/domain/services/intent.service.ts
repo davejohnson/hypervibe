@@ -16,7 +16,7 @@ const secretMappingRepo = new SecretMappingRepository();
 const connectionRepo = new ConnectionRepository();
 const integrationRepo = new IntegrationRepository();
 
-const INTENT_SCHEMA_VERSION = '2';
+const INTENT_SCHEMA_VERSION = '3';
 
 interface IntentEnvironmentSummary {
   name: string;
@@ -55,6 +55,22 @@ interface ProjectIntentSchema {
     domain?: string;
     databaseProvider?: string;
     setupEmail?: boolean;
+    deploy?: {
+      strategy?: 'branch' | 'manual';
+      branches?: {
+        staging?: string;
+        production?: string;
+      };
+    };
+    migrations?: {
+      mode?: 'none' | 'releaseCommand' | 'tool';
+      runInDeploy?: boolean;
+      command?: string;
+    };
+    protection: {
+      protectedEnvironments: string[];
+      requireApprovalForProtectedEnvironments: boolean;
+    };
   };
   observed: {
     overview: {
@@ -128,11 +144,40 @@ function hasVerifiedConnection(
   return connections.some((c) => c.provider === provider && c.status === 'verified');
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((v) => String(v));
+}
+
 export function buildDriftSignals(
   desiredState: Record<string, unknown> | null,
-  connections: Array<{ provider: string; status: string; scope: string | null }>
+  connections: Array<{ provider: string; status: string; scope: string | null }>,
+  policies?: Record<string, unknown>
 ): Array<{ check: string; status: 'ok' | 'warning'; message: string }> {
   const drift: Array<{ check: string; status: 'ok' | 'warning'; message: string }> = [];
+  const protectedEnvironments = toStringArray(policies?.protectedEnvironments).map((e) => e.toLowerCase());
+  const productionProtected = protectedEnvironments.some((e) => e === 'production' || e === 'prod');
+  drift.push({
+    check: 'policy.productionProtected',
+    status: productionProtected ? 'ok' : 'warning',
+    message: productionProtected
+      ? 'Production environment is protected by policy'
+      : 'Production environment is not protected by policy',
+  });
+
+  const requireProtectedApprovals = policies?.requireApprovalForProtectedEnvironments !== false;
+  drift.push({
+    check: 'policy.protectedApprovals',
+    status: requireProtectedApprovals ? 'ok' : 'warning',
+    message: requireProtectedApprovals
+      ? 'Protected environments require approval IDs'
+      : 'Protected environments do not require approval IDs',
+  });
+
   if (!desiredState) return drift;
 
   const desiredDbProvider = typeof desiredState.databaseProvider === 'string' ? desiredState.databaseProvider : undefined;
@@ -168,6 +213,35 @@ export function buildDriftSignals(
       message: ok
         ? 'Desired email setup has a verified SendGrid connection'
         : 'Desired email setup is enabled but no verified SendGrid connection was found',
+    });
+  }
+
+  const deploy = asRecord(desiredState.deploy);
+  const branches = asRecord(deploy?.branches);
+  const stagingBranch = typeof branches?.staging === 'string' ? branches.staging : undefined;
+  const productionBranch = typeof branches?.production === 'string' ? branches.production : undefined;
+  if (stagingBranch && productionBranch) {
+    const distinct = stagingBranch !== productionBranch;
+    drift.push({
+      check: 'deploy.branchesDistinct',
+      status: distinct ? 'ok' : 'warning',
+      message: distinct
+        ? `Deploy branches are distinct (staging=${stagingBranch}, production=${productionBranch})`
+        : `Deploy branches are identical (${stagingBranch}); use separate branches for safer promotion`,
+    });
+  }
+
+  const migrations = asRecord(desiredState.migrations);
+  const runInDeploy = migrations?.runInDeploy;
+  if (runInDeploy === true) {
+    const mode = typeof migrations.mode === 'string' ? migrations.mode : undefined;
+    const validMode = mode === 'releaseCommand' || mode === 'tool';
+    drift.push({
+      check: 'migrations.deployMode',
+      status: validMode ? 'ok' : 'warning',
+      message: validMode
+        ? `Deploy-time migrations configured with mode "${mode}"`
+        : 'Deploy-time migrations enabled without a supported mode (expected "releaseCommand" or "tool")',
     });
   }
 
@@ -259,7 +333,11 @@ function buildIntent(project: Project): ProjectIntentSchema {
 
   const componentCount = environmentSummaries.reduce((sum, env) => sum + env.components.length, 0);
   const desiredState = (project.policies?.desiredState as Record<string, unknown> | undefined) ?? null;
-  const drift = buildDriftSignals(desiredState, connectionSummaries);
+  const drift = buildDriftSignals(desiredState, connectionSummaries, project.policies);
+  const desiredDeploy = asRecord(desiredState?.deploy);
+  const desiredDeployBranches = asRecord(desiredDeploy?.branches);
+  const desiredMigrations = asRecord(desiredState?.migrations);
+  const protectedEnvironments = toStringArray(project.policies?.protectedEnvironments);
   const desired = {
     state: desiredState,
     environmentName: typeof desiredState?.environmentName === 'string' ? desiredState.environmentName : undefined,
@@ -267,6 +345,33 @@ function buildIntent(project: Project): ProjectIntentSchema {
     domain: typeof desiredState?.domain === 'string' ? desiredState.domain : undefined,
     databaseProvider: typeof desiredState?.databaseProvider === 'string' ? desiredState.databaseProvider : undefined,
     setupEmail: typeof desiredState?.setupEmail === 'boolean' ? desiredState.setupEmail : undefined,
+    deploy: desiredDeploy
+      ? {
+          strategy: desiredDeploy.strategy === 'branch' || desiredDeploy.strategy === 'manual' ? desiredDeploy.strategy : undefined,
+          branches: desiredDeployBranches
+            ? {
+                staging: typeof desiredDeployBranches.staging === 'string' ? desiredDeployBranches.staging : undefined,
+                production: typeof desiredDeployBranches.production === 'string' ? desiredDeployBranches.production : undefined,
+              }
+            : undefined,
+        }
+      : undefined,
+    migrations: desiredMigrations
+      ? {
+          mode:
+            desiredMigrations.mode === 'none' ||
+            desiredMigrations.mode === 'releaseCommand' ||
+            desiredMigrations.mode === 'tool'
+              ? desiredMigrations.mode
+              : undefined,
+          runInDeploy: typeof desiredMigrations.runInDeploy === 'boolean' ? desiredMigrations.runInDeploy : undefined,
+          command: typeof desiredMigrations.command === 'string' ? desiredMigrations.command : undefined,
+        }
+      : undefined,
+    protection: {
+      protectedEnvironments,
+      requireApprovalForProtectedEnvironments: project.policies?.requireApprovalForProtectedEnvironments !== false,
+    },
   };
   const observed = {
     overview: {
