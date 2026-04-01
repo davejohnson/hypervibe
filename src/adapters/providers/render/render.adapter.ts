@@ -517,6 +517,43 @@ export class RenderAdapter implements IProviderAdapter {
       message: entry.message ?? '',
     }));
   }
+
+  async listServiceDeployments(serviceId: string, limit = 10): Promise<RenderDeploy[]> {
+    const params = new URLSearchParams({
+      limit: String(limit),
+    });
+    const response = await this.request<{ deploys?: RenderDeploy[] } | RenderDeploy[]>(
+      'GET',
+      `/services/${serviceId}/deploys?${params.toString()}`
+    );
+    return Array.isArray(response) ? response : (response.deploys ?? []);
+  }
+
+  async getDeploymentLogs(
+    serviceId: string,
+    deployId: string,
+    limit = 200
+  ): Promise<Array<{ timestamp: string; severity: string; message: string }>> {
+    const params = new URLSearchParams({
+      limit: String(limit),
+    });
+
+    try {
+      const response = await this.request<{ logs?: RenderLogEntry[] } | RenderLogEntry[]>(
+        'GET',
+        `/services/${serviceId}/deploys/${deployId}/logs?${params.toString()}`
+      );
+      const rawLogs = Array.isArray(response) ? response : (response.logs ?? []);
+      return rawLogs.map((entry) => ({
+        timestamp: entry.timestamp ?? new Date().toISOString(),
+        severity: entry.level ?? 'info',
+        message: entry.message ?? '',
+      }));
+    } catch {
+      // Fallback to service logs if deployment log endpoint is unavailable.
+      return this.getServiceLogs(serviceId, limit);
+    }
+  }
 }
 
 // Self-register with provider registry

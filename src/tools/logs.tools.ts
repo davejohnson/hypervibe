@@ -405,12 +405,88 @@ export function registerLogsTools(server: McpServer): void {
           };
         }
 
+        if (provider === 'render') {
+          const result = await adapterFactory.getProviderAdapter('render', project);
+          if (!result.success || !result.adapter) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: result.error || 'Failed to create Render adapter' }),
+              }],
+            };
+          }
+          const adapter = result.adapter as unknown as {
+            listServiceDeployments: (serviceId: string, limit?: number) => Promise<Array<{
+              id: string;
+              status: string;
+              createdAt: string;
+            }>>;
+          };
+          if (typeof adapter.listServiceDeployments !== 'function') {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: 'Render deployments are not supported by this adapter version',
+                }),
+              }],
+            };
+          }
+
+          const targetServices = serviceName
+            ? [{ name: serviceName, serviceId: bindings.services?.[serviceName]?.serviceId }]
+            : Object.entries(bindings.services ?? {}).map(([name, svc]) => ({ name, serviceId: svc.serviceId }));
+
+          const deployments: Array<{
+            id: string;
+            status: string;
+            createdAt?: string;
+            service?: string;
+          }> = [];
+
+          for (const svc of targetServices) {
+            if (!svc.serviceId) continue;
+            const items = await adapter.listServiceDeployments(svc.serviceId, limit);
+            for (const d of items) {
+              deployments.push({
+                id: d.id,
+                status: d.status,
+                createdAt: d.createdAt,
+                service: svc.name,
+              });
+            }
+          }
+
+          deployments.sort((a, b) => {
+            const at = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+            const bt = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+            return bt - at;
+          });
+          const sliced = deployments.slice(0, limit);
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                project: projectName,
+                environment: environmentName,
+                provider,
+                service: serviceName || 'all',
+                count: sliced.length,
+                deployments: sliced,
+              }),
+            }],
+          };
+        }
+
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `logs_deployments currently supports Railway and Vercel only (provider: ${provider}).`,
+              error: `logs_deployments currently supports Railway, Vercel, and Render only (provider: ${provider}).`,
               provider,
             }),
           }],
@@ -688,12 +764,83 @@ export function registerLogsTools(server: McpServer): void {
           };
         }
 
+        if (provider === 'render') {
+          const serviceId = bindings.services?.[serviceName]?.serviceId;
+          if (!serviceId) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: `Service ${serviceName} not bound to Render` }),
+              }],
+            };
+          }
+          const result = await adapterFactory.getProviderAdapter('render', project);
+          if (!result.success || !result.adapter) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: result.error || 'Failed to create Render adapter' }),
+              }],
+            };
+          }
+          const adapter = result.adapter as unknown as {
+            listServiceDeployments: (serviceId: string, limit?: number) => Promise<Array<{ id: string }>>;
+            getDeploymentLogs: (serviceId: string, deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
+          };
+          if (
+            typeof adapter.listServiceDeployments !== 'function' ||
+            typeof adapter.getDeploymentLogs !== 'function'
+          ) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: 'Render build logs are not supported by this adapter version',
+                }),
+              }],
+            };
+          }
+
+          let targetDeploymentId = deploymentId;
+          if (!targetDeploymentId) {
+            const deployments = await adapter.listServiceDeployments(serviceId, 1);
+            if (deployments.length === 0) {
+              return {
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify({ success: false, error: 'No deployments found for service' }),
+                }],
+              };
+            }
+            targetDeploymentId = deployments[0].id;
+          }
+
+          const events = await adapter.getDeploymentLogs(serviceId, targetDeploymentId, 200);
+          const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                project: projectName,
+                environment: environmentName,
+                provider,
+                service: serviceName,
+                deploymentId: targetDeploymentId,
+                buildLogs: buildLogs || 'No build logs available',
+              }),
+            }],
+          };
+        }
+
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `logs_build currently supports Railway and Vercel only (provider: ${provider}).`,
+              error: `logs_build currently supports Railway, Vercel, and Render only (provider: ${provider}).`,
               provider,
             }),
           }],
