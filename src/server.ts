@@ -56,6 +56,7 @@ import { registerAutoFixTools } from './tools/autofix.tools.js';
 import { registerSecretsTools } from './tools/secrets.tools.js';
 import { registerInfraTools } from './tools/infra.tools.js';
 import { registerApprovalTools } from './tools/approval.tools.js';
+import { registerMarketingTools } from './tools/marketing.tools.js';
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -88,6 +89,7 @@ export function createServer(): McpServer {
   registerSecretsTools(server);
   registerInfraTools(server);
   registerApprovalTools(server);
+  registerMarketingTools(server);
 
   return server;
 }
