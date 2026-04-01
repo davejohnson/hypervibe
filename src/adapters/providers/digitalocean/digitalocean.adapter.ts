@@ -32,6 +32,19 @@ interface DOApp {
   };
 }
 
+interface DODeployment {
+  id: string;
+  phase?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface DODeploymentLog {
+  created_at?: string;
+  message?: string;
+  level?: string;
+}
+
 interface DOAppSpec {
   name: string;
   region?: string;
@@ -519,6 +532,93 @@ export class DigitalOceanAdapter implements IProviderAdapter {
       .replace(/-+/g, '-')
       .replace(/^-|-$/g, '')
       .substring(0, 32);
+  }
+
+  private normalizeDeploymentStatus(phase?: string): string {
+    const normalized = (phase ?? 'UNKNOWN').toUpperCase();
+    const map: Record<string, string> = {
+      PENDING_BUILD: 'building',
+      BUILDING: 'building',
+      PENDING_DEPLOY: 'deploying',
+      DEPLOYING: 'deploying',
+      ACTIVE: 'deployed',
+      SUPERSEDED: 'superseded',
+      ERROR: 'failed',
+      CANCELED: 'canceled',
+      CANCELLED: 'canceled',
+    };
+    return map[normalized] ?? normalized.toLowerCase();
+  }
+
+  async listDeployments(appId: string, limit = 10): Promise<Array<{
+    id: string;
+    status: string;
+    createdAt?: string;
+    updatedAt?: string;
+  }>> {
+    const params = new URLSearchParams({ per_page: String(limit) });
+    const response = await this.request<{ deployments?: DODeployment[] }>(
+      'GET',
+      `/apps/${appId}/deployments?${params.toString()}`
+    );
+    return (response.deployments ?? []).map((d) => ({
+      id: d.id,
+      status: this.normalizeDeploymentStatus(d.phase),
+      createdAt: d.created_at,
+      updatedAt: d.updated_at,
+    }));
+  }
+
+  async getDeploymentLogs(
+    appId: string,
+    deploymentId: string,
+    limit = 200
+  ): Promise<Array<{ timestamp: string; severity: string; message: string }>> {
+    const params = new URLSearchParams({ type: 'BUILD', follow: 'false', tail_lines: String(limit) });
+    try {
+      const response = await this.request<{ logs?: DODeploymentLog[]; live_url?: string }>(
+        'GET',
+        `/apps/${appId}/deployments/${deploymentId}/logs?${params.toString()}`
+      );
+
+      const logs = response.logs ?? [];
+      if (logs.length > 0) {
+        return logs.map((entry) => ({
+          timestamp: entry.created_at ?? new Date().toISOString(),
+          severity: entry.level ?? 'info',
+          message: entry.message ?? '',
+        }));
+      }
+
+      if (response.live_url) {
+        return [{
+          timestamp: new Date().toISOString(),
+          severity: 'info',
+          message: `DigitalOcean deployment logs are available via URL: ${response.live_url}`,
+        }];
+      }
+    } catch {
+      // Fall back to deployment metadata summary below.
+    }
+
+    try {
+      const deployment = await this.request<{ deployment?: DODeployment }>(
+        'GET',
+        `/apps/${appId}/deployments/${deploymentId}`
+      );
+      const detail = deployment.deployment;
+      return [{
+        timestamp: detail?.updated_at ?? detail?.created_at ?? new Date().toISOString(),
+        severity: this.normalizeDeploymentStatus(detail?.phase) === 'failed' ? 'error' : 'info',
+        message: `Deployment ${deploymentId} status: ${this.normalizeDeploymentStatus(detail?.phase)}`,
+      }];
+    } catch {
+      return [{
+        timestamp: new Date().toISOString(),
+        severity: 'warn',
+        message: `No build logs available for deployment ${deploymentId}`,
+      }];
+    }
   }
 }
 

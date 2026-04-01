@@ -481,12 +481,72 @@ export function registerLogsTools(server: McpServer): void {
           };
         }
 
+        if (provider === 'digitalocean') {
+          if (!bindings.projectId) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: 'Environment is not bound to DigitalOcean projectId' }),
+              }],
+            };
+          }
+          const result = await adapterFactory.getProviderAdapter('digitalocean', project);
+          if (!result.success || !result.adapter) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: result.error || 'Failed to create DigitalOcean adapter' }),
+              }],
+            };
+          }
+          const adapter = result.adapter as unknown as {
+            listDeployments: (appId: string, limit?: number) => Promise<Array<{
+              id: string;
+              status: string;
+              createdAt?: string;
+              updatedAt?: string;
+            }>>;
+          };
+          if (typeof adapter.listDeployments !== 'function') {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: 'DigitalOcean deployments are not supported by this adapter version',
+                }),
+              }],
+            };
+          }
+
+          const deployments = await adapter.listDeployments(bindings.projectId, limit);
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                project: projectName,
+                environment: environmentName,
+                provider,
+                service: serviceName || 'all',
+                count: deployments.length,
+                deployments: deployments.map((d) => ({
+                  id: d.id,
+                  status: d.status,
+                  createdAt: d.createdAt,
+                  updatedAt: d.updatedAt,
+                })),
+              }),
+            }],
+          };
+        }
+
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `logs_deployments currently supports Railway, Vercel, and Render only (provider: ${provider}).`,
+              error: `logs_deployments currently supports Railway, Vercel, Render, and DigitalOcean only (provider: ${provider}).`,
               provider,
             }),
           }],
@@ -835,12 +895,82 @@ export function registerLogsTools(server: McpServer): void {
           };
         }
 
+        if (provider === 'digitalocean') {
+          if (!bindings.projectId) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: 'Environment is not bound to DigitalOcean projectId' }),
+              }],
+            };
+          }
+          const result = await adapterFactory.getProviderAdapter('digitalocean', project);
+          if (!result.success || !result.adapter) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: result.error || 'Failed to create DigitalOcean adapter' }),
+              }],
+            };
+          }
+          const adapter = result.adapter as unknown as {
+            listDeployments: (appId: string, limit?: number) => Promise<Array<{ id: string }>>;
+            getDeploymentLogs: (appId: string, deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
+          };
+          if (
+            typeof adapter.listDeployments !== 'function' ||
+            typeof adapter.getDeploymentLogs !== 'function'
+          ) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: 'DigitalOcean build logs are not supported by this adapter version',
+                }),
+              }],
+            };
+          }
+
+          let targetDeploymentId = deploymentId;
+          if (!targetDeploymentId) {
+            const deployments = await adapter.listDeployments(bindings.projectId, 1);
+            if (deployments.length === 0) {
+              return {
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify({ success: false, error: 'No deployments found for service' }),
+                }],
+              };
+            }
+            targetDeploymentId = deployments[0].id;
+          }
+
+          const events = await adapter.getDeploymentLogs(bindings.projectId, targetDeploymentId, 200);
+          const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                project: projectName,
+                environment: environmentName,
+                provider,
+                service: serviceName,
+                deploymentId: targetDeploymentId,
+                buildLogs: buildLogs || 'No build logs available',
+              }),
+            }],
+          };
+        }
+
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `logs_build currently supports Railway, Vercel, and Render only (provider: ${provider}).`,
+              error: `logs_build currently supports Railway, Vercel, Render, and DigitalOcean only (provider: ${provider}).`,
               provider,
             }),
           }],
