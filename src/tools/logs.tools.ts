@@ -39,6 +39,17 @@ export function isErrorLike(log: UnifiedLog): boolean {
   );
 }
 
+const LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS = ['railway', 'vercel', 'render', 'digitalocean'] as const;
+const LOGS_BUILD_SUPPORTED_PROVIDERS = ['railway', 'vercel', 'render', 'digitalocean'] as const;
+
+export function supportsLogsDeploymentsProvider(provider: string): boolean {
+  return (LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS as readonly string[]).includes(provider.toLowerCase());
+}
+
+export function supportsLogsBuildProvider(provider: string): boolean {
+  return (LOGS_BUILD_SUPPORTED_PROVIDERS as readonly string[]).includes(provider.toLowerCase());
+}
+
 async function fetchProviderLogs(
   provider: string,
   environment: {
@@ -546,7 +557,7 @@ export function registerLogsTools(server: McpServer): void {
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `logs_deployments currently supports Railway, Vercel, Render, and DigitalOcean only (provider: ${provider}).`,
+              error: `logs_deployments currently supports ${LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS.join(', ')} only (provider: ${provider}).`,
               provider,
             }),
           }],
@@ -970,7 +981,7 @@ export function registerLogsTools(server: McpServer): void {
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `logs_build currently supports Railway, Vercel, Render, and DigitalOcean only (provider: ${provider}).`,
+              error: `logs_build currently supports ${LOGS_BUILD_SUPPORTED_PROVIDERS.join(', ')} only (provider: ${provider}).`,
               provider,
             }),
           }],

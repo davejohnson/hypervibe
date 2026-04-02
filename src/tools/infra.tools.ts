@@ -160,11 +160,19 @@ function buildPlan(params: {
   return plan;
 }
 
-function isProtectedEnvironment(project: { policies: Record<string, unknown> }, environmentName: string): boolean {
+export function isProtectedEnvironment(project: { policies: Record<string, unknown> }, environmentName: string): boolean {
   const protectedEnvs = Array.isArray(project.policies?.protectedEnvironments)
     ? (project.policies.protectedEnvironments as unknown[]).map((v) => String(v).toLowerCase())
     : [];
   return protectedEnvs.includes(environmentName.toLowerCase());
+}
+
+export function infraApprovalsRequiredForEnvironment(
+  project: { policies: Record<string, unknown> },
+  environmentName: string
+): boolean {
+  if (!isProtectedEnvironment(project, environmentName)) return false;
+  return project.policies?.requireApprovalForProtectedEnvironments !== false;
 }
 
 async function executeBootstrap(params: {
@@ -428,7 +436,7 @@ export function registerInfraTools(server: McpServer): void {
 
       const existingProject = resolveProject({ projectName });
       if (existingProject && isProtectedEnvironment(existingProject, environmentName)) {
-        const requireApprovals = existingProject.policies?.requireApprovalForProtectedEnvironments !== false;
+        const requireApprovals = infraApprovalsRequiredForEnvironment(existingProject, environmentName);
         if (requireApprovals) {
           if (!approvalId) {
             return {
@@ -650,7 +658,7 @@ export function registerInfraTools(server: McpServer): void {
       }
 
       if (isProtectedEnvironment(project, desired.environmentName)) {
-        const requireApprovals = project.policies?.requireApprovalForProtectedEnvironments !== false;
+        const requireApprovals = infraApprovalsRequiredForEnvironment(project, desired.environmentName);
         if (requireApprovals) {
           if (!approvalId) {
             return {

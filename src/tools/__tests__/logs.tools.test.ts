@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { detectProviderName, isErrorLike } from '../logs.tools.js';
+import {
+  detectProviderName,
+  isErrorLike,
+  supportsLogsBuildProvider,
+  supportsLogsDeploymentsProvider,
+} from '../logs.tools.js';
 
 describe('logs.tools helpers', () => {
   describe('detectProviderName', () => {
@@ -28,5 +33,22 @@ describe('logs.tools helpers', () => {
       expect(isErrorLike({ timestamp: '', severity: 'info', message: 'service is healthy' })).toBe(false);
     });
   });
-});
 
+  describe('provider support matrix', () => {
+    it('matches deployments provider support contract', () => {
+      expect(supportsLogsDeploymentsProvider('railway')).toBe(true);
+      expect(supportsLogsDeploymentsProvider('vercel')).toBe(true);
+      expect(supportsLogsDeploymentsProvider('render')).toBe(true);
+      expect(supportsLogsDeploymentsProvider('digitalocean')).toBe(true);
+      expect(supportsLogsDeploymentsProvider('heroku')).toBe(false);
+    });
+
+    it('matches build provider support contract', () => {
+      expect(supportsLogsBuildProvider('railway')).toBe(true);
+      expect(supportsLogsBuildProvider('vercel')).toBe(true);
+      expect(supportsLogsBuildProvider('render')).toBe(true);
+      expect(supportsLogsBuildProvider('digitalocean')).toBe(true);
+      expect(supportsLogsBuildProvider('aws')).toBe(false);
+    });
+  });
+});
