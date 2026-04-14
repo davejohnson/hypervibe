@@ -19,6 +19,7 @@ const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const componentRepo = new ComponentRepository();
 const connectionRepo = new ConnectionRepository();
+const DB_PROVIDERS = ['supabase', 'rds', 'cloudsql', 'railway'] as const;
 
 interface GoldenPathPlanItem {
   action: string;
@@ -30,7 +31,7 @@ interface DesiredState {
   environmentName: string;
   serviceName: string;
   domain?: string;
-  databaseProvider: 'supabase' | 'rds' | 'cloudsql';
+  databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
   deploy?: {
     strategy?: 'branch' | 'manual';
@@ -82,7 +83,7 @@ function buildPlan(params: {
   environmentName: string;
   serviceName: string;
   domain?: string;
-  databaseProvider: 'supabase' | 'rds' | 'cloudsql';
+  databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
 }): GoldenPathPlanItem[] {
   const project = resolveProject({ projectName: params.projectName });
@@ -180,7 +181,7 @@ async function executeBootstrap(params: {
   environmentName: string;
   serviceName: string;
   domain?: string;
-  databaseProvider: 'supabase' | 'rds' | 'cloudsql';
+  databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
   let project = resolveProject({ projectName: params.projectName });
@@ -347,7 +348,7 @@ export function registerInfraTools(server: McpServer): void {
       environmentName: z.string().optional().describe('Environment (default: staging)'),
       serviceName: z.string().optional().describe('Service name (default: web)'),
       domain: z.string().optional().describe('Optional domain for DNS configuration'),
-      databaseProvider: z.enum(['supabase', 'rds', 'cloudsql']).optional().describe('Database provider (default: supabase)'),
+      databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (default: supabase)'),
       setupEmail: z.boolean().optional().describe('Include SendGrid setup checks (default: true)'),
     },
     async ({
@@ -396,7 +397,7 @@ export function registerInfraTools(server: McpServer): void {
       environmentName: z.string().optional().describe('Environment (default: staging)'),
       serviceName: z.string().optional().describe('Service name (default: web)'),
       domain: z.string().optional().describe('Optional domain to configure'),
-      databaseProvider: z.enum(['supabase', 'rds', 'cloudsql']).optional().describe('Database provider (default: supabase)'),
+      databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (default: supabase)'),
       setupEmail: z.boolean().optional().describe('Configure SendGrid (default: true)'),
       confirm: z.boolean().optional().describe('Set true to apply changes'),
       approvalId: z.string().uuid().optional().describe('Approval ID for protected environments (action: infra.apply)'),
@@ -514,7 +515,7 @@ export function registerInfraTools(server: McpServer): void {
       environmentName: z.string().optional().describe('Desired environment (default: staging)'),
       serviceName: z.string().optional().describe('Desired service (default: web)'),
       domain: z.string().optional().describe('Optional desired domain'),
-      databaseProvider: z.enum(['supabase', 'rds', 'cloudsql']).optional().describe('Desired DB provider (default: supabase)'),
+      databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Desired DB provider (default: supabase)'),
       setupEmail: z.boolean().optional().describe('Include SendGrid setup (default: true)'),
       deploy: deployDesiredSchema.optional().describe('Desired deploy strategy and branch mapping'),
       migrations: migrationDesiredSchema.optional().describe('Desired migration behavior during deploy'),
@@ -604,7 +605,7 @@ export function registerInfraTools(server: McpServer): void {
       environmentName: z.string().optional().describe('Override desired environment'),
       serviceName: z.string().optional().describe('Override desired service'),
       domain: z.string().optional().describe('Override desired domain'),
-      databaseProvider: z.enum(['supabase', 'rds', 'cloudsql']).optional().describe('Override desired DB provider'),
+      databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Override desired DB provider'),
       setupEmail: z.boolean().optional().describe('Override desired email setup'),
       deploy: deployDesiredSchema.optional().describe('Override desired deploy strategy and branches'),
       migrations: migrationDesiredSchema.optional().describe('Override desired migration behavior'),

@@ -4,7 +4,8 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import type { Project } from '../entities/project.entity.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import type { IHostingAdapter } from '../ports/hosting.port.js';
-import type { IDatabaseAdapter } from '../ports/database.port.js';
+import type { IDatabaseAdapter, ProvisionResult, ProvisionableType } from '../ports/database.port.js';
+import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { getProjectScopeHints } from './project-scope.js';
 
 /**
@@ -23,6 +24,7 @@ export interface AdapterResult<T> {
 export class AdapterFactory {
   private connectionRepo = new ConnectionRepository();
   private secretStore = getSecretStore();
+  private envRepo = new EnvironmentRepository();
 
   /**
    * Get a hosting adapter for a project based on its defaultPlatform.
@@ -41,6 +43,9 @@ export class AdapterFactory {
     providerName: string,
     project?: Project
   ): Promise<AdapterResult<IDatabaseAdapter>> {
+    if (providerName === 'railway') {
+      return this.getRailwayDatabaseAdapter(project);
+    }
     return this.getAdapter<IDatabaseAdapter>(
       providerName,
       'database',
@@ -86,9 +91,13 @@ export class AdapterFactory {
    */
   getAvailableDatabaseProviders(): string[] {
     const dbProviders = providerRegistry.getByCategory('database');
-    return dbProviders
+    const available = dbProviders
       .filter((p) => this.hasVerifiedConnection(p.metadata.name))
       .map((p) => p.metadata.name);
+    if (this.hasVerifiedConnection('railway') && !available.includes('railway')) {
+      available.push('railway');
+    }
+    return available;
   }
 
   /**
@@ -150,6 +159,180 @@ export class AdapterFactory {
         error: `Failed to create ${providerName} adapter: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
+  }
+
+  private async getRailwayDatabaseAdapter(project?: Project): Promise<AdapterResult<IDatabaseAdapter>> {
+    const hostingResult = await this.getAdapter<IProviderAdapter>(
+      'railway',
+      'deployment',
+      project ? getProjectScopeHints(project) : undefined
+    );
+    if (!hostingResult.success || !hostingResult.adapter) {
+      return { success: false, error: hostingResult.error || 'No Railway adapter available' };
+    }
+
+    const railway = hostingResult.adapter as unknown as {
+      ensureProject: (projectName: string, environment: import('../entities/environment.entity.js').Environment) => Promise<{
+        success: boolean;
+        data?: Record<string, unknown>;
+        message: string;
+        error?: string;
+      }>;
+      ensureComponent: (
+        type: import('../entities/component.entity.js').ComponentType,
+        environment: import('../entities/environment.entity.js').Environment
+      ) => Promise<{
+        component: import('../entities/component.entity.js').Component;
+        receipt: { success: boolean; message: string; error?: string };
+      }>;
+      listPlugins: (projectId: string) => Promise<Array<{ id: string; name: string; type: string }>>;
+    };
+
+    const makePluginVarRefs = (pluginName: string, type: ProvisionableType): Record<string, string> => {
+      const ref = (varName: string) => '${{' + pluginName + '.' + varName + '}}';
+      if (type === 'postgres') {
+        return {
+          DATABASE_URL: ref('DATABASE_URL'),
+          DIRECT_URL: ref('DATABASE_PRIVATE_URL'),
+        };
+      }
+      if (type === 'redis') {
+        return {
+          REDIS_URL: ref('REDIS_URL'),
+        };
+      }
+      // Railway plugin provisioning currently supports postgres/redis in DB flows.
+      return {};
+    };
+
+    const envRepo = this.envRepo;
+    const adapter: IDatabaseAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedDatabases: ['postgres'],
+        supportedCaches: ['redis'],
+        supportsPooling: false,
+        supportsReadReplicas: false,
+        supportsPointInTimeRecovery: false,
+        serverlessOptimized: false,
+      },
+      async connect() {
+        // Already connected via factory; no-op for compatibility.
+      },
+      async verify() {
+        if (typeof hostingResult.adapter?.verify === 'function') {
+          return hostingResult.adapter.verify();
+        }
+        return { success: true };
+      },
+      async provision(type, environment, options): Promise<ProvisionResult> {
+        if (type !== 'postgres' && type !== 'redis') {
+          return {
+            component: {
+              id: '',
+              environmentId: environment.id,
+              type,
+              bindings: {},
+              externalId: null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+            receipt: {
+              success: false,
+              message: `Railway database adapter supports only postgres/redis (requested: ${type})`,
+            },
+          };
+        }
+
+        const projectName = options?.databaseName
+          ? `${options.databaseName}-project`
+          : (project?.name ?? `project-${environment.projectId}`);
+        const ensureProject = await railway.ensureProject(projectName, environment);
+        if (!ensureProject.success) {
+          return {
+            component: {
+              id: '',
+              environmentId: environment.id,
+              type,
+              bindings: {},
+              externalId: null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+            receipt: {
+              success: false,
+              message: ensureProject.message,
+              error: ensureProject.error,
+            },
+          };
+        }
+
+        const projectId =
+          (ensureProject.data?.projectId as string | undefined) ||
+          ((environment.platformBindings as Record<string, unknown>).projectId as string | undefined) ||
+          ((environment.platformBindings as Record<string, unknown>).railwayProjectId as string | undefined);
+
+        if (projectId) {
+          envRepo.updatePlatformBindings(environment.id, {
+            provider: 'railway',
+            projectId,
+            railwayProjectId: projectId,
+          });
+        }
+
+        const refreshedEnvironment = envRepo.findById(environment.id) ?? environment;
+        const componentResult = await railway.ensureComponent(type, refreshedEnvironment);
+        if (!componentResult.receipt.success) {
+          return {
+            component: componentResult.component,
+            receipt: componentResult.receipt,
+          };
+        }
+
+        let pluginName: string = type;
+        if (projectId && typeof railway.listPlugins === 'function') {
+          const plugins = await railway.listPlugins(projectId);
+          const matched =
+            plugins.find((p) => p.id === componentResult.component.externalId) ||
+            [...plugins].reverse().find((p) => p.type === type);
+          if (matched?.name) {
+            pluginName = matched.name;
+          }
+        }
+
+        const envVars = makePluginVarRefs(pluginName, type);
+        const connectionUrl = envVars.DATABASE_URL ?? envVars.REDIS_URL;
+
+        return {
+          component: {
+            ...componentResult.component,
+            bindings: {
+              ...(componentResult.component.bindings ?? {}),
+              provider: 'railway',
+              projectId: projectId ?? undefined,
+              connectionUrl,
+              pluginName,
+            },
+          },
+          receipt: componentResult.receipt,
+          connectionUrl,
+          envVars,
+        };
+      },
+      async getConnectionUrl(component) {
+        const bindings = component.bindings as Record<string, unknown>;
+        const value = bindings.connectionUrl;
+        return typeof value === 'string' ? value : null;
+      },
+      async destroy(component) {
+        return {
+          success: false,
+          message: `Destroy is not implemented for Railway component ${component.externalId ?? component.id}`,
+        };
+      },
+    };
+
+    return { success: true, adapter };
   }
 }
 

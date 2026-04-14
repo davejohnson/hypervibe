@@ -37,6 +37,8 @@ const MIGRATION_PRESETS: Record<string, string> = {
   laravel: 'php artisan migrate --force',
 };
 
+const DB_PROVIDERS = ['supabase', 'rds', 'cloudsql', 'railway'] as const;
+
 export function registerDbTools(server: McpServer): void {
   server.tool(
     'db_migrate',
@@ -358,7 +360,7 @@ export function registerDbTools(server: McpServer): void {
     {
       projectName: z.string().optional().describe('Project name (auto-detect if one project)'),
       environment: z.string().optional().describe('Environment name (default: staging)'),
-      provider: z.enum(['supabase', 'rds', 'cloudsql']).optional().describe('Database provider (default: supabase)'),
+      provider: z.enum(DB_PROVIDERS).optional().describe('Database provider (default: supabase)'),
       databaseType: z.enum(['postgres', 'mysql', 'mongodb', 'redis']).optional().describe('Database/cache type (default: postgres)'),
       size: z.string().optional().describe('Provider instance size/tier'),
       region: z.string().optional().describe('Provider region'),
@@ -501,7 +503,7 @@ export function registerDbTools(server: McpServer): void {
     {
       projectName: z.string().optional().describe('Project name'),
       environment: z.string().optional().describe('Environment name (default: staging)'),
-      targetProvider: z.enum(['supabase', 'rds', 'cloudsql']).describe('Target database provider'),
+      targetProvider: z.enum(DB_PROVIDERS).describe('Target database provider'),
       serviceName: z.string().optional().describe('Service to update DATABASE_URL on'),
       databaseName: z.string().optional().describe('Target database name'),
       region: z.string().optional().describe('Target region'),
@@ -661,7 +663,7 @@ export function registerDbTools(server: McpServer): void {
       projectName: z.string().optional().describe('Project name'),
       environment: z.string().optional().describe('Environment name (default: staging)'),
       serviceName: z.string().optional().describe('Service to apply cutover vars on (default: first service)'),
-      targetProvider: z.enum(['supabase', 'rds', 'cloudsql']).describe('Target provider'),
+      targetProvider: z.enum(DB_PROVIDERS).describe('Target provider'),
       phase: z.enum(['plan', 'copy', 'cutover']).optional().describe('Migration phase (default: plan)'),
       sourceConnectionUrl: z.string().optional().describe('Optional explicit source connection URL'),
       targetConnectionUrl: z.string().optional().describe('Optional explicit target connection URL for cutover'),
@@ -1503,7 +1505,7 @@ async function provisionTargetDatabaseUrl(params: {
   projectId: string;
   projectName: string;
   envName: string;
-  targetProvider: 'supabase' | 'rds' | 'cloudsql';
+  targetProvider: (typeof DB_PROVIDERS)[number];
   databaseName?: string;
   region?: string;
   size?: string;

@@ -40,4 +40,17 @@ describe('infra.tools desired state resolution', () => {
     expect(desired.deploy?.strategy).toBe('branch');
     expect(desired.migrations?.mode).toBe('releaseCommand');
   });
+
+  it('accepts railway as a desired database provider override', () => {
+    const desired = resolveDesiredState(
+      {
+        databaseProvider: 'supabase',
+      },
+      {
+        databaseProvider: 'railway',
+      }
+    );
+
+    expect(desired.databaseProvider).toBe('railway');
+  });
 });
