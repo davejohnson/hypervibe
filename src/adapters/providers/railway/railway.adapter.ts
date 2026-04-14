@@ -110,36 +110,146 @@ export class RailwayAdapter implements IProviderAdapter {
         }
       }
 
-      // Create new project
-      const mutation = gql`
-        mutation CreateProject($name: String!, $teamId: String) {
-          projectCreate(input: { name: $name, teamId: $teamId }) {
-            id
-            name
-          }
-        }
-      `;
+      // Reuse an existing project with the same name if present.
+      const existingByName = await this.findProjectByName(projectName);
+      if (existingByName) {
+        return {
+          success: true,
+          message: `Using existing Railway project: ${existingByName.name}`,
+          data: { projectId: existingByName.id, projectName: existingByName.name },
+        };
+      }
 
-      const result = await this.client.request<{ projectCreate: { id: string; name: string } }>(mutation, {
-        name: projectName,
-        teamId: this.credentials?.teamId,
-      });
+      // Create a new Railway project. Railway GraphQL schema differs across accounts/versions,
+      // so try a few compatible mutation shapes before failing.
+      const created = await this.createProject(projectName);
+      if (!created) {
+        return {
+          success: false,
+          message: 'Failed to ensure Railway project',
+          error: `Unable to create project "${projectName}" on Railway`,
+        };
+      }
 
       return {
         success: true,
-        message: `Created Railway project: ${result.projectCreate.name}`,
+        message: `Created Railway project: ${created.name}`,
         data: {
-          projectId: result.projectCreate.id,
-          projectName: result.projectCreate.name,
+          projectId: created.id,
+          projectName: created.name,
         },
       };
     } catch (error) {
       return {
         success: false,
         message: 'Failed to ensure Railway project',
-        error: String(error),
+        error: this.describeError(error),
       };
     }
+  }
+
+  private async createProject(projectName: string): Promise<{ id: string; name: string } | null> {
+    if (!this.client) return null;
+
+    const attempts: Array<{ mutation: string; variables: Record<string, unknown>; label: string }> = [
+      {
+        label: 'input.teamId',
+        mutation: `
+          mutation CreateProject($name: String!, $teamId: String) {
+            projectCreate(input: { name: $name, teamId: $teamId }) {
+              id
+              name
+            }
+          }
+        `,
+        variables: { name: projectName, teamId: this.credentials?.teamId ?? null },
+      },
+      {
+        label: 'input.workspaceId',
+        mutation: `
+          mutation CreateProject($name: String!, $workspaceId: String) {
+            projectCreate(input: { name: $name, workspaceId: $workspaceId }) {
+              id
+              name
+            }
+          }
+        `,
+        variables: { name: projectName, workspaceId: this.credentials?.teamId ?? null },
+      },
+      {
+        label: 'input.name_only',
+        mutation: `
+          mutation CreateProject($name: String!) {
+            projectCreate(input: { name: $name }) {
+              id
+              name
+            }
+          }
+        `,
+        variables: { name: projectName },
+      },
+      {
+        label: 'args.teamId',
+        mutation: `
+          mutation CreateProject($name: String!, $teamId: String) {
+            projectCreate(name: $name, teamId: $teamId) {
+              id
+              name
+            }
+          }
+        `,
+        variables: { name: projectName, teamId: this.credentials?.teamId ?? null },
+      },
+      {
+        label: 'args.name_only',
+        mutation: `
+          mutation CreateProject($name: String!) {
+            projectCreate(name: $name) {
+              id
+              name
+            }
+          }
+        `,
+        variables: { name: projectName },
+      },
+    ];
+
+    const errors: string[] = [];
+    for (const attempt of attempts) {
+      try {
+        const result = await this.client.request<{ projectCreate: { id: string; name: string } }>(
+          gql`${attempt.mutation}`,
+          attempt.variables
+        );
+        if (result?.projectCreate?.id) {
+          return result.projectCreate;
+        }
+        errors.push(`${attempt.label}: Railway returned empty projectCreate payload`);
+      } catch (error) {
+        errors.push(`${attempt.label}: ${this.describeError(error)}`);
+      }
+    }
+
+    throw new Error(errors.join(' | '));
+  }
+
+  private describeError(error: unknown): string {
+    if (error instanceof Error) {
+      const anyError = error as Error & {
+        response?: {
+          errors?: Array<{ message?: string }>;
+          status?: number;
+        };
+      };
+      const gqlErrors = anyError.response?.errors ?? [];
+      if (gqlErrors.length > 0) {
+        return gqlErrors
+          .map((entry) => entry.message ?? 'Unknown GraphQL error')
+          .join('; ');
+      }
+      return error.message;
+    }
+    return String(error);
   }
 
   async ensureComponent(type: ComponentType, environment: Environment): Promise<ComponentResult> {
