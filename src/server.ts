@@ -10,7 +10,7 @@ import './adapters/providers/heroku/heroku.adapter.js';
 import './adapters/providers/aws/apprunner.adapter.js';
 import './adapters/providers/gcp/cloudrun.adapter.js';
 
-// Database providers
+// Database providers (Railway Postgres is handled via the Railway adapter shim in adapterFactory)
 import './adapters/providers/supabase/supabase.adapter.js';
 import './adapters/providers/aws/rds.adapter.js';
 import './adapters/providers/gcp/cloudsql.adapter.js';

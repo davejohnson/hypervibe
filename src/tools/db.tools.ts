@@ -356,7 +356,7 @@ export function registerDbTools(server: McpServer): void {
 
   server.tool(
     'db_provision',
-    'Provision a managed database (default: Supabase Postgres), save it as a component, and optionally sync env vars to hosting.',
+    'Provision a managed database (default: Supabase Postgres; also supports Railway), save it as a component, and optionally sync env vars to hosting.',
     {
       projectName: z.string().optional().describe('Project name (auto-detect if one project)'),
       environment: z.string().optional().describe('Environment name (default: staging)'),
