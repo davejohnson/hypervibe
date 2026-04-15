@@ -465,6 +465,29 @@ export class RailwayAdapter implements IProviderAdapter {
       };
     }
     const serviceName = `${type}-db`;
+    const existingServiceId = await this.resolveServiceIdForProject(projectId, serviceName);
+    if (existingServiceId) {
+      const component: Component = {
+        id: '',
+        environmentId: environment.id,
+        type,
+        bindings: {
+          resourceKind: 'service',
+          pluginName: serviceName,
+        },
+        externalId: existingServiceId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      return {
+        component,
+        receipt: {
+          success: true,
+          message: `Using existing ${type} datastore service (${serviceName})`,
+          data: { serviceId: existingServiceId, serviceName, serviceBacked: true, reused: true },
+        },
+      };
+    }
     const createMutation = gql`
       mutation CreateService($input: ServiceCreateInput!) {
         serviceCreate(input: $input) {
