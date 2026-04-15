@@ -259,34 +259,102 @@ export class RailwayAdapter implements IProviderAdapter {
 
   private async getWorkspaces(): Promise<Array<{ id: string; name?: string }>> {
     if (!this.client) return [];
-    const query = gql`
-      query MyWorkspaces {
-        me {
-          workspaces {
-            edges {
-              node {
+    const attempts: Array<{
+      query: string;
+      parse: (payload: unknown) => Array<{ id: string; name?: string }>;
+    }> = [
+      {
+        // Connection-style shape (older API responses)
+        query: `
+          query MyWorkspacesConnection {
+            me {
+              workspaces {
+                edges {
+                  node {
+                    id
+                    name
+                  }
+                }
+              }
+            }
+          }
+        `,
+        parse: (payload) => {
+          const result = payload as {
+            me?: {
+              workspaces?: {
+                edges?: Array<{ node?: { id?: string; name?: string } }>;
+              };
+            };
+          };
+          const edges = result.me?.workspaces?.edges ?? [];
+          return edges
+            .map((edge) => ({
+              id: edge.node?.id ?? '',
+              name: edge.node?.name,
+            }))
+            .filter((workspace) => workspace.id.length > 0);
+        },
+      },
+      {
+        // Direct array/object shape (newer API responses)
+        query: `
+          query MyWorkspacesDirect {
+            me {
+              workspaces {
                 id
                 name
               }
             }
           }
+        `,
+        parse: (payload) => {
+          const result = payload as {
+            me?: {
+              workspaces?: { id?: string; name?: string } | Array<{ id?: string; name?: string }>;
+            };
+          };
+          const raw = result.me?.workspaces;
+          const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+          return list
+            .map((workspace) => ({ id: workspace.id ?? '', name: workspace.name }))
+            .filter((workspace) => workspace.id.length > 0);
+        },
+      },
+      {
+        // Singular workspace shape fallback
+        query: `
+          query MyWorkspaceSingular {
+            me {
+              workspace {
+                id
+                name
+              }
+            }
+          }
+        `,
+        parse: (payload) => {
+          const result = payload as { me?: { workspace?: { id?: string; name?: string } } };
+          const workspace = result.me?.workspace;
+          if (!workspace?.id) return [];
+          return [{ id: workspace.id, name: workspace.name }];
+        },
+      },
+    ];
+
+    for (const attempt of attempts) {
+      try {
+        const result = await this.client.request<unknown>(gql`${attempt.query}`);
+        const parsed = attempt.parse(result);
+        if (parsed.length > 0) {
+          return parsed;
         }
+      } catch {
+        // Try the next schema variant.
       }
-    `;
-    const result = await this.client.request<{
-      me?: {
-        workspaces?: {
-          edges?: Array<{ node?: { id?: string; name?: string } }>;
-        };
-      };
-    }>(query);
-    const edges = result.me?.workspaces?.edges ?? [];
-    return edges
-      .map((edge) => ({
-        id: edge.node?.id ?? '',
-        name: edge.node?.name,
-      }))
-      .filter((workspace) => workspace.id.length > 0);
+    }
+
+    return [];
   }
 
   private describeError(error: unknown): string {
