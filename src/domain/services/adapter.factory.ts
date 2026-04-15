@@ -187,6 +187,7 @@ export class AdapterFactory {
       }>;
       listPlugins: (projectId: string) => Promise<Array<{ id: string; name: string; type: string }>>;
       deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
+      deletePlugin?: (pluginId: string) => Promise<{ success: boolean; error?: string }>;
     };
 
     const makePluginVarRefs = (pluginName: string, type: ProvisionableType): Record<string, string> => {
@@ -205,6 +206,8 @@ export class AdapterFactory {
       // Railway plugin provisioning currently supports postgres/redis in DB flows.
       return {};
     };
+    const isAuthError = (message?: string): boolean =>
+      typeof message === 'string' && /not authorized|forbidden|permission denied/i.test(message);
 
     const envRepo = this.envRepo;
     const adapter: IDatabaseAdapter = {
@@ -283,7 +286,42 @@ export class AdapterFactory {
         }
 
         const refreshedEnvironment = envRepo.findById(environment.id) ?? environment;
-        const componentResult = await railway.ensureComponent(type, refreshedEnvironment);
+        let componentResult = await railway.ensureComponent(type, refreshedEnvironment);
+        if (!componentResult.receipt.success && projectId && !createdByProvision && isAuthError(componentResult.receipt.error)) {
+          // Recover from stale/non-writable Railway bindings by clearing project/service linkage and retrying once.
+          envRepo.updatePlatformBindings(environment.id, {
+            projectId: undefined,
+            railwayProjectId: undefined,
+            environmentId: undefined,
+            railwayEnvironmentId: undefined,
+            services: undefined,
+          });
+
+          const reboundEnv = envRepo.findById(environment.id) ?? refreshedEnvironment;
+          const retryEnsureProject = await railway.ensureProject(projectName, reboundEnv);
+          const retryProjectId =
+            (retryEnsureProject.data?.projectId as string | undefined) ||
+            ((reboundEnv.platformBindings as Record<string, unknown>).projectId as string | undefined) ||
+            ((reboundEnv.platformBindings as Record<string, unknown>).railwayProjectId as string | undefined);
+
+          if (retryEnsureProject.success && retryProjectId) {
+            envRepo.updatePlatformBindings(environment.id, {
+              provider: 'railway',
+              projectId: retryProjectId,
+              railwayProjectId: retryProjectId,
+            });
+            const retryEnv = envRepo.findById(environment.id) ?? reboundEnv;
+            componentResult = await railway.ensureComponent(type, retryEnv);
+
+            if (!componentResult.receipt.success && retryEnsureProject.data?.created === true && typeof railway.deleteProject === 'function') {
+              const retryCleanup = await railway.deleteProject(retryProjectId);
+              if (!retryCleanup.success) {
+                componentResult.receipt.error = `${componentResult.receipt.error ?? componentResult.receipt.message} Cleanup failed for Railway project ${retryProjectId}: ${retryCleanup.error ?? 'unknown error'}`;
+              }
+            }
+          }
+        }
+
         if (!componentResult.receipt.success) {
           if (projectId && createdByProvision && typeof railway.deleteProject === 'function') {
             const cleanup = await railway.deleteProject(projectId);
@@ -339,6 +377,21 @@ export class AdapterFactory {
         return typeof value === 'string' ? value : null;
       },
       async destroy(component) {
+        const pluginId = component.externalId;
+        if (pluginId && typeof railway.deletePlugin === 'function') {
+          const deleted = await railway.deletePlugin(pluginId);
+          if (deleted.success) {
+            return {
+              success: true,
+              message: `Deleted Railway plugin ${pluginId}`,
+            };
+          }
+          return {
+            success: false,
+            message: `Failed to delete Railway plugin ${pluginId}`,
+            error: deleted.error,
+          };
+        }
         return {
           success: false,
           message: `Destroy is not implemented for Railway component ${component.externalId ?? component.id}`,
