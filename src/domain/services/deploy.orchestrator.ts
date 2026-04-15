@@ -214,6 +214,7 @@ export class DeployOrchestrator {
             const bindings: Partial<HostingBindings> = {
               provider: options.adapter.name,
               projectId: nextProjectId,
+              railwayProjectId: nextProjectId,
             };
 
             // Also store environment ID if provided
@@ -376,15 +377,23 @@ export class DeployOrchestrator {
           );
 
           // Update environment bindings with service info using platform-agnostic structure
-          if (result.externalId) {
-            const latestEnvironment = this.envRepo.findById(options.environment.id) ?? environment;
-            const currentBindings = latestEnvironment.platformBindings as Partial<HostingBindings>;
-            const services = currentBindings.services ?? {};
-            services[service.name] = {
-              serviceId: result.externalId,
-              url: result.url,
-            };
-            this.envRepo.updatePlatformBindings(options.environment.id, { services });
+            if (result.externalId) {
+              const latestEnvironment = this.envRepo.findById(options.environment.id) ?? environment;
+              const currentBindings = latestEnvironment.platformBindings as Partial<HostingBindings>;
+              const services = currentBindings.services ?? {};
+              services[service.name] = {
+                serviceId: result.externalId,
+                url: result.url,
+              };
+            const deployData = (result.receipt.data ?? {}) as Record<string, unknown>;
+            const resolvedEnvironmentId = typeof deployData.railwayEnvironmentId === 'string'
+              ? deployData.railwayEnvironmentId
+              : undefined;
+            this.envRepo.updatePlatformBindings(options.environment.id, {
+              services,
+              environmentId: resolvedEnvironmentId,
+              railwayEnvironmentId: resolvedEnvironmentId,
+            });
 
             const createdService = result.receipt.data?.createdService === true || result.receipt.data?.created === true;
             if (createdService) {

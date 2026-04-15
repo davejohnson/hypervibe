@@ -268,7 +268,9 @@ async function executeBootstrap(params: {
     };
   }
   const dbReceiptData = (dbProvision.receipt.data ?? {}) as Record<string, unknown>;
-  const provisionProjectId = typeof dbReceiptData.railwayProjectId === 'string' ? dbReceiptData.railwayProjectId : null;
+  const provisionProjectId =
+    (typeof dbReceiptData.projectId === 'string' ? dbReceiptData.projectId : null) ??
+    (typeof dbReceiptData.railwayProjectId === 'string' ? dbReceiptData.railwayProjectId : null);
   const provisionCreatedProject = dbReceiptData.ensureProjectCreated === true;
   if (params.databaseProvider === 'railway' && provisionCreatedProject && provisionProjectId) {
     tx.addStep({
@@ -297,6 +299,8 @@ async function executeBootstrap(params: {
       },
     });
   }
+  // DB provisioning may update provider bindings; refresh the environment object before deploy planning.
+  environment = envRepo.findById(environment.id) ?? environment;
   tx.addStep({
     id: `database:${dbProvision.component.externalId ?? dbProvision.component.id}`,
     label: 'db_provision',

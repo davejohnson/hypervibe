@@ -41,7 +41,7 @@ describe('RailwayAdapter stale binding recovery', () => {
       .mockResolvedValueOnce({
         project: {
           environments: {
-            edges: [{ node: { id: 'env-new' } }],
+            edges: [{ node: { id: 'env-new', name: 'staging' } }],
           },
         },
       })
@@ -64,8 +64,13 @@ describe('RailwayAdapter stale binding recovery', () => {
     const receipt = await adapter.setEnvVars(env, makeService('web'), { DATABASE_URL: 'postgres://x' });
 
     expect(receipt.success).toBe(true);
-    const mutationCall = request.mock.calls[2];
-    expect(mutationCall[1].serviceId).toBe('svc-new');
-    expect(mutationCall[1].environmentId).toBe('env-new');
+    const upsertCall = request.mock.calls.find(([, vars]) => {
+      const payload = vars as Record<string, unknown> | undefined;
+      return Boolean(payload?.projectId && payload?.serviceId && payload?.environmentId && payload?.variables);
+    });
+    expect(upsertCall).toBeDefined();
+    const upsertVars = upsertCall?.[1] as Record<string, unknown>;
+    expect(upsertVars.serviceId).toBe('svc-new');
+    expect(upsertVars.environmentId).toBe('env-new');
   });
 });

@@ -506,9 +506,20 @@ export class RailwayAdapter implements IProviderAdapter {
       railwayEnvironmentId?: string;
     };
     let environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
-    const environmentIds = await this.listProjectEnvironmentIds(projectId);
+    const projectEnvironments = await this.listProjectEnvironments(projectId);
+    const environmentIds = projectEnvironments.map((env) => env.id);
     if (environmentId && environmentIds.includes(environmentId)) {
       return environmentId;
+    }
+    const byName = projectEnvironments.find((env) => env.name.toLowerCase() === environment.name.toLowerCase());
+    if (byName?.id) {
+      return byName.id;
+    }
+    if (environment.name.toLowerCase() !== 'production') {
+      const createdEnvironmentId = await this.createRailwayEnvironment(projectId, environment.name);
+      if (createdEnvironmentId) {
+        return createdEnvironmentId;
+      }
     }
     if (environmentIds.length > 0) {
       return environmentIds[0];
@@ -541,7 +552,7 @@ export class RailwayAdapter implements IProviderAdapter {
     }
   }
 
-  private async listProjectEnvironmentIds(projectId: string): Promise<string[]> {
+  private async listProjectEnvironments(projectId: string): Promise<Array<{ id: string; name: string }>> {
     const client = this.client;
     if (!client) return [];
     const envQuery = gql`
@@ -551,6 +562,7 @@ export class RailwayAdapter implements IProviderAdapter {
             edges {
               node {
                 id
+                name
               }
             }
           }
@@ -561,21 +573,65 @@ export class RailwayAdapter implements IProviderAdapter {
       const envResult = await client.request<{
         project?: {
           environments?:
-            | { edges?: Array<{ node?: { id?: string } }> }
-            | Array<{ id?: string }>;
+            | { edges?: Array<{ node?: { id?: string; name?: string } }> }
+            | Array<{ id?: string; name?: string }>;
         };
       }>(envQuery, { projectId });
       const envs = envResult.project?.environments;
       if (!envs) return [];
 
       if (Array.isArray(envs)) {
-        return envs.map((e) => e.id ?? '').filter((id) => id.length > 0);
+        return envs
+          .map((e) => ({ id: e.id ?? '', name: e.name ?? '' }))
+          .filter((env) => env.id.length > 0 && env.name.length > 0);
       }
       const edges = envs.edges ?? [];
-      return edges.map((e) => e.node?.id ?? '').filter((id) => id.length > 0);
+      return edges
+        .map((e) => ({ id: e.node?.id ?? '', name: e.node?.name ?? '' }))
+        .filter((env) => env.id.length > 0 && env.name.length > 0);
     } catch {
       return [];
     }
+  }
+
+  private async createRailwayEnvironment(projectId: string, environmentName: string): Promise<string | undefined> {
+    if (!this.client) return undefined;
+    const attempts: Array<{ mutation: string; variables: Record<string, unknown> }> = [
+      {
+        mutation: `
+          mutation CreateEnvironment($projectId: String!, $name: String!) {
+            environmentCreate(input: { projectId: $projectId, name: $name }) {
+              id
+              name
+            }
+          }
+        `,
+        variables: { projectId, name: environmentName },
+      },
+      {
+        mutation: `
+          mutation CreateEnvironment($projectId: String!, $name: String!) {
+            environmentCreate(projectId: $projectId, name: $name) {
+              id
+              name
+            }
+          }
+        `,
+        variables: { projectId, name: environmentName },
+      },
+    ];
+
+    for (const attempt of attempts) {
+      try {
+        const result = await this.client.request<Record<string, unknown>>(gql`${attempt.mutation}`, attempt.variables);
+        const created = result.environmentCreate as { id?: string } | undefined;
+        if (created?.id) return created.id;
+      } catch {
+        // Try next schema variant.
+      }
+    }
+
+    return undefined;
   }
 
   private async resolveServiceIdForProject(
