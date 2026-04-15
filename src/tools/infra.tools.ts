@@ -729,7 +729,7 @@ export function registerInfraTools(server: McpServer): void {
 
   server.tool(
     'infra_apply',
-    'Apply persisted desired state (or explicit state) to converge infrastructure.',
+    'Apply persisted desired state (or explicit state) to create/update provider infrastructure. Use this for new setup and retries; use project_import only to adopt already-existing live projects.',
     {
       projectName: z.string().describe('Project name'),
       environmentName: z.string().optional().describe('Override desired environment'),

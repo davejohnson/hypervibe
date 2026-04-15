@@ -50,7 +50,7 @@ export function mergeProjectPolicies(
 export function registerProjectTools(server: McpServer): void {
   server.tool(
     'project_create',
-    'Create a new infrastructure project',
+    'Create a new Hypervibe project record for new infrastructure provisioning (use infra_apply to create resources on providers).',
     {
       name: z.string().min(1).max(100).describe('Project name'),
       defaultPlatform: z.string().optional().describe('Default deployment platform (default: railway)'),
@@ -339,9 +339,9 @@ export function registerProjectTools(server: McpServer): void {
 
   server.tool(
     'project_import',
-    'Import an existing Railway project into Hypervibe',
+    'Adopt an already-deployed Railway project into Hypervibe state (discovery/import). Not for creating new infrastructure or retrying failed applies.',
     {
-      name: z.string().optional().describe('Railway project name to import. If omitted, lists available projects.'),
+      name: z.string().optional().describe('Existing Railway project name to adopt. If omitted, lists Railway projects available to import.'),
       environmentMappings: z
         .record(z.string(), z.string())
         .optional()
@@ -357,7 +357,7 @@ export function registerProjectTools(server: McpServer): void {
               type: 'text' as const,
               text: JSON.stringify({
                 success: false,
-                error: 'No Railway connection configured. Use connection_add first.',
+                  error: 'No Railway connection configured. Use connection_create provider="railway" first.',
               }),
             },
           ],
@@ -394,7 +394,7 @@ export function registerProjectTools(server: McpServer): void {
                 type: 'text' as const,
                 text: JSON.stringify({
                   success: true,
-                  message: `Found ${projects.length} Railway projects. Use project_import with a name to import one.`,
+                  message: `Found ${projects.length} Railway projects. Use project_import name="<existing-railway-project>" to adopt one into Hypervibe.`,
                   projects: projectSummaries,
                 }),
               },
@@ -411,7 +411,7 @@ export function registerProjectTools(server: McpServer): void {
                 type: 'text' as const,
                 text: JSON.stringify({
                   success: false,
-                  error: `Railway project "${name}" not found`,
+                  error: `Railway project "${name}" not found. For new infrastructure, use project_create then infra_apply (not project_import).`,
                 }),
               },
             ],
@@ -530,8 +530,8 @@ export function registerProjectTools(server: McpServer): void {
                   needsMapping,
                   message:
                     needsMapping.length > 0
-                      ? 'Found project. Some environments need classification. Call project_import with environmentMappings to complete import.'
-                      : 'Found project. Call project_import with environmentMappings to complete import (can use auto-detected mappings).',
+                      ? 'Found existing Railway project. Some environments need classification. Call project_import with environmentMappings to complete adoption.'
+                      : 'Found existing Railway project. Call project_import with environmentMappings to complete adoption (you can use auto-detected mappings).',
                 }),
               },
             ],
