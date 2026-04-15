@@ -237,9 +237,14 @@ async function executeBootstrap(params: {
 
   const dbAdapterResult = await adapterFactory.getDatabaseAdapter(params.databaseProvider, project);
   if (!dbAdapterResult.success || !dbAdapterResult.adapter) {
+    const cleanup = await tx.rollback();
     return {
       success: false,
-      summary: { error: dbAdapterResult.error || 'Database adapter unavailable' },
+      summary: {
+        error: dbAdapterResult.error || 'Database adapter unavailable',
+        rollback: cleanup,
+        transaction: { created: tx.listResources() },
+      },
     };
   }
 
@@ -247,10 +252,13 @@ async function executeBootstrap(params: {
     databaseName: project.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(),
   });
   if (!dbProvision.receipt.success) {
+    const cleanup = await tx.rollback();
     return {
       success: false,
       summary: {
         error: dbProvision.receipt.error || dbProvision.receipt.message,
+        rollback: cleanup,
+        transaction: { created: tx.listResources() },
         debug: {
           phase: 'db_provision',
           provider: params.databaseProvider,
@@ -258,6 +266,36 @@ async function executeBootstrap(params: {
         },
       },
     };
+  }
+  const dbReceiptData = (dbProvision.receipt.data ?? {}) as Record<string, unknown>;
+  const provisionProjectId = typeof dbReceiptData.railwayProjectId === 'string' ? dbReceiptData.railwayProjectId : null;
+  const provisionCreatedProject = dbReceiptData.ensureProjectCreated === true;
+  if (params.databaseProvider === 'railway' && provisionCreatedProject && provisionProjectId) {
+    tx.addStep({
+      id: `provider-project:${provisionProjectId}`,
+      label: 'db_provision_ensure_project',
+      resource: {
+        provider: 'railway',
+        type: 'project',
+        id: provisionProjectId,
+        name: params.projectName,
+      },
+      compensate: async () => {
+        const hosting = await adapterFactory.getHostingAdapter(project!);
+        if (!hosting.success || !hosting.adapter || typeof hosting.adapter.deleteProject !== 'function') {
+          return {
+            success: false,
+            error: `Manual cleanup required: railway project ${provisionProjectId}`,
+          };
+        }
+        const deleted = await hosting.adapter.deleteProject(provisionProjectId);
+        return {
+          success: deleted.success,
+          error: deleted.error,
+          message: deleted.success ? `Deleted provider project ${provisionProjectId}` : undefined,
+        };
+      },
+    });
   }
   tx.addStep({
     id: `database:${dbProvision.component.externalId ?? dbProvision.component.id}`,
