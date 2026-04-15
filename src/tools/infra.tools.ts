@@ -18,6 +18,7 @@ import {
   snapshotEnvironmentBindings,
 } from '../domain/services/local-state.transaction.js';
 import { resolveProject } from './resolve-project.js';
+import type { Component } from '../domain/entities/component.entity.js';
 
 const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
@@ -34,7 +35,8 @@ interface GoldenPathPlanItem {
 
 interface DesiredState {
   environmentName: string;
-  serviceName: string;
+  services: string[];
+  serviceName?: string;
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
@@ -52,13 +54,152 @@ interface DesiredState {
   };
 }
 
+interface ExistingDatabaseState {
+  status: 'missing' | 'match' | 'mismatch';
+  component?: Component;
+  provider?: string;
+  envVars?: Record<string, string>;
+  connectionUrl?: string;
+}
+
+function normalizeServices(services: Array<string | undefined | null>): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+
+  for (const service of services) {
+    if (typeof service !== 'string') continue;
+    const trimmed = service.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+
+  return normalized.length > 0 ? normalized : ['web'];
+}
+
+function explicitServicesOrNull(services: unknown): string[] | null {
+  if (!Array.isArray(services)) return null;
+
+  const normalized = services
+    .filter((service): service is string => typeof service === 'string')
+    .map((service) => service.trim())
+    .filter((service) => service.length > 0);
+
+  if (normalized.length === 0) return null;
+  return normalizeServices(normalized);
+}
+
+function getComponentProvider(component: Component | null): string | undefined {
+  if (!component) return undefined;
+  const bindings = component.bindings as Record<string, unknown>;
+  return typeof bindings.provider === 'string' && bindings.provider.length > 0 ? bindings.provider : undefined;
+}
+
+function buildEnvVarsFromComponent(component: Component): { envVars: Record<string, string>; connectionUrl?: string } {
+  const bindings = component.bindings as Record<string, unknown>;
+  const envVars: Record<string, string> = {};
+  const connectionUrl =
+    (typeof bindings.connectionUrl === 'string' && bindings.connectionUrl.length > 0
+      ? bindings.connectionUrl
+      : undefined)
+    ?? (typeof bindings.connectionString === 'string' && bindings.connectionString.length > 0
+      ? bindings.connectionString
+      : undefined);
+
+  if (getComponentProvider(component) === 'railway') {
+    const pluginName =
+      typeof bindings.pluginName === 'string' && bindings.pluginName.trim().length > 0
+        ? bindings.pluginName.trim()
+        : undefined;
+    if (pluginName) {
+      envVars.DATABASE_URL = '${{' + pluginName + '.DATABASE_URL}}';
+      envVars.DIRECT_URL = '${{' + pluginName + '.DATABASE_PRIVATE_URL}}';
+      return { envVars, connectionUrl };
+    }
+  }
+
+  if (connectionUrl) {
+    envVars.DATABASE_URL = connectionUrl;
+    envVars.DIRECT_URL = connectionUrl;
+  }
+  if (typeof bindings.pooledUrl === 'string' && bindings.pooledUrl.length > 0) {
+    envVars.DATABASE_POOLER_URL = bindings.pooledUrl;
+  }
+  if (typeof bindings.host === 'string' && bindings.host.length > 0) {
+    envVars.PGHOST = bindings.host;
+    envVars.DB_HOST = bindings.host;
+  }
+  if (typeof bindings.port === 'number' || typeof bindings.port === 'string') {
+    const port = String(bindings.port);
+    envVars.PGPORT = port;
+    envVars.DB_PORT = port;
+  }
+  if (typeof bindings.username === 'string' && bindings.username.length > 0) {
+    envVars.PGUSER = bindings.username;
+    envVars.DB_USER = bindings.username;
+  }
+  if (typeof bindings.password === 'string' && bindings.password.length > 0) {
+    envVars.PGPASSWORD = bindings.password;
+    envVars.DB_PASSWORD = bindings.password;
+  }
+  if (typeof bindings.database === 'string' && bindings.database.length > 0) {
+    envVars.PGDATABASE = bindings.database;
+    envVars.DB_NAME = bindings.database;
+  }
+
+  return { envVars, connectionUrl };
+}
+
+function resolveExistingDatabaseState(
+  environmentId: string,
+  desiredProvider: (typeof DB_PROVIDERS)[number]
+): ExistingDatabaseState {
+  const component = componentRepo.findByEnvironmentAndType(environmentId, 'postgres');
+  if (!component) {
+    return { status: 'missing' };
+  }
+
+  const provider = getComponentProvider(component);
+  if (provider === desiredProvider) {
+    const { envVars, connectionUrl } = buildEnvVarsFromComponent(component);
+    return {
+      status: 'match',
+      component,
+      provider,
+      envVars,
+      connectionUrl,
+    };
+  }
+
+  return {
+    status: 'mismatch',
+    component,
+    provider,
+  };
+}
+
 export function resolveDesiredState(
   policyState: Partial<DesiredState> | undefined,
   overrides: Partial<DesiredState>
 ): DesiredState {
+  const overrideServices = explicitServicesOrNull(overrides.services);
+  const policyServices = explicitServicesOrNull(policyState?.services);
+  const fallbackPrimaryService =
+    (typeof overrides.serviceName === 'string' && overrides.serviceName.trim().length > 0
+      ? overrides.serviceName.trim()
+      : undefined)
+    ?? (typeof policyState?.serviceName === 'string' && policyState.serviceName.trim().length > 0
+      ? policyState.serviceName.trim()
+      : undefined)
+    ?? 'web';
+  const fallbackServices = overrideServices
+    ?? policyServices
+    ?? [fallbackPrimaryService];
+
   return {
     environmentName: overrides.environmentName ?? policyState?.environmentName ?? 'staging',
-    serviceName: overrides.serviceName ?? policyState?.serviceName ?? 'web',
+    services: fallbackServices,
+    serviceName: fallbackServices[0],
     domain: overrides.domain ?? policyState?.domain,
     databaseProvider: overrides.databaseProvider ?? policyState?.databaseProvider ?? 'supabase',
     setupEmail: overrides.setupEmail ?? policyState?.setupEmail ?? true,
@@ -86,7 +227,7 @@ const migrationDesiredSchema = z.object({
 function buildPlan(params: {
   projectName: string;
   environmentName: string;
-  serviceName: string;
+  services: string[];
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
@@ -120,28 +261,47 @@ function buildPlan(params: {
       : `Create environment "${params.environmentName}"`,
   });
 
-  const service = effectiveProject ? serviceRepo.findByProjectAndName(effectiveProject.id, params.serviceName) : null;
-  plan.push({
-    action: 'service_create',
-    status: service ? 'ok' : 'needed',
-    detail: service ? `Service "${params.serviceName}" exists` : `Create service "${params.serviceName}"`,
-  });
+  for (const serviceName of params.services) {
+    const service = effectiveProject ? serviceRepo.findByProjectAndName(effectiveProject.id, serviceName) : null;
+    plan.push({
+      action: 'service_create',
+      status: service ? 'ok' : 'needed',
+      detail: service ? `Service "${serviceName}" exists` : `Create service "${serviceName}"`,
+    });
+  }
 
+  const existingDatabase = env ? resolveExistingDatabaseState(env.id, params.databaseProvider) : { status: 'missing' as const };
   const dbConnection = connectionRepo.findBestMatchFromHints(params.databaseProvider, scopeHints);
   plan.push({
     action: 'db_provision',
-    status: dbConnection ? 'needed' : 'blocked',
-    detail: dbConnection
-      ? `Provision postgres on ${params.databaseProvider}`
-      : `Missing verified ${params.databaseProvider} connection`,
+    status:
+      existingDatabase.status === 'match'
+        ? 'ok'
+        : dbConnection
+          ? 'needed'
+          : 'blocked',
+    detail:
+      existingDatabase.status === 'match'
+        ? `Postgres already managed on ${params.databaseProvider}`
+        : existingDatabase.status === 'mismatch'
+          ? dbConnection
+            ? `Switch postgres from ${existingDatabase.provider ?? 'unknown'} to ${params.databaseProvider}`
+            : `Missing verified ${params.databaseProvider} connection to replace existing ${existingDatabase.provider ?? 'unknown'} postgres`
+          : dbConnection
+            ? `Provision postgres on ${params.databaseProvider}`
+            : `Missing verified ${params.databaseProvider} connection`,
   });
 
   const railwayConnection = connectionRepo.findBestMatchFromHints('railway', scopeHints);
-  plan.push({
-    action: 'deploy',
-    status: railwayConnection ? 'needed' : 'blocked',
-    detail: railwayConnection ? 'Deploy to Railway' : 'Missing verified Railway connection',
-  });
+  for (const serviceName of params.services) {
+    plan.push({
+      action: 'deploy',
+      status: railwayConnection ? 'needed' : 'blocked',
+      detail: railwayConnection
+        ? `Deploy service "${serviceName}" to Railway`
+        : 'Missing verified Railway connection',
+    });
+  }
 
   if (params.domain) {
     const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [params.domain, ...scopeHints]);
@@ -184,7 +344,7 @@ export function infraApprovalsRequiredForEnvironment(
 async function executeBootstrap(params: {
   projectName: string;
   environmentName: string;
-  serviceName: string;
+  services: string[];
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
@@ -220,137 +380,177 @@ async function executeBootstrap(params: {
     });
   }
 
-  let service = serviceRepo.findByProjectAndName(project.id, params.serviceName);
-  if (!service) {
-    service = serviceRepo.create({
-      projectId: project.id,
-      name: params.serviceName,
-      buildConfig: { builder: 'nixpacks' },
-    });
-    const createdServiceId = service.id;
-    tx.addStep({
-      id: `service:${createdServiceId}`,
-      label: 'service_create',
-      resource: { provider: 'hypervibe', type: 'service', id: createdServiceId, name: service.name },
-      compensate: async () => ({
-        success: serviceRepo.delete(createdServiceId),
-        message: `Deleted local service ${createdServiceId}`,
-      }),
-    });
-  }
+  const services = params.services.map((serviceName) => {
+    let service = serviceRepo.findByProjectAndName(project.id, serviceName);
+    if (!service) {
+      service = serviceRepo.create({
+        projectId: project.id,
+        name: serviceName,
+        buildConfig: { builder: 'nixpacks' },
+      });
+      const createdServiceId = service.id;
+      tx.addStep({
+        id: `service:${createdServiceId}`,
+        label: 'service_create',
+        resource: { provider: 'hypervibe', type: 'service', id: createdServiceId, name: service.name },
+        compensate: async () => ({
+          success: serviceRepo.delete(createdServiceId),
+          message: `Deleted local service ${createdServiceId}`,
+        }),
+      });
+    }
+    return service;
+  });
 
-  const dbAdapterResult = await adapterFactory.getDatabaseAdapter(params.databaseProvider, project);
-  if (!dbAdapterResult.success || !dbAdapterResult.adapter) {
+  if (services.length === 0) {
     const cleanup = await tx.rollback();
     return {
       success: false,
       summary: {
-        error: dbAdapterResult.error || 'Database adapter unavailable',
+        error: 'No services resolved for infrastructure apply',
         rollback: cleanup,
         transaction: { created: tx.listResources() },
       },
     };
   }
 
-  snapshotEnvironmentBindings({
-    tx,
-    envRepo,
-    environmentId: environment.id,
-    label: 'environment_bindings_db_provision',
-  });
-  const dbProvision = await dbAdapterResult.adapter.provision('postgres', environment, {
-    databaseName: project.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(),
-  });
-  if (!dbProvision.receipt.success) {
-    const cleanup = await tx.rollback();
-    return {
-      success: false,
-      summary: {
-        error: dbProvision.receipt.error || dbProvision.receipt.message,
-        rollback: cleanup,
-        transaction: { created: tx.listResources() },
-        debug: {
-          phase: 'db_provision',
+  const existingDatabase = resolveExistingDatabaseState(environment.id, params.databaseProvider);
+  let dbProvision: {
+    component: Component;
+    receipt: { success: boolean; message: string; error?: string; data?: Record<string, unknown> };
+    connectionUrl?: string;
+    envVars?: Record<string, string>;
+  };
+
+  if (existingDatabase.status === 'match' && existingDatabase.component) {
+    dbProvision = {
+      component: existingDatabase.component,
+      receipt: {
+        success: true,
+        message: `Reusing existing postgres on ${params.databaseProvider}`,
+        data: {
+          phase: 'reuseExisting',
           provider: params.databaseProvider,
-          receiptData: dbProvision.receipt.data ?? null,
+          componentId: existingDatabase.component.externalId ?? existingDatabase.component.id,
         },
       },
+      connectionUrl: existingDatabase.connectionUrl,
+      envVars: existingDatabase.envVars,
     };
-  }
-  const dbReceiptData = (dbProvision.receipt.data ?? {}) as Record<string, unknown>;
-  const provisionProjectId =
-    (typeof dbReceiptData.projectId === 'string' ? dbReceiptData.projectId : null) ??
-    (typeof dbReceiptData.railwayProjectId === 'string' ? dbReceiptData.railwayProjectId : null);
-  const provisionCreatedProject = dbReceiptData.ensureProjectCreated === true;
-  if (params.databaseProvider === 'railway' && provisionCreatedProject && provisionProjectId) {
-    tx.addStep({
-      id: `provider-project:${provisionProjectId}`,
-      label: 'db_provision_ensure_project',
-      resource: {
-        provider: 'railway',
-        type: 'project',
-        id: provisionProjectId,
-        name: params.projectName,
-      },
-      compensate: async () => {
-        const hosting = await adapterFactory.getHostingAdapter(project!);
-        if (!hosting.success || !hosting.adapter || typeof hosting.adapter.deleteProject !== 'function') {
-          return {
-            success: false,
-            error: `Manual cleanup required: railway project ${provisionProjectId}`,
-          };
-        }
-        const deleted = await hosting.adapter.deleteProject(provisionProjectId);
-        return {
-          success: deleted.success,
-          error: deleted.error,
-          message: deleted.success ? `Deleted provider project ${provisionProjectId}` : undefined,
-        };
-      },
-    });
-  }
-  // DB provisioning may update provider bindings; refresh the environment object before deploy planning.
-  environment = envRepo.findById(environment.id) ?? environment;
-  tx.addStep({
-    id: `database:${dbProvision.component.externalId ?? dbProvision.component.id}`,
-    label: 'db_provision',
-    resource: {
-      provider: params.databaseProvider,
-      type: dbProvision.component.type,
-      id: dbProvision.component.externalId ?? dbProvision.component.id,
-      metadata: { environmentId: environment.id },
-    },
-    compensate: async () => dbAdapterResult.adapter!.destroy(dbProvision.component),
-  });
-
-  const existingComponent = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
-  if (existingComponent) {
-    snapshotComponentRecord({
-      tx,
-      componentRepo,
-      component: existingComponent,
-      label: 'component_record_update',
-    });
-    componentRepo.update(existingComponent.id, {
-      bindings: dbProvision.component.bindings,
-      externalId: dbProvision.component.externalId ?? undefined,
-    });
   } else {
-    const createdComponent = componentRepo.create({
+    const dbAdapterResult = await adapterFactory.getDatabaseAdapter(params.databaseProvider, project);
+    if (!dbAdapterResult.success || !dbAdapterResult.adapter) {
+      const cleanup = await tx.rollback();
+      return {
+        success: false,
+        summary: {
+          error: dbAdapterResult.error || 'Database adapter unavailable',
+          rollback: cleanup,
+          transaction: { created: tx.listResources() },
+        },
+      };
+    };
+
+    snapshotEnvironmentBindings({
+      tx,
+      envRepo,
       environmentId: environment.id,
-      type: 'postgres',
-      bindings: dbProvision.component.bindings,
-      externalId: dbProvision.component.externalId ?? undefined,
+      label: 'environment_bindings_db_provision',
     });
+    dbProvision = await dbAdapterResult.adapter.provision('postgres', environment, {
+      databaseName: project.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(),
+    });
+    if (!dbProvision.receipt.success) {
+      const cleanup = await tx.rollback();
+      return {
+        success: false,
+        summary: {
+          error: dbProvision.receipt.error || dbProvision.receipt.message,
+          rollback: cleanup,
+          transaction: { created: tx.listResources() },
+          debug: {
+            phase: 'db_provision',
+            provider: params.databaseProvider,
+            receiptData: dbProvision.receipt.data ?? null,
+          },
+        },
+      };
+    }
+    const dbReceiptData = (dbProvision.receipt.data ?? {}) as Record<string, unknown>;
+    const provisionProjectId =
+      (typeof dbReceiptData.projectId === 'string' ? dbReceiptData.projectId : null) ??
+      (typeof dbReceiptData.railwayProjectId === 'string' ? dbReceiptData.railwayProjectId : null);
+    const provisionCreatedProject = dbReceiptData.ensureProjectCreated === true;
+    if (params.databaseProvider === 'railway' && provisionCreatedProject && provisionProjectId) {
+      tx.addStep({
+        id: `provider-project:${provisionProjectId}`,
+        label: 'db_provision_ensure_project',
+        resource: {
+          provider: 'railway',
+          type: 'project',
+          id: provisionProjectId,
+          name: params.projectName,
+        },
+        compensate: async () => {
+          const hosting = await adapterFactory.getHostingAdapter(project!);
+          if (!hosting.success || !hosting.adapter || typeof hosting.adapter.deleteProject !== 'function') {
+            return {
+              success: false,
+              error: `Manual cleanup required: railway project ${provisionProjectId}`,
+            };
+          }
+          const deleted = await hosting.adapter.deleteProject(provisionProjectId);
+          return {
+            success: deleted.success,
+            error: deleted.error,
+            message: deleted.success ? `Deleted provider project ${provisionProjectId}` : undefined,
+          };
+        },
+      });
+    }
+    // DB provisioning may update provider bindings; refresh the environment object before deploy planning.
+    environment = envRepo.findById(environment.id) ?? environment;
     tx.addStep({
-      id: `component:${createdComponent.id}`,
-      label: 'component_record_create',
-      resource: { provider: 'hypervibe', type: 'component', id: createdComponent.id, name: 'postgres' },
-      compensate: async () => ({
-        success: componentRepo.delete(createdComponent.id),
-        message: `Deleted local component ${createdComponent.id}`,
-      }),
+      id: `database:${dbProvision.component.externalId ?? dbProvision.component.id}`,
+      label: 'db_provision',
+      resource: {
+        provider: params.databaseProvider,
+        type: dbProvision.component.type,
+        id: dbProvision.component.externalId ?? dbProvision.component.id,
+        metadata: { environmentId: environment.id },
+      },
+      compensate: async () => dbAdapterResult.adapter!.destroy(dbProvision.component),
     });
+
+    const existingComponent = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
+    if (existingComponent) {
+      snapshotComponentRecord({
+        tx,
+        componentRepo,
+        component: existingComponent,
+        label: 'component_record_update',
+      });
+      componentRepo.update(existingComponent.id, {
+        bindings: dbProvision.component.bindings,
+        externalId: dbProvision.component.externalId ?? undefined,
+      });
+    } else {
+      const createdComponent = componentRepo.create({
+        environmentId: environment.id,
+        type: 'postgres',
+        bindings: dbProvision.component.bindings,
+        externalId: dbProvision.component.externalId ?? undefined,
+      });
+      tx.addStep({
+        id: `component:${createdComponent.id}`,
+        label: 'component_record_create',
+        resource: { provider: 'hypervibe', type: 'component', id: createdComponent.id, name: 'postgres' },
+        compensate: async () => ({
+          success: componentRepo.delete(createdComponent.id),
+          message: `Deleted local component ${createdComponent.id}`,
+        }),
+      });
+    }
   }
 
   const hostingResult = await adapterFactory.getHostingAdapter(project);
@@ -370,7 +570,7 @@ async function executeBootstrap(params: {
   const deploy = await orchestrator.execute({
     project,
     environment,
-    services: [service],
+    services,
     envVars: dbProvision.envVars,
     adapter: hostingResult.adapter,
   });
@@ -378,7 +578,8 @@ async function executeBootstrap(params: {
   const summary: Record<string, unknown> = {
     project: project.name,
     environment: environment.name,
-    service: service.name,
+    service: services[0]?.name,
+    services: services.map((service) => service.name),
     deploymentRunId: deploy.run.id,
     deploymentSuccess: deploy.success,
     urls: deploy.urls,
@@ -415,12 +616,18 @@ async function executeBootstrap(params: {
     if (sgConnection) {
       const sgCreds = secretStore.decryptObject<SendGridCredentials>(sgConnection.credentialsEncrypted);
       const latestEnvironment = envRepo.findById(environment.id) ?? environment;
-      const receipt = await hostingResult.adapter.setEnvVars(latestEnvironment, service, {
-        SENDGRID_API_KEY: sgCreds.apiKey,
-      });
-      summary.sendgridApiKeySynced = receipt.success;
-      if (!receipt.success) {
-        summary.sendgridApiKeySyncError = receipt.error || receipt.message;
+      const sendgridFailures: string[] = [];
+      for (const service of services) {
+        const receipt = await hostingResult.adapter.setEnvVars(latestEnvironment, service, {
+          SENDGRID_API_KEY: sgCreds.apiKey,
+        });
+        if (!receipt.success) {
+          sendgridFailures.push(`${service.name}: ${receipt.error || receipt.message}`);
+        }
+      }
+      summary.sendgridApiKeySynced = sendgridFailures.length === 0;
+      if (sendgridFailures.length > 0) {
+        summary.sendgridApiKeySyncError = sendgridFailures.join('; ');
       }
 
       if (params.domain) {
@@ -495,6 +702,7 @@ export function registerInfraTools(server: McpServer): void {
     {
       projectName: z.string().describe('Project name'),
       environmentName: z.string().optional().describe('Environment (default: staging)'),
+      services: z.array(z.string().min(1)).optional().describe('Service names to converge (default: ["web"])'),
       serviceName: z.string().optional().describe('Service name (default: web)'),
       domain: z.string().optional().describe('Optional domain for DNS configuration'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (default: supabase)'),
@@ -503,6 +711,7 @@ export function registerInfraTools(server: McpServer): void {
     async ({
       projectName,
       environmentName,
+      services,
       serviceName,
       domain,
       databaseProvider,
@@ -512,6 +721,7 @@ export function registerInfraTools(server: McpServer): void {
       const policyState = (project?.policies?.desiredState as Partial<DesiredState> | undefined) ?? {};
       const desired = resolveDesiredState(policyState, {
         environmentName,
+        services,
         serviceName,
         domain,
         databaseProvider,
@@ -521,7 +731,7 @@ export function registerInfraTools(server: McpServer): void {
       const plan = buildPlan({
         projectName,
         environmentName: desired.environmentName,
-        serviceName: desired.serviceName,
+        services: desired.services,
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
@@ -537,6 +747,7 @@ export function registerInfraTools(server: McpServer): void {
             desired,
             environmentName: desired.environmentName,
             serviceName: desired.serviceName,
+            services: desired.services,
             plan,
             summary: {
               needed: plan.filter((p) => p.status === 'needed').length,
@@ -555,6 +766,7 @@ export function registerInfraTools(server: McpServer): void {
     {
       projectName: z.string().describe('Project name'),
       environmentName: z.string().optional().describe('Environment (default: staging)'),
+      services: z.array(z.string().min(1)).optional().describe('Service names to bootstrap (default: ["web"])'),
       serviceName: z.string().optional().describe('Service name (default: web)'),
       domain: z.string().optional().describe('Optional domain to configure'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (default: supabase)'),
@@ -564,21 +776,32 @@ export function registerInfraTools(server: McpServer): void {
     },
     async ({
       projectName,
-      environmentName = 'staging',
-      serviceName = 'web',
+      environmentName,
+      services,
+      serviceName,
       domain,
-      databaseProvider = 'supabase',
-      setupEmail = true,
+      databaseProvider,
+      setupEmail,
       confirm = false,
       approvalId,
     }) => {
-      const previewPlan = buildPlan({
-        projectName,
+      const existingProject = resolveProject({ projectName });
+      const policyState = (existingProject?.policies?.desiredState as Partial<DesiredState> | undefined) ?? {};
+      const resolvedDesired = resolveDesiredState(policyState, {
         environmentName,
+        services,
         serviceName,
         domain,
         databaseProvider,
         setupEmail,
+      });
+      const previewPlan = buildPlan({
+        projectName,
+        environmentName: resolvedDesired.environmentName,
+        services: resolvedDesired.services,
+        domain: resolvedDesired.domain,
+        databaseProvider: resolvedDesired.databaseProvider,
+        setupEmail: resolvedDesired.setupEmail,
       });
 
       if (!confirm) {
@@ -589,15 +812,15 @@ export function registerInfraTools(server: McpServer): void {
               success: true,
               mode: 'preview',
               message: 'Call again with confirm=true to execute bootstrap.',
+              desired: resolvedDesired,
               plan: previewPlan,
             }),
           }],
         };
       }
 
-      const existingProject = resolveProject({ projectName });
-      if (existingProject && isProtectedEnvironment(existingProject, environmentName)) {
-        const requireApprovals = infraApprovalsRequiredForEnvironment(existingProject, environmentName);
+      if (existingProject && isProtectedEnvironment(existingProject, resolvedDesired.environmentName)) {
+        const requireApprovals = infraApprovalsRequiredForEnvironment(existingProject, resolvedDesired.environmentName);
         if (requireApprovals) {
           if (!approvalId) {
             return {
@@ -605,7 +828,7 @@ export function registerInfraTools(server: McpServer): void {
                 type: 'text' as const,
                 text: JSON.stringify({
                   success: false,
-                  error: `Approval required for protected environment "${environmentName}". Create one with approval_request_create and re-run with approvalId.`,
+                  error: `Approval required for protected environment "${resolvedDesired.environmentName}". Create one with approval_request_create and re-run with approvalId.`,
                   requiredAction: 'infra.apply',
                 }),
               }],
@@ -613,7 +836,7 @@ export function registerInfraTools(server: McpServer): void {
           }
           const { ApprovalRepository } = await import('../adapters/db/repositories/approval.repository.js');
           const approvalRepo = new ApprovalRepository();
-          const validation = approvalRepo.validateForAction(approvalId, existingProject.id, environmentName, 'infra.apply');
+          const validation = approvalRepo.validateForAction(approvalId, existingProject.id, resolvedDesired.environmentName, 'infra.apply');
           if (!validation.ok) {
             return {
               content: [{
@@ -629,7 +852,7 @@ export function registerInfraTools(server: McpServer): void {
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `Environment "${environmentName}" is protected by project policy. Use deploy/rollback tools with explicit production confirm.`,
+              error: `Environment "${resolvedDesired.environmentName}" is protected by project policy. Use deploy/rollback tools with explicit production confirm.`,
             }),
           }],
         };
@@ -637,11 +860,11 @@ export function registerInfraTools(server: McpServer): void {
 
       const executed = await executeBootstrap({
         projectName,
-        environmentName,
-        serviceName,
-        domain,
-        databaseProvider,
-        setupEmail,
+        environmentName: resolvedDesired.environmentName,
+        services: resolvedDesired.services,
+        domain: resolvedDesired.domain,
+        databaseProvider: resolvedDesired.databaseProvider,
+        setupEmail: resolvedDesired.setupEmail,
       });
       if (!executed.success && executed.summary.error) {
         return {
@@ -674,6 +897,7 @@ export function registerInfraTools(server: McpServer): void {
     {
       projectName: z.string().describe('Project name'),
       environmentName: z.string().optional().describe('Desired environment (default: staging)'),
+      services: z.array(z.string().min(1)).optional().describe('Desired services to converge (default: ["web"])'),
       serviceName: z.string().optional().describe('Desired service (default: web)'),
       domain: z.string().optional().describe('Optional desired domain'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Desired DB provider (default: supabase)'),
@@ -684,6 +908,7 @@ export function registerInfraTools(server: McpServer): void {
     async ({
       projectName,
       environmentName = 'staging',
+      services,
       serviceName = 'web',
       domain,
       databaseProvider = 'supabase',
@@ -701,15 +926,16 @@ export function registerInfraTools(server: McpServer): void {
         };
       }
 
-      const desiredState: DesiredState = {
+      const desiredState = resolveDesiredState(undefined, {
         environmentName,
+        services,
         serviceName,
         domain,
         databaseProvider,
         setupEmail,
         deploy,
         migrations,
-      };
+      });
       const nextPolicies = { ...(project.policies ?? {}), desiredState };
       const updated = projectRepo.update(project.id, { policies: nextPolicies });
       const intent = syncProjectIntent(project.id);
@@ -764,6 +990,7 @@ export function registerInfraTools(server: McpServer): void {
     {
       projectName: z.string().describe('Project name'),
       environmentName: z.string().optional().describe('Override desired environment'),
+      services: z.array(z.string().min(1)).optional().describe('Override desired services to converge'),
       serviceName: z.string().optional().describe('Override desired service'),
       domain: z.string().optional().describe('Override desired domain'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Override desired DB provider'),
@@ -773,7 +1000,7 @@ export function registerInfraTools(server: McpServer): void {
       confirm: z.boolean().optional().describe('Set true to apply'),
       approvalId: z.string().uuid().optional().describe('Approval ID for protected environments (action: infra.apply)'),
     },
-    async ({ projectName, environmentName, serviceName, domain, databaseProvider, setupEmail, deploy, migrations, confirm = false, approvalId }) => {
+    async ({ projectName, environmentName, services, serviceName, domain, databaseProvider, setupEmail, deploy, migrations, confirm = false, approvalId }) => {
       const project = resolveProject({ projectName });
       if (!project) {
         return {
@@ -787,6 +1014,7 @@ export function registerInfraTools(server: McpServer): void {
       const policyState = (project.policies?.desiredState as Partial<DesiredState> | undefined) ?? {};
       const desired = resolveDesiredState(policyState, {
         environmentName,
+        services,
         serviceName,
         domain,
         databaseProvider,
@@ -798,7 +1026,7 @@ export function registerInfraTools(server: McpServer): void {
       const plan = buildPlan({
         projectName,
         environmentName: desired.environmentName,
-        serviceName: desired.serviceName,
+        services: desired.services,
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
@@ -812,6 +1040,7 @@ export function registerInfraTools(server: McpServer): void {
               success: true,
               mode: 'preview',
               desired,
+              services: desired.services,
               plan,
               message: 'Call again with confirm=true to apply desired state.',
             }),
@@ -861,7 +1090,7 @@ export function registerInfraTools(server: McpServer): void {
       const executed = await executeBootstrap({
         projectName,
         environmentName: desired.environmentName,
-        serviceName: desired.serviceName,
+        services: desired.services,
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,

@@ -52,6 +52,7 @@ interface ProjectIntentSchema {
     state: Record<string, unknown> | null;
     environmentName?: string;
     serviceName?: string;
+    services?: string[];
     domain?: string;
     databaseProvider?: string;
     setupEmail?: boolean;
@@ -151,6 +152,15 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function toStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((v) => String(v));
+}
+
+function normalizeDesiredServices(desiredState: Record<string, unknown> | null): string[] | undefined {
+  const explicitServices = toStringArray(desiredState?.services);
+  if (explicitServices.length > 0) return explicitServices;
+  if (typeof desiredState?.serviceName === 'string' && desiredState.serviceName.trim().length > 0) {
+    return [desiredState.serviceName.trim()];
+  }
+  return undefined;
 }
 
 export function buildDriftSignals(
@@ -346,10 +356,12 @@ function buildIntent(project: Project): ProjectIntentSchema {
     desiredMigrations?.mode === 'tool'
       ? desiredMigrations.mode
       : undefined;
+  const desiredServices = normalizeDesiredServices(desiredState);
   const desired = {
     state: desiredState,
     environmentName: typeof desiredState?.environmentName === 'string' ? desiredState.environmentName : undefined,
-    serviceName: typeof desiredState?.serviceName === 'string' ? desiredState.serviceName : undefined,
+    serviceName: desiredServices?.[0],
+    services: desiredServices,
     domain: typeof desiredState?.domain === 'string' ? desiredState.domain : undefined,
     databaseProvider: typeof desiredState?.databaseProvider === 'string' ? desiredState.databaseProvider : undefined,
     setupEmail: typeof desiredState?.setupEmail === 'boolean' ? desiredState.setupEmail : undefined,

@@ -1657,6 +1657,68 @@ export class RailwayAdapter implements IProviderAdapter {
     }
   }
 
+  async updateServiceInstanceConfig(params: {
+    serviceId: string;
+    environmentId: string;
+    startCommand?: string;
+    healthcheckPath?: string;
+    cronSchedule?: string;
+  }): Promise<Receipt> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const input: Record<string, unknown> = {};
+    if (params.startCommand) {
+      input.startCommand = params.startCommand;
+    }
+    if (params.healthcheckPath) {
+      input.healthcheckPath = params.healthcheckPath;
+    }
+    if (params.cronSchedule) {
+      input.cronSchedule = params.cronSchedule;
+    }
+
+    if (Object.keys(input).length === 0) {
+      return {
+        success: true,
+        message: 'No Railway service instance updates requested',
+      };
+    }
+
+    const mutation = gql`
+      mutation UpdateServiceInstance(
+        $serviceId: String!
+        $environmentId: String!
+        $input: ServiceInstanceUpdateInput!
+      ) {
+        serviceInstanceUpdate(
+          serviceId: $serviceId
+          environmentId: $environmentId
+          input: $input
+        )
+      }
+    `;
+
+    try {
+      await this.client.request(mutation, {
+        serviceId: params.serviceId,
+        environmentId: params.environmentId,
+        input,
+      });
+      return {
+        success: true,
+        message: 'Railway service instance updated',
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to update Railway service instance',
+        error: this.describeError(error),
+      };
+    }
+  }
+
   async findProjectByName(name: string): Promise<RailwayProject | null> {
     const projects = await this.listProjects();
     return projects.find((p) => p.name.toLowerCase() === name.toLowerCase()) ?? null;

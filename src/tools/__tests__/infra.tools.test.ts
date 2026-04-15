@@ -6,6 +6,7 @@ describe('infra.tools desired state resolution', () => {
     const desired = resolveDesiredState(undefined, {});
     expect(desired).toEqual({
       environmentName: 'staging',
+      services: ['web'],
       serviceName: 'web',
       databaseProvider: 'supabase',
       setupEmail: true,
@@ -19,6 +20,7 @@ describe('infra.tools desired state resolution', () => {
     const desired = resolveDesiredState(
       {
         environmentName: 'production',
+        services: ['api', 'worker'],
         serviceName: 'api',
         domain: 'example.com',
         databaseProvider: 'rds',
@@ -26,7 +28,7 @@ describe('infra.tools desired state resolution', () => {
         deploy: { strategy: 'manual' },
       },
       {
-        serviceName: 'web',
+        services: ['web', 'worker'],
         databaseProvider: 'cloudsql',
         deploy: { strategy: 'branch', branches: { staging: 'staging', production: 'main' } },
         migrations: { mode: 'releaseCommand', runInDeploy: true, command: 'npm run migrate' },
@@ -34,6 +36,7 @@ describe('infra.tools desired state resolution', () => {
     );
 
     expect(desired.environmentName).toBe('production');
+    expect(desired.services).toEqual(['web', 'worker']);
     expect(desired.serviceName).toBe('web');
     expect(desired.databaseProvider).toBe('cloudsql');
     expect(desired.setupEmail).toBe(false);
@@ -52,5 +55,17 @@ describe('infra.tools desired state resolution', () => {
     );
 
     expect(desired.databaseProvider).toBe('railway');
+  });
+
+  it('falls back to legacy serviceName when services are not persisted', () => {
+    const desired = resolveDesiredState(
+      {
+        serviceName: 'worker',
+      },
+      {}
+    );
+
+    expect(desired.services).toEqual(['worker']);
+    expect(desired.serviceName).toBe('worker');
   });
 });

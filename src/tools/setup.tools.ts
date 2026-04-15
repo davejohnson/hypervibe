@@ -1,7 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
-import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
@@ -10,25 +9,47 @@ import type { RailwayCredentials, RailwayProjectDetails } from '../adapters/prov
 import { resolveProject } from './resolve-project.js';
 
 const envRepo = new EnvironmentRepository();
-const serviceRepo = new ServiceRepository();
 const connectionRepo = new ConnectionRepository();
-
-interface ServiceConfig {
-  name: string;
-  type: 'web' | 'worker' | 'cron';
-  startCommand?: string;
-  releaseCommand?: string; // For migrations - runs once before deploy
-  cronSchedule?: string;
-  healthCheckPath?: string;
-  replicas?: number;
-  autoscaling?: boolean;
-}
 
 interface SetupIssue {
   service: string;
   issue: string;
   severity: 'error' | 'warning' | 'info';
   fix?: string;
+}
+
+async function resolveRailwayProjectDetails(
+  adapter: RailwayAdapter,
+  params: { projectName?: string; railwayProjectId?: string }
+): Promise<RailwayProjectDetails | null> {
+  if (params.railwayProjectId) {
+    return await adapter.getProjectDetails(params.railwayProjectId);
+  }
+
+  if (!params.projectName) {
+    return null;
+  }
+
+  const project = resolveProject({ projectName: params.projectName });
+  if (project) {
+    const envs = envRepo.findByProjectId(project.id);
+    for (const env of envs) {
+      const bindings = env.platformBindings as { projectId?: string; railwayProjectId?: string };
+      const providerProjectId = bindings.projectId || bindings.railwayProjectId;
+      if (!providerProjectId) continue;
+      const details = await adapter.getProjectDetails(providerProjectId);
+      if (details) {
+        return details;
+      }
+    }
+  }
+
+  const found = await adapter.findProjectByName(params.projectName);
+  if (!found) {
+    return null;
+  }
+
+  return await adapter.getProjectDetails(found.id);
 }
 
 export function registerSetupTools(server: McpServer): void {
@@ -56,31 +77,7 @@ export function registerSetupTools(server: McpServer): void {
       await adapter.connect(credentials);
 
       // Find Railway project
-      let railwayProject: RailwayProjectDetails | null = null;
-
-      if (railwayProjectId) {
-        railwayProject = await adapter.getProjectDetails(railwayProjectId);
-      } else if (projectName) {
-        const project = resolveProject({ projectName });
-        if (project) {
-          const envs = envRepo.findByProjectId(project.id);
-          for (const env of envs) {
-            const bindings = env.platformBindings as { railwayProjectId?: string };
-            if (bindings.railwayProjectId) {
-              railwayProject = await adapter.getProjectDetails(bindings.railwayProjectId);
-              break;
-            }
-          }
-        }
-
-        // Try finding by name in Railway
-        if (!railwayProject) {
-          const found = await adapter.findProjectByName(projectName);
-          if (found) {
-            railwayProject = await adapter.getProjectDetails(found.id);
-          }
-        }
-      }
+      const railwayProject = await resolveRailwayProjectDetails(adapter, { projectName, railwayProjectId });
 
       if (!railwayProject) {
         // List available projects
@@ -258,27 +255,12 @@ export function registerSetupTools(server: McpServer): void {
       await adapter.connect(credentials);
 
       // Find project
-      let projectId = railwayProjectId;
-      if (!projectId && projectName) {
-        const found = await adapter.findProjectByName(projectName);
-        projectId = found?.id;
-      }
-
-      if (!projectId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Project not found' }),
-          }],
-        };
-      }
-
-      const projectDetails = await adapter.getProjectDetails(projectId);
+      const projectDetails = await resolveRailwayProjectDetails(adapter, { projectName, railwayProjectId });
       if (!projectDetails) {
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Could not fetch project details' }),
+            text: JSON.stringify({ success: false, error: 'Project not found' }),
           }],
         };
       }
@@ -323,38 +305,35 @@ export function registerSetupTools(server: McpServer): void {
       try {
         const updates: string[] = [];
 
-        // Note: Railway's GraphQL API for updating service settings is complex
-        // We'll use the serviceInstanceUpdate mutation
-        const client = (adapter as unknown as { client: { request: Function } }).client;
-
         if (startCommand || healthCheckPath || cronSchedule) {
-          const mutation = `
-            mutation UpdateServiceInstance($input: ServiceInstanceUpdateInput!) {
-              serviceInstanceUpdate(input: $input)
-            }
-          `;
-
-          const input: Record<string, unknown> = {
+          const receipt = await adapter.updateServiceInstanceConfig({
             serviceId: service.node.id,
             environmentId: env.node.id,
-          };
+            startCommand,
+            healthcheckPath: healthCheckPath,
+            cronSchedule,
+          });
+          if (!receipt.success) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: receipt.error || receipt.message,
+                }),
+              }],
+            };
+          }
 
           if (startCommand) {
-            input.startCommand = startCommand;
             updates.push(`Start command: ${startCommand}`);
           }
-
           if (healthCheckPath) {
-            input.healthcheckPath = healthCheckPath;
             updates.push(`Health check: ${healthCheckPath}`);
           }
-
           if (cronSchedule) {
-            input.cronSchedule = cronSchedule;
             updates.push(`Cron schedule: ${cronSchedule}`);
           }
-
-          await client.request(mutation, { input });
         }
 
         // Release command needs to be set via railway.toml or service variables
@@ -395,155 +374,4 @@ export function registerSetupTools(server: McpServer): void {
     }
   );
 
-  server.tool(
-    'setup_fix',
-    'Automatically fix common configuration issues in a Railway project',
-    {
-      projectName: z.string().optional().describe('Project name'),
-      railwayProjectId: z.string().optional().describe('Railway project ID'),
-      dryRun: z.boolean().optional().describe('Show what would be fixed without applying'),
-    },
-    async ({ projectName, railwayProjectId, dryRun }) => {
-      // First, scan for issues
-      const connection = connectionRepo.findByProvider('railway');
-      if (!connection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No Railway connection' }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
-
-      // Find project
-      let projectId = railwayProjectId;
-      if (!projectId && projectName) {
-        const found = await adapter.findProjectByName(projectName);
-        projectId = found?.id;
-      }
-
-      if (!projectId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Project not found' }),
-          }],
-        };
-      }
-
-      const projectDetails = await adapter.getProjectDetails(projectId);
-      if (!projectDetails) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Could not fetch project' }),
-          }],
-        };
-      }
-
-      const fixes: Array<{ service: string; action: string; applied: boolean }> = [];
-
-      // Check for database and auto-wire connections
-      const hasPostgres = projectDetails.plugins.edges.some((p) =>
-        p.node.name.toLowerCase().includes('postgres')
-      );
-      const hasRedis = projectDetails.plugins.edges.some((p) =>
-        p.node.name.toLowerCase().includes('redis')
-      );
-
-      for (const envEdge of projectDetails.environments.edges) {
-        const railwayEnv = envEdge.node;
-
-        for (const svcEdge of projectDetails.services.edges) {
-          const svc = svcEdge.node;
-
-          // Get current variables
-          const currentVars = await adapter.getServiceVariables(
-            projectDetails.id,
-            svc.id,
-            railwayEnv.id
-          );
-
-          const varsToSet: Record<string, string> = {};
-
-          // Auto-wire database if not set
-          if (hasPostgres && !currentVars['DATABASE_URL']) {
-            const postgresPlugin = projectDetails.plugins.edges.find((p) =>
-              p.node.name.toLowerCase().includes('postgres')
-            );
-            if (postgresPlugin) {
-              varsToSet['DATABASE_URL'] = '${{' + postgresPlugin.node.name + '.DATABASE_URL}}';
-              fixes.push({
-                service: `${svc.name} (${railwayEnv.name})`,
-                action: 'Wire DATABASE_URL to Postgres plugin',
-                applied: !dryRun,
-              });
-            }
-          }
-
-          // Auto-wire Redis if not set
-          if (hasRedis && !currentVars['REDIS_URL']) {
-            const redisPlugin = projectDetails.plugins.edges.find((p) =>
-              p.node.name.toLowerCase().includes('redis')
-            );
-            if (redisPlugin) {
-              varsToSet['REDIS_URL'] = '${{' + redisPlugin.node.name + '.REDIS_URL}}';
-              fixes.push({
-                service: `${svc.name} (${railwayEnv.name})`,
-                action: 'Wire REDIS_URL to Redis plugin',
-                applied: !dryRun,
-              });
-            }
-          }
-
-          // Apply fixes if not dry run
-          if (!dryRun && Object.keys(varsToSet).length > 0) {
-            // We need to create a mock environment and service object for setEnvVars
-            const mockEnv = {
-              id: '',
-              projectId: '',
-              name: railwayEnv.name,
-              platformBindings: {
-                railwayProjectId: projectDetails.id,
-                railwayEnvironmentId: railwayEnv.id,
-                services: { [svc.name]: { serviceId: svc.id } },
-              },
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            };
-            const mockService = {
-              id: '',
-              projectId: '',
-              name: svc.name,
-              buildConfig: {},
-              envVarSpec: {},
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            };
-
-            await adapter.setEnvVars(mockEnv, mockService, varsToSet);
-          }
-        }
-      }
-
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            success: true,
-            dryRun: dryRun || false,
-            project: projectDetails.name,
-            fixesApplied: fixes.filter((f) => f.applied).length,
-            fixes,
-            note: dryRun ? 'Run without dryRun=true to apply fixes' : undefined,
-          }),
-        }],
-      };
-    }
-  );
 }
