@@ -11,6 +11,7 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { SecretMappingRepository } from '../../adapters/db/repositories/secret-mapping.repository.js';
 import { SecretResolver } from './secret.resolver.js';
 import { InfraTransaction, type InfraTransactionRollbackResult } from './infra.transaction.js';
+import { snapshotEnvironmentBindings } from './local-state.transaction.js';
 
 export interface DeployOptions {
   project: Project;
@@ -229,6 +230,12 @@ export class DeployOrchestrator {
                 : undefined;
             }
 
+            snapshotEnvironmentBindings({
+              tx,
+              envRepo: this.envRepo,
+              environmentId: options.environment.id,
+              label: 'environment_bindings_ensure_project',
+            });
             this.envRepo.updatePlatformBindings(options.environment.id, bindings);
             const refreshed = this.envRepo.findById(options.environment.id);
             if (refreshed) {
@@ -389,6 +396,12 @@ export class DeployOrchestrator {
             const resolvedEnvironmentId = typeof deployData.railwayEnvironmentId === 'string'
               ? deployData.railwayEnvironmentId
               : undefined;
+            snapshotEnvironmentBindings({
+              tx,
+              envRepo: this.envRepo,
+              environmentId: options.environment.id,
+              label: `environment_bindings_deploy_${service.name}`,
+            });
             this.envRepo.updatePlatformBindings(options.environment.id, {
               services,
               environmentId: resolvedEnvironmentId,

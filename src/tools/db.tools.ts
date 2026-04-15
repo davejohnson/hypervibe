@@ -15,6 +15,7 @@ import type { DatabaseCredentials } from '../adapters/providers/database/databas
 import type { Project } from '../domain/entities/project.entity.js';
 import { resolveProject, resolveProjectOrError } from './resolve-project.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { captureEnvironmentSnapshot, restoreEnvironmentSnapshot } from '../domain/services/local-state.transaction.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 
 const envRepo = new EnvironmentRepository();
@@ -428,6 +429,7 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
+      const envSnapshot = captureEnvironmentSnapshot(env);
       const provisionResult = await adapterResult.adapter.provision(databaseType, env, {
         size,
         region,
@@ -435,6 +437,7 @@ export function registerDbTools(server: McpServer): void {
       });
 
       if (!provisionResult.receipt.success) {
+        restoreEnvironmentSnapshot(envRepo, envSnapshot);
         return {
           content: [{
             type: 'text' as const,
@@ -573,12 +576,14 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
+      const envSnapshot = captureEnvironmentSnapshot(env);
       const provision = await dbAdapterResult.adapter.provision('postgres', env, {
         databaseName,
         region,
         size,
       });
       if (!provision.receipt.success || !provision.connectionUrl) {
+        restoreEnvironmentSnapshot(envRepo, envSnapshot);
         return {
           content: [{
             type: 'text' as const,
@@ -1523,12 +1528,16 @@ async function provisionTargetDatabaseUrl(params: {
   const dbAdapterResult = await adapterFactory.getDatabaseAdapter(params.targetProvider, project);
   if (!dbAdapterResult.success || !dbAdapterResult.adapter) return null;
 
+  const envSnapshot = captureEnvironmentSnapshot(env);
   const provision = await dbAdapterResult.adapter.provision('postgres', env, {
     databaseName: params.databaseName,
     region: params.region,
     size: params.size,
   });
-  if (!provision.receipt.success || !provision.connectionUrl) return null;
+  if (!provision.receipt.success || !provision.connectionUrl) {
+    restoreEnvironmentSnapshot(envRepo, envSnapshot);
+    return null;
+  }
 
   const existing = componentRepo.findByEnvironmentAndType(env.id, 'postgres');
   if (existing) {

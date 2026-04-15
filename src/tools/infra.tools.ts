@@ -13,6 +13,10 @@ import { CloudflareAdapter, type CloudflareCredentials } from '../adapters/provi
 import { SendGridAdapter, type SendGridCredentials } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { InfraTransaction } from '../domain/services/infra.transaction.js';
+import {
+  snapshotComponentRecord,
+  snapshotEnvironmentBindings,
+} from '../domain/services/local-state.transaction.js';
 import { resolveProject } from './resolve-project.js';
 
 const projectRepo = new ProjectRepository();
@@ -248,6 +252,12 @@ async function executeBootstrap(params: {
     };
   }
 
+  snapshotEnvironmentBindings({
+    tx,
+    envRepo,
+    environmentId: environment.id,
+    label: 'environment_bindings_db_provision',
+  });
   const dbProvision = await dbAdapterResult.adapter.provision('postgres', environment, {
     databaseName: project.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(),
   });
@@ -315,6 +325,12 @@ async function executeBootstrap(params: {
 
   const existingComponent = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
   if (existingComponent) {
+    snapshotComponentRecord({
+      tx,
+      componentRepo,
+      component: existingComponent,
+      label: 'component_record_update',
+    });
     componentRepo.update(existingComponent.id, {
       bindings: dbProvision.component.bindings,
       externalId: dbProvision.component.externalId ?? undefined,
