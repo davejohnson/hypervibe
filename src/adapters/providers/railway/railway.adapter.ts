@@ -1,4 +1,5 @@
 import { GraphQLClient, gql } from 'graphql-request';
+import { randomBytes } from 'crypto';
 import { z } from 'zod';
 import type { IProviderAdapter, Receipt, ComponentResult, DeployResult, JobResult, ProviderCapabilities } from '../../../domain/ports/provider.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
@@ -444,6 +445,7 @@ export class RailwayAdapter implements IProviderAdapter {
     if (!image) return null;
 
     const environmentId = await this.resolveRailwayEnvironmentId(projectId, environment);
+    if (!environmentId) return null;
     const serviceName = `${type}-db`;
     const createMutation = gql`
       mutation CreateService($input: ServiceCreateInput!) {
@@ -468,6 +470,29 @@ export class RailwayAdapter implements IProviderAdapter {
           },
         }
       );
+
+      const bootstrapVars = this.buildDatastoreBootstrapVars(type, serviceName);
+      if (bootstrapVars) {
+        const varsSet = await this.upsertServiceVariables(projectId, result.serviceCreate.id, environmentId, bootstrapVars);
+        if (!varsSet.success) {
+          return {
+            component: {
+              id: '',
+              environmentId: environment.id,
+              type,
+              bindings: {},
+              externalId: null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+            receipt: {
+              success: false,
+              message: `Created ${type} service ${result.serviceCreate.name} but failed to set bootstrap variables`,
+              error: varsSet.error,
+            },
+          };
+        }
+      }
 
       const component: Component = {
         id: '',
@@ -495,6 +520,102 @@ export class RailwayAdapter implements IProviderAdapter {
     }
   }
 
+  private buildDatastoreBootstrapVars(type: ComponentType, serviceName: string): Record<string, string> | null {
+    const serviceHost = `${serviceName}.railway.internal`;
+
+    if (type === 'postgres') {
+      const password = randomBytes(18).toString('base64url');
+      const connectionUrl = `postgresql://postgres:${password}@${serviceHost}:5432/postgres`;
+      return {
+        POSTGRES_PASSWORD: password,
+        POSTGRES_USER: 'postgres',
+        POSTGRES_DB: 'postgres',
+        DATABASE_URL: connectionUrl,
+        DATABASE_PRIVATE_URL: connectionUrl,
+        PGHOST: serviceHost,
+        PGPORT: '5432',
+        PGUSER: 'postgres',
+        PGPASSWORD: password,
+        PGDATABASE: 'postgres',
+      };
+    }
+
+    if (type === 'mysql') {
+      const rootPassword = randomBytes(18).toString('base64url');
+      const userPassword = randomBytes(18).toString('base64url');
+      const databaseName = 'app';
+      const username = 'app';
+      const connectionUrl = `mysql://${username}:${userPassword}@${serviceHost}:3306/${databaseName}`;
+      return {
+        MYSQL_ROOT_PASSWORD: rootPassword,
+        MYSQL_DATABASE: databaseName,
+        MYSQL_USER: username,
+        MYSQL_PASSWORD: userPassword,
+        DATABASE_URL: connectionUrl,
+        MYSQL_URL: connectionUrl,
+        MYSQLHOST: serviceHost,
+        MYSQLPORT: '3306',
+        MYSQLUSER: username,
+        MYSQLPASSWORD: userPassword,
+        MYSQLDATABASE: databaseName,
+      };
+    }
+
+    if (type === 'mongodb') {
+      const username = 'admin';
+      const password = randomBytes(18).toString('base64url');
+      const authDb = 'admin';
+      const connectionUrl = `mongodb://${username}:${password}@${serviceHost}:27017/?authSource=${authDb}`;
+      return {
+        MONGO_INITDB_ROOT_USERNAME: username,
+        MONGO_INITDB_ROOT_PASSWORD: password,
+        DATABASE_URL: connectionUrl,
+        MONGO_URL: connectionUrl,
+        MONGOHOST: serviceHost,
+        MONGOPORT: '27017',
+        MONGOUSER: username,
+        MONGOPASSWORD: password,
+      };
+    }
+
+    return null;
+  }
+
+  private async upsertServiceVariables(
+    projectId: string,
+    serviceId: string,
+    environmentId: string,
+    variables: Record<string, string>
+  ): Promise<{ success: boolean; error?: string }> {
+    if (!this.client) {
+      return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+
+    const mutation = gql`
+      mutation UpsertVariables($projectId: String!, $serviceId: String!, $environmentId: String!, $variables: EnvironmentVariables!) {
+        variableCollectionUpsert(
+          input: {
+            projectId: $projectId
+            serviceId: $serviceId
+            environmentId: $environmentId
+            variables: $variables
+          }
+        )
+      }
+    `;
+    try {
+      await this.client.request(mutation, {
+        projectId,
+        serviceId,
+        environmentId,
+        variables,
+      });
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: this.describeError(error) };
+    }
+  }
+
   private async resolveRailwayEnvironmentId(
     projectId: string,
     environment: Environment
@@ -515,11 +636,14 @@ export class RailwayAdapter implements IProviderAdapter {
     if (byName?.id) {
       return byName.id;
     }
-    if (environment.name.toLowerCase() !== 'production') {
+    const targetIsProduction = environment.name.toLowerCase() === 'production';
+    if (!targetIsProduction) {
       const createdEnvironmentId = await this.createRailwayEnvironment(projectId, environment.name);
       if (createdEnvironmentId) {
         return createdEnvironmentId;
       }
+      // Never silently send non-production deployments to the default/production env.
+      return undefined;
     }
     if (environmentIds.length > 0) {
       return environmentIds[0];
@@ -939,6 +1063,18 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     try {
+      const railwayEnvId = await this.resolveRailwayEnvironmentId(projectId, environment);
+      if (!railwayEnvId) {
+        return {
+          serviceId: service.id,
+          status: 'failed',
+          receipt: {
+            success: false,
+            message: `Railway environment "${environment.name}" not found and could not be created`,
+          },
+        };
+      }
+
       // Check if service already exists
       let railwayServiceId = await this.resolveServiceIdForProject(
         projectId,
@@ -950,8 +1086,8 @@ export class RailwayAdapter implements IProviderAdapter {
       if (!railwayServiceId) {
         // Create service
         const createMutation = gql`
-          mutation CreateService($projectId: String!, $name: String!) {
-            serviceCreate(input: { projectId: $projectId, name: $name }) {
+          mutation CreateService($input: ServiceCreateInput!) {
+            serviceCreate(input: $input) {
               id
               name
             }
@@ -961,8 +1097,11 @@ export class RailwayAdapter implements IProviderAdapter {
         const createResult = await this.client.request<{ serviceCreate: { id: string; name: string } }>(
           createMutation,
           {
-            projectId: projectId,
-            name: service.name,
+            input: {
+              projectId,
+              environmentId: railwayEnvId,
+              name: service.name,
+            },
           }
         );
 
@@ -995,9 +1134,6 @@ export class RailwayAdapter implements IProviderAdapter {
           serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
         }
       `;
-
-      // Get or create environment
-      const railwayEnvId = await this.resolveRailwayEnvironmentId(projectId, environment);
 
       if (railwayEnvId) {
         await this.client.request(redeployMutation, {
