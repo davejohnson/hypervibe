@@ -342,12 +342,13 @@ export function registerProjectTools(server: McpServer): void {
     'Adopt an already-deployed Railway project into Hypervibe state (discovery/import). Not for creating new infrastructure or retrying failed applies.',
     {
       name: z.string().optional().describe('Existing Railway project name to adopt. If omitted, lists Railway projects available to import.'),
+      force: z.boolean().optional().describe('Set true to override safety checks when a Hypervibe project with the same name already exists.'),
       environmentMappings: z
         .record(z.string(), z.string())
         .optional()
         .describe('Map Railway environment names to Hypervibe types (e.g., {"prod-us-east": "production", "blue": "staging"})'),
     },
-    async ({ name, environmentMappings }) => {
+    async ({ name, force = false, environmentMappings }) => {
       // Get Railway connection
       const connection = connectionRepo.findByProvider('railway');
       if (!connection) {
@@ -412,6 +413,24 @@ export function registerProjectTools(server: McpServer): void {
                 text: JSON.stringify({
                   success: false,
                   error: `Railway project "${name}" not found. For new infrastructure, use project_create then infra_apply (not project_import).`,
+                }),
+              },
+            ],
+          };
+        }
+
+        // Guardrail: import is for adoption-only. If a Hypervibe project already exists,
+        // default to blocking import to avoid replacing/re-mapping active deploy state.
+        const existingHypervibe = projectRepo.findByName(name);
+        if (existingHypervibe && !force) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: `Hypervibe project "${name}" already exists. project_import is adoption-only and should not be used for retries/remediation.`,
+                  next: 'Use infra_apply for setup/retry, or rerun project_import with force=true only if you intentionally want to re-adopt this live Railway project.',
                 }),
               },
             ],
