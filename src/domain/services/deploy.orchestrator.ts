@@ -218,6 +218,10 @@ export class DeployOrchestrator {
             }
 
             this.envRepo.updatePlatformBindings(options.environment.id, bindings);
+            const refreshed = this.envRepo.findById(options.environment.id);
+            if (refreshed) {
+              options.environment = refreshed;
+            }
 
             if (receipt.data?.created === true) {
               const createdProjectId = receipt.data.projectId as string;
@@ -353,15 +357,16 @@ export class DeployOrchestrator {
             };
           }
 
+          const environment = this.envRepo.findById(options.environment.id) ?? options.environment;
           const result = await options.adapter.deploy(
             service,
-            options.environment,
+            environment,
             options.envVars ?? {}
           );
 
           // Update environment bindings with service info using platform-agnostic structure
           if (result.externalId) {
-            const latestEnvironment = this.envRepo.findById(options.environment.id) ?? options.environment;
+            const latestEnvironment = this.envRepo.findById(options.environment.id) ?? environment;
             const currentBindings = latestEnvironment.platformBindings as Partial<HostingBindings>;
             const services = currentBindings.services ?? {};
             services[service.name] = {

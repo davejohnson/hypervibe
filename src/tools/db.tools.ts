@@ -468,7 +468,8 @@ export function registerDbTools(server: McpServer): void {
           const targetService = serviceName ? services.find((s) => s.name === serviceName) : services[0];
 
           if (targetService) {
-            const receipt = await hostingResult.adapter.setEnvVars(env, targetService, provisionResult.envVars);
+            const latestEnv = envRepo.findById(env.id) ?? env;
+            const receipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, provisionResult.envVars);
             syncResult.success = receipt.success;
             syncResult.error = receipt.success ? undefined : (receipt.error || receipt.message);
           } else {
@@ -634,7 +635,8 @@ export function registerDbTools(server: McpServer): void {
         DATABASE_URL: provision.connectionUrl,
         DIRECT_URL: provision.connectionUrl,
       };
-      const receipt = await hostingResult.adapter.setEnvVars(env, targetService, varsToSet);
+      const latestEnv = envRepo.findById(env.id) ?? env;
+      const receipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, varsToSet);
 
       return {
         content: [{
@@ -851,7 +853,8 @@ export function registerDbTools(server: McpServer): void {
         if (setShadowVar && targetService) {
           const hostingResult = await adapterFactory.getHostingAdapter(project);
           if (hostingResult.success && hostingResult.adapter) {
-            const shadowReceipt = await hostingResult.adapter.setEnvVars(env, targetService, {
+            const latestEnv = envRepo.findById(env.id) ?? env;
+            const shadowReceipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, {
               NEXT_DATABASE_URL: targetUrl,
             });
             shadowSynced = shadowReceipt.success;
@@ -939,7 +942,8 @@ export function registerDbTools(server: McpServer): void {
         DIRECT_URL: cutoverTarget,
         DATABASE_URL_PREV: cutoverSource,
       };
-      const cutoverReceipt = await hostingResult.adapter.setEnvVars(env, targetService, cutoverVars);
+      const latestEnv = envRepo.findById(env.id) ?? env;
+      const cutoverReceipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, cutoverVars);
 
       if (cutoverReceipt.success && component) {
         componentRepo.updateBindings(component.id, {
@@ -1046,7 +1050,8 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
-      const receipt = await hostingResult.adapter.setEnvVars(env, targetService, {
+      const latestEnv = envRepo.findById(env.id) ?? env;
+      const receipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, {
         DATABASE_URL: rollbackUrl,
         DIRECT_URL: rollbackUrl,
       });

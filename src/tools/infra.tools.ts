@@ -356,7 +356,8 @@ async function executeBootstrap(params: {
     const sgConnection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
     if (sgConnection) {
       const sgCreds = secretStore.decryptObject<SendGridCredentials>(sgConnection.credentialsEncrypted);
-      const receipt = await hostingResult.adapter.setEnvVars(environment, service, {
+      const latestEnvironment = envRepo.findById(environment.id) ?? environment;
+      const receipt = await hostingResult.adapter.setEnvVars(latestEnvironment, service, {
         SENDGRID_API_KEY: sgCreds.apiKey,
       });
       summary.sendgridApiKeySynced = receipt.success;
@@ -580,6 +581,7 @@ export function registerInfraTools(server: McpServer): void {
             text: JSON.stringify({
               success: false,
               error: executed.summary.error,
+              summary: executed.summary,
             }),
           }],
         };
@@ -799,7 +801,7 @@ export function registerInfraTools(server: McpServer): void {
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ success: false, error: executed.summary.error }),
+            text: JSON.stringify({ success: false, error: executed.summary.error, summary: executed.summary }),
           }],
         };
       }
