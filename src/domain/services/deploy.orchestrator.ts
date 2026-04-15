@@ -207,14 +207,25 @@ export class DeployOrchestrator {
           // Update environment bindings if we got a project ID
           // Use platform-agnostic keys that work with any hosting provider
           if (receipt.success && receipt.data?.projectId) {
+            const currentEnvironment = this.envRepo.findById(options.environment.id) ?? options.environment;
+            const currentBindings = currentEnvironment.platformBindings as Partial<HostingBindings>;
+            const nextProjectId = receipt.data.projectId as string;
+            const projectChanged = Boolean(currentBindings.projectId && currentBindings.projectId !== nextProjectId);
             const bindings: Partial<HostingBindings> = {
               provider: options.adapter.name,
-              projectId: receipt.data.projectId as string,
+              projectId: nextProjectId,
             };
 
             // Also store environment ID if provided
             if (receipt.data.environmentId) {
               bindings.environmentId = receipt.data.environmentId as string;
+            }
+            // If provider project was recreated/switched, drop stale service/environment bindings.
+            if (projectChanged || receipt.data?.created === true) {
+              bindings.services = undefined;
+              bindings.environmentId = receipt.data.environmentId
+                ? (receipt.data.environmentId as string)
+                : undefined;
             }
 
             this.envRepo.updatePlatformBindings(options.environment.id, bindings);

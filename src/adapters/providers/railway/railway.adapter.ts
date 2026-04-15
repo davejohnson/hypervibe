@@ -506,6 +506,14 @@ export class RailwayAdapter implements IProviderAdapter {
       railwayEnvironmentId?: string;
     };
     let environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
+    const environmentIds = await this.listProjectEnvironmentIds(projectId);
+    if (environmentId && environmentIds.includes(environmentId)) {
+      return environmentId;
+    }
+    if (environmentIds.length > 0) {
+      return environmentIds[0];
+    }
+
     if (environmentId) return environmentId;
 
     const envQuery = gql`
@@ -531,6 +539,115 @@ export class RailwayAdapter implements IProviderAdapter {
     } catch {
       return undefined;
     }
+  }
+
+  private async listProjectEnvironmentIds(projectId: string): Promise<string[]> {
+    const client = this.client;
+    if (!client) return [];
+    const envQuery = gql`
+      query GetEnvironments($projectId: String!) {
+        project(id: $projectId) {
+          environments {
+            edges {
+              node {
+                id
+              }
+            }
+          }
+        }
+      }
+    `;
+    try {
+      const envResult = await client.request<{
+        project?: {
+          environments?:
+            | { edges?: Array<{ node?: { id?: string } }> }
+            | Array<{ id?: string }>;
+        };
+      }>(envQuery, { projectId });
+      const envs = envResult.project?.environments;
+      if (!envs) return [];
+
+      if (Array.isArray(envs)) {
+        return envs.map((e) => e.id ?? '').filter((id) => id.length > 0);
+      }
+      const edges = envs.edges ?? [];
+      return edges.map((e) => e.node?.id ?? '').filter((id) => id.length > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  private async resolveServiceIdForProject(
+    projectId: string,
+    serviceName: string,
+    boundServiceId?: string
+  ): Promise<string | undefined> {
+    const services = await this.listProjectServices(projectId);
+    if (boundServiceId && services.some((s) => s.id === boundServiceId)) {
+      return boundServiceId;
+    }
+    const byName = services.find((s) => s.name === serviceName);
+    return byName?.id;
+  }
+
+  private async listProjectServices(projectId: string): Promise<Array<{ id: string; name: string }>> {
+    const client = this.client;
+    if (!client) return [];
+    const attempts = [
+      gql`
+        query GetProjectServicesConnection($projectId: String!) {
+          project(id: $projectId) {
+            services {
+              edges {
+                node {
+                  id
+                  name
+                }
+              }
+            }
+          }
+        }
+      `,
+      gql`
+        query GetProjectServicesDirect($projectId: String!) {
+          project(id: $projectId) {
+            services {
+              id
+              name
+            }
+          }
+        }
+      `,
+    ];
+
+    for (const query of attempts) {
+      try {
+        const result = await client.request<Record<string, unknown>>(query, { projectId });
+        const project = result.project as
+          | {
+              services?:
+                | { edges?: Array<{ node?: { id?: string; name?: string } }> }
+                | Array<{ id?: string; name?: string }>;
+            }
+          | undefined;
+        const services = project?.services;
+        if (!services) continue;
+        if (Array.isArray(services)) {
+          return services
+            .map((s) => ({ id: s.id ?? '', name: s.name ?? '' }))
+            .filter((s) => s.id.length > 0 && s.name.length > 0);
+        }
+        const edges = services.edges ?? [];
+        return edges
+          .map((e) => ({ id: e.node?.id ?? '', name: e.node?.name ?? '' }))
+          .filter((s) => s.id.length > 0 && s.name.length > 0);
+      } catch {
+        // Try next shape.
+      }
+    }
+
+    return [];
   }
 
   async deleteProject(projectId: string): Promise<{ success: boolean; error?: string }> {
@@ -767,7 +884,11 @@ export class RailwayAdapter implements IProviderAdapter {
 
     try {
       // Check if service already exists
-      let railwayServiceId = bindings.services?.[service.name]?.serviceId;
+      let railwayServiceId = await this.resolveServiceIdForProject(
+        projectId,
+        service.name,
+        bindings.services?.[service.name]?.serviceId
+      );
       let createdService = false;
 
       if (!railwayServiceId) {
@@ -799,7 +920,17 @@ export class RailwayAdapter implements IProviderAdapter {
 
       // Set environment variables (including auto-wired plugin connections)
       if (Object.keys(allEnvVars).length > 0) {
-        await this.setEnvVars(environment, service, allEnvVars);
+        const envForVarSync: Environment = {
+          ...environment,
+          platformBindings: {
+            ...bindings,
+            services: {
+              ...(bindings.services ?? {}),
+              [service.name]: { serviceId: railwayServiceId },
+            },
+          },
+        };
+        await this.setEnvVars(envForVarSync, service, allEnvVars);
       }
 
       // Trigger redeploy
@@ -810,30 +941,7 @@ export class RailwayAdapter implements IProviderAdapter {
       `;
 
       // Get or create environment
-      let railwayEnvId = environmentId;
-      if (!railwayEnvId) {
-        // Use default environment
-        const envQuery = gql`
-          query GetEnvironments($projectId: String!) {
-            project(id: $projectId) {
-              environments {
-                edges {
-                  node {
-                    id
-                    name
-                  }
-                }
-              }
-            }
-          }
-        `;
-
-        const envResult = await this.client.request<{
-          project: { environments: { edges: Array<{ node: { id: string; name: string } }> } };
-        }>(envQuery, { projectId: projectId });
-
-        railwayEnvId = envResult.project.environments.edges[0]?.node.id;
-      }
+      const railwayEnvId = await this.resolveRailwayEnvironmentId(projectId, environment);
 
       if (railwayEnvId) {
         await this.client.request(redeployMutation, {
@@ -882,7 +990,7 @@ export class RailwayAdapter implements IProviderAdapter {
       services?: Record<string, { serviceId: string }>;
     };
     const projectId = bindings.projectId || bindings.railwayProjectId;
-    let environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
+      let environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
 
     if (!projectId) {
       return {
@@ -892,11 +1000,15 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     try {
-      const railwayServiceId = bindings.services?.[service.name]?.serviceId;
+      const railwayServiceId = await this.resolveServiceIdForProject(
+        projectId,
+        service.name,
+        bindings.services?.[service.name]?.serviceId
+      );
       if (!railwayServiceId) {
         return {
           success: false,
-          message: `Service ${service.name} not found in Railway bindings`,
+          message: `Service ${service.name} not found in Railway project ${projectId}`,
         };
       }
 
@@ -913,25 +1025,7 @@ export class RailwayAdapter implements IProviderAdapter {
         }
       `;
 
-      if (!environmentId) {
-        const envQuery = gql`
-          query GetEnvironments($projectId: String!) {
-            project(id: $projectId) {
-              environments {
-                edges {
-                  node {
-                    id
-                  }
-                }
-              }
-            }
-          }
-        `;
-        const envResult = await this.client.request<{
-          project: { environments: { edges: Array<{ node: { id: string } }> } };
-        }>(envQuery, { projectId: projectId });
-        environmentId = envResult.project.environments.edges[0]?.node.id;
-      }
+      environmentId = await this.resolveRailwayEnvironmentId(projectId, environment);
 
       if (!environmentId) {
         return {
