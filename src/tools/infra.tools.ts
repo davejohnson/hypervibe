@@ -486,19 +486,29 @@ export function registerInfraTools(server: McpServer): void {
     },
     async ({
       projectName,
-      environmentName = 'staging',
-      serviceName = 'web',
+      environmentName,
+      serviceName,
       domain,
-      databaseProvider = 'supabase',
-      setupEmail = true,
+      databaseProvider,
+      setupEmail,
     }) => {
-      const plan = buildPlan({
-        projectName,
+      const project = resolveProject({ projectName });
+      const policyState = (project?.policies?.desiredState as Partial<DesiredState> | undefined) ?? {};
+      const desired = resolveDesiredState(policyState, {
         environmentName,
         serviceName,
         domain,
         databaseProvider,
         setupEmail,
+      });
+
+      const plan = buildPlan({
+        projectName,
+        environmentName: desired.environmentName,
+        serviceName: desired.serviceName,
+        domain: desired.domain,
+        databaseProvider: desired.databaseProvider,
+        setupEmail: desired.setupEmail,
       });
 
       return {
@@ -508,8 +518,9 @@ export function registerInfraTools(server: McpServer): void {
             success: true,
             mode: 'plan',
             projectName,
-            environmentName,
-            serviceName,
+            desired,
+            environmentName: desired.environmentName,
+            serviceName: desired.serviceName,
             plan,
             summary: {
               needed: plan.filter((p) => p.status === 'needed').length,
