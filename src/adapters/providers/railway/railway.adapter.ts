@@ -445,7 +445,25 @@ export class RailwayAdapter implements IProviderAdapter {
     if (!image) return null;
 
     const environmentId = await this.resolveRailwayEnvironmentId(projectId, environment);
-    if (!environmentId) return null;
+    if (!environmentId) {
+      return {
+        component: {
+          id: '',
+          environmentId: environment.id,
+          type,
+          bindings: {},
+          externalId: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+        receipt: {
+          success: false,
+          message: `No Railway environment resolved for ${environment.name}`,
+          error: `Could not resolve or create Railway environment "${environment.name}" on project ${projectId}`,
+          data: { phase: 'resolveEnvironment', projectId, environmentName: environment.name },
+        },
+      };
+    }
     const serviceName = `${type}-db`;
     const createMutation = gql`
       mutation CreateService($input: ServiceCreateInput!) {
@@ -515,8 +533,24 @@ export class RailwayAdapter implements IProviderAdapter {
           data: { serviceId: result.serviceCreate.id, serviceName: result.serviceCreate.name, serviceBacked: true },
         },
       };
-    } catch {
-      return null;
+    } catch (error) {
+      return {
+        component: {
+          id: '',
+          environmentId: environment.id,
+          type,
+          bindings: {},
+          externalId: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+        receipt: {
+          success: false,
+          message: `Failed to create ${type} service-backed datastore`,
+          error: this.describeError(error),
+          data: { phase: 'serviceCreate', projectId, environmentId, image },
+        },
+      };
     }
   }
 
