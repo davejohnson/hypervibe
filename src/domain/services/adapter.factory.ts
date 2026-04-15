@@ -186,6 +186,7 @@ export class AdapterFactory {
         receipt: { success: boolean; message: string; error?: string };
       }>;
       listPlugins: (projectId: string) => Promise<Array<{ id: string; name: string; type: string }>>;
+      deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
     };
 
     const makePluginVarRefs = (pluginName: string, type: ProvisionableType): Record<string, string> => {
@@ -244,9 +245,9 @@ export class AdapterFactory {
           };
         }
 
-        const projectName = options?.databaseName
-          ? `${options.databaseName}-project`
-          : (project?.name ?? `project-${environment.projectId}`);
+        // Railway DB provisioning should target the same Railway project as the app hosting project.
+        // Do not derive names from databaseName or environment.
+        const projectName = project?.name ?? `project-${environment.projectId}`;
         const ensureProject = await railway.ensureProject(projectName, environment);
         if (!ensureProject.success) {
           return {
@@ -271,6 +272,7 @@ export class AdapterFactory {
           (ensureProject.data?.projectId as string | undefined) ||
           ((environment.platformBindings as Record<string, unknown>).projectId as string | undefined) ||
           ((environment.platformBindings as Record<string, unknown>).railwayProjectId as string | undefined);
+        const createdByProvision = Boolean(ensureProject.data?.created);
 
         if (projectId) {
           envRepo.updatePlatformBindings(environment.id, {
@@ -283,6 +285,18 @@ export class AdapterFactory {
         const refreshedEnvironment = envRepo.findById(environment.id) ?? environment;
         const componentResult = await railway.ensureComponent(type, refreshedEnvironment);
         if (!componentResult.receipt.success) {
+          if (projectId && createdByProvision && typeof railway.deleteProject === 'function') {
+            const cleanup = await railway.deleteProject(projectId);
+            if (cleanup.success) {
+              envRepo.updatePlatformBindings(environment.id, {
+                provider: undefined,
+                projectId: undefined,
+                railwayProjectId: undefined,
+              });
+            } else {
+              componentResult.receipt.error = `${componentResult.receipt.error ?? componentResult.receipt.message} Cleanup failed for Railway project ${projectId}: ${cleanup.error ?? 'unknown error'}`;
+            }
+          }
           return {
             component: componentResult.component,
             receipt: componentResult.receipt,

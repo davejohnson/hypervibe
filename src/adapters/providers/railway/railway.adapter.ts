@@ -114,7 +114,7 @@ export class RailwayAdapter implements IProviderAdapter {
             return {
               success: true,
               message: `Using existing Railway project: ${result.project.name}`,
-              data: { projectId: result.project.id, projectName: result.project.name },
+              data: { projectId: result.project.id, projectName: result.project.name, created: false },
             };
           }
         } catch {
@@ -122,40 +122,48 @@ export class RailwayAdapter implements IProviderAdapter {
         }
       }
 
-      // Reuse an existing project with the same name if present.
-      const existingByName = await this.findProjectByName(projectName);
-      if (existingByName) {
-        return {
-          success: true,
-          message: `Using existing Railway project: ${existingByName.name}`,
-          data: { projectId: existingByName.id, projectName: existingByName.name },
-        };
-      }
-
       // Create a new Railway project. Railway GraphQL schema differs across accounts/versions,
       // so try a few compatible mutation shapes before failing.
-      const created = await this.createProject(projectName);
+      let created: { id: string; name: string } | null = null;
+      let createError: string | undefined;
+      let reusedByName = false;
+      try {
+        created = await this.createProject(projectName);
+      } catch (error) {
+        createError = this.describeError(error);
+      }
+      if (!created) {
+        // Last-resort compatibility: if creation is blocked because a project already exists
+        // with this name, try to reuse it.
+        const existingByName = await this.findProjectByName(projectName);
+        if (existingByName) {
+          created = existingByName;
+          reusedByName = true;
+        }
+      }
       if (!created) {
         return {
           success: false,
           message: 'Failed to ensure Railway project',
-          error: `Unable to create project "${projectName}" on Railway`,
+          error: createError || `Unable to create project "${projectName}" on Railway`,
         };
       }
 
       return {
         success: true,
-        message: `Created Railway project: ${created.name}`,
+        message: reusedByName ? `Using existing Railway project: ${created.name}` : `Created Railway project: ${created.name}`,
         data: {
           projectId: created.id,
           projectName: created.name,
+          created: !reusedByName,
         },
       };
     } catch (error) {
+      const message = this.describeError(error);
       return {
         success: false,
         message: 'Failed to ensure Railway project',
-        error: this.describeError(error),
+        error: message,
       };
     }
   }
@@ -460,10 +468,72 @@ export class RailwayAdapter implements IProviderAdapter {
         receipt: {
           success: false,
           message: `Failed to create ${type} component`,
-          error: String(error),
+          error: this.describeRailwayAuthorizationError(error, projectId, type),
         },
       };
     }
+  }
+
+  async deleteProject(projectId: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.client) {
+      return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+
+    const attempts: Array<{ mutation: string; variables: Record<string, unknown>; label: string }> = [
+      {
+        label: 'projectDelete.id',
+        mutation: `
+          mutation DeleteProject($id: String!) {
+            projectDelete(id: $id)
+          }
+        `,
+        variables: { id: projectId },
+      },
+      {
+        label: 'projectDelete.input.id',
+        mutation: `
+          mutation DeleteProject($id: String!) {
+            projectDelete(input: { id: $id })
+          }
+        `,
+        variables: { id: projectId },
+      },
+      {
+        label: 'projectDelete.input.projectId',
+        mutation: `
+          mutation DeleteProject($id: String!) {
+            projectDelete(input: { projectId: $id })
+          }
+        `,
+        variables: { id: projectId },
+      },
+    ];
+
+    const errors: string[] = [];
+    for (const attempt of attempts) {
+      try {
+        await this.client.request<unknown>(gql`${attempt.mutation}`, attempt.variables);
+        return { success: true };
+      } catch (error) {
+        errors.push(`${attempt.label}: ${this.describeError(error)}`);
+      }
+    }
+    return { success: false, error: errors.join(' | ') };
+  }
+
+  private describeRailwayAuthorizationError(error: unknown, projectId: string, type: ComponentType): string {
+    const message = this.describeError(error);
+    if (!/not authorized/i.test(message)) {
+      return message;
+    }
+
+    return [
+      message,
+      `Not authorized to create ${type} on Railway project ${projectId}.`,
+      'Use an Account token or a Workspace token with write access to this workspace/project.',
+      'If you are using OAuth, ensure project/workspace member scopes were granted.',
+      'Then run connection_verify provider=\"railway\" again to refresh connection context.',
+    ].join(' ');
   }
 
   async deploy(
