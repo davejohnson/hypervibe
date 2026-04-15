@@ -115,7 +115,7 @@ export class VercelAdapter implements IProviderAdapter {
             return {
               success: true,
               message: `Using existing Vercel project: ${project.name}`,
-              data: { projectId: project.id, projectName: project.name },
+              data: { projectId: project.id, projectName: project.name, created: false },
             };
           }
         } catch {
@@ -136,6 +136,7 @@ export class VercelAdapter implements IProviderAdapter {
         data: {
           projectId: response.id,
           projectName: response.name,
+          created: true,
         },
       };
     } catch (error) {
@@ -448,6 +449,15 @@ export class VercelAdapter implements IProviderAdapter {
         message: 'Vercel does not support one-off jobs. Use Edge Functions or Cron Jobs instead.',
       },
     };
+  }
+
+  async deleteProject(projectId: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      await this.request('DELETE', `/v9/projects/${projectId}`);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   // Helper methods

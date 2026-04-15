@@ -113,4 +113,16 @@ export interface IProviderAdapter {
     service: Service,
     command: string
   ): Promise<JobResult>;
+
+  /**
+   * Delete a provider project/app that was created by Hypervibe.
+   * Optional because not all providers expose this operation.
+   */
+  deleteProject?(projectId: string): Promise<{ success: boolean; error?: string }>;
+
+  /**
+   * Delete a provider service/resource that was created by Hypervibe.
+   * Optional because not all providers expose this operation.
+   */
+  deleteService?(serviceId: string): Promise<{ success: boolean; error?: string }>;
 }

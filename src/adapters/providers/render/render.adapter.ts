@@ -129,7 +129,7 @@ export class RenderAdapter implements IProviderAdapter {
     return {
       success: true,
       message: `Using Render project prefix: ${projectId}`,
-      data: { projectId, projectName },
+      data: { projectId, projectName, created: false },
     };
   }
 

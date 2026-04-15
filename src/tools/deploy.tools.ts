@@ -183,6 +183,8 @@ export function registerDeployTools(server: McpServer): void {
               status: result.run.status,
               urls: result.urls,
               errors: result.errors.length > 0 ? result.errors : undefined,
+              createdResources: result.createdResources,
+              rollback: result.rollback,
               intent: syncProjectIntent(project.id),
               message: result.success
                 ? `Deployment completed for ${servicesToDeploy.length} service(s)`
@@ -392,6 +394,8 @@ export function registerDeployTools(server: McpServer): void {
             services: servicesToDeploy.map((s) => s.name),
             urls: rollback.urls,
             errors: rollback.errors.length ? rollback.errors : undefined,
+            createdResources: rollback.createdResources,
+            rollback: rollback.rollback,
             intent: syncProjectIntent(project.id),
             note: 'This rollback re-triggers deployment for the last known-good service set. It does not restore provider-side manual config outside hypervibe state.',
           }),

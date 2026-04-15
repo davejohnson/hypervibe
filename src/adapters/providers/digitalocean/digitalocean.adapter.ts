@@ -142,7 +142,7 @@ export class DigitalOceanAdapter implements IProviderAdapter {
             return {
               success: true,
               message: `Using existing DigitalOcean App: ${app.spec.name}`,
-              data: { projectId: app.id, projectName: app.spec.name },
+              data: { projectId: app.id, projectName: app.spec.name, created: false },
             };
           }
         } catch {
@@ -166,6 +166,7 @@ export class DigitalOceanAdapter implements IProviderAdapter {
         data: {
           projectId: response.app.id,
           projectName: response.app.spec.name,
+          created: true,
         },
       };
     } catch (error) {
@@ -484,6 +485,15 @@ export class DigitalOceanAdapter implements IProviderAdapter {
         message: 'Job execution not yet implemented for DigitalOcean',
       },
     };
+  }
+
+  async deleteProject(projectId: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      await this.request('DELETE', `/apps/${projectId}`);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   // Helper methods

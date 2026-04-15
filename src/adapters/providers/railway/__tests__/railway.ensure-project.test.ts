@@ -14,7 +14,7 @@ function makeEnv(bindings: Record<string, unknown> = {}): Environment {
 }
 
 describe('RailwayAdapter.ensureProject', () => {
-  it('reuses an existing project found by name', async () => {
+  it('falls back to existing project by name when create attempts fail', async () => {
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = {
       request: vi.fn(),
@@ -25,7 +25,7 @@ describe('RailwayAdapter.ensureProject', () => {
 
     expect(receipt.success).toBe(true);
     expect(receipt.data?.projectId).toBe('railway-1');
-    expect((adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client.request).not.toHaveBeenCalled();
+    expect((adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client.request).toHaveBeenCalled();
   });
 
   it('falls back to alternate create mutation shapes when first create attempt fails', async () => {

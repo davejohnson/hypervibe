@@ -400,46 +400,84 @@ export class RailwayAdapter implements IProviderAdapter {
       throw new Error('No Railway project bound to this environment');
     }
 
-    try {
-      // Create plugin based on type
-      let pluginType: string;
-      switch (type) {
-        case 'postgres':
-          pluginType = 'postgresql';
-          break;
-        case 'redis':
-          pluginType = 'redis';
-          break;
-        case 'mysql':
-          pluginType = 'mysql';
-          break;
-        case 'mongodb':
-          pluginType = 'mongodb';
-          break;
-        default:
-          throw new Error(`Unsupported component type: ${type}`);
-      }
+    // Railway component provisioning is service-first: create a datastore service.
+    const created = await this.createServiceBackedDatastore(type, environment, projectId);
+    if (created) {
+      return created;
+    }
 
-      const mutation = gql`
-        mutation CreatePlugin($projectId: String!, $name: String!) {
-          pluginCreate(input: { projectId: $projectId, name: $name }) {
-            id
-            name
-          }
+    const emptyComponent: Component = {
+      id: '',
+      environmentId: environment.id,
+      type,
+      bindings: {},
+      externalId: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    return {
+      component: emptyComponent,
+      receipt: {
+        success: false,
+        message: `Failed to create ${type} component`,
+        error: `Unable to create ${type} service-backed datastore on Railway project ${projectId}`,
+      },
+    };
+  }
+
+  private async createServiceBackedDatastore(
+    type: ComponentType,
+    environment: Environment,
+    projectId: string
+  ): Promise<ComponentResult | null> {
+    const client = this.client;
+    if (!client) return null;
+
+    const imageMap: Partial<Record<ComponentType, string>> = {
+      postgres: 'postgres:16',
+      redis: 'redis:7',
+      mysql: 'mysql:8',
+      mongodb: 'mongo:7',
+    };
+    const image = imageMap[type];
+    if (!image) return null;
+
+    const environmentId = await this.resolveRailwayEnvironmentId(projectId, environment);
+    const serviceName = `${type}-db`;
+    const createMutation = gql`
+      mutation CreateService($input: ServiceCreateInput!) {
+        serviceCreate(input: $input) {
+          id
+          name
         }
-      `;
+      }
+    `;
 
-      const result = await this.client.request<{ pluginCreate: { id: string; name: string } }>(mutation, {
-        projectId: projectId,
-        name: pluginType,
-      });
+    try {
+      const result = await client.request<{ serviceCreate: { id: string; name: string } }>(
+        createMutation,
+        {
+          input: {
+            projectId,
+            environmentId,
+            name: serviceName,
+            source: {
+              image,
+            },
+          },
+        }
+      );
 
       const component: Component = {
-        id: '', // Will be set by repository
+        id: '',
         environmentId: environment.id,
         type,
-        bindings: {},
-        externalId: result.pluginCreate.id,
+        bindings: {
+          resourceKind: 'service',
+          pluginName: result.serviceCreate.name,
+        },
+        externalId: result.serviceCreate.id,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -448,29 +486,50 @@ export class RailwayAdapter implements IProviderAdapter {
         component,
         receipt: {
           success: true,
-          message: `Created ${type} plugin on Railway`,
-          data: { pluginId: result.pluginCreate.id },
+          message: `Created ${type} datastore as Railway service (${result.serviceCreate.name})`,
+          data: { serviceId: result.serviceCreate.id, serviceName: result.serviceCreate.name, serviceBacked: true },
         },
       };
-    } catch (error) {
-      const emptyComponent: Component = {
-        id: '',
-        environmentId: environment.id,
-        type,
-        bindings: {},
-        externalId: null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
+    } catch {
+      return null;
+    }
+  }
 
-      return {
-        component: emptyComponent,
-        receipt: {
-          success: false,
-          message: `Failed to create ${type} component`,
-          error: this.describeRailwayAuthorizationError(error, projectId, type),
-        },
-      };
+  private async resolveRailwayEnvironmentId(
+    projectId: string,
+    environment: Environment
+  ): Promise<string | undefined> {
+    const client = this.client;
+    if (!client) return undefined;
+    const bindings = environment.platformBindings as {
+      environmentId?: string;
+      railwayEnvironmentId?: string;
+    };
+    let environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
+    if (environmentId) return environmentId;
+
+    const envQuery = gql`
+      query GetEnvironments($projectId: String!) {
+        project(id: $projectId) {
+          environments {
+            edges {
+              node {
+                id
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const envResult = await client.request<{
+        project: { environments: { edges: Array<{ node: { id: string } }> } };
+      }>(envQuery, { projectId });
+      environmentId = envResult.project.environments.edges[0]?.node.id;
+      return environmentId;
+    } catch {
+      return undefined;
     }
   }
 
@@ -518,6 +577,54 @@ export class RailwayAdapter implements IProviderAdapter {
         errors.push(`${attempt.label}: ${this.describeError(error)}`);
       }
     }
+    return { success: false, error: errors.join(' | ') };
+  }
+
+  async deleteService(serviceId: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.client) {
+      return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+
+    const attempts: Array<{ mutation: string; variables: Record<string, unknown>; label: string }> = [
+      {
+        label: 'serviceDelete.id',
+        mutation: `
+          mutation DeleteService($id: String!) {
+            serviceDelete(id: $id)
+          }
+        `,
+        variables: { id: serviceId },
+      },
+      {
+        label: 'serviceDelete.input.id',
+        mutation: `
+          mutation DeleteService($id: String!) {
+            serviceDelete(input: { id: $id })
+          }
+        `,
+        variables: { id: serviceId },
+      },
+      {
+        label: 'serviceDelete.input.serviceId',
+        mutation: `
+          mutation DeleteService($id: String!) {
+            serviceDelete(input: { serviceId: $id })
+          }
+        `,
+        variables: { id: serviceId },
+      },
+    ];
+
+    const errors: string[] = [];
+    for (const attempt of attempts) {
+      try {
+        await this.client.request<unknown>(gql`${attempt.mutation}`, attempt.variables);
+        return { success: true };
+      } catch (error) {
+        errors.push(`${attempt.label}: ${this.describeError(error)}`);
+      }
+    }
+
     return { success: false, error: errors.join(' | ') };
   }
 
@@ -569,6 +676,7 @@ export class RailwayAdapter implements IProviderAdapter {
     try {
       // Check if service already exists
       let railwayServiceId = bindings.services?.[service.name]?.serviceId;
+      let createdService = false;
 
       if (!railwayServiceId) {
         // Create service
@@ -590,6 +698,7 @@ export class RailwayAdapter implements IProviderAdapter {
         );
 
         railwayServiceId = createResult.serviceCreate.id;
+        createdService = true;
       }
 
       // Auto-wire database and cache connections from Railway plugins
@@ -648,7 +757,7 @@ export class RailwayAdapter implements IProviderAdapter {
         receipt: {
           success: true,
           message: `Deployment triggered for ${service.name}`,
-          data: { railwayServiceId, railwayEnvironmentId: railwayEnvId },
+          data: { railwayServiceId, railwayEnvironmentId: railwayEnvId, createdService },
         },
       };
     } catch (error) {

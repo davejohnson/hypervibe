@@ -10,6 +10,7 @@ import { ServiceRepository } from '../../adapters/db/repositories/service.reposi
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { SecretMappingRepository } from '../../adapters/db/repositories/secret-mapping.repository.js';
 import { SecretResolver } from './secret.resolver.js';
+import { InfraTransaction, type InfraTransactionRollbackResult } from './infra.transaction.js';
 
 export interface DeployOptions {
   project: Project;
@@ -25,6 +26,8 @@ export interface DeployResult {
   success: boolean;
   urls: string[];
   errors: string[];
+  createdResources?: Array<{ provider: string; type: string; id?: string; name?: string; metadata?: Record<string, unknown> }>;
+  rollback?: InfraTransactionRollbackResult;
 }
 
 export class DeployOrchestrator {
@@ -104,6 +107,7 @@ export class DeployOrchestrator {
     const plan = this.buildPlan(options);
     const urls: string[] = [];
     const errors: string[] = [];
+    const tx = new InfraTransaction();
 
     // Create run record
     const run = this.runRepo.create({
@@ -128,7 +132,7 @@ export class DeployOrchestrator {
 
     try {
       for (const step of plan.steps) {
-        const receipt = await this.executeStep(step, options);
+        const receipt = await this.executeStep(step, options, tx);
         this.runRepo.addReceipt(run.id, receipt);
 
         if (receipt.status === 'failure') {
@@ -142,6 +146,10 @@ export class DeployOrchestrator {
       }
 
       const hasErrors = errors.length > 0;
+      let rollback: InfraTransactionRollbackResult | undefined;
+      if (hasErrors) {
+        rollback = await tx.rollback();
+      }
       this.runRepo.updateStatus(
         run.id,
         hasErrors ? 'failed' : 'succeeded',
@@ -160,8 +168,11 @@ export class DeployOrchestrator {
         success: !hasErrors,
         urls,
         errors,
+        createdResources: tx.listResources(),
+        rollback,
       };
     } catch (error) {
+      const rollback = await tx.rollback();
       this.runRepo.updateStatus(run.id, 'failed', String(error));
 
       this.auditRepo.create({
@@ -176,11 +187,13 @@ export class DeployOrchestrator {
         success: false,
         urls,
         errors: [...errors, String(error)],
+        createdResources: tx.listResources(),
+        rollback,
       };
     }
   }
 
-  private async executeStep(step: RunStep, options: DeployOptions): Promise<RunReceipt> {
+  private async executeStep(step: RunStep, options: DeployOptions, tx: InfraTransaction): Promise<RunReceipt> {
     const timestamp = new Date().toISOString();
 
     try {
@@ -205,6 +218,37 @@ export class DeployOrchestrator {
             }
 
             this.envRepo.updatePlatformBindings(options.environment.id, bindings);
+
+            if (receipt.data?.created === true) {
+              const createdProjectId = receipt.data.projectId as string;
+              tx.addStep({
+                id: `provider-project:${createdProjectId}`,
+                label: 'ensure_project',
+                resource: {
+                  provider: options.adapter.name,
+                  type: 'project',
+                  id: createdProjectId,
+                  name: (receipt.data.projectName as string | undefined) ?? options.project.name,
+                },
+                compensate: async () => {
+                  const adapterWithDelete = options.adapter as (IProviderAdapter | IHostingAdapter) & {
+                    deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
+                  };
+                  if (typeof adapterWithDelete.deleteProject !== 'function') {
+                    return {
+                      success: false,
+                      error: `Manual cleanup required: ${options.adapter.name} project ${createdProjectId}`,
+                    };
+                  }
+                  const result = await adapterWithDelete.deleteProject(createdProjectId);
+                  return {
+                    success: result.success,
+                    error: result.error,
+                    message: result.success ? `Deleted provider project ${createdProjectId}` : undefined,
+                  };
+                },
+              });
+            }
           }
 
           return {
@@ -325,6 +369,38 @@ export class DeployOrchestrator {
               url: result.url,
             };
             this.envRepo.updatePlatformBindings(options.environment.id, { services });
+
+            const createdService = result.receipt.data?.createdService === true || result.receipt.data?.created === true;
+            if (createdService) {
+              const createdServiceId = result.externalId;
+              tx.addStep({
+                id: `provider-service:${createdServiceId}`,
+                label: `deploy_${service.name}`,
+                resource: {
+                  provider: options.adapter.name,
+                  type: 'service',
+                  id: createdServiceId,
+                  name: service.name,
+                },
+                compensate: async () => {
+                  const adapterWithDelete = options.adapter as (IProviderAdapter | IHostingAdapter) & {
+                    deleteService?: (serviceId: string) => Promise<{ success: boolean; error?: string }>;
+                  };
+                  if (typeof adapterWithDelete.deleteService !== 'function') {
+                    return {
+                      success: false,
+                      error: `Manual cleanup required: ${options.adapter.name} service ${createdServiceId}`,
+                    };
+                  }
+                  const deleted = await adapterWithDelete.deleteService(createdServiceId);
+                  return {
+                    success: deleted.success,
+                    error: deleted.error,
+                    message: deleted.success ? `Deleted provider service ${createdServiceId}` : undefined,
+                  };
+                },
+              });
+            }
           }
 
           return {

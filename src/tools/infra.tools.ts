@@ -12,6 +12,7 @@ import { DeployOrchestrator } from '../domain/services/deploy.orchestrator.js';
 import { CloudflareAdapter, type CloudflareCredentials } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { SendGridAdapter, type SendGridCredentials } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
+import { InfraTransaction } from '../domain/services/infra.transaction.js';
 import { resolveProject } from './resolve-project.js';
 
 const projectRepo = new ProjectRepository();
@@ -184,14 +185,35 @@ async function executeBootstrap(params: {
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
+  const tx = new InfraTransaction();
   let project = resolveProject({ projectName: params.projectName });
   if (!project) {
     project = projectRepo.create({ name: params.projectName, defaultPlatform: 'railway' });
+    const createdProjectId = project.id;
+    tx.addStep({
+      id: `project:${createdProjectId}`,
+      label: 'project_create',
+      resource: { provider: 'hypervibe', type: 'project', id: createdProjectId, name: project.name },
+      compensate: async () => ({
+        success: projectRepo.delete(createdProjectId),
+        message: `Deleted local project ${createdProjectId}`,
+      }),
+    });
   }
 
   let environment = envRepo.findByProjectAndName(project.id, params.environmentName);
   if (!environment) {
     environment = envRepo.create({ projectId: project.id, name: params.environmentName });
+    const createdEnvironmentId = environment.id;
+    tx.addStep({
+      id: `environment:${createdEnvironmentId}`,
+      label: 'env_create',
+      resource: { provider: 'hypervibe', type: 'environment', id: createdEnvironmentId, name: environment.name },
+      compensate: async () => ({
+        success: envRepo.delete(createdEnvironmentId),
+        message: `Deleted local environment ${createdEnvironmentId}`,
+      }),
+    });
   }
 
   let service = serviceRepo.findByProjectAndName(project.id, params.serviceName);
@@ -200,6 +222,16 @@ async function executeBootstrap(params: {
       projectId: project.id,
       name: params.serviceName,
       buildConfig: { builder: 'nixpacks' },
+    });
+    const createdServiceId = service.id;
+    tx.addStep({
+      id: `service:${createdServiceId}`,
+      label: 'service_create',
+      resource: { provider: 'hypervibe', type: 'service', id: createdServiceId, name: service.name },
+      compensate: async () => ({
+        success: serviceRepo.delete(createdServiceId),
+        message: `Deleted local service ${createdServiceId}`,
+      }),
     });
   }
 
@@ -212,14 +244,32 @@ async function executeBootstrap(params: {
   }
 
   const dbProvision = await dbAdapterResult.adapter.provision('postgres', environment, {
-    databaseName: `${project.name}_${environment.name}`.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(),
+    databaseName: project.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(),
   });
   if (!dbProvision.receipt.success) {
     return {
       success: false,
-      summary: { error: dbProvision.receipt.error || dbProvision.receipt.message },
+      summary: {
+        error: dbProvision.receipt.error || dbProvision.receipt.message,
+        debug: {
+          phase: 'db_provision',
+          provider: params.databaseProvider,
+          receiptData: dbProvision.receipt.data ?? null,
+        },
+      },
     };
   }
+  tx.addStep({
+    id: `database:${dbProvision.component.externalId ?? dbProvision.component.id}`,
+    label: 'db_provision',
+    resource: {
+      provider: params.databaseProvider,
+      type: dbProvision.component.type,
+      id: dbProvision.component.externalId ?? dbProvision.component.id,
+      metadata: { environmentId: environment.id },
+    },
+    compensate: async () => dbAdapterResult.adapter!.destroy(dbProvision.component),
+  });
 
   const existingComponent = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
   if (existingComponent) {
@@ -228,17 +278,34 @@ async function executeBootstrap(params: {
       externalId: dbProvision.component.externalId ?? undefined,
     });
   } else {
-    componentRepo.create({
+    const createdComponent = componentRepo.create({
       environmentId: environment.id,
       type: 'postgres',
       bindings: dbProvision.component.bindings,
       externalId: dbProvision.component.externalId ?? undefined,
     });
+    tx.addStep({
+      id: `component:${createdComponent.id}`,
+      label: 'component_record_create',
+      resource: { provider: 'hypervibe', type: 'component', id: createdComponent.id, name: 'postgres' },
+      compensate: async () => ({
+        success: componentRepo.delete(createdComponent.id),
+        message: `Deleted local component ${createdComponent.id}`,
+      }),
+    });
   }
 
   const hostingResult = await adapterFactory.getHostingAdapter(project);
   if (!hostingResult.success || !hostingResult.adapter) {
-    return { success: false, summary: { error: hostingResult.error || 'Hosting adapter unavailable' } };
+    const cleanup = await tx.rollback();
+    return {
+      success: false,
+      summary: {
+        error: hostingResult.error || 'Hosting adapter unavailable',
+        rollback: cleanup,
+        transaction: { created: tx.listResources() },
+      },
+    };
   }
 
   const orchestrator = new DeployOrchestrator();
@@ -257,7 +324,30 @@ async function executeBootstrap(params: {
     deploymentRunId: deploy.run.id,
     deploymentSuccess: deploy.success,
     urls: deploy.urls,
+    deploymentCreatedResources: deploy.createdResources,
+    deploymentRollback: deploy.rollback,
+    transaction: {
+      created: tx.listResources(),
+    },
+    debug: {
+      dbProvision: {
+        provider: params.databaseProvider,
+        receiptData: dbProvision.receipt.data ?? null,
+      },
+    },
   };
+
+  if (!deploy.success) {
+    const cleanup = await tx.rollback();
+    summary.rollback = cleanup;
+    return {
+      success: false,
+      summary: {
+        ...summary,
+        error: deploy.errors.join('; ') || 'Deploy failed',
+      },
+    };
+  }
 
   const scopeHints = getProjectScopeHints(project);
   const secretStore = getSecretStore();

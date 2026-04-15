@@ -183,11 +183,11 @@ export class AdapterFactory {
         environment: import('../entities/environment.entity.js').Environment
       ) => Promise<{
         component: import('../entities/component.entity.js').Component;
-        receipt: { success: boolean; message: string; error?: string };
+        receipt: { success: boolean; message: string; error?: string; data?: Record<string, unknown> };
       }>;
       listPlugins: (projectId: string) => Promise<Array<{ id: string; name: string; type: string }>>;
       deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
-      deletePlugin?: (pluginId: string) => Promise<{ success: boolean; error?: string }>;
+      deleteService?: (serviceId: string) => Promise<{ success: boolean; error?: string }>;
     };
 
     const makePluginVarRefs = (pluginName: string, type: ProvisionableType): Record<string, string> => {
@@ -267,6 +267,11 @@ export class AdapterFactory {
               success: false,
               message: ensureProject.message,
               error: ensureProject.error,
+              data: {
+                phase: 'ensureProject',
+                provider: 'railway',
+                requestedProjectName: projectName,
+              },
             },
           };
         }
@@ -276,6 +281,7 @@ export class AdapterFactory {
           ((environment.platformBindings as Record<string, unknown>).projectId as string | undefined) ||
           ((environment.platformBindings as Record<string, unknown>).railwayProjectId as string | undefined);
         const createdByProvision = Boolean(ensureProject.data?.created);
+        let retriedAfterAuthRecover = false;
 
         if (projectId) {
           envRepo.updatePlatformBindings(environment.id, {
@@ -288,6 +294,7 @@ export class AdapterFactory {
         const refreshedEnvironment = envRepo.findById(environment.id) ?? environment;
         let componentResult = await railway.ensureComponent(type, refreshedEnvironment);
         if (!componentResult.receipt.success && projectId && !createdByProvision && isAuthError(componentResult.receipt.error)) {
+          retriedAfterAuthRecover = true;
           // Recover from stale/non-writable Railway bindings by clearing project/service linkage and retrying once.
           envRepo.updatePlatformBindings(environment.id, {
             projectId: undefined,
@@ -323,6 +330,15 @@ export class AdapterFactory {
         }
 
         if (!componentResult.receipt.success) {
+          componentResult.receipt.data = {
+            ...(componentResult.receipt.data ?? {}),
+            phase: 'ensureComponent',
+            provider: 'railway',
+            railwayProjectId: projectId,
+            requestedProjectName: projectName,
+            ensureProjectCreated: createdByProvision,
+            authRecoveryRetried: retriedAfterAuthRecover,
+          };
           if (projectId && createdByProvision && typeof railway.deleteProject === 'function') {
             const cleanup = await railway.deleteProject(projectId);
             if (cleanup.success) {
@@ -341,7 +357,8 @@ export class AdapterFactory {
           };
         }
 
-        let pluginName: string = type;
+        let pluginName: string =
+          (componentResult.component.bindings as Record<string, unknown>)?.pluginName as string || type;
         if (projectId && typeof railway.listPlugins === 'function') {
           const plugins = await railway.listPlugins(projectId);
           const matched =
@@ -364,9 +381,21 @@ export class AdapterFactory {
               projectId: projectId ?? undefined,
               connectionUrl,
               pluginName,
+              resourceKind: (componentResult.component.bindings as Record<string, unknown>)?.resourceKind,
             },
           },
-          receipt: componentResult.receipt,
+          receipt: {
+            ...componentResult.receipt,
+            data: {
+              ...(componentResult.receipt.data ?? {}),
+              phase: 'completed',
+              provider: 'railway',
+              railwayProjectId: projectId,
+              requestedProjectName: projectName,
+              ensureProjectCreated: createdByProvision,
+              authRecoveryRetried: retriedAfterAuthRecover,
+            },
+          },
           connectionUrl,
           envVars,
         };
@@ -377,24 +406,25 @@ export class AdapterFactory {
         return typeof value === 'string' ? value : null;
       },
       async destroy(component) {
-        const pluginId = component.externalId;
-        if (pluginId && typeof railway.deletePlugin === 'function') {
-          const deleted = await railway.deletePlugin(pluginId);
-          if (deleted.success) {
+        const bindings = component.bindings as Record<string, unknown>;
+        const resourceKind = bindings.resourceKind;
+        if (component.externalId && typeof railway.deleteService === 'function') {
+          const deletedService = await railway.deleteService(component.externalId);
+          if (deletedService.success) {
             return {
               success: true,
-              message: `Deleted Railway plugin ${pluginId}`,
+              message: `Deleted Railway service ${component.externalId}`,
             };
           }
           return {
             success: false,
-            message: `Failed to delete Railway plugin ${pluginId}`,
-            error: deleted.error,
+            message: `Failed to delete Railway service ${component.externalId}`,
+            error: deletedService.error,
           };
         }
         return {
           success: false,
-          message: `Destroy is not implemented for Railway component ${component.externalId ?? component.id}`,
+          message: `Destroy is not implemented for Railway component ${component.externalId ?? component.id}${resourceKind ? ` (kind: ${String(resourceKind)})` : ''}`,
         };
       },
     };
