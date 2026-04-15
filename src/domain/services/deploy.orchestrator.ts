@@ -432,6 +432,7 @@ export class DeployOrchestrator {
           const services = options.services ?? this.serviceRepo.findByProjectId(options.project.id);
 
           const failures: string[] = [];
+          const pending: string[] = [];
           const health: Array<{ service: string; status: string; url?: string }> = [];
 
           for (const service of services) {
@@ -443,16 +444,24 @@ export class DeployOrchestrator {
             const check = await this.waitForHealthyDeployment(options, environment, deployTarget);
             health.push({ service: service.name, status: check.status, url: check.url });
 
-            if (check.status !== 'deployed') {
+            if (check.status === 'failed' || check.status === 'canceled' || check.status === 'cancelled') {
               failures.push(`${service.name}: status=${check.status}`);
+            } else if (check.status !== 'deployed') {
+              pending.push(`${service.name}: status=${check.status}`);
             }
           }
+
+          const warning = pending.length > 0
+            ? `Health check inconclusive for ${pending.join(', ')}`
+            : undefined;
 
           return {
             step: step.name,
             status: failures.length > 0 ? 'failure' : 'success',
-            result: { services: health },
-            error: failures.length > 0 ? `Health check failed for ${failures.join(', ')}` : undefined,
+            result: { services: health, warning },
+            error: failures.length > 0
+              ? `Health check failed for ${failures.join(', ')}`
+              : undefined,
             timestamp,
           };
         }

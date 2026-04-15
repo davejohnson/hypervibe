@@ -571,8 +571,17 @@ export class RailwayAdapter implements IProviderAdapter {
     const errors: string[] = [];
     for (const attempt of attempts) {
       try {
-        await this.client.request<unknown>(gql`${attempt.mutation}`, attempt.variables);
-        return { success: true };
+        const result = await this.client.request<Record<string, unknown>>(gql`${attempt.mutation}`, attempt.variables);
+        const accepted = this.isDeleteAccepted(result, 'projectDelete');
+        if (!accepted) {
+          errors.push(`${attempt.label}: delete mutation returned unsuccessful payload`);
+          continue;
+        }
+        const deleted = await this.waitUntilProjectDeleted(projectId);
+        if (deleted) {
+          return { success: true };
+        }
+        errors.push(`${attempt.label}: delete acknowledged but project still exists (${projectId})`);
       } catch (error) {
         errors.push(`${attempt.label}: ${this.describeError(error)}`);
       }
@@ -618,14 +627,97 @@ export class RailwayAdapter implements IProviderAdapter {
     const errors: string[] = [];
     for (const attempt of attempts) {
       try {
-        await this.client.request<unknown>(gql`${attempt.mutation}`, attempt.variables);
-        return { success: true };
+        const result = await this.client.request<Record<string, unknown>>(gql`${attempt.mutation}`, attempt.variables);
+        const accepted = this.isDeleteAccepted(result, 'serviceDelete');
+        if (!accepted) {
+          errors.push(`${attempt.label}: delete mutation returned unsuccessful payload`);
+          continue;
+        }
+        const deleted = await this.waitUntilServiceDeleted(serviceId);
+        if (deleted) {
+          return { success: true };
+        }
+        errors.push(`${attempt.label}: delete acknowledged but service still exists (${serviceId})`);
       } catch (error) {
         errors.push(`${attempt.label}: ${this.describeError(error)}`);
       }
     }
 
     return { success: false, error: errors.join(' | ') };
+  }
+
+  private isDeleteAccepted(payload: Record<string, unknown>, field: 'projectDelete' | 'serviceDelete'): boolean {
+    const value = payload[field];
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') return value.length > 0 && value.toLowerCase() !== 'false';
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if ('success' in record) return Boolean(record.success);
+      if ('id' in record) return Boolean(record.id);
+      return true;
+    }
+    return false;
+  }
+
+  private async waitUntilProjectDeleted(projectId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const exists = await this.projectExists(projectId);
+      if (!exists) return true;
+      await this.sleep(500);
+    }
+    return false;
+  }
+
+  private async waitUntilServiceDeleted(serviceId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const exists = await this.serviceExists(serviceId);
+      if (!exists) return true;
+      await this.sleep(500);
+    }
+    return false;
+  }
+
+  private async projectExists(projectId: string): Promise<boolean> {
+    if (!this.client) return true;
+    try {
+      const query = gql`
+        query GetProject($id: String!) {
+          project(id: $id) {
+            id
+          }
+        }
+      `;
+      const result = await this.client.request<{ project: { id: string } | null }>(query, { id: projectId });
+      return Boolean(result.project?.id);
+    } catch (error) {
+      const message = this.describeError(error).toLowerCase();
+      if (message.includes('not found')) return false;
+      return true;
+    }
+  }
+
+  private async serviceExists(serviceId: string): Promise<boolean> {
+    if (!this.client) return true;
+    try {
+      const query = gql`
+        query GetService($id: String!) {
+          service(id: $id) {
+            id
+          }
+        }
+      `;
+      const result = await this.client.request<{ service: { id: string } | null }>(query, { id: serviceId });
+      return Boolean(result.service?.id);
+    } catch (error) {
+      const message = this.describeError(error).toLowerCase();
+      if (message.includes('not found')) return false;
+      return true;
+    }
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private describeRailwayAuthorizationError(error: unknown, projectId: string, type: ComponentType): string {
@@ -904,51 +996,92 @@ export class RailwayAdapter implements IProviderAdapter {
         // Fall through to service-based status lookup.
       }
 
-      // Second attempt: treat deploymentId as a service ID (current deploy flow)
-      const serviceQuery = gql`
-        query GetServiceStatus($id: String!) {
-          service(id: $id) {
-            id
-            serviceInstances {
-              edges {
-                node {
-                  id
-                  latestDeployment {
-                    id
-                    status
-                    staticUrl
+      // Second attempt: treat deploymentId as a service ID (current deploy flow),
+      // supporting both connection and array response shapes.
+      const serviceQueries = [
+        gql`
+          query GetServiceStatusConnection($id: String!) {
+            service(id: $id) {
+              id
+              serviceInstances {
+                edges {
+                  node {
+                    latestDeployment {
+                      id
+                      status
+                      staticUrl
+                    }
                   }
                 }
               }
             }
           }
-        }
-      `;
+        `,
+        gql`
+          query GetServiceStatusDirect($id: String!) {
+            service(id: $id) {
+              id
+              serviceInstances {
+                latestDeployment {
+                  id
+                  status
+                  staticUrl
+                }
+              }
+            }
+          }
+        `,
+      ];
 
-      const serviceResult = await this.client.request<{
-        service: {
-          serviceInstances: {
-            edges: Array<{
-              node: {
-                latestDeployment?: { id: string; status: string; staticUrl?: string };
-              };
-            }>;
+      for (const query of serviceQueries) {
+        try {
+          const serviceResult = await this.client.request<Record<string, unknown>>(query, { id: deploymentId });
+          const latestDeployment = this.extractLatestDeployment(serviceResult);
+          if (!latestDeployment) {
+            continue;
+          }
+          return {
+            status: this.normalizeStatus(latestDeployment.status),
+            url: latestDeployment.staticUrl,
           };
-        } | null;
-      }>(serviceQuery, { id: deploymentId });
-
-      const latestDeployment = serviceResult.service?.serviceInstances.edges[0]?.node.latestDeployment;
-      if (!latestDeployment) {
-        return { status: 'unknown' };
+        } catch {
+          // Try next query shape.
+        }
       }
 
-      return {
-        status: this.normalizeStatus(latestDeployment.status),
-        url: latestDeployment.staticUrl,
-      };
+      return { status: 'unknown' };
     } catch {
       return { status: 'unknown' };
     }
+  }
+
+  private extractLatestDeployment(payload: Record<string, unknown>): { status: string; staticUrl?: string } | null {
+    const service = payload.service as
+      | {
+          serviceInstances?:
+            | { edges?: Array<{ node?: { latestDeployment?: { status?: string; staticUrl?: string } } }> }
+            | Array<{ latestDeployment?: { status?: string; staticUrl?: string } }>;
+        }
+      | undefined;
+    const instances = service?.serviceInstances;
+    if (!instances) return null;
+
+    const edges = (instances as { edges?: Array<{ node?: { latestDeployment?: { status?: string; staticUrl?: string } } }> }).edges;
+    if (Array.isArray(edges)) {
+      const deployment = edges[0]?.node?.latestDeployment;
+      if (deployment?.status) {
+        return { status: deployment.status, staticUrl: deployment.staticUrl };
+      }
+    }
+
+    if (Array.isArray(instances)) {
+      const deployment = instances[0]?.latestDeployment;
+      if (deployment?.status) {
+        return { status: deployment.status, staticUrl: deployment.staticUrl };
+      }
+    }
+
+    return null;
   }
 
   private normalizeStatus(status: string): string {
