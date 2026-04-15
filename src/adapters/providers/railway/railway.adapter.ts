@@ -45,7 +45,13 @@ export class RailwayAdapter implements IProviderAdapter {
     });
   }
 
-  async verify(): Promise<{ success: boolean; error?: string; email?: string }> {
+  async verify(): Promise<{
+    success: boolean;
+    error?: string;
+    email?: string;
+    workspaceId?: string;
+    workspaces?: Array<{ id: string; name?: string }>;
+  }> {
     if (!this.client) {
       return { success: false, error: 'Not connected. Call connect() first.' };
     }
@@ -61,7 +67,9 @@ export class RailwayAdapter implements IProviderAdapter {
       `;
       const result = await this.client.request<{ me: { id: string; email: string } }>(query);
       if (result.me?.id) {
-        return { success: true, email: result.me.email };
+        const workspaces = await this.getWorkspaces();
+        const workspaceId = await this.resolveWorkspaceId();
+        return { success: true, email: result.me.email, workspaceId: workspaceId ?? undefined, workspaces };
       }
       return { success: false, error: 'No user returned from Railway API' };
     } catch (error) {
@@ -239,33 +247,46 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     try {
-      const query = gql`
-        query MyWorkspaces {
-          me {
-            workspaces {
-              edges {
-                node {
-                  id
-                }
-              }
-            }
-          }
-        }
-      `;
-      const result = await this.client.request<{
-        me?: {
-          workspaces?: {
-            edges?: Array<{ node?: { id?: string } }>;
-          };
-        };
-      }>(query);
-      const id = result.me?.workspaces?.edges?.[0]?.node?.id;
+      const workspaces = await this.getWorkspaces();
+      const id = workspaces[0]?.id;
       this.resolvedWorkspaceId = id ?? null;
       return this.resolvedWorkspaceId;
     } catch {
       this.resolvedWorkspaceId = null;
       return this.resolvedWorkspaceId;
     }
+  }
+
+  private async getWorkspaces(): Promise<Array<{ id: string; name?: string }>> {
+    if (!this.client) return [];
+    const query = gql`
+      query MyWorkspaces {
+        me {
+          workspaces {
+            edges {
+              node {
+                id
+                name
+              }
+            }
+          }
+        }
+      }
+    `;
+    const result = await this.client.request<{
+      me?: {
+        workspaces?: {
+          edges?: Array<{ node?: { id?: string; name?: string } }>;
+        };
+      };
+    }>(query);
+    const edges = result.me?.workspaces?.edges ?? [];
+    return edges
+      .map((edge) => ({
+        id: edge.node?.id ?? '',
+        name: edge.node?.name,
+      }))
+      .filter((workspace) => workspace.id.length > 0);
   }
 
   private describeError(error: unknown): string {

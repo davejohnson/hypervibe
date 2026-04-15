@@ -144,9 +144,32 @@ export function registerConnectionTools(server: McpServer): void {
         }
 
         // Call verify on the adapter
-        const result = await (adapter as { verify: (scope?: string) => Promise<{ success: boolean; error?: string; email?: string; accountId?: string; zones?: string[]; version?: string; warning?: string }> }).verify(scope || undefined);
+        const result = await (adapter as {
+          verify: (scope?: string) => Promise<{
+            success: boolean;
+            error?: string;
+            email?: string;
+            accountId?: string;
+            zones?: string[];
+            version?: string;
+            warning?: string;
+            workspaceId?: string;
+            workspaces?: Array<{ id: string; name?: string }>;
+          }>
+        }).verify(scope || undefined);
 
         if (result.success) {
+          // Persist discovered Railway workspaceId so future deploy/apply flows can create projects
+          // without requiring manual workspace lookup.
+          if (provider === 'railway' && result.workspaceId) {
+            const creds = decryptedCreds as { apiToken?: string; workspaceId?: string; teamId?: string };
+            if (!creds.workspaceId) {
+              const nextCreds = { ...creds, workspaceId: result.workspaceId };
+              const nextEncrypted = secretStore.encryptObject(nextCreds);
+              connectionRepo.updateCredentials(connection.id, nextEncrypted);
+            }
+          }
+
           connectionRepo.updateStatus(connection.id, 'verified');
           auditRepo.create({
             action: 'connection.verified',
@@ -171,6 +194,8 @@ export function registerConnectionTools(server: McpServer): void {
             ...(result.accountId && { accountId: result.accountId }),
             ...(result.version && { version: result.version }),
             ...(result.warning && { warning: result.warning }),
+            ...(result.workspaceId && { workspaceId: result.workspaceId }),
+            ...(result.workspaces && result.workspaces.length > 0 && { workspaces: result.workspaces }),
           });
         } else {
           connectionRepo.updateStatus(connection.id, 'failed');
