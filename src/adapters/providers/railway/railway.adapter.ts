@@ -9,6 +9,7 @@ import { providerRegistry } from '../../../domain/registry/provider.registry.js'
 // Credentials schema for self-registration
 export const RailwayCredentialsSchema = z.object({
   apiToken: z.string().min(1, 'API token is required'),
+  workspaceId: z.string().optional(),
   teamId: z.string().optional(),
 });
 
@@ -32,9 +33,11 @@ export class RailwayAdapter implements IProviderAdapter {
 
   private client: GraphQLClient | null = null;
   private credentials: RailwayCredentials | null = null;
+  private resolvedWorkspaceId: string | null | undefined;
 
   async connect(credentials: unknown): Promise<void> {
     this.credentials = credentials as RailwayCredentials;
+    this.resolvedWorkspaceId = undefined;
     this.client = new GraphQLClient(RAILWAY_API_URL, {
       headers: {
         Authorization: `Bearer ${this.credentials.apiToken}`,
@@ -70,6 +73,7 @@ export class RailwayAdapter implements IProviderAdapter {
   async disconnect(): Promise<void> {
     this.client = null;
     this.credentials = null;
+    this.resolvedWorkspaceId = undefined;
   }
 
   async ensureProject(projectName: string, environment: Environment): Promise<Receipt> {
@@ -150,8 +154,21 @@ export class RailwayAdapter implements IProviderAdapter {
 
   private async createProject(projectName: string): Promise<{ id: string; name: string } | null> {
     if (!this.client) return null;
+    const workspaceId = await this.resolveWorkspaceId();
 
     const attempts: Array<{ mutation: string; variables: Record<string, unknown>; label: string }> = [
+      {
+        label: 'input.workspaceId',
+        mutation: `
+          mutation CreateProject($name: String!, $workspaceId: String!) {
+            projectCreate(input: { name: $name, workspaceId: $workspaceId }) {
+              id
+              name
+            }
+          }
+        `,
+        variables: { name: projectName, workspaceId },
+      },
       {
         label: 'input.teamId',
         mutation: `
@@ -162,19 +179,7 @@ export class RailwayAdapter implements IProviderAdapter {
             }
           }
         `,
-        variables: { name: projectName, teamId: this.credentials?.teamId ?? null },
-      },
-      {
-        label: 'input.workspaceId',
-        mutation: `
-          mutation CreateProject($name: String!, $workspaceId: String) {
-            projectCreate(input: { name: $name, workspaceId: $workspaceId }) {
-              id
-              name
-            }
-          }
-        `,
-        variables: { name: projectName, workspaceId: this.credentials?.teamId ?? null },
+        variables: { name: projectName, teamId: this.credentials?.teamId ?? workspaceId ?? null },
       },
       {
         label: 'input.name_only',
@@ -188,34 +193,14 @@ export class RailwayAdapter implements IProviderAdapter {
         `,
         variables: { name: projectName },
       },
-      {
-        label: 'args.teamId',
-        mutation: `
-          mutation CreateProject($name: String!, $teamId: String) {
-            projectCreate(name: $name, teamId: $teamId) {
-              id
-              name
-            }
-          }
-        `,
-        variables: { name: projectName, teamId: this.credentials?.teamId ?? null },
-      },
-      {
-        label: 'args.name_only',
-        mutation: `
-          mutation CreateProject($name: String!) {
-            projectCreate(name: $name) {
-              id
-              name
-            }
-          }
-        `,
-        variables: { name: projectName },
-      },
     ];
 
     const errors: string[] = [];
     for (const attempt of attempts) {
+      if (attempt.label === 'input.workspaceId' && !workspaceId) {
+        errors.push('input.workspaceId: No workspaceId available from credentials or Railway account');
+        continue;
+      }
       try {
         const result = await this.client.request<{ projectCreate: { id: string; name: string } }>(
           gql`${attempt.mutation}`,
@@ -231,6 +216,56 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     throw new Error(errors.join(' | '));
+  }
+
+  private async resolveWorkspaceId(): Promise<string | null> {
+    if (this.resolvedWorkspaceId !== undefined) {
+      return this.resolvedWorkspaceId;
+    }
+    if (!this.client) {
+      this.resolvedWorkspaceId = null;
+      return this.resolvedWorkspaceId;
+    }
+
+    if (this.credentials?.workspaceId) {
+      this.resolvedWorkspaceId = this.credentials.workspaceId;
+      return this.resolvedWorkspaceId;
+    }
+
+    // Backward compatibility: some users stored teamId previously.
+    if (this.credentials?.teamId) {
+      this.resolvedWorkspaceId = this.credentials.teamId;
+      return this.resolvedWorkspaceId;
+    }
+
+    try {
+      const query = gql`
+        query MyWorkspaces {
+          me {
+            workspaces {
+              edges {
+                node {
+                  id
+                }
+              }
+            }
+          }
+        }
+      `;
+      const result = await this.client.request<{
+        me?: {
+          workspaces?: {
+            edges?: Array<{ node?: { id?: string } }>;
+          };
+        };
+      }>(query);
+      const id = result.me?.workspaces?.edges?.[0]?.node?.id;
+      this.resolvedWorkspaceId = id ?? null;
+      return this.resolvedWorkspaceId;
+    } catch {
+      this.resolvedWorkspaceId = null;
+      return this.resolvedWorkspaceId;
+    }
   }
 
   private describeError(error: unknown): string {

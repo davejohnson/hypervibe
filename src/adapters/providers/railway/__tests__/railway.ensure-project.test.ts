@@ -30,6 +30,9 @@ describe('RailwayAdapter.ensureProject', () => {
 
   it('falls back to alternate create mutation shapes when first create attempt fails', async () => {
     const request = vi.fn()
+      .mockResolvedValueOnce({
+        me: { workspaces: { edges: [{ node: { id: 'ws-1' } }] } },
+      })
       .mockRejectedValueOnce(new Error('Unknown field "teamId"'))
       .mockResolvedValueOnce({
         projectCreate: { id: 'railway-2', name: 'billforge' },
@@ -43,6 +46,6 @@ describe('RailwayAdapter.ensureProject', () => {
 
     expect(receipt.success).toBe(true);
     expect(receipt.data?.projectId).toBe('railway-2');
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledTimes(3);
   });
 });

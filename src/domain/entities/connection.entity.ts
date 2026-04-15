@@ -21,6 +21,7 @@ export interface CreateConnectionInput {
 
 export interface RailwayCredentials {
   apiToken: string;
+  workspaceId?: string;
   teamId?: string;
 }
 

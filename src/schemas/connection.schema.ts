@@ -4,6 +4,7 @@ export const providerSchema = z.enum(['railway', 'local']).or(z.string().min(1))
 
 export const railwayCredentialsSchema = z.object({
   apiToken: z.string().min(1),
+  workspaceId: z.string().optional(),
   teamId: z.string().optional(),
 });
 
