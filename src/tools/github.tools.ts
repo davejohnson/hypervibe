@@ -2,11 +2,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
+import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
+import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../adapters/providers/github/github.adapter.js';
 import { CloudflareAdapter } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import type { GitHubCredentials } from '../adapters/providers/github/github.adapter.js';
 import type { CloudflareCredentials } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
+import type { Project } from '../domain/entities/project.entity.js';
 
 // ============= Workflow Templates =============
 
@@ -346,6 +349,8 @@ const BRANCH_DEPLOY_TEMPLATES: Record<string, { staging: string; production: str
 
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
+const projectRepo = new ProjectRepository();
+const envRepo = new EnvironmentRepository();
 
 // GitHub Pages IP addresses for A records (apex domain)
 const GITHUB_PAGES_IPS = [
@@ -407,6 +412,232 @@ function getApexDomain(domain: string): string {
   return parts.slice(-2).join('.');
 }
 
+type BranchDeployProvider = 'railway' | 'vercel' | 'render' | 'digitalocean';
+type BranchDeployEnvironmentKind = 'staging' | 'production';
+
+interface BranchDeployTarget {
+  environmentName: string;
+  kind: BranchDeployEnvironmentKind;
+  branch: string;
+}
+
+interface BranchDeployWorkflow {
+  template: string;
+  templateName: string;
+  branch: string;
+  environment: string;
+  path: string;
+  content: string;
+  requiredSecrets: string[];
+  requiredVariables: string[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function classifyEnvironmentName(name: string): BranchDeployEnvironmentKind | null {
+  const normalized = name.trim().toLowerCase();
+  if (!normalized || normalized === 'local') return null;
+  if (normalized === 'production' || normalized === 'prod' || normalized.includes('prod')) return 'production';
+  if (normalized === 'staging' || normalized === 'stage' || normalized.includes('stag')) return 'staging';
+  return null;
+}
+
+function resolveBranchDeployProject(owner: string, repo: string, projectName?: string): Project | null {
+  if (projectName) {
+    return projectRepo.findByName(projectName);
+  }
+
+  return (
+    projectRepo.findByGitRemoteUrl(`https://github.com/${owner}/${repo}`) ??
+    projectRepo.findByGitRemoteUrl(`git@github.com:${owner}/${repo}.git`) ??
+    projectRepo.findByName(repo)
+  );
+}
+
+function resolveBranchDeployTargets(project: Project): {
+  targets: BranchDeployTarget[];
+  desiredBranches: { staging?: string; production?: string };
+  migration: { includeStep: boolean; command?: string; note?: string };
+  skippedEnvironments: string[];
+} {
+  const desiredState = asRecord(project.policies?.desiredState);
+  const desiredDeploy = asRecord(desiredState?.deploy);
+  const desiredBranchesRecord = asRecord(desiredDeploy?.branches);
+  const desiredBranches = {
+    staging:
+      typeof desiredBranchesRecord?.staging === 'string' && desiredBranchesRecord.staging.trim().length > 0
+        ? desiredBranchesRecord.staging.trim()
+        : undefined,
+    production:
+      typeof desiredBranchesRecord?.production === 'string' && desiredBranchesRecord.production.trim().length > 0
+        ? desiredBranchesRecord.production.trim()
+        : undefined,
+  };
+
+  const desiredEnvironmentName =
+    typeof desiredState?.environmentName === 'string' && desiredState.environmentName.trim().length > 0
+      ? desiredState.environmentName.trim()
+      : undefined;
+
+  const migrations = asRecord(desiredState?.migrations);
+  const migrationMode = typeof migrations?.mode === 'string' ? migrations.mode : undefined;
+  const migrationCommand =
+    typeof migrations?.command === 'string' && migrations.command.trim().length > 0
+      ? migrations.command.trim()
+      : undefined;
+  const includeMigrationStep =
+    migrationMode === 'tool' && migrations?.runInDeploy !== false && Boolean(migrationCommand);
+
+  const candidateEnvironmentNames = Array.from(
+    new Set(
+      [
+        ...envRepo.findByProjectId(project.id).map((environment) => environment.name),
+        desiredEnvironmentName,
+      ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    )
+  );
+
+  const targetsByKind = new Map<BranchDeployEnvironmentKind, BranchDeployTarget>();
+  const skippedEnvironments: string[] = [];
+
+  for (const environmentName of candidateEnvironmentNames) {
+    const kind = classifyEnvironmentName(environmentName);
+    if (!kind) {
+      skippedEnvironments.push(environmentName);
+      continue;
+    }
+    if (targetsByKind.has(kind)) {
+      skippedEnvironments.push(environmentName);
+      continue;
+    }
+
+    targetsByKind.set(kind, {
+      environmentName,
+      kind,
+      branch: kind === 'production'
+        ? desiredBranches.production ?? 'main'
+        : desiredBranches.staging ?? 'staging',
+    });
+  }
+
+  const targets = Array.from(targetsByKind.values()).sort((a, b) => {
+    if (a.kind === b.kind) return a.environmentName.localeCompare(b.environmentName);
+    return a.kind === 'staging' ? -1 : 1;
+  });
+
+  return {
+    targets,
+    desiredBranches,
+    migration: {
+      includeStep: includeMigrationStep,
+      command: migrationCommand,
+      note:
+        migrationMode === 'releaseCommand'
+          ? 'Project uses release-command migrations; branch workflows will not run migrations in GitHub Actions.'
+          : undefined,
+    },
+    skippedEnvironments,
+  };
+}
+
+function buildMigrationStep(command: string): string {
+  return `      - name: Run migrations
+        run: ${command}
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+`;
+}
+
+function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDeployEnvironmentKind): {
+  steps: string;
+  requiredSecrets: string[];
+} {
+  switch (provider) {
+    case 'railway':
+      return {
+        steps: `      - uses: railwayapp/railway-github-action@v0.1.0
+        with:
+          railway_token: \${{ secrets.RAILWAY_TOKEN }}
+`,
+        requiredSecrets: ['RAILWAY_TOKEN'],
+      };
+    case 'vercel':
+      return {
+        steps: `      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+      - name: Deploy (${kind === 'production' ? 'production' : 'preview'})
+        run: vercel deploy --token \${{ secrets.VERCEL_TOKEN }}${kind === 'production' ? ' --prod' : ''} --yes
+`,
+        requiredSecrets: ['VERCEL_TOKEN'],
+      };
+    case 'render':
+      return {
+        steps: `      - name: Trigger Render deploy hook
+        run: curl -fsSL -X POST "\${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+`,
+        requiredSecrets: ['RENDER_DEPLOY_HOOK_URL'],
+      };
+    case 'digitalocean':
+      return {
+        steps: `      - uses: digitalocean/action-doctl@v2
+        with:
+          token: \${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: Trigger App Platform deployment
+        run: doctl apps create-deployment \${{ secrets.DO_APP_ID }}
+`,
+        requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'DO_APP_ID'],
+      };
+  }
+}
+
+function buildBranchDeployWorkflow(
+  provider: BranchDeployProvider,
+  target: BranchDeployTarget,
+  migration: { includeStep: boolean; command?: string }
+): BranchDeployWorkflow {
+  const providerName =
+    provider === 'digitalocean'
+      ? 'DigitalOcean'
+      : provider.charAt(0).toUpperCase() + provider.slice(1);
+  const template = `deploy-${provider}-${target.kind}`;
+  const filename = `${template}.yml`;
+  const migrationStep = migration.includeStep && migration.command ? buildMigrationStep(migration.command) : '';
+  const deployBlock = buildProviderDeploySteps(provider, target.kind);
+  const requiredSecrets = migrationStep
+    ? [...deployBlock.requiredSecrets, 'DATABASE_URL']
+    : [...deployBlock.requiredSecrets];
+
+  const content = `name: Deploy ${providerName} (${target.environmentName})
+
+on:
+  push:
+    branches: [${target.branch}]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${target.environmentName}
+    steps:
+      - uses: actions/checkout@v4
+${migrationStep}${deployBlock.steps}`;
+
+  return {
+    template,
+    templateName: `Deploy ${providerName} (${target.environmentName})`,
+    branch: target.branch,
+    environment: target.environmentName,
+    path: `.github/workflows/${filename}`,
+    content,
+    requiredSecrets: Array.from(new Set(requiredSecrets)),
+    requiredVariables: [],
+  };
+}
+
 export function registerGitHubTools(server: McpServer): void {
   server.tool(
     'github_setup_help',
@@ -428,14 +659,26 @@ Fine-grained tokens let you scope access to specific repositories with minimal p
 
 | Permission | Access | Used by |
 |------------|--------|---------|
-| Actions | Read and write | Workflows: list, trigger, create |
+| Actions | Read and write | Workflow runs: list, rerun, trigger |
 | Administration | Read and write | Branch protection rules |
-| Contents | Read and write | Workflow files, CNAME file for Pages |
+| Contents | Read and write | Repository files, workflow files, CNAME file for Pages |
+| Workflows | Read and write | Required to create or update files in \`.github/workflows/\` |
 | Pages | Read and write | GitHub Pages setup and status |
 | Secrets | Read and write | Repository secrets management |
 
 7. Click **"Generate token"**
 8. Copy the token (shown only once!)
+
+### Minimum recommended fine-grained set for Hypervibe
+
+If you want Hypervibe to manage branch-deploy workflows, branch protection, Pages, and secrets reliably, grant:
+
+- **Actions:** Read and write
+- **Administration:** Read and write
+- **Contents:** Read and write
+- **Workflows:** Read and write
+- **Pages:** Read and write
+- **Secrets:** Read and write
 
 ## Classic Token (Simpler Alternative)
 
@@ -444,28 +687,32 @@ If you prefer a simpler setup or need org-wide access:
 1. Go to https://github.com/settings/tokens
 2. Click **"Generate new token (classic)"**
 3. Set a **Note** (e.g., "Hypervibe")
-4. Select the **\`repo\`** scope (grants full repository access)
-5. Click **"Generate token"**
-6. Copy the token (shown only once!)
+4. Select the **\`repo\`** scope
+5. Select the **\`workflow\`** scope if Hypervibe will create or update files under \`.github/workflows/\`
+6. Click **"Generate token"**
+7. Copy the token (shown only once!)
 
 ## What Each Hypervibe Feature Needs
 
 | Feature | Fine-grained permission | Classic scope |
 |---------|------------------------|---------------|
 | Secrets (list, set, delete) | Secrets: Read and write | repo |
-| Workflows (list, create, trigger) | Actions: Read and write, Contents: Read and write | repo |
+| Workflow runs (list, trigger) | Actions: Read and write | repo |
+| Workflow file creation/update (\`.github/workflows/*\`) | Contents: Read and write, Workflows: Read and write | repo + workflow |
 | Branch protection | Administration: Read and write | repo |
 | GitHub Pages setup | Pages: Read and write, Contents: Read and write | repo |
-| AI code review setup | Actions: Read and write, Contents: Read and write, Secrets: Read and write | repo |
+| AI code review setup | Actions: Read and write, Contents: Read and write, Workflows: Read and write, Secrets: Read and write | repo + workflow |
 
 ## Verification
 
 After creating the token, connect and verify it:
 
 \`\`\`
-connection_create provider=github credentials={"token":"ghp_your_token_here"}
+connection_create provider=github credentials={"apiToken":"ghp_your_token_here"}
 connection_verify provider=github
-\`\`\``;
+\`\`\`
+
+Note: GitHub's repository contents API has a special case for \`.github/workflows/\`. Even when the token can read/write normal repository contents, modifying workflow files may require explicit **Workflows: Read and write** permission for fine-grained PATs, or the **\`workflow\`** scope for classic PATs.`;
 
       return {
         content: [{
@@ -1504,18 +1751,19 @@ jobs:
 
   server.tool(
     'deploy_branch_setup',
-    'Set up branch-based deploy workflows (staging->staging, main->production) for a provider',
+    'Set up branch-based deploy workflows for a provider using the project\'s actual environments and desired deploy state',
     {
       owner: z.string().describe('Repository owner (user or organization)'),
       repo: z.string().describe('Repository name'),
+      projectName: z.string().optional().describe('Optional Hypervibe project name override for resolving environments/desired state'),
       provider: z.enum(['railway', 'vercel', 'render', 'digitalocean']).describe('Deployment provider'),
-      protectBranches: z.boolean().optional().describe('DEPRECATED: branch protection is now enabled by default. Set false to opt out'),
-      ignoreBranchProtection: z.boolean().optional().describe('Set true to skip branch protection setup'),
+      protectBranches: z.boolean().optional().describe('Set true to configure branch protection for the deploy branches'),
+      ignoreBranchProtection: z.boolean().optional().describe('Set true to skip branch protection setup even if protectBranches=true'),
       statusChecks: z.array(z.string()).optional().describe('Required status checks for branch protection'),
       requiredReviewers: z.number().optional().describe('Number of required PR reviewers (default: 1)'),
       confirm: z.boolean().optional().describe('Set to true to create/update the workflows'),
     },
-    async ({ owner, repo, provider, protectBranches, ignoreBranchProtection, statusChecks, requiredReviewers, confirm }) => {
+    async ({ owner, repo, projectName, provider, protectBranches, ignoreBranchProtection, statusChecks, requiredReviewers, confirm }) => {
       const result = getGitHubAdapter(`${owner}/${repo}`);
       if ('error' in result) {
         return {
@@ -1526,21 +1774,55 @@ jobs:
         };
       }
 
-      const mapping = BRANCH_DEPLOY_TEMPLATES[provider];
-      const stagingTemplate = WORKFLOW_TEMPLATES[mapping.staging];
-      const productionTemplate = WORKFLOW_TEMPLATES[mapping.production];
-      const templates = [
-        { key: mapping.staging, branch: 'staging', tmpl: stagingTemplate },
-        { key: mapping.production, branch: 'main', tmpl: productionTemplate },
-      ];
+      const verification = await result.adapter.verify();
+      if (!verification.success) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: verification.error || 'GitHub connection verification failed',
+            }),
+          }],
+        };
+      }
 
-      const uniqueRequiredSecrets = Array.from(new Set(templates.flatMap(({ tmpl }) => tmpl.requiredSecrets ?? [])));
-      const uniqueRequiredVariables = Array.from(new Set(templates.flatMap(({ tmpl }) => tmpl.requiredVariables ?? [])));
-      // Conservative default: enforce protection unless explicitly ignored/disabled.
-      const shouldProtectBranches = !(ignoreBranchProtection === true || protectBranches === false);
+      const project = resolveBranchDeployProject(owner, repo, projectName);
+      if (!project) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `No Hypervibe project matched ${owner}/${repo}. Pass projectName explicitly or ensure the project's gitRemoteUrl matches this repository.`,
+            }),
+          }],
+        };
+      }
+
+      const { targets, migration, skippedEnvironments } = resolveBranchDeployTargets(project);
+      if (targets.length === 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `Project "${project.name}" has no deployable staging/production environments for branch setup.`,
+              skippedEnvironments,
+            }),
+          }],
+        };
+      }
+
+      const workflows = targets.map((target) => buildBranchDeployWorkflow(provider, target, migration));
+
+      const uniqueRequiredSecrets = Array.from(new Set(workflows.flatMap((workflow) => workflow.requiredSecrets)));
+      const uniqueRequiredVariables = Array.from(new Set(workflows.flatMap((workflow) => workflow.requiredVariables)));
+      const shouldProtectBranches = protectBranches === true && ignoreBranchProtection !== true;
+      const protectedBranches = Array.from(new Set(targets.map((target) => target.branch)));
       const branchProtectionPlan = shouldProtectBranches
         ? {
-            branches: ['staging', 'main'],
+            branches: protectedBranches,
             rules: {
               requireReviews: true,
               requiredReviewers: requiredReviewers ?? 1,
@@ -1565,27 +1847,22 @@ jobs:
               success: true,
               mode: 'preview',
               provider,
+              project: project.name,
               repository: `${owner}/${repo}`,
-              branchMapping: {
-                staging: 'staging',
-                production: 'main',
-              },
+              branchMapping: Object.fromEntries(targets.map((target) => [target.kind, target.branch])),
               message: 'Review planned workflows and call again with confirm=true to apply.',
-              workflows: templates.map(({ key, branch, tmpl }) => ({
-                template: key,
-                templateName: tmpl.name,
-                branch,
-                path: `.github/workflows/${tmpl.filename}`,
-                content: tmpl.content,
-                requiredSecrets: tmpl.requiredSecrets ?? [],
-                requiredVariables: tmpl.requiredVariables ?? [],
-              })),
+              workflows,
               requiredSecrets: uniqueRequiredSecrets,
               requiredVariables: uniqueRequiredVariables,
               branchProtection: branchProtectionPlan,
               notes: [
-                'Set secret DATABASE_URL in each GitHub Environment only if using migrations.',
-                'Set variable MIGRATION_COMMAND in each GitHub Environment to enable migration step.',
+                ...(migration.includeStep
+                  ? targets.map((target) => `Set secret DATABASE_URL in GitHub Environment "${target.environmentName}" for the migration step.`)
+                  : []),
+                ...(migration.note ? [migration.note] : []),
+                ...(skippedEnvironments.length > 0
+                  ? [`Skipped unsupported/custom environments: ${skippedEnvironments.join(', ')}`]
+                  : []),
               ],
             }),
           }],
@@ -1607,35 +1884,34 @@ jobs:
         error?: string;
       }> = [];
 
-      for (const { key, branch, tmpl } of templates) {
-        const workflowPath = `.github/workflows/${tmpl.filename}`;
+      for (const workflow of workflows) {
         try {
           const fileResult = await result.adapter.createOrUpdateFile(
             owner,
             repo,
-            workflowPath,
-            tmpl.content,
-            `Add ${tmpl.name} workflow`
+            workflow.path,
+            workflow.content,
+            `Add ${workflow.templateName} workflow`
           );
 
           workflowResults.push({
-            template: key,
-            templateName: tmpl.name,
-            branch,
-            path: workflowPath,
+            template: workflow.template,
+            templateName: workflow.templateName,
+            branch: workflow.branch,
+            path: workflow.path,
             created: fileResult.created,
             updated: fileResult.updated,
           });
         } catch (error) {
           errors.push({
-            template: key,
-            path: workflowPath,
+            template: workflow.template,
+            path: workflow.path,
             error: error instanceof Error ? error.message : String(error),
           });
         }
       }
 
-      if (shouldProtectBranches && branchProtectionPlan) {
+      if (errors.length === 0 && shouldProtectBranches && branchProtectionPlan) {
         for (const branch of branchProtectionPlan.branches) {
           try {
             await result.adapter.updateBranchProtection(owner, repo, branch, branchProtectionPlan.rules);
@@ -1655,8 +1931,9 @@ jobs:
         resourceType: 'github_workflow',
         resourceId: `${owner}/${repo}/branch-deploy/${provider}`,
         details: {
+          project: project.name,
           provider,
-          branchMapping: { staging: 'staging', production: 'main' },
+          branchMapping: Object.fromEntries(targets.map((target) => [target.kind, target.branch])),
           workflows: workflowResults,
           errors,
           branchProtection: branchProtectionResults,
@@ -1672,23 +1949,26 @@ jobs:
             success: errors.length === 0 && protectionFailures.length === 0,
             mode: 'executed',
             provider,
+            project: project.name,
             repository: `${owner}/${repo}`,
-            branchMapping: {
-              staging: 'staging',
-              production: 'main',
-            },
+            branchMapping: Object.fromEntries(targets.map((target) => [target.kind, target.branch])),
             workflows: workflowResults,
             errors,
             branchProtection: {
-              enabled: shouldProtectBranches,
+              enabled: shouldProtectBranches && errors.length === 0,
               results: branchProtectionResults,
               rules: branchProtectionPlan?.rules ?? null,
             },
             requiredSecrets: uniqueRequiredSecrets,
             requiredVariables: uniqueRequiredVariables,
             notes: [
-              'Set secret DATABASE_URL in each GitHub Environment only if using migrations.',
-              'Set variable MIGRATION_COMMAND in each GitHub Environment to enable migration step.',
+              ...(migration.includeStep
+                ? targets.map((target) => `Set secret DATABASE_URL in GitHub Environment "${target.environmentName}" for the migration step.`)
+                : []),
+              ...(migration.note ? [migration.note] : []),
+              ...(skippedEnvironments.length > 0
+                ? [`Skipped unsupported/custom environments: ${skippedEnvironments.join(', ')}`]
+                : []),
             ],
           }),
         }],

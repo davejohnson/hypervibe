@@ -18,6 +18,33 @@ interface SetupIssue {
   fix?: string;
 }
 
+function parseGitHubRepoFromRemote(remoteUrl?: string): string | null {
+  if (!remoteUrl) {
+    return null;
+  }
+
+  const normalized = remoteUrl.trim().replace(/\.git$/i, '');
+
+  try {
+    const url = new URL(normalized);
+    if (url.hostname.toLowerCase() !== 'github.com') {
+      return null;
+    }
+    const parts = url.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
+    return parts.length >= 2 ? `${parts[parts.length - 2]}/${parts[parts.length - 1]}` : null;
+  } catch {
+    // Not a URL format, continue with SSH-like parsing.
+  }
+
+  const sshMatch = normalized.match(/^(?:ssh:\/\/)?(?:git@)?github\.com[:/](.+)$/i);
+  if (!sshMatch) {
+    return null;
+  }
+
+  const parts = sshMatch[1].replace(/^\/+/, '').split('/').filter(Boolean);
+  return parts.length >= 2 ? `${parts[parts.length - 2]}/${parts[parts.length - 1]}` : null;
+}
+
 async function resolveRailwayProjectDetails(
   adapter: RailwayAdapter,
   params: { projectName?: string; railwayProjectId?: string }
@@ -227,18 +254,20 @@ export function registerSetupTools(server: McpServer): void {
 
   server.tool(
     'setup_configure',
-    'Configure a Railway service with proper settings (start command, migrations, health checks)',
+    'Configure a Railway service with proper settings (start command, migrations, health checks, repo/branch deploy source)',
     {
       projectName: z.string().optional().describe('Project name'),
       railwayProjectId: z.string().optional().describe('Railway project ID'),
       serviceName: z.string().describe('Service to configure'),
       environmentName: z.string().optional().describe('Environment (default: production)'),
+      repo: z.string().optional().describe('GitHub repository to connect for Railway auto-deploy (owner/repo). Defaults from project gitRemoteUrl when available'),
+      branch: z.string().optional().describe('Git branch to connect for Railway auto-deploy (e.g., main)'),
       startCommand: z.string().optional().describe('Start command (e.g., npm start)'),
       releaseCommand: z.string().optional().describe('Release command for migrations (runs once before deploy)'),
       healthCheckPath: z.string().optional().describe('Health check endpoint (e.g., /health)'),
       cronSchedule: z.string().optional().describe('Cron schedule (e.g., "0 * * * *" for hourly)'),
     },
-    async ({ projectName, railwayProjectId, serviceName, environmentName = 'production', startCommand, releaseCommand, healthCheckPath, cronSchedule }) => {
+    async ({ projectName, railwayProjectId, serviceName, environmentName = 'production', repo, branch, startCommand, releaseCommand, healthCheckPath, cronSchedule }) => {
       const connection = connectionRepo.findByProvider('railway');
       if (!connection) {
         return {
@@ -253,6 +282,7 @@ export function registerSetupTools(server: McpServer): void {
       const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
       const adapter = new RailwayAdapter();
       await adapter.connect(credentials);
+      const project = resolveProject({ projectName });
 
       // Find project
       const projectDetails = await resolveRailwayProjectDetails(adapter, { projectName, railwayProjectId });
@@ -304,6 +334,55 @@ export function registerSetupTools(server: McpServer): void {
       // Apply configuration via Railway API
       try {
         const updates: string[] = [];
+        const wantsRepoLink = typeof repo === 'string' || typeof branch === 'string';
+
+        if (wantsRepoLink) {
+          const resolvedBranch = branch?.trim();
+          const resolvedRepo = repo?.trim() || parseGitHubRepoFromRemote(project?.gitRemoteUrl);
+
+          if (!resolvedBranch) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: 'branch is required when configuring a Railway GitHub deploy source',
+                }),
+              }],
+            };
+          }
+
+          if (!resolvedRepo) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: 'repo is required when configuring a Railway GitHub deploy source. Pass repo explicitly or set the Hypervibe project gitRemoteUrl to a GitHub remote.',
+                }),
+              }],
+            };
+          }
+
+          const receipt = await adapter.connectServiceToRepo({
+            serviceId: service.node.id,
+            repo: resolvedRepo,
+            branch: resolvedBranch,
+          });
+          if (!receipt.success) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: receipt.error || receipt.message,
+                }),
+              }],
+            };
+          }
+
+          updates.push(`Deploy source: ${resolvedRepo}#${resolvedBranch}`);
+        }
 
         if (startCommand || healthCheckPath || cronSchedule) {
           const receipt = await adapter.updateServiceInstanceConfig({

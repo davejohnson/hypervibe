@@ -136,4 +136,106 @@ describe('setup tools', () => {
 
     await Promise.all([client.close(), server.close()]);
   });
+
+  it('setup_configure links a Railway service to the project GitHub repo and branch', async () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const connectionRepo = new ConnectionRepository();
+    const secretStore = getSecretStore();
+
+    const project = projectRepo.create({
+      name: 'billforge',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'git@github.com:davejohnson/billforge.git',
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project-1',
+        railwayProjectId: 'rail-project-1',
+      },
+    });
+
+    const connection = connectionRepo.create({
+      provider: 'railway',
+      credentialsEncrypted: secretStore.encryptObject({ apiToken: 'token' }),
+    });
+    connectionRepo.updateStatus(connection.id, 'verified');
+
+    const projectDetails: RailwayProjectDetails = {
+      id: 'rail-project-1',
+      name: 'billforge',
+      environments: {
+        edges: [{ node: { id: 'env-prod', name: 'production' } }],
+      },
+      services: {
+        edges: [{
+          node: {
+            id: 'svc-web',
+            name: 'web',
+            icon: 'node',
+            repoTriggers: { edges: [] },
+            serviceInstances: {
+              edges: [{
+                node: {
+                  environmentId: 'env-prod',
+                  domains: {
+                    serviceDomains: [],
+                    customDomains: [],
+                  },
+                  startCommand: undefined,
+                  healthcheckPath: undefined,
+                  numReplicas: 1,
+                  sleepApplication: false,
+                },
+              }],
+            },
+          },
+        }],
+      },
+      plugins: { edges: [] },
+    };
+
+    vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(RailwayAdapter.prototype, 'getProjectDetails').mockResolvedValue(projectDetails);
+    vi.spyOn(RailwayAdapter.prototype, 'findProjectByName').mockResolvedValue(null);
+    const connectServiceToRepo = vi
+      .spyOn(RailwayAdapter.prototype, 'connectServiceToRepo')
+      .mockResolvedValue({ success: true, message: 'connected' });
+    const updateServiceInstanceConfig = vi
+      .spyOn(RailwayAdapter.prototype, 'updateServiceInstanceConfig')
+      .mockResolvedValue({ success: true, message: 'updated' });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'setup-client-repo-link', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'setup_configure', {
+      projectName: 'billforge',
+      environmentName: 'production',
+      serviceName: 'web',
+      branch: 'main',
+      startCommand: 'npm start',
+    });
+
+    expect(payload.success).toBe(true);
+    expect(connectServiceToRepo).toHaveBeenCalledWith({
+      serviceId: 'svc-web',
+      repo: 'davejohnson/billforge',
+      branch: 'main',
+    });
+    expect(updateServiceInstanceConfig).toHaveBeenCalledWith({
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      startCommand: 'npm start',
+      healthcheckPath: undefined,
+      cronSchedule: undefined,
+    });
+
+    await Promise.all([client.close(), server.close()]);
+  });
 });

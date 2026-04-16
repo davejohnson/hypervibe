@@ -1719,6 +1719,49 @@ export class RailwayAdapter implements IProviderAdapter {
     }
   }
 
+  async connectServiceToRepo(params: {
+    serviceId: string;
+    repo: string;
+    branch: string;
+  }): Promise<Receipt> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const mutation = gql`
+      mutation ServiceConnect($id: String!, $input: ServiceConnectInput!) {
+        serviceConnect(id: $id, input: $input) {
+          id
+        }
+      }
+    `;
+
+    try {
+      await this.client.request(mutation, {
+        id: params.serviceId,
+        input: {
+          repo: params.repo,
+          branch: params.branch,
+        },
+      });
+
+      return {
+        success: true,
+        message: 'Railway service connected to repository',
+        data: {
+          repo: params.repo,
+          branch: params.branch,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to connect Railway service to repository',
+        error: this.describeError(error),
+      };
+    }
+  }
+
   async findProjectByName(name: string): Promise<RailwayProject | null> {
     const projects = await this.listProjects();
     return projects.find((p) => p.name.toLowerCase() === name.toLowerCase()) ?? null;

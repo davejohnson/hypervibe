@@ -30,4 +30,31 @@ describe('RailwayAdapter service instance updates', () => {
       },
     });
   });
+
+  it('connects a service to a GitHub repo and branch via serviceConnect', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      serviceConnect: {
+        id: 'svc-web',
+      },
+    });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.connectServiceToRepo({
+      serviceId: 'svc-web',
+      repo: 'davejohnson/billforge',
+      branch: 'main',
+    });
+
+    expect(receipt.success).toBe(true);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0]?.[1]).toEqual({
+      id: 'svc-web',
+      input: {
+        repo: 'davejohnson/billforge',
+        branch: 'main',
+      },
+    });
+  });
 });
