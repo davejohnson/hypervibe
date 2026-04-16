@@ -391,4 +391,222 @@ describe('infra_apply multi-service convergence', () => {
 
     await Promise.all([client.close(), server.close()]);
   });
+
+  it('shows repo-linked deploy source configuration in preview when branch deploy is desired', async () => {
+    const projectRepo = new ProjectRepository();
+    const project = projectRepo.create({
+      name: 'branch-source-project',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/davejohnson/billforge.git',
+    });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'branch-source-preview-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'infra_apply', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web', 'worker'],
+      databaseProvider: 'railway',
+      setupEmail: false,
+      deploy: {
+        strategy: 'branch',
+        branches: {
+          production: 'main',
+        },
+      },
+      confirm: false,
+    });
+
+    const sourcePlan = (payload.plan as Array<Record<string, unknown>>).filter(
+      (item) => item.action === 'deploy_source_configure'
+    );
+    expect(sourcePlan).toHaveLength(2);
+    expect(sourcePlan).toEqual([
+      {
+        action: 'deploy_source_configure',
+        status: 'needed',
+        detail: 'Connect service "web" to GitHub davejohnson/billforge#main',
+      },
+      {
+        action: 'deploy_source_configure',
+        status: 'needed',
+        detail: 'Connect service "worker" to GitHub davejohnson/billforge#main',
+      },
+    ]);
+
+    await Promise.all([client.close(), server.close()]);
+  });
+
+  it('configures repo-linked deploy sources for all services during apply', async () => {
+    const projectRepo = new ProjectRepository();
+    const project = projectRepo.create({
+      name: 'branch-source-apply-project',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'git@github.com:davejohnson/billforge.git',
+    });
+
+    const fakeDatabaseAdapter: IDatabaseAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedDatabases: ['postgres'],
+        supportedCaches: [],
+        supportsPooling: false,
+        supportsReadReplicas: false,
+        supportsPointInTimeRecovery: false,
+        serverlessOptimized: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async provision(_type, environment) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type: 'postgres',
+            bindings: {
+              provider: 'railway',
+              pluginName: 'postgres-db',
+              connectionString: 'postgres://shared-db',
+            },
+            externalId: 'rail-db-1',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: true,
+            message: 'db ready',
+            data: {
+              projectId: 'rail-project-1',
+              railwayProjectId: 'rail-project-1',
+              ensureProjectCreated: false,
+            },
+          },
+          connectionUrl: 'postgres://shared-db',
+          envVars: {
+            DATABASE_URL: '${{postgres-db.DATABASE_URL}}',
+            DIRECT_URL: '${{postgres-db.DATABASE_PRIVATE_URL}}',
+          },
+        };
+      },
+      async getConnectionUrl() {
+        return 'postgres://shared-db';
+      },
+      async destroy() {
+        return { success: true, message: 'destroyed' };
+      },
+    };
+
+    const connectServiceToRepo = vi.fn(async () => ({
+      success: true,
+      message: 'connected',
+    }));
+
+    const fakeHostingAdapter: IHostingAdapter & {
+      connectServiceToRepo: typeof connectServiceToRepo;
+    } = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: false,
+        supportsReleaseCommand: true,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return {
+          success: true,
+          message: 'bound',
+          data: {
+            projectId: 'rail-project-1',
+            environmentId: 'rail-env-1',
+          },
+        };
+      },
+      async deploy(service) {
+        return {
+          serviceId: `deploy-${service.name}`,
+          externalId: `rail-${service.name}`,
+          url: `https://${service.name}.example.com`,
+          status: 'deployed',
+          receipt: {
+            success: true,
+            message: 'deployed',
+            data: {
+              railwayEnvironmentId: 'rail-env-1',
+            },
+          },
+        };
+      },
+      async setEnvVars() {
+        return {
+          success: true,
+          message: 'vars synced',
+        };
+      },
+      async getDeployStatus(_environment, deploymentId) {
+        return {
+          status: 'deployed',
+          url: `https://${deploymentId}.example.com`,
+        };
+      },
+      connectServiceToRepo,
+    };
+
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeDatabaseAdapter,
+    });
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeHostingAdapter,
+    });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'branch-source-apply-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'infra_apply', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web', 'worker'],
+      databaseProvider: 'railway',
+      setupEmail: false,
+      deploy: {
+        strategy: 'branch',
+        branches: {
+          production: 'main',
+        },
+      },
+      confirm: true,
+    });
+
+    expect(payload.success).toBe(true);
+    expect(payload.deploySource).toEqual({
+      strategy: 'branch',
+      repo: 'davejohnson/billforge',
+      branch: 'main',
+      services: ['web', 'worker'],
+    });
+    expect(connectServiceToRepo.mock.calls).toEqual([
+      [{ serviceId: 'rail-web', repo: 'davejohnson/billforge', branch: 'main' }],
+      [{ serviceId: 'rail-worker', repo: 'davejohnson/billforge', branch: 'main' }],
+    ]);
+
+    await Promise.all([client.close(), server.close()]);
+  });
 });

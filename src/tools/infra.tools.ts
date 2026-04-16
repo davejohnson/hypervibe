@@ -19,6 +19,8 @@ import {
 } from '../domain/services/local-state.transaction.js';
 import { resolveProject } from './resolve-project.js';
 import type { Component } from '../domain/entities/component.entity.js';
+import type { Receipt } from '../domain/ports/provider.port.js';
+import type { IHostingAdapter } from '../domain/ports/hosting.port.js';
 
 const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
@@ -61,6 +63,15 @@ interface ExistingDatabaseState {
   envVars?: Record<string, string>;
   connectionUrl?: string;
 }
+
+interface GitDeploySource {
+  repo: string;
+  branch: string;
+}
+
+type SourceConfigurableHostingAdapter = {
+  connectServiceToRepo?: (params: { serviceId: string; repo: string; branch: string }) => Promise<Receipt>;
+};
 
 function normalizeServices(services: Array<string | undefined | null>): string[] {
   const seen = new Set<string>();
@@ -178,6 +189,81 @@ function resolveExistingDatabaseState(
   };
 }
 
+function parseGitHubRepoFromRemote(remoteUrl?: string): string | null {
+  if (!remoteUrl) {
+    return null;
+  }
+
+  const normalized = remoteUrl.trim().replace(/\.git$/i, '');
+
+  try {
+    const url = new URL(normalized);
+    if (url.hostname.toLowerCase() !== 'github.com') {
+      return null;
+    }
+    const parts = url.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
+    return parts.length >= 2 ? `${parts[parts.length - 2]}/${parts[parts.length - 1]}` : null;
+  } catch {
+    // Not a URL format, continue with SSH-like parsing.
+  }
+
+  const sshMatch = normalized.match(/^(?:ssh:\/\/)?(?:git@)?github\.com[:/](.+)$/i);
+  if (!sshMatch) {
+    return null;
+  }
+
+  const parts = sshMatch[1].replace(/^\/+/, '').split('/').filter(Boolean);
+  return parts.length >= 2 ? `${parts[parts.length - 2]}/${parts[parts.length - 1]}` : null;
+}
+
+function classifyDeployEnvironment(environmentName: string): 'staging' | 'production' | null {
+  const normalized = environmentName.trim().toLowerCase();
+  if (normalized === 'production' || normalized === 'prod' || normalized.includes('prod')) {
+    return 'production';
+  }
+  if (normalized === 'staging' || normalized === 'stage' || normalized.includes('stag')) {
+    return 'staging';
+  }
+  return null;
+}
+
+function resolveGitDeploySource(
+  project: { gitRemoteUrl?: string },
+  environmentName: string,
+  deploy?: DesiredState['deploy']
+): { source: GitDeploySource | null; error?: string } {
+  if (deploy?.strategy !== 'branch') {
+    return { source: null };
+  }
+
+  const kind = classifyDeployEnvironment(environmentName);
+  if (!kind) {
+    return {
+      source: null,
+      error: `Branch deploy strategy only supports staging/production environments; could not map "${environmentName}" to a deploy branch.`,
+    };
+  }
+
+  const repo = parseGitHubRepoFromRemote(project.gitRemoteUrl);
+  if (!repo) {
+    return {
+      source: null,
+      error: 'Project gitRemoteUrl is missing or is not a GitHub remote, so Railway repo-linked deploys cannot be configured.',
+    };
+  }
+
+  const branch = kind === 'production'
+    ? deploy?.branches?.production ?? 'main'
+    : deploy?.branches?.staging ?? 'staging';
+
+  return {
+    source: {
+      repo,
+      branch,
+    },
+  };
+}
+
 export function resolveDesiredState(
   policyState: Partial<DesiredState> | undefined,
   overrides: Partial<DesiredState>
@@ -231,6 +317,7 @@ function buildPlan(params: {
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
+  deploy?: DesiredState['deploy'];
 }): GoldenPathPlanItem[] {
   const project = resolveProject({ projectName: params.projectName });
   const plan: GoldenPathPlanItem[] = [];
@@ -303,6 +390,19 @@ function buildPlan(params: {
     });
   }
 
+  const deploySource = project ? resolveGitDeploySource(project, params.environmentName, params.deploy) : { source: null };
+  if (params.deploy?.strategy === 'branch') {
+    for (const serviceName of params.services) {
+      plan.push({
+        action: 'deploy_source_configure',
+        status: deploySource.source ? 'needed' : 'blocked',
+        detail: deploySource.source
+          ? `Connect service "${serviceName}" to GitHub ${deploySource.source.repo}#${deploySource.source.branch}`
+          : deploySource.error ?? `Unable to configure branch deploy source for service "${serviceName}"`,
+      });
+    }
+  }
+
   if (params.domain) {
     const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [params.domain, ...scopeHints]);
     plan.push({
@@ -348,6 +448,7 @@ async function executeBootstrap(params: {
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
+  deploy?: DesiredState['deploy'];
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
   const tx = new InfraTransaction();
   let project = resolveProject({ projectName: params.projectName });
@@ -608,6 +709,75 @@ async function executeBootstrap(params: {
     };
   }
 
+  const deploySource = resolveGitDeploySource(project, params.environmentName, params.deploy);
+  if (params.deploy?.strategy === 'branch') {
+    if (!deploySource.source) {
+      const cleanup = await tx.rollback();
+      return {
+        success: false,
+        summary: {
+          ...summary,
+          error: deploySource.error || 'Branch deploy source configuration is incomplete',
+          rollback: cleanup,
+        },
+      };
+    }
+
+    const latestEnvironment = envRepo.findById(environment.id) ?? environment;
+    const latestBindings = latestEnvironment.platformBindings as Record<string, unknown>;
+    const boundServices = (latestBindings.services as Record<string, { serviceId: string; url?: string }> | undefined) ?? {};
+    const sourceAdapter = hostingResult.adapter as IHostingAdapter & SourceConfigurableHostingAdapter;
+
+    if (typeof sourceAdapter.connectServiceToRepo !== 'function') {
+      const cleanup = await tx.rollback();
+      return {
+        success: false,
+        summary: {
+          ...summary,
+          error: `Provider ${hostingResult.adapter.name} does not support repo-linked deploy source configuration`,
+          rollback: cleanup,
+        },
+      };
+    }
+
+    const sourceFailures: string[] = [];
+    for (const service of services) {
+      const serviceId = boundServices[service.name]?.serviceId;
+      if (!serviceId) {
+        sourceFailures.push(`${service.name}: missing bound provider service ID`);
+        continue;
+      }
+
+      const receipt = await sourceAdapter.connectServiceToRepo({
+        serviceId,
+        repo: deploySource.source.repo,
+        branch: deploySource.source.branch,
+      });
+      if (!receipt.success) {
+        sourceFailures.push(`${service.name}: ${receipt.error || receipt.message}`);
+      }
+    }
+
+    if (sourceFailures.length > 0) {
+      const cleanup = await tx.rollback();
+      return {
+        success: false,
+        summary: {
+          ...summary,
+          error: `Failed to configure deploy source for ${sourceFailures.join('; ')}`,
+          rollback: cleanup,
+        },
+      };
+    }
+
+    summary.deploySource = {
+      strategy: 'branch',
+      repo: deploySource.source.repo,
+      branch: deploySource.source.branch,
+      services: services.map((service) => service.name),
+    };
+  }
+
   const scopeHints = getProjectScopeHints(project);
   const secretStore = getSecretStore();
 
@@ -735,6 +905,7 @@ export function registerInfraTools(server: McpServer): void {
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
+        deploy: desired.deploy,
       });
 
       return {
@@ -802,6 +973,7 @@ export function registerInfraTools(server: McpServer): void {
         domain: resolvedDesired.domain,
         databaseProvider: resolvedDesired.databaseProvider,
         setupEmail: resolvedDesired.setupEmail,
+        deploy: resolvedDesired.deploy,
       });
 
       if (!confirm) {
@@ -865,6 +1037,7 @@ export function registerInfraTools(server: McpServer): void {
         domain: resolvedDesired.domain,
         databaseProvider: resolvedDesired.databaseProvider,
         setupEmail: resolvedDesired.setupEmail,
+        deploy: resolvedDesired.deploy,
       });
       if (!executed.success && executed.summary.error) {
         return {
@@ -1030,6 +1203,7 @@ export function registerInfraTools(server: McpServer): void {
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
+        deploy: desired.deploy,
       });
 
       if (!confirm) {
@@ -1094,6 +1268,7 @@ export function registerInfraTools(server: McpServer): void {
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
+        deploy: desired.deploy,
       });
       if (!executed.success && executed.summary.error) {
         return {
