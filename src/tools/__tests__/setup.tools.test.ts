@@ -260,4 +260,119 @@ describe('setup tools', () => {
 
     await Promise.all([client.close(), server.close()]);
   });
+
+  it('setup_configure returns Railway GitHub app guidance when repo access is denied', async () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const connectionRepo = new ConnectionRepository();
+    const secretStore = getSecretStore();
+
+    const project = projectRepo.create({
+      name: 'billforge',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'git@github.com:davejohnson/billforge.git',
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project-1',
+        railwayProjectId: 'rail-project-1',
+      },
+    });
+
+    const connection = connectionRepo.create({
+      provider: 'railway',
+      credentialsEncrypted: secretStore.encryptObject({ apiToken: 'token' }),
+    });
+    connectionRepo.updateStatus(connection.id, 'verified');
+
+    const projectDetails: RailwayProjectDetails = {
+      id: 'rail-project-1',
+      name: 'billforge',
+      environments: {
+        edges: [{ node: { id: 'env-prod', name: 'production' } }],
+      },
+      services: {
+        edges: [{
+          node: {
+            id: 'svc-web',
+            name: 'web',
+            icon: 'node',
+            repoTriggers: { edges: [] },
+            serviceInstances: {
+              edges: [{
+                node: {
+                  environmentId: 'env-prod',
+                  domains: {
+                    serviceDomains: [],
+                    customDomains: [],
+                  },
+                  startCommand: undefined,
+                  healthcheckPath: undefined,
+                  numReplicas: 1,
+                  sleepApplication: false,
+                },
+              }],
+            },
+          },
+        }],
+      },
+      plugins: { edges: [] },
+    };
+
+    vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(RailwayAdapter.prototype, 'getProjectDetails').mockResolvedValue(projectDetails);
+    vi.spyOn(RailwayAdapter.prototype, 'findProjectByName').mockResolvedValue(null);
+    vi
+      .spyOn(RailwayAdapter.prototype, 'connectServiceToRepo')
+      .mockResolvedValue({ success: false, message: 'failed', error: 'User does not have access to the repo' });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'setup-client-repo-access', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'setup_configure', {
+      projectName: 'billforge',
+      environmentName: 'production',
+      serviceName: 'web',
+      branch: 'main',
+    });
+
+    expect(payload.success).toBe(false);
+    expect(payload.error).toBe('User does not have access to the repo');
+    expect(payload.help).toMatchObject({
+      code: 'railway_github_repo_access',
+      helpTool: 'railway_setup_help',
+      repo: 'davejohnson/billforge',
+    });
+    expect(payload.nextSteps).toContain('Then rerun infra_apply or setup_configure.');
+
+    await Promise.all([client.close(), server.close()]);
+  });
+
+  it('railway_setup_help returns Railway GitHub app instructions', async () => {
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'setup-client-railway-help', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'railway_setup_help', {
+      repo: 'davejohnson/billforge',
+    });
+
+    expect(payload.success).toBe(true);
+    expect(String(payload.instructions)).toContain('Install Railway GitHub App');
+    expect(String(payload.instructions)).toContain('Create a **classic** GitHub PAT');
+    expect(payload.help).toMatchObject({
+      code: 'railway_github_repo_access',
+      repo: 'davejohnson/billforge',
+    });
+
+    await Promise.all([client.close(), server.close()]);
+  });
 });

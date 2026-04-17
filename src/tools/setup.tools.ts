@@ -8,6 +8,7 @@ import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js
 import type { RailwayCredentials, RailwayProjectDetails } from '../adapters/providers/railway/railway.adapter.js';
 
 import { resolveProject } from './resolve-project.js';
+import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from './railway-help.js';
 
 const envRepo = new EnvironmentRepository();
 const connectionRepo = new ConnectionRepository();
@@ -372,12 +373,17 @@ export function registerSetupTools(server: McpServer): void {
             branch: resolvedBranch,
           });
           if (!receipt.success) {
+            const error = receipt.error || receipt.message;
+            const help = isRailwayGitHubRepoAccessError(error)
+              ? buildRailwayGitHubRepoAccessHelp(resolvedRepo)
+              : undefined;
             return {
               content: [{
                 type: 'text' as const,
                 text: JSON.stringify({
                   success: false,
-                  error: receipt.error || receipt.message,
+                  error,
+                  ...(help ? { help, nextSteps: help.nextSteps } : {}),
                 }),
               }],
             };

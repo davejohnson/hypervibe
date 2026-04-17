@@ -36,6 +36,7 @@ import { registerProjectTools } from './tools/project.tools.js';
 import { registerEnvironmentTools } from './tools/environment.tools.js';
 import { registerConnectionTools } from './tools/connection.tools.js';
 import { registerDeployTools } from './tools/deploy.tools.js';
+import { registerRailwayTools } from './tools/railway.tools.js';
 import { registerLocalTools } from './tools/local.tools.js';
 import { registerRunTools } from './tools/run.tools.js';
 import { registerIntegrationTools } from './tools/integration.tools.js';
@@ -69,6 +70,7 @@ export function createServer(): McpServer {
   registerEnvironmentTools(server);
   registerConnectionTools(server);
   registerDeployTools(server);
+  registerRailwayTools(server);
   registerLocalTools(server);
   registerRunTools(server);
   registerIntegrationTools(server);

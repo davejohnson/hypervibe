@@ -18,6 +18,7 @@ import {
   snapshotEnvironmentBindings,
 } from '../domain/services/local-state.transaction.js';
 import { resolveProject } from './resolve-project.js';
+import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from './railway-help.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Receipt } from '../domain/ports/provider.port.js';
 import type { IHostingAdapter } from '../domain/ports/hosting.port.js';
@@ -844,6 +845,7 @@ async function executeBootstrap(params: {
     }
 
     const sourceFailures: string[] = [];
+    let repoAccessHelp: ReturnType<typeof buildRailwayGitHubRepoAccessHelp> | undefined;
     for (const service of services) {
       const serviceId = boundServices[service.name]?.serviceId;
       if (!serviceId) {
@@ -857,7 +859,11 @@ async function executeBootstrap(params: {
         branch: deploySource.source.branch,
       });
       if (!receipt.success) {
-        sourceFailures.push(`${service.name}: ${receipt.error || receipt.message}`);
+        const error = receipt.error || receipt.message;
+        sourceFailures.push(`${service.name}: ${error}`);
+        if (!repoAccessHelp && isRailwayGitHubRepoAccessError(error)) {
+          repoAccessHelp = buildRailwayGitHubRepoAccessHelp(deploySource.source.repo);
+        }
       }
     }
 
@@ -869,6 +875,12 @@ async function executeBootstrap(params: {
           ...summary,
           error: `Failed to configure deploy source for ${sourceFailures.join('; ')}`,
           rollback: cleanup,
+          ...(repoAccessHelp
+            ? {
+                help: repoAccessHelp,
+                nextSteps: repoAccessHelp.nextSteps,
+              }
+            : {}),
         },
       };
     }

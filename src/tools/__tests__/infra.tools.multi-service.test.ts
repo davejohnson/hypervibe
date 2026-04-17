@@ -809,4 +809,172 @@ describe('infra_apply multi-service convergence', () => {
 
     await Promise.all([client.close(), server.close()]);
   });
+
+  it('returns Railway GitHub app guidance when repo-linked deploy source access is denied', async () => {
+    const projectRepo = new ProjectRepository();
+    const project = projectRepo.create({
+      name: 'branch-source-repo-access-project',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'git@github.com:davejohnson/billforge.git',
+    });
+
+    const fakeDatabaseAdapter: IDatabaseAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedDatabases: ['postgres'],
+        supportedCaches: [],
+        supportsPooling: false,
+        supportsReadReplicas: false,
+        supportsPointInTimeRecovery: false,
+        serverlessOptimized: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async provision(_type, environment) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type: 'postgres',
+            bindings: {
+              provider: 'railway',
+              pluginName: 'postgres-db',
+              connectionString: 'postgres://shared-db',
+            },
+            externalId: 'rail-db-1',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: true,
+            message: 'db ready',
+            data: {
+              projectId: 'rail-project-1',
+              railwayProjectId: 'rail-project-1',
+              ensureProjectCreated: false,
+            },
+          },
+          connectionUrl: 'postgres://shared-db',
+          envVars: {
+            DATABASE_URL: '${{postgres-db.DATABASE_URL}}',
+            DIRECT_URL: '${{postgres-db.DATABASE_PRIVATE_URL}}',
+          },
+        };
+      },
+      async getConnectionUrl() {
+        return 'postgres://shared-db';
+      },
+      async destroy() {
+        return { success: true, message: 'destroyed' };
+      },
+    };
+
+    const fakeHostingAdapter: IHostingAdapter & {
+      connectServiceToRepo: (params: { serviceId: string; repo: string; branch: string }) => Promise<{ success: boolean; message: string; error?: string }>;
+    } = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: false,
+        supportsReleaseCommand: true,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return {
+          success: true,
+          message: 'bound',
+          data: {
+            projectId: 'rail-project-1',
+            environmentId: 'rail-env-1',
+          },
+        };
+      },
+      async deploy(service) {
+        return {
+          serviceId: `deploy-${service.name}`,
+          externalId: `rail-${service.name}`,
+          url: `https://${service.name}.example.com`,
+          status: 'deployed',
+          receipt: {
+            success: true,
+            message: 'deployed',
+            data: {
+              railwayEnvironmentId: 'rail-env-1',
+            },
+          },
+        };
+      },
+      async setEnvVars() {
+        return {
+          success: true,
+          message: 'vars synced',
+        };
+      },
+      async getDeployStatus(_environment, deploymentId) {
+        return {
+          status: 'deployed',
+          url: `https://${deploymentId}.example.com`,
+        };
+      },
+      async connectServiceToRepo() {
+        return {
+          success: false,
+          message: 'failed',
+          error: 'User does not have access to the repo',
+        };
+      },
+    };
+
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeDatabaseAdapter,
+    });
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeHostingAdapter,
+    });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'branch-source-repo-access-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'infra_apply', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      databaseProvider: 'railway',
+      setupEmail: false,
+      deploy: {
+        strategy: 'branch',
+        branches: {
+          production: 'main',
+        },
+      },
+      confirm: true,
+    });
+
+    expect(payload.success).toBe(false);
+    const summary = payload.summary as JsonObj;
+    expect(String(summary.error)).toContain('Failed to configure deploy source');
+    expect(summary.help).toMatchObject({
+      code: 'railway_github_repo_access',
+      helpTool: 'railway_setup_help',
+      repo: 'davejohnson/billforge',
+    });
+    expect(summary.nextSteps).toContain('Then rerun infra_apply or setup_configure.');
+
+    await Promise.all([client.close(), server.close()]);
+  });
 });
