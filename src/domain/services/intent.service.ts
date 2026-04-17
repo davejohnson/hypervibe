@@ -56,6 +56,12 @@ interface ProjectIntentSchema {
     domain?: string;
     databaseProvider?: string;
     setupEmail?: boolean;
+    serviceConfig?: Record<string, {
+      startCommand?: string;
+      releaseCommand?: string;
+      healthCheckPath?: string;
+      cronSchedule?: string;
+    }>;
     deploy?: {
       strategy?: 'branch' | 'manual';
       branches?: {
@@ -365,6 +371,7 @@ function buildIntent(project: Project): ProjectIntentSchema {
     domain: typeof desiredState?.domain === 'string' ? desiredState.domain : undefined,
     databaseProvider: typeof desiredState?.databaseProvider === 'string' ? desiredState.databaseProvider : undefined,
     setupEmail: typeof desiredState?.setupEmail === 'boolean' ? desiredState.setupEmail : undefined,
+    serviceConfig: asRecord(desiredState?.serviceConfig) as ProjectIntentSchema['desired']['serviceConfig'] | undefined,
     deploy: desiredDeploy
       ? {
           strategy: desiredDeployStrategy,

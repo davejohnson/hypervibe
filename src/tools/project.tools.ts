@@ -652,14 +652,15 @@ async function performImport(
   const createdServices: Array<{ name: string; id: string; railwayId: string }> = [];
 
   for (const svc of services) {
+    const firstInstance = Object.values(svc.instancesByEnv)[0];
     const service = serviceRepo.create({
       projectId: project.id,
       name: svc.name,
-      buildConfig: svc.repo
-        ? {
-            builder: 'nixpacks',
-          }
-        : {},
+      buildConfig: {
+        ...(svc.repo ? { builder: 'nixpacks' as const } : {}),
+        ...(firstInstance?.startCommand ? { startCommand: firstInstance.startCommand } : {}),
+        ...(firstInstance?.healthcheckPath ? { healthCheckPath: firstInstance.healthcheckPath } : {}),
+      },
       envVarSpec: {},
     });
 

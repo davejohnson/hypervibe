@@ -441,6 +441,206 @@ describe('infra_apply multi-service convergence', () => {
     await Promise.all([client.close(), server.close()]);
   });
 
+  it('shows per-service runtime configuration in preview and persists it for apply', async () => {
+    const projectRepo = new ProjectRepository();
+    const serviceRepo = new ServiceRepository();
+    const project = projectRepo.create({
+      name: 'service-config-project',
+      defaultPlatform: 'railway',
+    });
+
+    const fakeDatabaseAdapter: IDatabaseAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedDatabases: ['postgres'],
+        supportedCaches: [],
+        supportsPooling: false,
+        supportsReadReplicas: false,
+        supportsPointInTimeRecovery: false,
+        serverlessOptimized: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async provision(_type, environment) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type: 'postgres',
+            bindings: {
+              provider: 'railway',
+              pluginName: 'postgres-db',
+              connectionString: 'postgres://shared-db',
+            },
+            externalId: 'rail-db-1',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: true,
+            message: 'db ready',
+            data: {
+              projectId: 'rail-project-1',
+              railwayProjectId: 'rail-project-1',
+              ensureProjectCreated: false,
+            },
+          },
+          connectionUrl: 'postgres://shared-db',
+          envVars: {
+            DATABASE_URL: '${{postgres-db.DATABASE_URL}}',
+            DIRECT_URL: '${{postgres-db.DATABASE_PRIVATE_URL}}',
+          },
+        };
+      },
+      async getConnectionUrl() {
+        return 'postgres://shared-db';
+      },
+      async destroy() {
+        return { success: true, message: 'destroyed' };
+      },
+    };
+
+    const fakeHostingAdapter: IHostingAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: true,
+        supportsReleaseCommand: false,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return {
+          success: true,
+          message: 'bound',
+          data: {
+            projectId: 'rail-project-1',
+            environmentId: 'rail-env-1',
+          },
+        };
+      },
+      async deploy(service) {
+        return {
+          serviceId: `deploy-${service.name}`,
+          externalId: `rail-${service.name}`,
+          url: `https://${service.name}.example.com`,
+          status: 'deployed',
+          receipt: {
+            success: true,
+            message: 'deployed',
+            data: {
+              railwayEnvironmentId: 'rail-env-1',
+            },
+          },
+        };
+      },
+      async setEnvVars() {
+        return {
+          success: true,
+          message: 'vars synced',
+        };
+      },
+      async getDeployStatus(_environment, deploymentId) {
+        return {
+          status: 'deployed',
+          url: `https://${deploymentId}.example.com`,
+        };
+      },
+    };
+
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeDatabaseAdapter,
+    });
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeHostingAdapter,
+    });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'service-config-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const previewPayload = await callTool(client, 'infra_apply', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web', 'worker'],
+      databaseProvider: 'railway',
+      setupEmail: false,
+      serviceConfig: {
+        web: {
+          startCommand: 'npm start',
+          healthCheckPath: '/health',
+        },
+        worker: {
+          startCommand: 'npm run worker',
+          cronSchedule: '0 * * * *',
+        },
+      },
+      confirm: false,
+    });
+
+    const runtimePlan = (previewPayload.plan as Array<Record<string, unknown>>).filter(
+      (item) => item.action === 'service_configure'
+    );
+    expect(runtimePlan).toEqual([
+      {
+        action: 'service_configure',
+        status: 'needed',
+        detail: 'Configure service "web" (start=npm start, health=/health)',
+      },
+      {
+        action: 'service_configure',
+        status: 'needed',
+        detail: 'Configure service "worker" (start=npm run worker, cron=0 * * * *)',
+      },
+    ]);
+
+    const applyPayload = await callTool(client, 'infra_apply', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web', 'worker'],
+      databaseProvider: 'railway',
+      setupEmail: false,
+      serviceConfig: {
+        web: {
+          startCommand: 'npm start',
+          healthCheckPath: '/health',
+        },
+        worker: {
+          startCommand: 'npm run worker',
+          cronSchedule: '0 * * * *',
+        },
+      },
+      confirm: true,
+    });
+
+    expect(applyPayload.success).toBe(true);
+    expect(serviceRepo.findByProjectAndName(project.id, 'web')?.buildConfig).toMatchObject({
+      builder: 'nixpacks',
+      startCommand: 'npm start',
+      healthCheckPath: '/health',
+    });
+    expect(serviceRepo.findByProjectAndName(project.id, 'worker')?.buildConfig).toMatchObject({
+      builder: 'nixpacks',
+      startCommand: 'npm run worker',
+      cronSchedule: '0 * * * *',
+    });
+
+    await Promise.all([client.close(), server.close()]);
+  });
+
   it('configures repo-linked deploy sources for all services during apply', async () => {
     const projectRepo = new ProjectRepository();
     const project = projectRepo.create({

@@ -42,6 +42,12 @@ interface DesiredState {
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
+  serviceConfig?: Record<string, {
+    startCommand?: string;
+    releaseCommand?: string;
+    healthCheckPath?: string;
+    cronSchedule?: string;
+  }>;
   deploy?: {
     strategy?: 'branch' | 'manual';
     branches?: {
@@ -98,6 +104,40 @@ function explicitServicesOrNull(services: unknown): string[] | null {
 
   if (normalized.length === 0) return null;
   return normalizeServices(normalized);
+}
+
+function normalizeServiceConfig(
+  serviceConfig: unknown
+): DesiredState['serviceConfig'] | undefined {
+  if (!serviceConfig || typeof serviceConfig !== 'object' || Array.isArray(serviceConfig)) {
+    return undefined;
+  }
+
+  const normalized: NonNullable<DesiredState['serviceConfig']> = {};
+  for (const [serviceName, rawConfig] of Object.entries(serviceConfig as Record<string, unknown>)) {
+    if (!serviceName.trim() || !rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) continue;
+    const configRecord = rawConfig as Record<string, unknown>;
+    const nextConfig: NonNullable<DesiredState['serviceConfig']>[string] = {};
+
+    if (typeof configRecord.startCommand === 'string' && configRecord.startCommand.trim().length > 0) {
+      nextConfig.startCommand = configRecord.startCommand.trim();
+    }
+    if (typeof configRecord.releaseCommand === 'string' && configRecord.releaseCommand.trim().length > 0) {
+      nextConfig.releaseCommand = configRecord.releaseCommand.trim();
+    }
+    if (typeof configRecord.healthCheckPath === 'string' && configRecord.healthCheckPath.trim().length > 0) {
+      nextConfig.healthCheckPath = configRecord.healthCheckPath.trim();
+    }
+    if (typeof configRecord.cronSchedule === 'string' && configRecord.cronSchedule.trim().length > 0) {
+      nextConfig.cronSchedule = configRecord.cronSchedule.trim();
+    }
+
+    if (Object.keys(nextConfig).length > 0) {
+      normalized[serviceName.trim()] = nextConfig;
+    }
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 function getComponentProvider(component: Component | null): string | undefined {
@@ -289,6 +329,7 @@ export function resolveDesiredState(
     domain: overrides.domain ?? policyState?.domain,
     databaseProvider: overrides.databaseProvider ?? policyState?.databaseProvider ?? 'supabase',
     setupEmail: overrides.setupEmail ?? policyState?.setupEmail ?? true,
+    serviceConfig: normalizeServiceConfig(overrides.serviceConfig) ?? normalizeServiceConfig(policyState?.serviceConfig),
     deploy: overrides.deploy ?? policyState?.deploy,
     migrations: overrides.migrations ?? policyState?.migrations,
   };
@@ -310,6 +351,15 @@ const migrationDesiredSchema = z.object({
   command: z.string().min(1).optional(),
 });
 
+const serviceRuntimeConfigSchema = z.object({
+  startCommand: z.string().min(1).optional(),
+  releaseCommand: z.string().min(1).optional(),
+  healthCheckPath: z.string().min(1).optional(),
+  cronSchedule: z.string().min(1).optional(),
+});
+
+const serviceConfigSchema = z.record(z.string().min(1), serviceRuntimeConfigSchema);
+
 function buildPlan(params: {
   projectName: string;
   environmentName: string;
@@ -317,10 +367,12 @@ function buildPlan(params: {
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
+  serviceConfig?: DesiredState['serviceConfig'];
   deploy?: DesiredState['deploy'];
 }): GoldenPathPlanItem[] {
   const project = resolveProject({ projectName: params.projectName });
   const plan: GoldenPathPlanItem[] = [];
+  const targetPlatform = (project?.defaultPlatform ?? 'railway').toLowerCase();
 
   if (!project) {
     plan.push({
@@ -390,6 +442,24 @@ function buildPlan(params: {
     });
   }
 
+  for (const serviceName of params.services) {
+    const runtimeConfig = params.serviceConfig?.[serviceName];
+    if (!runtimeConfig) continue;
+    const parts: string[] = [];
+    if (runtimeConfig.startCommand) parts.push(`start=${runtimeConfig.startCommand}`);
+    if (runtimeConfig.healthCheckPath) parts.push(`health=${runtimeConfig.healthCheckPath}`);
+    if (runtimeConfig.cronSchedule) parts.push(`cron=${runtimeConfig.cronSchedule}`);
+    if (runtimeConfig.releaseCommand) parts.push(`release=${runtimeConfig.releaseCommand}`);
+    plan.push({
+      action: 'service_configure',
+      status: runtimeConfig.releaseCommand && targetPlatform === 'railway' ? 'blocked' : 'needed',
+      detail:
+        runtimeConfig.releaseCommand && targetPlatform === 'railway'
+          ? `Configure service "${serviceName}" (${parts.join(', ')}). Railway releaseCommand is not API-configurable; use migrations.mode=tool or railway.toml.`
+          : `Configure service "${serviceName}" (${parts.join(', ')})`,
+    });
+  }
+
   const deploySource = project ? resolveGitDeploySource(project, params.environmentName, params.deploy) : { source: null };
   if (params.deploy?.strategy === 'branch') {
     for (const serviceName of params.services) {
@@ -448,6 +518,7 @@ async function executeBootstrap(params: {
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
+  serviceConfig?: DesiredState['serviceConfig'];
   deploy?: DesiredState['deploy'];
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
   const tx = new InfraTransaction();
@@ -483,11 +554,18 @@ async function executeBootstrap(params: {
 
   const services = params.services.map((serviceName) => {
     let service = serviceRepo.findByProjectAndName(project.id, serviceName);
+    const runtimeConfig = params.serviceConfig?.[serviceName];
     if (!service) {
       service = serviceRepo.create({
         projectId: project.id,
         name: serviceName,
-        buildConfig: { builder: 'nixpacks' },
+        buildConfig: {
+          builder: 'nixpacks',
+          ...(runtimeConfig?.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
+          ...(runtimeConfig?.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),
+          ...(runtimeConfig?.healthCheckPath ? { healthCheckPath: runtimeConfig.healthCheckPath } : {}),
+          ...(runtimeConfig?.cronSchedule ? { cronSchedule: runtimeConfig.cronSchedule } : {}),
+        },
       });
       const createdServiceId = service.id;
       tx.addStep({
@@ -499,6 +577,16 @@ async function executeBootstrap(params: {
           message: `Deleted local service ${createdServiceId}`,
         }),
       });
+    } else if (runtimeConfig) {
+      service = serviceRepo.update(service.id, {
+        buildConfig: {
+          ...service.buildConfig,
+          ...(runtimeConfig.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
+          ...(runtimeConfig.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),
+          ...(runtimeConfig.healthCheckPath ? { healthCheckPath: runtimeConfig.healthCheckPath } : {}),
+          ...(runtimeConfig.cronSchedule ? { cronSchedule: runtimeConfig.cronSchedule } : {}),
+        },
+      }) ?? service;
     }
     return service;
   });
@@ -661,6 +749,21 @@ async function executeBootstrap(params: {
       success: false,
       summary: {
         error: hostingResult.error || 'Hosting adapter unavailable',
+        rollback: cleanup,
+        transaction: { created: tx.listResources() },
+      },
+    };
+  }
+
+  const unsupportedReleaseCommands = Object.entries(params.serviceConfig ?? {})
+    .filter(([, config]) => Boolean(config?.releaseCommand))
+    .map(([serviceName]) => serviceName);
+  if (unsupportedReleaseCommands.length > 0 && !hostingResult.adapter.capabilities.supportsReleaseCommand) {
+    const cleanup = await tx.rollback();
+    return {
+      success: false,
+      summary: {
+        error: `Provider ${hostingResult.adapter.name} does not support releaseCommand via API for services: ${unsupportedReleaseCommands.join(', ')}. Use migrations.mode=tool or configure railway.toml manually.`,
         rollback: cleanup,
         transaction: { created: tx.listResources() },
       },
@@ -877,6 +980,7 @@ export function registerInfraTools(server: McpServer): void {
       domain: z.string().optional().describe('Optional domain for DNS configuration'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (default: supabase)'),
       setupEmail: z.boolean().optional().describe('Include SendGrid setup checks (default: true)'),
+      serviceConfig: serviceConfigSchema.optional().describe('Per-service runtime config to include in the plan'),
     },
     async ({
       projectName,
@@ -886,6 +990,7 @@ export function registerInfraTools(server: McpServer): void {
       domain,
       databaseProvider,
       setupEmail,
+      serviceConfig,
     }) => {
       const project = resolveProject({ projectName });
       const policyState = (project?.policies?.desiredState as Partial<DesiredState> | undefined) ?? {};
@@ -896,6 +1001,7 @@ export function registerInfraTools(server: McpServer): void {
         domain,
         databaseProvider,
         setupEmail,
+        serviceConfig,
       });
 
       const plan = buildPlan({
@@ -905,6 +1011,7 @@ export function registerInfraTools(server: McpServer): void {
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
+        serviceConfig: desired.serviceConfig,
         deploy: desired.deploy,
       });
 
@@ -942,6 +1049,7 @@ export function registerInfraTools(server: McpServer): void {
       domain: z.string().optional().describe('Optional domain to configure'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (default: supabase)'),
       setupEmail: z.boolean().optional().describe('Configure SendGrid (default: true)'),
+      serviceConfig: serviceConfigSchema.optional().describe('Per-service runtime config to apply during bootstrap'),
       confirm: z.boolean().optional().describe('Set true to apply changes'),
       approvalId: z.string().uuid().optional().describe('Approval ID for protected environments (action: infra.apply)'),
     },
@@ -953,6 +1061,7 @@ export function registerInfraTools(server: McpServer): void {
       domain,
       databaseProvider,
       setupEmail,
+      serviceConfig,
       confirm = false,
       approvalId,
     }) => {
@@ -965,6 +1074,7 @@ export function registerInfraTools(server: McpServer): void {
         domain,
         databaseProvider,
         setupEmail,
+        serviceConfig,
       });
       const previewPlan = buildPlan({
         projectName,
@@ -973,6 +1083,7 @@ export function registerInfraTools(server: McpServer): void {
         domain: resolvedDesired.domain,
         databaseProvider: resolvedDesired.databaseProvider,
         setupEmail: resolvedDesired.setupEmail,
+        serviceConfig: resolvedDesired.serviceConfig,
         deploy: resolvedDesired.deploy,
       });
 
@@ -1037,6 +1148,7 @@ export function registerInfraTools(server: McpServer): void {
         domain: resolvedDesired.domain,
         databaseProvider: resolvedDesired.databaseProvider,
         setupEmail: resolvedDesired.setupEmail,
+        serviceConfig: resolvedDesired.serviceConfig,
         deploy: resolvedDesired.deploy,
       });
       if (!executed.success && executed.summary.error) {
@@ -1075,6 +1187,7 @@ export function registerInfraTools(server: McpServer): void {
       domain: z.string().optional().describe('Optional desired domain'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Desired DB provider (default: supabase)'),
       setupEmail: z.boolean().optional().describe('Include SendGrid setup (default: true)'),
+      serviceConfig: serviceConfigSchema.optional().describe('Desired per-service runtime config'),
       deploy: deployDesiredSchema.optional().describe('Desired deploy strategy and branch mapping'),
       migrations: migrationDesiredSchema.optional().describe('Desired migration behavior during deploy'),
     },
@@ -1086,6 +1199,7 @@ export function registerInfraTools(server: McpServer): void {
       domain,
       databaseProvider = 'supabase',
       setupEmail = true,
+      serviceConfig,
       deploy,
       migrations,
     }) => {
@@ -1106,6 +1220,7 @@ export function registerInfraTools(server: McpServer): void {
         domain,
         databaseProvider,
         setupEmail,
+        serviceConfig,
         deploy,
         migrations,
       });
@@ -1168,12 +1283,13 @@ export function registerInfraTools(server: McpServer): void {
       domain: z.string().optional().describe('Override desired domain'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Override desired DB provider'),
       setupEmail: z.boolean().optional().describe('Override desired email setup'),
+      serviceConfig: serviceConfigSchema.optional().describe('Override desired per-service runtime config'),
       deploy: deployDesiredSchema.optional().describe('Override desired deploy strategy and branches'),
       migrations: migrationDesiredSchema.optional().describe('Override desired migration behavior'),
       confirm: z.boolean().optional().describe('Set true to apply'),
       approvalId: z.string().uuid().optional().describe('Approval ID for protected environments (action: infra.apply)'),
     },
-    async ({ projectName, environmentName, services, serviceName, domain, databaseProvider, setupEmail, deploy, migrations, confirm = false, approvalId }) => {
+    async ({ projectName, environmentName, services, serviceName, domain, databaseProvider, setupEmail, serviceConfig, deploy, migrations, confirm = false, approvalId }) => {
       const project = resolveProject({ projectName });
       if (!project) {
         return {
@@ -1192,6 +1308,7 @@ export function registerInfraTools(server: McpServer): void {
         domain,
         databaseProvider,
         setupEmail,
+        serviceConfig,
         deploy,
         migrations,
       });
@@ -1203,6 +1320,7 @@ export function registerInfraTools(server: McpServer): void {
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
+        serviceConfig: desired.serviceConfig,
         deploy: desired.deploy,
       });
 
@@ -1268,6 +1386,7 @@ export function registerInfraTools(server: McpServer): void {
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
+        serviceConfig: desired.serviceConfig,
         deploy: desired.deploy,
       });
       if (!executed.success && executed.summary.error) {

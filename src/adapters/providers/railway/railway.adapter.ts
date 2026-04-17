@@ -1166,6 +1166,31 @@ export class RailwayAdapter implements IProviderAdapter {
         createdService = true;
       }
 
+      const runtimeConfig = {
+        startCommand: service.buildConfig.startCommand,
+        healthcheckPath: service.buildConfig.healthCheckPath,
+        cronSchedule: service.buildConfig.cronSchedule,
+      };
+      if (runtimeConfig.startCommand || runtimeConfig.healthcheckPath || runtimeConfig.cronSchedule) {
+        const configReceipt = await this.updateServiceInstanceConfig({
+          serviceId: railwayServiceId,
+          environmentId: railwayEnvId,
+          ...runtimeConfig,
+        });
+        if (!configReceipt.success) {
+          return {
+            serviceId: service.id,
+            externalId: railwayServiceId,
+            status: 'failed',
+            receipt: {
+              success: false,
+              message: `Failed to configure ${service.name} before deploy`,
+              error: configReceipt.error || configReceipt.message,
+            },
+          };
+        }
+      }
+
       // Auto-wire database and cache connections from Railway plugins
       const pluginVars = await this.getPluginVariableReferences(projectId);
       const allEnvVars = { ...pluginVars, ...envVars }; // User vars override auto-detected

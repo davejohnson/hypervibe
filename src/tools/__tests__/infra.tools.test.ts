@@ -10,6 +10,7 @@ describe('infra.tools desired state resolution', () => {
       serviceName: 'web',
       databaseProvider: 'supabase',
       setupEmail: true,
+      serviceConfig: undefined,
       domain: undefined,
       deploy: undefined,
       migrations: undefined,
@@ -25,11 +26,22 @@ describe('infra.tools desired state resolution', () => {
         domain: 'example.com',
         databaseProvider: 'rds',
         setupEmail: false,
+        serviceConfig: {
+          api: {
+            startCommand: 'npm run api',
+          },
+        },
         deploy: { strategy: 'manual' },
       },
       {
         services: ['web', 'worker'],
         databaseProvider: 'cloudsql',
+        serviceConfig: {
+          web: {
+            startCommand: 'npm start',
+            healthCheckPath: '/health',
+          },
+        },
         deploy: { strategy: 'branch', branches: { staging: 'staging', production: 'main' } },
         migrations: { mode: 'releaseCommand', runInDeploy: true, command: 'npm run migrate' },
       }
@@ -40,6 +52,12 @@ describe('infra.tools desired state resolution', () => {
     expect(desired.serviceName).toBe('web');
     expect(desired.databaseProvider).toBe('cloudsql');
     expect(desired.setupEmail).toBe(false);
+    expect(desired.serviceConfig).toEqual({
+      web: {
+        startCommand: 'npm start',
+        healthCheckPath: '/health',
+      },
+    });
     expect(desired.deploy?.strategy).toBe('branch');
     expect(desired.migrations?.mode).toBe('releaseCommand');
   });

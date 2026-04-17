@@ -3,6 +3,10 @@ export interface BuildConfig {
   dockerfilePath?: string;
   buildCommand?: string;
   watchPaths?: string[];
+  startCommand?: string;
+  releaseCommand?: string;
+  healthCheckPath?: string;
+  cronSchedule?: string;
 }
 
 export interface EnvVarSpec {

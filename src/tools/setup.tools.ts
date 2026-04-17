@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
+import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import type { RailwayCredentials, RailwayProjectDetails } from '../adapters/providers/railway/railway.adapter.js';
@@ -10,6 +11,7 @@ import { resolveProject } from './resolve-project.js';
 
 const envRepo = new EnvironmentRepository();
 const connectionRepo = new ConnectionRepository();
+const serviceRepo = new ServiceRepository();
 
 interface SetupIssue {
   service: string;
@@ -421,6 +423,21 @@ export function registerSetupTools(server: McpServer): void {
           // Set as a variable - the app's railway.toml should reference this
           // Or we document that they need to add it to railway.toml
           updates.push(`Release command: ${releaseCommand} (add to railway.toml)`);
+        }
+
+        if (project) {
+          const localService = serviceRepo.findByProjectAndName(project.id, serviceName);
+          if (localService) {
+            serviceRepo.update(localService.id, {
+              buildConfig: {
+                ...localService.buildConfig,
+                ...(startCommand ? { startCommand } : {}),
+                ...(releaseCommand ? { releaseCommand } : {}),
+                ...(healthCheckPath ? { healthCheckPath } : {}),
+                ...(cronSchedule ? { cronSchedule } : {}),
+              },
+            });
+          }
         }
 
         return {

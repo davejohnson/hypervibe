@@ -9,6 +9,7 @@ import { initializeDatabase, SqliteAdapter } from '../../adapters/db/sqlite.adap
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter, type RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
 
@@ -49,9 +50,15 @@ describe('setup tools', () => {
     const projectRepo = new ProjectRepository();
     const envRepo = new EnvironmentRepository();
     const connectionRepo = new ConnectionRepository();
+    const serviceRepo = new ServiceRepository();
     const secretStore = getSecretStore();
 
     const project = projectRepo.create({ name: 'billforge', defaultPlatform: 'railway' });
+    const localService = serviceRepo.create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { builder: 'nixpacks' },
+    });
     envRepo.create({
       projectId: project.id,
       name: 'production',
@@ -133,6 +140,11 @@ describe('setup tools', () => {
       healthcheckPath: '/health',
       cronSchedule: undefined,
     });
+    expect(serviceRepo.findById(localService.id)?.buildConfig).toMatchObject({
+      builder: 'nixpacks',
+      startCommand: 'npm start',
+      healthCheckPath: '/health',
+    });
 
     await Promise.all([client.close(), server.close()]);
   });
@@ -141,12 +153,18 @@ describe('setup tools', () => {
     const projectRepo = new ProjectRepository();
     const envRepo = new EnvironmentRepository();
     const connectionRepo = new ConnectionRepository();
+    const serviceRepo = new ServiceRepository();
     const secretStore = getSecretStore();
 
     const project = projectRepo.create({
       name: 'billforge',
       defaultPlatform: 'railway',
       gitRemoteUrl: 'git@github.com:davejohnson/billforge.git',
+    });
+    const localService = serviceRepo.create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { builder: 'nixpacks' },
     });
     envRepo.create({
       projectId: project.id,
@@ -234,6 +252,10 @@ describe('setup tools', () => {
       startCommand: 'npm start',
       healthcheckPath: undefined,
       cronSchedule: undefined,
+    });
+    expect(serviceRepo.findById(localService.id)?.buildConfig).toMatchObject({
+      builder: 'nixpacks',
+      startCommand: 'npm start',
     });
 
     await Promise.all([client.close(), server.close()]);
