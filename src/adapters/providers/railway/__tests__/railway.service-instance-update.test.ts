@@ -60,6 +60,90 @@ describe('RailwayAdapter service instance updates', () => {
     });
   });
 
+  it('attaches a custom domain and returns Railway-required DNS records', async () => {
+    const request = vi.fn()
+      // getCustomDomainStatus before create
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{
+              node: {
+                environmentId: 'env-prod',
+                domains: {
+                  customDomains: [],
+                },
+              },
+            }],
+          },
+        },
+      })
+      // customDomainCreate
+      .mockResolvedValueOnce({
+        customDomainCreate: {
+          id: 'cd_123',
+          domain: 'usebillforge.com',
+        },
+      })
+      // getCustomDomainStatus after create
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{
+              node: {
+                environmentId: 'env-prod',
+                domains: {
+                  customDomains: [{
+                    id: 'cd_123',
+                    domain: 'usebillforge.com',
+                    status: {
+                      dnsRecords: [{
+                        fqdn: 'usebillforge.com',
+                        hostlabel: '@',
+                        recordType: 'CNAME',
+                        requiredValue: 'web-production.up.railway.app',
+                        status: 'DNS_RECORD_STATUS_PENDING',
+                        zone: 'usebillforge.com',
+                      }],
+                      verificationDnsHost: '_railway.usebillforge.com',
+                      verificationToken: 'verify-token',
+                    },
+                  }],
+                },
+              },
+            }],
+          },
+        },
+      });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.attachCustomDomain({
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+    });
+
+    expect(receipt.success).toBe(true);
+    expect(receipt.data).toMatchObject({
+      domain: 'usebillforge.com',
+      customDomainId: 'cd_123',
+      created: true,
+      dnsRecords: [
+        {
+          name: 'usebillforge.com',
+          type: 'CNAME',
+          value: 'web-production.up.railway.app',
+        },
+        {
+          name: '_railway.usebillforge.com',
+          type: 'TXT',
+          value: 'verify-token',
+        },
+      ],
+    });
+  });
+
   it('applies runtime config before redeploying a service', async () => {
     const request = vi.fn()
       // resolveRailwayEnvironmentId -> listProjectEnvironmentIds

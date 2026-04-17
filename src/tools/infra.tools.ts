@@ -80,6 +80,10 @@ type SourceConfigurableHostingAdapter = {
   connectServiceToRepo?: (params: { serviceId: string; repo: string; branch: string }) => Promise<Receipt>;
 };
 
+type DomainConfigurableHostingAdapter = {
+  attachCustomDomain?: (params: { serviceId: string; environmentId: string; domain: string }) => Promise<Receipt>;
+};
+
 function normalizeServices(services: Array<string | undefined | null>): string[] {
   const seen = new Set<string>();
   const normalized: string[] = [];
@@ -228,6 +232,37 @@ function resolveExistingDatabaseState(
     component,
     provider,
   };
+}
+
+function inferExistingDatabaseProvider(
+  projectId: string,
+  environmentName: string
+): (typeof DB_PROVIDERS)[number] | undefined {
+  const environment = envRepo.findByProjectAndName(projectId, environmentName);
+  if (!environment) {
+    return undefined;
+  }
+
+  const component = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
+  const provider = getComponentProvider(component);
+  if (!provider) {
+    return undefined;
+  }
+
+  return DB_PROVIDERS.includes(provider as (typeof DB_PROVIDERS)[number])
+    ? (provider as (typeof DB_PROVIDERS)[number])
+    : undefined;
+}
+
+function resolveDatabaseProviderForProject(
+  project: { id: string },
+  policyState: Partial<DesiredState> | undefined,
+  overrides: { environmentName?: string; databaseProvider?: (typeof DB_PROVIDERS)[number] }
+): (typeof DB_PROVIDERS)[number] {
+  return overrides.databaseProvider
+    ?? policyState?.databaseProvider
+    ?? inferExistingDatabaseProvider(project.id, overrides.environmentName ?? policyState?.environmentName ?? 'staging')
+    ?? 'supabase';
 }
 
 function parseGitHubRepoFromRemote(remoteUrl?: string): string | null {
@@ -956,7 +991,89 @@ async function executeBootstrap(params: {
     }
   }
 
-  if (params.domain && deploy.urls[0]) {
+  let providerDomainConfigured = false;
+  if (params.domain) {
+    try {
+      const latestEnvironment = envRepo.findById(environment.id) ?? environment;
+      const latestBindings = latestEnvironment.platformBindings as Record<string, unknown>;
+      const boundServices = (latestBindings.services as Record<string, { serviceId: string; url?: string }> | undefined) ?? {};
+      const boundEnvironmentId =
+        (typeof latestBindings.environmentId === 'string' ? latestBindings.environmentId : null)
+        ?? (typeof latestBindings.railwayEnvironmentId === 'string' ? latestBindings.railwayEnvironmentId : null);
+      const domainAdapter = hostingResult.adapter as IHostingAdapter & DomainConfigurableHostingAdapter;
+      const targetService = services[0];
+      const targetServiceId = targetService ? boundServices[targetService.name]?.serviceId : undefined;
+
+      if (targetService && targetServiceId && boundEnvironmentId && typeof domainAdapter.attachCustomDomain === 'function') {
+        const receipt = await domainAdapter.attachCustomDomain({
+          serviceId: targetServiceId,
+          environmentId: boundEnvironmentId,
+          domain: params.domain,
+        });
+
+        if (!receipt.success) {
+          summary.customDomainAttached = false;
+          summary.customDomainError = receipt.error || receipt.message;
+        } else {
+          providerDomainConfigured = true;
+          summary.customDomainAttached = true;
+          summary.customDomain = {
+            domain: params.domain,
+            service: targetService.name,
+            created: receipt.data?.created === true,
+          };
+
+          const dnsRecords = Array.isArray(receipt.data?.dnsRecords)
+            ? receipt.data.dnsRecords as Array<Record<string, unknown>>
+            : [];
+          const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [params.domain, ...scopeHints]);
+
+          if (!cfConnection) {
+            summary.domainDnsConfigured = false;
+            summary.domainDnsError = `No Cloudflare connection available for ${params.domain}`;
+          } else {
+            const cfCreds = secretStore.decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted);
+            const cfAdapter = new CloudflareAdapter();
+            cfAdapter.connect(cfCreds);
+            const zone = await cfAdapter.findZoneByName(params.domain);
+            if (!zone) {
+              summary.domainDnsConfigured = false;
+              summary.domainDnsError = `Cloudflare zone not found for ${params.domain}`;
+            } else if (dnsRecords.length === 0) {
+              summary.domainDnsConfigured = false;
+              summary.domainDnsError = `Railway did not return required DNS records for ${params.domain}`;
+            } else {
+              const results: Array<{ name: string; type: string; target: string; action: string }> = [];
+              for (const record of dnsRecords) {
+                const name = typeof record.name === 'string' ? record.name : '';
+                const type = typeof record.type === 'string' ? record.type : '';
+                const value = typeof record.value === 'string' ? record.value : '';
+                if (!name || !type || !value) {
+                  continue;
+                }
+
+                const upsert = await cfAdapter.upsertDnsRecord(zone.id, name, type, value, {
+                  proxied: false,
+                });
+                results.push({ name, type, target: value, action: upsert.action });
+              }
+              summary.domainDnsConfigured = results.length > 0;
+              summary.domainDnsRecords = results;
+              if (results.length === 0) {
+                summary.domainDnsError = `Railway returned no usable DNS records for ${params.domain}`;
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      summary.customDomainAttached = false;
+      summary.customDomainError = error instanceof Error ? error.message : String(error);
+      summary.domainDnsConfigured = false;
+    }
+  }
+
+  if (!providerDomainConfigured && params.domain && deploy.urls[0]) {
     try {
       const targetHost = new URL(deploy.urls[0]).hostname;
       const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [params.domain, ...scopeHints]);
@@ -969,7 +1086,13 @@ async function executeBootstrap(params: {
           const result = await cfAdapter.upsertDnsRecord(zone.id, params.domain, 'CNAME', targetHost, { proxied: true });
           summary.domainDnsConfigured = true;
           summary.domainDns = { name: params.domain, type: 'CNAME', target: targetHost, action: result.action };
+        } else {
+          summary.domainDnsConfigured = false;
+          summary.domainDnsError = `Cloudflare zone not found for ${params.domain}`;
         }
+      } else {
+        summary.domainDnsConfigured = false;
+        summary.domainDnsError = `No Cloudflare connection available for ${params.domain}`;
       }
     } catch {
       summary.domainDnsConfigured = false;
@@ -990,7 +1113,7 @@ export function registerInfraTools(server: McpServer): void {
       services: z.array(z.string().min(1)).optional().describe('Service names to converge (default: ["web"])'),
       serviceName: z.string().optional().describe('Service name (default: web)'),
       domain: z.string().optional().describe('Optional domain for DNS configuration'),
-      databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (default: supabase)'),
+      databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (defaults to desired state, then existing managed DB provider, then supabase)'),
       setupEmail: z.boolean().optional().describe('Include SendGrid setup checks (default: true)'),
       serviceConfig: serviceConfigSchema.optional().describe('Per-service runtime config to include in the plan'),
     },
@@ -1006,12 +1129,15 @@ export function registerInfraTools(server: McpServer): void {
     }) => {
       const project = resolveProject({ projectName });
       const policyState = (project?.policies?.desiredState as Partial<DesiredState> | undefined) ?? {};
+      const resolvedDatabaseProvider = project
+        ? resolveDatabaseProviderForProject(project, policyState, { environmentName, databaseProvider })
+        : (databaseProvider ?? policyState?.databaseProvider ?? 'supabase');
       const desired = resolveDesiredState(policyState, {
         environmentName,
         services,
         serviceName,
         domain,
-        databaseProvider,
+        databaseProvider: resolvedDatabaseProvider,
         setupEmail,
         serviceConfig,
       });
@@ -1059,7 +1185,7 @@ export function registerInfraTools(server: McpServer): void {
       services: z.array(z.string().min(1)).optional().describe('Service names to bootstrap (default: ["web"])'),
       serviceName: z.string().optional().describe('Service name (default: web)'),
       domain: z.string().optional().describe('Optional domain to configure'),
-      databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (default: supabase)'),
+      databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (defaults to desired state, then existing managed DB provider, then supabase)'),
       setupEmail: z.boolean().optional().describe('Configure SendGrid (default: true)'),
       serviceConfig: serviceConfigSchema.optional().describe('Per-service runtime config to apply during bootstrap'),
       confirm: z.boolean().optional().describe('Set true to apply changes'),
@@ -1079,12 +1205,15 @@ export function registerInfraTools(server: McpServer): void {
     }) => {
       const existingProject = resolveProject({ projectName });
       const policyState = (existingProject?.policies?.desiredState as Partial<DesiredState> | undefined) ?? {};
+      const resolvedDatabaseProvider = existingProject
+        ? resolveDatabaseProviderForProject(existingProject, policyState, { environmentName, databaseProvider })
+        : (databaseProvider ?? policyState?.databaseProvider ?? 'supabase');
       const resolvedDesired = resolveDesiredState(policyState, {
         environmentName,
         services,
         serviceName,
         domain,
-        databaseProvider,
+        databaseProvider: resolvedDatabaseProvider,
         setupEmail,
         serviceConfig,
       });
@@ -1197,7 +1326,7 @@ export function registerInfraTools(server: McpServer): void {
       services: z.array(z.string().min(1)).optional().describe('Desired services to converge (default: ["web"])'),
       serviceName: z.string().optional().describe('Desired service (default: web)'),
       domain: z.string().optional().describe('Optional desired domain'),
-      databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Desired DB provider (default: supabase)'),
+      databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Desired DB provider (defaults to existing managed DB provider when present, otherwise supabase)'),
       setupEmail: z.boolean().optional().describe('Include SendGrid setup (default: true)'),
       serviceConfig: serviceConfigSchema.optional().describe('Desired per-service runtime config'),
       deploy: deployDesiredSchema.optional().describe('Desired deploy strategy and branch mapping'),
@@ -1209,7 +1338,7 @@ export function registerInfraTools(server: McpServer): void {
       services,
       serviceName = 'web',
       domain,
-      databaseProvider = 'supabase',
+      databaseProvider,
       setupEmail = true,
       serviceConfig,
       deploy,
@@ -1225,12 +1354,17 @@ export function registerInfraTools(server: McpServer): void {
         };
       }
 
-      const desiredState = resolveDesiredState(undefined, {
+      const policyState = (project.policies?.desiredState as Partial<DesiredState> | undefined) ?? {};
+      const resolvedDatabaseProvider = resolveDatabaseProviderForProject(project, policyState, {
+        environmentName,
+        databaseProvider,
+      });
+      const desiredState = resolveDesiredState(policyState, {
         environmentName,
         services,
         serviceName,
         domain,
-        databaseProvider,
+        databaseProvider: resolvedDatabaseProvider,
         setupEmail,
         serviceConfig,
         deploy,
@@ -1313,12 +1447,16 @@ export function registerInfraTools(server: McpServer): void {
       }
 
       const policyState = (project.policies?.desiredState as Partial<DesiredState> | undefined) ?? {};
+      const resolvedDatabaseProvider = resolveDatabaseProviderForProject(project, policyState, {
+        environmentName,
+        databaseProvider,
+      });
       const desired = resolveDesiredState(policyState, {
         environmentName,
         services,
         serviceName,
         domain,
-        databaseProvider,
+        databaseProvider: resolvedDatabaseProvider,
         setupEmail,
         serviceConfig,
         deploy,

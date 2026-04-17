@@ -1787,6 +1787,218 @@ export class RailwayAdapter implements IProviderAdapter {
     }
   }
 
+  private normalizeRailwayRecordName(record: RailwayCustomDomainDnsRecord): string | null {
+    const fqdn = typeof record.fqdn === 'string' ? record.fqdn.trim().replace(/\.$/, '') : '';
+    if (fqdn) {
+      return fqdn;
+    }
+
+    const hostlabel = typeof record.hostlabel === 'string' ? record.hostlabel.trim() : '';
+    const zone = typeof record.zone === 'string' ? record.zone.trim() : '';
+    if (!hostlabel && !zone) {
+      return null;
+    }
+    if (hostlabel === '@' || hostlabel.length === 0) {
+      return zone || null;
+    }
+    if (!zone) {
+      return hostlabel;
+    }
+    return `${hostlabel}.${zone}`;
+  }
+
+  private extractCustomDomainDnsRecords(status?: RailwayCustomDomainStatus | null): Array<{
+    name: string;
+    type: string;
+    value: string;
+    currentValue?: string;
+    purpose?: string;
+    status?: string;
+  }> {
+    const records: Array<{
+      name: string;
+      type: string;
+      value: string;
+      currentValue?: string;
+      purpose?: string;
+      status?: string;
+    }> = [];
+
+    for (const record of status?.dnsRecords ?? []) {
+      const name = this.normalizeRailwayRecordName(record);
+      const type = typeof record.recordType === 'string' ? record.recordType.trim().toUpperCase() : '';
+      const value = typeof record.requiredValue === 'string' ? record.requiredValue.trim() : '';
+      if (!name || !type || !value) {
+        continue;
+      }
+      records.push({
+        name,
+        type,
+        value,
+        currentValue: record.currentValue,
+        purpose: record.purpose,
+        status: record.status,
+      });
+    }
+
+    const verificationHost = status?.verificationDnsHost?.trim().replace(/\.$/, '');
+    const verificationToken = status?.verificationToken?.trim();
+    if (verificationHost && verificationToken) {
+      records.push({
+        name: verificationHost,
+        type: 'TXT',
+        value: verificationToken,
+        purpose: 'verification',
+      });
+    }
+
+    return records;
+  }
+
+  async getCustomDomainStatus(params: {
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+  }): Promise<RailwayCustomDomain | null> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const query = gql`
+      query GetServiceCustomDomains($id: String!) {
+        service(id: $id) {
+          id
+          serviceInstances {
+            edges {
+              node {
+                environmentId
+                domains {
+                  customDomains {
+                    id
+                    domain
+                    status {
+                      dnsRecords {
+                        currentValue
+                        fqdn
+                        hostlabel
+                        purpose
+                        recordType
+                        requiredValue
+                        status
+                        zone
+                      }
+                      verificationDnsHost
+                      verificationToken
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const result = await this.client.request<{
+        service?: {
+          serviceInstances?: {
+            edges?: Array<{
+              node?: {
+                environmentId?: string;
+                domains?: {
+                  customDomains?: RailwayCustomDomain[];
+                };
+              };
+            }>;
+          };
+        };
+      }>(query, { id: params.serviceId });
+
+      for (const edge of result.service?.serviceInstances?.edges ?? []) {
+        if (edge.node?.environmentId !== params.environmentId) {
+          continue;
+        }
+        const match = edge.node.domains?.customDomains?.find(
+          (domain) => domain.domain.toLowerCase() === params.domain.toLowerCase()
+        );
+        if (match) {
+          return match;
+        }
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async attachCustomDomain(params: {
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+  }): Promise<Receipt> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const existing = await this.getCustomDomainStatus(params);
+    if (existing) {
+      return {
+        success: true,
+        message: 'Railway custom domain already attached',
+        data: {
+          domain: existing.domain,
+          customDomainId: existing.id,
+          created: false,
+          dnsRecords: this.extractCustomDomainDnsRecords(existing.status),
+        },
+      };
+    }
+
+    const mutation = gql`
+      mutation CreateCustomDomain($input: CustomDomainCreateInput!) {
+        customDomainCreate(input: $input) {
+          id
+          domain
+        }
+      }
+    `;
+
+    try {
+      const result = await this.client.request<{
+        customDomainCreate: {
+          id: string;
+          domain: string;
+        };
+      }>(mutation, {
+        input: {
+          serviceId: params.serviceId,
+          environmentId: params.environmentId,
+          domain: params.domain,
+        },
+      });
+
+      const current = await this.getCustomDomainStatus(params);
+      return {
+        success: true,
+        message: 'Railway custom domain attached',
+        data: {
+          domain: result.customDomainCreate.domain,
+          customDomainId: result.customDomainCreate.id,
+          created: true,
+          dnsRecords: this.extractCustomDomainDnsRecords(current?.status),
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to attach Railway custom domain',
+        error: this.describeError(error),
+      };
+    }
+  }
+
   async findProjectByName(name: string): Promise<RailwayProject | null> {
     const projects = await this.listProjects();
     return projects.find((p) => p.name.toLowerCase() === name.toLowerCase()) ?? null;
@@ -2006,7 +2218,7 @@ export interface RailwayServiceInstance {
   environmentId: string;
   domains: {
     serviceDomains: Array<{ domain: string }>;
-    customDomains: Array<{ domain: string }>;
+    customDomains: Array<{ id?: string; domain: string; status?: RailwayCustomDomainStatus | null }>;
   };
   startCommand?: string;
   healthcheckPath?: string;
@@ -2019,6 +2231,29 @@ export interface RailwayDeployment {
   status: string;
   createdAt: string;
   staticUrl?: string;
+}
+
+export interface RailwayCustomDomainDnsRecord {
+  fqdn?: string;
+  hostlabel?: string;
+  purpose?: string;
+  recordType?: string;
+  requiredValue?: string;
+  currentValue?: string;
+  status?: string;
+  zone?: string;
+}
+
+export interface RailwayCustomDomainStatus {
+  dnsRecords?: RailwayCustomDomainDnsRecord[];
+  verificationDnsHost?: string;
+  verificationToken?: string;
+}
+
+export interface RailwayCustomDomain {
+  id: string;
+  domain: string;
+  status?: RailwayCustomDomainStatus | null;
 }
 
 export interface RailwayLogEntry {

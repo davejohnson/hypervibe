@@ -10,7 +10,10 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
+import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
+import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import type { IDatabaseAdapter } from '../../domain/ports/database.port.js';
 import type { IHostingAdapter } from '../../domain/ports/hosting.port.js';
 
@@ -241,6 +244,49 @@ describe('infra_apply multi-service convergence', () => {
     await Promise.all([client.close(), server.close()]);
   });
 
+  it('infers the existing managed postgres provider during infra_plan when databaseProvider is omitted', async () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const componentRepo = new ComponentRepository();
+    const project = projectRepo.create({ name: 'existing-db-plan-project', defaultPlatform: 'railway' });
+    const environment = envRepo.create({ projectId: project.id, name: 'production' });
+
+    componentRepo.create({
+      environmentId: environment.id,
+      type: 'postgres',
+      bindings: {
+        provider: 'railway',
+        pluginName: 'postgres-db',
+        connectionUrl: 'postgres://shared-db',
+      },
+      externalId: 'rail-db-1',
+    });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'existing-db-plan-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'infra_plan', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      domain: 'usebillforge.com',
+      setupEmail: false,
+    });
+
+    const desired = payload.desired as JsonObj;
+    const plan = payload.plan as Array<Record<string, unknown>>;
+    const dbPlan = plan.find((item) => item.action === 'db_provision');
+    expect(payload.success).toBe(true);
+    expect(desired.databaseProvider).toBe('railway');
+    expect(dbPlan?.status).toBe('ok');
+    expect(dbPlan?.detail).toBe('Postgres already managed on railway');
+
+    await Promise.all([client.close(), server.close()]);
+  });
+
   it('reuses an existing managed postgres component during apply', async () => {
     const projectRepo = new ProjectRepository();
     const envRepo = new EnvironmentRepository();
@@ -388,6 +434,44 @@ describe('infra_apply multi-service convergence', () => {
         },
       },
     ]);
+
+    await Promise.all([client.close(), server.close()]);
+  });
+
+  it('infra_desired_set preserves the existing managed postgres provider when databaseProvider is omitted', async () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const componentRepo = new ComponentRepository();
+    const project = projectRepo.create({ name: 'desired-existing-db-project', defaultPlatform: 'railway' });
+    const environment = envRepo.create({ projectId: project.id, name: 'production' });
+
+    componentRepo.create({
+      environmentId: environment.id,
+      type: 'postgres',
+      bindings: {
+        provider: 'railway',
+        pluginName: 'postgres-db',
+        connectionUrl: 'postgres://shared-db',
+      },
+      externalId: 'rail-db-1',
+    });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'desired-existing-db-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'infra_desired_set', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      setupEmail: false,
+    });
+
+    const desiredState = payload.desiredState as JsonObj;
+    expect(payload.success).toBe(true);
+    expect(desiredState.databaseProvider).toBe('railway');
 
     await Promise.all([client.close(), server.close()]);
   });
@@ -974,6 +1058,211 @@ describe('infra_apply multi-service convergence', () => {
       repo: 'davejohnson/billforge',
     });
     expect(summary.nextSteps).toContain('Then rerun infra_apply or setup_configure.');
+
+    await Promise.all([client.close(), server.close()]);
+  });
+
+  it('attaches a Railway custom domain and syncs the required DNS records to Cloudflare', async () => {
+    const projectRepo = new ProjectRepository();
+    const connectionRepo = new ConnectionRepository();
+    const secretStore = getSecretStore();
+    const project = projectRepo.create({ name: 'domain-attach-project', defaultPlatform: 'railway' });
+
+    const cloudflareConnection = connectionRepo.create({
+      provider: 'cloudflare',
+      scope: 'usebillforge.com',
+      credentialsEncrypted: secretStore.encryptObject({ apiToken: 'cf-token' }),
+    });
+    connectionRepo.updateStatus(cloudflareConnection.id, 'verified');
+
+    const fakeDatabaseAdapter: IDatabaseAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedDatabases: ['postgres'],
+        supportedCaches: [],
+        supportsPooling: false,
+        supportsReadReplicas: false,
+        supportsPointInTimeRecovery: false,
+        serverlessOptimized: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async provision(_type, environment) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type: 'postgres',
+            bindings: {
+              provider: 'railway',
+              pluginName: 'postgres-db',
+              connectionString: 'postgres://shared-db',
+            },
+            externalId: 'rail-db-1',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: true,
+            message: 'db ready',
+            data: {
+              projectId: 'rail-project-1',
+              railwayProjectId: 'rail-project-1',
+              ensureProjectCreated: false,
+            },
+          },
+          connectionUrl: 'postgres://shared-db',
+          envVars: {
+            DATABASE_URL: '${{postgres-db.DATABASE_URL}}',
+            DIRECT_URL: '${{postgres-db.DATABASE_PRIVATE_URL}}',
+          },
+        };
+      },
+      async getConnectionUrl() {
+        return 'postgres://shared-db';
+      },
+      async destroy() {
+        return { success: true, message: 'destroyed' };
+      },
+    };
+
+    const attachCustomDomain = vi.fn(async () => ({
+      success: true,
+      message: 'attached',
+      data: {
+        domain: 'usebillforge.com',
+        customDomainId: 'cd_123',
+        created: true,
+        dnsRecords: [
+          { name: 'usebillforge.com', type: 'CNAME', value: 'web-production.up.railway.app' },
+          { name: '_railway.usebillforge.com', type: 'TXT', value: 'verify-token' },
+        ],
+      },
+    }));
+
+    const fakeHostingAdapter: IHostingAdapter & {
+      attachCustomDomain: typeof attachCustomDomain;
+    } = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: false,
+        supportsReleaseCommand: true,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return {
+          success: true,
+          message: 'bound',
+          data: {
+            projectId: 'rail-project-1',
+            environmentId: 'rail-env-1',
+          },
+        };
+      },
+      async deploy(service) {
+        return {
+          serviceId: `deploy-${service.name}`,
+          externalId: `rail-${service.name}`,
+          url: undefined,
+          status: 'deployed',
+          receipt: {
+            success: true,
+            message: 'deployed',
+            data: {
+              railwayEnvironmentId: 'rail-env-1',
+            },
+          },
+        };
+      },
+      async setEnvVars() {
+        return {
+          success: true,
+          message: 'vars synced',
+        };
+      },
+      async getDeployStatus() {
+        return {
+          status: 'deployed',
+          url: undefined,
+        };
+      },
+      attachCustomDomain,
+    };
+
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeDatabaseAdapter,
+    });
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeHostingAdapter,
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'connect').mockImplementation(() => {});
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1',
+      name: 'usebillforge.com',
+      status: 'active',
+      paused: false,
+      type: 'full',
+      name_servers: [],
+    });
+    const upsertDnsRecord = vi.spyOn(CloudflareAdapter.prototype, 'upsertDnsRecord')
+      .mockResolvedValue({
+        record: {
+          id: 'rec-1',
+          zone_id: 'zone-1',
+          zone_name: 'usebillforge.com',
+          name: 'usebillforge.com',
+          type: 'CNAME',
+          content: 'web-production.up.railway.app',
+          proxied: false,
+          proxiable: true,
+          ttl: 1,
+          created_on: new Date().toISOString(),
+          modified_on: new Date().toISOString(),
+        },
+        action: 'created',
+      });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'domain-attach-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'infra_apply', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      databaseProvider: 'railway',
+      domain: 'usebillforge.com',
+      setupEmail: false,
+      confirm: true,
+    });
+
+    expect(payload.success).toBe(true);
+    expect(attachCustomDomain).toHaveBeenCalledWith({
+      serviceId: 'rail-web',
+      environmentId: 'rail-env-1',
+      domain: 'usebillforge.com',
+    });
+    expect(upsertDnsRecord.mock.calls).toEqual([
+      ['zone-1', 'usebillforge.com', 'CNAME', 'web-production.up.railway.app', { proxied: false }],
+      ['zone-1', '_railway.usebillforge.com', 'TXT', 'verify-token', { proxied: false }],
+    ]);
+    expect(payload.customDomainAttached).toBe(true);
+    expect(payload.domainDnsConfigured).toBe(true);
 
     await Promise.all([client.close(), server.close()]);
   });
