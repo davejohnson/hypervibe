@@ -51,7 +51,16 @@ export interface HostingBindings {
   railwayEnvironmentId?: string;
 
   /** Map of service names to their external IDs */
-  services: Record<string, { serviceId: string; url?: string }>;
+  services: Record<string, {
+    serviceId: string;
+    url?: string;
+    customDomains?: string[];
+    imageUri?: string;
+    workloadKind?: string;
+    resourceType?: string;
+    jobName?: string;
+    schedulerJobName?: string;
+  }>;
 }
 
 /**

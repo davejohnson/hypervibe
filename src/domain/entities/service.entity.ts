@@ -1,4 +1,7 @@
+export type WorkloadKind = 'web' | 'worker' | 'cron' | 'job';
+
 export interface BuildConfig {
+  workloadKind?: WorkloadKind;
   builder?: 'nixpacks' | 'dockerfile' | 'buildpack';
   dockerfilePath?: string;
   buildCommand?: string;
@@ -7,6 +10,7 @@ export interface BuildConfig {
   releaseCommand?: string;
   healthCheckPath?: string;
   cronSchedule?: string;
+  public?: boolean;
 }
 
 export interface EnvVarSpec {
@@ -30,4 +34,27 @@ export interface CreateServiceInput {
   name: string;
   buildConfig?: BuildConfig;
   envVarSpec?: EnvVarSpec;
+}
+
+export function serviceWorkloadKind(service: Pick<Service, 'name' | 'buildConfig'>): WorkloadKind {
+  if (service.buildConfig.workloadKind) {
+    return service.buildConfig.workloadKind;
+  }
+
+  if (service.buildConfig.cronSchedule) {
+    return 'cron';
+  }
+
+  const name = service.name.toLowerCase();
+  if (/cron|sched|schedule/.test(name)) {
+    return 'cron';
+  }
+  if (/worker|queue|consumer|processor/.test(name)) {
+    return 'worker';
+  }
+  if (/job|task|migrate/.test(name)) {
+    return 'job';
+  }
+
+  return 'web';
 }

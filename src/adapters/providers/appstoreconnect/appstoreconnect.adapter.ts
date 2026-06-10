@@ -25,6 +25,26 @@ export interface AppStoreConnectBuild {
   appId: string;
 }
 
+export interface AppStoreBetaTester {
+  id: string;
+  email?: string;
+  firstName?: string;
+  lastName?: string;
+  inviteType?: string;
+  state?: string;
+}
+
+export interface AppStoreBetaGroup {
+  id: string;
+  name: string;
+  isInternal: boolean;
+  hasAccessToAllBuilds?: boolean;
+  publicLinkEnabled?: boolean;
+  publicLink?: string;
+  publicLinkLimit?: number;
+  feedbackEnabled?: boolean;
+}
+
 export interface AppStoreVersion {
   id: string;
   versionString: string;
@@ -208,7 +228,7 @@ export class AppStoreConnectAdapter {
           processingState: string;
           usesNonExemptEncryption: boolean | null;
         };
-        relationships: {
+        relationships?: {
           preReleaseVersion?: { data?: { id: string } };
           app?: { data?: { id: string } };
         };
@@ -228,12 +248,12 @@ export class AppStoreConnectAdapter {
 
     return result.data.map(build => ({
       id: build.id,
-      version: preReleaseVersions.get(build.relationships.preReleaseVersion?.data?.id ?? '') ?? '',
+      version: preReleaseVersions.get(build.relationships?.preReleaseVersion?.data?.id ?? '') ?? '',
       buildNumber: build.attributes.version,
       processingState: build.attributes.processingState,
       usesNonExemptEncryption: build.attributes.usesNonExemptEncryption,
       uploadedDate: build.attributes.uploadedDate,
-      appId: build.relationships.app?.data?.id ?? '',
+      appId: build.relationships?.app?.data?.id ?? '',
     }));
   }
 
@@ -287,19 +307,252 @@ export class AppStoreConnectAdapter {
   /**
    * List beta groups for an app.
    */
-  async listBetaGroups(appId: string): Promise<Array<{ id: string; name: string; isInternal: boolean }>> {
+  async listBetaGroups(appId: string): Promise<AppStoreBetaGroup[]> {
     const result = await this.apiRequest<{
       data: Array<{
         id: string;
-        attributes: { name: string; isInternalGroup: boolean };
+        attributes: {
+          name: string;
+          isInternalGroup: boolean;
+          hasAccessToAllBuilds?: boolean;
+          publicLinkEnabled?: boolean;
+          publicLink?: string;
+          publicLinkLimit?: number;
+          feedbackEnabled?: boolean;
+        };
       }>;
-    }>('GET', `/apps/${appId}/betaGroups`);
+    }>('GET', `/apps/${appId}/betaGroups?limit=200&fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds,publicLinkEnabled,publicLink,publicLinkLimit,feedbackEnabled`);
 
     return result.data.map(g => ({
       id: g.id,
       name: g.attributes.name,
       isInternal: g.attributes.isInternalGroup,
+      hasAccessToAllBuilds: g.attributes.hasAccessToAllBuilds,
+      publicLinkEnabled: g.attributes.publicLinkEnabled,
+      publicLink: g.attributes.publicLink,
+      publicLinkLimit: g.attributes.publicLinkLimit,
+      feedbackEnabled: g.attributes.feedbackEnabled,
     }));
+  }
+
+  async findBetaGroupByName(appId: string, name: string): Promise<AppStoreBetaGroup | null> {
+    const groups = await this.listBetaGroups(appId);
+    return groups.find((group) => group.name.toLowerCase() === name.toLowerCase()) ?? null;
+  }
+
+  async createBetaGroup(input: {
+    appId: string;
+    name: string;
+    isInternal?: boolean;
+    hasAccessToAllBuilds?: boolean;
+    feedbackEnabled?: boolean;
+    publicLinkEnabled?: boolean;
+    publicLinkLimit?: number;
+  }): Promise<AppStoreBetaGroup> {
+    const attributes: Record<string, unknown> = {
+      name: input.name,
+      isInternalGroup: input.isInternal ?? false,
+    };
+
+    if (input.hasAccessToAllBuilds !== undefined) attributes.hasAccessToAllBuilds = input.hasAccessToAllBuilds;
+    if (input.feedbackEnabled !== undefined) attributes.feedbackEnabled = input.feedbackEnabled;
+    if (input.publicLinkEnabled !== undefined) attributes.publicLinkEnabled = input.publicLinkEnabled;
+    if (input.publicLinkLimit !== undefined) {
+      attributes.publicLinkLimitEnabled = true;
+      attributes.publicLinkLimit = input.publicLinkLimit;
+    }
+
+    const response = await this.apiRequest<{
+      data: {
+        id: string;
+        attributes: {
+          name: string;
+          isInternalGroup: boolean;
+          hasAccessToAllBuilds?: boolean;
+          publicLinkEnabled?: boolean;
+          publicLink?: string;
+          publicLinkLimit?: number;
+          feedbackEnabled?: boolean;
+        };
+      };
+    }>('POST', '/betaGroups', {
+      data: {
+        type: 'betaGroups',
+        attributes,
+        relationships: {
+          app: {
+            data: { type: 'apps', id: input.appId },
+          },
+        },
+      },
+    });
+
+    return {
+      id: response.data.id,
+      name: response.data.attributes.name,
+      isInternal: response.data.attributes.isInternalGroup,
+      hasAccessToAllBuilds: response.data.attributes.hasAccessToAllBuilds,
+      publicLinkEnabled: response.data.attributes.publicLinkEnabled,
+      publicLink: response.data.attributes.publicLink,
+      publicLinkLimit: response.data.attributes.publicLinkLimit,
+      feedbackEnabled: response.data.attributes.feedbackEnabled,
+    };
+  }
+
+  async getOrCreateBetaGroup(input: {
+    appId: string;
+    name: string;
+    isInternal?: boolean;
+    hasAccessToAllBuilds?: boolean;
+    feedbackEnabled?: boolean;
+    publicLinkEnabled?: boolean;
+    publicLinkLimit?: number;
+  }): Promise<{ group: AppStoreBetaGroup; created: boolean }> {
+    const existing = await this.findBetaGroupByName(input.appId, input.name);
+    if (existing) {
+      return { group: existing, created: false };
+    }
+    const group = await this.createBetaGroup(input);
+    return { group, created: true };
+  }
+
+  async listBetaTesters(options?: {
+    email?: string;
+    appId?: string;
+    groupId?: string;
+    limit?: number;
+  }): Promise<AppStoreBetaTester[]> {
+    const params = new URLSearchParams();
+    params.set('limit', String(options?.limit ?? 200));
+    params.set('fields[betaTesters]', 'firstName,lastName,email,inviteType,state');
+    if (options?.email && !options?.groupId) {
+      params.set('filter[email]', options.email);
+    }
+    if (options?.appId) {
+      params.set('filter[apps]', options.appId);
+    }
+
+    const path = options?.groupId
+      ? `/betaGroups/${options.groupId}/betaTesters?${params.toString()}`
+      : `/betaTesters?${params.toString()}`;
+    const response = await this.apiRequest<{
+      data: Array<{
+        id: string;
+        attributes: {
+          firstName?: string;
+          lastName?: string;
+          email?: string;
+          inviteType?: string;
+          state?: string;
+        };
+      }>;
+    }>('GET', path);
+
+    const testers = response.data.map((tester) => ({
+      id: tester.id,
+      firstName: tester.attributes.firstName,
+      lastName: tester.attributes.lastName,
+      email: tester.attributes.email,
+      inviteType: tester.attributes.inviteType,
+      state: tester.attributes.state,
+    }));
+
+    return options?.email && options.groupId
+      ? testers.filter((tester) => tester.email?.toLowerCase() === options.email!.toLowerCase())
+      : testers;
+  }
+
+  async findBetaTesterByEmail(email: string): Promise<AppStoreBetaTester | null> {
+    const testers = await this.listBetaTesters({ email, limit: 10 });
+    return testers.find((tester) => tester.email?.toLowerCase() === email.toLowerCase()) ?? null;
+  }
+
+  async createBetaTester(input: {
+    email: string;
+    firstName?: string;
+    lastName?: string;
+    appIds?: string[];
+    groupIds?: string[];
+    buildIds?: string[];
+  }): Promise<AppStoreBetaTester> {
+    const relationships: Record<string, unknown> = {};
+    if (input.appIds?.length) {
+      relationships.apps = {
+        data: input.appIds.map((id) => ({ type: 'apps', id })),
+      };
+    }
+    if (input.groupIds?.length) {
+      relationships.betaGroups = {
+        data: input.groupIds.map((id) => ({ type: 'betaGroups', id })),
+      };
+    }
+    if (input.buildIds?.length) {
+      relationships.builds = {
+        data: input.buildIds.map((id) => ({ type: 'builds', id })),
+      };
+    }
+
+    const response = await this.apiRequest<{
+      data: {
+        id: string;
+        attributes: {
+          firstName?: string;
+          lastName?: string;
+          email?: string;
+          inviteType?: string;
+          state?: string;
+        };
+      };
+    }>('POST', '/betaTesters', {
+      data: {
+        type: 'betaTesters',
+        attributes: {
+          email: input.email,
+          ...(input.firstName ? { firstName: input.firstName } : {}),
+          ...(input.lastName ? { lastName: input.lastName } : {}),
+        },
+        ...(Object.keys(relationships).length > 0 ? { relationships } : {}),
+      },
+    });
+
+    return {
+      id: response.data.id,
+      firstName: response.data.attributes.firstName,
+      lastName: response.data.attributes.lastName,
+      email: response.data.attributes.email,
+      inviteType: response.data.attributes.inviteType,
+      state: response.data.attributes.state,
+    };
+  }
+
+  async getOrCreateBetaTester(input: {
+    email: string;
+    firstName?: string;
+    lastName?: string;
+    appIds?: string[];
+    groupIds?: string[];
+    buildIds?: string[];
+  }): Promise<{ tester: AppStoreBetaTester; created: boolean }> {
+    const existing = await this.findBetaTesterByEmail(input.email);
+    if (existing) {
+      return { tester: existing, created: false };
+    }
+    const tester = await this.createBetaTester(input);
+    return { tester, created: true };
+  }
+
+  async addBetaTesterToBetaGroups(testerId: string, groupIds: string[]): Promise<void> {
+    if (groupIds.length === 0) return;
+    await this.apiRequest('POST', `/betaTesters/${testerId}/relationships/betaGroups`, {
+      data: groupIds.map((id) => ({ type: 'betaGroups', id })),
+    });
+  }
+
+  async assignBetaTesterToBuilds(testerId: string, buildIds: string[]): Promise<void> {
+    if (buildIds.length === 0) return;
+    await this.apiRequest('POST', `/betaTesters/${testerId}/relationships/builds`, {
+      data: buildIds.map((id) => ({ type: 'builds', id })),
+    });
   }
 
   /**

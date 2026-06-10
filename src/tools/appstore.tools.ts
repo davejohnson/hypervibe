@@ -6,11 +6,19 @@ import { ConnectionRepository } from '../adapters/db/repositories/connection.rep
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { AppStoreConnectAdapter } from '../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
-import type { AppStoreConnectCredentials } from '../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
+import type { AppStoreBetaGroup, AppStoreConnectBuild, AppStoreConnectCredentials } from '../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
 
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg']);
+
+const betaTesterInputSchema = z.object({
+  email: z.string().email().describe('Tester email address'),
+  firstName: z.string().optional().describe('Tester first name'),
+  lastName: z.string().optional().describe('Tester last name'),
+});
+
+type BetaTesterInput = z.infer<typeof betaTesterInputSchema>;
 
 /**
  * Get an App Store Connect adapter, using scoped connection if available.
@@ -31,6 +39,114 @@ function getAppStoreConnectAdapter(scopeHint?: string): { adapter: AppStoreConne
   adapter.connect(credentials);
 
   return { adapter };
+}
+
+async function resolveAppId(
+  adapter: AppStoreConnectAdapter,
+  appIdentifier?: string,
+  appId?: string,
+): Promise<{ appId: string; app?: { id: string; bundleId: string; name: string } } | { error: string }> {
+  if (appId) return { appId };
+  if (!appIdentifier) {
+    return { error: 'Provide appId or appIdentifier so Hypervibe can resolve the App Store Connect app.' };
+  }
+
+  const app = await adapter.findAppByBundleId(appIdentifier);
+  if (!app) {
+    return { error: `App not found for bundle ID: ${appIdentifier}` };
+  }
+
+  return { appId: app.id, app };
+}
+
+async function resolveBuild(
+  adapter: AppStoreConnectAdapter,
+  params: {
+    appId?: string;
+    buildId?: string;
+    buildNumber?: string;
+    usesNonExemptEncryption?: boolean;
+  },
+): Promise<{ build: AppStoreConnectBuild; complianceSet?: boolean } | { error: string }> {
+  if (params.buildId) {
+    const builds = await adapter.listBuilds({ appId: params.appId, limit: 50 });
+    const build = builds.find((candidate) => candidate.id === params.buildId);
+    if (!build) {
+      return { error: `Build not found by ID: ${params.buildId}` };
+    }
+    return { build };
+  }
+
+  const compliance = await adapter.waitForProcessingAndSetCompliance({
+    appId: params.appId,
+    buildNumber: params.buildNumber,
+    usesNonExemptEncryption: params.usesNonExemptEncryption ?? false,
+  });
+  if (compliance.error || !compliance.build) {
+    return {
+      error: compliance.error ?? 'No processed build found for TestFlight distribution',
+    };
+  }
+
+  return { build: compliance.build, complianceSet: compliance.complianceSet };
+}
+
+async function resolveBetaGroup(
+  adapter: AppStoreConnectAdapter,
+  params: {
+    appId: string;
+    groupId?: string;
+    groupName?: string;
+    createIfMissing?: boolean;
+    groupType?: 'internal' | 'external';
+    hasAccessToAllBuilds?: boolean;
+    feedbackEnabled?: boolean;
+    publicLinkEnabled?: boolean;
+    publicLinkLimit?: number;
+  },
+): Promise<{ group: AppStoreBetaGroup; created: boolean } | { error: string }> {
+  if (params.groupId) {
+    const groups = await adapter.listBetaGroups(params.appId);
+    const group = groups.find((candidate) => candidate.id === params.groupId);
+    if (!group) {
+      return { error: `Beta group not found by ID for app: ${params.groupId}` };
+    }
+    return { group, created: false };
+  }
+
+  const groupName = params.groupName?.trim();
+  if (!groupName) {
+    return { error: 'Provide groupName or groupId.' };
+  }
+
+  if (params.createIfMissing === false) {
+    const group = await adapter.findBetaGroupByName(params.appId, groupName);
+    return group
+      ? { group, created: false }
+      : { error: `Beta group not found: ${groupName}` };
+  }
+
+  return adapter.getOrCreateBetaGroup({
+    appId: params.appId,
+    name: groupName,
+    isInternal: params.groupType === 'internal',
+    hasAccessToAllBuilds: params.hasAccessToAllBuilds,
+    feedbackEnabled: params.feedbackEnabled,
+    publicLinkEnabled: params.publicLinkEnabled,
+    publicLinkLimit: params.publicLinkLimit,
+  });
+}
+
+function summarizeBuild(build: AppStoreConnectBuild): Record<string, unknown> {
+  return {
+    id: build.id,
+    version: build.version,
+    buildNumber: build.buildNumber,
+    processingState: build.processingState,
+    usesNonExemptEncryption: build.usesNonExemptEncryption,
+    uploadedDate: build.uploadedDate,
+    appId: build.appId,
+  };
 }
 
 export function registerAppStoreTools(server: McpServer): void {
@@ -79,8 +195,16 @@ connection_create provider=appstoreconnect scope="com.mycompany.app1" credential
 
 1. Archive in Xcode
 2. Upload: \`testflight_upload ipaPath="./build/MyApp.ipa"\`
-3. Set compliance + distribute: \`testflight_compliance\` (waits for processing, sets export compliance, ready for testers)
-4. Submit for review: \`appstore_submit\``;
+3. Distribute to testers: \`testflight_distribute appIdentifier="com.example.app" groupName="External Testers" testers=[{"email":"tester@example.com"}]\`
+4. For App Store release readiness: \`appstore_submission_readiness\`
+5. Submit for App Store review: \`appstore_submit\`
+
+Useful TestFlight tools:
+- \`testflight_builds\` lists processed builds.
+- \`testflight_groups\` lists or creates beta groups.
+- \`testflight_testers\` lists testers by app, group, or email.
+- \`testflight_tester_add\` adds testers to a beta group without changing build assignment.
+- \`testflight_distribute\` prepares compliance, attaches a build to a group, and adds testers.`;
 
       return {
         content: [{
@@ -348,6 +472,365 @@ connection_create provider=appstoreconnect scope="com.mycompany.app1" credential
             }),
           }],
         };
+      }
+    }
+  );
+
+  server.tool(
+    'testflight_groups',
+    'List TestFlight beta groups for an app, optionally creating a group if it is missing.',
+    {
+      appIdentifier: z.string().optional().describe('App bundle identifier (for scoped connection lookup and app resolution)'),
+      appId: z.string().optional().describe('App Store Connect app ID (numeric)'),
+      groupName: z.string().optional().describe('Group name to find or create'),
+      createIfMissing: z.boolean().optional().describe('Create groupName if not found (default: false)'),
+      groupType: z.enum(['external', 'internal']).optional().describe('Group type when creating (default: external)'),
+      hasAccessToAllBuilds: z.boolean().optional().describe('When creating, allow group access to all builds'),
+      feedbackEnabled: z.boolean().optional().describe('When creating, enable TestFlight feedback'),
+      publicLinkEnabled: z.boolean().optional().describe('When creating an external group, enable public invite link'),
+      publicLinkLimit: z.number().int().min(1).max(10000).optional().describe('When enabling public link, cap testers between 1 and 10000'),
+    },
+    async ({ appIdentifier, appId, groupName, createIfMissing = false, groupType = 'external', hasAccessToAllBuilds, feedbackEnabled, publicLinkEnabled, publicLinkLimit }) => {
+      const result = getAppStoreConnectAdapter(appIdentifier);
+      if ('error' in result) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: result.error }) }] };
+      }
+
+      const { adapter } = result;
+      try {
+        const appResolution = await resolveAppId(adapter, appIdentifier, appId);
+        if ('error' in appResolution) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: appResolution.error }) }] };
+        }
+
+        let createdGroup: AppStoreBetaGroup | undefined;
+        let created = false;
+        if (groupName && createIfMissing) {
+          const groupResolution = await resolveBetaGroup(adapter, {
+            appId: appResolution.appId,
+            groupName,
+            createIfMissing: true,
+            groupType,
+            hasAccessToAllBuilds,
+            feedbackEnabled,
+            publicLinkEnabled,
+            publicLinkLimit,
+          });
+          if ('error' in groupResolution) {
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: groupResolution.error }) }] };
+          }
+          createdGroup = groupResolution.group;
+          created = groupResolution.created;
+        }
+
+        const groups = await adapter.listBetaGroups(appResolution.appId);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              appId: appResolution.appId,
+              app: appResolution.app,
+              count: groups.length,
+              groups,
+              created,
+              createdGroup,
+            }),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }) }] };
+      }
+    }
+  );
+
+  server.tool(
+    'testflight_testers',
+    'List TestFlight beta testers, optionally filtered by app, group, or email.',
+    {
+      appIdentifier: z.string().optional().describe('App bundle identifier (for scoped connection lookup and app resolution)'),
+      appId: z.string().optional().describe('App Store Connect app ID (numeric)'),
+      groupId: z.string().optional().describe('Beta group ID to list testers from'),
+      groupName: z.string().optional().describe('Beta group name to list testers from'),
+      email: z.string().email().optional().describe('Tester email to find'),
+      limit: z.number().int().min(1).max(200).optional().describe('Number of testers to return (default: 200)'),
+    },
+    async ({ appIdentifier, appId, groupId, groupName, email, limit }) => {
+      const result = getAppStoreConnectAdapter(appIdentifier);
+      if ('error' in result) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: result.error }) }] };
+      }
+
+      const { adapter } = result;
+      try {
+        let resolvedAppId = appId;
+        if (!resolvedAppId && appIdentifier) {
+          const appResolution = await resolveAppId(adapter, appIdentifier, appId);
+          if ('error' in appResolution) {
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: appResolution.error }) }] };
+          }
+          resolvedAppId = appResolution.appId;
+        }
+
+        let resolvedGroupId = groupId;
+        if (!resolvedGroupId && groupName) {
+          if (!resolvedAppId) {
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: 'Provide appId or appIdentifier when resolving groupName.' }) }] };
+          }
+          const group = await adapter.findBetaGroupByName(resolvedAppId, groupName);
+          if (!group) {
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: `Beta group not found: ${groupName}` }) }] };
+          }
+          resolvedGroupId = group.id;
+        }
+
+        const testers = await adapter.listBetaTesters({
+          appId: resolvedGroupId ? undefined : resolvedAppId,
+          groupId: resolvedGroupId,
+          email,
+          limit,
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              appId: resolvedAppId,
+              groupId: resolvedGroupId,
+              count: testers.length,
+              testers,
+            }),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }) }] };
+      }
+    }
+  );
+
+  server.tool(
+    'testflight_tester_add',
+    'Create or find TestFlight beta testers and add them to an app beta group.',
+    {
+      appIdentifier: z.string().optional().describe('App bundle identifier (for scoped connection lookup and app resolution)'),
+      appId: z.string().optional().describe('App Store Connect app ID (numeric)'),
+      groupId: z.string().optional().describe('Existing beta group ID'),
+      groupName: z.string().optional().describe('Beta group name to use or create'),
+      createGroupIfMissing: z.boolean().optional().describe('Create groupName if not found (default: true)'),
+      groupType: z.enum(['external', 'internal']).optional().describe('Group type when creating (default: external)'),
+      testers: z.array(betaTesterInputSchema).min(1).describe('Testers to create or add'),
+    },
+    async ({ appIdentifier, appId, groupId, groupName, createGroupIfMissing = true, groupType = 'external', testers }) => {
+      const result = getAppStoreConnectAdapter(appIdentifier);
+      if ('error' in result) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: result.error }) }] };
+      }
+
+      const { adapter } = result;
+      try {
+        const appResolution = await resolveAppId(adapter, appIdentifier, appId);
+        if ('error' in appResolution) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: appResolution.error }) }] };
+        }
+
+        const groupResolution = await resolveBetaGroup(adapter, {
+          appId: appResolution.appId,
+          groupId,
+          groupName,
+          createIfMissing: createGroupIfMissing,
+          groupType,
+        });
+        if ('error' in groupResolution) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: groupResolution.error }) }] };
+        }
+
+        const existingGroupTesters = await adapter.listBetaTesters({ groupId: groupResolution.group.id, limit: 200 });
+        const existingGroupEmails = new Set(existingGroupTesters.map((tester) => tester.email?.toLowerCase()).filter(Boolean));
+        const testerResults: Array<Record<string, unknown>> = [];
+
+        for (const testerInput of testers as BetaTesterInput[]) {
+          const testerResolution = await adapter.getOrCreateBetaTester({
+            email: testerInput.email,
+            firstName: testerInput.firstName,
+            lastName: testerInput.lastName,
+            appIds: [appResolution.appId],
+            groupIds: [groupResolution.group.id],
+          });
+
+          const alreadyInGroup = existingGroupEmails.has(testerInput.email.toLowerCase());
+          if (!testerResolution.created && !alreadyInGroup) {
+            await adapter.addBetaTesterToBetaGroups(testerResolution.tester.id, [groupResolution.group.id]);
+          }
+
+          testerResults.push({
+            ...testerResolution.tester,
+            created: testerResolution.created,
+            addedToGroup: testerResolution.created || !alreadyInGroup,
+          });
+        }
+
+        auditRepo.create({
+          action: 'testflight.testers.add',
+          resourceType: 'testflight',
+          resourceId: groupResolution.group.id,
+          details: {
+            appId: appResolution.appId,
+            groupName: groupResolution.group.name,
+            testerCount: testers.length,
+          },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              appId: appResolution.appId,
+              group: groupResolution.group,
+              groupCreated: groupResolution.created,
+              testers: testerResults,
+              message: `Added ${testerResults.length} tester(s) to ${groupResolution.group.name}`,
+            }),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }) }] };
+      }
+    }
+  );
+
+  server.tool(
+    'testflight_distribute',
+    'Prepare a TestFlight build, attach it to a beta group, and add testers to that group.',
+    {
+      appIdentifier: z.string().optional().describe('App bundle identifier (for scoped connection lookup and app resolution)'),
+      appId: z.string().optional().describe('App Store Connect app ID (numeric)'),
+      buildId: z.string().optional().describe('Specific App Store Connect build ID'),
+      buildNumber: z.string().optional().describe('Specific build number (default: most recent processed build)'),
+      groupId: z.string().optional().describe('Existing beta group ID'),
+      groupName: z.string().optional().describe('Beta group name to use or create (default: External Testers)'),
+      createGroupIfMissing: z.boolean().optional().describe('Create groupName if not found (default: true)'),
+      groupType: z.enum(['external', 'internal']).optional().describe('Group type when creating (default: external)'),
+      testers: z.array(betaTesterInputSchema).optional().describe('Testers to create or add to the group'),
+      usesNonExemptEncryption: z.boolean().optional().describe('Does the app use non-exempt encryption? (default: false - standard HTTPS only)'),
+      submitForBetaReview: z.boolean().optional().describe('Submit build for external beta review after distribution (default: false)'),
+      publicLinkEnabled: z.boolean().optional().describe('When creating an external group, enable public invite link'),
+      publicLinkLimit: z.number().int().min(1).max(10000).optional().describe('When enabling public link, cap testers between 1 and 10000'),
+      feedbackEnabled: z.boolean().optional().describe('When creating a group, enable TestFlight feedback'),
+    },
+    async ({ appIdentifier, appId, buildId, buildNumber, groupId, groupName = 'External Testers', createGroupIfMissing = true, groupType = 'external', testers = [], usesNonExemptEncryption, submitForBetaReview = false, publicLinkEnabled, publicLinkLimit, feedbackEnabled }) => {
+      const result = getAppStoreConnectAdapter(appIdentifier);
+      if ('error' in result) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: result.error }) }] };
+      }
+
+      const { adapter } = result;
+      try {
+        const appResolution = await resolveAppId(adapter, appIdentifier, appId);
+        if ('error' in appResolution) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: appResolution.error }) }] };
+        }
+
+        const buildResolution = await resolveBuild(adapter, {
+          appId: appResolution.appId,
+          buildId,
+          buildNumber,
+          usesNonExemptEncryption,
+        });
+        if ('error' in buildResolution) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: buildResolution.error }) }] };
+        }
+
+        const groupResolution = await resolveBetaGroup(adapter, {
+          appId: buildResolution.build.appId || appResolution.appId,
+          groupId,
+          groupName,
+          createIfMissing: createGroupIfMissing,
+          groupType,
+          feedbackEnabled,
+          publicLinkEnabled,
+          publicLinkLimit,
+        });
+        if ('error' in groupResolution) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: groupResolution.error }) }] };
+        }
+
+        const actions: string[] = [];
+        if (buildResolution.complianceSet) {
+          actions.push(`Export compliance set (usesNonExemptEncryption: ${usesNonExemptEncryption ?? false})`);
+        }
+        if (groupResolution.created) {
+          actions.push(`Created beta group: ${groupResolution.group.name}`);
+        }
+
+        await adapter.addBuildToBetaGroup(buildResolution.build.id, groupResolution.group.id);
+        actions.push(`Added build ${buildResolution.build.buildNumber} to beta group: ${groupResolution.group.name}`);
+
+        const existingGroupTesters = testers.length > 0
+          ? await adapter.listBetaTesters({ groupId: groupResolution.group.id, limit: 200 })
+          : [];
+        const existingGroupEmails = new Set(existingGroupTesters.map((tester) => tester.email?.toLowerCase()).filter(Boolean));
+        const testerResults: Array<Record<string, unknown>> = [];
+
+        for (const testerInput of testers as BetaTesterInput[]) {
+          const testerResolution = await adapter.getOrCreateBetaTester({
+            email: testerInput.email,
+            firstName: testerInput.firstName,
+            lastName: testerInput.lastName,
+            appIds: [buildResolution.build.appId || appResolution.appId],
+            groupIds: [groupResolution.group.id],
+          });
+
+          const alreadyInGroup = existingGroupEmails.has(testerInput.email.toLowerCase());
+          if (!testerResolution.created && !alreadyInGroup) {
+            await adapter.addBetaTesterToBetaGroups(testerResolution.tester.id, [groupResolution.group.id]);
+          }
+
+          testerResults.push({
+            ...testerResolution.tester,
+            created: testerResolution.created,
+            addedToGroup: testerResolution.created || !alreadyInGroup,
+          });
+        }
+        if (testerResults.length > 0) {
+          actions.push(`Added ${testerResults.length} tester(s) to ${groupResolution.group.name}`);
+        }
+
+        if (submitForBetaReview) {
+          await adapter.submitForBetaReview(buildResolution.build.id);
+          actions.push('Submitted build for external beta review');
+        }
+
+        auditRepo.create({
+          action: 'testflight.distribute',
+          resourceType: 'testflight',
+          resourceId: buildResolution.build.id,
+          details: {
+            appId: buildResolution.build.appId || appResolution.appId,
+            groupId: groupResolution.group.id,
+            testerCount: testerResults.length,
+            submitForBetaReview,
+          },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              appId: buildResolution.build.appId || appResolution.appId,
+              build: summarizeBuild(buildResolution.build),
+              group: groupResolution.group,
+              groupCreated: groupResolution.created,
+              testers: testerResults,
+              actions,
+              message: `Build ${buildResolution.build.buildNumber} is assigned to ${groupResolution.group.name}`,
+            }),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: error instanceof Error ? error.message : String(error) }) }] };
       }
     }
   );

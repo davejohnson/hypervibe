@@ -4,11 +4,10 @@ import { ConnectionRepository } from '../adapters/db/repositories/connection.rep
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
-import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { StripeAdapter, STRIPE_COMMON_WEBHOOK_EVENTS } from '../adapters/providers/stripe/stripe.adapter.js';
-import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import type { StripeCredentials, StripeMode, StripeCustomer } from '../adapters/providers/stripe/stripe.adapter.js';
-import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
+import { getSecretStore } from '../adapters/secrets/secret-store.js';
+import { providerDisplayName, syncHostingEnvVars } from './hosting-env.js';
 
 import { resolveProject } from './resolve-project.js';
 
@@ -695,7 +694,7 @@ stripe_webhook_setup mode=live webhookUrl=https://myapp.com/api/webhooks/stripe 
 
   server.tool(
     'stripe_webhook_setup',
-    'Create a Stripe webhook and sync the signing secret to a Railway environment in one step',
+    'Create a Stripe webhook and sync the signing secret to the current hosting provider in one step',
     {
       mode: z.enum(['sandbox', 'live']).describe('Stripe mode (sandbox or live)'),
       webhookUrl: z.string().url().describe('Webhook endpoint URL (e.g., https://myapp.railway.app/api/webhooks/stripe)'),
@@ -713,20 +712,6 @@ stripe_webhook_setup mode=live webhookUrl=https://myapp.com/api/webhooks/stripe 
           content: [{
             type: 'text' as const,
             text: JSON.stringify({ success: false, error: stripeResult.error }),
-          }],
-        };
-      }
-
-      // Get Railway connection
-      const railwayConnection = connectionRepo.findByProvider('railway');
-      if (!railwayConnection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: 'No Railway connection found. Use connection_create with provider=railway first.',
-            }),
           }],
         };
       }
@@ -762,25 +747,6 @@ stripe_webhook_setup mode=live webhookUrl=https://myapp.com/api/webhooks/stripe 
         };
       }
 
-      // Check Railway bindings
-      const bindings = environment.platformBindings as {
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
-        services?: Record<string, { serviceId: string }>;
-      };
-
-      if (!bindings.railwayProjectId || !bindings.services?.[serviceName]?.serviceId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: `Service ${serviceName} not deployed to Railway in environment ${environmentName}`,
-            }),
-          }],
-        };
-      }
-
       const { adapter: stripeAdapter } = stripeResult;
       const eventsToUse = events && events.length > 0 ? events : STRIPE_COMMON_WEBHOOK_EVENTS;
 
@@ -803,21 +769,22 @@ stripe_webhook_setup mode=live webhookUrl=https://myapp.com/api/webhooks/stripe 
           },
         };
 
-        // Step 2: If created (has secret), sync to Railway
+        // Step 2: If created (has secret), sync to the current hosting provider.
         if (webhookResult.action === 'created' && webhookResult.secret) {
-          const secretStore = getSecretStore();
-          const railwayCreds = secretStore.decryptObject<RailwayCredentials>(railwayConnection.credentialsEncrypted);
-          const railwayAdapter = new RailwayAdapter();
-          await railwayAdapter.connect(railwayCreds);
-
           const envVars = { [secretEnvVar]: webhookResult.secret };
-          const syncResult = await railwayAdapter.setEnvVars(environment, service, envVars);
+          const syncResult = await syncHostingEnvVars({
+            project,
+            environment,
+            service,
+            vars: envVars,
+          });
 
           if (syncResult.success) {
             response.secretSynced = true;
             response.envVar = secretEnvVar;
             response.environment = environmentName;
-            response.message = `Webhook created and ${secretEnvVar} synced to ${serviceName} in ${environmentName}`;
+            response.hostingProvider = syncResult.provider;
+            response.message = `Webhook created and ${secretEnvVar} synced to ${serviceName} in ${environmentName}${syncResult.provider ? ` on ${providerDisplayName(syncResult.provider)}` : ''}`;
 
             auditRepo.create({
               action: 'stripe.webhook_setup',
@@ -833,9 +800,10 @@ stripe_webhook_setup mode=live webhookUrl=https://myapp.com/api/webhooks/stripe 
             });
           } else {
             response.secretSynced = false;
-            response.syncError = syncResult.error;
+            response.hostingProvider = syncResult.provider;
+            response.syncError = syncResult.error || syncResult.message;
             response.signingSecret = webhookResult.secret;
-            response.message = `Webhook created but failed to sync secret: ${syncResult.error}. Secret included in response - set ${secretEnvVar} manually.`;
+            response.message = `Webhook created but failed to sync secret: ${syncResult.error || syncResult.message}. Secret included in response - set ${secretEnvVar} manually.`;
           }
         } else if (webhookResult.action === 'updated') {
           response.secretSynced = false;

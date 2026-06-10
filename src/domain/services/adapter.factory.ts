@@ -31,7 +31,7 @@ export class AdapterFactory {
    * Looks up the verified connection and instantiates the adapter.
    */
   async getHostingAdapter(project: Project): Promise<AdapterResult<IHostingAdapter>> {
-    const platform = project.defaultPlatform || 'railway';
+    const platform = project.defaultPlatform || 'cloudrun';
     return this.getAdapter<IHostingAdapter>(platform, 'deployment', getProjectScopeHints(project));
   }
 

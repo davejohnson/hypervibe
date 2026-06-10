@@ -53,7 +53,7 @@ export function registerProjectTools(server: McpServer): void {
     'Create a new Hypervibe project record for new infrastructure provisioning (use infra_apply to create resources on providers).',
     {
       name: z.string().min(1).max(100).describe('Project name'),
-      defaultPlatform: z.string().optional().describe('Default deployment platform (default: railway)'),
+      defaultPlatform: z.string().optional().describe('Greenfield deployment platform hint (default: cloudrun)'),
       gitRemoteUrl: z.string().optional().describe('Git remote URL to scope this project to (auto-detected from cwd if not provided)'),
     },
     async ({ name, defaultPlatform, gitRemoteUrl }) => {

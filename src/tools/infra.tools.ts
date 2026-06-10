@@ -5,21 +5,27 @@ import { EnvironmentRepository } from '../adapters/db/repositories/environment.r
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../adapters/db/repositories/component.repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
+import { ApprovalRepository } from '../adapters/db/repositories/approval.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import { DeployOrchestrator } from '../domain/services/deploy.orchestrator.js';
 import { CloudflareAdapter, type CloudflareCredentials } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
-import { SendGridAdapter, type SendGridCredentials } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
+import { SendGridAdapter, assessSendGridScopes, type SendGridCredentials } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
+import type { GitHubCredentials } from '../adapters/providers/github/github.adapter.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { InfraTransaction } from '../domain/services/infra.transaction.js';
+import { buildDatabaseEnvVarsFromComponent } from '../domain/services/database-env.js';
+import { getCloudPrepareProfile, isCloudPrepared } from '../domain/services/cloud-prepare.js';
 import {
   snapshotComponentRecord,
   snapshotEnvironmentBindings,
 } from '../domain/services/local-state.transaction.js';
 import { resolveProject } from './resolve-project.js';
+import { hostingProviderForEnvironment } from './hosting-env.js';
 import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from './railway-help.js';
 import type { Component } from '../domain/entities/component.entity.js';
+import { serviceWorkloadKind, type WorkloadKind } from '../domain/entities/service.entity.js';
 import type { Receipt } from '../domain/ports/provider.port.js';
 import type { IHostingAdapter } from '../domain/ports/hosting.port.js';
 
@@ -28,6 +34,7 @@ const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const componentRepo = new ComponentRepository();
 const connectionRepo = new ConnectionRepository();
+const approvalRepo = new ApprovalRepository();
 const DB_PROVIDERS = ['supabase', 'rds', 'cloudsql', 'railway'] as const;
 
 interface GoldenPathPlanItem {
@@ -40,6 +47,11 @@ interface DesiredState {
   environmentName: string;
   services: string[];
   serviceName?: string;
+  crons?: Record<string, {
+    schedule: string;
+    command?: string;
+    timeZone?: string;
+  }>;
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
@@ -48,7 +60,9 @@ interface DesiredState {
     releaseCommand?: string;
     healthCheckPath?: string;
     cronSchedule?: string;
+    public?: boolean;
   }>;
+  envVars?: Record<string, string>;
   deploy?: {
     strategy?: 'branch' | 'manual';
     branches?: {
@@ -62,6 +76,8 @@ interface DesiredState {
     command?: string;
   };
 }
+
+type DesiredCronConfig = NonNullable<DesiredState['crons']>[string];
 
 interface ExistingDatabaseState {
   status: 'missing' | 'match' | 'mismatch';
@@ -83,6 +99,22 @@ type SourceConfigurableHostingAdapter = {
 type DomainConfigurableHostingAdapter = {
   attachCustomDomain?: (params: { serviceId: string; environmentId: string; domain: string }) => Promise<Receipt>;
 };
+
+type DatabaseEnsuringAdapter = {
+  ensureDatabase?: (component: Component, databaseName?: string) => Promise<Receipt>;
+};
+
+async function ensureDatabaseIfSupported(
+  adapter: unknown,
+  component: Component,
+  databaseName?: string
+): Promise<Receipt | undefined> {
+  const databaseAdapter = adapter as DatabaseEnsuringAdapter;
+  if (typeof databaseAdapter.ensureDatabase !== 'function') {
+    return undefined;
+  }
+  return databaseAdapter.ensureDatabase(component, databaseName);
+}
 
 function normalizeServices(services: Array<string | undefined | null>): string[] {
   const seen = new Set<string>();
@@ -136,10 +168,107 @@ function normalizeServiceConfig(
     if (typeof configRecord.cronSchedule === 'string' && configRecord.cronSchedule.trim().length > 0) {
       nextConfig.cronSchedule = configRecord.cronSchedule.trim();
     }
+    if (typeof configRecord.public === 'boolean') {
+      nextConfig.public = configRecord.public;
+    }
 
     if (Object.keys(nextConfig).length > 0) {
       normalized[serviceName.trim()] = nextConfig;
     }
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeCrons(crons: unknown): DesiredState['crons'] | undefined {
+  if (!crons || typeof crons !== 'object' || Array.isArray(crons)) {
+    return undefined;
+  }
+
+  const normalized: NonNullable<DesiredState['crons']> = {};
+  for (const [cronName, rawConfig] of Object.entries(crons as Record<string, unknown>)) {
+    const name = cronName.trim();
+    if (!name || !rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) continue;
+    const config = rawConfig as Record<string, unknown>;
+    const schedule = typeof config.schedule === 'string' && config.schedule.trim().length > 0
+      ? config.schedule.trim()
+      : typeof config.cronSchedule === 'string' && config.cronSchedule.trim().length > 0
+        ? config.cronSchedule.trim()
+        : undefined;
+    if (!schedule) continue;
+
+    normalized[name] = {
+      schedule,
+      ...(typeof config.command === 'string' && config.command.trim().length > 0
+        ? { command: config.command.trim() }
+        : {}),
+      ...(typeof config.startCommand === 'string' && config.startCommand.trim().length > 0
+        ? { command: config.startCommand.trim() }
+        : {}),
+      ...(typeof config.timeZone === 'string' && config.timeZone.trim().length > 0
+        ? { timeZone: config.timeZone.trim() }
+        : {}),
+    };
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function splitDesiredWorkloads(params: {
+  services: string[];
+  serviceConfig?: DesiredState['serviceConfig'];
+  crons?: DesiredState['crons'];
+}): {
+  services: string[];
+  serviceConfig?: DesiredState['serviceConfig'];
+  crons?: DesiredState['crons'];
+} {
+  const crons: NonNullable<DesiredState['crons']> = { ...(params.crons ?? {}) };
+  const serviceConfig: NonNullable<DesiredState['serviceConfig']> = {};
+
+  for (const [name, config] of Object.entries(params.serviceConfig ?? {})) {
+    if (config.cronSchedule) {
+      crons[name] = {
+        schedule: config.cronSchedule,
+        ...(config.startCommand ? { command: config.startCommand } : {}),
+      };
+      continue;
+    }
+
+    serviceConfig[name] = config;
+  }
+
+  const cronNames = new Set(Object.keys(crons));
+  const services = params.services.filter((serviceName) => !cronNames.has(serviceName));
+
+  return {
+    services,
+    serviceConfig: Object.keys(serviceConfig).length > 0 ? serviceConfig : undefined,
+    crons: Object.keys(crons).length > 0 ? crons : undefined,
+  };
+}
+
+function workloadKindForServiceName(serviceName: string, index: number): WorkloadKind {
+  const normalized = serviceName.toLowerCase();
+  if (/worker|queue|consumer|processor/.test(normalized)) return 'worker';
+  if (/job|task|migrate/.test(normalized)) return 'job';
+  return index === 0 ? 'web' : 'worker';
+}
+
+function defaultPublicForWorkload(workloadKind: WorkloadKind): boolean {
+  return workloadKind === 'web';
+}
+
+function normalizeEnvVars(envVars: unknown): Record<string, string> | undefined {
+  if (!envVars || typeof envVars !== 'object' || Array.isArray(envVars)) {
+    return undefined;
+  }
+
+  const normalized: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(envVars as Record<string, unknown>)) {
+    const key = rawKey.trim();
+    if (!key || typeof rawValue !== 'string') continue;
+    normalized[key] = rawValue;
   }
 
   return Object.keys(normalized).length > 0 ? normalized : undefined;
@@ -151,59 +280,21 @@ function getComponentProvider(component: Component | null): string | undefined {
   return typeof bindings.provider === 'string' && bindings.provider.length > 0 ? bindings.provider : undefined;
 }
 
+function providerDisplayName(provider: string): string {
+  switch (provider) {
+    case 'railway':
+      return 'Railway';
+    case 'cloudrun':
+      return 'GCP Cloud Run';
+    case 'apprunner':
+      return 'AWS App Runner';
+    default:
+      return provider;
+  }
+}
+
 function buildEnvVarsFromComponent(component: Component): { envVars: Record<string, string>; connectionUrl?: string } {
-  const bindings = component.bindings as Record<string, unknown>;
-  const envVars: Record<string, string> = {};
-  const connectionUrl =
-    (typeof bindings.connectionUrl === 'string' && bindings.connectionUrl.length > 0
-      ? bindings.connectionUrl
-      : undefined)
-    ?? (typeof bindings.connectionString === 'string' && bindings.connectionString.length > 0
-      ? bindings.connectionString
-      : undefined);
-
-  if (getComponentProvider(component) === 'railway') {
-    const pluginName =
-      typeof bindings.pluginName === 'string' && bindings.pluginName.trim().length > 0
-        ? bindings.pluginName.trim()
-        : undefined;
-    if (pluginName) {
-      envVars.DATABASE_URL = '${{' + pluginName + '.DATABASE_URL}}';
-      envVars.DIRECT_URL = '${{' + pluginName + '.DATABASE_PRIVATE_URL}}';
-      return { envVars, connectionUrl };
-    }
-  }
-
-  if (connectionUrl) {
-    envVars.DATABASE_URL = connectionUrl;
-    envVars.DIRECT_URL = connectionUrl;
-  }
-  if (typeof bindings.pooledUrl === 'string' && bindings.pooledUrl.length > 0) {
-    envVars.DATABASE_POOLER_URL = bindings.pooledUrl;
-  }
-  if (typeof bindings.host === 'string' && bindings.host.length > 0) {
-    envVars.PGHOST = bindings.host;
-    envVars.DB_HOST = bindings.host;
-  }
-  if (typeof bindings.port === 'number' || typeof bindings.port === 'string') {
-    const port = String(bindings.port);
-    envVars.PGPORT = port;
-    envVars.DB_PORT = port;
-  }
-  if (typeof bindings.username === 'string' && bindings.username.length > 0) {
-    envVars.PGUSER = bindings.username;
-    envVars.DB_USER = bindings.username;
-  }
-  if (typeof bindings.password === 'string' && bindings.password.length > 0) {
-    envVars.PGPASSWORD = bindings.password;
-    envVars.DB_PASSWORD = bindings.password;
-  }
-  if (typeof bindings.database === 'string' && bindings.database.length > 0) {
-    envVars.PGDATABASE = bindings.database;
-    envVars.DB_NAME = bindings.database;
-  }
-
-  return { envVars, connectionUrl };
+  return buildDatabaseEnvVarsFromComponent(component);
 }
 
 function resolveExistingDatabaseState(
@@ -292,6 +383,20 @@ function parseGitHubRepoFromRemote(remoteUrl?: string): string | null {
   return parts.length >= 2 ? `${parts[parts.length - 2]}/${parts[parts.length - 1]}` : null;
 }
 
+function normalizeGitRemoteForBuild(remoteUrl?: string): string | undefined {
+  if (!remoteUrl) {
+    return undefined;
+  }
+
+  const trimmed = remoteUrl.trim();
+  const repo = parseGitHubRepoFromRemote(trimmed);
+  if (repo) {
+    return `https://github.com/${repo}.git`;
+  }
+
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function classifyDeployEnvironment(environmentName: string): 'staging' | 'production' | null {
   const normalized = environmentName.trim().toLowerCase();
   if (normalized === 'production' || normalized === 'prod' || normalized.includes('prod')) {
@@ -346,6 +451,8 @@ export function resolveDesiredState(
 ): DesiredState {
   const overrideServices = explicitServicesOrNull(overrides.services);
   const policyServices = explicitServicesOrNull(policyState?.services);
+  const normalizedCrons = normalizeCrons(overrides.crons) ?? normalizeCrons(policyState?.crons);
+  const normalizedServiceConfig = normalizeServiceConfig(overrides.serviceConfig) ?? normalizeServiceConfig(policyState?.serviceConfig);
   const fallbackPrimaryService =
     (typeof overrides.serviceName === 'string' && overrides.serviceName.trim().length > 0
       ? overrides.serviceName.trim()
@@ -354,18 +461,27 @@ export function resolveDesiredState(
       ? policyState.serviceName.trim()
       : undefined)
     ?? 'web';
+  const hasExplicitServiceIntent = Boolean(overrideServices ?? policyServices ?? overrides.serviceName ?? policyState?.serviceName);
   const fallbackServices = overrideServices
     ?? policyServices
+    ?? (normalizedCrons && !hasExplicitServiceIntent ? [] : undefined)
     ?? [fallbackPrimaryService];
+  const workloads = splitDesiredWorkloads({
+    services: fallbackServices,
+    serviceConfig: normalizedServiceConfig,
+    crons: normalizedCrons,
+  });
 
   return {
     environmentName: overrides.environmentName ?? policyState?.environmentName ?? 'staging',
-    services: fallbackServices,
-    serviceName: fallbackServices[0],
+    services: workloads.services,
+    serviceName: workloads.services[0] ?? Object.keys(workloads.crons ?? {})[0] ?? fallbackPrimaryService,
+    crons: workloads.crons,
     domain: overrides.domain ?? policyState?.domain,
     databaseProvider: overrides.databaseProvider ?? policyState?.databaseProvider ?? 'supabase',
     setupEmail: overrides.setupEmail ?? policyState?.setupEmail ?? true,
-    serviceConfig: normalizeServiceConfig(overrides.serviceConfig) ?? normalizeServiceConfig(policyState?.serviceConfig),
+    serviceConfig: workloads.serviceConfig,
+    envVars: normalizeEnvVars(overrides.envVars) ?? normalizeEnvVars(policyState?.envVars),
     deploy: overrides.deploy ?? policyState?.deploy,
     migrations: overrides.migrations ?? policyState?.migrations,
   };
@@ -392,14 +508,28 @@ const serviceRuntimeConfigSchema = z.object({
   releaseCommand: z.string().min(1).optional(),
   healthCheckPath: z.string().min(1).optional(),
   cronSchedule: z.string().min(1).optional(),
+  public: z.boolean().optional(),
+});
+
+const cronConfigSchema = z.object({
+  schedule: z.string().min(1).optional(),
+  cronSchedule: z.string().min(1).optional(),
+  command: z.string().min(1).optional(),
+  startCommand: z.string().min(1).optional(),
+  timeZone: z.string().min(1).optional(),
+}).refine((value) => Boolean(value.schedule ?? value.cronSchedule), {
+  message: 'Cron jobs require schedule or cronSchedule',
 });
 
 const serviceConfigSchema = z.record(z.string().min(1), serviceRuntimeConfigSchema);
+const cronsSchema = z.record(z.string().min(1), cronConfigSchema);
+const envVarsSchema = z.record(z.string());
 
 function buildPlan(params: {
   projectName: string;
   environmentName: string;
   services: string[];
+  crons?: DesiredState['crons'];
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
@@ -408,7 +538,6 @@ function buildPlan(params: {
 }): GoldenPathPlanItem[] {
   const project = resolveProject({ projectName: params.projectName });
   const plan: GoldenPathPlanItem[] = [];
-  const targetPlatform = (project?.defaultPlatform ?? 'railway').toLowerCase();
 
   if (!project) {
     plan.push({
@@ -427,6 +556,9 @@ function buildPlan(params: {
   const effectiveProject = project ?? projectRepo.findByName(params.projectName) ?? null;
   const scopeHints = effectiveProject ? getProjectScopeHints(effectiveProject) : [];
   const env = effectiveProject ? envRepo.findByProjectAndName(effectiveProject.id, params.environmentName) : null;
+  const targetPlatform = effectiveProject && env
+    ? hostingProviderForEnvironment(effectiveProject, env)
+    : (effectiveProject?.defaultPlatform ?? 'cloudrun').toLowerCase();
 
   plan.push({
     action: 'env_create',
@@ -445,8 +577,36 @@ function buildPlan(params: {
     });
   }
 
+  for (const cronName of Object.keys(params.crons ?? {})) {
+    const service = effectiveProject ? serviceRepo.findByProjectAndName(effectiveProject.id, cronName) : null;
+    const isCron = service ? serviceWorkloadKind(service) === 'cron' : false;
+    plan.push({
+      action: 'cron_create',
+      status: service && isCron ? 'ok' : 'needed',
+      detail: service && isCron ? `Cron job "${cronName}" exists` : `Create cron job "${cronName}"`,
+    });
+  }
+
   const existingDatabase = env ? resolveExistingDatabaseState(env.id, params.databaseProvider) : { status: 'missing' as const };
   const dbConnection = connectionRepo.findBestMatchFromHints(params.databaseProvider, scopeHints);
+  const hostingConnection = connectionRepo.findBestMatchFromHints(targetPlatform, scopeHints);
+  const cloudPrepareProfile = getCloudPrepareProfile(targetPlatform);
+  const cloudPrepared = cloudPrepareProfile ? isCloudPrepared(effectiveProject, targetPlatform) : true;
+  if (cloudPrepareProfile) {
+    plan.push({
+      action: 'cloud_prepare',
+      status: !effectiveProject || !hostingConnection
+        ? 'blocked'
+        : cloudPrepared ? 'ok' : 'needed',
+      detail: !effectiveProject
+        ? `Create project before preparing ${cloudPrepareProfile.label}`
+        : !hostingConnection
+          ? `Missing verified ${providerDisplayName(targetPlatform)} connection`
+          : cloudPrepared
+            ? `${cloudPrepareProfile.label} is prepared for Hypervibe deploys`
+            : `Prepare ${cloudPrepareProfile.label} with cloud_prepare before deploy`,
+    });
+  }
   plan.push({
     action: 'db_provision',
     status:
@@ -467,14 +627,28 @@ function buildPlan(params: {
             : `Missing verified ${params.databaseProvider} connection`,
   });
 
-  const railwayConnection = connectionRepo.findBestMatchFromHints('railway', scopeHints);
+  const hostingLabel = providerDisplayName(targetPlatform);
   for (const serviceName of params.services) {
     plan.push({
       action: 'deploy',
-      status: railwayConnection ? 'needed' : 'blocked',
-      detail: railwayConnection
-        ? `Deploy service "${serviceName}" to Railway`
-        : 'Missing verified Railway connection',
+      status: hostingConnection && cloudPrepared ? 'needed' : 'blocked',
+      detail: !hostingConnection
+        ? `Missing verified ${hostingLabel} connection`
+        : !cloudPrepared
+          ? `Run cloud_prepare for ${hostingLabel} before deploying service "${serviceName}"`
+          : `Deploy service "${serviceName}" to ${hostingLabel}`,
+    });
+  }
+
+  for (const [cronName, cronConfig] of Object.entries(params.crons ?? {})) {
+    plan.push({
+      action: 'cron_deploy',
+      status: hostingConnection && cloudPrepared ? 'needed' : 'blocked',
+      detail: !hostingConnection
+        ? `Missing verified ${hostingLabel} connection`
+        : !cloudPrepared
+          ? `Run cloud_prepare for ${hostingLabel} before deploying cron job "${cronName}"`
+          : `Deploy cron job "${cronName}" (${cronConfig.schedule}) to ${hostingLabel}`,
     });
   }
 
@@ -486,6 +660,7 @@ function buildPlan(params: {
     if (runtimeConfig.healthCheckPath) parts.push(`health=${runtimeConfig.healthCheckPath}`);
     if (runtimeConfig.cronSchedule) parts.push(`cron=${runtimeConfig.cronSchedule}`);
     if (runtimeConfig.releaseCommand) parts.push(`release=${runtimeConfig.releaseCommand}`);
+    if (typeof runtimeConfig.public === 'boolean') parts.push(`public=${runtimeConfig.public}`);
     plan.push({
       action: 'service_configure',
       status: runtimeConfig.releaseCommand && targetPlatform === 'railway' ? 'blocked' : 'needed',
@@ -498,7 +673,7 @@ function buildPlan(params: {
 
   const deploySource = project ? resolveGitDeploySource(project, params.environmentName, params.deploy) : { source: null };
   if (params.deploy?.strategy === 'branch') {
-    for (const serviceName of params.services) {
+    for (const serviceName of [...params.services, ...Object.keys(params.crons ?? {})]) {
       plan.push({
         action: 'deploy_source_configure',
         status: deploySource.source ? 'needed' : 'blocked',
@@ -551,16 +726,18 @@ async function executeBootstrap(params: {
   projectName: string;
   environmentName: string;
   services: string[];
+  crons?: DesiredState['crons'];
   domain?: string;
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
   serviceConfig?: DesiredState['serviceConfig'];
+  envVars?: DesiredState['envVars'];
   deploy?: DesiredState['deploy'];
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
   const tx = new InfraTransaction();
   let project = resolveProject({ projectName: params.projectName });
   if (!project) {
-    project = projectRepo.create({ name: params.projectName, defaultPlatform: 'railway' });
+    project = projectRepo.create({ name: params.projectName, defaultPlatform: 'cloudrun' });
     const createdProjectId = project.id;
     tx.addStep({
       id: `project:${createdProjectId}`,
@@ -572,6 +749,7 @@ async function executeBootstrap(params: {
       }),
     });
   }
+  const scopeHints = getProjectScopeHints(project);
 
   let environment = envRepo.findByProjectAndName(project.id, params.environmentName);
   if (!environment) {
@@ -588,19 +766,24 @@ async function executeBootstrap(params: {
     });
   }
 
-  const services = params.services.map((serviceName) => {
+  const serviceWorkloads = params.services.map((serviceName, index) => {
     let service = serviceRepo.findByProjectAndName(project.id, serviceName);
     const runtimeConfig = params.serviceConfig?.[serviceName];
+    const workloadKind = service?.buildConfig.workloadKind ?? workloadKindForServiceName(serviceName, index);
+    const publicAccess = typeof runtimeConfig?.public === 'boolean'
+      ? runtimeConfig.public
+      : defaultPublicForWorkload(workloadKind);
     if (!service) {
       service = serviceRepo.create({
         projectId: project.id,
         name: serviceName,
         buildConfig: {
+          workloadKind,
           builder: 'nixpacks',
           ...(runtimeConfig?.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
           ...(runtimeConfig?.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),
           ...(runtimeConfig?.healthCheckPath ? { healthCheckPath: runtimeConfig.healthCheckPath } : {}),
-          ...(runtimeConfig?.cronSchedule ? { cronSchedule: runtimeConfig.cronSchedule } : {}),
+          public: publicAccess,
         },
       });
       const createdServiceId = service.id;
@@ -613,26 +796,87 @@ async function executeBootstrap(params: {
           message: `Deleted local service ${createdServiceId}`,
         }),
       });
-    } else if (runtimeConfig) {
+    } else {
+      const nextBuildConfig = {
+        ...service.buildConfig,
+        workloadKind,
+        ...(runtimeConfig?.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
+        ...(runtimeConfig?.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),
+        ...(runtimeConfig?.healthCheckPath ? { healthCheckPath: runtimeConfig.healthCheckPath } : {}),
+        public: publicAccess,
+      };
+      const buildConfigChanged = JSON.stringify(service.buildConfig) !== JSON.stringify(nextBuildConfig);
+      if (buildConfigChanged) {
+        service = serviceRepo.update(service.id, {
+          buildConfig: nextBuildConfig,
+        }) ?? service;
+      }
+    }
+    return service;
+  });
+  const cronWorkloads = Object.entries(params.crons ?? {}).map(([cronName, cronConfig]) => {
+    let service = serviceRepo.findByProjectAndName(project.id, cronName);
+    if (!service) {
+      service = serviceRepo.create({
+        projectId: project.id,
+        name: cronName,
+        buildConfig: {
+          workloadKind: 'cron',
+          builder: 'nixpacks',
+          cronSchedule: cronConfig.schedule,
+          ...(cronConfig.command ? { startCommand: cronConfig.command } : {}),
+        },
+      });
+      const createdServiceId = service.id;
+      tx.addStep({
+        id: `service:${createdServiceId}`,
+        label: 'cron_create',
+        resource: { provider: 'hypervibe', type: 'cron', id: createdServiceId, name: service.name },
+        compensate: async () => ({
+          success: serviceRepo.delete(createdServiceId),
+          message: `Deleted local cron job ${createdServiceId}`,
+        }),
+      });
+    } else {
       service = serviceRepo.update(service.id, {
         buildConfig: {
           ...service.buildConfig,
-          ...(runtimeConfig.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
-          ...(runtimeConfig.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),
-          ...(runtimeConfig.healthCheckPath ? { healthCheckPath: runtimeConfig.healthCheckPath } : {}),
-          ...(runtimeConfig.cronSchedule ? { cronSchedule: runtimeConfig.cronSchedule } : {}),
+          workloadKind: 'cron',
+          builder: service.buildConfig.builder ?? 'nixpacks',
+          cronSchedule: cronConfig.schedule,
+          ...(cronConfig.command ? { startCommand: cronConfig.command } : {}),
         },
       }) ?? service;
     }
     return service;
   });
+  const workloads = [...serviceWorkloads, ...cronWorkloads];
 
-  if (services.length === 0) {
+  if (workloads.length === 0) {
     const cleanup = await tx.rollback();
     return {
       success: false,
       summary: {
-        error: 'No services resolved for infrastructure apply',
+        error: 'No workloads resolved for infrastructure apply',
+        rollback: cleanup,
+        transaction: { created: tx.listResources() },
+      },
+    };
+  }
+
+  const targetPlatform = hostingProviderForEnvironment(project, environment);
+  const cloudPrepareProfile = getCloudPrepareProfile(targetPlatform);
+  if (cloudPrepareProfile && !isCloudPrepared(project, targetPlatform)) {
+    const cleanup = await tx.rollback();
+    return {
+      success: false,
+      summary: {
+        error: `${cloudPrepareProfile.label} is not prepared for Hypervibe deploys. Run cloud_prepare provider="${targetPlatform}" confirm=true before infra_apply.`,
+        action: 'cloud_prepare',
+        provider: targetPlatform,
+        requiredVersion: cloudPrepareProfile.version,
+        requiredApis: cloudPrepareProfile.requiredApis,
+        requiredRoles: cloudPrepareProfile.requiredRoles,
         rollback: cleanup,
         transaction: { created: tx.listResources() },
       },
@@ -640,6 +884,7 @@ async function executeBootstrap(params: {
   }
 
   const existingDatabase = resolveExistingDatabaseState(environment.id, params.databaseProvider);
+  let dbEnsureReceipt: Receipt | undefined;
   let dbProvision: {
     component: Component;
     receipt: { success: boolean; message: string; error?: string; data?: Record<string, unknown> };
@@ -648,6 +893,37 @@ async function executeBootstrap(params: {
   };
 
   if (existingDatabase.status === 'match' && existingDatabase.component) {
+    if (params.databaseProvider === 'cloudsql') {
+      const dbAdapterResult = await adapterFactory.getDatabaseAdapter(params.databaseProvider, project);
+      if (!dbAdapterResult.success || !dbAdapterResult.adapter) {
+        const cleanup = await tx.rollback();
+        return {
+          success: false,
+          summary: {
+            error: dbAdapterResult.error || 'Database adapter unavailable',
+            rollback: cleanup,
+            transaction: { created: tx.listResources() },
+          },
+        };
+      }
+      dbEnsureReceipt = await ensureDatabaseIfSupported(dbAdapterResult.adapter, existingDatabase.component);
+      if (dbEnsureReceipt && !dbEnsureReceipt.success) {
+        const cleanup = await tx.rollback();
+        return {
+          success: false,
+          summary: {
+            error: dbEnsureReceipt.error || dbEnsureReceipt.message,
+            rollback: cleanup,
+            transaction: { created: tx.listResources() },
+            debug: {
+              phase: 'db_ensure',
+              provider: params.databaseProvider,
+              receiptData: dbEnsureReceipt.data ?? null,
+            },
+          },
+        };
+      }
+    }
     dbProvision = {
       component: existingDatabase.component,
       receipt: {
@@ -683,7 +959,7 @@ async function executeBootstrap(params: {
       label: 'environment_bindings_db_provision',
     });
     dbProvision = await dbAdapterResult.adapter.provision('postgres', environment, {
-      databaseName: project.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase(),
+      databaseName: 'app',
     });
     if (!dbProvision.receipt.success) {
       const cleanup = await tx.rollback();
@@ -778,7 +1054,10 @@ async function executeBootstrap(params: {
     }
   }
 
-  const hostingResult = await adapterFactory.getHostingAdapter(project);
+  const hostingProject = project.defaultPlatform?.toLowerCase() === targetPlatform
+    ? project
+    : { ...project, defaultPlatform: targetPlatform };
+  const hostingResult = await adapterFactory.getHostingAdapter(hostingProject);
   if (!hostingResult.success || !hostingResult.adapter) {
     const cleanup = await tx.rollback();
     return {
@@ -790,16 +1069,28 @@ async function executeBootstrap(params: {
       },
     };
   }
-
-  const unsupportedReleaseCommands = Object.entries(params.serviceConfig ?? {})
-    .filter(([, config]) => Boolean(config?.releaseCommand))
-    .map(([serviceName]) => serviceName);
-  if (unsupportedReleaseCommands.length > 0 && !hostingResult.adapter.capabilities.supportsReleaseCommand) {
+  const hostingAdapter = hostingResult.adapter as unknown as IHostingAdapter;
+  if (!hostingAdapter.capabilities || typeof hostingAdapter.deploy !== 'function') {
     const cleanup = await tx.rollback();
     return {
       success: false,
       summary: {
-        error: `Provider ${hostingResult.adapter.name} does not support releaseCommand via API for services: ${unsupportedReleaseCommands.join(', ')}. Use migrations.mode=tool or configure railway.toml manually.`,
+        error: `Provider ${targetPlatform} is not a hosting adapter`,
+        rollback: cleanup,
+        transaction: { created: tx.listResources() },
+      },
+    };
+  }
+
+  const unsupportedReleaseCommands = Object.entries(params.serviceConfig ?? {})
+    .filter(([, config]) => Boolean(config?.releaseCommand))
+    .map(([serviceName]) => serviceName);
+  if (unsupportedReleaseCommands.length > 0 && !hostingAdapter.capabilities.supportsReleaseCommand) {
+    const cleanup = await tx.rollback();
+    return {
+      success: false,
+      summary: {
+        error: `Provider ${hostingAdapter.name} does not support releaseCommand/predeploy configuration via API for services: ${unsupportedReleaseCommands.join(', ')}. Move the command to migrations.mode="tool" or remove releaseCommand from serviceConfig.`,
         rollback: cleanup,
         transaction: { created: tx.listResources() },
       },
@@ -807,22 +1098,46 @@ async function executeBootstrap(params: {
   }
 
   const orchestrator = new DeployOrchestrator();
+  const deploySource = resolveGitDeploySource(project, params.environmentName, params.deploy);
+  const sourceRepoUrl = normalizeGitRemoteForBuild(project.gitRemoteUrl);
+  const secretStore = getSecretStore();
+  const githubConnection = sourceRepoUrl && hostingAdapter.name === 'cloudrun'
+    ? connectionRepo.findBestMatchFromHints('github', scopeHints)
+    : null;
+  const githubCredentials = githubConnection
+    ? secretStore.decryptObject<GitHubCredentials>(githubConnection.credentialsEncrypted)
+    : null;
+  const sourceEnvVars: Record<string, string> = sourceRepoUrl
+    ? {
+        HYPERVIBE_SOURCE_REPO_URL: sourceRepoUrl,
+        HYPERVIBE_SOURCE_REVISION: deploySource.source?.branch ?? params.deploy?.branches?.production ?? 'main',
+        ...(githubCredentials?.apiToken ? { HYPERVIBE_GITHUB_TOKEN: githubCredentials.apiToken } : {}),
+      }
+    : {};
+  const deployEnvVars = {
+    ...sourceEnvVars,
+    ...(dbProvision.envVars ?? {}),
+    ...(params.envVars ?? {}),
+  };
   const deploy = await orchestrator.execute({
     project,
     environment,
-    services,
-    envVars: dbProvision.envVars,
-    adapter: hostingResult.adapter,
+    services: workloads,
+    envVars: Object.keys(deployEnvVars).length > 0 ? deployEnvVars : undefined,
+    adapter: hostingAdapter,
   });
 
   const summary: Record<string, unknown> = {
     project: project.name,
     environment: environment.name,
-    service: services[0]?.name,
-    services: services.map((service) => service.name),
+    service: serviceWorkloads[0]?.name ?? cronWorkloads[0]?.name,
+    services: serviceWorkloads.map((service) => service.name),
+    ...(cronWorkloads.length > 0 ? { crons: cronWorkloads.map((service) => service.name) } : {}),
     deploymentRunId: deploy.run.id,
     deploymentSuccess: deploy.success,
     urls: deploy.urls,
+    serviceUrls: deploy.serviceUrls,
+    primaryUrl: deploy.primaryUrl,
     deploymentCreatedResources: deploy.createdResources,
     deploymentRollback: deploy.rollback,
     transaction: {
@@ -832,6 +1147,13 @@ async function executeBootstrap(params: {
       dbProvision: {
         provider: params.databaseProvider,
         receiptData: dbProvision.receipt.data ?? null,
+        databaseEnsureReceipt: dbEnsureReceipt
+          ? {
+              success: dbEnsureReceipt.success,
+              message: dbEnsureReceipt.message,
+              data: dbEnsureReceipt.data ?? null,
+            }
+          : undefined,
       },
     },
   };
@@ -848,7 +1170,6 @@ async function executeBootstrap(params: {
     };
   }
 
-  const deploySource = resolveGitDeploySource(project, params.environmentName, params.deploy);
   if (params.deploy?.strategy === 'branch') {
     if (!deploySource.source) {
       const cleanup = await tx.rollback();
@@ -865,7 +1186,7 @@ async function executeBootstrap(params: {
     const latestEnvironment = envRepo.findById(environment.id) ?? environment;
     const latestBindings = latestEnvironment.platformBindings as Record<string, unknown>;
     const boundServices = (latestBindings.services as Record<string, { serviceId: string; url?: string }> | undefined) ?? {};
-    const sourceAdapter = hostingResult.adapter as IHostingAdapter & SourceConfigurableHostingAdapter;
+    const sourceAdapter = hostingAdapter as IHostingAdapter & SourceConfigurableHostingAdapter;
 
     if (typeof sourceAdapter.connectServiceToRepo !== 'function') {
       const cleanup = await tx.rollback();
@@ -873,7 +1194,7 @@ async function executeBootstrap(params: {
         success: false,
         summary: {
           ...summary,
-          error: `Provider ${hostingResult.adapter.name} does not support repo-linked deploy source configuration`,
+          error: `Provider ${hostingAdapter.name} does not support repo-linked deploy source configuration`,
           rollback: cleanup,
         },
       };
@@ -881,7 +1202,7 @@ async function executeBootstrap(params: {
 
     const sourceFailures: string[] = [];
     let repoAccessHelp: ReturnType<typeof buildRailwayGitHubRepoAccessHelp> | undefined;
-    for (const service of services) {
+    for (const service of workloads) {
       const serviceId = boundServices[service.name]?.serviceId;
       if (!serviceId) {
         sourceFailures.push(`${service.name}: missing bound provider service ID`);
@@ -924,21 +1245,47 @@ async function executeBootstrap(params: {
       strategy: 'branch',
       repo: deploySource.source.repo,
       branch: deploySource.source.branch,
-      services: services.map((service) => service.name),
+      services: serviceWorkloads.map((service) => service.name),
+      ...(cronWorkloads.length > 0 ? { crons: cronWorkloads.map((service) => service.name) } : {}),
     };
   }
-
-  const scopeHints = getProjectScopeHints(project);
-  const secretStore = getSecretStore();
 
   if (params.setupEmail) {
     const sgConnection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
     if (sgConnection) {
       const sgCreds = secretStore.decryptObject<SendGridCredentials>(sgConnection.credentialsEncrypted);
+      const sgAdapter = new SendGridAdapter();
+      sgAdapter.connect(sgCreds);
+      const sendgridPermissions = assessSendGridScopes(await sgAdapter.getScopes());
+      const missingSendgridScopes: Record<string, string[]> = {};
+      if (!sendgridPermissions.hasMailSend) {
+        missingSendgridScopes.mailSend = sendgridPermissions.missingScopes.mailSend;
+      }
+      if (params.domain) {
+        if (!sendgridPermissions.canManageDomainAuthentication) {
+          missingSendgridScopes.domainAuthentication = sendgridPermissions.missingScopes.domainAuthentication;
+        }
+      } else if (!sendgridPermissions.canManageDomainAuthentication && !sendgridPermissions.canManageSenderVerification) {
+        missingSendgridScopes.domainAuthentication = sendgridPermissions.missingScopes.domainAuthentication;
+        missingSendgridScopes.senderVerification = sendgridPermissions.missingScopes.senderVerification;
+      }
+
+      if (Object.keys(missingSendgridScopes).length > 0) {
+        return {
+          success: false,
+          summary: {
+            ...summary,
+            sendgridApiKeySynced: false,
+            sendgridApiKeySyncError: `SendGrid API key is valid but cannot complete setupEmail. ${sendgridPermissions.recommendation}`,
+            sendgridMissingScopes: missingSendgridScopes,
+          },
+        };
+      }
+
       const latestEnvironment = envRepo.findById(environment.id) ?? environment;
       const sendgridFailures: string[] = [];
-      for (const service of services) {
-        const receipt = await hostingResult.adapter.setEnvVars(latestEnvironment, service, {
+      for (const service of workloads) {
+        const receipt = await hostingAdapter.setEnvVars(latestEnvironment, service, {
           SENDGRID_API_KEY: sgCreds.apiKey,
         });
         if (!receipt.success) {
@@ -951,8 +1298,6 @@ async function executeBootstrap(params: {
       }
 
       if (params.domain) {
-        const sgAdapter = new SendGridAdapter();
-        sgAdapter.connect(sgCreds);
         const existingDomains = await sgAdapter.listDomainAuthentications();
         const existingAuth = existingDomains.find((d) => d.domain.toLowerCase() === params.domain!.toLowerCase());
         const auth = existingAuth ?? await sgAdapter.createDomainAuthentication(params.domain, { default: false });
@@ -1000,8 +1345,8 @@ async function executeBootstrap(params: {
       const boundEnvironmentId =
         (typeof latestBindings.environmentId === 'string' ? latestBindings.environmentId : null)
         ?? (typeof latestBindings.railwayEnvironmentId === 'string' ? latestBindings.railwayEnvironmentId : null);
-      const domainAdapter = hostingResult.adapter as IHostingAdapter & DomainConfigurableHostingAdapter;
-      const targetService = services[0];
+      const domainAdapter = hostingAdapter as IHostingAdapter & DomainConfigurableHostingAdapter;
+      const targetService = serviceWorkloads[0];
       const targetServiceId = targetService ? boundServices[targetService.name]?.serviceId : undefined;
 
       if (targetService && targetServiceId && boundEnvironmentId && typeof domainAdapter.attachCustomDomain === 'function') {
@@ -1111,6 +1456,7 @@ export function registerInfraTools(server: McpServer): void {
       projectName: z.string().describe('Project name'),
       environmentName: z.string().optional().describe('Environment (default: staging)'),
       services: z.array(z.string().min(1)).optional().describe('Service names to converge (default: ["web"])'),
+      crons: cronsSchema.optional().describe('Scheduled jobs to converge, keyed by cron name'),
       serviceName: z.string().optional().describe('Service name (default: web)'),
       domain: z.string().optional().describe('Optional domain for DNS configuration'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (defaults to desired state, then existing managed DB provider, then supabase)'),
@@ -1121,6 +1467,7 @@ export function registerInfraTools(server: McpServer): void {
       projectName,
       environmentName,
       services,
+      crons,
       serviceName,
       domain,
       databaseProvider,
@@ -1135,6 +1482,7 @@ export function registerInfraTools(server: McpServer): void {
       const desired = resolveDesiredState(policyState, {
         environmentName,
         services,
+        crons: normalizeCrons(crons),
         serviceName,
         domain,
         databaseProvider: resolvedDatabaseProvider,
@@ -1146,6 +1494,7 @@ export function registerInfraTools(server: McpServer): void {
         projectName,
         environmentName: desired.environmentName,
         services: desired.services,
+        crons: desired.crons,
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
@@ -1164,6 +1513,7 @@ export function registerInfraTools(server: McpServer): void {
             environmentName: desired.environmentName,
             serviceName: desired.serviceName,
             services: desired.services,
+            crons: desired.crons,
             plan,
             summary: {
               needed: plan.filter((p) => p.status === 'needed').length,
@@ -1183,6 +1533,7 @@ export function registerInfraTools(server: McpServer): void {
       projectName: z.string().describe('Project name'),
       environmentName: z.string().optional().describe('Environment (default: staging)'),
       services: z.array(z.string().min(1)).optional().describe('Service names to bootstrap (default: ["web"])'),
+      crons: cronsSchema.optional().describe('Scheduled jobs to bootstrap, keyed by cron name'),
       serviceName: z.string().optional().describe('Service name (default: web)'),
       domain: z.string().optional().describe('Optional domain to configure'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Database provider (defaults to desired state, then existing managed DB provider, then supabase)'),
@@ -1195,6 +1546,7 @@ export function registerInfraTools(server: McpServer): void {
       projectName,
       environmentName,
       services,
+      crons,
       serviceName,
       domain,
       databaseProvider,
@@ -1211,6 +1563,7 @@ export function registerInfraTools(server: McpServer): void {
       const resolvedDesired = resolveDesiredState(policyState, {
         environmentName,
         services,
+        crons: normalizeCrons(crons),
         serviceName,
         domain,
         databaseProvider: resolvedDatabaseProvider,
@@ -1221,6 +1574,7 @@ export function registerInfraTools(server: McpServer): void {
         projectName,
         environmentName: resolvedDesired.environmentName,
         services: resolvedDesired.services,
+        crons: resolvedDesired.crons,
         domain: resolvedDesired.domain,
         databaseProvider: resolvedDesired.databaseProvider,
         setupEmail: resolvedDesired.setupEmail,
@@ -1243,6 +1597,7 @@ export function registerInfraTools(server: McpServer): void {
         };
       }
 
+      let approvalToConsume: string | undefined;
       if (existingProject && isProtectedEnvironment(existingProject, resolvedDesired.environmentName)) {
         const requireApprovals = infraApprovalsRequiredForEnvironment(existingProject, resolvedDesired.environmentName);
         if (requireApprovals) {
@@ -1258,8 +1613,6 @@ export function registerInfraTools(server: McpServer): void {
               }],
             };
           }
-          const { ApprovalRepository } = await import('../adapters/db/repositories/approval.repository.js');
-          const approvalRepo = new ApprovalRepository();
           const validation = approvalRepo.validateForAction(approvalId, existingProject.id, resolvedDesired.environmentName, 'infra.apply');
           if (!validation.ok) {
             return {
@@ -1269,27 +1622,20 @@ export function registerInfraTools(server: McpServer): void {
               }],
             };
           }
+          approvalToConsume = approvalId;
         }
-
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: `Environment "${resolvedDesired.environmentName}" is protected by project policy. Use deploy/rollback tools with explicit production confirm.`,
-            }),
-          }],
-        };
       }
 
       const executed = await executeBootstrap({
         projectName,
         environmentName: resolvedDesired.environmentName,
         services: resolvedDesired.services,
+        crons: resolvedDesired.crons,
         domain: resolvedDesired.domain,
         databaseProvider: resolvedDesired.databaseProvider,
         setupEmail: resolvedDesired.setupEmail,
         serviceConfig: resolvedDesired.serviceConfig,
+        envVars: resolvedDesired.envVars,
         deploy: resolvedDesired.deploy,
       });
       if (!executed.success && executed.summary.error) {
@@ -1303,6 +1649,9 @@ export function registerInfraTools(server: McpServer): void {
             }),
           }],
         };
+      }
+      if (approvalToConsume && executed.success) {
+        approvalRepo.consume(approvalToConsume);
       }
 
       return {
@@ -1324,11 +1673,13 @@ export function registerInfraTools(server: McpServer): void {
       projectName: z.string().describe('Project name'),
       environmentName: z.string().optional().describe('Desired environment (default: staging)'),
       services: z.array(z.string().min(1)).optional().describe('Desired services to converge (default: ["web"])'),
+      crons: cronsSchema.optional().describe('Desired scheduled jobs keyed by cron name'),
       serviceName: z.string().optional().describe('Desired service (default: web)'),
       domain: z.string().optional().describe('Optional desired domain'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Desired DB provider (defaults to existing managed DB provider when present, otherwise supabase)'),
       setupEmail: z.boolean().optional().describe('Include SendGrid setup (default: true)'),
       serviceConfig: serviceConfigSchema.optional().describe('Desired per-service runtime config'),
+      envVars: envVarsSchema.optional().describe('Advanced environment variables to provide during deploy'),
       deploy: deployDesiredSchema.optional().describe('Desired deploy strategy and branch mapping'),
       migrations: migrationDesiredSchema.optional().describe('Desired migration behavior during deploy'),
     },
@@ -1336,11 +1687,13 @@ export function registerInfraTools(server: McpServer): void {
       projectName,
       environmentName = 'staging',
       services,
-      serviceName = 'web',
+      crons,
+      serviceName,
       domain,
       databaseProvider,
       setupEmail = true,
       serviceConfig,
+      envVars,
       deploy,
       migrations,
     }) => {
@@ -1362,11 +1715,13 @@ export function registerInfraTools(server: McpServer): void {
       const desiredState = resolveDesiredState(policyState, {
         environmentName,
         services,
+        crons: normalizeCrons(crons),
         serviceName,
         domain,
         databaseProvider: resolvedDatabaseProvider,
         setupEmail,
         serviceConfig,
+        envVars,
         deploy,
         migrations,
       });
@@ -1425,17 +1780,19 @@ export function registerInfraTools(server: McpServer): void {
       projectName: z.string().describe('Project name'),
       environmentName: z.string().optional().describe('Override desired environment'),
       services: z.array(z.string().min(1)).optional().describe('Override desired services to converge'),
+      crons: cronsSchema.optional().describe('Override desired scheduled jobs keyed by cron name'),
       serviceName: z.string().optional().describe('Override desired service'),
       domain: z.string().optional().describe('Override desired domain'),
       databaseProvider: z.enum(DB_PROVIDERS).optional().describe('Override desired DB provider'),
       setupEmail: z.boolean().optional().describe('Override desired email setup'),
       serviceConfig: serviceConfigSchema.optional().describe('Override desired per-service runtime config'),
+      envVars: envVarsSchema.optional().describe('Override advanced deploy environment variables'),
       deploy: deployDesiredSchema.optional().describe('Override desired deploy strategy and branches'),
       migrations: migrationDesiredSchema.optional().describe('Override desired migration behavior'),
       confirm: z.boolean().optional().describe('Set true to apply'),
       approvalId: z.string().uuid().optional().describe('Approval ID for protected environments (action: infra.apply)'),
     },
-    async ({ projectName, environmentName, services, serviceName, domain, databaseProvider, setupEmail, serviceConfig, deploy, migrations, confirm = false, approvalId }) => {
+    async ({ projectName, environmentName, services, crons, serviceName, domain, databaseProvider, setupEmail, serviceConfig, envVars, deploy, migrations, confirm = false, approvalId }) => {
       const project = resolveProject({ projectName });
       if (!project) {
         return {
@@ -1454,11 +1811,13 @@ export function registerInfraTools(server: McpServer): void {
       const desired = resolveDesiredState(policyState, {
         environmentName,
         services,
+        crons: normalizeCrons(crons),
         serviceName,
         domain,
         databaseProvider: resolvedDatabaseProvider,
         setupEmail,
         serviceConfig,
+        envVars,
         deploy,
         migrations,
       });
@@ -1467,6 +1826,7 @@ export function registerInfraTools(server: McpServer): void {
         projectName,
         environmentName: desired.environmentName,
         services: desired.services,
+        crons: desired.crons,
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
@@ -1483,6 +1843,7 @@ export function registerInfraTools(server: McpServer): void {
               mode: 'preview',
               desired,
               services: desired.services,
+              crons: desired.crons,
               plan,
               message: 'Call again with confirm=true to apply desired state.',
             }),
@@ -1490,6 +1851,7 @@ export function registerInfraTools(server: McpServer): void {
         };
       }
 
+      let approvalToConsume: string | undefined;
       if (isProtectedEnvironment(project, desired.environmentName)) {
         const requireApprovals = infraApprovalsRequiredForEnvironment(project, desired.environmentName);
         if (requireApprovals) {
@@ -1505,8 +1867,6 @@ export function registerInfraTools(server: McpServer): void {
               }],
             };
           }
-          const { ApprovalRepository } = await import('../adapters/db/repositories/approval.repository.js');
-          const approvalRepo = new ApprovalRepository();
           const validation = approvalRepo.validateForAction(approvalId, project.id, desired.environmentName, 'infra.apply');
           if (!validation.ok) {
             return {
@@ -1516,27 +1876,20 @@ export function registerInfraTools(server: McpServer): void {
               }],
             };
           }
+          approvalToConsume = approvalId;
         }
-
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: `Environment "${desired.environmentName}" is protected by project policy.`,
-            }),
-          }],
-        };
       }
 
       const executed = await executeBootstrap({
         projectName,
         environmentName: desired.environmentName,
         services: desired.services,
+        crons: desired.crons,
         domain: desired.domain,
         databaseProvider: desired.databaseProvider,
         setupEmail: desired.setupEmail,
         serviceConfig: desired.serviceConfig,
+        envVars: desired.envVars,
         deploy: desired.deploy,
       });
       if (!executed.success && executed.summary.error) {
@@ -1546,6 +1899,9 @@ export function registerInfraTools(server: McpServer): void {
             text: JSON.stringify({ success: false, error: executed.summary.error, summary: executed.summary }),
           }],
         };
+      }
+      if (approvalToConsume && executed.success) {
+        approvalRepo.consume(approvalToConsume);
       }
 
       return {

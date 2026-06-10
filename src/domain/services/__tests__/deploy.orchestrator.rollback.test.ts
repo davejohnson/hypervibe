@@ -122,4 +122,103 @@ describe('DeployOrchestrator local rollback', () => {
     const restored = envRepo.findById(environment.id);
     expect(restored?.platformBindings).toEqual(originalBindings);
   });
+
+  it('stores provider-neutral bindings for non-Railway deploys', async () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const serviceRepo = new ServiceRepository();
+
+    const project = projectRepo.create({ name: 'cloud-project', defaultPlatform: 'cloudrun' });
+    const environment = envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-old-project',
+        railwayProjectId: 'rail-old-project',
+        environmentId: 'rail-old-env',
+        railwayEnvironmentId: 'rail-old-env',
+      },
+    });
+    const service = serviceRepo.create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { builder: 'dockerfile' },
+    });
+
+    const adapter: IHostingAdapter = {
+      name: 'cloudrun',
+      capabilities: {
+        supportedBuilders: ['dockerfile'],
+        supportsAutoWiring: false,
+        supportsHealthChecks: true,
+        supportsCronSchedule: true,
+        supportsReleaseCommand: false,
+        supportsMultiEnvironment: false,
+        managedTls: true,
+        supportsAutoScaling: true,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return {
+          success: true,
+          message: 'using gcp project',
+          data: {
+            projectId: 'gcp-project',
+            environmentId: 'us-central1',
+          },
+        };
+      },
+      async deploy() {
+        return {
+          serviceId: service.id,
+          externalId: 'cloudrun-web',
+          url: 'https://web.example.run.app',
+          status: 'deploying',
+          receipt: {
+            success: true,
+            message: 'deploy started',
+            data: {
+              environmentId: 'us-central1',
+            },
+          },
+        };
+      },
+      async setEnvVars() {
+        return { success: true, message: 'ok' };
+      },
+      async getDeployStatus() {
+        return { status: 'deployed', url: 'https://web.example.run.app' };
+      },
+    };
+
+    const orchestrator = new DeployOrchestrator();
+    const result = await orchestrator.execute({
+      project,
+      environment,
+      services: [service],
+      adapter,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.urls).toEqual(['https://web.example.run.app']);
+    expect(result.serviceUrls).toEqual({ web: 'https://web.example.run.app' });
+    expect(result.primaryUrl).toBe('https://web.example.run.app');
+    const updated = envRepo.findById(environment.id);
+    expect(updated?.platformBindings).toEqual({
+      provider: 'cloudrun',
+      projectId: 'gcp-project',
+      environmentId: 'us-central1',
+      services: {
+        web: {
+          serviceId: 'cloudrun-web',
+          url: 'https://web.example.run.app',
+          workloadKind: 'web',
+        },
+      },
+    });
+  });
 });

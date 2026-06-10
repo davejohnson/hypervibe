@@ -11,6 +11,7 @@ describe('infra.tools desired state resolution', () => {
       databaseProvider: 'supabase',
       setupEmail: true,
       serviceConfig: undefined,
+      envVars: undefined,
       domain: undefined,
       deploy: undefined,
       migrations: undefined,
@@ -32,6 +33,7 @@ describe('infra.tools desired state resolution', () => {
           },
         },
         deploy: { strategy: 'manual' },
+        envVars: { IMAGE_URI: 'old-image', EMPTY: '' },
       },
       {
         services: ['web', 'worker'],
@@ -44,6 +46,7 @@ describe('infra.tools desired state resolution', () => {
         },
         deploy: { strategy: 'branch', branches: { staging: 'staging', production: 'main' } },
         migrations: { mode: 'releaseCommand', runInDeploy: true, command: 'npm run migrate' },
+        envVars: { IMAGE_URI_WEB: 'us-docker.pkg.dev/example/web:sha' },
       }
     );
 
@@ -60,6 +63,7 @@ describe('infra.tools desired state resolution', () => {
     });
     expect(desired.deploy?.strategy).toBe('branch');
     expect(desired.migrations?.mode).toBe('releaseCommand');
+    expect(desired.envVars).toEqual({ IMAGE_URI_WEB: 'us-docker.pkg.dev/example/web:sha' });
   });
 
   it('accepts railway as a desired database provider override', () => {

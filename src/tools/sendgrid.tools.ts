@@ -5,13 +5,18 @@ import { EnvironmentRepository } from '../adapters/db/repositories/environment.r
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { SendGridAdapter, SENDGRID_COMMON_WEBHOOK_EVENTS } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
+import {
+  SendGridAdapter,
+  SENDGRID_COMMON_WEBHOOK_EVENTS,
+  SENDGRID_SCOPE_REQUIREMENTS,
+  assessSendGridScopes,
+} from '../adapters/providers/sendgrid/sendgrid.adapter.js';
 import { CloudflareAdapter } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
-import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import type { SendGridCredentials } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
+import type { SendGridPermissionAudit } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
 import type { CloudflareCredentials } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
-import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
+import { providerDisplayName, syncHostingEnvVars } from './hosting-env.js';
 
 import { resolveProject } from './resolve-project.js';
 
@@ -19,6 +24,55 @@ const connectionRepo = new ConnectionRepository();
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const auditRepo = new AuditRepository();
+
+function missingScopeGroups(permissions: SendGridPermissionAudit, requireWebhook = false): Record<string, string[]> {
+  const missing: Record<string, string[]> = {};
+  if (!permissions.hasMailSend) missing.mailSend = permissions.missingScopes.mailSend;
+  if (!permissions.canManageDomainAuthentication && !permissions.canManageSenderVerification) {
+    missing.domainAuthentication = permissions.missingScopes.domainAuthentication;
+    missing.senderVerification = permissions.missingScopes.senderVerification;
+  }
+  if (requireWebhook && !permissions.canConfigureEventWebhook) {
+    missing.eventWebhook = permissions.missingScopes.eventWebhook;
+  }
+  return missing;
+}
+
+function sendGridSetupReady(permissions: SendGridPermissionAudit, requireWebhook = false): boolean {
+  return permissions.setupReady && (!requireWebhook || permissions.canConfigureEventWebhook);
+}
+
+function sendGridPermissionPayload(permissions: SendGridPermissionAudit, requireWebhook = false): Record<string, unknown> {
+  return {
+    setupReady: sendGridSetupReady(permissions, requireWebhook),
+    hasMailSend: permissions.hasMailSend,
+    canAuthorizeSenderEmail: permissions.canManageDomainAuthentication || permissions.canManageSenderVerification,
+    canManageDomainAuthentication: permissions.canManageDomainAuthentication,
+    canManageSenderVerification: permissions.canManageSenderVerification,
+    canConfigureEventWebhook: permissions.canConfigureEventWebhook,
+    requiredScopes: {
+      mailSend: SENDGRID_SCOPE_REQUIREMENTS.mailSend,
+      domainAuthentication: SENDGRID_SCOPE_REQUIREMENTS.domainAuthentication,
+      senderVerification: SENDGRID_SCOPE_REQUIREMENTS.senderVerification,
+      eventWebhook: SENDGRID_SCOPE_REQUIREMENTS.eventWebhook,
+    },
+    missingScopes: missingScopeGroups(permissions, requireWebhook),
+    recommendation: permissions.recommendation,
+    docs: {
+      apiKeyPermissions: 'https://www.twilio.com/docs/sendgrid/api-reference/how-to-use-the-sendgrid-v3-api/authorization',
+      senderVerification: 'https://www.twilio.com/docs/sendgrid/api-reference/sender-verification/create-verified-sender-request',
+      senderIdentity: 'https://www.twilio.com/docs/sendgrid/for-developers/sending-email/sender-identity',
+    },
+  };
+}
+
+function sendGridPermissionError(permissions: SendGridPermissionAudit, requireWebhook = false): string {
+  const missing = missingScopeGroups(permissions, requireWebhook);
+  const groups = Object.entries(missing)
+    .map(([group, scopes]) => `${group}: ${scopes.join(', ')}`)
+    .join('; ');
+  return `SendGrid API key is valid but cannot complete Hypervibe email setup. Missing ${groups}. ${permissions.recommendation}`;
+}
 
 function getSendGridAdapter(scopeHints?: string[]): { adapter: SendGridAdapter } | { error: string } {
   const connection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
@@ -49,6 +103,69 @@ function getCloudflareAdapter(scopeHints?: string[]): { adapter: CloudflareAdapt
 }
 
 export function registerSendGridTools(server: McpServer): void {
+  server.tool(
+    'sendgrid_permissions_check',
+    'Check whether the saved SendGrid API key can send mail and authorize sender email/domain identities',
+    {
+      projectName: z.string().optional().describe('Optional project name used to select a scoped SendGrid connection'),
+      requireWebhook: z.boolean().optional().describe('Require event webhook management permissions too'),
+    },
+    async ({ projectName, requireWebhook = false }) => {
+      let scopeHints: string[] | undefined;
+      if (projectName) {
+        const project = resolveProject({ projectName });
+        if (!project) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ success: false, error: `Project not found: ${projectName}` }),
+            }],
+          };
+        }
+        scopeHints = getProjectScopeHints(project);
+      }
+
+      const result = getSendGridAdapter(scopeHints);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      try {
+        const scopes = await result.adapter.getScopes();
+        const permissions = assessSendGridScopes(scopes);
+        const ready = sendGridSetupReady(permissions, requireWebhook);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: ready,
+              ...sendGridPermissionPayload(permissions, requireWebhook),
+              message: ready
+                ? 'SendGrid API key has enough permissions for Hypervibe email setup.'
+                : sendGridPermissionError(permissions, requireWebhook),
+            }),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
   server.tool(
     'sendgrid_domains_list',
     'List domain authentications with their validation status',
@@ -327,6 +444,146 @@ export function registerSendGridTools(server: McpServer): void {
             }],
           };
         }
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          }],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'sendgrid_sender_verify_request',
+    'Create a SendGrid Single Sender verification request. This sends a verification email when confirm=true.',
+    {
+      fromEmail: z.string().email().describe('Sender email address to authorize'),
+      nickname: z.string().optional().describe('Nickname for this sender identity'),
+      fromName: z.string().optional().describe('Display name for the sender'),
+      replyTo: z.string().email().optional().describe('Reply-to email address (defaults to fromEmail)'),
+      replyToName: z.string().optional().describe('Reply-to display name'),
+      address: z.string().optional().describe('Physical mailing address for compliance metadata'),
+      address2: z.string().optional().describe('Additional physical address line'),
+      city: z.string().optional().describe('Sender city'),
+      state: z.string().optional().describe('Sender state/province'),
+      zip: z.string().optional().describe('Sender postal code'),
+      country: z.string().optional().describe('Sender country'),
+      projectName: z.string().optional().describe('Optional project name used to select a scoped SendGrid connection'),
+      confirm: z.boolean().optional().describe('Set true to create the sender identity and send the verification email'),
+    },
+    async ({
+      fromEmail,
+      nickname,
+      fromName,
+      replyTo,
+      replyToName,
+      address,
+      address2,
+      city,
+      state,
+      zip,
+      country,
+      projectName,
+      confirm = false,
+    }) => {
+      let scopeHints: string[] | undefined;
+      if (projectName) {
+        const project = resolveProject({ projectName });
+        if (!project) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ success: false, error: `Project not found: ${projectName}` }),
+            }],
+          };
+        }
+        scopeHints = getProjectScopeHints(project);
+      }
+
+      const result = getSendGridAdapter(scopeHints);
+      if ('error' in result) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: result.error }),
+          }],
+        };
+      }
+
+      const { adapter } = result;
+
+      try {
+        const permissions = assessSendGridScopes(await adapter.getScopes());
+        if (!permissions.canManageSenderVerification) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `SendGrid API key cannot create Single Sender verification requests. Missing senderVerification: ${permissions.missingScopes.senderVerification.join(', ')}.`,
+                ...sendGridPermissionPayload(permissions),
+              }),
+            }],
+          };
+        }
+
+        const senderInput = {
+          nickname: nickname ?? fromEmail,
+          fromEmail,
+          replyTo: replyTo ?? fromEmail,
+          ...(fromName && { fromName }),
+          ...(replyToName && { replyToName }),
+          ...(address && { address }),
+          ...(address2 && { address2 }),
+          ...(city && { city }),
+          ...(state && { state }),
+          ...(zip && { zip }),
+          ...(country && { country }),
+        };
+
+        if (!confirm) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                mode: 'preview',
+                message: 'Call again with confirm=true to create the SendGrid sender identity and send the verification email.',
+                plannedAction: {
+                  action: 'create_sender_verification_request',
+                  fromEmail,
+                  replyTo: senderInput.replyTo,
+                  nickname: senderInput.nickname,
+                },
+              }),
+            }],
+          };
+        }
+
+        const sender = await adapter.createVerifiedSender(senderInput);
+
+        auditRepo.create({
+          action: 'sendgrid.sender_verification_requested',
+          resourceType: 'sendgrid_sender',
+          resourceId: String(sender.id ?? fromEmail),
+          details: { fromEmail, replyTo: senderInput.replyTo, nickname: senderInput.nickname },
+        });
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              message: `SendGrid verification email sent to ${fromEmail}. The sender must complete the verification email before it can be used.`,
+              sender,
+            }),
+          }],
+        };
       } catch (error) {
         return {
           content: [{
@@ -820,7 +1077,7 @@ export function registerSendGridTools(server: McpServer): void {
 
   server.tool(
     'sendgrid_setup',
-    'Set up SendGrid for an environment: sync API key to Railway and optionally configure webhook',
+    'Set up SendGrid for an environment: sync API key to the current hosting provider and optionally configure webhook',
     {
       projectName: z.string().describe('Hypervibe project name'),
       environmentName: z.string().describe('Environment to configure'),
@@ -855,20 +1112,6 @@ export function registerSendGridTools(server: McpServer): void {
         };
       }
 
-      // Get Railway connection
-      const railwayConnection = connectionRepo.findBestMatchFromHints('railway', scopeHints);
-      if (!railwayConnection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: 'No Railway connection found. Use connection_create with provider=railway first.',
-            }),
-          }],
-        };
-      }
-
       const environment = envRepo.findByProjectAndName(project.id, environmentName);
       if (!environment) {
         return {
@@ -889,55 +1132,53 @@ export function registerSendGridTools(server: McpServer): void {
         };
       }
 
-      // Check Railway bindings
-      const bindings = environment.platformBindings as {
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
-        services?: Record<string, { serviceId: string }>;
-      };
-
-      if (!bindings.railwayProjectId || !bindings.services?.[serviceName]?.serviceId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: `Service ${serviceName} not deployed to Railway in environment ${environmentName}`,
-            }),
-          }],
-        };
-      }
-
       const secretStore = getSecretStore();
       const response: Record<string, unknown> = { success: true };
 
       try {
-        // Step 1: Sync API key to Railway
+        // Step 1: Sync API key to the current hosting provider
         const sgCreds = secretStore.decryptObject<SendGridCredentials>(sgConnection.credentialsEncrypted);
-        const railwayCreds = secretStore.decryptObject<RailwayCredentials>(railwayConnection.credentialsEncrypted);
+        const sgAdapter = new SendGridAdapter();
+        sgAdapter.connect(sgCreds);
 
-        const railwayAdapter = new RailwayAdapter();
-        await railwayAdapter.connect(railwayCreds);
+        const permissions = assessSendGridScopes(await sgAdapter.getScopes());
+        if (!sendGridSetupReady(permissions, Boolean(webhookUrl))) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: sendGridPermissionError(permissions, Boolean(webhookUrl)),
+                ...sendGridPermissionPayload(permissions, Boolean(webhookUrl)),
+              }),
+            }],
+          };
+        }
 
         const envVars: Record<string, string> = {
           [apiKeyEnvVar]: sgCreds.apiKey,
         };
 
-        const syncResult = await railwayAdapter.setEnvVars(environment, service, envVars);
+        const syncResult = await syncHostingEnvVars({
+          project,
+          environment,
+          service,
+          vars: envVars,
+        });
+        const hostingProvider = syncResult.provider;
 
         if (syncResult.success) {
           response.apiKeySynced = true;
           response.apiKeyEnvVar = apiKeyEnvVar;
+          response.hostingProvider = hostingProvider;
         } else {
           response.apiKeySynced = false;
-          response.apiKeySyncError = syncResult.error;
+          response.apiKeySyncError = syncResult.error || syncResult.message;
+          response.hostingProvider = hostingProvider;
         }
 
         // Step 2: Configure webhook if URL provided
         if (webhookUrl) {
-          const sgAdapter = new SendGridAdapter();
-          sgAdapter.connect(sgCreds);
-
           try {
             const webhookSettings = await sgAdapter.enableEventWebhook(webhookUrl);
             response.webhookConfigured = true;
@@ -962,7 +1203,7 @@ export function registerSendGridTools(server: McpServer): void {
         });
 
         response.message = response.apiKeySynced
-          ? `SendGrid configured for ${serviceName} in ${environmentName}`
+          ? `SendGrid configured for ${serviceName} in ${environmentName}${typeof response.hostingProvider === 'string' ? ` on ${providerDisplayName(response.hostingProvider)}` : ''}`
           : `Setup completed with errors`;
 
         return {

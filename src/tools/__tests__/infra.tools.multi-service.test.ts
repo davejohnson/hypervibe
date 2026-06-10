@@ -11,8 +11,10 @@ import { ProjectRepository } from '../../adapters/db/repositories/project.reposi
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { ApprovalRepository } from '../../adapters/db/repositories/approval.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
+import { CLOUD_PREPARE_PROFILES } from '../../domain/services/cloud-prepare.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import type { IDatabaseAdapter } from '../../domain/ports/database.port.js';
 import type { IHostingAdapter } from '../../domain/ports/hosting.port.js';
@@ -684,10 +686,28 @@ describe('infra_apply multi-service convergence', () => {
         status: 'needed',
         detail: 'Configure service "web" (start=npm start, health=/health)',
       },
+    ]);
+    expect(previewPayload.desired).toMatchObject({
+      services: ['web'],
+      crons: {
+        worker: {
+          schedule: '0 * * * *',
+          command: 'npm run worker',
+        },
+      },
+    });
+    expect((previewPayload.plan as Array<Record<string, unknown>>).filter(
+      (item) => item.action === 'cron_create' || item.action === 'cron_deploy'
+    )).toEqual([
       {
-        action: 'service_configure',
+        action: 'cron_create',
         status: 'needed',
-        detail: 'Configure service "worker" (start=npm run worker, cron=0 * * * *)',
+        detail: 'Create cron job "worker"',
+      },
+      {
+        action: 'cron_deploy',
+        status: 'blocked',
+        detail: 'Missing verified Railway connection',
       },
     ]);
 
@@ -711,12 +731,16 @@ describe('infra_apply multi-service convergence', () => {
     });
 
     expect(applyPayload.success).toBe(true);
+    expect(applyPayload.services).toEqual(['web']);
+    expect(applyPayload.crons).toEqual(['worker']);
     expect(serviceRepo.findByProjectAndName(project.id, 'web')?.buildConfig).toMatchObject({
+      workloadKind: 'web',
       builder: 'nixpacks',
       startCommand: 'npm start',
       healthCheckPath: '/health',
     });
     expect(serviceRepo.findByProjectAndName(project.id, 'worker')?.buildConfig).toMatchObject({
+      workloadKind: 'cron',
       builder: 'nixpacks',
       startCommand: 'npm run worker',
       cronSchedule: '0 * * * *',
@@ -1263,6 +1287,427 @@ describe('infra_apply multi-service convergence', () => {
     ]);
     expect(payload.customDomainAttached).toBe(true);
     expect(payload.domainDnsConfigured).toBe(true);
+
+    await Promise.all([client.close(), server.close()]);
+  });
+
+  it('allows protected infra_apply with an approved infra.apply approval and consumes it', async () => {
+    const projectRepo = new ProjectRepository();
+    const serviceRepo = new ServiceRepository();
+    const approvalRepo = new ApprovalRepository();
+    const project = projectRepo.create({ name: 'protected-approved-infra-project', defaultPlatform: 'railway' });
+    projectRepo.update(project.id, {
+      policies: {
+        protectedEnvironments: ['production'],
+        requireApprovalForProtectedEnvironments: true,
+      },
+    });
+    serviceRepo.create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { builder: 'nixpacks' },
+      envVarSpec: {},
+    });
+    const approval = approvalRepo.create({
+      projectId: project.id,
+      environmentName: 'production',
+      action: 'infra.apply',
+    });
+    approvalRepo.approve(approval.id, 'test');
+
+    const fakeDatabaseAdapter: IDatabaseAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedDatabases: ['postgres'],
+        supportedCaches: [],
+        supportsPooling: false,
+        supportsReadReplicas: false,
+        supportsPointInTimeRecovery: false,
+        serverlessOptimized: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async provision(_type, environment) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type: 'postgres',
+            bindings: { provider: 'railway', connectionString: 'postgres://shared-db' },
+            externalId: 'rail-db-1',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: true,
+            message: 'db ready',
+            data: { projectId: 'rail-project-1', railwayProjectId: 'rail-project-1' },
+          },
+          connectionUrl: 'postgres://shared-db',
+          envVars: { DATABASE_URL: 'postgres://shared-db' },
+        };
+      },
+      async getConnectionUrl() {
+        return 'postgres://shared-db';
+      },
+      async destroy() {
+        return { success: true, message: 'destroyed' };
+      },
+    };
+
+    const fakeHostingAdapter: IHostingAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: false,
+        supportsReleaseCommand: true,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return { success: true, message: 'bound', data: { projectId: 'rail-project-1', environmentId: 'rail-env-1' } };
+      },
+      async deploy(service) {
+        return {
+          serviceId: service.id,
+          externalId: `rail-${service.name}`,
+          status: 'deployed',
+          receipt: { success: true, message: 'deployed', data: { railwayEnvironmentId: 'rail-env-1' } },
+        };
+      },
+      async setEnvVars() {
+        return { success: true, message: 'vars synced' };
+      },
+      async getDeployStatus() {
+        return { status: 'deployed' };
+      },
+    };
+
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: fakeDatabaseAdapter });
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeHostingAdapter });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'protected-approved-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'infra_apply', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      databaseProvider: 'railway',
+      setupEmail: false,
+      confirm: true,
+      approvalId: approval.id,
+    });
+
+    expect(payload.success).toBe(true);
+    expect(approvalRepo.findById(approval.id)?.status).toBe('consumed');
+
+    await Promise.all([client.close(), server.close()]);
+  });
+
+  it('passes project git source metadata and scoped GitHub token during direct Cloud Run deploy', async () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const serviceRepo = new ServiceRepository();
+    const connectionRepo = new ConnectionRepository();
+    const secretStore = getSecretStore();
+    const project = projectRepo.create({
+      name: 'direct-cloudrun-source-project',
+      defaultPlatform: 'cloudrun',
+      gitRemoteUrl: 'git@github.com:davejohnson/hls-property-care.git',
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
+    });
+    serviceRepo.create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { builder: 'dockerfile', startCommand: 'npm start' },
+      envVarSpec: {},
+    });
+    connectionRepo.create({
+      provider: 'github',
+      scope: 'davejohnson/hls-property-care',
+      credentialsEncrypted: secretStore.encryptObject({ apiToken: 'ghp_repo_token' }),
+    });
+
+    const deployEnvVars: Array<Record<string, string>> = [];
+    const fakeHostingAdapter: IHostingAdapter = {
+      name: 'cloudrun',
+      capabilities: {
+        supportedBuilders: ['dockerfile'],
+        supportsAutoWiring: false,
+        supportsHealthChecks: true,
+        supportsCronSchedule: true,
+        supportsReleaseCommand: false,
+        supportsMultiEnvironment: false,
+        managedTls: true,
+        supportsAutoScaling: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return { success: true, message: 'bound', data: { projectId: 'gcp-project', environmentId: 'us-central1' } };
+      },
+      async deploy(service, _environment, envVars) {
+        deployEnvVars.push(envVars);
+        return {
+          serviceId: service.id,
+          externalId: `gcp-${service.name}`,
+          status: 'deployed',
+          receipt: { success: true, message: 'deployed', data: { environmentId: 'us-central1', imageUri: 'image' } },
+        };
+      },
+      async setEnvVars() {
+        return { success: true, message: 'vars synced' };
+      },
+      async getDeployStatus() {
+        return { status: 'deployed' };
+      },
+    };
+
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeHostingAdapter });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'direct-cloudrun-source-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'deploy', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      envVars: { NODE_ENV: 'production' },
+    });
+
+    expect(payload.success).toBe(true);
+    expect(deployEnvVars[0]).toMatchObject({
+      HYPERVIBE_SOURCE_REPO_URL: 'https://github.com/davejohnson/hls-property-care.git',
+      HYPERVIBE_SOURCE_REVISION: 'main',
+      HYPERVIBE_GITHUB_TOKEN: 'ghp_repo_token',
+      NODE_ENV: 'production',
+    });
+
+    await Promise.all([client.close(), server.close()]);
+  });
+
+  it('normalizes Cloud Run web services to public during infra_apply unless explicitly private', async () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const serviceRepo = new ServiceRepository();
+    const cloudrunProfile = CLOUD_PREPARE_PROFILES.cloudrun;
+    const project = projectRepo.create({
+      name: 'cloudrun-public-web-project',
+      defaultPlatform: 'cloudrun',
+      policies: {
+        cloudPreparation: {
+          cloudrun: {
+            provider: 'cloudrun',
+            version: cloudrunProfile.version,
+            preparedAt: new Date().toISOString(),
+            gcpProjectId: 'gcp-project',
+            deployServiceAccountEmail: 'deploy@gcp-project.iam.gserviceaccount.com',
+            requiredApis: cloudrunProfile.requiredApis,
+            requiredRoles: cloudrunProfile.requiredRoles,
+          },
+        },
+      },
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
+    });
+    serviceRepo.create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: {
+        workloadKind: 'web',
+        builder: 'dockerfile',
+        startCommand: 'npm start',
+        public: false,
+      },
+      envVarSpec: {},
+    });
+
+    const deployedPublicFlags: Array<boolean | undefined> = [];
+    const fakeDatabaseAdapter: IDatabaseAdapter = {
+      name: 'cloudsql',
+      capabilities: {
+        supportedDatabases: ['postgres'],
+        supportedCaches: [],
+        supportsPooling: false,
+        supportsReadReplicas: false,
+        supportsPointInTimeRecovery: true,
+        serverlessOptimized: true,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async provision(_type, environment) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type: 'postgres',
+            bindings: {
+              provider: 'cloudsql',
+              connectionString: 'postgres://cloudsql',
+            },
+            externalId: 'cloudsql-instance',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: { success: true, message: 'provisioned' },
+        };
+      },
+      async getConnectionUrl() {
+        return 'postgres://cloudsql';
+      },
+      async destroy() {
+        return { success: true, message: 'destroyed' };
+      },
+    };
+    const fakeHostingAdapter: IHostingAdapter = {
+      name: 'cloudrun',
+      capabilities: {
+        supportedBuilders: ['dockerfile', 'nixpacks'],
+        supportsAutoWiring: false,
+        supportsHealthChecks: true,
+        supportsCronSchedule: true,
+        supportsReleaseCommand: false,
+        supportsMultiEnvironment: false,
+        managedTls: true,
+        supportsAutoScaling: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return { success: true, message: 'bound', data: { projectId: 'gcp-project', environmentId: 'us-central1' } };
+      },
+      async deploy(service) {
+        deployedPublicFlags.push(service.buildConfig.public);
+        return {
+          serviceId: service.id,
+          externalId: `gcp-${service.name}`,
+          status: 'deployed',
+          url: 'https://web.run.app',
+          receipt: { success: true, message: 'deployed', data: { environmentId: 'us-central1' } },
+        };
+      },
+      async setEnvVars() {
+        return { success: true, message: 'vars synced' };
+      },
+      async getDeployStatus() {
+        return { status: 'deployed' };
+      },
+    };
+
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: fakeDatabaseAdapter });
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeHostingAdapter });
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'cloudrun-public-web-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'infra_apply', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      databaseProvider: 'cloudsql',
+      serviceConfig: {
+        web: {
+          startCommand: 'npm start',
+          healthCheckPath: '/api/health',
+        },
+      },
+      setupEmail: false,
+      confirm: true,
+    });
+
+    expect(payload.success).toBe(true);
+    expect(deployedPublicFlags).toEqual([true]);
+    expect(serviceRepo.findByProjectAndName(project.id, 'web')?.buildConfig.public).toBe(true);
+
+    const privatePayload = await callTool(client, 'infra_apply', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      databaseProvider: 'cloudsql',
+      serviceConfig: {
+        web: {
+          startCommand: 'npm start',
+          healthCheckPath: '/api/health',
+          public: false,
+        },
+      },
+      setupEmail: false,
+      confirm: true,
+    });
+
+    expect(privatePayload.success).toBe(true);
+    expect(deployedPublicFlags).toEqual([true, false]);
+    expect(serviceRepo.findByProjectAndName(project.id, 'web')?.buildConfig.public).toBe(false);
+
+    await Promise.all([client.close(), server.close()]);
+  });
+
+  it('blocks Cloud Run infra_apply before provisioning when cloud_prepare has not been recorded', async () => {
+    const projectRepo = new ProjectRepository();
+    const project = projectRepo.create({
+      name: 'unprepared-cloudrun-project',
+      defaultPlatform: 'cloudrun',
+      gitRemoteUrl: 'git@github.com:davejohnson/hls-property-care.git',
+    });
+    const databaseAdapterSpy = vi.spyOn(adapterFactory, 'getDatabaseAdapter');
+    const hostingAdapterSpy = vi.spyOn(adapterFactory, 'getHostingAdapter');
+
+    const { createServer } = await import('../../server.js');
+    const server = createServer();
+    const client = new Client({ name: 'unprepared-cloudrun-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const payload = await callTool(client, 'infra_apply', {
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      databaseProvider: 'cloudsql',
+      setupEmail: false,
+      confirm: true,
+    });
+
+    expect(payload.success).toBe(false);
+    expect(payload.error).toContain('Run cloud_prepare provider="cloudrun" confirm=true before infra_apply');
+    expect(payload.summary).toMatchObject({
+      action: 'cloud_prepare',
+      provider: 'cloudrun',
+      requiredVersion: 'gcp-cloudrun-v1',
+    });
+    expect(databaseAdapterSpy).not.toHaveBeenCalled();
+    expect(hostingAdapterSpy).not.toHaveBeenCalled();
 
     await Promise.all([client.close(), server.close()]);
   });

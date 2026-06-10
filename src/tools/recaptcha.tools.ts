@@ -4,10 +4,9 @@ import { ConnectionRepository } from '../adapters/db/repositories/connection.rep
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import { RecaptchaAdapter } from '../adapters/providers/recaptcha/recaptcha.adapter.js';
-import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
 import type { RecaptchaCredentials } from '../adapters/providers/recaptcha/recaptcha.adapter.js';
+import { providerDisplayName, syncHostingEnvVars } from './hosting-env.js';
 
 import { resolveProject } from './resolve-project.js';
 
@@ -57,7 +56,7 @@ export function registerRecaptchaTools(server: McpServer): void {
 
   server.tool(
     'recaptcha_sync',
-    'Sync reCAPTCHA keys to a Railway environment',
+    'Sync reCAPTCHA keys to the current hosting provider',
     {
       projectName: z.string().describe('Project name'),
       environmentName: z.string().describe('Environment name (e.g., staging, production)'),
@@ -73,20 +72,6 @@ export function registerRecaptchaTools(server: McpServer): void {
             text: JSON.stringify({
               success: false,
               error: 'No reCAPTCHA connection found. Use connection_create first.',
-            }),
-          }],
-        };
-      }
-
-      // Get Railway connection
-      const railwayConnection = connectionRepo.findByProvider('railway');
-      if (!railwayConnection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: 'No Railway connection found. Use connection_create first.',
             }),
           }],
         };
@@ -132,19 +117,17 @@ export function registerRecaptchaTools(server: McpServer): void {
       const recaptchaAdapter = new RecaptchaAdapter();
       recaptchaAdapter.connect(recaptchaCredentials);
 
-      // Get Railway credentials and connect
-      const railwayCredentials = secretStore.decryptObject<RailwayCredentials>(
-        railwayConnection.credentialsEncrypted
-      );
-      const railwayAdapter = new RailwayAdapter();
-      await railwayAdapter.connect(railwayCredentials);
-
       try {
         // Get the env vars to sync
         const envVars = recaptchaAdapter.getEnvVars();
 
-        // Set them on the Railway service
-        const result = await railwayAdapter.setEnvVars(environment, service, envVars);
+        // Set them on the deployed service.
+        const result = await syncHostingEnvVars({
+          project,
+          environment,
+          service,
+          vars: envVars,
+        });
 
         if (!result.success) {
           return {
@@ -163,7 +146,8 @@ export function registerRecaptchaTools(server: McpServer): void {
             type: 'text' as const,
             text: JSON.stringify({
               success: true,
-              message: `reCAPTCHA keys synced to ${serviceName} in ${environmentName}`,
+              message: `reCAPTCHA keys synced to ${serviceName} in ${environmentName}${result.provider ? ` on ${providerDisplayName(result.provider)}` : ''}`,
+              hostingProvider: result.provider,
               variables: Object.keys(envVars),
             }),
           }],

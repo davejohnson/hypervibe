@@ -1,6 +1,6 @@
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
-import type { Service } from '../entities/service.entity.js';
+import { serviceWorkloadKind, type Service } from '../entities/service.entity.js';
 import type { Run, RunPlan, RunStep, RunReceipt } from '../entities/run.entity.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import type { IHostingAdapter, HostingBindings } from '../ports/hosting.port.js';
@@ -26,6 +26,8 @@ export interface DeployResult {
   run: Run;
   success: boolean;
   urls: string[];
+  serviceUrls: Record<string, string>;
+  primaryUrl?: string;
   errors: string[];
   createdResources?: Array<{ provider: string; type: string; id?: string; name?: string; metadata?: Record<string, unknown> }>;
   rollback?: InfraTransactionRollbackResult;
@@ -77,14 +79,17 @@ export class DeployOrchestrator {
       });
     }
 
-    // Step 4: Deploy each service
+    // Step 4: Deploy each workload. Services remain the storage primitive, but
+    // workloadKind drives provider behavior and plan semantics.
     const services = options.services ?? this.serviceRepo.findByProjectId(options.project.id);
     for (const service of services) {
+      const workloadKind = serviceWorkloadKind(service);
+      const isCron = workloadKind === 'cron';
       steps.push({
-        name: `deploy_${service.name}`,
-        action: 'deploy',
+        name: `${isCron ? 'deploy_cron' : 'deploy'}_${service.name}`,
+        action: isCron ? 'deployCron' : 'deploy',
         target: service.name,
-        params: { serviceId: service.id },
+        params: { serviceId: service.id, workloadKind },
       });
     }
 
@@ -107,6 +112,7 @@ export class DeployOrchestrator {
   async execute(options: DeployOptions): Promise<DeployResult> {
     const plan = this.buildPlan(options);
     const urls: string[] = [];
+    const serviceUrls: Record<string, string> = {};
     const errors: string[] = [];
     const tx = new InfraTransaction();
 
@@ -142,7 +148,11 @@ export class DeployOrchestrator {
         }
 
         if (receipt.result?.url) {
-          urls.push(receipt.result.url as string);
+          const url = receipt.result.url as string;
+          urls.push(url);
+          if (typeof receipt.result.service === 'string') {
+            serviceUrls[receipt.result.service] = url;
+          }
         }
       }
 
@@ -168,6 +178,8 @@ export class DeployOrchestrator {
         run: this.runRepo.findById(run.id)!,
         success: !hasErrors,
         urls,
+        serviceUrls,
+        primaryUrl: urls[0],
         errors,
         createdResources: tx.listResources(),
         rollback,
@@ -187,6 +199,8 @@ export class DeployOrchestrator {
         run: this.runRepo.findById(run.id)!,
         success: false,
         urls,
+        serviceUrls,
+        primaryUrl: urls[0],
         errors: [...errors, String(error)],
         createdResources: tx.listResources(),
         rollback,
@@ -212,22 +226,34 @@ export class DeployOrchestrator {
             const currentBindings = currentEnvironment.platformBindings as Partial<HostingBindings>;
             const nextProjectId = receipt.data.projectId as string;
             const projectChanged = Boolean(currentBindings.projectId && currentBindings.projectId !== nextProjectId);
+            const isRailway = options.adapter.name === 'railway';
             const bindings: Partial<HostingBindings> = {
               provider: options.adapter.name,
               projectId: nextProjectId,
-              railwayProjectId: nextProjectId,
             };
+            if (isRailway) {
+              bindings.railwayProjectId = nextProjectId;
+            } else {
+              bindings.railwayProjectId = undefined;
+              bindings.railwayEnvironmentId = undefined;
+            }
 
             // Also store environment ID if provided
             if (receipt.data.environmentId) {
               bindings.environmentId = receipt.data.environmentId as string;
+              if (isRailway) {
+                bindings.railwayEnvironmentId = receipt.data.environmentId as string;
+              }
             }
             // If provider project was recreated/switched, drop stale service/environment bindings.
             if (projectChanged || receipt.data?.created === true) {
               bindings.services = undefined;
-              bindings.environmentId = receipt.data.environmentId
-                ? (receipt.data.environmentId as string)
-                : undefined;
+              if (!receipt.data.environmentId) {
+                bindings.environmentId = undefined;
+                if (isRailway) {
+                  bindings.railwayEnvironmentId = undefined;
+                }
+              }
             }
 
             snapshotEnvironmentBindings({
@@ -365,7 +391,8 @@ export class DeployOrchestrator {
           };
         }
 
-        case 'deploy': {
+        case 'deploy':
+        case 'deployCron': {
           const service = this.serviceRepo.findById(step.params?.serviceId as string);
           if (!service) {
             return {
@@ -384,29 +411,50 @@ export class DeployOrchestrator {
           );
 
           // Update environment bindings with service info using platform-agnostic structure
-            if (result.externalId) {
-              const latestEnvironment = this.envRepo.findById(options.environment.id) ?? environment;
-              const currentBindings = latestEnvironment.platformBindings as Partial<HostingBindings>;
-              const services = currentBindings.services ?? {};
-              services[service.name] = {
-                serviceId: result.externalId,
-                url: result.url,
-              };
+          if (result.externalId) {
+            const latestEnvironment = this.envRepo.findById(options.environment.id) ?? environment;
+            const currentBindings = latestEnvironment.platformBindings as Partial<HostingBindings>;
+            const services = currentBindings.services ?? {};
+            const existingServiceBinding = services[service.name] ?? {};
+            services[service.name] = {
+              ...existingServiceBinding,
+              serviceId: result.externalId,
+              url: result.url,
+              workloadKind: serviceWorkloadKind(service),
+            };
             const deployData = (result.receipt.data ?? {}) as Record<string, unknown>;
-            const resolvedEnvironmentId = typeof deployData.railwayEnvironmentId === 'string'
-              ? deployData.railwayEnvironmentId
-              : undefined;
+            if (typeof deployData.imageUri === 'string') {
+              services[service.name].imageUri = deployData.imageUri;
+            }
+            for (const key of ['resourceType', 'jobName', 'schedulerJobName'] as const) {
+              if (typeof deployData[key] === 'string') {
+                services[service.name][key] = deployData[key];
+              }
+            }
+            const resolvedEnvironmentId = typeof deployData.environmentId === 'string'
+              ? deployData.environmentId
+              : typeof deployData.railwayEnvironmentId === 'string'
+                ? deployData.railwayEnvironmentId
+                : undefined;
+            const bindingUpdates: Partial<HostingBindings> = {
+              provider: options.adapter.name,
+              services,
+            };
+            if (resolvedEnvironmentId) {
+              bindingUpdates.environmentId = resolvedEnvironmentId;
+              if (options.adapter.name === 'railway') {
+                bindingUpdates.railwayEnvironmentId = resolvedEnvironmentId;
+              } else {
+                bindingUpdates.railwayEnvironmentId = undefined;
+              }
+            }
             snapshotEnvironmentBindings({
               tx,
               envRepo: this.envRepo,
               environmentId: options.environment.id,
               label: `environment_bindings_deploy_${service.name}`,
             });
-            this.envRepo.updatePlatformBindings(options.environment.id, {
-              services,
-              environmentId: resolvedEnvironmentId,
-              railwayEnvironmentId: resolvedEnvironmentId,
-            });
+            this.envRepo.updatePlatformBindings(options.environment.id, bindingUpdates);
 
             const createdService = result.receipt.data?.createdService === true || result.receipt.data?.created === true;
             if (createdService) {
@@ -444,7 +492,7 @@ export class DeployOrchestrator {
           return {
             step: step.name,
             status: result.receipt.success ? 'success' : 'failure',
-            result: { url: result.url, externalId: result.externalId },
+            result: { service: service.name, url: result.url, publicUrl: result.url, externalId: result.externalId },
             error: result.receipt.error,
             timestamp,
           };

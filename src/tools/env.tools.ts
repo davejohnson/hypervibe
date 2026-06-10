@@ -2,18 +2,27 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
-import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
-import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import { ComposeGenerator } from '../adapters/providers/local/compose.generator.js';
 import { integrationRegistry } from '../domain/registry/integration.registry.js';
-import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { resolveProject } from './resolve-project.js';
+import { readHostingEnvVars, syncHostingEnvVars } from './hosting-env.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
-const connectionRepo = new ConnectionRepository();
+
+function maskEnvVars(vars: Record<string, string>): Record<string, string> {
+  const maskedVars: Record<string, string> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    const lower = key.toLowerCase();
+    const isSecret = lower.includes('secret') ||
+      lower.includes('password') ||
+      lower.includes('token') ||
+      lower.includes('key');
+    maskedVars[key] = isSecret ? '***' : value;
+  }
+  return maskedVars;
+}
 
 export function registerEnvTools(server: McpServer): void {
   // ============================================
@@ -58,19 +67,6 @@ export function registerEnvTools(server: McpServer): void {
         return false;
       });
 
-      // Get Railway connection for deployed environments
-      const railwayConnection = connectionRepo.findByProvider('railway');
-      let railwayAdapter: RailwayAdapter | null = null;
-
-      if (railwayConnection && targetEnvs.some((e) => e.name !== 'local')) {
-        const secretStore = getSecretStore();
-        const credentials = secretStore.decryptObject<RailwayCredentials>(
-          railwayConnection.credentialsEncrypted
-        );
-        railwayAdapter = new RailwayAdapter();
-        await railwayAdapter.connect(credentials);
-      }
-
       for (const env of targetEnvs) {
         try {
           if (env.name === 'local') {
@@ -81,50 +77,35 @@ export function registerEnvTools(server: McpServer): void {
               success: true,
               error: 'Local vars noted. Run local_bootstrap to regenerate .env.local',
             });
-          } else if (railwayAdapter) {
-            // For deployed environments, sync to Railway
-            const bindings = env.platformBindings as {
-              railwayProjectId?: string;
-              services?: Record<string, { serviceId: string }>;
-            };
+            continue;
+          }
 
-            if (!bindings.railwayProjectId) {
-              results.push({
-                environment: env.name,
-                success: false,
-                error: 'Environment not deployed to Railway',
-              });
-              continue;
-            }
+          // Find service to set vars on
+          const services = serviceRepo.findByProjectId(project.id);
+          const targetService = serviceName
+            ? services.find((s) => s.name === serviceName)
+            : services[0]; // Default to first service
 
-            // Find service to set vars on
-            const services = serviceRepo.findByProjectId(project.id);
-            const targetService = serviceName
-              ? services.find((s) => s.name === serviceName)
-              : services[0]; // Default to first service
-
-            if (!targetService) {
-              results.push({
-                environment: env.name,
-                success: false,
-                error: serviceName ? `Service not found: ${serviceName}` : 'No services found',
-              });
-              continue;
-            }
-
-            const result = await railwayAdapter.setEnvVars(env, targetService, vars);
-            results.push({
-              environment: env.name,
-              success: result.success,
-              error: result.error,
-            });
-          } else {
+          if (!targetService) {
             results.push({
               environment: env.name,
               success: false,
-              error: 'No Railway connection for deployed environment',
+              error: serviceName ? `Service not found: ${serviceName}` : 'No services found',
             });
+            continue;
           }
+
+          const result = await syncHostingEnvVars({
+            project,
+            environment: env,
+            service: targetService,
+            vars,
+          });
+          results.push({
+            environment: env.name,
+            success: result.success,
+            error: result.success ? undefined : (result.error || result.message),
+          });
         } catch (error) {
           results.push({
             environment: env.name,
@@ -197,69 +178,34 @@ export function registerEnvTools(server: McpServer): void {
         };
       }
 
-      // For deployed environments, fetch from Railway
-      const railwayConnection = connectionRepo.findByProvider('railway');
-      if (!railwayConnection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No Railway connection' }),
-          }],
-        };
-      }
-
-      const bindings = environment.platformBindings as {
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
-        services?: Record<string, { serviceId: string }>;
-      };
-
-      if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(
-        railwayConnection.credentialsEncrypted
-      );
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
-
       // Find service
       const services = serviceRepo.findByProjectId(project.id);
       const targetService = serviceName
         ? services.find((s) => s.name === serviceName)
         : services[0];
 
-      if (!targetService || !bindings.services?.[targetService.name]) {
+      if (!targetService) {
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Service not found in Railway' }),
+            text: JSON.stringify({ success: false, error: serviceName ? `Service not found: ${serviceName}` : 'No services found' }),
           }],
         };
       }
 
       try {
-        const vars = await adapter.getServiceVariables(
-          bindings.railwayProjectId,
-          bindings.services[targetService.name].serviceId,
-          bindings.railwayEnvironmentId
-        );
-
-        // Mask secret values
-        const maskedVars: Record<string, string> = {};
-        for (const [key, value] of Object.entries(vars)) {
-          const isSecret = key.toLowerCase().includes('secret') ||
-            key.toLowerCase().includes('password') ||
-            key.toLowerCase().includes('token') ||
-            key.toLowerCase().includes('key');
-          maskedVars[key] = isSecret ? '***' : value;
+        const readResult = await readHostingEnvVars({ project, environment, service: targetService });
+        if (!readResult.success) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                provider: readResult.provider,
+                error: readResult.error,
+              }),
+            }],
+          };
         }
 
         return {
@@ -268,9 +214,10 @@ export function registerEnvTools(server: McpServer): void {
             text: JSON.stringify({
               success: true,
               environment: environmentName,
+              provider: readResult.provider,
               service: targetService.name,
-              variables: maskedVars,
-              count: Object.keys(vars).length,
+              variables: maskEnvVars(readResult.variables),
+              count: Object.keys(readResult.variables).length,
             }),
           }],
         };
@@ -485,45 +432,10 @@ export function registerEnvTools(server: McpServer): void {
         };
       }
 
-      // Get Railway connection
-      const railwayConnection = connectionRepo.findByProvider('railway');
-      if (!railwayConnection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: 'No Railway connection. Use connection_create first.',
-            }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const railwayCredentials = secretStore.decryptObject<RailwayCredentials>(
-        railwayConnection.credentialsEncrypted
-      );
-      const railwayAdapter = new RailwayAdapter();
-      await railwayAdapter.connect(railwayCredentials);
-
       const results: Array<{ environment: string; success: boolean; error?: string }> = [];
 
       for (const env of targetEnvs) {
         try {
-          const bindings = env.platformBindings as {
-            railwayProjectId?: string;
-            services?: Record<string, { serviceId: string }>;
-          };
-
-          if (!bindings.railwayProjectId) {
-            results.push({
-              environment: env.name,
-              success: false,
-              error: 'Environment not deployed to Railway',
-            });
-            continue;
-          }
-
           const services = serviceRepo.findByProjectId(project.id);
           const targetService = serviceName
             ? services.find((s) => s.name === serviceName)
@@ -538,11 +450,16 @@ export function registerEnvTools(server: McpServer): void {
             continue;
           }
 
-          const result = await railwayAdapter.setEnvVars(env, targetService, envVars);
+          const result = await syncHostingEnvVars({
+            project,
+            environment: env,
+            service: targetService,
+            vars: envVars,
+          });
           results.push({
             environment: env.name,
             success: result.success,
-            error: result.error,
+            error: result.success ? undefined : (result.error || result.message),
           });
         } catch (error) {
           results.push({

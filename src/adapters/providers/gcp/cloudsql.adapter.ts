@@ -9,6 +9,7 @@ import type {
   ProvisionableType,
 } from '../../../domain/ports/database.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { buildDatabaseEnvVarsFromComponent } from '../../../domain/services/database-env.js';
 
 // Credentials schema for self-registration
 export const CloudSqlCredentialsSchema = z.object({
@@ -31,6 +32,14 @@ interface CloudSqlInstance {
     cert: string;
     commonName: string;
     expirationTime: string;
+  };
+}
+
+interface CloudSqlOperation {
+  name?: string;
+  status?: string;
+  error?: {
+    errors?: Array<{ code?: string; message?: string }>;
   };
 }
 
@@ -127,11 +136,9 @@ export class CloudSqlAdapter implements IDatabaseAdapter {
       const token = await this.getAccessToken();
       const { projectId, region } = this.credentials;
 
-      const instanceName = this.sanitizeName(
-        options?.databaseName || `${environment.name}-${type}`
-      );
+      const instanceName = this.sanitizeName(`${environment.name}-${type}`);
       const rootPassword = this.generatePassword();
-      const dbName = 'app';
+      const dbName = options?.databaseName?.trim() || 'app';
 
       // Map type to Cloud SQL database version
       const versionMap: Record<string, string> = {
@@ -182,16 +189,24 @@ export class CloudSqlAdapter implements IDatabaseAdapter {
       }
 
       // Wait for operation to start (instance creation is async)
-      const operation = (await response.json()) as { name: string };
+      const operation = (await response.json()) as CloudSqlOperation;
+      if (operation.name) {
+        await this.waitForOperation(token, operation.name, 'instance create');
+      }
 
       // Get the instance details (may not have IP yet)
       // For now, construct connection string with placeholder
       const host = `${instanceName}.${region}.${projectId}`;
       const rootUser = type === 'postgres' ? 'postgres' : 'root';
+      await this.ensureDatabaseByName({
+        token,
+        instanceName,
+        databaseName: dbName,
+      });
 
       const connectionUrl = type === 'postgres'
-        ? `postgresql://${rootUser}:${rootPassword}@${host}:${defaultPort}/${dbName}`
-        : `mysql://${rootUser}:${rootPassword}@${host}:${defaultPort}/${dbName}`;
+        ? `postgresql://${encodeURIComponent(rootUser)}:${encodeURIComponent(rootPassword)}@${host}:${defaultPort}/${encodeURIComponent(dbName)}`
+        : `mysql://${encodeURIComponent(rootUser)}:${encodeURIComponent(rootPassword)}@${host}:${defaultPort}/${encodeURIComponent(dbName)}`;
 
       // Cloud SQL connection name format for Cloud SQL Auth Proxy
       const connectionName = `${projectId}:${region}:${instanceName}`;
@@ -228,15 +243,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter {
           },
         },
         connectionUrl,
-        envVars: {
-          DATABASE_URL: connectionUrl,
-          CLOUD_SQL_CONNECTION_NAME: connectionName,
-          DB_HOST: host,
-          DB_PORT: String(defaultPort),
-          DB_USER: rootUser,
-          DB_PASSWORD: rootPassword,
-          DB_NAME: dbName,
-        },
+        envVars: buildDatabaseEnvVarsFromComponent(component).envVars,
       };
     } catch (error) {
       const emptyComponent: Component = {
@@ -260,38 +267,92 @@ export class CloudSqlAdapter implements IDatabaseAdapter {
     }
   }
 
+  async ensureDatabase(component: Component, databaseName?: string): Promise<Receipt> {
+    if (!this.credentials) {
+      return { success: false, message: 'Not connected' };
+    }
+
+    const bindings = component.bindings as Record<string, unknown>;
+    const instanceName =
+      component.externalId
+      ?? (typeof bindings.instanceId === 'string' ? bindings.instanceId : undefined);
+    const targetDatabase =
+      databaseName?.trim()
+      || (typeof bindings.database === 'string' && bindings.database.trim().length > 0 ? bindings.database.trim() : undefined)
+      || 'app';
+
+    if (!instanceName) {
+      return {
+        success: false,
+        message: 'Cloud SQL component is missing an instance ID',
+      };
+    }
+
+    try {
+      const token = await this.getAccessToken();
+      const created = await this.ensureDatabaseByName({
+        token,
+        instanceName,
+        databaseName: targetDatabase,
+      });
+      return {
+        success: true,
+        message: created
+          ? `Created Cloud SQL database ${targetDatabase} on ${instanceName}`
+          : `Cloud SQL database ${targetDatabase} already exists on ${instanceName}`,
+        data: {
+          instanceName,
+          databaseName: targetDatabase,
+          created,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Failed to ensure Cloud SQL database ${targetDatabase}`,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   async getConnectionUrl(component: Component): Promise<string | null> {
     if (!this.credentials) {
       return null;
     }
 
-    const bindings = component.bindings as { connectionString?: string };
-    if (bindings.connectionString) {
-      return bindings.connectionString;
-    }
+    const bindings = component.bindings as {
+      connectionUrl?: string;
+      connectionString?: string;
+      username?: string;
+      password?: string;
+      database?: string;
+      port?: number | string;
+    };
 
-    // Fetch from API if not stored
+    // Prefer a live public IP lookup. Early Cloud SQL bindings stored a
+    // provider-internal placeholder host that is useful inside Cloud Run but
+    // not directly reachable by local Hypervibe db_query.
     if (component.externalId) {
       try {
         const instance = await this.getInstance(component.externalId);
         if (instance?.ipAddresses) {
           const publicIp = instance.ipAddresses.find((ip) => ip.type === 'PRIMARY');
           if (publicIp) {
-            const { username, password, database } = component.bindings as {
-              username?: string;
-              password?: string;
-              database?: string;
-            };
-            const port = component.type === 'postgres' ? 5432 : 3306;
-            return `postgresql://${username}:${password}@${publicIp.ipAddress}:${port}/${database}`;
+            const port = Number(bindings.port ?? (component.type === 'postgres' ? 5432 : 3306));
+            const username = bindings.username;
+            const password = bindings.password;
+            const database = bindings.database;
+            if (username && password && database) {
+              return `postgresql://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${publicIp.ipAddress}:${port}/${encodeURIComponent(database)}`;
+            }
           }
         }
       } catch {
-        return null;
+        // Fall back to stored connection URL below.
       }
     }
 
-    return null;
+    return bindings.connectionUrl ?? bindings.connectionString ?? null;
   }
 
   async destroy(component: Component): Promise<Receipt> {
@@ -480,6 +541,97 @@ export class CloudSqlAdapter implements IDatabaseAdapter {
     } catch {
       return null;
     }
+  }
+
+  private async ensureDatabaseByName(params: {
+    token: string;
+    instanceName: string;
+    databaseName: string;
+  }): Promise<boolean> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const { projectId } = this.credentials;
+    const encodedInstance = encodeURIComponent(params.instanceName);
+    const encodedDatabase = encodeURIComponent(params.databaseName);
+    const existing = await fetch(
+      `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances/${encodedInstance}/databases/${encodedDatabase}`,
+      {
+        headers: { Authorization: `Bearer ${params.token}` },
+      }
+    );
+
+    if (existing.ok) {
+      return false;
+    }
+    if (existing.status !== 404) {
+      const text = await existing.text();
+      throw new Error(`Cloud SQL database lookup failed: ${existing.status} ${text}`);
+    }
+
+    const created = await fetch(
+      `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances/${encodedInstance}/databases`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${params.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: params.databaseName }),
+      }
+    );
+
+    if (!created.ok) {
+      const text = await created.text();
+      if (created.status === 409 || /alreadyExists|already exists/i.test(text)) {
+        return false;
+      }
+      throw new Error(`Cloud SQL database creation failed: ${created.status} ${text}`);
+    }
+
+    const operation = await created.json() as CloudSqlOperation;
+    if (operation.name) {
+      await this.waitForOperation(params.token, operation.name, 'database create');
+    }
+    return true;
+  }
+
+  private async waitForOperation(token: string, operationName: string, description: string): Promise<void> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const { projectId } = this.credentials;
+    const operationUrl = operationName.includes('/operations/')
+      ? `https://sqladmin.googleapis.com/v1/${operationName}`
+      : `https://sqladmin.googleapis.com/v1/projects/${projectId}/operations/${encodeURIComponent(operationName)}`;
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const response = await fetch(
+        operationUrl,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Cloud SQL ${description} operation lookup failed: ${response.status} ${text}`);
+      }
+
+      const operation = await response.json() as CloudSqlOperation;
+      const status = (operation.status ?? '').toUpperCase();
+      if (status === 'DONE') {
+        if (operation.error?.errors?.length) {
+          throw new Error(`Cloud SQL ${description} operation failed: ${operation.error.errors.map((entry) => entry.message ?? entry.code ?? 'unknown').join('; ')}`);
+        }
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+
+    throw new Error(`Cloud SQL ${description} operation did not finish before timeout`);
   }
 
   private sanitizeName(name: string): string {

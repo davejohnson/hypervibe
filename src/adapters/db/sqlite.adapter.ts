@@ -20,7 +20,7 @@ const migrations: Migration[] = [
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
-        default_platform TEXT DEFAULT 'railway',
+        default_platform TEXT DEFAULT 'cloudrun',
         policies TEXT DEFAULT '{}',
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))

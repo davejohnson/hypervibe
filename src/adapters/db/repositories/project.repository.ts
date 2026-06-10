@@ -14,7 +14,7 @@ export class ProjectRepository {
     `).run(
       id,
       input.name,
-      input.defaultPlatform ?? 'railway',
+      input.defaultPlatform ?? 'cloudrun',
       input.gitRemoteUrl ?? null,
       JSON.stringify(input.policies ?? {}),
       now,

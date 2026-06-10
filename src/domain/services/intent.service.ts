@@ -7,6 +7,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { IntegrationRepository } from '../../adapters/db/repositories/integration.repository.js';
 import { getProjectScopeHints } from './project-scope.js';
 import type { Project } from '../entities/project.entity.js';
+import { serviceWorkloadKind } from '../entities/service.entity.js';
 
 const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
@@ -29,6 +30,7 @@ interface IntentEnvironmentSummary {
   services: Array<{
     name: string;
     builder?: string;
+    workloadKind: string;
     railwayServiceBound: boolean;
   }>;
   components: Array<{
@@ -53,6 +55,11 @@ interface ProjectIntentSchema {
     environmentName?: string;
     serviceName?: string;
     services?: string[];
+    crons?: Record<string, {
+      schedule?: string;
+      command?: string;
+      timeZone?: string;
+    }>;
     domain?: string;
     databaseProvider?: string;
     setupEmail?: boolean;
@@ -167,6 +174,24 @@ function normalizeDesiredServices(desiredState: Record<string, unknown> | null):
     return [desiredState.serviceName.trim()];
   }
   return undefined;
+}
+
+function normalizeDesiredCrons(desiredState: Record<string, unknown> | null): ProjectIntentSchema['desired']['crons'] | undefined {
+  const crons = asRecord(desiredState?.crons);
+  if (!crons) return undefined;
+
+  const normalized: NonNullable<ProjectIntentSchema['desired']['crons']> = {};
+  for (const [name, value] of Object.entries(crons)) {
+    const cron = asRecord(value);
+    if (!cron) continue;
+    normalized[name] = {
+      schedule: typeof cron.schedule === 'string' ? cron.schedule : undefined,
+      command: typeof cron.command === 'string' ? cron.command : undefined,
+      timeZone: typeof cron.timeZone === 'string' ? cron.timeZone : undefined,
+    };
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 export function buildDriftSignals(
@@ -303,6 +328,7 @@ function buildIntent(project: Project): ProjectIntentSchema {
       services: services.map((service) => ({
         name: service.name,
         builder: service.buildConfig.builder,
+        workloadKind: serviceWorkloadKind(service),
         railwayServiceBound: Boolean(serviceBindings[service.name]?.serviceId),
       })),
       components: components.map((component) => ({
@@ -363,11 +389,13 @@ function buildIntent(project: Project): ProjectIntentSchema {
       ? desiredMigrations.mode
       : undefined;
   const desiredServices = normalizeDesiredServices(desiredState);
+  const desiredCrons = normalizeDesiredCrons(desiredState);
   const desired = {
     state: desiredState,
     environmentName: typeof desiredState?.environmentName === 'string' ? desiredState.environmentName : undefined,
     serviceName: desiredServices?.[0],
     services: desiredServices,
+    crons: desiredCrons,
     domain: typeof desiredState?.domain === 'string' ? desiredState.domain : undefined,
     databaseProvider: typeof desiredState?.databaseProvider === 'string' ? desiredState.databaseProvider : undefined,
     setupEmail: typeof desiredState?.setupEmail === 'boolean' ? desiredState.setupEmail : undefined,

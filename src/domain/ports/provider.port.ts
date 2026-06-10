@@ -69,6 +69,7 @@ export interface VerifyResult {
   success: boolean;
   error?: string;
   email?: string;
+  warning?: string;
 }
 
 export interface IProviderAdapter {

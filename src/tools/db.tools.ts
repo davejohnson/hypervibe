@@ -13,10 +13,15 @@ import { DatabaseAdapter } from '../adapters/providers/database/database.adapter
 import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
 import type { DatabaseCredentials } from '../adapters/providers/database/database.adapter.js';
 import type { Project } from '../domain/entities/project.entity.js';
+import type { Service } from '../domain/entities/service.entity.js';
+import type { Component } from '../domain/entities/component.entity.js';
+import type { Receipt } from '../domain/ports/provider.port.js';
 import { resolveProject, resolveProjectOrError } from './resolve-project.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { captureEnvironmentSnapshot, restoreEnvironmentSnapshot } from '../domain/services/local-state.transaction.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
+import { buildDatabaseEnvVarsFromComponent } from '../domain/services/database-env.js';
+import { hostingProviderForEnvironment } from './hosting-env.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
@@ -39,6 +44,7 @@ const MIGRATION_PRESETS: Record<string, string> = {
 };
 
 const DB_PROVIDERS = ['supabase', 'rds', 'cloudsql', 'railway'] as const;
+const DB_MIGRATION_STRATEGIES = ['snapshot', 'logical_replication', 'managed_migration', 'read_replica_promote'] as const;
 
 export function registerDbTools(server: McpServer): void {
   server.tool(
@@ -79,19 +85,14 @@ export function registerDbTools(server: McpServer): void {
 
       // Get bindings
       const bindings = env.platformBindings as {
+        provider?: string;
+        projectId?: string;
+        environmentId?: string;
         railwayProjectId?: string;
         railwayEnvironmentId?: string;
         services?: Record<string, { serviceId: string }>;
       };
-
-      if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
-          }],
-        };
-      }
+      const hostingProvider = hostingProviderForEnvironment(project, env);
 
       // Resolve service
       const services = serviceRepo.findByProjectId(project.id);
@@ -118,7 +119,7 @@ export function registerDbTools(server: McpServer): void {
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `Service ${targetService.name} not deployed to Railway`,
+              error: `Service ${targetService.name} not deployed to ${hostingProvider}`,
             }),
           }],
         };
@@ -145,6 +146,7 @@ export function registerDbTools(server: McpServer): void {
               message: 'Would run migration',
               project: project.name,
               environment: env.name,
+              provider: hostingProvider,
               service: targetService.name,
               command: migrationCommand,
             }),
@@ -152,8 +154,63 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
+      if (hostingProvider !== 'railway') {
+        const adapterResult = await adapterFactory.getProviderAdapter(hostingProvider, project);
+        if (!adapterResult.success || !adapterResult.adapter) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({ success: false, error: adapterResult.error || `No ${hostingProvider} adapter available` }),
+            }],
+          };
+        }
+
+        if (typeof adapterResult.adapter.runJob !== 'function') {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `Provider ${hostingProvider} does not support one-off migration jobs`,
+              }),
+            }],
+          };
+        }
+
+        const job = await adapterResult.adapter.runJob(env, targetService, migrationCommand);
+        const success = job.receipt.success && job.status !== 'failed';
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success,
+              message: success ? 'Migration job started' : 'Migration job failed',
+              project: project.name,
+              environment: env.name,
+              provider: hostingProvider,
+              service: targetService.name,
+              command: migrationCommand,
+              jobId: job.jobId,
+              status: job.status,
+              output: job.output,
+              error: success ? undefined : (job.receipt.error || job.receipt.message),
+              receipt: job.receipt,
+            }),
+          }],
+        };
+      }
+
+      if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'Environment is marked as Railway but is missing Railway project/environment bindings' }),
+          }],
+        };
+      }
+
       // Get Railway connection
-      const connection = connectionRepo.findByProvider('railway');
+      const connection = connectionRepo.findBestMatchFromHints('railway', getProjectScopeHints(project));
       if (!connection) {
         return {
           content: [{
@@ -244,93 +301,50 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
-      const bindings = env.platformBindings as {
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
-        services?: Record<string, { serviceId: string }>;
-      };
-
-      if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
-          }],
-        };
-      }
-
       const services = serviceRepo.findByProjectId(project.id);
       const targetService = serviceName
         ? services.find((s) => s.name === serviceName)
         : services[0];
 
-      if (!targetService || !bindings.services?.[targetService.name]) {
+      if (serviceName && !targetService) {
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Service not found' }),
+            text: JSON.stringify({ success: false, error: `Service not found: ${serviceName}` }),
           }],
         };
       }
 
-      const connection = connectionRepo.findByProvider('railway');
-      if (!connection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No Railway connection' }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
-
-      try {
-        const dbUrl = await adapter.getDatabaseUrl(
-          bindings.railwayProjectId,
-          bindings.railwayEnvironmentId,
-          bindings.services[targetService.name].serviceId
-        );
-
-        if (dbUrl) {
-          // Mask password in output
-          const maskedUrl = dbUrl.replace(/:([^:@]+)@/, ':***@');
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                environment: env.name,
-                databaseUrl: maskedUrl,
-                hint: 'Use this URL to run migrations locally: DATABASE_URL="<url>" npx prisma migrate deploy',
-              }),
-            }],
-          };
-        } else {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: false,
-                error: 'No DATABASE_URL found in service variables',
-              }),
-            }],
-          };
-        }
-      } catch (error) {
+      const dbUrl = await resolveEnvironmentDatabaseUrl(
+        project,
+        env as { id: string; name: string; platformBindings: Record<string, unknown> },
+        targetService?.name
+      );
+      if (!dbUrl) {
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: error instanceof Error ? error.message : String(error),
+              error: `No database URL found for ${project.name}/${env.name}`,
+              hint: 'Ensure the environment has a managed postgres component or a deployed service with database env vars.',
             }),
           }],
         };
       }
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            success: true,
+            environment: env.name,
+            service: targetService?.name,
+            databaseUrl: maskDatabaseUrl(dbUrl),
+            hint: 'Use this URL for local read-only debugging only. Prefer Hypervibe db_query/db_migrate for managed deploy workflows.',
+          }),
+        }],
+      };
     }
   );
 
@@ -425,6 +439,66 @@ export function registerDbTools(server: McpServer): void {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({ success: false, error: adapterResult.error || `No ${provider} database adapter available` }),
+          }],
+        };
+      }
+
+      const reusable = componentRepo.findByEnvironmentAndType(env.id, databaseType);
+      const reusableProvider = reusable?.bindings && typeof reusable.bindings.provider === 'string'
+        ? reusable.bindings.provider
+        : undefined;
+      if (reusable && reusableProvider === provider) {
+        const ensureReceipt = await ensureDatabaseIfSupported(adapterResult.adapter, reusable, databaseName);
+        if (ensureReceipt && !ensureReceipt.success) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: ensureReceipt.error || ensureReceipt.message,
+                provider,
+                environment: env.name,
+                reusedExisting: true,
+              }),
+            }],
+          };
+        }
+        const reusableEnv = buildDatabaseEnvVarsFromComponent(reusable);
+        const syncResult: { success: boolean; error?: string } = { success: false };
+        if (syncToHosting && Object.keys(reusableEnv.envVars).length > 0) {
+          const hostingResult = await adapterFactory.getHostingAdapter(project);
+          if (hostingResult.success && hostingResult.adapter) {
+            const services = serviceRepo.findByProjectId(project.id);
+            const targetService = serviceName ? services.find((s) => s.name === serviceName) : services[0];
+            if (targetService) {
+              const latestEnv = envRepo.findById(env.id) ?? env;
+              const receipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, reusableEnv.envVars);
+              syncResult.success = receipt.success;
+              syncResult.error = receipt.success ? undefined : (receipt.error || receipt.message);
+            } else {
+              syncResult.error = 'No service found to sync env vars';
+            }
+          } else {
+            syncResult.error = hostingResult.error || 'Hosting adapter unavailable';
+          }
+        }
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              provider,
+              environment: env.name,
+              component: reusable,
+              reusedExisting: true,
+              connectionUrl: reusableEnv.connectionUrl ? maskDatabaseUrl(reusableEnv.connectionUrl) : undefined,
+              databaseEnsured: ensureReceipt?.success,
+              databaseEnsure: ensureReceipt?.data,
+              envVarsSynced: syncToHosting ? syncResult.success : undefined,
+              envVarsSyncError: syncToHosting && !syncResult.success ? syncResult.error : undefined,
+              message: `Reused existing ${databaseType} on ${provider}${syncToHosting ? ' and attempted env sync' : ''}`,
+            }),
           }],
         };
       }
@@ -576,6 +650,78 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
+      const services = serviceRepo.findByProjectId(project.id);
+      const targetService = serviceName ? services.find((s) => s.name === serviceName) : services[0];
+      if (!targetService) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'No service found to apply database switch' }),
+          }],
+        };
+      }
+
+      if (currentComponent && currentProvider === targetProvider) {
+        const ensureReceipt = await ensureDatabaseIfSupported(dbAdapterResult.adapter, currentComponent, databaseName);
+        if (ensureReceipt && !ensureReceipt.success) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: ensureReceipt.error || ensureReceipt.message,
+                reusedExisting: true,
+                provider: targetProvider,
+              }),
+            }],
+          };
+        }
+        const existingEnv = buildDatabaseEnvVarsFromComponent(currentComponent);
+        if (!existingEnv.connectionUrl && !existingEnv.envVars.DATABASE_URL) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: `Existing ${targetProvider} component does not have a usable database URL or env var set`,
+              }),
+            }],
+          };
+        }
+
+        const hostingResult = await adapterFactory.getHostingAdapter(project);
+        if (!hostingResult.success || !hostingResult.adapter) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: false,
+                error: hostingResult.error || 'No hosting adapter available for env var switch',
+              }),
+            }],
+          };
+        }
+
+        const latestEnv = envRepo.findById(env.id) ?? env;
+        const receipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, existingEnv.envVars);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: receipt.success,
+              reusedExisting: true,
+              message: receipt.success
+                ? `Existing ${targetProvider} database env vars synced on ${targetService.name}.`
+                : `Existing ${targetProvider} database found but env switch failed: ${receipt.error || receipt.message}`,
+              component: currentComponent,
+              connectionUrl: existingEnv.connectionUrl ? maskDatabaseUrl(existingEnv.connectionUrl) : undefined,
+              databaseEnsured: ensureReceipt?.success,
+              databaseEnsure: ensureReceipt?.data,
+            }),
+          }],
+        };
+      }
+
       const envSnapshot = captureEnvironmentSnapshot(env);
       const provision = await dbAdapterResult.adapter.provision('postgres', env, {
         databaseName,
@@ -625,21 +771,7 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
-      const services = serviceRepo.findByProjectId(project.id);
-      const targetService = serviceName ? services.find((s) => s.name === serviceName) : services[0];
-      if (!targetService) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No service found to apply database switch' }),
-          }],
-        };
-      }
-
-      const varsToSet: Record<string, string> = {
-        DATABASE_URL: provision.connectionUrl,
-        DIRECT_URL: provision.connectionUrl,
-      };
+      const varsToSet = buildDatabaseEnvVarsFromComponent(provision.component).envVars;
       const latestEnv = envRepo.findById(env.id) ?? env;
       const receipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, varsToSet);
 
@@ -670,7 +802,9 @@ export function registerDbTools(server: McpServer): void {
       projectName: z.string().optional().describe('Project name'),
       environment: z.string().optional().describe('Environment name (default: staging)'),
       serviceName: z.string().optional().describe('Service to apply cutover vars on (default: first service)'),
+      services: z.array(z.string().min(1)).optional().describe('Services to apply shadow/cutover vars on; overrides serviceName when provided'),
       targetProvider: z.enum(DB_PROVIDERS).describe('Target provider'),
+      strategy: z.enum(DB_MIGRATION_STRATEGIES).optional().describe('Database move strategy (default: snapshot)'),
       phase: z.enum(['plan', 'copy', 'cutover']).optional().describe('Migration phase (default: plan)'),
       sourceConnectionUrl: z.string().optional().describe('Optional explicit source connection URL'),
       targetConnectionUrl: z.string().optional().describe('Optional explicit target connection URL for cutover'),
@@ -686,7 +820,9 @@ export function registerDbTools(server: McpServer): void {
       projectName,
       environment = 'staging',
       serviceName,
+      services: requestedServices,
       targetProvider,
+      strategy = 'snapshot',
       phase = 'plan',
       sourceConnectionUrl,
       targetConnectionUrl,
@@ -712,8 +848,25 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
-      const services = serviceRepo.findByProjectId(project.id);
-      const targetService = serviceName ? services.find((s) => s.name === serviceName) : services[0];
+      const projectServices = serviceRepo.findByProjectId(project.id);
+      const serviceSelection = resolveServiceSelection(projectServices, {
+        serviceName,
+        services: requestedServices,
+      });
+      if (serviceSelection.missing.length > 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `Service(s) not found: ${serviceSelection.missing.join(', ')}`,
+              available: projectServices.map((service) => service.name),
+            }),
+          }],
+        };
+      }
+      const targetServices = serviceSelection.services;
+      const targetService = targetServices[0];
 
       const sourceUrl = sourceConnectionUrl ?? await resolveEnvironmentDatabaseUrl(project, env, targetService?.name);
       if (!sourceUrl) {
@@ -749,24 +902,43 @@ export function registerDbTools(server: McpServer): void {
                 databaseName,
                 region,
                 size,
+                services: targetServices.map((service) => service.name),
               },
+              strategy: databaseMigrationStrategyStatus(strategy),
               prerequisites: {
                 pgDump: toolAvailability.pgDump,
                 pgRestore: toolAvailability.pgRestore,
-                hostingServiceResolved: Boolean(targetService),
+                hostingServicesResolved: targetServices.length,
               },
               steps: [
-                'copy: provision target postgres',
-                'copy: pg_dump -> pg_restore',
-                'copy: compare source/target table estimates',
-                'cutover: set DATABASE_URL, DIRECT_URL, DATABASE_URL_PREV',
+                strategy === 'snapshot' ? 'copy: provision target postgres' : `${strategy}: not implemented yet`,
+                strategy === 'snapshot' ? 'copy: pg_dump -> pg_restore' : 'choose snapshot or implement provider-specific replication',
+                strategy === 'snapshot' ? 'copy: compare source/target table estimates' : 'replication verification pending',
+                `cutover: set DATABASE_URL, DIRECT_URL, DATABASE_URL_PREV on ${targetServices.map((service) => service.name).join(', ') || '(no services)'}`,
                 'rollback: restore DATABASE_URL from DATABASE_URL_PREV',
               ],
+              warnings: strategy === 'snapshot'
+                ? ['Snapshot mode requires a write freeze or maintenance window. Writes after pg_dump starts are not replicated.']
+                : [`Strategy "${strategy}" is planned but not implemented.`],
               next: [
                 'Run phase="copy" with confirm=true',
                 'Validate app against NEXT_DATABASE_URL',
                 'Run phase="cutover" with confirm=true',
               ],
+            }),
+          }],
+        };
+      }
+
+      if (strategy !== 'snapshot') {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              phase,
+              strategy,
+              error: `Database migration strategy "${strategy}" is not implemented yet. Use strategy="snapshot" with an explicit write freeze, or implement a provider-specific replication path first.`,
             }),
           }],
         };
@@ -784,7 +956,7 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
-      if (!toolAvailability.pgDump || !toolAvailability.pgRestore) {
+      if (phase === 'copy' && (!toolAvailability.pgDump || !toolAvailability.pgRestore)) {
         return {
           content: [{
             type: 'text' as const,
@@ -853,21 +1025,32 @@ export function registerDbTools(server: McpServer): void {
           });
         }
 
-        let shadowSynced = false;
-        let shadowError: string | undefined;
-        if (setShadowVar && targetService) {
+        const shadowResults: Array<{ service: string; success: boolean; error?: string }> = [];
+        if (setShadowVar && targetServices.length > 0) {
           const hostingResult = await adapterFactory.getHostingAdapter(project);
           if (hostingResult.success && hostingResult.adapter) {
             const latestEnv = envRepo.findById(env.id) ?? env;
-            const shadowReceipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, {
-              NEXT_DATABASE_URL: targetUrl,
-            });
-            shadowSynced = shadowReceipt.success;
-            shadowError = shadowReceipt.success ? undefined : (shadowReceipt.error || shadowReceipt.message);
+            for (const service of targetServices) {
+              const shadowReceipt = await hostingResult.adapter.setEnvVars(latestEnv, service, {
+                NEXT_DATABASE_URL: targetUrl,
+              });
+              shadowResults.push({
+                service: service.name,
+                success: shadowReceipt.success,
+                error: shadowReceipt.success ? undefined : (shadowReceipt.error || shadowReceipt.message),
+              });
+            }
           } else {
-            shadowError = hostingResult.error || 'No hosting adapter for shadow var sync';
+            shadowResults.push({
+              service: targetServices.map((service) => service.name).join(', '),
+              success: false,
+              error: hostingResult.error || 'No hosting adapter for shadow var sync',
+            });
           }
         }
+        const shadowSynced = setShadowVar
+          ? shadowResults.length > 0 && shadowResults.every((result) => result.success)
+          : undefined;
 
         return {
           content: [{
@@ -877,11 +1060,14 @@ export function registerDbTools(server: McpServer): void {
               phase: 'copy',
               source: maskDatabaseUrl(sourceUrl),
               target: maskDatabaseUrl(targetUrl),
+              strategy: databaseMigrationStrategyStatus(strategy),
               verification: compare,
               exactCountVerification: exactCheck,
               next: 'Run phase="cutover" confirm=true when ready',
-              shadowVarSynced: setShadowVar ? shadowSynced : undefined,
-              shadowVarError: setShadowVar && !shadowSynced ? shadowError : undefined,
+              services: targetServices.map((service) => service.name),
+              shadowVarSynced: shadowSynced,
+              shadowVarResults: setShadowVar ? shadowResults : undefined,
+              warnings: ['Snapshot copy is not continuous replication. Keep writes frozen until cutover or run another final copy.'],
             }),
           }],
         };
@@ -923,11 +1109,11 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
-      if (!targetService) {
+      if (targetServices.length === 0) {
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No service found for cutover env var update' }),
+            text: JSON.stringify({ success: false, error: 'No services found for cutover env var update' }),
           }],
         };
       }
@@ -948,9 +1134,18 @@ export function registerDbTools(server: McpServer): void {
         DATABASE_URL_PREV: cutoverSource,
       };
       const latestEnv = envRepo.findById(env.id) ?? env;
-      const cutoverReceipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, cutoverVars);
+      const cutoverResults = [];
+      for (const service of targetServices) {
+        const receipt = await hostingResult.adapter.setEnvVars(latestEnv, service, cutoverVars);
+        cutoverResults.push({
+          service: service.name,
+          success: receipt.success,
+          error: receipt.success ? undefined : (receipt.error || receipt.message),
+        });
+      }
+      const cutoverSuccess = cutoverResults.every((result) => result.success);
 
-      if (cutoverReceipt.success && component) {
+      if (cutoverSuccess && component) {
         componentRepo.updateBindings(component.id, {
           previousProvider: (component.bindings.provider as string | undefined) ?? 'unknown',
           previousConnectionString: cutoverSource,
@@ -965,11 +1160,13 @@ export function registerDbTools(server: McpServer): void {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            success: cutoverReceipt.success,
+            success: cutoverSuccess,
             phase: 'cutover',
-            message: cutoverReceipt.success
-              ? `Cutover complete on service ${targetService.name}`
-              : `Cutover failed: ${cutoverReceipt.error || cutoverReceipt.message}`,
+            strategy: databaseMigrationStrategyStatus(strategy),
+            message: cutoverSuccess
+              ? `Cutover complete on services: ${targetServices.map((service) => service.name).join(', ')}`
+              : 'Cutover failed on one or more services',
+            services: cutoverResults,
             currentDatabaseUrl: maskDatabaseUrl(cutoverTarget),
             rollback: {
               strategy: 'Set DATABASE_URL and DIRECT_URL back to DATABASE_URL_PREV',
@@ -988,10 +1185,11 @@ export function registerDbTools(server: McpServer): void {
       projectName: z.string().optional().describe('Project name'),
       environment: z.string().optional().describe('Environment name (default: staging)'),
       serviceName: z.string().optional().describe('Service to update (default: first service)'),
+      services: z.array(z.string().min(1)).optional().describe('Services to update; overrides serviceName when provided'),
       previousConnectionUrl: z.string().optional().describe('Optional explicit rollback URL'),
       confirm: z.boolean().optional().describe('Required to execute rollback'),
     },
-    async ({ projectName, environment = 'staging', serviceName, previousConnectionUrl, confirm = false }) => {
+    async ({ projectName, environment = 'staging', serviceName, services: requestedServices, previousConnectionUrl, confirm = false }) => {
       if (!confirm) {
         return {
           content: [{
@@ -1019,13 +1217,29 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
-      const services = serviceRepo.findByProjectId(project.id);
-      const targetService = serviceName ? services.find((s) => s.name === serviceName) : services[0];
-      if (!targetService) {
+      const projectServices = serviceRepo.findByProjectId(project.id);
+      const serviceSelection = resolveServiceSelection(projectServices, {
+        serviceName,
+        services: requestedServices,
+      });
+      if (serviceSelection.missing.length > 0) {
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No service found for rollback' }),
+            text: JSON.stringify({
+              success: false,
+              error: `Service(s) not found: ${serviceSelection.missing.join(', ')}`,
+              available: projectServices.map((service) => service.name),
+            }),
+          }],
+        };
+      }
+      const targetServices = serviceSelection.services;
+      if (targetServices.length === 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: 'No services found for rollback' }),
           }],
         };
       }
@@ -1056,11 +1270,20 @@ export function registerDbTools(server: McpServer): void {
       }
 
       const latestEnv = envRepo.findById(env.id) ?? env;
-      const receipt = await hostingResult.adapter.setEnvVars(latestEnv, targetService, {
-        DATABASE_URL: rollbackUrl,
-        DIRECT_URL: rollbackUrl,
-      });
-      if (receipt.success && component) {
+      const rollbackResults = [];
+      for (const service of targetServices) {
+        const receipt = await hostingResult.adapter.setEnvVars(latestEnv, service, {
+          DATABASE_URL: rollbackUrl,
+          DIRECT_URL: rollbackUrl,
+        });
+        rollbackResults.push({
+          service: service.name,
+          success: receipt.success,
+          error: receipt.success ? undefined : (receipt.error || receipt.message),
+        });
+      }
+      const rollbackSuccess = rollbackResults.every((result) => result.success);
+      if (rollbackSuccess && component) {
         componentRepo.updateBindings(component.id, {
           connectionString: rollbackUrl,
           provider: component.bindings.previousProvider,
@@ -1072,10 +1295,11 @@ export function registerDbTools(server: McpServer): void {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            success: receipt.success,
-            message: receipt.success
-              ? `Rollback complete on ${targetService.name}`
-              : `Rollback failed: ${receipt.error || receipt.message}`,
+            success: rollbackSuccess,
+            message: rollbackSuccess
+              ? `Rollback complete on services: ${targetServices.map((service) => service.name).join(', ')}`
+              : 'Rollback failed on one or more services',
+            services: rollbackResults,
             restoredDatabaseUrl: maskDatabaseUrl(rollbackUrl),
           }),
         }],
@@ -1266,10 +1490,11 @@ export function registerDbTools(server: McpServer): void {
       projectName: z.string().optional().describe('Resolve database URL from project environment'),
       environment: z.string().optional().describe('Environment name (default: staging)'),
       serviceName: z.string().optional().describe('Service name (when resolving from project)'),
+      databaseName: z.string().optional().describe('Override database name when resolving from project/env/service credentials'),
       allowMutations: z.boolean().optional().describe('Allow INSERT/UPDATE/DELETE queries (default: false)'),
       params: z.array(z.unknown()).optional().describe('Query parameters for parameterized queries'),
     },
-    async ({ sql, connectionName, connectionUrl, projectName, environment = 'staging', serviceName, allowMutations = false, params }) => {
+    async ({ sql, connectionName, connectionUrl, projectName, environment = 'staging', serviceName, databaseName, allowMutations = false, params }) => {
       const secretStore = getSecretStore();
 
       // Resolve the database URL from one of the sources
@@ -1319,55 +1544,36 @@ export function registerDbTools(server: McpServer): void {
           };
         }
 
-        const bindings = env.platformBindings as {
-          railwayProjectId?: string;
-          railwayEnvironmentId?: string;
-          services?: Record<string, { serviceId: string }>;
-        };
-
-        if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
-            }],
-          };
-        }
-
-        const services = serviceRepo.findByProjectId(project.id);
         const targetService = serviceName
-          ? services.find((s) => s.name === serviceName)
-          : services[0];
+          ? serviceRepo.findByProjectAndName(project.id, serviceName)
+          : serviceRepo.findByProjectId(project.id)[0];
 
-        if (!targetService || !bindings.services?.[targetService.name]) {
+        if (serviceName && !targetService) {
           return {
             content: [{
               type: 'text' as const,
-              text: JSON.stringify({ success: false, error: 'Service not found' }),
+              text: JSON.stringify({ success: false, error: `Service not found: ${serviceName}` }),
             }],
           };
         }
 
-        const railwayConnection = connectionRepo.findByProvider('railway');
-        if (!railwayConnection) {
+        resolvedUrl = await resolveEnvironmentDatabaseUrl(project, env as { id: string; name: string; platformBindings: Record<string, unknown> }, targetService?.name);
+        if (!resolvedUrl) {
           return {
             content: [{
               type: 'text' as const,
-              text: JSON.stringify({ success: false, error: 'No Railway connection' }),
+              text: JSON.stringify({
+                success: false,
+                error: `Could not resolve a database URL for ${projectName}/${environment}`,
+                hint: 'Ensure the environment has a managed postgres component or a deployed service with database env vars.',
+              }),
             }],
           };
         }
-
-        const railwayCreds = secretStore.decryptObject<RailwayCredentials>(railwayConnection.credentialsEncrypted);
-        const railwayAdapter = new RailwayAdapter();
-        await railwayAdapter.connect(railwayCreds);
-
-        resolvedUrl = await railwayAdapter.getDatabaseUrl(
-          bindings.railwayProjectId,
-          bindings.railwayEnvironmentId,
-          bindings.services[targetService.name].serviceId
-        );
-        source = `${projectName}/${environment}`;
+        if (databaseName) {
+          resolvedUrl = overrideDatabaseName(resolvedUrl, databaseName);
+        }
+        source = `${projectName}/${environment}${targetService ? `/${targetService.name}` : ''}${databaseName ? `/${databaseName}` : ''}`;
       } else {
         return {
           content: [{
@@ -1408,9 +1614,10 @@ export function registerDbTools(server: McpServer): void {
             text: JSON.stringify({
               success: false,
               error: 'Mutation query blocked for safety',
+              source,
               queryType: 'mutation',
               warnings: analysis.warnings,
-              hint: 'Add allowMutations=true to execute INSERT/UPDATE/DELETE queries',
+              hint: 'Add allowMutations=true to execute INSERT/UPDATE/DELETE/DDL queries',
               query: sql.substring(0, 100) + (sql.length > 100 ? '...' : ''),
             }),
           }],
@@ -1462,8 +1669,16 @@ export function registerDbTools(server: McpServer): void {
   );
 }
 
-function maskDatabaseUrl(url: string): string {
-  return url.replace(/:([^:@]+)@/, ':***@');
+async function ensureDatabaseIfSupported(
+  adapter: unknown,
+  component: Component,
+  databaseName?: string
+): Promise<Receipt | undefined> {
+  const ensureDatabase = (adapter as { ensureDatabase?: (component: Component, databaseName?: string) => Promise<Receipt> }).ensureDatabase;
+  if (typeof ensureDatabase !== 'function') {
+    return undefined;
+  }
+  return ensureDatabase.call(adapter, component, databaseName);
 }
 
 async function resolveEnvironmentDatabaseUrl(
@@ -1472,8 +1687,25 @@ async function resolveEnvironmentDatabaseUrl(
   serviceName?: string
 ): Promise<string | null> {
   const component = componentRepo.findByEnvironmentAndType(env.id, 'postgres');
-  const componentUrl = component?.bindings.connectionString;
-  if (typeof componentUrl === 'string' && componentUrl.length > 0) {
+  const componentBindings = component?.bindings as Record<string, unknown> | undefined;
+  const componentProvider = typeof componentBindings?.provider === 'string' ? componentBindings.provider : undefined;
+  if (component && componentProvider && componentProvider !== 'railway') {
+    const adapterResult = await adapterFactory.getDatabaseAdapter(componentProvider, project);
+    if (adapterResult.success && adapterResult.adapter) {
+      const adapterUrl = await adapterResult.adapter.getConnectionUrl(component);
+      if (adapterUrl) {
+        return adapterUrl;
+      }
+    }
+  }
+
+  const componentUrl =
+    typeof componentBindings?.connectionUrl === 'string' && componentBindings.connectionUrl.length > 0
+      ? componentBindings.connectionUrl
+      : typeof componentBindings?.connectionString === 'string' && componentBindings.connectionString.length > 0
+        ? componentBindings.connectionString
+        : undefined;
+  if (componentUrl) {
     return componentUrl;
   }
 
@@ -1563,6 +1795,74 @@ async function provisionTargetDatabaseUrl(params: {
   }
 
   return provision.connectionUrl;
+}
+
+function resolveServiceSelection(
+  services: Service[],
+  requested: { serviceName?: string; services?: string[] }
+): { services: Service[]; missing: string[] } {
+  const requestedNames = requested.services && requested.services.length > 0
+    ? Array.from(new Set(requested.services.map((service) => service.trim()).filter(Boolean)))
+    : requested.serviceName
+      ? [requested.serviceName]
+      : [];
+
+  if (requestedNames.length === 0) {
+    return {
+      services: services[0] ? [services[0]] : [],
+      missing: [],
+    };
+  }
+
+  const selected: Service[] = [];
+  const missing: string[] = [];
+  for (const name of requestedNames) {
+    const service = services.find((candidate) => candidate.name === name);
+    if (service) {
+      selected.push(service);
+    } else {
+      missing.push(name);
+    }
+  }
+
+  return { services: selected, missing };
+}
+
+function databaseMigrationStrategyStatus(strategy: (typeof DB_MIGRATION_STRATEGIES)[number]): Record<string, unknown> {
+  if (strategy === 'snapshot') {
+    return {
+      selected: strategy,
+      status: 'available',
+      writeFreezeRequired: true,
+      continuousReplication: false,
+      detail: 'Uses pg_dump/pg_restore. Writes after the dump starts are not copied unless you freeze writes or run a final copy.',
+    };
+  }
+
+  return {
+    selected: strategy,
+    status: 'planned',
+    writeFreezeRequired: false,
+    continuousReplication: true,
+    detail: 'Not implemented yet. Requires provider-specific replication or migration service support.',
+  };
+}
+
+function maskDatabaseUrl(url: string): string {
+  return url.replace(/:([^:@]+)@/, ':***@');
+}
+
+function overrideDatabaseName(url: string, databaseName?: string): string {
+  const trimmed = databaseName?.trim();
+  if (!trimmed) return url;
+
+  try {
+    const parsed = new URL(url);
+    parsed.pathname = `/${encodeURIComponent(trimmed)}`;
+    return parsed.toString();
+  } catch {
+    return url.replace(/\/([^/?#]*)([?#].*)?$/, `/${encodeURIComponent(trimmed)}$2`);
+  }
 }
 
 function hasCommand(command: string): boolean {

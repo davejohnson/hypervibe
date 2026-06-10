@@ -10,6 +10,7 @@ import type { RailwayCredentials } from '../adapters/providers/railway/railway.a
 import type { StripeCredentials, StripeMode } from '../adapters/providers/stripe/stripe.adapter.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { resolveProject, resolveProjectOrError } from './resolve-project.js';
+import type { Project } from '../domain/entities/project.entity.js';
 
 const connectionRepo = new ConnectionRepository();
 const envRepo = new EnvironmentRepository();
@@ -22,7 +23,7 @@ type UnifiedLog = {
 };
 
 export function detectProviderName(projectDefaultPlatform: string | undefined, bindingsProvider: string | undefined): string {
-  return (bindingsProvider || projectDefaultPlatform || 'railway').toLowerCase();
+  return (bindingsProvider || projectDefaultPlatform || 'cloudrun').toLowerCase();
 }
 
 export function isErrorLike(log: UnifiedLog): boolean {
@@ -39,7 +40,7 @@ export function isErrorLike(log: UnifiedLog): boolean {
   );
 }
 
-const LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS = ['railway', 'vercel', 'render', 'digitalocean'] as const;
+const LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS = ['railway', 'vercel', 'render', 'digitalocean', 'cloudrun'] as const;
 const LOGS_BUILD_SUPPORTED_PROVIDERS = ['railway', 'vercel', 'render', 'digitalocean'] as const;
 
 export function supportsLogsDeploymentsProvider(provider: string): boolean {
@@ -52,12 +53,14 @@ export function supportsLogsBuildProvider(provider: string): boolean {
 
 async function fetchProviderLogs(
   provider: string,
+  project: Project,
   environment: {
     platformBindings: unknown;
     name: string;
   },
   serviceName: string,
-  lines: number
+  lines: number,
+  options: { errorsOnly?: boolean } = {}
 ): Promise<{ deploymentStatus?: string; deploymentId?: string; logs: UnifiedLog[] }> {
   const bindings = environment.platformBindings as {
     projectId?: string;
@@ -121,6 +124,41 @@ async function fetchProviderLogs(
     }
     const logs = await adapter.getServiceLogs(serviceId, lines);
     return { deploymentStatus: 'unknown', logs };
+  }
+
+  if (provider === 'cloudrun') {
+    const result = await adapterFactory.getProviderAdapter('cloudrun', project);
+    if (!result.success || !result.adapter) {
+      throw new Error(result.error || 'Failed to create Cloud Run adapter');
+    }
+    const adapter = result.adapter as unknown as {
+      getLogs: (
+        environment: { platformBindings: unknown; name: string },
+        serviceName: string,
+        options?: { limit?: number; errorsOnly?: boolean }
+      ) => Promise<Array<{ timestamp: Date; severity: string; message: string; raw: string }>>;
+      getDeployStatus?: (
+        environment: { platformBindings: unknown; name: string },
+        deploymentId: string
+      ) => Promise<{ status: string; url?: string }>;
+    };
+    if (typeof adapter.getLogs !== 'function') {
+      throw new Error('Cloud Run logs are not supported by this adapter version');
+    }
+    const deploymentId = bindings.services?.[serviceName]?.serviceId;
+    const logs = await adapter.getLogs(environment, serviceName, { limit: lines, errorsOnly: options.errorsOnly });
+    const status = deploymentId && typeof adapter.getDeployStatus === 'function'
+      ? await adapter.getDeployStatus(environment, deploymentId)
+      : undefined;
+    return {
+      deploymentStatus: status?.status ?? 'unknown',
+      deploymentId,
+      logs: logs.map((log) => ({
+        timestamp: log.timestamp.toISOString(),
+        severity: log.severity || 'info',
+        message: log.message,
+      })),
+    };
   }
 
   if (provider === 'vercel') {
@@ -222,7 +260,7 @@ export function registerLogsTools(server: McpServer): void {
 
         // Fetch logs from all services
         for (const serviceName of Object.keys(bindings.services)) {
-          const { logs } = await fetchProviderLogs(provider, env, serviceName, 500);
+          const { logs } = await fetchProviderLogs(provider, project, env, serviceName, 500);
           const errors = logs.filter(isErrorLike);
 
           for (const error of errors) {
@@ -552,6 +590,61 @@ export function registerLogsTools(server: McpServer): void {
           };
         }
 
+        if (provider === 'cloudrun') {
+          const result = await adapterFactory.getProviderAdapter('cloudrun', project);
+          if (!result.success || !result.adapter) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: result.error || 'Failed to create Cloud Run adapter' }),
+              }],
+            };
+          }
+          const adapter = result.adapter as unknown as {
+            listDeployments: (
+              environment: { platformBindings: unknown; name: string },
+              serviceName?: string,
+              limit?: number
+            ) => Promise<Array<{
+              id: string;
+              status: string;
+              createdAt?: string;
+              updatedAt?: string;
+              url?: string;
+              service?: string;
+              type?: string;
+              logUri?: string;
+            }>>;
+          };
+          if (typeof adapter.listDeployments !== 'function') {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: 'Cloud Run deployments are not supported by this adapter version',
+                }),
+              }],
+            };
+          }
+
+          const deployments = await adapter.listDeployments(environment, serviceName, limit);
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                project: projectName,
+                environment: environmentName,
+                provider,
+                service: serviceName || 'all',
+                count: deployments.length,
+                deployments,
+              }),
+            }],
+          };
+        }
+
         return {
           content: [{
             type: 'text' as const,
@@ -623,7 +716,7 @@ export function registerLogsTools(server: McpServer): void {
       }
 
       try {
-        const { deploymentId, deploymentStatus, logs: allLogs } = await fetchProviderLogs(provider, environment, serviceName, lines);
+        const { deploymentId, deploymentStatus, logs: allLogs } = await fetchProviderLogs(provider, project, environment, serviceName, lines, { errorsOnly });
         let logs = allLogs;
 
         // Filter to errors only if requested
@@ -1052,7 +1145,7 @@ export function registerLogsTools(server: McpServer): void {
         }> = [];
 
         for (const serviceName of Object.keys(bindings.services)) {
-          const { deploymentStatus, logs } = await fetchProviderLogs(provider, environment, serviceName, 200);
+          const { deploymentStatus, logs } = await fetchProviderLogs(provider, project, environment, serviceName, 200);
           const errors = logs.filter(isErrorLike);
 
           serviceErrors.push({

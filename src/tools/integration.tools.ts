@@ -6,13 +6,12 @@ import { ConnectionRepository } from '../adapters/db/repositories/connection.rep
 import { IntegrationRepository } from '../adapters/db/repositories/integration.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import { parseEnvFile, maskSecretValue } from '../utils/env-parser.js';
-import type { RailwayCredentials } from '../domain/entities/connection.entity.js';
 import type { IntegrationKeyMode, StoredKeys } from '../domain/entities/integration.entity.js';
 import type { StripeCredentials } from '../adapters/providers/stripe/stripe.adapter.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { resolveProject } from './resolve-project.js';
+import { providerDisplayName, readHostingEnvVars, syncHostingEnvVars } from './hosting-env.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
@@ -26,7 +25,7 @@ const STRIPE_KEY_NAMES = ['STRIPE_SECRET_KEY', 'STRIPE_PUBLISHABLE_KEY'];
 export function registerIntegrationTools(server: McpServer): void {
   server.tool(
     'integration_sync',
-    'Sync integration keys to environment(s). Supports Stripe keys synced to Railway environments.',
+    'Sync integration keys to deployed environment(s) through the current hosting provider.',
     {
       provider: z.enum(['stripe']).describe('Integration provider'),
       projectName: z.string().describe('Project name'),
@@ -81,22 +80,7 @@ export function registerIntegrationTools(server: McpServer): void {
         };
       }
 
-      // Get Railway connection
-      const connection = connectionRepo.findByProvider('railway');
-      if (!connection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: 'No Railway connection found. Use connection_create first.',
-            }),
-          }],
-        };
-      }
-
       const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
 
       // Get keys to sync
       let keysToSync: Record<string, string>;
@@ -247,15 +231,12 @@ export function registerIntegrationTools(server: McpServer): void {
         }
       }
 
-      // Connect to Railway
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
-
       // Process each target environment
       const results: Array<{
         environment: string;
         success: boolean;
         message: string;
+        provider?: string;
         keysSet?: string[];
       }> = [];
 
@@ -281,39 +262,20 @@ export function registerIntegrationTools(server: McpServer): void {
           continue;
         }
 
-        // Check if environment has Railway bindings
-        const bindings = environment.platformBindings as {
-          railwayProjectId?: string;
-          railwayEnvironmentId?: string;
-          services?: Record<string, { serviceId: string }>;
-        };
-
-        if (!bindings.railwayProjectId) {
-          results.push({
-            environment: envName,
-            success: false,
-            message: 'No Railway project bound to this environment',
-          });
-          continue;
-        }
-
-        if (!bindings.services?.[serviceName]?.serviceId) {
-          results.push({
-            environment: envName,
-            success: false,
-            message: `Service ${serviceName} not deployed to Railway in this environment`,
-          });
-          continue;
-        }
-
         // Set environment variables
         try {
-          const receipt = await adapter.setEnvVars(environment, service, keysToSync);
+          const receipt = await syncHostingEnvVars({
+            project,
+            environment,
+            service,
+            vars: keysToSync,
+          });
           if (receipt.success) {
             results.push({
               environment: envName,
               success: true,
-              message: `Set ${Object.keys(keysToSync).length} keys`,
+              message: `Set ${Object.keys(keysToSync).length} keys${receipt.provider ? ` on ${providerDisplayName(receipt.provider)}` : ''}`,
+              provider: receipt.provider,
               keysSet: Object.keys(keysToSync),
             });
 
@@ -333,7 +295,8 @@ export function registerIntegrationTools(server: McpServer): void {
             results.push({
               environment: envName,
               success: false,
-              message: receipt.error || 'Failed to set environment variables',
+              provider: receipt.provider,
+              message: receipt.error || receipt.message || 'Failed to set environment variables',
             });
           }
         } catch (error) {
@@ -515,7 +478,7 @@ export function registerIntegrationTools(server: McpServer): void {
 
   server.tool(
     'integration_verify',
-    'Verify integration keys are correctly set in an environment. Fetches actual env vars from Railway and checks expected keys exist with correct prefixes.',
+    'Verify integration keys are correctly set in an environment. Fetches actual env vars from the current hosting provider and checks expected keys exist with correct prefixes.',
     {
       provider: z.enum(['stripe']).describe('Integration provider'),
       projectName: z.string().describe('Project name'),
@@ -552,74 +515,31 @@ export function registerIntegrationTools(server: McpServer): void {
         };
       }
 
-      // Get Railway connection
-      const connection = connectionRepo.findByProvider('railway');
-      if (!connection) {
+      const service = serviceRepo.findByProjectAndName(project.id, serviceName);
+      if (!service) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ success: false, error: `Service not found: ${serviceName}` }),
+          }],
+        };
+      }
+
+      const readResult = await readHostingEnvVars({ project, environment, service });
+      if (!readResult.success) {
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: 'No Railway connection found. Use connection_create first.',
+              provider: readResult.provider,
+              error: readResult.error,
             }),
           }],
         };
       }
 
-      // Check environment has Railway bindings
-      const bindings = environment.platformBindings as {
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
-        services?: Record<string, { serviceId: string }>;
-      };
-
-      if (!bindings.railwayProjectId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: 'No Railway project bound to this environment',
-            }),
-          }],
-        };
-      }
-
-      if (!bindings.railwayEnvironmentId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: 'No Railway environment bound to this environment',
-            }),
-          }],
-        };
-      }
-
-      if (!bindings.services?.[serviceName]?.serviceId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: `Service ${serviceName} not deployed to Railway in this environment`,
-            }),
-          }],
-        };
-      }
-
-      // Connect to Railway and fetch variables
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
-
-      const variables = await adapter.getServiceVariables(
-        bindings.railwayProjectId,
-        bindings.services[serviceName].serviceId,
-        bindings.railwayEnvironmentId
-      );
+      const variables = readResult.variables;
 
       // Check for Stripe keys
       const results: Array<{
@@ -688,6 +608,7 @@ export function registerIntegrationTools(server: McpServer): void {
             verification: {
               passed,
               provider,
+              hostingProvider: readResult.provider,
               environment: environmentName,
               service: serviceName,
               expectedMode,

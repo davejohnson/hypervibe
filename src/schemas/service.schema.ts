@@ -1,10 +1,16 @@
 import { z } from 'zod';
 
 export const buildConfigSchema = z.object({
+  workloadKind: z.enum(['web', 'worker', 'cron', 'job']).optional(),
   builder: z.enum(['nixpacks', 'dockerfile', 'buildpack']).optional(),
   dockerfilePath: z.string().optional(),
   buildCommand: z.string().optional(),
   watchPaths: z.array(z.string()).optional(),
+  startCommand: z.string().optional(),
+  releaseCommand: z.string().optional(),
+  healthCheckPath: z.string().optional(),
+  cronSchedule: z.string().optional(),
+  public: z.boolean().optional(),
 });
 
 export const envVarSpecSchema = z.object({

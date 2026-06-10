@@ -16,8 +16,8 @@ describe('logs.tools helpers', () => {
       expect(detectProviderName('vercel', undefined)).toBe('vercel');
     });
 
-    it('defaults to railway when no provider is available', () => {
-      expect(detectProviderName(undefined, undefined)).toBe('railway');
+    it('defaults to cloudrun when no provider is available', () => {
+      expect(detectProviderName(undefined, undefined)).toBe('cloudrun');
     });
   });
 
@@ -40,6 +40,7 @@ describe('logs.tools helpers', () => {
       expect(supportsLogsDeploymentsProvider('vercel')).toBe(true);
       expect(supportsLogsDeploymentsProvider('render')).toBe(true);
       expect(supportsLogsDeploymentsProvider('digitalocean')).toBe(true);
+      expect(supportsLogsDeploymentsProvider('cloudrun')).toBe(true);
       expect(supportsLogsDeploymentsProvider('heroku')).toBe(false);
     });
 
