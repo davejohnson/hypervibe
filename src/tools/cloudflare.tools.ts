@@ -39,7 +39,7 @@ export function registerCloudflareTools(server: McpServer): void {
 
 1. Go to https://dash.cloudflare.com/profile/api-tokens
 2. Click **"Create Token"**
-3. Find **"Edit zone DNS"** template and click **"Use template"**
+3. For DNS-only use, find **"Edit zone DNS"** template and click **"Use template"**
 4. Configure zone resources:
    - **Zone Resources**: Select specific zones or "All zones"
    - For production, scope to specific zones (e.g., example.com)
@@ -55,6 +55,17 @@ The "Edit zone DNS" template includes:
 | Zone:Zone:Read | Zone | List zones, find zone by domain name |
 | Zone:DNS:Edit | Zone | Create, read, update, delete DNS records |
 
+## Email Routing / Forwarding Addresses
+
+If you want Hypervibe to create addresses like support@example.com and forward them to Gmail, create a custom token instead of the DNS-only template and add:
+
+| Permission | Level | Purpose |
+|------------|-------|---------|
+| Zone:Zone:Read | Zone | Find the domain and account ID |
+| Zone:DNS:Edit | Zone | Enable/repair Email Routing MX/TXT DNS records |
+| Zone:Email Routing Rules:Edit | Zone | Create forwarding aliases and catch-all routing |
+| Account:Email Routing Addresses:Edit | Account | Create and verify destination mailboxes |
+
 ## Manual Setup (If Needed)
 
 If you need to create the token manually:
@@ -63,8 +74,11 @@ If you need to create the token manually:
 2. Add these permissions:
    - Zone → Zone → Read
    - Zone → DNS → Edit
+   - Zone → Email Routing Rules → Edit
+   - Account → Email Routing Addresses → Edit
 3. Under **Zone Resources**, select which zones to grant access to
-4. (Optional) Add IP filtering or TTL for additional security
+4. Under **Account Resources**, select the account that owns the zone
+5. (Optional) Add IP filtering or TTL for additional security
 
 ## Token Security Tips
 

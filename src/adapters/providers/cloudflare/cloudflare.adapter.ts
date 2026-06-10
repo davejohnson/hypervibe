@@ -11,6 +11,10 @@ export interface CloudflareZone {
   paused: boolean;
   type: string;
   name_servers: string[];
+  account?: {
+    id: string;
+    name?: string;
+  };
 }
 
 export interface CloudflareDnsRecord {
@@ -45,6 +49,60 @@ export interface UpdateDnsRecordInput {
   ttl?: number;
   proxied?: boolean;
   priority?: number;
+}
+
+export interface CloudflareEmailRoutingAddress {
+  id: string;
+  email: string;
+  created?: string;
+  modified?: string;
+  tag?: string;
+  verified?: string | null;
+}
+
+export interface CloudflareEmailRoutingAction {
+  type: 'drop' | 'forward' | 'worker';
+  value?: string[];
+}
+
+export interface CloudflareEmailRoutingMatcher {
+  type: 'all' | 'literal';
+  field?: 'to';
+  value?: string;
+}
+
+export interface CloudflareEmailRoutingRule {
+  id: string;
+  name?: string;
+  enabled: boolean;
+  actions: CloudflareEmailRoutingAction[];
+  matchers: CloudflareEmailRoutingMatcher[];
+  priority?: number;
+  tag?: string;
+}
+
+export interface CloudflareEmailRoutingSettings {
+  id: string;
+  enabled: boolean;
+  name: string;
+  status?: 'ready' | 'unconfigured' | 'misconfigured' | 'misconfigured/locked' | 'unlocked' | string;
+  created?: string;
+  modified?: string;
+  skip_wizard?: boolean;
+  tag?: string;
+}
+
+export interface CloudflareEmailRoutingDnsRecord {
+  type?: string;
+  name?: string;
+  content?: string;
+  priority?: number;
+  ttl?: number;
+}
+
+export interface CloudflareEmailRoutingDnsSettings {
+  record?: CloudflareEmailRoutingDnsRecord[];
+  errors?: Array<{ code?: string; missing?: CloudflareEmailRoutingDnsRecord }>;
 }
 
 interface CloudflareResponse<T> {
@@ -163,6 +221,154 @@ export class CloudflareAdapter implements IDnsProvider {
   async findZoneByName(domain: string): Promise<CloudflareZone | null> {
     const response = await this.request<CloudflareZone[]>('GET', `/zones?name=${encodeURIComponent(domain)}`);
     return response.result[0] ?? null;
+  }
+
+  async getEmailRoutingSettings(zoneId: string): Promise<CloudflareEmailRoutingSettings> {
+    const response = await this.request<CloudflareEmailRoutingSettings>('GET', `/zones/${zoneId}/email/routing`);
+    return response.result;
+  }
+
+  async getEmailRoutingDnsSettings(zoneId: string): Promise<CloudflareEmailRoutingDnsSettings> {
+    const response = await this.request<CloudflareEmailRoutingDnsSettings>('GET', `/zones/${zoneId}/email/routing/dns`);
+    return response.result;
+  }
+
+  async enableEmailRoutingDns(zoneId: string): Promise<CloudflareEmailRoutingDnsSettings> {
+    const response = await this.request<CloudflareEmailRoutingDnsSettings>('POST', `/zones/${zoneId}/email/routing/dns`);
+    return response.result;
+  }
+
+  async listEmailRoutingAddresses(accountId: string): Promise<CloudflareEmailRoutingAddress[]> {
+    const addresses: CloudflareEmailRoutingAddress[] = [];
+    let page = 1;
+    let hasMore = true;
+
+    while (hasMore) {
+      const response = await this.request<CloudflareEmailRoutingAddress[]>(
+        'GET',
+        `/accounts/${accountId}/email/routing/addresses?page=${page}&per_page=100`
+      );
+      addresses.push(...response.result);
+
+      if (response.result_info) {
+        hasMore = page < response.result_info.total_pages;
+        page++;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    return addresses;
+  }
+
+  async createEmailRoutingAddress(accountId: string, email: string): Promise<CloudflareEmailRoutingAddress> {
+    const response = await this.request<CloudflareEmailRoutingAddress>(
+      'POST',
+      `/accounts/${accountId}/email/routing/addresses`,
+      { email }
+    );
+    return response.result;
+  }
+
+  async deleteEmailRoutingAddress(accountId: string, addressId: string): Promise<{ id: string }> {
+    const response = await this.request<{ id: string }>(
+      'DELETE',
+      `/accounts/${accountId}/email/routing/addresses/${addressId}`
+    );
+    return response.result;
+  }
+
+  async listEmailRoutingRules(zoneId: string): Promise<CloudflareEmailRoutingRule[]> {
+    const rules: CloudflareEmailRoutingRule[] = [];
+    let page = 1;
+    let hasMore = true;
+
+    while (hasMore) {
+      const response = await this.request<CloudflareEmailRoutingRule[]>(
+        'GET',
+        `/zones/${zoneId}/email/routing/rules?page=${page}&per_page=100`
+      );
+      rules.push(...response.result);
+
+      if (response.result_info) {
+        hasMore = page < response.result_info.total_pages;
+        page++;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    return rules;
+  }
+
+  async createEmailRoutingRule(
+    zoneId: string,
+    rule: {
+      name?: string;
+      enabled?: boolean;
+      actions: CloudflareEmailRoutingAction[];
+      matchers: CloudflareEmailRoutingMatcher[];
+      priority?: number;
+    }
+  ): Promise<CloudflareEmailRoutingRule> {
+    const response = await this.request<CloudflareEmailRoutingRule>(
+      'POST',
+      `/zones/${zoneId}/email/routing/rules`,
+      rule as Record<string, unknown>
+    );
+    return response.result;
+  }
+
+  async updateEmailRoutingRule(
+    zoneId: string,
+    ruleId: string,
+    rule: {
+      name?: string;
+      enabled?: boolean;
+      actions: CloudflareEmailRoutingAction[];
+      matchers: CloudflareEmailRoutingMatcher[];
+      priority?: number;
+    }
+  ): Promise<CloudflareEmailRoutingRule> {
+    const response = await this.request<CloudflareEmailRoutingRule>(
+      'PUT',
+      `/zones/${zoneId}/email/routing/rules/${ruleId}`,
+      rule as Record<string, unknown>
+    );
+    return response.result;
+  }
+
+  async deleteEmailRoutingRule(zoneId: string, ruleId: string): Promise<{ id: string }> {
+    const response = await this.request<{ id: string }>(
+      'DELETE',
+      `/zones/${zoneId}/email/routing/rules/${ruleId}`
+    );
+    return response.result;
+  }
+
+  async getEmailRoutingCatchAll(zoneId: string): Promise<CloudflareEmailRoutingRule> {
+    const response = await this.request<CloudflareEmailRoutingRule>(
+      'GET',
+      `/zones/${zoneId}/email/routing/rules/catch_all`
+    );
+    return response.result;
+  }
+
+  async updateEmailRoutingCatchAll(
+    zoneId: string,
+    rule: {
+      name?: string;
+      enabled: boolean;
+      actions: CloudflareEmailRoutingAction[];
+      matchers: Array<{ type: 'all' }>;
+    }
+  ): Promise<CloudflareEmailRoutingRule> {
+    const response = await this.request<CloudflareEmailRoutingRule>(
+      'PUT',
+      `/zones/${zoneId}/email/routing/rules/catch_all`,
+      rule as Record<string, unknown>
+    );
+    return response.result;
   }
 
   async listDnsRecords(zoneId: string, type?: string): Promise<CloudflareDnsRecord[]> {
