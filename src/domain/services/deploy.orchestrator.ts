@@ -226,33 +226,20 @@ export class DeployOrchestrator {
             const currentBindings = currentEnvironment.platformBindings as Partial<HostingBindings>;
             const nextProjectId = receipt.data.projectId as string;
             const projectChanged = Boolean(currentBindings.projectId && currentBindings.projectId !== nextProjectId);
-            const isRailway = options.adapter.name === 'railway';
             const bindings: Partial<HostingBindings> = {
               provider: options.adapter.name,
               projectId: nextProjectId,
             };
-            if (isRailway) {
-              bindings.railwayProjectId = nextProjectId;
-            } else {
-              bindings.railwayProjectId = undefined;
-              bindings.railwayEnvironmentId = undefined;
-            }
 
             // Also store environment ID if provided
             if (receipt.data.environmentId) {
               bindings.environmentId = receipt.data.environmentId as string;
-              if (isRailway) {
-                bindings.railwayEnvironmentId = receipt.data.environmentId as string;
-              }
             }
             // If provider project was recreated/switched, drop stale service/environment bindings.
             if (projectChanged || receipt.data?.created === true) {
               bindings.services = undefined;
               if (!receipt.data.environmentId) {
                 bindings.environmentId = undefined;
-                if (isRailway) {
-                  bindings.railwayEnvironmentId = undefined;
-                }
               }
             }
 
@@ -433,20 +420,13 @@ export class DeployOrchestrator {
             }
             const resolvedEnvironmentId = typeof deployData.environmentId === 'string'
               ? deployData.environmentId
-              : typeof deployData.railwayEnvironmentId === 'string'
-                ? deployData.railwayEnvironmentId
-                : undefined;
+              : undefined;
             const bindingUpdates: Partial<HostingBindings> = {
               provider: options.adapter.name,
               services,
             };
             if (resolvedEnvironmentId) {
               bindingUpdates.environmentId = resolvedEnvironmentId;
-              if (options.adapter.name === 'railway') {
-                bindingUpdates.railwayEnvironmentId = resolvedEnvironmentId;
-              } else {
-                bindingUpdates.railwayEnvironmentId = undefined;
-              }
             }
             snapshotEnvironmentBindings({
               tx,

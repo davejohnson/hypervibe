@@ -58,8 +58,8 @@ export class RailwayLogWatcher extends LogWatcher {
     // Check if any environment in this project has Railway bindings
     const envs = this.envRepo.findByProjectId(projectId);
     return envs.some((env) => {
-      const bindings = env.platformBindings as { railwayProjectId?: string };
-      return !!bindings.railwayProjectId;
+      const bindings = env.platformBindings as { provider?: string; projectId?: string };
+      return bindings.provider === 'railway' && !!bindings.projectId;
     });
   }
 
@@ -76,12 +76,13 @@ export class RailwayLogWatcher extends LogWatcher {
     }
 
     const bindings = env.platformBindings as {
-      railwayProjectId?: string;
-      railwayEnvironmentId?: string;
+      provider?: string;
+      projectId?: string;
+      environmentId?: string;
       services?: Record<string, { serviceId: string }>;
     };
 
-    if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
+    if (bindings.provider !== 'railway' || !bindings.projectId || !bindings.environmentId) {
       console.warn('Environment not bound to Railway');
       return [];
     }
@@ -95,8 +96,8 @@ export class RailwayLogWatcher extends LogWatcher {
     try {
       // Get latest deployment
       const deployments = await this.adapter.getDeployments(
-        bindings.railwayProjectId,
-        bindings.railwayEnvironmentId,
+        bindings.projectId,
+        bindings.environmentId,
         serviceBinding.serviceId,
         1
       );

@@ -940,7 +940,7 @@ async function executeBootstrap(params: {
     const dbReceiptData = (dbProvision.receipt.data ?? {}) as Record<string, unknown>;
     const provisionProjectId =
       (typeof dbReceiptData.projectId === 'string' ? dbReceiptData.projectId : null) ??
-      (typeof dbReceiptData.railwayProjectId === 'string' ? dbReceiptData.railwayProjectId : null);
+      (typeof dbReceiptData.providerProjectId === 'string' ? dbReceiptData.providerProjectId : null);
     const provisionCreatedProject = dbReceiptData.ensureProjectCreated === true;
     if (params.databaseProvider === 'railway' && provisionCreatedProject && provisionProjectId) {
       tx.addStep({
@@ -1303,8 +1303,7 @@ async function executeBootstrap(params: {
       const latestBindings = latestEnvironment.platformBindings as Record<string, unknown>;
       const boundServices = (latestBindings.services as Record<string, { serviceId: string; url?: string }> | undefined) ?? {};
       const boundEnvironmentId =
-        (typeof latestBindings.environmentId === 'string' ? latestBindings.environmentId : null)
-        ?? (typeof latestBindings.railwayEnvironmentId === 'string' ? latestBindings.railwayEnvironmentId : null);
+        typeof latestBindings.environmentId === 'string' ? latestBindings.environmentId : null;
       const domainAdapter = hostingAdapter as IHostingAdapter & DomainConfigurableHostingAdapter;
       const targetService = serviceWorkloads[0];
       const targetServiceId = targetService ? boundServices[targetService.name]?.serviceId : undefined;

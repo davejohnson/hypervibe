@@ -91,12 +91,9 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     try {
-      // Check if we already have a project ID bound (check both new and legacy keys)
-      const bindings = environment.platformBindings as {
-        projectId?: string;
-        railwayProjectId?: string;
-      };
-      const existingProjectId = bindings.projectId || bindings.railwayProjectId;
+      // Check if we already have a project ID bound
+      const bindings = environment.platformBindings as { projectId?: string };
+      const existingProjectId = bindings.projectId;
       if (existingProjectId) {
         // Verify project still exists
         const query = gql`
@@ -392,11 +389,9 @@ export class RailwayAdapter implements IProviderAdapter {
 
     const bindings = environment.platformBindings as {
       projectId?: string;
-      railwayProjectId?: string;
       environmentId?: string;
-      railwayEnvironmentId?: string;
     };
-    const projectId = bindings.projectId || bindings.railwayProjectId;
+    const projectId = bindings.projectId;
     if (!projectId) {
       throw new Error('No Railway project bound to this environment');
     }
@@ -679,11 +674,8 @@ export class RailwayAdapter implements IProviderAdapter {
   ): Promise<string | undefined> {
     const client = this.client;
     if (!client) return undefined;
-    const bindings = environment.platformBindings as {
-      environmentId?: string;
-      railwayEnvironmentId?: string;
-    };
-    let environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
+    const bindings = environment.platformBindings as { environmentId?: string };
+    let environmentId = bindings.environmentId;
     const projectEnvironments = await this.listProjectEnvironments(projectId);
     const environmentIds = projectEnvironments.map((env) => env.id);
     if (environmentId && environmentIds.includes(environmentId)) {
@@ -1100,13 +1092,11 @@ export class RailwayAdapter implements IProviderAdapter {
 
     const bindings = environment.platformBindings as {
       projectId?: string;
-      railwayProjectId?: string;
       environmentId?: string;
-      railwayEnvironmentId?: string;
       services?: Record<string, { serviceId: string }>;
     };
-    const projectId = bindings.projectId || bindings.railwayProjectId;
-    let environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
+    const projectId = bindings.projectId;
+    let environmentId = bindings.environmentId;
 
     if (!projectId) {
       return {
@@ -1231,7 +1221,7 @@ export class RailwayAdapter implements IProviderAdapter {
         receipt: {
           success: true,
           message: `Deployment triggered for ${service.name}`,
-          data: { railwayServiceId, railwayEnvironmentId: railwayEnvId, createdService },
+          data: { railwayServiceId, environmentId: railwayEnvId, createdService },
         },
       };
     } catch (error) {
@@ -1258,13 +1248,11 @@ export class RailwayAdapter implements IProviderAdapter {
 
     const bindings = environment.platformBindings as {
       projectId?: string;
-      railwayProjectId?: string;
       environmentId?: string;
-      railwayEnvironmentId?: string;
       services?: Record<string, { serviceId: string }>;
     };
-    const projectId = bindings.projectId || bindings.railwayProjectId;
-      let environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
+    const projectId = bindings.projectId;
+    let environmentId = bindings.environmentId;
 
     if (!projectId) {
       return {

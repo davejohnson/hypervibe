@@ -9,8 +9,6 @@ type PlatformBindings = {
   provider?: string;
   projectId?: string;
   environmentId?: string;
-  railwayProjectId?: string;
-  railwayEnvironmentId?: string;
   services?: Record<string, {
     serviceId?: string;
     jobName?: string;
@@ -141,8 +139,8 @@ export async function readHostingEnvVars(params: {
   }
 
   if (provider === 'railway') {
-    const projectId = bindings.railwayProjectId ?? bindings.projectId;
-    const environmentId = bindings.railwayEnvironmentId ?? bindings.environmentId;
+    const projectId = bindings.projectId;
+    const environmentId = bindings.environmentId;
     const serviceId = bindings.services?.[params.service.name]?.serviceId;
     if (!projectId || !environmentId || !serviceId) {
       return {

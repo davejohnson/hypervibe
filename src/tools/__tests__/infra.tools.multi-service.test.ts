@@ -93,8 +93,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'db ready',
             data: {
-              projectId: 'rail-project-1',
-              railwayProjectId: 'rail-project-1',
+              providerProjectId: 'rail-project-1',
               ensureProjectCreated: false,
             },
           },
@@ -150,7 +149,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'deployed',
             data: {
-              railwayEnvironmentId: 'rail-env-1',
+              environmentId: 'rail-env-1',
             },
           },
         };
@@ -350,7 +349,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'deployed',
             data: {
-              railwayEnvironmentId: 'rail-env-1',
+              environmentId: 'rail-env-1',
             },
           },
         };
@@ -568,8 +567,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'db ready',
             data: {
-              projectId: 'rail-project-1',
-              railwayProjectId: 'rail-project-1',
+              providerProjectId: 'rail-project-1',
               ensureProjectCreated: false,
             },
           },
@@ -624,7 +622,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'deployed',
             data: {
-              railwayEnvironmentId: 'rail-env-1',
+              environmentId: 'rail-env-1',
             },
           },
         };
@@ -790,8 +788,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'db ready',
             data: {
-              projectId: 'rail-project-1',
-              railwayProjectId: 'rail-project-1',
+              providerProjectId: 'rail-project-1',
               ensureProjectCreated: false,
             },
           },
@@ -853,7 +850,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'deployed',
             data: {
-              railwayEnvironmentId: 'rail-env-1',
+              environmentId: 'rail-env-1',
             },
           },
         };
@@ -959,8 +956,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'db ready',
             data: {
-              projectId: 'rail-project-1',
-              railwayProjectId: 'rail-project-1',
+              providerProjectId: 'rail-project-1',
               ensureProjectCreated: false,
             },
           },
@@ -1017,7 +1013,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'deployed',
             data: {
-              railwayEnvironmentId: 'rail-env-1',
+              environmentId: 'rail-env-1',
             },
           },
         };
@@ -1132,8 +1128,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'db ready',
             data: {
-              projectId: 'rail-project-1',
-              railwayProjectId: 'rail-project-1',
+              providerProjectId: 'rail-project-1',
               ensureProjectCreated: false,
             },
           },
@@ -1204,7 +1199,7 @@ describe('infra_apply multi-service convergence', () => {
             success: true,
             message: 'deployed',
             data: {
-              railwayEnvironmentId: 'rail-env-1',
+              environmentId: 'rail-env-1',
             },
           },
         };
@@ -1343,7 +1338,7 @@ describe('infra_apply multi-service convergence', () => {
           receipt: {
             success: true,
             message: 'db ready',
-            data: { projectId: 'rail-project-1', railwayProjectId: 'rail-project-1' },
+            data: { providerProjectId: 'rail-project-1' },
           },
           connectionUrl: 'postgres://shared-db',
           envVars: { DATABASE_URL: 'postgres://shared-db' },
@@ -1381,7 +1376,7 @@ describe('infra_apply multi-service convergence', () => {
           serviceId: service.id,
           externalId: `rail-${service.name}`,
           status: 'deployed',
-          receipt: { success: true, message: 'deployed', data: { railwayEnvironmentId: 'rail-env-1' } },
+          receipt: { success: true, message: 'deployed', data: { environmentId: 'rail-env-1' } },
         };
       },
       async setEnvVars() {

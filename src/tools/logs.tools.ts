@@ -64,13 +64,12 @@ async function fetchProviderLogs(
 ): Promise<{ deploymentStatus?: string; deploymentId?: string; logs: UnifiedLog[] }> {
   const bindings = environment.platformBindings as {
     projectId?: string;
-    railwayProjectId?: string;
-    railwayEnvironmentId?: string;
+    environmentId?: string;
     services?: Record<string, { serviceId: string }>;
   };
 
   if (provider === 'railway') {
-    if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId || !bindings.services?.[serviceName]) {
+    if (!bindings.projectId || !bindings.environmentId || !bindings.services?.[serviceName]) {
       throw new Error('Environment/service not fully bound to Railway');
     }
     const connection = connectionRepo.findByProvider('railway');
@@ -84,8 +83,8 @@ async function fetchProviderLogs(
     await adapter.connect(credentials);
 
     const deployments = await adapter.getDeployments(
-      bindings.railwayProjectId,
-      bindings.railwayEnvironmentId,
+      bindings.projectId,
+      bindings.environmentId,
       bindings.services[serviceName].serviceId,
       1
     );
@@ -337,15 +336,14 @@ export function registerLogsTools(server: McpServer): void {
       const bindings = environment.platformBindings as {
         provider?: string;
         projectId?: string;
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
+        environmentId?: string;
         services?: Record<string, { serviceId: string }>;
       };
       const provider = detectProviderName(project.defaultPlatform, bindings.provider);
 
       try {
         if (provider === 'railway') {
-          if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
+          if (!bindings.projectId || !bindings.environmentId) {
             return {
               content: [{
                 type: 'text' as const,
@@ -375,8 +373,8 @@ export function registerLogsTools(server: McpServer): void {
           }
 
           const deployments = await adapter.getDeployments(
-            bindings.railwayProjectId,
-            bindings.railwayEnvironmentId,
+            bindings.projectId,
+            bindings.environmentId,
             serviceId,
             limit
           );
@@ -791,8 +789,7 @@ export function registerLogsTools(server: McpServer): void {
       const bindings = environment.platformBindings as {
         provider?: string;
         projectId?: string;
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
+        environmentId?: string;
         services?: Record<string, { serviceId: string }>;
       };
       const provider = detectProviderName(project.defaultPlatform, bindings.provider);
@@ -808,7 +805,7 @@ export function registerLogsTools(server: McpServer): void {
 
       try {
         if (provider === 'railway') {
-          if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
+          if (!bindings.projectId || !bindings.environmentId) {
             return {
               content: [{
                 type: 'text' as const,
@@ -836,8 +833,8 @@ export function registerLogsTools(server: McpServer): void {
 
           if (!targetDeploymentId) {
             const deployments = await adapter.getDeployments(
-              bindings.railwayProjectId,
-              bindings.railwayEnvironmentId,
+              bindings.projectId,
+              bindings.environmentId,
               bindings.services[serviceName].serviceId,
               1
             );

@@ -25,6 +25,70 @@ const MUTATION_PATTERNS = [
   /^\s*REVOKE\s+/i,
 ];
 
+/**
+ * Strip string literals and comments so safety checks can't be evaded by
+ * hiding keywords in comments/strings or prefixing statements with comments.
+ * Handles -- line comments, nested block comments, '...' (with '' escapes),
+ * "..." identifiers, and $tag$...$tag$ dollar quoting.
+ */
+export function stripSqlLiteralsAndComments(sql: string): string {
+  let result = '';
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === '-' && next === '-') {
+      while (i < n && sql[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') { depth++; i += 2; continue; }
+        if (sql[i] === '*' && sql[i + 1] === '/') { depth--; i += 2; continue; }
+        i++;
+      }
+      result += ' ';
+      continue;
+    }
+    if (ch === "'") {
+      i++;
+      while (i < n) {
+        if (sql[i] === "'" && sql[i + 1] === "'") { i += 2; continue; }
+        if (sql[i] === "'") { i++; break; }
+        i++;
+      }
+      result += "''";
+      continue;
+    }
+    if (ch === '"') {
+      i++;
+      while (i < n) {
+        if (sql[i] === '"' && sql[i + 1] === '"') { i += 2; continue; }
+        if (sql[i] === '"') { i++; break; }
+        i++;
+      }
+      result += '""';
+      continue;
+    }
+    if (ch === '$') {
+      const match = sql.slice(i).match(/^\$[A-Za-z_]*\$/);
+      if (match) {
+        const tag = match[0];
+        const end = sql.indexOf(tag, i + tag.length);
+        i = end === -1 ? n : end + tag.length;
+        result += "''";
+        continue;
+      }
+    }
+    result += ch;
+    i++;
+  }
+  return result;
+}
+
 export interface QueryResult {
   success: boolean;
   rows?: Record<string, unknown>[];
@@ -63,20 +127,39 @@ export class DatabaseAdapter {
 
   /**
    * Check if a query is a mutation (INSERT, UPDATE, DELETE, etc.)
+   * Comments and string literals are stripped first so keywords cannot be
+   * hidden behind a leading comment or inside a data-modifying CTE.
    */
   isMutationQuery(sql: string): boolean {
-    return MUTATION_PATTERNS.some(pattern => pattern.test(sql.trim()));
+    const stripped = stripSqlLiteralsAndComments(sql).trim();
+    if (MUTATION_PATTERNS.some(pattern => pattern.test(stripped))) return true;
+    // Data-modifying CTEs: WITH x AS (DELETE ... RETURNING *) SELECT ...
+    if (/^WITH\b/i.test(stripped) && /\b(INSERT|UPDATE|DELETE)\b/i.test(stripped)) return true;
+    // SELECT ... INTO creates a new table
+    if (/^SELECT\b/i.test(stripped) && /\bINTO\b/i.test(stripped)) return true;
+    return false;
+  }
+
+  /**
+   * Check if SQL contains more than one statement (e.g. "SELECT 1; DROP TABLE x").
+   */
+  isMultiStatement(sql: string): boolean {
+    const stripped = stripSqlLiteralsAndComments(sql);
+    const semi = stripped.indexOf(';');
+    if (semi === -1) return false;
+    return stripped.slice(semi + 1).trim().length > 0;
   }
 
   /**
    * Analyze a query and return warnings
    */
-  analyzeQuery(sql: string): { isMutation: boolean; warnings: string[] } {
+  analyzeQuery(sql: string): { isMutation: boolean; multiStatement: boolean; warnings: string[] } {
     const warnings: string[] = [];
     const isMutation = this.isMutationQuery(sql);
+    const multiStatement = this.isMultiStatement(sql);
 
     if (isMutation) {
-      const trimmed = sql.trim().toLowerCase();
+      const trimmed = stripSqlLiteralsAndComments(sql).trim().toLowerCase();
 
       if (trimmed.startsWith('delete') && !trimmed.includes('where')) {
         warnings.push('DELETE without WHERE clause will affect all rows');
@@ -92,7 +175,7 @@ export class DatabaseAdapter {
       }
     }
 
-    return { isMutation, warnings };
+    return { isMutation, multiStatement, warnings };
   }
 
   /**

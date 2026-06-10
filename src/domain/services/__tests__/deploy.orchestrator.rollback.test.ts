@@ -32,9 +32,7 @@ describe('DeployOrchestrator local rollback', () => {
     const originalBindings = {
       provider: 'railway',
       projectId: 'rail-old-project',
-      railwayProjectId: 'rail-old-project',
       environmentId: 'rail-old-env',
-      railwayEnvironmentId: 'rail-old-env',
       services: {
         web: {
           serviceId: 'rail-old-service',
@@ -91,7 +89,7 @@ describe('DeployOrchestrator local rollback', () => {
             message: 'deploy started',
             data: {
               createdService: true,
-              railwayEnvironmentId: 'rail-new-env',
+              environmentId: 'rail-new-env',
             },
           },
         };
@@ -135,9 +133,7 @@ describe('DeployOrchestrator local rollback', () => {
       platformBindings: {
         provider: 'railway',
         projectId: 'rail-old-project',
-        railwayProjectId: 'rail-old-project',
         environmentId: 'rail-old-env',
-        railwayEnvironmentId: 'rail-old-env',
       },
     });
     const service = serviceRepo.create({

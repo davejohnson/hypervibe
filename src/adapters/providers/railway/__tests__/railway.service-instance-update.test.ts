@@ -191,7 +191,6 @@ describe('RailwayAdapter service instance updates', () => {
       name: 'production',
       platformBindings: {
         projectId: 'rail-project-1',
-        railwayProjectId: 'rail-project-1',
         services: {},
       },
       createdAt: new Date(),

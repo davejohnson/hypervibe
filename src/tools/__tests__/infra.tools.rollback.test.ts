@@ -54,9 +54,7 @@ describe('infra_apply local rollback coverage', () => {
     const originalBindings = {
       provider: 'railway',
       projectId: 'rail-original-project',
-      railwayProjectId: 'rail-original-project',
       environmentId: 'rail-original-env',
-      railwayEnvironmentId: 'rail-original-env',
     };
     const environment = envRepo.create({
       projectId: project.id,
@@ -87,9 +85,7 @@ describe('infra_apply local rollback coverage', () => {
         envRepo.updatePlatformBindings(env.id, {
           provider: 'railway',
           projectId: 'rail-stale-project',
-          railwayProjectId: 'rail-stale-project',
           environmentId: 'rail-stale-env',
-          railwayEnvironmentId: 'rail-stale-env',
           services: {
             web: { serviceId: 'rail-stale-service' },
           },

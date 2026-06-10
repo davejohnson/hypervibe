@@ -635,8 +635,9 @@ async function performImport(
       projectId: project.id,
       name: infraType,
       platformBindings: {
-        railwayProjectId: details.id,
-        railwayEnvironmentId: railwayEnv.node.id,
+        provider: 'railway',
+        projectId: details.id,
+        environmentId: railwayEnv.node.id,
         services: {},
       },
     });
@@ -675,8 +676,9 @@ async function performImport(
       const existingEnv = envRepo.findById(env.id);
       if (existingEnv) {
         const bindings = existingEnv.platformBindings as {
-          railwayProjectId?: string;
-          railwayEnvironmentId?: string;
+          provider?: string;
+          projectId?: string;
+          environmentId?: string;
           services?: Record<string, { serviceId: string }>;
         };
         bindings.services = bindings.services || {};
@@ -714,7 +716,7 @@ async function performImport(
     details: {
       name: project.name,
       source: 'railway',
-      railwayProjectId: details.id,
+      providerProjectId: details.id,
       environmentCount: createdEnvironments.length,
       serviceCount: createdServices.length,
       componentCount: createdComponents.length,

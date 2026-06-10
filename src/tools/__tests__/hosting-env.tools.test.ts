@@ -195,14 +195,12 @@ describe('hosting env var tools', () => {
     await Promise.all([client.close(), server.close()]);
   });
 
-  it('sendgrid_setup does not let stale Railway bindings override a Cloud Run project', async () => {
+  it('sendgrid_setup resolves the Cloud Run provider from generic bindings', async () => {
     const { environment } = await setupCloudRunProject();
     new EnvironmentRepository().update(environment.id, {
       platformBindings: {
         projectId: 'gcp-project',
         environmentId: 'us-central1',
-        railwayProjectId: 'stale-railway-project',
-        railwayEnvironmentId: 'stale-railway-env',
         services: {
           web: { serviceId: 'gcp-project-web' },
         },

@@ -107,8 +107,8 @@ describe('workflow mode tools', () => {
       name: 'production',
       platformBindings: {
         provider: 'railway',
-        railwayProjectId: 'rail-project-1',
-        railwayEnvironmentId: 'rail-env-1',
+        projectId: 'rail-project-1',
+        environmentId: 'rail-env-1',
         services: {
           web: {
             serviceId: 'rail-web',

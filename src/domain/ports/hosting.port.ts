@@ -42,13 +42,9 @@ export interface HostingBindings {
 
   /** External project/app ID on the hosting platform */
   projectId: string;
-  /** Legacy provider-specific project key kept for backward compatibility */
-  railwayProjectId?: string;
 
   /** External environment ID (if platform supports multi-env) */
   environmentId?: string;
-  /** Legacy provider-specific environment key kept for backward compatibility */
-  railwayEnvironmentId?: string;
 
   /** Map of service names to their external IDs */
   services: Record<string, {

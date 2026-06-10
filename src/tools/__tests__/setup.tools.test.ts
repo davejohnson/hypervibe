@@ -65,7 +65,6 @@ describe('setup tools', () => {
       platformBindings: {
         provider: 'railway',
         projectId: 'rail-project-1',
-        railwayProjectId: 'rail-project-1',
       },
     });
 
@@ -172,7 +171,6 @@ describe('setup tools', () => {
       platformBindings: {
         provider: 'railway',
         projectId: 'rail-project-1',
-        railwayProjectId: 'rail-project-1',
       },
     });
 
@@ -278,7 +276,6 @@ describe('setup tools', () => {
       platformBindings: {
         provider: 'railway',
         projectId: 'rail-project-1',
-        railwayProjectId: 'rail-project-1',
       },
     });
 

@@ -240,6 +240,35 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_approvals_env ON approvals(environment_name);
     `,
   },
+  {
+    version: 7,
+    name: 'platform_bindings_v2',
+    up: `
+      -- Migrate environment platform bindings off legacy railway* keys.
+      -- 1. Infer provider for rows that only carry legacy Railway bindings.
+      UPDATE environments
+      SET platform_bindings = json_set(platform_bindings, '$.provider', 'railway')
+      WHERE json_extract(platform_bindings, '$.provider') IS NULL
+        AND json_extract(platform_bindings, '$.railwayProjectId') IS NOT NULL;
+
+      -- 2. Copy legacy keys to generic keys where the generic key is missing.
+      UPDATE environments
+      SET platform_bindings = json_set(platform_bindings, '$.projectId', json_extract(platform_bindings, '$.railwayProjectId'))
+      WHERE json_extract(platform_bindings, '$.projectId') IS NULL
+        AND json_extract(platform_bindings, '$.railwayProjectId') IS NOT NULL;
+
+      UPDATE environments
+      SET platform_bindings = json_set(platform_bindings, '$.environmentId', json_extract(platform_bindings, '$.railwayEnvironmentId'))
+      WHERE json_extract(platform_bindings, '$.environmentId') IS NULL
+        AND json_extract(platform_bindings, '$.railwayEnvironmentId') IS NOT NULL;
+
+      -- 3. Drop the legacy keys everywhere.
+      UPDATE environments
+      SET platform_bindings = json_remove(platform_bindings, '$.railwayProjectId', '$.railwayEnvironmentId')
+      WHERE json_extract(platform_bindings, '$.railwayProjectId') IS NOT NULL
+         OR json_extract(platform_bindings, '$.railwayEnvironmentId') IS NOT NULL;
+    `,
+  },
 ];
 
 export class SqliteAdapter {

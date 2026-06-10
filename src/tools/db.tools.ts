@@ -88,8 +88,6 @@ export function registerDbTools(server: McpServer): void {
         provider?: string;
         projectId?: string;
         environmentId?: string;
-        railwayProjectId?: string;
-        railwayEnvironmentId?: string;
         services?: Record<string, { serviceId: string }>;
       };
       const hostingProvider = hostingProviderForEnvironment(project, env);
@@ -200,7 +198,7 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
-      if (!bindings.railwayProjectId || !bindings.railwayEnvironmentId) {
+      if (!bindings.projectId || !bindings.environmentId) {
         return {
           content: [{
             type: 'text' as const,
@@ -227,8 +225,8 @@ export function registerDbTools(server: McpServer): void {
 
       try {
         const result = await adapter.executeCommand(
-          bindings.railwayProjectId,
-          bindings.railwayEnvironmentId,
+          bindings.projectId,
+          bindings.environmentId,
           serviceBinding.serviceId,
           migrationCommand
         );
@@ -1606,6 +1604,23 @@ export function registerDbTools(server: McpServer): void {
 
       const analysis = dbAdapter.analyzeQuery(sql);
 
+      // Reject multi-statement SQL outright: it can smuggle mutations past
+      // the mutation check (e.g. "SELECT 1; DROP TABLE users").
+      if (analysis.multiStatement) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: 'Multi-statement SQL is not allowed',
+              source,
+              hint: 'Run one statement per db_query call.',
+              query: sql.substring(0, 100) + (sql.length > 100 ? '...' : ''),
+            }),
+          }],
+        };
+      }
+
       // Check mutation safety
       if (analysis.isMutation && !allowMutations) {
         return {
@@ -1710,16 +1725,15 @@ async function resolveEnvironmentDatabaseUrl(
   }
 
   const bindings = env.platformBindings as {
+    provider?: string;
     projectId?: string;
-    railwayProjectId?: string;
     environmentId?: string;
-    railwayEnvironmentId?: string;
     services?: Record<string, { serviceId: string }>;
   };
-  const projectId = bindings.projectId || bindings.railwayProjectId;
-  const environmentId = bindings.environmentId || bindings.railwayEnvironmentId;
+  const projectId = bindings.projectId;
+  const environmentId = bindings.environmentId;
 
-  if (!projectId || !environmentId) {
+  if (bindings.provider !== 'railway' || !projectId || !environmentId) {
     return null;
   }
 
@@ -1849,7 +1863,10 @@ function databaseMigrationStrategyStatus(strategy: (typeof DB_MIGRATION_STRATEGI
 }
 
 function maskDatabaseUrl(url: string): string {
-  return url.replace(/:([^:@]+)@/, ':***@');
+  // Mask both username and password: postgres://user:pass@host → postgres://***:***@host
+  return url
+    .replace(/\/\/([^:@/]+):([^@]*)@/, '//***:***@')
+    .replace(/\/\/([^:@/]+)@/, '//***@');
 }
 
 function overrideDatabaseName(url: string, databaseName?: string): string {

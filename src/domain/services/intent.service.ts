@@ -23,15 +23,16 @@ interface IntentEnvironmentSummary {
   name: string;
   kind: 'local' | 'staging' | 'production' | 'custom';
   hosting: {
-    railwayBound: boolean;
-    railwayEnvironmentId?: string;
+    provider?: string;
+    bound: boolean;
+    providerEnvironmentId?: string;
     boundServices: string[];
   };
   services: Array<{
     name: string;
     builder?: string;
     workloadKind: string;
-    railwayServiceBound: boolean;
+    serviceBound: boolean;
   }>;
   components: Array<{
     type: string;
@@ -310,8 +311,9 @@ function buildIntent(project: Project): ProjectIntentSchema {
 
   const environmentSummaries: IntentEnvironmentSummary[] = environments.map((env) => {
     const bindings = env.platformBindings as {
-      railwayEnvironmentId?: string;
-      railwayProjectId?: string;
+      provider?: string;
+      projectId?: string;
+      environmentId?: string;
       services?: Record<string, { serviceId: string }>;
     };
     const serviceBindings = bindings.services ?? {};
@@ -321,15 +323,16 @@ function buildIntent(project: Project): ProjectIntentSchema {
       name: env.name,
       kind: classifyEnvironment(env.name),
       hosting: {
-        railwayBound: Boolean(bindings.railwayProjectId),
-        railwayEnvironmentId: bindings.railwayEnvironmentId,
+        provider: bindings.provider,
+        bound: Boolean(bindings.projectId),
+        providerEnvironmentId: bindings.environmentId,
         boundServices: Object.keys(serviceBindings),
       },
       services: services.map((service) => ({
         name: service.name,
         builder: service.buildConfig.builder,
         workloadKind: serviceWorkloadKind(service),
-        railwayServiceBound: Boolean(serviceBindings[service.name]?.serviceId),
+        serviceBound: Boolean(serviceBindings[service.name]?.serviceId),
       })),
       components: components.map((component) => ({
         type: component.type,

@@ -38,8 +38,8 @@ async function resolveRailwayProjectDetails(
   if (project) {
     const envs = envRepo.findByProjectId(project.id);
     for (const env of envs) {
-      const bindings = env.platformBindings as { projectId?: string; railwayProjectId?: string };
-      const providerProjectId = bindings.projectId || bindings.railwayProjectId;
+      const bindings = env.platformBindings as { projectId?: string };
+      const providerProjectId = bindings.projectId;
       if (!providerProjectId) continue;
       const details = await adapter.getProjectDetails(providerProjectId);
       if (details) {

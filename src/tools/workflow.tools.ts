@@ -532,8 +532,6 @@ function summarizeEnvironment(environment: Environment, services: Service[], com
     provider?: string;
     projectId?: string;
     environmentId?: string;
-    railwayProjectId?: string;
-    railwayEnvironmentId?: string;
     services?: Record<string, { serviceId?: string; url?: string; customDomains?: string[] }>;
     domains?: Record<string, unknown>;
   };
@@ -541,8 +539,8 @@ function summarizeEnvironment(environment: Environment, services: Service[], com
   return {
     name: environment.name,
     provider: bindings.provider,
-    providerProjectId: bindings.projectId ?? bindings.railwayProjectId,
-    providerEnvironmentId: bindings.environmentId ?? bindings.railwayEnvironmentId,
+    providerProjectId: bindings.projectId,
+    providerEnvironmentId: bindings.environmentId,
     services: services.map((service) => ({
       name: service.name,
       workloadKind: serviceWorkloadKind(service),
