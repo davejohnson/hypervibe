@@ -3,27 +3,25 @@ import { z } from 'zod';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
-import { ApprovalRepository } from '../adapters/db/repositories/approval.repository.js';
-import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
-import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { DeployOrchestrator } from '../domain/services/deploy.orchestrator.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
-import { getProjectScopeHints } from '../domain/services/project-scope.js';
-import { hostingProviderForEnvironment, providerDisplayName } from './hosting-env.js';
-import type { Project } from '../domain/entities/project.entity.js';
-import type { BuildConfig, WorkloadKind } from '../domain/entities/service.entity.js';
-import type { GitHubCredentials } from '../adapters/providers/github/github.adapter.js';
-import { normalizeGitRemoteForBuild } from '../lib/git-remote.js';
+import { hostingProviderForEnvironment, providerDisplayName } from '../domain/services/hosting-env.service.js';
+import { requiresProductionConfirm } from '../domain/services/policy.service.js';
+import { buildDeploySourceEnvVars, definedBuildConfigUpdates } from '../domain/services/deploy-source.js';
+import {
+  removeServiceFromDesiredState,
+  updateServiceInDesiredState,
+  serviceBindingFor,
+  removeServiceBinding,
+} from '../domain/services/spec.service.js';
 
 import { resolveProject } from './resolve-project.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const runRepo = new RunRepository();
-const approvalRepo = new ApprovalRepository();
-const connectionRepo = new ConnectionRepository();
 const projectRepo = new ProjectRepository();
 
 function toolResponse(data: Record<string, unknown>) {
@@ -46,154 +44,6 @@ function resolveEnvironment(
   return envRepo.findByProjectAndName(projectId, 'staging');
 }
 
-export function requiresProductionConfirm(project: { policies: Record<string, unknown> }, environmentName: string): boolean {
-  const policies = project.policies ?? {};
-  const protectedEnvs = Array.isArray(policies.protectedEnvironments)
-    ? (policies.protectedEnvironments as unknown[]).map((v) => String(v).toLowerCase())
-    : [];
-  return protectedEnvs.includes(environmentName.toLowerCase());
-}
-
-export function approvalsRequired(project: { policies: Record<string, unknown> }, environmentName: string): boolean {
-  if (!requiresProductionConfirm(project, environmentName)) return false;
-  const explicit = project.policies?.requireApprovalForProtectedEnvironments;
-  if (explicit === false) return false;
-  return true;
-}
-
-function buildDeploySourceEnvVars(project: Project, adapterName: string): Record<string, string> {
-  const sourceRepoUrl = normalizeGitRemoteForBuild(project.gitRemoteUrl);
-  if (!sourceRepoUrl) {
-    return {};
-  }
-
-  const sourceEnvVars: Record<string, string> = {
-    HYPERVIBE_SOURCE_REPO_URL: sourceRepoUrl,
-    HYPERVIBE_SOURCE_REVISION: 'main',
-  };
-
-  if (adapterName === 'cloudrun') {
-    const githubConnection = connectionRepo.findBestMatchFromHints('github', getProjectScopeHints(project));
-    if (githubConnection) {
-      const githubCredentials = getSecretStore().decryptObject<GitHubCredentials>(githubConnection.credentialsEncrypted);
-      if (githubCredentials.apiToken) {
-        sourceEnvVars.HYPERVIBE_GITHUB_TOKEN = githubCredentials.apiToken;
-      }
-    }
-  }
-
-  return sourceEnvVars;
-}
-
-function definedBuildConfigUpdates(updates: {
-  workloadKind?: WorkloadKind;
-  builder?: 'nixpacks' | 'dockerfile' | 'buildpack';
-  dockerfilePath?: string;
-  buildCommand?: string;
-  startCommand?: string;
-  releaseCommand?: string;
-  healthCheckPath?: string;
-  cronSchedule?: string;
-  public?: boolean;
-}): Partial<BuildConfig> {
-  const buildConfig: Partial<BuildConfig> = {};
-  for (const [key, value] of Object.entries(updates) as Array<[keyof BuildConfig, unknown]>) {
-    if (value !== undefined) {
-      buildConfig[key] = value as never;
-    }
-  }
-  return buildConfig;
-}
-
-function removeServiceFromDesiredState(
-  desiredState: Record<string, unknown> | undefined,
-  serviceName: string
-): Record<string, unknown> | undefined {
-  if (!desiredState) return undefined;
-  const next = { ...desiredState };
-  if (Array.isArray(next.services)) {
-    next.services = next.services.filter((name) => name !== serviceName);
-  }
-  for (const key of ['serviceConfig', 'crons'] as const) {
-    const value = next[key];
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      const record = { ...(value as Record<string, unknown>) };
-      delete record[serviceName];
-      next[key] = record;
-    }
-  }
-  return next;
-}
-
-function updateServiceInDesiredState(
-  desiredState: Record<string, unknown> | undefined,
-  previousName: string,
-  nextName: string,
-  buildConfig: BuildConfig
-): Record<string, unknown> | undefined {
-  if (!desiredState) return undefined;
-  const next = { ...desiredState };
-  if (Array.isArray(next.services)) {
-    next.services = next.services.map((name) => name === previousName ? nextName : name);
-  }
-
-  const serviceConfig = next.serviceConfig && typeof next.serviceConfig === 'object' && !Array.isArray(next.serviceConfig)
-    ? { ...(next.serviceConfig as Record<string, unknown>) }
-    : {};
-  const existingConfig = serviceConfig[previousName] && typeof serviceConfig[previousName] === 'object'
-    ? { ...(serviceConfig[previousName] as Record<string, unknown>) }
-    : {};
-  delete serviceConfig[previousName];
-  serviceConfig[nextName] = {
-    ...existingConfig,
-    ...(buildConfig.startCommand ? { startCommand: buildConfig.startCommand } : {}),
-    ...(buildConfig.releaseCommand ? { releaseCommand: buildConfig.releaseCommand } : {}),
-    ...(buildConfig.healthCheckPath ? { healthCheckPath: buildConfig.healthCheckPath } : {}),
-    ...(typeof buildConfig.public === 'boolean' ? { public: buildConfig.public } : {}),
-  };
-  if (Object.keys(serviceConfig[nextName] as Record<string, unknown>).length > 0) {
-    next.serviceConfig = serviceConfig;
-  }
-
-  const crons = next.crons && typeof next.crons === 'object' && !Array.isArray(next.crons)
-    ? { ...(next.crons as Record<string, unknown>) }
-    : {};
-  if (buildConfig.workloadKind === 'cron' || buildConfig.cronSchedule) {
-    delete crons[previousName];
-    crons[nextName] = {
-      schedule: buildConfig.cronSchedule,
-      ...(buildConfig.startCommand ? { command: buildConfig.startCommand } : {}),
-    };
-    next.crons = crons;
-  } else if (crons[previousName]) {
-    delete crons[previousName];
-    next.crons = crons;
-  }
-
-  return next;
-}
-
-function serviceBindingFor(
-  environment: { platformBindings: Record<string, unknown> },
-  serviceName: string
-): Record<string, unknown> | undefined {
-  const bindings = environment.platformBindings;
-  const services = bindings.services;
-  if (!services || typeof services !== 'object' || Array.isArray(services)) return undefined;
-  const serviceBinding = (services as Record<string, unknown>)[serviceName];
-  return serviceBinding && typeof serviceBinding === 'object' && !Array.isArray(serviceBinding)
-    ? serviceBinding as Record<string, unknown>
-    : undefined;
-}
-
-function removeServiceBinding(environmentId: string, environment: { platformBindings: Record<string, unknown> }, serviceName: string) {
-  const services = environment.platformBindings.services && typeof environment.platformBindings.services === 'object' && !Array.isArray(environment.platformBindings.services)
-    ? { ...(environment.platformBindings.services as Record<string, unknown>) }
-    : {};
-  delete services[serviceName];
-  envRepo.updatePlatformBindings(environmentId, { services });
-}
-
 export function registerDeployTools(server: McpServer): void {
   server.tool(
     'deploy',
@@ -206,9 +56,8 @@ export function registerDeployTools(server: McpServer): void {
       services: z.array(z.string()).optional().describe('Specific services to deploy (default: all)'),
       envVars: z.record(z.string()).optional().describe('Additional environment variables'),
       confirmProduction: z.boolean().optional().describe('Required when deploying to protected environments'),
-      approvalId: z.string().uuid().optional().describe('Approval ID (required when policy requires approvals for protected environments)'),
     },
-    async ({ projectId, projectName, environmentId, environmentName, services, envVars, confirmProduction, approvalId }) => {
+    async ({ projectId, projectName, environmentId, environmentName, services, envVars, confirmProduction }) => {
       // Resolve project
       const project = resolveProject({ projectId, projectName });
       if (!project) {
@@ -246,31 +95,6 @@ export function registerDeployTools(server: McpServer): void {
             }),
           }],
         };
-      }
-
-      if (approvalsRequired(project, environment.name)) {
-        if (!approvalId) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: false,
-                error: `Approval required for protected environment "${environment.name}". Create one with approval_request_create and re-run with approvalId.`,
-                requiredAction: 'deploy',
-              }),
-            }],
-          };
-        }
-
-        const validation = approvalRepo.validateForAction(approvalId, project.id, environment.name, 'deploy');
-        if (!validation.ok) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({ success: false, error: validation.error }),
-            }],
-          };
-        }
       }
 
       // Get hosting adapter for project's platform
@@ -325,10 +149,6 @@ export function registerDeployTools(server: McpServer): void {
         envVars: Object.keys(deployEnvVars).length > 0 ? deployEnvVars : undefined,
         adapter,
       });
-
-      if (approvalsRequired(project, environment.name) && approvalId) {
-        approvalRepo.consume(approvalId);
-      }
 
       return {
         content: [
@@ -410,9 +230,8 @@ export function registerDeployTools(server: McpServer): void {
       toRunId: z.string().uuid().optional().describe('Specific successful deploy run ID to roll back to'),
       services: z.array(z.string()).optional().describe('Specific services to rollback (default: all in target run)'),
       confirmProduction: z.boolean().optional().describe('Required when rolling back protected environments'),
-      approvalId: z.string().uuid().optional().describe('Approval ID (required when policy requires approvals for protected environments)'),
     },
-    async ({ projectId, projectName, environmentName = 'staging', toRunId, services, confirmProduction, approvalId }) => {
+    async ({ projectId, projectName, environmentName = 'staging', toRunId, services, confirmProduction }) => {
       const project = resolveProject({ projectId, projectName });
       if (!project) {
         return {
@@ -443,31 +262,6 @@ export function registerDeployTools(server: McpServer): void {
             }),
           }],
         };
-      }
-
-      if (approvalsRequired(project, environment.name)) {
-        if (!approvalId) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: false,
-                error: `Approval required for protected environment "${environment.name}". Create one with approval_request_create and re-run with approvalId.`,
-                requiredAction: 'deploy.rollback',
-              }),
-            }],
-          };
-        }
-
-        const validation = approvalRepo.validateForAction(approvalId, project.id, environment.name, 'deploy.rollback');
-        if (!validation.ok) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({ success: false, error: validation.error }),
-            }],
-          };
-        }
       }
 
       let targetRun = toRunId ? runRepo.findById(toRunId) : null;
@@ -539,10 +333,6 @@ export function registerDeployTools(server: McpServer): void {
         envVars: Object.keys(deployEnvVars).length > 0 ? deployEnvVars : undefined,
         adapter: adapterResult.adapter,
       });
-
-      if (approvalsRequired(project, environment.name) && approvalId) {
-        approvalRepo.consume(approvalId);
-      }
 
       return {
         content: [{

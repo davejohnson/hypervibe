@@ -26,20 +26,12 @@ export function mergeProjectPolicies(
   currentPolicies: Record<string, unknown> | undefined,
   updates: {
     protectedEnvironments?: string[];
-    requireApprovalForDestructive?: boolean;
-    requireApprovalForProtectedEnvironments?: boolean;
     desiredState?: Record<string, unknown>;
   }
 ): Record<string, unknown> {
   const nextPolicies = { ...(currentPolicies ?? {}) } as Record<string, unknown>;
   if (updates.protectedEnvironments !== undefined) {
     nextPolicies.protectedEnvironments = updates.protectedEnvironments;
-  }
-  if (updates.requireApprovalForDestructive !== undefined) {
-    nextPolicies.requireApprovalForDestructive = updates.requireApprovalForDestructive;
-  }
-  if (updates.requireApprovalForProtectedEnvironments !== undefined) {
-    nextPolicies.requireApprovalForProtectedEnvironments = updates.requireApprovalForProtectedEnvironments;
   }
   if (updates.desiredState !== undefined) {
     nextPolicies.desiredState = updates.desiredState;
@@ -235,16 +227,14 @@ export function registerProjectTools(server: McpServer): void {
 
   server.tool(
     'project_policy_set',
-    'Set project policy controls (protected environments, approval requirements, desired state).',
+    'Set project policy controls (protected environments, desired state).',
     {
       projectId: z.string().uuid().optional().describe('Project ID'),
       projectName: z.string().optional().describe('Project name'),
       protectedEnvironments: z.array(z.string()).optional().describe('Environments requiring confirm flags (e.g., production)'),
-      requireApprovalForDestructive: z.boolean().optional().describe('Require explicit confirm for destructive actions'),
-      requireApprovalForProtectedEnvironments: z.boolean().optional().describe('Require approval IDs for deploy/rollback/apply in protected environments (default: true)'),
       desiredState: z.record(z.unknown()).optional().describe('Optional desired-state object for infra_apply'),
     },
-    async ({ projectId, projectName, protectedEnvironments, requireApprovalForDestructive, requireApprovalForProtectedEnvironments, desiredState }) => {
+    async ({ projectId, projectName, protectedEnvironments, desiredState }) => {
       const project = resolveProject({ projectId, projectName });
       if (!project) {
         return {
@@ -257,8 +247,6 @@ export function registerProjectTools(server: McpServer): void {
 
       const nextPolicies = mergeProjectPolicies(project.policies ?? {}, {
         protectedEnvironments,
-        requireApprovalForDestructive,
-        requireApprovalForProtectedEnvironments,
         desiredState,
       });
 
@@ -270,8 +258,6 @@ export function registerProjectTools(server: McpServer): void {
         resourceId: project.id,
         details: {
           protectedEnvironments,
-          requireApprovalForDestructive,
-          requireApprovalForProtectedEnvironments,
           desiredStateSet: desiredState !== undefined,
         },
       });

@@ -21,7 +21,7 @@ import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { captureEnvironmentSnapshot, restoreEnvironmentSnapshot } from '../domain/services/local-state.transaction.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import { buildDatabaseEnvVarsFromComponent } from '../domain/services/database-env.js';
-import { hostingProviderForEnvironment } from './hosting-env.js';
+import { hostingProviderForEnvironment } from '../domain/services/hosting-env.service.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();

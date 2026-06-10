@@ -56,7 +56,6 @@ import { registerVisualizeTools } from './tools/visualize.tools.js';
 import { registerAutoFixTools } from './tools/autofix.tools.js';
 import { registerSecretsTools } from './tools/secrets.tools.js';
 import { registerInfraTools } from './tools/infra.tools.js';
-import { registerApprovalTools } from './tools/approval.tools.js';
 import { registerMarketingTools } from './tools/marketing.tools.js';
 import { registerWorkflowTools } from './tools/workflow.tools.js';
 import { registerGcpTools } from './tools/gcp.tools.js';
@@ -94,7 +93,6 @@ export function createServer(): McpServer {
   registerAutoFixTools(server);
   registerSecretsTools(server);
   registerInfraTools(server);
-  registerApprovalTools(server);
   registerMarketingTools(server);
   registerWorkflowTools(server);
   registerGcpTools(server);

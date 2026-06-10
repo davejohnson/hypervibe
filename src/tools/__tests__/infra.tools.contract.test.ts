@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { infraApprovalsRequiredForEnvironment, isProtectedEnvironment, resolveDesiredState } from '../infra.tools.js';
+import { isProtectedEnvironment } from '../../domain/services/policy.service.js';
+import { resolveDesiredState } from '../../domain/services/spec.service.js';
 
 describe('infra.tools contract', () => {
   it('detects protected environments case-insensitively', () => {
@@ -9,24 +10,6 @@ describe('infra.tools contract', () => {
     expect(isProtectedEnvironment(project, 'production')).toBe(true);
     expect(isProtectedEnvironment(project, 'STAGING')).toBe(true);
     expect(isProtectedEnvironment(project, 'dev')).toBe(false);
-  });
-
-  it('requires approvals for protected environments by default', () => {
-    const project = {
-      policies: { protectedEnvironments: ['production'] } as Record<string, unknown>,
-    };
-    expect(infraApprovalsRequiredForEnvironment(project, 'production')).toBe(true);
-    expect(infraApprovalsRequiredForEnvironment(project, 'staging')).toBe(false);
-  });
-
-  it('can disable protected-environment approvals explicitly', () => {
-    const project = {
-      policies: {
-        protectedEnvironments: ['production'],
-        requireApprovalForProtectedEnvironments: false,
-      } as Record<string, unknown>,
-    };
-    expect(infraApprovalsRequiredForEnvironment(project, 'production')).toBe(false);
   });
 
   it('resolveDesiredState preserves deploy and migration policy defaults', () => {

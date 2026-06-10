@@ -86,7 +86,6 @@ describe('server-level tools/call contracts', () => {
     const setPayload = await callTool(client, 'project_policy_set', {
       projectName: 'contract-policy-project',
       protectedEnvironments: ['production'],
-      requireApprovalForProtectedEnvironments: true,
       desiredState: { environmentName: 'staging', serviceName: 'web' },
     });
     expect(setPayload.success).toBe(true);
@@ -95,7 +94,6 @@ describe('server-level tools/call contracts', () => {
     expect(getPayload.success).toBe(true);
     const policies = getPayload.policies as JsonObj;
     expect(policies.protectedEnvironments).toEqual(['production']);
-    expect(policies.requireApprovalForProtectedEnvironments).toBe(true);
     expect((policies.desiredState as JsonObj).environmentName).toBe('staging');
 
     await Promise.all([client.close(), server.close()]);

@@ -29,18 +29,15 @@ describe('project.tools policy contract', () => {
     const merged = mergeProjectPolicies(
       {
         protectedEnvironments: ['production'],
-        requireApprovalForProtectedEnvironments: true,
         existing: 'keep',
       },
       {
-        requireApprovalForDestructive: true,
+        protectedEnvironments: ['production', 'staging'],
       }
     );
 
     expect(merged).toEqual({
-      protectedEnvironments: ['production'],
-      requireApprovalForProtectedEnvironments: true,
-      requireApprovalForDestructive: true,
+      protectedEnvironments: ['production', 'staging'],
       existing: 'keep',
     });
   });

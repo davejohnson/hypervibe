@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveDesiredState } from '../infra.tools.js';
+import { resolveDesiredState } from '../../domain/services/spec.service.js';
 
 describe('infra.tools desired state resolution', () => {
   it('uses defaults when neither policy nor overrides provide values', () => {

@@ -16,7 +16,7 @@ import type { SendGridCredentials } from '../adapters/providers/sendgrid/sendgri
 import type { SendGridPermissionAudit } from '../adapters/providers/sendgrid/sendgrid.adapter.js';
 import type { CloudflareCredentials } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
-import { providerDisplayName, syncHostingEnvVars } from './hosting-env.js';
+import { providerDisplayName, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
 
 import { resolveProject } from './resolve-project.js';
 

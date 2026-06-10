@@ -6,7 +6,7 @@ import { serviceWorkloadKind } from '../domain/entities/service.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Service } from '../domain/entities/service.entity.js';
-import { hostingProviderForEnvironment, providerDisplayName } from './hosting-env.js';
+import { hostingProviderForEnvironment, providerDisplayName } from '../domain/services/hosting-env.service.js';
 import { resolveProjectOrError } from './resolve-project.js';
 
 const envRepo = new EnvironmentRepository();

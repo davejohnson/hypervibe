@@ -11,7 +11,6 @@ import { ProjectRepository } from '../../adapters/db/repositories/project.reposi
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { ApprovalRepository } from '../../adapters/db/repositories/approval.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { CLOUD_PREPARE_PROFILES } from '../../domain/services/cloud-prepare.js';
@@ -1286,15 +1285,13 @@ describe('infra_apply multi-service convergence', () => {
     await Promise.all([client.close(), server.close()]);
   });
 
-  it('allows protected infra_apply with an approved infra.apply approval and consumes it', async () => {
+  it('allows protected infra_apply with confirm=true', async () => {
     const projectRepo = new ProjectRepository();
     const serviceRepo = new ServiceRepository();
-    const approvalRepo = new ApprovalRepository();
     const project = projectRepo.create({ name: 'protected-approved-infra-project', defaultPlatform: 'railway' });
     projectRepo.update(project.id, {
       policies: {
         protectedEnvironments: ['production'],
-        requireApprovalForProtectedEnvironments: true,
       },
     });
     serviceRepo.create({
@@ -1303,13 +1300,6 @@ describe('infra_apply multi-service convergence', () => {
       buildConfig: { builder: 'nixpacks' },
       envVarSpec: {},
     });
-    const approval = approvalRepo.create({
-      projectId: project.id,
-      environmentName: 'production',
-      action: 'infra.apply',
-    });
-    approvalRepo.approve(approval.id, 'test');
-
     const fakeDatabaseAdapter: IDatabaseAdapter = {
       name: 'railway',
       capabilities: {
@@ -1403,11 +1393,9 @@ describe('infra_apply multi-service convergence', () => {
       databaseProvider: 'railway',
       setupEmail: false,
       confirm: true,
-      approvalId: approval.id,
     });
 
     expect(payload.success).toBe(true);
-    expect(approvalRepo.findById(approval.id)?.status).toBe('consumed');
 
     await Promise.all([client.close(), server.close()]);
   });

@@ -5,16 +5,16 @@ import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { initializeDatabase, SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
-import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
-import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
-import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
-import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { getSecretStore } from '../../adapters/secrets/secret-store.js';
-import { adapterFactory } from '../../domain/services/adapter.factory.js';
-import type { Environment } from '../../domain/entities/environment.entity.js';
-import type { Service } from '../../domain/entities/service.entity.js';
-import type { IHostingAdapter } from '../../domain/ports/hosting.port.js';
+import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
+import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
+import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
+import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
+import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { adapterFactory } from '../../../domain/services/adapter.factory.js';
+import type { Environment } from '../../../domain/entities/environment.entity.js';
+import type { Service } from '../../../domain/entities/service.entity.js';
+import type { IHostingAdapter } from '../../../domain/ports/hosting.port.js';
 
 type JsonObj = Record<string, unknown>;
 
@@ -174,7 +174,7 @@ describe('hosting env var tools', () => {
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(sendGridSetupScopes);
 
-    const { createServer } = await import('../../server.js');
+    const { createServer } = await import('../../../server.js');
     const server = createServer();
     const client = new Client({ name: 'sendgrid-cloudrun-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -209,7 +209,7 @@ describe('hosting env var tools', () => {
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(sendGridSetupScopes);
 
-    const { createServer } = await import('../../server.js');
+    const { createServer } = await import('../../../server.js');
     const server = createServer();
     const client = new Client({ name: 'sendgrid-stale-railway-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -234,7 +234,7 @@ describe('hosting env var tools', () => {
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(['mail.send']);
 
-    const { createServer } = await import('../../server.js');
+    const { createServer } = await import('../../../server.js');
     const server = createServer();
     const client = new Client({ name: 'sendgrid-cloudrun-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -263,7 +263,7 @@ describe('hosting env var tools', () => {
     stubCloudRunHostingAdapter();
     stubSendGridScopes(['mail.send', 'user.email.read', 'user.email.create', 'user.email.update']);
 
-    const { createServer } = await import('../../server.js');
+    const { createServer } = await import('../../../server.js');
     const server = createServer();
     const client = new Client({ name: 'sendgrid-permissions-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -287,7 +287,7 @@ describe('hosting env var tools', () => {
     stubCloudRunHostingAdapter();
     stubSendGridScopes(['user.email.read', 'user.email.create', 'user.email.update']);
 
-    const { createServer } = await import('../../server.js');
+    const { createServer } = await import('../../../server.js');
     const server = createServer();
     const client = new Client({ name: 'sendgrid-sender-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -314,7 +314,7 @@ describe('hosting env var tools', () => {
     await setupCloudRunProject();
     const { setEnvCalls } = stubCloudRunHostingAdapter();
 
-    const { createServer } = await import('../../server.js');
+    const { createServer } = await import('../../../server.js');
     const server = createServer();
     const client = new Client({ name: 'integration-cloudrun-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -352,7 +352,7 @@ describe('hosting env var tools', () => {
       }],
     ]));
 
-    const { createServer } = await import('../../server.js');
+    const { createServer } = await import('../../../server.js');
     const server = createServer();
     const client = new Client({ name: 'vars-get-cloudrun-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

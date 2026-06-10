@@ -269,6 +269,25 @@ const migrations: Migration[] = [
          OR json_extract(platform_bindings, '$.railwayEnvironmentId') IS NOT NULL;
     `,
   },
+  {
+    version: 8,
+    name: 'project_specs',
+    up: `
+      -- Desired-state spec documents, revisioned per project.
+      -- Legacy policies.desiredState is lazily converted to revision 1 on
+      -- first read (the converter needs JS, not SQL).
+      CREATE TABLE IF NOT EXISTS project_specs (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        document TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(project_id, revision)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_project_specs_project ON project_specs(project_id, revision DESC);
+    `,
+  },
 ];
 
 export class SqliteAdapter {

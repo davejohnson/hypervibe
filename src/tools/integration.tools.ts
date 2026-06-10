@@ -11,7 +11,7 @@ import type { IntegrationKeyMode, StoredKeys } from '../domain/entities/integrat
 import type { StripeCredentials } from '../adapters/providers/stripe/stripe.adapter.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { resolveProject } from './resolve-project.js';
-import { providerDisplayName, readHostingEnvVars, syncHostingEnvVars } from './hosting-env.js';
+import { providerDisplayName, readHostingEnvVars, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();

@@ -7,7 +7,7 @@ import { AuditRepository } from '../adapters/db/repositories/audit.repository.js
 import { StripeAdapter, STRIPE_COMMON_WEBHOOK_EVENTS } from '../adapters/providers/stripe/stripe.adapter.js';
 import type { StripeCredentials, StripeMode, StripeCustomer } from '../adapters/providers/stripe/stripe.adapter.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { providerDisplayName, syncHostingEnvVars } from './hosting-env.js';
+import { providerDisplayName, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
 
 import { resolveProject } from './resolve-project.js';
 

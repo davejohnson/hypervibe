@@ -6,7 +6,7 @@ import { ComposeGenerator } from '../adapters/providers/local/compose.generator.
 import { integrationRegistry } from '../domain/registry/integration.registry.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { resolveProject } from './resolve-project.js';
-import { readHostingEnvVars, syncHostingEnvVars } from './hosting-env.js';
+import { readHostingEnvVars, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();

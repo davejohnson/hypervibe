@@ -84,7 +84,6 @@ interface ProjectIntentSchema {
     };
     protection: {
       protectedEnvironments: string[];
-      requireApprovalForProtectedEnvironments: boolean;
     };
   };
   observed: {
@@ -209,15 +208,6 @@ export function buildDriftSignals(
     message: productionProtected
       ? 'Production environment is protected by policy'
       : 'Production environment is not protected by policy',
-  });
-
-  const requireProtectedApprovals = policies?.requireApprovalForProtectedEnvironments !== false;
-  drift.push({
-    check: 'policy.protectedApprovals',
-    status: requireProtectedApprovals ? 'ok' : 'warning',
-    message: requireProtectedApprovals
-      ? 'Protected environments require approval IDs'
-      : 'Protected environments do not require approval IDs',
   });
 
   if (!desiredState) return drift;
@@ -423,7 +413,6 @@ function buildIntent(project: Project): ProjectIntentSchema {
       : undefined,
     protection: {
       protectedEnvironments,
-      requireApprovalForProtectedEnvironments: project.policies?.requireApprovalForProtectedEnvironments !== false,
     },
   };
   const observed = {

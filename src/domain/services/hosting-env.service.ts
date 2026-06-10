@@ -1,9 +1,9 @@
-import type { Environment } from '../domain/entities/environment.entity.js';
-import type { Project } from '../domain/entities/project.entity.js';
-import type { Service } from '../domain/entities/service.entity.js';
-import type { IHostingAdapter } from '../domain/ports/hosting.port.js';
-import type { Receipt } from '../domain/ports/provider.port.js';
-import { adapterFactory } from '../domain/services/adapter.factory.js';
+import type { Environment } from '../entities/environment.entity.js';
+import type { Project } from '../entities/project.entity.js';
+import type { Service } from '../entities/service.entity.js';
+import type { IHostingAdapter } from '../ports/hosting.port.js';
+import type { Receipt } from '../ports/provider.port.js';
+import { adapterFactory } from './adapter.factory.js';
 
 type PlatformBindings = {
   provider?: string;

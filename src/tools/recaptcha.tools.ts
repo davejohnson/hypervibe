@@ -6,7 +6,7 @@ import { ServiceRepository } from '../adapters/db/repositories/service.repositor
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { RecaptchaAdapter } from '../adapters/providers/recaptcha/recaptcha.adapter.js';
 import type { RecaptchaCredentials } from '../adapters/providers/recaptcha/recaptcha.adapter.js';
-import { providerDisplayName, syncHostingEnvVars } from './hosting-env.js';
+import { providerDisplayName, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
 
 import { resolveProject } from './resolve-project.js';
 
