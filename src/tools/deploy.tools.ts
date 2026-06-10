@@ -15,6 +15,7 @@ import { hostingProviderForEnvironment, providerDisplayName } from './hosting-en
 import type { Project } from '../domain/entities/project.entity.js';
 import type { BuildConfig, WorkloadKind } from '../domain/entities/service.entity.js';
 import type { GitHubCredentials } from '../adapters/providers/github/github.adapter.js';
+import { normalizeGitRemoteForBuild } from '../lib/git-remote.js';
 
 import { resolveProject } from './resolve-project.js';
 
@@ -58,36 +59,6 @@ export function approvalsRequired(project: { policies: Record<string, unknown> }
   const explicit = project.policies?.requireApprovalForProtectedEnvironments;
   if (explicit === false) return false;
   return true;
-}
-
-function parseGitHubRepoFromRemote(remoteUrl?: string): string | null {
-  if (!remoteUrl) return null;
-  const normalized = remoteUrl.trim().replace(/\.git$/i, '');
-  try {
-    const url = new URL(normalized);
-    if (url.hostname.toLowerCase() !== 'github.com') {
-      return null;
-    }
-    const parts = url.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
-    return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null;
-  } catch {
-    // Fall through to SSH-style parsing.
-  }
-
-  const sshMatch = normalized.match(/^(?:ssh:\/\/)?(?:git@)?github\.com[:/](.+)$/i);
-  if (!sshMatch) return null;
-  const parts = sshMatch[1].split('/').filter(Boolean);
-  return parts.length >= 2 ? `${parts[parts.length - 2]}/${parts[parts.length - 1]}` : null;
-}
-
-function normalizeGitRemoteForBuild(remoteUrl?: string): string | undefined {
-  if (!remoteUrl) return undefined;
-  const trimmed = remoteUrl.trim();
-  const repo = parseGitHubRepoFromRemote(trimmed);
-  if (repo) {
-    return `https://github.com/${repo}.git`;
-  }
-  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function buildDeploySourceEnvVars(project: Project, adapterName: string): Record<string, string> {

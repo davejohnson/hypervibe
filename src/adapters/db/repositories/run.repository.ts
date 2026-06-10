@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 import { getDb } from '../sqlite.adapter.js';
+import { parseJsonColumn } from '../json.codec.js';
+import { runPlanColumnSchema, runReceiptsColumnSchema } from '../column.schemas.js';
 import type { Run, CreateRunInput, RunStatus, RunReceipt } from '../../../domain/entities/run.entity.js';
 
 export class RunRepository {
@@ -105,8 +107,8 @@ export class RunRepository {
       environmentId: row.environment_id as string,
       type: row.type as string,
       status: row.status as RunStatus,
-      plan: JSON.parse(row.plan as string),
-      receipts: JSON.parse(row.receipts as string),
+      plan: parseJsonColumn(runPlanColumnSchema, row.plan, `runs.plan (${row.id})`) as Run['plan'],
+      receipts: parseJsonColumn(runReceiptsColumnSchema, row.receipts, `runs.receipts (${row.id})`) as RunReceipt[],
       error: row.error as string | null,
       startedAt: row.started_at ? new Date(row.started_at as string) : null,
       completedAt: row.completed_at ? new Date(row.completed_at as string) : null,

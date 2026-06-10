@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 import { getDb } from '../sqlite.adapter.js';
+import { parseJsonColumn } from '../json.codec.js';
+import { policiesColumnSchema } from '../column.schemas.js';
 import type { Project, CreateProjectInput } from '../../../domain/entities/project.entity.js';
 
 export class ProjectRepository {
@@ -82,7 +84,7 @@ export class ProjectRepository {
       name: row.name as string,
       defaultPlatform: row.default_platform as string,
       gitRemoteUrl: (row.git_remote_url as string) ?? undefined,
-      policies: JSON.parse(row.policies as string),
+      policies: parseJsonColumn(policiesColumnSchema, row.policies, `projects.policies (${row.id})`),
       createdAt: new Date(row.created_at as string),
       updatedAt: new Date(row.updated_at as string),
     };

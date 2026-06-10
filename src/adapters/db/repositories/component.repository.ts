@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 import { getDb } from '../sqlite.adapter.js';
+import { parseJsonColumn } from '../json.codec.js';
+import { componentBindingsColumnSchema } from '../column.schemas.js';
 import type { Component, CreateComponentInput } from '../../../domain/entities/component.entity.js';
 
 export class ComponentRepository {
@@ -91,7 +93,7 @@ export class ComponentRepository {
       id: row.id as string,
       environmentId: row.environment_id as string,
       type: row.type as string,
-      bindings: JSON.parse(row.bindings as string),
+      bindings: parseJsonColumn(componentBindingsColumnSchema, row.bindings, `components.bindings (${row.id})`),
       externalId: row.external_id as string | null,
       createdAt: new Date(row.created_at as string),
       updatedAt: new Date(row.updated_at as string),

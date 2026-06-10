@@ -8,6 +8,7 @@ import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js
 import type { RailwayCredentials, RailwayProjectDetails } from '../adapters/providers/railway/railway.adapter.js';
 
 import { resolveProject } from './resolve-project.js';
+import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from './railway-help.js';
 
 const envRepo = new EnvironmentRepository();
@@ -19,33 +20,6 @@ interface SetupIssue {
   issue: string;
   severity: 'error' | 'warning' | 'info';
   fix?: string;
-}
-
-function parseGitHubRepoFromRemote(remoteUrl?: string): string | null {
-  if (!remoteUrl) {
-    return null;
-  }
-
-  const normalized = remoteUrl.trim().replace(/\.git$/i, '');
-
-  try {
-    const url = new URL(normalized);
-    if (url.hostname.toLowerCase() !== 'github.com') {
-      return null;
-    }
-    const parts = url.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
-    return parts.length >= 2 ? `${parts[parts.length - 2]}/${parts[parts.length - 1]}` : null;
-  } catch {
-    // Not a URL format, continue with SSH-like parsing.
-  }
-
-  const sshMatch = normalized.match(/^(?:ssh:\/\/)?(?:git@)?github\.com[:/](.+)$/i);
-  if (!sshMatch) {
-    return null;
-  }
-
-  const parts = sshMatch[1].replace(/^\/+/, '').split('/').filter(Boolean);
-  return parts.length >= 2 ? `${parts[parts.length - 2]}/${parts[parts.length - 1]}` : null;
 }
 
 async function resolveRailwayProjectDetails(

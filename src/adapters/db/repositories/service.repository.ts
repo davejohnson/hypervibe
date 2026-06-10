@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 import { getDb } from '../sqlite.adapter.js';
+import { parseJsonColumn } from '../json.codec.js';
+import { buildConfigColumnSchema, envVarSpecColumnSchema } from '../column.schemas.js';
 import type { Service, CreateServiceInput } from '../../../domain/entities/service.entity.js';
 
 export class ServiceRepository {
@@ -74,8 +76,8 @@ export class ServiceRepository {
       id: row.id as string,
       projectId: row.project_id as string,
       name: row.name as string,
-      buildConfig: JSON.parse(row.build_config as string),
-      envVarSpec: JSON.parse(row.env_var_spec as string),
+      buildConfig: parseJsonColumn(buildConfigColumnSchema, row.build_config, `services.build_config (${row.id})`),
+      envVarSpec: parseJsonColumn(envVarSpecColumnSchema, row.env_var_spec, `services.env_var_spec (${row.id})`),
       createdAt: new Date(row.created_at as string),
       updatedAt: new Date(row.updated_at as string),
     };

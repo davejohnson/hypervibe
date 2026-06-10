@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 import { getDb } from '../sqlite.adapter.js';
+import { parseJsonColumn } from '../json.codec.js';
+import { platformBindingsColumnSchema } from '../column.schemas.js';
 import type { Environment, CreateEnvironmentInput } from '../../../domain/entities/environment.entity.js';
 
 export class EnvironmentRepository {
@@ -89,7 +91,7 @@ export class EnvironmentRepository {
       id: row.id as string,
       projectId: row.project_id as string,
       name: row.name as string,
-      platformBindings: JSON.parse(row.platform_bindings as string),
+      platformBindings: parseJsonColumn(platformBindingsColumnSchema, row.platform_bindings, `environments.platform_bindings (${row.id})`),
       createdAt: new Date(row.created_at as string),
       updatedAt: new Date(row.updated_at as string),
     };

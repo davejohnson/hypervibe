@@ -1,23 +1,8 @@
-import { execSync } from 'child_process';
 import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
 import type { Project } from '../domain/entities/project.entity.js';
+import { detectGitRemoteUrl } from '../lib/git-remote.js';
 
 const projectRepo = new ProjectRepository();
-
-/**
- * Detect the git remote URL of the current working directory.
- */
-function detectGitRemoteUrl(): string | null {
-  try {
-    return execSync('git remote get-url origin', {
-      encoding: 'utf-8',
-      timeout: 5000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim() || null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Shared project resolver used across all tools.
