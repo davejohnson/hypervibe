@@ -115,8 +115,8 @@ describe('setup tools', () => {
       .spyOn(RailwayAdapter.prototype, 'updateServiceInstanceConfig')
       .mockResolvedValue({ success: true, message: 'updated' });
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'setup-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -224,8 +224,8 @@ describe('setup tools', () => {
       .spyOn(RailwayAdapter.prototype, 'updateServiceInstanceConfig')
       .mockResolvedValue({ success: true, message: 'updated' });
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'setup-client-repo-link', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -326,8 +326,8 @@ describe('setup tools', () => {
       .spyOn(RailwayAdapter.prototype, 'connectServiceToRepo')
       .mockResolvedValue({ success: false, message: 'failed', error: 'User does not have access to the repo' });
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'setup-client-repo-access', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -352,8 +352,8 @@ describe('setup tools', () => {
   });
 
   it('railway_setup_help returns Railway GitHub app instructions', async () => {
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'setup-client-railway-help', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

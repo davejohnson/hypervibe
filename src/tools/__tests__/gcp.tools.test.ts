@@ -68,8 +68,8 @@ describe('gcp tools', () => {
 
     expect(project.name).toBe('hls-property-care');
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'cloud-prepare-preview-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -143,8 +143,8 @@ describe('gcp tools', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'cloud-prepare-apply-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

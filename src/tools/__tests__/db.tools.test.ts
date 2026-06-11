@@ -72,8 +72,8 @@ describe('db tools', () => {
       buildConfig: { builder: 'dockerfile' },
     });
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'db-tools-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -136,8 +136,8 @@ describe('db tools', () => {
       },
     });
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'db-provider-tools-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -242,8 +242,8 @@ describe('db tools', () => {
     });
     connectionRepo.updateStatus(connection.id, 'verified');
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'db-query-cloudsql-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -319,8 +319,8 @@ describe('db tools', () => {
     });
     connectionRepo.updateStatus(connection.id, 'verified');
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'db-query-cloudsql-postgres-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

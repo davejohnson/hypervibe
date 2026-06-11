@@ -46,8 +46,8 @@ describe('service lifecycle tools', () => {
   });
 
   async function createClient() {
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'service-lifecycle-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

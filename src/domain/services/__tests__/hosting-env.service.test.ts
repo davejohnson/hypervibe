@@ -175,8 +175,8 @@ describe('hosting env var tools', () => {
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(sendGridSetupScopes);
 
-    const { createServer } = await import('../../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'sendgrid-cloudrun-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -210,8 +210,8 @@ describe('hosting env var tools', () => {
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(sendGridSetupScopes);
 
-    const { createServer } = await import('../../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'sendgrid-stale-railway-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -235,8 +235,8 @@ describe('hosting env var tools', () => {
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(['mail.send']);
 
-    const { createServer } = await import('../../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'sendgrid-cloudrun-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -264,8 +264,8 @@ describe('hosting env var tools', () => {
     stubCloudRunHostingAdapter();
     stubSendGridScopes(['mail.send', 'user.email.read', 'user.email.create', 'user.email.update']);
 
-    const { createServer } = await import('../../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'sendgrid-permissions-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -288,8 +288,8 @@ describe('hosting env var tools', () => {
     stubCloudRunHostingAdapter();
     stubSendGridScopes(['user.email.read', 'user.email.create', 'user.email.update']);
 
-    const { createServer } = await import('../../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'sendgrid-sender-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -315,8 +315,8 @@ describe('hosting env var tools', () => {
     await setupCloudRunProject();
     const { setEnvCalls } = stubCloudRunHostingAdapter();
 
-    const { createServer } = await import('../../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'integration-cloudrun-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -353,8 +353,8 @@ describe('hosting env var tools', () => {
       }],
     ]));
 
-    const { createServer } = await import('../../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'vars-get-cloudrun-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

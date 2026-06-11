@@ -100,8 +100,8 @@ describe('health tools', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'health-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -141,8 +141,8 @@ describe('health tools', () => {
     const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'health-url-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -169,8 +169,8 @@ describe('health tools', () => {
   it('returns an actionable error when no service URL is stored', async () => {
     createCloudRunProject('');
 
-    const { createServer } = await import('../../server.js');
-    const server = createServer();
+    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
+    const server = createLegacyTestServer();
     const client = new Client({ name: 'health-missing-url-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

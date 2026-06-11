@@ -14,6 +14,7 @@ import {
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
+import { StateManager } from '../agent/state.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField } from './schemas.js';
@@ -287,6 +288,10 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         handler,
       });
 
+      if (result.success) {
+        syncAutofixWatches(ctx, applyProject, envName, envSpec);
+      }
+
       const skipped = result.receipts.filter((r) => r.status === 'skipped_requires_confirm');
       if (!result.success && !result.applyRunId) {
         // Rejected before execution (stale plan, superseded spec, etc.)
@@ -313,6 +318,34 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       );
     })
   );
+}
+
+/** Sync spec.autofix to the autofix agent's watch list after a successful apply. */
+function syncAutofixWatches(
+  ctx: ToolContext,
+  project: Project,
+  envName: string,
+  envSpec: import('../domain/spec/spec.schema.js').EnvironmentSpec
+): void {
+  if (!envSpec.autofix) return;
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) return;
+
+  try {
+    const stateManager = new StateManager();
+    const serviceNames = envSpec.autofix.services ?? Object.keys(envSpec.services);
+    for (const serviceName of serviceNames) {
+      if (envSpec.autofix.enabled) {
+        stateManager.addWatch({ projectId: project.id, environmentId: environment.id, serviceName, enabled: true });
+      } else {
+        stateManager.removeWatch(project.id, environment.id, serviceName);
+      }
+    }
+    stateManager.save();
+  } catch (error) {
+    // Watch sync must never fail an apply.
+    console.warn(`[hypervibe] autofix watch sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 async function destroyDatabase(

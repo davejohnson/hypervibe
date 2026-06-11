@@ -56,6 +56,12 @@ export const environmentSpecSchema = z.object({
   envVars: z.record(z.string()).default({}),
   deploy: deploySpecSchema.optional(),
   migrations: migrationsSpecSchema.optional(),
+  /** Autofix agent log watches, synced on hv_apply. */
+  autofix: z.object({
+    enabled: z.boolean(),
+    /** Services to watch (default: all services in this environment). */
+    services: z.array(z.string().min(1)).optional(),
+  }).optional(),
 });
 
 export const projectSpecSchema = z.object({

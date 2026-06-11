@@ -32,35 +32,6 @@ import './adapters/providers/secretmanagers/vault.adapter.js';
 import './adapters/providers/secretmanagers/aws-secrets.adapter.js';
 import './adapters/providers/secretmanagers/doppler.adapter.js';
 
-import { registerProjectTools } from './tools/project.tools.js';
-import { registerEnvironmentTools } from './tools/environment.tools.js';
-import { registerConnectionTools } from './tools/connection.tools.js';
-import { registerDeployTools } from './tools/deploy.tools.js';
-import { registerRailwayTools } from './tools/railway.tools.js';
-import { registerLocalTools } from './tools/local.tools.js';
-import { registerRunTools } from './tools/run.tools.js';
-import { registerIntegrationTools } from './tools/integration.tools.js';
-import { registerStripeTools } from './tools/stripe.tools.js';
-import { registerCloudflareTools } from './tools/cloudflare.tools.js';
-import { registerSendGridTools } from './tools/sendgrid.tools.js';
-import { registerTunnelTools } from './tools/tunnel.tools.js';
-import { registerLogsTools } from './tools/logs.tools.js';
-import { registerRecaptchaTools } from './tools/recaptcha.tools.js';
-import { registerEnvTools } from './tools/env.tools.js';
-import { registerDbTools } from './tools/db.tools.js';
-import { registerSetupTools } from './tools/setup.tools.js';
-import { registerGitHubTools } from './tools/github.tools.js';
-import { registerAppStoreTools } from './tools/appstore.tools.js';
-import { registerXcodeTools } from './tools/xcode.tools.js';
-import { registerVisualizeTools } from './tools/visualize.tools.js';
-import { registerAutoFixTools } from './tools/autofix.tools.js';
-import { registerSecretsTools } from './tools/secrets.tools.js';
-import { registerInfraTools } from './tools/infra.tools.js';
-import { registerMarketingTools } from './tools/marketing.tools.js';
-import { registerWorkflowTools } from './tools/workflow.tools.js';
-import { registerGcpTools } from './tools/gcp.tools.js';
-import { registerHealthTools } from './tools/health.tools.js';
-import { registerEmailTools } from './tools/email.tools.js';
 import { createToolContext } from './tools/context.js';
 import { registerCoreTools } from './tools/core.tools.js';
 import { registerLifecycleTools } from './tools/lifecycle.tools.js';
@@ -84,7 +55,7 @@ export function createServer(): McpServer {
 
   const ctx = createToolContext();
 
-  // New intent-level surface (hv_*) — replaces the legacy tools below at cutover.
+  // The consolidated intent-level tool surface (42 hv_* tools).
   registerCoreTools(server, ctx);
   registerLifecycleTools(server, ctx);
   registerConnectionsTools(server, ctx);
@@ -98,37 +69,6 @@ export function createServer(): McpServer {
   registerHvCiTools(server, ctx);
   registerHvAppstoreTools(server, ctx);
   registerHvDevxTools(server, ctx);
-
-  // Register all tool groups
-  registerProjectTools(server);
-  registerEnvironmentTools(server);
-  registerConnectionTools(server);
-  registerDeployTools(server);
-  registerRailwayTools(server);
-  registerLocalTools(server);
-  registerRunTools(server);
-  registerIntegrationTools(server);
-  registerStripeTools(server);
-  registerCloudflareTools(server);
-  registerSendGridTools(server);
-  registerTunnelTools(server);
-  registerLogsTools(server);
-  registerRecaptchaTools(server);
-  registerEnvTools(server);
-  registerDbTools(server);
-  registerSetupTools(server);
-  registerGitHubTools(server);
-  registerAppStoreTools(server);
-  registerXcodeTools(server);
-  registerVisualizeTools(server);
-  registerAutoFixTools(server);
-  registerSecretsTools(server);
-  registerInfraTools(server);
-  registerMarketingTools(server);
-  registerWorkflowTools(server);
-  registerGcpTools(server);
-  registerHealthTools(server);
-  registerEmailTools(server);
 
   return server;
 }
