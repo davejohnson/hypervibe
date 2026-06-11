@@ -17,10 +17,10 @@ import {
   snapshotComponentRecord,
   snapshotEnvironmentBindings,
 } from './local-state.transaction.js';
-import { resolveProject } from '../../tools/resolve-project.js';
+import { resolveProject } from './resolve-project.js';
 import { normalizeGitRemoteForBuild } from '../../lib/git-remote.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
-import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from '../../tools/railway-help.js';
+import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from './railway-help.js';
 import type { Component } from '../entities/component.entity.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';

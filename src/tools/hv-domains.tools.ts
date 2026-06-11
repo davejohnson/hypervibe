@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { CloudflareAdapter, CloudflareDnsRecord } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { setupCustomDomain } from '../domain/services/domain.service.js';
-import { getCloudflareAdapter } from './cloudflare.tools.js';
+import { getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';

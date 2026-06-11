@@ -6,7 +6,7 @@ import {
   executeDatabaseReset,
   resolveEnvironmentDatabaseUrl,
   maskDatabaseUrl,
-} from './db.tools.js';
+} from '../domain/services/database-ops.service.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { projectField, envField, confirmField } from './schemas.js';

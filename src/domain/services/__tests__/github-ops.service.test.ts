@@ -5,13 +5,13 @@ import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { initializeDatabase, SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
-import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
-import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
-import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { getSecretStore } from '../../adapters/secrets/secret-store.js';
-import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
-import { resolveBranchDeployTargets, buildBranchDeployWorkflow } from '../github.tools.js';
+import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
+import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
+import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
+import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
+import { resolveBranchDeployTargets, buildBranchDeployWorkflow } from '../github-ops.service.js';
 
 type JsonObj = Record<string, unknown>;
 
@@ -120,8 +120,8 @@ describe('github tools', () => {
     });
 
     const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
-    const { registerHvCiTools } = await import('../hv-ci.tools.js');
-    const { createToolContext } = await import('../context.js');
+    const { registerHvCiTools } = await import('../../../tools/hv-ci.tools.js');
+    const { createToolContext } = await import('../../../tools/context.js');
     const server = new McpServer({ name: 'hv-ci-invalid-test', version: '1.0.0' });
     registerHvCiTools(server, createToolContext());
     const client = new Client({ name: 'hv-ci-invalid-client', version: '1.0.0' });
@@ -170,8 +170,8 @@ describe('github tools', () => {
     const updateBranchProtection = vi.spyOn(GitHubAdapter.prototype, 'updateBranchProtection').mockResolvedValue();
 
     const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
-    const { registerHvCiTools } = await import('../hv-ci.tools.js');
-    const { createToolContext } = await import('../context.js');
+    const { registerHvCiTools } = await import('../../../tools/hv-ci.tools.js');
+    const { createToolContext } = await import('../../../tools/context.js');
     const server = new McpServer({ name: 'hv-ci-protection-test', version: '1.0.0' });
     registerHvCiTools(server, createToolContext());
     const client = new Client({ name: 'github-client-protection-failure', version: '1.0.0' });

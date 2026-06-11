@@ -1,6 +1,6 @@
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
-import type { Project } from '../domain/entities/project.entity.js';
-import { detectGitRemoteUrl } from '../lib/git-remote.js';
+import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import type { Project } from '../entities/project.entity.js';
+import { detectGitRemoteUrl } from '../../lib/git-remote.js';
 
 const projectRepo = new ProjectRepository();
 

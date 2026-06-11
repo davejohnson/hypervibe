@@ -11,8 +11,8 @@ import {
   sendGridSetupReady,
   sendGridPermissionPayload,
   sendGridPermissionError,
-} from './sendgrid.tools.js';
-import { getCloudflareAdapter } from './cloudflare.tools.js';
+} from '../domain/services/sendgrid-ops.service.js';
+import { getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.js';
 import {
   resolveCloudflareEmailContext,
   normalizeDomain,
@@ -26,7 +26,7 @@ import {
   rulePayload,
   catchAllPayload,
   ensureDestination,
-} from './email.tools.js';
+} from '../domain/services/email-routing.service.js';
 import type { ToolContext } from './context.js';
 import { projectField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';

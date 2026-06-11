@@ -7,7 +7,7 @@ import { syncHostingEnvVars, readHostingEnvVars } from '../domain/services/hosti
 import { SecretAccessLogRepository } from '../adapters/db/repositories/secret-mapping.repository.js';
 import { parseSecretRef, type SecretManagerProvider } from '../domain/ports/secretmanager.port.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
-import { getGitHubAdapter } from './github.tools.js';
+import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { projectField, envField } from './schemas.js';

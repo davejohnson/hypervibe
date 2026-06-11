@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -12,9 +13,14 @@ import { ServiceRepository } from '../../../adapters/db/repositories/service.rep
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { adapterFactory } from '../../../domain/services/adapter.factory.js';
+import { assessSendGridScopes } from '../../../adapters/providers/sendgrid/sendgrid.adapter.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
 import type { IHostingAdapter } from '../../../domain/ports/hosting.port.js';
+import { createToolContext } from '../../../tools/context.js';
+import { registerHvEmailTools } from '../../../tools/hv-email.tools.js';
+import { getSendGridAdapter, sendGridSetupReady, sendGridPermissionPayload } from '../sendgrid-ops.service.js';
+import { getProjectScopeHints } from '../project-scope.js';
 import { syncHostingEnvVars, readHostingEnvVars } from '../hosting-env.service.js';
 
 type JsonObj = Record<string, unknown>;
@@ -171,34 +177,34 @@ describe('hosting env var tools', () => {
     'user.email.update',
   ];
 
-  it('sendgrid_setup syncs API key through the Cloud Run hosting adapter', async () => {
-    await setupCloudRunProject();
+  it('SendGrid setup syncs the API key through the Cloud Run hosting adapter when setup-ready', async () => {
+    const { project, environment, service } = await setupCloudRunProject();
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(sendGridSetupScopes);
 
-    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'sendgrid-cloudrun-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const sg = getSendGridAdapter(getProjectScopeHints(project));
+    if ('error' in sg) throw new Error(sg.error);
+    const permissions = assessSendGridScopes(await sg.adapter.getScopes());
+    expect(sendGridSetupReady(permissions)).toBe(true);
 
-    const payload = await callTool(client, 'sendgrid_setup', {
-      projectName: 'cloudrun-integrations',
-      environmentName: 'production',
-      serviceName: 'web',
+    const connection = new ConnectionRepository().findByProvider('sendgrid')!;
+    const credentials = getSecretStore().decryptObject<{ apiKey: string }>(connection.credentialsEncrypted);
+
+    const result = await syncHostingEnvVars({
+      project,
+      environment,
+      service,
+      vars: { SENDGRID_API_KEY: credentials.apiKey },
     });
 
-    expect(payload.success).toBe(true);
-    expect(payload.apiKeySynced).toBe(true);
-    expect(payload.hostingProvider).toBe('cloudrun');
+    expect(result.success).toBe(true);
+    expect(result.provider).toBe('cloudrun');
     expect(setEnvCalls).toHaveLength(1);
     expect(setEnvCalls[0].vars).toEqual({ SENDGRID_API_KEY: 'SG.test-key' });
-
-    await Promise.all([client.close(), server.close()]);
   });
 
-  it('sendgrid_setup resolves the Cloud Run provider from generic bindings', async () => {
-    const { environment } = await setupCloudRunProject();
+  it('SendGrid setup resolves the Cloud Run provider from generic bindings', async () => {
+    const { project, environment, service } = await setupCloudRunProject();
     new EnvironmentRepository().update(environment.id, {
       platformBindings: {
         projectId: 'gcp-project',
@@ -211,103 +217,110 @@ describe('hosting env var tools', () => {
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(sendGridSetupScopes);
 
-    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'sendgrid-stale-railway-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const sg = getSendGridAdapter(getProjectScopeHints(project));
+    if ('error' in sg) throw new Error(sg.error);
+    const permissions = assessSendGridScopes(await sg.adapter.getScopes());
+    expect(sendGridSetupReady(permissions)).toBe(true);
 
-    const payload = await callTool(client, 'sendgrid_setup', {
-      projectName: 'cloudrun-integrations',
-      environmentName: 'production',
-      serviceName: 'web',
+    const updatedEnvironment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    const result = await syncHostingEnvVars({
+      project,
+      environment: updatedEnvironment,
+      service,
+      vars: { SENDGRID_API_KEY: 'SG.test-key' },
     });
 
-    expect(payload.success).toBe(true);
-    expect(payload.hostingProvider).toBe('cloudrun');
-    expect(String(payload.apiKeySyncError ?? '')).not.toContain('Railway');
+    expect(result.success).toBe(true);
+    expect(result.provider).toBe('cloudrun');
+    expect(String(result.error ?? '')).not.toContain('Railway');
     expect(setEnvCalls).toHaveLength(1);
-
-    await Promise.all([client.close(), server.close()]);
   });
 
-  it('sendgrid_setup rejects keys that cannot authorize a sender email', async () => {
-    await setupCloudRunProject();
+  it('SendGrid setup rejects keys that cannot authorize a sender email', async () => {
+    const { project } = await setupCloudRunProject();
     const { setEnvCalls } = stubCloudRunHostingAdapter();
     stubSendGridScopes(['mail.send']);
 
-    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'sendgrid-cloudrun-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const sg = getSendGridAdapter(getProjectScopeHints(project));
+    if ('error' in sg) throw new Error(sg.error);
+    const permissions = assessSendGridScopes(await sg.adapter.getScopes());
+    const payload = sendGridPermissionPayload(permissions);
 
-    const payload = await callTool(client, 'sendgrid_setup', {
-      projectName: 'cloudrun-integrations',
-      environmentName: 'production',
-      serviceName: 'web',
-    });
-
-    expect(payload.success).toBe(false);
+    expect(sendGridSetupReady(permissions)).toBe(false);
     expect(payload.setupReady).toBe(false);
     expect(payload.canAuthorizeSenderEmail).toBe(false);
     expect(payload.missingScopes).toEqual({
       domainAuthentication: ['whitelabel.read', 'whitelabel.create', 'whitelabel.update'],
       senderVerification: ['user.email.read', 'user.email.create', 'user.email.update'],
     });
+    // Setup is gated on sendGridSetupReady, so no hosting env sync happens.
     expect(setEnvCalls).toHaveLength(0);
-
-    await Promise.all([client.close(), server.close()]);
   });
 
-  it('sendgrid_permissions_check reports setup-ready scoped keys', async () => {
-    await setupCloudRunProject();
+  it('SendGrid permission assessment reports setup-ready scoped keys', async () => {
+    const { project } = await setupCloudRunProject();
     stubCloudRunHostingAdapter();
     stubSendGridScopes(['mail.send', 'user.email.read', 'user.email.create', 'user.email.update']);
 
-    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'sendgrid-permissions-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const sg = getSendGridAdapter(getProjectScopeHints(project));
+    if ('error' in sg) throw new Error(sg.error);
+    const permissions = assessSendGridScopes(await sg.adapter.getScopes());
+    const payload = sendGridPermissionPayload(permissions);
 
-    const payload = await callTool(client, 'sendgrid_permissions_check', {
-      projectName: 'cloudrun-integrations',
-    });
-
-    expect(payload.success).toBe(true);
+    expect(sendGridSetupReady(permissions)).toBe(true);
     expect(payload.setupReady).toBe(true);
     expect(payload.canAuthorizeSenderEmail).toBe(true);
     expect(payload.canManageSenderVerification).toBe(true);
     expect(payload.canManageDomainAuthentication).toBe(false);
-
-    await Promise.all([client.close(), server.close()]);
   });
 
-  it('sendgrid_sender_verify_request previews Single Sender authorization', async () => {
+  it('hv_email_setup sender-verify defaults nickname and reply-to to the sender email', async () => {
     await setupCloudRunProject();
     stubCloudRunHostingAdapter();
-    stubSendGridScopes(['user.email.read', 'user.email.create', 'user.email.update']);
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === 'https://api.sendgrid.com/v3/scopes') {
+        return new Response(JSON.stringify({ scopes: ['user.email.read', 'user.email.create', 'user.email.update'] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url === 'https://api.sendgrid.com/v3/verified_senders' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        expect(body).toEqual({
+          nickname: 'sender@example.com',
+          from_email: 'sender@example.com',
+          reply_to: 'sender@example.com',
+        });
+        return new Response(JSON.stringify({
+          id: 42,
+          nickname: 'sender@example.com',
+          from_email: 'sender@example.com',
+          reply_to: 'sender@example.com',
+          verified: false,
+        }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      throw new Error(`Unexpected SendGrid request: ${url}`);
+    }));
 
-    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
-    const server = createLegacyTestServer();
+    const server = new McpServer({ name: 'hv-email-test', version: '1.0.0' });
+    registerHvEmailTools(server, createToolContext());
     const client = new Client({ name: 'sendgrid-sender-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-    const payload = await callTool(client, 'sendgrid_sender_verify_request', {
-      projectName: 'cloudrun-integrations',
+    const payload = await callTool(client, 'hv_email_setup', {
+      project: 'cloudrun-integrations',
+      action: 'sender-verify',
       fromEmail: 'sender@example.com',
     });
 
-    expect(payload.success).toBe(true);
-    expect(payload.mode).toBe('preview');
-    expect(payload.plannedAction).toEqual({
-      action: 'create_sender_verification_request',
-      fromEmail: 'sender@example.com',
-      replyTo: 'sender@example.com',
-      nickname: 'sender@example.com',
-    });
+    expect(payload.ok).toBe(true);
+    expect((payload.data as JsonObj).sender).toMatchObject({ id: 42 });
+    expect(String(payload.hint)).toContain('verification email');
 
     await Promise.all([client.close(), server.close()]);
   });

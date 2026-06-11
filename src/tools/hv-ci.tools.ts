@@ -13,8 +13,8 @@ import {
   AI_REVIEW_WORKFLOW_PATH,
   AI_REVIEW_DEFAULT_MODEL,
   buildAiReviewWorkflowContent,
-} from './github.tools.js';
-import { getCloudflareAdapter } from './cloudflare.tools.js';
+} from '../domain/services/github-ops.service.js';
+import { getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.js';
 import type { ToolContext } from './context.js';
 import { projectField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';

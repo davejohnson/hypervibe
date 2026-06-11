@@ -13,7 +13,7 @@ import {
   betaTesterInputSchema,
   IMAGE_EXTENSIONS,
   type BetaTesterInput,
-} from './appstore.tools.js';
+} from '../domain/services/appstore-ops.service.js';
 import type {
   AppStoreConnectAdapter,
   AppStoreBetaGroup,

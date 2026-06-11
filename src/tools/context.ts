@@ -11,7 +11,7 @@ import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
-import { resolveProject } from './resolve-project.js';
+import { resolveProject } from '../domain/services/resolve-project.js';
 import { HvError } from './respond.js';
 
 export interface Repos {

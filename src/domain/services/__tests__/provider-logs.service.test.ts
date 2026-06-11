@@ -4,9 +4,9 @@ import {
   isErrorLike,
   supportsLogsBuildProvider,
   supportsLogsDeploymentsProvider,
-} from '../logs.tools.js';
+} from '../provider-logs.service.js';
 
-describe('logs.tools helpers', () => {
+describe('provider-logs.service helpers', () => {
   describe('detectProviderName', () => {
     it('prefers explicit provider from bindings', () => {
       expect(detectProviderName('railway', 'render')).toBe('render');

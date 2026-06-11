@@ -1,31 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { initializeDatabase, SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { createToolContext } from '../context.js';
+import { registerHvEmailTools } from '../hv-email.tools.js';
 
-type JsonObj = Record<string, unknown>;
-
-async function callTool(client: Client, name: string, args: Record<string, unknown> = {}): Promise<JsonObj> {
-  const result = await client.request(
-    {
-      method: 'tools/call',
-      params: {
-        name,
-        arguments: args,
-      },
-    },
-    CallToolResultSchema
-  );
-  const text = result.content.find((content) => content.type === 'text')?.text;
-  if (!text) throw new Error(`Tool ${name} returned no text payload`);
-  return JSON.parse(text) as JsonObj;
-}
+type JsonObj = Record<string, any>;
 
 function cloudflareResponse<T>(result: T) {
   return {
@@ -36,7 +22,7 @@ function cloudflareResponse<T>(result: T) {
   };
 }
 
-describe('email routing tools', () => {
+describe('hv_email_forwarding (Cloudflare email routing)', () => {
   let tempDir: string;
 
   beforeEach(() => {
@@ -61,15 +47,24 @@ describe('email routing tools', () => {
   });
 
   async function createClient() {
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
+    const server = new McpServer({ name: 'hv-email-forwarding-test', version: '1.0.0' });
+    registerHvEmailTools(server, createToolContext());
     const client = new Client({ name: 'email-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-    return { server, client };
+    return {
+      server,
+      client,
+      async call(name: string, args: Record<string, unknown> = {}): Promise<JsonObj> {
+        const result = await client.callTool({ name, arguments: args });
+        const text = (result.content as Array<{ type: string; text: string }>).find((c) => c.type === 'text')?.text;
+        if (!text) throw new Error(`Tool ${name} returned no text payload`);
+        return JSON.parse(text) as JsonObj;
+      },
+    };
   }
 
-  function stubCloudflareEmailApi() {
+  function stubCloudflareEmailApi(alias = 'support@example.com') {
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
       const parsed = new URL(url);
@@ -114,12 +109,12 @@ describe('email routing tools', () => {
       if (parsed.pathname === '/client/v4/zones/zone-123/email/routing/rules' && method === 'POST') {
         if (!body) throw new Error('Expected Cloudflare routing rule body');
         expect(body).toEqual({
-          name: 'Forward support@example.com to me@gmail.com',
+          name: `Forward ${alias} to me@gmail.com`,
           enabled: true,
           matchers: [{
             type: 'literal',
             field: 'to',
-            value: 'support@example.com',
+            value: alias,
           }],
           actions: [{
             type: 'forward',
@@ -128,7 +123,7 @@ describe('email routing tools', () => {
         });
         return Response.json(cloudflareResponse({
           id: 'rule-123',
-          name: 'Forward support@example.com to me@gmail.com',
+          name: `Forward ${alias} to me@gmail.com`,
           enabled: true,
           matchers: body.matchers,
           actions: body.actions,
@@ -143,22 +138,22 @@ describe('email routing tools', () => {
 
   it('creates a Cloudflare forwarding address and reports destination verification state', async () => {
     const fetchMock = stubCloudflareEmailApi();
-    const { server, client } = await createClient();
+    const { server, client, call } = await createClient();
 
-    const payload = await callTool(client, 'email_address_create', {
+    const payload = await call('hv_email_forwarding', {
+      action: 'create',
       domain: 'example.com',
       address: 'support',
       forwardTo: 'me@gmail.com',
-      confirm: true,
     });
 
-    expect(payload.success).toBe(true);
-    expect(payload.provider).toBe('cloudflare');
-    expect(payload.address).toBe('support@example.com');
-    expect(payload.forwardTo).toBe('me@gmail.com');
-    expect(payload.destinationCreated).toBe(true);
-    expect(payload.destinationVerificationRequired).toBe(true);
-    expect(payload.message).toBe('support@example.com was created, but me@gmail.com must accept Cloudflare\'s verification email before forwarding works.');
+    expect(payload.ok).toBe(true);
+    expect(payload.data.domain).toBe('example.com');
+    expect(payload.data.address).toBe('support@example.com');
+    expect(payload.data.forwardTo).toBe('me@gmail.com');
+    expect(payload.data.destinationCreated).toBe(true);
+    expect(payload.data.destinationVerificationRequired).toBe(true);
+    expect(payload.hint).toBe('me@gmail.com must accept Cloudflare\'s verification email before forwarding works.');
     expect(fetchMock).toHaveBeenCalledWith(
       'https://api.cloudflare.com/client/v4/zones/zone-123/email/routing/rules',
       expect.objectContaining({ method: 'POST' })
@@ -167,24 +162,21 @@ describe('email routing tools', () => {
     await Promise.all([client.close(), server.close()]);
   });
 
-  it('previews forwarding address creation without writing Cloudflare resources', async () => {
-    const fetchMock = stubCloudflareEmailApi();
-    const { server, client } = await createClient();
+  it('normalizes a fully-qualified alias when creating a forwarding address', async () => {
+    const fetchMock = stubCloudflareEmailApi('billing@example.com');
+    const { server, client, call } = await createClient();
 
-    const payload = await callTool(client, 'email_address_create', {
+    const payload = await call('hv_email_forwarding', {
+      action: 'create',
       domain: 'example.com',
       address: 'billing@example.com',
       forwardTo: 'me@gmail.com',
     });
 
-    expect(payload.success).toBe(true);
-    expect(payload.mode).toBe('preview');
-    expect(payload.plannedChanges).toEqual([
-      { action: 'enable_email_routing_dns', domain: 'example.com' },
-      { action: 'create_destination', email: 'me@gmail.com' },
-      { action: 'create_route', address: 'billing@example.com', forwardTo: 'me@gmail.com' },
-    ]);
-    expect(fetchMock).not.toHaveBeenCalledWith(
+    expect(payload.ok).toBe(true);
+    expect(payload.data.address).toBe('billing@example.com');
+    expect(payload.data.forwardTo).toBe('me@gmail.com');
+    expect(fetchMock).toHaveBeenCalledWith(
       'https://api.cloudflare.com/client/v4/zones/zone-123/email/routing/rules',
       expect.objectContaining({ method: 'POST' })
     );
@@ -235,17 +227,16 @@ describe('email routing tools', () => {
       throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
-    const { server, client } = await createClient();
+    const { server, client, call } = await createClient();
 
-    const payload = await callTool(client, 'email_catchall_set', {
+    const payload = await call('hv_email_forwarding', {
+      action: 'catchall',
       domain: 'example.com',
-      action: 'forward',
       forwardTo: 'me@gmail.com',
-      confirm: true,
     });
 
-    expect(payload.success).toBe(true);
-    expect(payload.catchAll).toMatchObject({
+    expect(payload.ok).toBe(true);
+    expect(payload.data.catchAll).toMatchObject({
       id: 'catch-all',
       enabled: true,
       forwardsTo: ['me@gmail.com'],

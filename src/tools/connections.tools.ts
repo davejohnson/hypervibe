@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
-import { saveConnection, verifyConnection, deleteConnection } from './connection.tools.js';
+import { saveConnection, verifyConnection, deleteConnection } from '../domain/services/connection-ops.service.js';
 import type { ToolContext } from './context.js';
 import { projectField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler } from './respond.js';

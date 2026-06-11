@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { STRIPE_COMMON_WEBHOOK_EVENTS } from '../adapters/providers/stripe/stripe.adapter.js';
 import type { StripeAdapter, StripeMode } from '../adapters/providers/stripe/stripe.adapter.js';
 import { providerDisplayName, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
-import { getStripeAdapter } from './stripe.tools.js';
+import { getStripeAdapter } from '../domain/services/stripe-ops.service.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';

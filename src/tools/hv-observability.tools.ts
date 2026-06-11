@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { StateManager, type TrackedError } from '../agent/state.js';
-import { detectProviderName } from './logs.tools.js';
+import { detectProviderName } from '../domain/services/provider-logs.service.js';
 import {
   fetchProviderLogs,
   fetchProviderDeployments,
@@ -13,7 +13,7 @@ import {
   supportsLogsBuildProvider,
   logsDeploymentsUnsupportedMessage,
   logsBuildUnsupportedMessage,
-} from './logs.tools.js';
+} from '../domain/services/provider-logs.service.js';
 import {
   resolveHealthEnvironment,
   resolveHealthService,
@@ -21,7 +21,7 @@ import {
   joinUrl,
   resolveServiceBaseUrl,
   runHttpCheck,
-} from './health.tools.js';
+} from '../domain/services/health.service.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';

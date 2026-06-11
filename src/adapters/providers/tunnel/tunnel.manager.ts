@@ -4,6 +4,9 @@ import type { TunnelInfo, TunnelAdapter } from './tunnel.types.js';
 import { CloudflaredAdapter } from './cloudflared.adapter.js';
 import { NgrokAdapter } from './ngrok.adapter.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { ConnectionRepository } from '../../db/repositories/connection.repository.js';
+import { getSecretStore } from '../../secrets/secret-store.js';
+import type { TunnelCredentials as TunnelConnectionCredentials } from '../../../domain/entities/connection.entity.js';
 
 // Credentials schema for tunnel configuration
 export const TunnelCredentialsSchema = z.object({
@@ -85,6 +88,24 @@ class TunnelManager {
 
 // Export singleton instance
 export const tunnelManager = new TunnelManager();
+
+const connectionRepo = new ConnectionRepository();
+
+export function getTunnelConfig(): { provider: 'cloudflared' | 'ngrok'; ngrokAuthToken?: string } {
+  // Check if there's a tunnel connection with preferences
+  const connection = connectionRepo.findByProvider('tunnel');
+  if (connection) {
+    const secretStore = getSecretStore();
+    const credentials = secretStore.decryptObject<TunnelConnectionCredentials>(connection.credentialsEncrypted);
+    return {
+      provider: credentials.provider,
+      ngrokAuthToken: credentials.ngrokAuthToken,
+    };
+  }
+
+  // Default to cloudflared (free, no account required)
+  return { provider: 'cloudflared' };
+}
 
 async function commandExists(cmd: string): Promise<boolean> {
   return new Promise((resolve) => {
