@@ -1,0 +1,260 @@
+import { describe, expect, it, vi } from 'vitest';
+import { RailwayAdapter } from '../railway.adapter.js';
+import { hashEnvValue } from '../../../../domain/ports/observe.port.js';
+import type { Environment } from '../../../../domain/entities/environment.entity.js';
+
+function makeEnvironment(platformBindings: Record<string, unknown>): Environment {
+  return {
+    id: 'env-local',
+    projectId: 'proj-local',
+    name: 'production',
+    platformBindings,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+}
+
+const projectDetailsResponse = {
+  project: {
+    id: 'rail-project-1',
+    name: 'billforge',
+    environments: {
+      edges: [
+        { node: { id: 'env-prod', name: 'production' } },
+        { node: { id: 'env-staging', name: 'staging' } },
+      ],
+    },
+    services: {
+      edges: [
+        {
+          node: {
+            id: 'svc-web',
+            name: 'web',
+            repoTriggers: { edges: [] },
+            serviceInstances: {
+              edges: [
+                {
+                  node: {
+                    environmentId: 'env-prod',
+                    domains: {
+                      serviceDomains: [{ domain: 'web-production.up.railway.app' }],
+                      customDomains: [{ domain: 'usebillforge.com' }],
+                    },
+                    startCommand: 'npm start',
+                    healthcheckPath: '/health',
+                  },
+                },
+              ],
+            },
+          },
+        },
+        {
+          node: {
+            id: 'svc-pg',
+            name: 'postgres-db',
+            repoTriggers: { edges: [] },
+            serviceInstances: { edges: [] },
+          },
+        },
+      ],
+    },
+    plugins: {
+      edges: [{ node: { id: 'plugin-redis', name: 'Redis' } }],
+    },
+  },
+};
+
+describe('RailwayAdapter observe', () => {
+  it('observes services, hashes env vars, and classifies databases', async () => {
+    const request = vi.fn()
+      // getProjectDetails
+      .mockResolvedValueOnce(projectDetailsResponse)
+      // getServiceInstanceDetails for web
+      .mockResolvedValueOnce({
+        serviceInstance: {
+          startCommand: 'npm run start:prod',
+          healthcheckPath: '/healthz',
+          cronSchedule: null,
+          latestDeployment: { status: 'SUCCESS' },
+        },
+      })
+      // fetchServiceVariables for web
+      .mockResolvedValueOnce({
+        variables: {
+          DATABASE_URL: 'postgres://user:hunter2@db.internal:5432/app',
+          API_KEY: 'value',
+        },
+      });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
+    );
+
+    expect(result.provider).toBe('railway');
+    expect(result.projectExists).toBe(true);
+    expect(result.projectId).toBe('rail-project-1');
+    expect(result.environmentId).toBe('env-prod');
+    expect(result.partial).toBe(false);
+    expect(result.warnings).toEqual([]);
+
+    expect(result.services).toHaveLength(1);
+    const web = result.services[0];
+    expect(web).toMatchObject({
+      name: 'web',
+      externalId: 'svc-web',
+      workloadKind: 'web',
+      url: 'https://web-production.up.railway.app',
+      customDomains: ['usebillforge.com'],
+      config: {
+        startCommand: 'npm run start:prod',
+        healthCheckPath: '/healthz',
+      },
+      status: 'running',
+    });
+    expect(web.envVarKeys.sort()).toEqual(['API_KEY', 'DATABASE_URL']);
+
+    expect(result.databases).toEqual([
+      {
+        provider: 'railway',
+        engine: 'postgres',
+        externalId: 'svc-pg',
+        name: 'postgres-db',
+        status: 'unknown',
+      },
+      {
+        provider: 'railway',
+        engine: 'redis',
+        externalId: 'plugin-redis',
+        name: 'Redis',
+        status: 'unknown',
+      },
+    ]);
+  });
+
+  it('marks workloadKind cron when the service instance has a cron schedule', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(projectDetailsResponse)
+      .mockResolvedValueOnce({
+        serviceInstance: {
+          startCommand: 'npm run report',
+          cronSchedule: '0 * * * *',
+          latestDeployment: { status: 'SUCCESS' },
+        },
+      })
+      .mockResolvedValueOnce({ variables: {} });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
+    );
+
+    expect(result.services[0]?.workloadKind).toBe('cron');
+    expect(result.services[0]?.config.cronSchedule).toBe('0 * * * *');
+  });
+
+  it('returns projectExists false without calling Railway when no project is bound', async () => {
+    const request = vi.fn();
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(makeEnvironment({}));
+
+    expect(result).toMatchObject({
+      provider: 'railway',
+      projectExists: false,
+      services: [],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('returns projectExists false when the project query fails', async () => {
+    const request = vi.fn().mockRejectedValueOnce(new Error('Project not found'));
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(makeEnvironment({ projectId: 'rail-project-gone' }));
+
+    expect(result.projectExists).toBe(false);
+    expect(result.projectId).toBe('rail-project-gone');
+    expect(result.services).toEqual([]);
+  });
+
+  it('sets partial true with warnings when a sub-query fails', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(projectDetailsResponse)
+      // getServiceInstanceDetails fails
+      .mockRejectedValueOnce(new Error('serviceInstance query exploded'))
+      // fetchServiceVariables fails
+      .mockRejectedValueOnce(new Error('variables query exploded'));
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
+    );
+
+    expect(result.projectExists).toBe(true);
+    expect(result.partial).toBe(true);
+    expect(result.warnings).toHaveLength(2);
+    expect(result.warnings[0]).toContain('web');
+    // Service is still reported, falling back to project-level instance data.
+    expect(result.services[0]).toMatchObject({
+      name: 'web',
+      status: 'unknown',
+      config: {
+        startCommand: 'npm start',
+        healthCheckPath: '/health',
+      },
+      envVarKeys: [],
+      envVarHashes: {},
+    });
+  });
+
+  it('hashes env var values and never exposes raw values', async () => {
+    const secret = 'postgres://user:hunter2@db.internal:5432/app';
+    const request = vi.fn()
+      .mockResolvedValueOnce(projectDetailsResponse)
+      .mockResolvedValueOnce({
+        serviceInstance: { latestDeployment: { status: 'SUCCESS' } },
+      })
+      .mockResolvedValueOnce({
+        variables: {
+          DATABASE_URL: secret,
+          API_KEY: 'value',
+        },
+      });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
+    );
+
+    const web = result.services[0];
+    expect(web?.envVarHashes['API_KEY']).toBe(hashEnvValue('value'));
+    expect(web?.envVarHashes['DATABASE_URL']).toBe(hashEnvValue(secret));
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain('hunter2');
+  });
+
+  it('throws when not connected', async () => {
+    const adapter = new RailwayAdapter();
+    await expect(adapter.observe(makeEnvironment({ projectId: 'rail-project-1' }))).rejects.toThrow(
+      'Not connected'
+    );
+  });
+});

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CloudSqlAdapter } from '../cloudsql.adapter.js';
 import type { Component } from '../../../../domain/entities/component.entity.js';
+import type { Environment } from '../../../../domain/entities/environment.entity.js';
 
 describe('CloudSqlAdapter', () => {
   afterEach(() => {
@@ -120,5 +121,97 @@ describe('CloudSqlAdapter', () => {
       created: false,
     });
     expect(fetchMock.mock.calls).toHaveLength(1);
+  });
+
+  it('observes a provisioned Cloud SQL instance for an environment', async () => {
+    const adapter = new CloudSqlAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url.endsWith('/instances/production-postgres') && method === 'GET') {
+        return Response.json({
+          name: 'production-postgres',
+          state: 'RUNNABLE',
+          databaseVersion: 'POSTGRES_15',
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const now = new Date();
+    const environment: Environment = {
+      id: 'env-1',
+      projectId: 'project-1',
+      name: 'production',
+      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const observed = await adapter.observeDatabase(environment);
+
+    expect(observed).toEqual({
+      provider: 'cloudsql',
+      engine: 'postgres',
+      externalId: 'production-postgres',
+      name: 'production-postgres',
+      status: 'running',
+    });
+  });
+
+  it('returns null from observeDatabase when no instance exists for the environment', async () => {
+    const adapter = new CloudSqlAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if ((url.endsWith('/instances/production-postgres') || url.endsWith('/instances/production-mysql')) && method === 'GET') {
+        return new Response('not found', { status: 404 });
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const now = new Date();
+    const environment: Environment = {
+      id: 'env-1',
+      projectId: 'project-1',
+      name: 'production',
+      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await expect(adapter.observeDatabase(environment)).resolves.toBeNull();
   });
 });

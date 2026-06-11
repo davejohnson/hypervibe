@@ -71,6 +71,7 @@ export class HerokuAdapter implements IProviderAdapter {
     supportsReleaseCommand: true, // release phase in Procfile
     supportsMultiEnvironment: false, // Pipelines exist but separate apps
     managedTls: true,
+    supportsObserve: false,
   };
 
   private credentials: HerokuCredentials | null = null;

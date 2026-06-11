@@ -12,6 +12,7 @@ import { serviceWorkloadKind, type Service } from '../../../domain/entities/serv
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import type { GetLogsOptions, LogEntry } from '../../../domain/ports/hosting.port.js';
+import { hashEnvValue, type ObservedService, type ObservedState } from '../../../domain/ports/observe.port.js';
 
 // Credentials schema for self-registration
 export const CloudRunCredentialsSchema = z.object({
@@ -28,6 +29,7 @@ interface CloudRunService {
   generation: number | string;
   observedGeneration?: number | string;
   reconciling?: boolean;
+  labels?: Record<string, string>;
   uri?: string;
   template?: {
     containers?: CloudRunContainer[];
@@ -53,6 +55,7 @@ interface CloudRunJob {
   generation?: string;
   observedGeneration?: string;
   reconciling?: boolean;
+  labels?: Record<string, string>;
   template?: {
     template?: {
       containers?: CloudRunContainer[];
@@ -116,6 +119,8 @@ interface CloudRunContainer {
   args?: string[];
   volumeMounts?: Array<Record<string, unknown>>;
   resources?: Record<string, unknown>;
+  startupProbe?: { httpGet?: { path?: string } };
+  livenessProbe?: { httpGet?: { path?: string } };
 }
 
 interface CloudBuildResult {
@@ -219,6 +224,7 @@ export class CloudRunAdapter implements IProviderAdapter {
     supportsReleaseCommand: false,
     supportsMultiEnvironment: false, // Separate services per env
     managedTls: true,
+    supportsObserve: true,
   };
 
   private credentials: CloudRunCredentials | null = null;
@@ -1167,6 +1173,128 @@ export class CloudRunAdapter implements IProviderAdapter {
     return deployments.slice(0, limit);
   }
 
+  async observe(environment: Environment): Promise<ObservedState> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const bindings = environment.platformBindings as {
+      projectId?: string;
+      environmentId?: string;
+      services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
+    };
+    const observedAt = new Date().toISOString();
+
+    if (!bindings.projectId) {
+      return {
+        provider: this.name,
+        observedAt,
+        projectExists: false,
+        services: [],
+        databases: [],
+        partial: false,
+        warnings: [],
+      };
+    }
+
+    const token = await this.getAccessToken();
+    const prefix = bindings.projectId;
+    const environmentLabel = this.labelValue(environment.name);
+    const serviceBindings = bindings.services ?? {};
+    const warnings: string[] = [];
+    const services: ObservedService[] = [];
+
+    let liveServices: CloudRunService[] = [];
+    try {
+      liveServices = await this.listCloudRunServices(token);
+    } catch (error) {
+      warnings.push(`Failed to list Cloud Run services: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    for (const liveService of liveServices) {
+      const externalId = this.lastPathSegment(liveService.name);
+      if (!externalId) continue;
+      const bindingKey = Object.entries(serviceBindings)
+        .find(([, binding]) => binding?.serviceId === externalId)?.[0];
+      if (liveService.labels?.['infraprint-environment'] !== environmentLabel && !bindingKey) {
+        continue;
+      }
+
+      const container = this.primaryContainer(liveService);
+      const readiness = this.cloudRunServiceReadiness(liveService);
+      const startCommand = this.containerStartCommand(container);
+      const healthCheckPath = container?.startupProbe?.httpGet?.path ?? container?.livenessProbe?.httpGet?.path;
+      const publicAccess = await this.observePublicInvoker(externalId, token);
+      services.push({
+        name: this.observedServiceName(externalId, liveService.labels, bindingKey, prefix),
+        externalId,
+        workloadKind: 'web',
+        ...(liveService.uri ? { url: liveService.uri } : {}),
+        customDomains: [],
+        config: {
+          ...(startCommand ? { startCommand } : {}),
+          ...(healthCheckPath ? { healthCheckPath } : {}),
+          ...(publicAccess === undefined ? {} : { public: publicAccess }),
+        },
+        ...this.observedEnvFromContainer(container),
+        status: readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
+      });
+    }
+
+    let liveJobs: CloudRunJob[] = [];
+    try {
+      liveJobs = await this.listCloudRunJobs(token);
+    } catch (error) {
+      warnings.push(`Failed to list Cloud Run jobs: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    for (const liveJob of liveJobs) {
+      const externalId = this.lastPathSegment(liveJob.name);
+      if (!externalId) continue;
+      const bindingKey = Object.entries(serviceBindings)
+        .find(([, binding]) => binding?.jobName === externalId)?.[0];
+      if (liveJob.labels?.['infraprint-environment'] !== environmentLabel && !bindingKey) {
+        continue;
+      }
+
+      const schedulerJobName = this.sanitizeName(`${externalId}-schedule`);
+      let schedulerJob: CloudSchedulerJob | null = null;
+      try {
+        schedulerJob = await this.getCloudSchedulerJob(schedulerJobName, token);
+      } catch (error) {
+        warnings.push(`Failed to read Cloud Scheduler job ${schedulerJobName}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      const container = this.primaryJobContainer(liveJob);
+      const readiness = this.cloudRunJobReadiness(liveJob);
+      const startCommand = this.containerStartCommand(container);
+      services.push({
+        name: this.observedServiceName(externalId, liveJob.labels, bindingKey, prefix),
+        externalId: schedulerJob ? schedulerJobName : externalId,
+        workloadKind: schedulerJob ? 'cron' : 'job',
+        customDomains: [],
+        config: {
+          ...(startCommand ? { startCommand } : {}),
+          ...(schedulerJob?.schedule ? { cronSchedule: schedulerJob.schedule } : {}),
+        },
+        ...this.observedEnvFromContainer(container),
+        status: readiness.ready ? 'running' : readiness.error ? 'failed' : 'unknown',
+      });
+    }
+
+    return {
+      provider: this.name,
+      observedAt,
+      projectExists: true,
+      projectId: bindings.projectId,
+      environmentId: bindings.environmentId ?? this.credentials.region,
+      services,
+      databases: [],
+      partial: warnings.length > 0,
+      warnings,
+    };
+  }
+
   // Helper methods
 
   private async queryCloudLogging(params: {
@@ -1301,6 +1429,110 @@ export class CloudRunAdapter implements IProviderAdapter {
 
     const body = await response.json() as { executions?: CloudRunExecution[] };
     return body.executions ?? [];
+  }
+
+  private async listCloudRunServices(token: string): Promise<CloudRunService[]> {
+    if (!this.credentials) {
+      return [];
+    }
+
+    const { projectId, region } = this.credentials;
+    return this.listCloudRunResources<CloudRunService>(
+      `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services`,
+      'services',
+      token
+    );
+  }
+
+  private async listCloudRunJobs(token: string): Promise<CloudRunJob[]> {
+    if (!this.credentials) {
+      return [];
+    }
+
+    const { projectId, region } = this.credentials;
+    return this.listCloudRunResources<CloudRunJob>(
+      `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs`,
+      'jobs',
+      token
+    );
+  }
+
+  private async listCloudRunResources<T>(baseUrl: string, key: string, token: string): Promise<T[]> {
+    const resources: T[] = [];
+    let pageToken: string | undefined;
+    do {
+      const url = `${baseUrl}?pageSize=100${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Cloud Run list API error: ${response.status} ${text}`);
+      }
+
+      const body = await response.json() as Record<string, unknown>;
+      resources.push(...((body[key] as T[] | undefined) ?? []));
+      pageToken = typeof body.nextPageToken === 'string' && body.nextPageToken ? body.nextPageToken : undefined;
+    } while (pageToken);
+    return resources;
+  }
+
+  private observedServiceName(
+    externalId: string,
+    labels: Record<string, string> | undefined,
+    bindingKey: string | undefined,
+    prefix: string
+  ): string {
+    if (bindingKey) {
+      return bindingKey;
+    }
+    const labeled = labels?.['infraprint-service'];
+    if (labeled) {
+      return labeled;
+    }
+    return externalId.startsWith(`${prefix}-`) ? externalId.slice(prefix.length + 1) : externalId;
+  }
+
+  private containerStartCommand(container: CloudRunContainer | undefined): string | undefined {
+    if (!container) {
+      return undefined;
+    }
+    if (
+      container.command?.length === 1
+      && container.command[0] === '/bin/sh'
+      && container.args?.[0] === '-lc'
+      && typeof container.args[1] === 'string'
+    ) {
+      return container.args[1];
+    }
+    const parts = [...(container.command ?? []), ...(container.args ?? [])];
+    return parts.length > 0 ? parts.join(' ') : undefined;
+  }
+
+  private observedEnvFromContainer(container: CloudRunContainer | undefined): {
+    envVarKeys: string[];
+    envVarHashes: Record<string, string>;
+  } {
+    const envVarKeys: string[] = [];
+    const envVarHashes: Record<string, string> = {};
+    for (const entry of container?.env ?? []) {
+      if (typeof entry.name !== 'string') continue;
+      envVarKeys.push(entry.name);
+      if (typeof entry.value === 'string') {
+        envVarHashes[entry.name] = hashEnvValue(entry.value);
+      }
+    }
+    return { envVarKeys, envVarHashes };
+  }
+
+  private async observePublicInvoker(serviceName: string, token: string): Promise<boolean | undefined> {
+    try {
+      const policy = await this.getServiceIamPolicy(this.cloudRunServiceResource(serviceName), token);
+      return this.hasIamBinding(policy.bindings ?? [], 'roles/run.invoker', 'allUsers');
+    } catch {
+      return undefined;
+    }
   }
 
   private toLogEntry(entry: CloudLoggingEntry): LogEntry {

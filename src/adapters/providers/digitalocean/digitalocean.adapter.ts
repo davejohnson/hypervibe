@@ -97,6 +97,7 @@ export class DigitalOceanAdapter implements IProviderAdapter {
     supportsReleaseCommand: false,
     supportsMultiEnvironment: false, // Separate apps per environment
     managedTls: true,
+    supportsObserve: false,
   };
 
   private credentials: DigitalOceanCredentials | null = null;

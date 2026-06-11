@@ -106,6 +106,7 @@ describe('hosting env var tools', () => {
         supportsMultiEnvironment: false,
         managedTls: true,
         supportsAutoScaling: true,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {

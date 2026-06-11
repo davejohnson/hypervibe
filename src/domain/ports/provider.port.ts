@@ -37,6 +37,9 @@ export interface ProviderCapabilities {
 
   /** Whether the platform manages TLS certificates automatically */
   managedTls: boolean;
+
+  /** Whether the adapter can read back live state via observe() */
+  supportsObserve: boolean;
 }
 
 export interface ComponentResult {
@@ -126,4 +129,10 @@ export interface IProviderAdapter {
    * Optional because not all providers expose this operation.
    */
   deleteService?(serviceId: string): Promise<{ success: boolean; error?: string }>;
+
+  /**
+   * Read back live state for an environment (services, config, env var
+   * hashes, databases). Implemented when capabilities.supportsObserve is true.
+   */
+  observe?(environment: Environment): Promise<import('./observe.port.js').ObservedState>;
 }

@@ -82,6 +82,7 @@ export class RenderAdapter implements IProviderAdapter {
     supportsReleaseCommand: false,
     supportsMultiEnvironment: false, // Separate services per environment
     managedTls: true,
+    supportsObserve: false,
   };
 
   private credentials: RenderCredentials | null = null;

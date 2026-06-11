@@ -47,6 +47,7 @@ export class AppRunnerAdapter implements IProviderAdapter {
     supportsReleaseCommand: false,
     supportsMultiEnvironment: false, // Separate services per env
     managedTls: true,
+    supportsObserve: false,
   };
 
   private credentials: AppRunnerCredentials | null = null;

@@ -5,6 +5,8 @@ import type { IProviderAdapter, Receipt, ComponentResult, DeployResult, JobResul
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
+import { hashEnvValue } from '../../../domain/ports/observe.port.js';
+import type { ObservedDatabase, ObservedService, ObservedState } from '../../../domain/ports/observe.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 
 // Credentials schema for self-registration
@@ -30,6 +32,7 @@ export class RailwayAdapter implements IProviderAdapter {
     supportsReleaseCommand: false, // Railway uses start commands
     supportsMultiEnvironment: true,
     managedTls: true,
+    supportsObserve: true,
   };
 
   private client: GraphQLClient | null = null;
@@ -1653,21 +1656,33 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     try {
-      const query = gql`
-        query GetVariables($projectId: String!, $serviceId: String!, $environmentId: String!) {
-          variables(projectId: $projectId, serviceId: $serviceId, environmentId: $environmentId)
-        }
-      `;
-
-      const result = await this.client.request<{ variables: Record<string, string> }>(query, {
-        projectId,
-        serviceId,
-        environmentId,
-      });
-      return result.variables ?? {};
+      return await this.fetchServiceVariables(projectId, serviceId, environmentId);
     } catch {
       return {};
     }
+  }
+
+  private async fetchServiceVariables(
+    projectId: string,
+    serviceId: string,
+    environmentId: string
+  ): Promise<Record<string, string>> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const query = gql`
+      query GetVariables($projectId: String!, $serviceId: String!, $environmentId: String!) {
+        variables(projectId: $projectId, serviceId: $serviceId, environmentId: $environmentId)
+      }
+    `;
+
+    const result = await this.client.request<{ variables: Record<string, string> }>(query, {
+      projectId,
+      serviceId,
+      environmentId,
+    });
+    return result.variables ?? {};
   }
 
   async updateServiceInstanceConfig(params: {
@@ -2191,6 +2206,220 @@ export class RailwayAdapter implements IProviderAdapter {
     } catch {
       return '';
     }
+  }
+
+  /**
+   * Read back the live state of an environment for spec → observe → diff reconciliation.
+   * Never includes raw env var values — only key names and sha256 hashes.
+   */
+  async observe(environment: Environment): Promise<ObservedState> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const observedAt = new Date().toISOString();
+    const warnings: string[] = [];
+    let partial = false;
+
+    const bindings = environment.platformBindings as {
+      projectId?: string;
+      environmentId?: string;
+      services?: Record<string, { serviceId?: string }>;
+    };
+    const projectId = bindings.projectId;
+    if (!projectId) {
+      return {
+        provider: 'railway',
+        observedAt,
+        projectExists: false,
+        services: [],
+        databases: [],
+        partial: false,
+        warnings: [],
+      };
+    }
+
+    const details = await this.getProjectDetails(projectId);
+    if (!details) {
+      return {
+        provider: 'railway',
+        observedAt,
+        projectExists: false,
+        projectId,
+        services: [],
+        databases: [],
+        partial: false,
+        warnings: [],
+      };
+    }
+
+    const projectEnvironments = (details.environments?.edges ?? []).map((e) => e.node);
+    let environmentId = bindings.environmentId;
+    if (!environmentId || !projectEnvironments.some((env) => env.id === environmentId)) {
+      environmentId = projectEnvironments.find(
+        (env) => env.name.toLowerCase() === environment.name.toLowerCase()
+      )?.id;
+    }
+    if (!environmentId) {
+      warnings.push(`Could not resolve Railway environment for "${environment.name}"`);
+      partial = true;
+    }
+
+    const services: ObservedService[] = [];
+    const databases: ObservedDatabase[] = [];
+
+    for (const edge of details.services?.edges ?? []) {
+      const node = edge.node;
+      const engine = this.classifyDatastoreEngine(node.name);
+      if (engine) {
+        databases.push({
+          provider: 'railway',
+          engine,
+          externalId: node.id,
+          name: node.name,
+          status: 'unknown',
+        });
+        continue;
+      }
+
+      const instanceEdges = node.serviceInstances?.edges ?? [];
+      const instance =
+        (environmentId
+          ? instanceEdges.find((e) => e.node.environmentId === environmentId)
+          : instanceEdges[0])?.node ?? instanceEdges[0]?.node;
+
+      const serviceDomain = instance?.domains?.serviceDomains?.[0]?.domain;
+      const customDomains = (instance?.domains?.customDomains ?? []).map((d) => d.domain);
+
+      let startCommand = instance?.startCommand ?? undefined;
+      let healthCheckPath = instance?.healthcheckPath ?? undefined;
+      let cronSchedule: string | undefined;
+      let status: ObservedService['status'] = 'unknown';
+
+      if (environmentId) {
+        try {
+          const instanceDetails = await this.getServiceInstanceDetails(node.id, environmentId);
+          if (instanceDetails) {
+            startCommand = instanceDetails.startCommand ?? startCommand;
+            healthCheckPath = instanceDetails.healthcheckPath ?? healthCheckPath;
+            cronSchedule = instanceDetails.cronSchedule ?? undefined;
+            status = this.toObservedStatus(instanceDetails.latestDeployment?.status);
+          }
+        } catch (error) {
+          warnings.push(`Failed to read service instance for "${node.name}": ${this.describeError(error)}`);
+          partial = true;
+        }
+      }
+
+      const envVarKeys: string[] = [];
+      const envVarHashes: Record<string, string> = {};
+      if (environmentId) {
+        try {
+          const vars = await this.fetchServiceVariables(projectId, node.id, environmentId);
+          for (const [key, value] of Object.entries(vars)) {
+            envVarKeys.push(key);
+            envVarHashes[key] = hashEnvValue(value);
+          }
+        } catch (error) {
+          warnings.push(`Failed to read variables for "${node.name}": ${this.describeError(error)}`);
+          partial = true;
+        }
+      }
+
+      services.push({
+        name: node.name,
+        externalId: node.id,
+        workloadKind: cronSchedule ? 'cron' : 'web',
+        url: serviceDomain ? `https://${serviceDomain}` : undefined,
+        customDomains,
+        config: {
+          startCommand,
+          healthCheckPath,
+          cronSchedule,
+        },
+        envVarKeys,
+        envVarHashes,
+        status,
+      });
+    }
+
+    for (const edge of details.plugins?.edges ?? []) {
+      const node = edge.node;
+      databases.push({
+        provider: 'railway',
+        engine: this.classifyDatastoreEngine(node.name) ?? 'unknown',
+        externalId: node.id,
+        name: node.name,
+        status: 'unknown',
+      });
+    }
+
+    return {
+      provider: 'railway',
+      observedAt,
+      projectExists: true,
+      projectId,
+      environmentId,
+      services,
+      databases,
+      partial,
+      warnings,
+    };
+  }
+
+  private async getServiceInstanceDetails(
+    serviceId: string,
+    environmentId: string
+  ): Promise<{
+    startCommand?: string;
+    healthcheckPath?: string;
+    cronSchedule?: string;
+    latestDeployment?: { status?: string };
+  } | null> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const query = gql`
+      query GetServiceInstance($serviceId: String!, $environmentId: String!) {
+        serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
+          startCommand
+          healthcheckPath
+          cronSchedule
+          latestDeployment {
+            status
+          }
+        }
+      }
+    `;
+
+    const result = await this.client.request<{
+      serviceInstance?: {
+        startCommand?: string;
+        healthcheckPath?: string;
+        cronSchedule?: string;
+        latestDeployment?: { status?: string };
+      } | null;
+    }>(query, { serviceId, environmentId });
+    return result.serviceInstance ?? null;
+  }
+
+  /** Same name-based datastore classification used by listPlugins. */
+  private classifyDatastoreEngine(name: string): string | null {
+    const normalized = name.toLowerCase();
+    if (normalized.includes('postgres')) return 'postgres';
+    if (normalized.includes('redis')) return 'redis';
+    if (normalized.includes('mysql')) return 'mysql';
+    if (normalized.includes('mongo')) return 'mongodb';
+    return null;
+  }
+
+  private toObservedStatus(status?: string): ObservedService['status'] {
+    if (!status) return 'unknown';
+    const normalized = status.toUpperCase();
+    if (normalized.includes('SUCCESS')) return 'running';
+    if (normalized.includes('FAIL') || normalized.includes('CRASH')) return 'failed';
+    return 'unknown';
   }
 }
 

@@ -8,6 +8,7 @@ import type {
   ProvisionResult,
   ProvisionableType,
 } from '../../../domain/ports/database.port.js';
+import type { IObservableDatabase, ObservedDatabase } from '../../../domain/ports/observe.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { buildDatabaseEnvVarsFromComponent } from '../../../domain/services/database-env.js';
 
@@ -50,7 +51,7 @@ interface ServiceAccountCredentials {
   client_email: string;
 }
 
-export class CloudSqlAdapter implements IDatabaseAdapter {
+export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
   readonly name = 'cloudsql';
 
   readonly capabilities: DatabaseCapabilities = {
@@ -425,6 +426,40 @@ export class CloudSqlAdapter implements IDatabaseAdapter {
     } catch {
       return { status: 'unknown' };
     }
+  }
+
+  async observeDatabase(environment: Environment): Promise<ObservedDatabase | null> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    // provision() names instances `${environment.name}-${type}`.
+    for (const type of ['postgres', 'mysql'] as const) {
+      const instanceName = this.sanitizeName(`${environment.name}-${type}`);
+      const instance = await this.getInstance(instanceName);
+      if (!instance) {
+        continue;
+      }
+
+      const statusMap: Record<string, string> = {
+        RUNNABLE: 'running',
+        PENDING_CREATE: 'provisioning',
+        MAINTENANCE: 'running',
+        FAILED: 'error',
+        SUSPENDED: 'stopped',
+        PENDING_DELETE: 'stopped',
+      };
+
+      return {
+        provider: this.name,
+        engine: type,
+        externalId: instance.name || instanceName,
+        name: instance.name || instanceName,
+        status: statusMap[instance.state] ?? (instance.state ? instance.state.toLowerCase() : 'unknown'),
+      };
+    }
+
+    return null;
   }
 
   // Helper methods

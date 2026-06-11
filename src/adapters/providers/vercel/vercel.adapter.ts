@@ -70,6 +70,7 @@ export class VercelAdapter implements IProviderAdapter {
     supportsReleaseCommand: false,
     supportsMultiEnvironment: true, // Production, Preview, Development
     managedTls: true,
+    supportsObserve: false,
   };
 
   private credentials: VercelCredentials | null = null;

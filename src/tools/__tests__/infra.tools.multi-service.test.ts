@@ -122,6 +122,7 @@ describe('infra_apply multi-service convergence', () => {
         supportsMultiEnvironment: true,
         managedTls: true,
         supportsAutoScaling: false,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {
@@ -321,6 +322,7 @@ describe('infra_apply multi-service convergence', () => {
         supportsMultiEnvironment: true,
         managedTls: true,
         supportsAutoScaling: false,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {
@@ -596,6 +598,7 @@ describe('infra_apply multi-service convergence', () => {
         supportsMultiEnvironment: true,
         managedTls: true,
         supportsAutoScaling: false,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {
@@ -824,6 +827,7 @@ describe('infra_apply multi-service convergence', () => {
         supportsMultiEnvironment: true,
         managedTls: true,
         supportsAutoScaling: false,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {
@@ -987,6 +991,7 @@ describe('infra_apply multi-service convergence', () => {
         supportsMultiEnvironment: true,
         managedTls: true,
         supportsAutoScaling: false,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {
@@ -1173,6 +1178,7 @@ describe('infra_apply multi-service convergence', () => {
         supportsMultiEnvironment: true,
         managedTls: true,
         supportsAutoScaling: false,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {
@@ -1353,6 +1359,7 @@ describe('infra_apply multi-service convergence', () => {
         supportsMultiEnvironment: true,
         managedTls: true,
         supportsAutoScaling: false,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {
@@ -1440,6 +1447,7 @@ describe('infra_apply multi-service convergence', () => {
         supportsMultiEnvironment: false,
         managedTls: true,
         supportsAutoScaling: false,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {
@@ -1580,6 +1588,7 @@ describe('infra_apply multi-service convergence', () => {
         supportsMultiEnvironment: false,
         managedTls: true,
         supportsAutoScaling: false,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {

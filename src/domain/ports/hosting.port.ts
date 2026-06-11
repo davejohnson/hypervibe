@@ -30,6 +30,9 @@ export interface HostingCapabilities {
 
   /** Whether auto-scaling is available */
   supportsAutoScaling: boolean;
+
+  /** Whether the adapter can read back live state via observe() */
+  supportsObserve: boolean;
 }
 
 /**
@@ -157,6 +160,12 @@ export interface IHostingAdapter {
     serviceName: string,
     options?: GetLogsOptions
   ): Promise<LogEntry[]>;
+
+  /**
+   * Read back live state for an environment (services, config, env var
+   * hashes, databases). Implemented when capabilities.supportsObserve is true.
+   */
+  observe?(environment: Environment): Promise<import('./observe.port.js').ObservedState>;
 }
 
 /**

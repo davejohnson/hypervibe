@@ -62,6 +62,7 @@ describe('DeployOrchestrator local rollback', () => {
         supportsMultiEnvironment: true,
         managedTls: true,
         supportsAutoScaling: false,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {
@@ -153,6 +154,7 @@ describe('DeployOrchestrator local rollback', () => {
         supportsMultiEnvironment: false,
         managedTls: true,
         supportsAutoScaling: true,
+        supportsObserve: false,
       },
       async connect() {},
       async verify() {
