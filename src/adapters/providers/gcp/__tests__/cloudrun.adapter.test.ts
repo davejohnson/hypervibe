@@ -8,6 +8,110 @@ describe('CloudRunAdapter', () => {
     vi.restoreAllMocks();
   });
 
+  it('preserves live revision env vars and Cloud SQL volumes on redeploy', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+
+    let patchBody: Record<string, unknown> | undefined;
+    const liveService = {
+      name: 'gcp-project-web',
+      uri: 'https://gcp-project-web.run.app',
+      terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
+      template: {
+        containers: [{
+          image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:old',
+          env: [
+            // Injected at database provision time — must survive a redeploy
+            // that does not re-pass it.
+            { name: 'DATABASE_URL', value: 'postgres://app:pw@34.44.202.227:5432/app' },
+            { name: 'CLOUD_SQL_CONNECTION_NAME', value: 'gcp-project:us-central1:app' },
+            { name: 'NODE_ENV', value: 'production' },
+          ],
+          volumeMounts: [{ name: 'cloudsql', mountPath: '/cloudsql' }],
+        }],
+        volumes: [{ name: 'cloudsql', cloudSqlInstance: { instances: ['gcp-project:us-central1:app'] } }],
+      },
+    };
+
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url.endsWith(':getIamPolicy')) {
+        return Response.json({ bindings: [{ role: 'roles/run.invoker', members: ['allUsers'] }] });
+      }
+      if (url.endsWith(':setIamPolicy')) {
+        return Response.json(JSON.parse(String(init?.body)).policy);
+      }
+      if (url.includes('run.googleapis.com') && method === 'GET') {
+        return Response.json(liveService);
+      }
+      if (url.includes('run.googleapis.com') && method === 'PATCH') {
+        patchBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ name: 'operations/update-service', done: true });
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const now = new Date();
+    const environment: Environment = {
+      id: 'env-1',
+      projectId: 'project-1',
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        services: { web: { serviceId: 'gcp-project-web' } },
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const service: Service = {
+      id: 'service-1',
+      projectId: 'project-1',
+      name: 'web',
+      buildConfig: { builder: 'dockerfile', startCommand: 'npm start' },
+      envVarSpec: {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    // Redeploy with a new image and only one explicit env var.
+    const result = await adapter.deploy(service, environment, {
+      IMAGE_URI: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:new',
+      FEATURE_FLAG: 'on',
+    });
+
+    expect(result.receipt.success).toBe(true);
+    expect(patchBody).toBeTruthy();
+    const template = patchBody!.template as { containers: Array<{ env: Array<{ name: string; value?: string }>; volumeMounts?: unknown[] }>; volumes?: unknown[] };
+    const env = Object.fromEntries(template.containers[0].env.map((e) => [e.name, e.value]));
+
+    // The var injected at provision time survives the redeploy...
+    expect(env.DATABASE_URL).toBe('postgres://app:pw@34.44.202.227:5432/app');
+    expect(env.CLOUD_SQL_CONNECTION_NAME).toBe('gcp-project:us-central1:app');
+    expect(env.NODE_ENV).toBe('production');
+    // ...and explicitly passed vars are applied.
+    expect(env.FEATURE_FLAG).toBe('on');
+
+    // Cloud SQL wiring survives too.
+    expect(template.containers[0].volumeMounts).toContainEqual({ name: 'cloudsql', mountPath: '/cloudsql' });
+    expect(template.volumes).toContainEqual(expect.objectContaining({ name: 'cloudsql' }));
+  });
+
   it('explains missing source metadata when no image can be built', async () => {
     const adapter = new CloudRunAdapter();
     await adapter.connect({

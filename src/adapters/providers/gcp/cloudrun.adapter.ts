@@ -436,17 +436,27 @@ export class CloudRunAdapter implements IProviderAdapter {
         // Service doesn't exist
       }
 
-      // Build environment variables config
+      // Build environment variables config. Cloud Run env vars live on the
+      // revision, so merge with the live container's env — a deploy that
+      // doesn't re-pass every var (e.g. DATABASE_URL injected at database
+      // provision time) must not silently wipe it. Passed vars always win.
       const runtimeVars = this.runtimeEnvVarsForService(service, envVars);
-      const env = Object.entries(runtimeVars).map(([name, value]) => ({ name, value }));
-      const cloudSql = this.cloudSqlVolumeConfigFromEnv(runtimeVars);
+      const existingContainer = cloudRunService ? this.primaryContainer(cloudRunService) : undefined;
+      const env = this.mergeEnvVars(existingContainer?.env, runtimeVars);
+      const cloudSqlNames = Array.from(new Set([
+        ...this.cloudSqlConnectionNamesFromEnv(runtimeVars),
+        ...this.cloudSqlConnectionNamesFromEnvVars(existingContainer?.env),
+      ]));
+      const cloudSql = this.cloudSqlVolumeConfig(cloudSqlNames);
 
       // Build container spec
       const containerSpec = {
         image: imageUri,
         ports: [{ containerPort: parseInt(envVars['PORT'] || '8080', 10) }],
         env,
-        ...(cloudSql ? { volumeMounts: [cloudSql.volumeMount] } : {}),
+        ...(cloudSql
+          ? { volumeMounts: this.mergeVolumeMounts(existingContainer?.volumeMounts, [cloudSql.volumeMount]) }
+          : existingContainer?.volumeMounts ? { volumeMounts: existingContainer.volumeMounts } : {}),
         resources: {
           limits: {
             cpu: envVars['CPU'] || '1',
@@ -467,7 +477,9 @@ export class CloudRunAdapter implements IProviderAdapter {
         template: {
           labels,
           containers: [containerSpec],
-          ...(cloudSql ? { volumes: [cloudSql.volume] } : {}),
+          ...(cloudSql
+            ? { volumes: this.mergeVolumes(this.serviceVolumes(cloudRunService), [cloudSql.volume]) }
+            : {}),
           ...(this.serviceAccountCreds?.client_email
             ? { serviceAccount: this.serviceAccountCreds.client_email }
             : {}),
@@ -598,7 +610,11 @@ export class CloudRunAdapter implements IProviderAdapter {
       const token = await this.getAccessToken();
       const { region } = this.credentials;
       const runtimeVars = this.runtimeEnvVarsForService(service, envVars);
-      const env = Object.entries(runtimeVars).map(([name, value]) => ({ name, value }));
+      // Merge with the live job container env so redeploys don't wipe vars
+      // injected outside this call (e.g. DATABASE_URL at provision time).
+      const currentJob = await this.getCloudRunJob(jobName, token);
+      const currentJobContainer = currentJob ? this.primaryJobContainer(currentJob) : undefined;
+      const env = this.mergeEnvVars(currentJobContainer?.env, runtimeVars);
       const labels = {
         'infraprint-environment': this.labelValue(environment.name),
         'infraprint-service': this.labelValue(service.name),
@@ -617,7 +633,12 @@ export class CloudRunAdapter implements IProviderAdapter {
         },
         serviceAccount: this.serviceAccountCreds?.client_email,
         labels,
-        cloudSqlConnectionNames: this.cloudSqlConnectionNamesFromEnv(runtimeVars),
+        existingVolumes: currentJob?.template?.template?.volumes,
+        existingVolumeMounts: currentJobContainer?.volumeMounts,
+        cloudSqlConnectionNames: Array.from(new Set([
+          ...this.cloudSqlConnectionNamesFromEnv(runtimeVars),
+          ...this.cloudSqlConnectionNamesFromEnvVars(currentJobContainer?.env),
+        ])),
       });
 
       const { created: createdJob } = await this.upsertCloudRunJob({

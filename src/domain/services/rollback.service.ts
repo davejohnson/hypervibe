@@ -1,8 +1,10 @@
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
+import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { adapterFactory } from './adapter.factory.js';
 import { DeployOrchestrator } from './deploy.orchestrator.js';
 import { buildDeploySourceEnvVars } from './deploy-source.js';
+import { buildDatabaseEnvVarsFromComponent } from './database-env.js';
 import { syncProjectIntent } from './intent.service.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -10,6 +12,7 @@ import type { DeployResult } from './deploy.orchestrator.js';
 
 const runRepo = new RunRepository();
 const serviceRepo = new ServiceRepository();
+const componentRepo = new ComponentRepository();
 
 export const ROLLBACK_NOTE =
   'This rollback re-triggers deployment for the last known-good service set. It does not restore provider-side manual config outside hypervibe state.';
@@ -92,7 +95,13 @@ export async function executeRollback(params: {
   }
 
   const orchestrator = new DeployOrchestrator();
-  const deployEnvVars = buildDeploySourceEnvVars(project, adapterResult.adapter.name);
+  // Include managed database env vars (e.g. DATABASE_URL): Cloud Run scopes
+  // env to the revision, so a rollback deploy must carry them too.
+  const dbComponent = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
+  const deployEnvVars = {
+    ...buildDeploySourceEnvVars(project, adapterResult.adapter.name),
+    ...(dbComponent ? buildDatabaseEnvVarsFromComponent(dbComponent).envVars : {}),
+  };
   const rollback = await orchestrator.execute({
     project,
     environment,

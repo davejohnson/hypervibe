@@ -8,6 +8,10 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
+import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
+import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
+import { adapterFactory } from '../../domain/services/adapter.factory.js';
+import type { IHostingAdapter } from '../../domain/ports/hosting.port.js';
 import { createToolContext } from '../context.js';
 import { registerHvDeployTools } from '../hv-deploy.tools.js';
 
@@ -63,6 +67,67 @@ describe('hv_deploy', () => {
     const result = await t.call('hv_deploy', { project: 'gate-app', env: 'production' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('CONFIRM_REQUIRED');
+    await t.close();
+  });
+});
+
+describe('hv_deploy database env injection', () => {
+  it('injects the managed database env vars into every deploy', async () => {
+    const project = new ProjectRepository().create({ name: 'dbenv-app', defaultPlatform: 'cloudrun' });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project', services: { web: { serviceId: 'gcp-project-web' } } },
+    });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      bindings: {
+        provider: 'cloudsql',
+        connectionUrl: 'postgresql://app:pw@34.44.202.227:5432/app',
+      },
+      externalId: 'production-postgres',
+    });
+
+    const deployCalls: Array<Record<string, string>> = [];
+    const fakeAdapter: IHostingAdapter = {
+      name: 'cloudrun',
+      capabilities: {
+        supportedBuilders: ['dockerfile'],
+        supportsAutoWiring: false,
+        supportsHealthChecks: true,
+        supportsCronSchedule: true,
+        supportsReleaseCommand: false,
+        supportsMultiEnvironment: false,
+        managedTls: true,
+        supportsAutoScaling: true,
+        supportsObserve: true,
+      },
+      async connect() {},
+      async verify() { return { success: true }; },
+      async ensureProject() { return { success: true, message: 'ok', data: { projectId: 'gcp-project' } }; },
+      async deploy(service, _environment, envVars) {
+        deployCalls.push({ ...envVars });
+        return {
+          serviceId: service.id,
+          externalId: 'gcp-project-web',
+          status: 'deployed',
+          receipt: { success: true, message: 'deployed' },
+        };
+      },
+      async setEnvVars() { return { success: true, message: 'ok' }; },
+      async getDeployStatus() { return { status: 'deployed' }; },
+    };
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeAdapter });
+
+    const t = await makeClient();
+    const result = await t.call('hv_deploy', { project: 'dbenv-app', env: 'production' });
+    expect(result.ok).toBe(true);
+
+    expect(deployCalls).toHaveLength(1);
+    // The managed database URL is injected even though the caller passed no envVars.
+    expect(deployCalls[0].DATABASE_URL).toBe('postgresql://app:pw@34.44.202.227:5432/app');
     await t.close();
   });
 });

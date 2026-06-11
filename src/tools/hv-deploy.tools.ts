@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { DeployOrchestrator } from '../domain/services/deploy.orchestrator.js';
 import { buildDeploySourceEnvVars } from '../domain/services/deploy-source.js';
+import { buildDatabaseEnvVarsFromComponent } from '../domain/services/database-env.js';
 import { requiresProductionConfirm } from '../domain/services/policy.service.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { executeRollback, ROLLBACK_NOTE } from '../domain/services/rollback.service.js';
@@ -64,8 +65,16 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
       }
 
       const orchestrator = new DeployOrchestrator();
+      // Inject the managed database's env vars (e.g. DATABASE_URL) on every
+      // deploy, same as hv_apply does: some providers (Cloud Run) scope env
+      // vars to the revision, so a redeploy that omits them would lose them.
+      const dbComponent = ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres');
+      const databaseEnvVars = dbComponent
+        ? buildDatabaseEnvVarsFromComponent(dbComponent).envVars
+        : {};
       const deployEnvVars = {
         ...buildDeploySourceEnvVars(project, adapter.name),
+        ...databaseEnvVars,
         ...(envVars ?? {}),
       };
       const result = await orchestrator.execute({
