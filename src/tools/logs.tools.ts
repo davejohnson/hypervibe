@@ -22,6 +22,11 @@ type UnifiedLog = {
   message: string;
 };
 
+type EnvironmentLike = {
+  platformBindings: unknown;
+  name: string;
+};
+
 export function detectProviderName(projectDefaultPlatform: string | undefined, bindingsProvider: string | undefined): string {
   return (bindingsProvider || projectDefaultPlatform || 'cloudrun').toLowerCase();
 }
@@ -51,13 +56,18 @@ export function supportsLogsBuildProvider(provider: string): boolean {
   return (LOGS_BUILD_SUPPORTED_PROVIDERS as readonly string[]).includes(provider.toLowerCase());
 }
 
-async function fetchProviderLogs(
+export function logsDeploymentsUnsupportedMessage(provider: string): string {
+  return `logs_deployments currently supports ${LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS.join(', ')} only (provider: ${provider}).`;
+}
+
+export function logsBuildUnsupportedMessage(provider: string): string {
+  return `logs_build currently supports ${LOGS_BUILD_SUPPORTED_PROVIDERS.join(', ')} only (provider: ${provider}).`;
+}
+
+export async function fetchProviderLogs(
   provider: string,
   project: Project,
-  environment: {
-    platformBindings: unknown;
-    name: string;
-  },
+  environment: EnvironmentLike,
   serviceName: string,
   lines: number,
   options: { errorsOnly?: boolean } = {}
@@ -193,6 +203,452 @@ async function fetchProviderLogs(
   throw new Error(`Logs are not yet supported for provider: ${provider}`);
 }
 
+export type ProviderDeployment = {
+  id: string;
+  status: string;
+  createdAt?: string;
+  updatedAt?: string;
+  url?: string;
+  service?: string;
+  type?: string;
+  logUri?: string;
+};
+
+/**
+ * List recent deployments for an environment (optionally narrowed to one
+ * service) across the supported hosting providers. Throws on resolution and
+ * provider failures with the same messages the legacy tools returned.
+ */
+export async function fetchProviderDeployments(
+  provider: string,
+  project: Project,
+  environment: EnvironmentLike,
+  serviceName: string | undefined,
+  limit: number
+): Promise<ProviderDeployment[]> {
+  const bindings = environment.platformBindings as {
+    projectId?: string;
+    environmentId?: string;
+    services?: Record<string, { serviceId: string }>;
+  };
+
+  if (provider === 'railway') {
+    if (!bindings.projectId || !bindings.environmentId) {
+      throw new Error('Environment not deployed to Railway');
+    }
+    const connection = connectionRepo.findByProvider('railway');
+    if (!connection) {
+      throw new Error('No Railway connection found');
+    }
+
+    const secretStore = getSecretStore();
+    const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
+    const adapter = new RailwayAdapter();
+    await adapter.connect(credentials);
+
+    let serviceId: string | undefined;
+    if (serviceName && bindings.services?.[serviceName]) {
+      serviceId = bindings.services[serviceName].serviceId;
+    }
+
+    const deployments = await adapter.getDeployments(
+      bindings.projectId,
+      bindings.environmentId,
+      serviceId,
+      limit
+    );
+    return deployments.map((d) => ({
+      id: d.id,
+      status: d.status,
+      createdAt: d.createdAt,
+      url: d.staticUrl,
+    }));
+  }
+
+  if (provider === 'vercel') {
+    if (!bindings.projectId) {
+      throw new Error('Environment is not bound to Vercel projectId');
+    }
+    const result = await adapterFactory.getProviderAdapter('vercel', project);
+    if (!result.success || !result.adapter) {
+      throw new Error(result.error || 'Failed to create Vercel adapter');
+    }
+    const adapter = result.adapter as unknown as {
+      listDeployments: (projectId: string, limit?: number) => Promise<Array<{
+        id: string;
+        readyState?: string;
+        createdAt?: number;
+        url?: string;
+        name?: string;
+      }>>;
+    };
+    const deployments = await adapter.listDeployments(bindings.projectId, limit);
+    return deployments.map((d) => ({
+      id: d.id,
+      status: d.readyState ?? 'unknown',
+      createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : undefined,
+      url: d.url ? `https://${d.url}` : undefined,
+      service: d.name,
+    }));
+  }
+
+  if (provider === 'render') {
+    const result = await adapterFactory.getProviderAdapter('render', project);
+    if (!result.success || !result.adapter) {
+      throw new Error(result.error || 'Failed to create Render adapter');
+    }
+    const adapter = result.adapter as unknown as {
+      listServiceDeployments: (serviceId: string, limit?: number) => Promise<Array<{
+        id: string;
+        status: string;
+        createdAt: string;
+      }>>;
+    };
+    if (typeof adapter.listServiceDeployments !== 'function') {
+      throw new Error('Render deployments are not supported by this adapter version');
+    }
+
+    const targetServices = serviceName
+      ? [{ name: serviceName, serviceId: bindings.services?.[serviceName]?.serviceId }]
+      : Object.entries(bindings.services ?? {}).map(([name, svc]) => ({ name, serviceId: svc.serviceId }));
+
+    const deployments: ProviderDeployment[] = [];
+    for (const svc of targetServices) {
+      if (!svc.serviceId) continue;
+      const items = await adapter.listServiceDeployments(svc.serviceId, limit);
+      for (const d of items) {
+        deployments.push({
+          id: d.id,
+          status: d.status,
+          createdAt: d.createdAt,
+          service: svc.name,
+        });
+      }
+    }
+
+    deployments.sort((a, b) => {
+      const at = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const bt = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return bt - at;
+    });
+    return deployments.slice(0, limit);
+  }
+
+  if (provider === 'digitalocean') {
+    if (!bindings.projectId) {
+      throw new Error('Environment is not bound to DigitalOcean projectId');
+    }
+    const result = await adapterFactory.getProviderAdapter('digitalocean', project);
+    if (!result.success || !result.adapter) {
+      throw new Error(result.error || 'Failed to create DigitalOcean adapter');
+    }
+    const adapter = result.adapter as unknown as {
+      listDeployments: (appId: string, limit?: number) => Promise<Array<{
+        id: string;
+        status: string;
+        createdAt?: string;
+        updatedAt?: string;
+      }>>;
+    };
+    if (typeof adapter.listDeployments !== 'function') {
+      throw new Error('DigitalOcean deployments are not supported by this adapter version');
+    }
+
+    const deployments = await adapter.listDeployments(bindings.projectId, limit);
+    return deployments.map((d) => ({
+      id: d.id,
+      status: d.status,
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt,
+    }));
+  }
+
+  if (provider === 'cloudrun') {
+    const result = await adapterFactory.getProviderAdapter('cloudrun', project);
+    if (!result.success || !result.adapter) {
+      throw new Error(result.error || 'Failed to create Cloud Run adapter');
+    }
+    const adapter = result.adapter as unknown as {
+      listDeployments: (
+        environment: { platformBindings: unknown; name: string },
+        serviceName?: string,
+        limit?: number
+      ) => Promise<ProviderDeployment[]>;
+    };
+    if (typeof adapter.listDeployments !== 'function') {
+      throw new Error('Cloud Run deployments are not supported by this adapter version');
+    }
+
+    return adapter.listDeployments(environment, serviceName, limit);
+  }
+
+  throw new Error(logsDeploymentsUnsupportedMessage(provider));
+}
+
+/**
+ * Get build logs for a deployment (latest by default) across the supported
+ * hosting providers. Throws on resolution and provider failures.
+ */
+export async function fetchProviderBuildLogs(
+  provider: string,
+  project: Project,
+  environment: EnvironmentLike,
+  serviceName: string,
+  deploymentId?: string
+): Promise<{ deploymentId: string; buildLogs: string }> {
+  const bindings = environment.platformBindings as {
+    projectId?: string;
+    environmentId?: string;
+    services?: Record<string, { serviceId: string }>;
+  };
+
+  if (provider === 'railway') {
+    if (!bindings.projectId || !bindings.environmentId) {
+      throw new Error('Environment not deployed to Railway');
+    }
+    const connection = connectionRepo.findByProvider('railway');
+    if (!connection) {
+      throw new Error('No Railway connection found');
+    }
+
+    const secretStore = getSecretStore();
+    const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
+    const adapter = new RailwayAdapter();
+    await adapter.connect(credentials);
+
+    let targetDeploymentId = deploymentId;
+    if (!targetDeploymentId) {
+      const deployments = await adapter.getDeployments(
+        bindings.projectId,
+        bindings.environmentId,
+        bindings.services?.[serviceName]?.serviceId,
+        1
+      );
+      if (deployments.length === 0) {
+        throw new Error('No deployments found for service');
+      }
+      targetDeploymentId = deployments[0].id;
+    }
+
+    const buildLogs = await adapter.getBuildLogs(targetDeploymentId);
+    return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
+  }
+
+  if (provider === 'vercel') {
+    if (!bindings.projectId) {
+      throw new Error('Environment is not bound to Vercel projectId');
+    }
+    const result = await adapterFactory.getProviderAdapter('vercel', project);
+    if (!result.success || !result.adapter) {
+      throw new Error(result.error || 'Failed to create Vercel adapter');
+    }
+    const adapter = result.adapter as unknown as {
+      listDeployments: (projectId: string, limit?: number) => Promise<Array<{ id: string }>>;
+      getDeploymentEvents: (deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
+    };
+
+    let targetDeploymentId = deploymentId;
+    if (!targetDeploymentId) {
+      const deployments = await adapter.listDeployments(bindings.projectId, 1);
+      if (deployments.length === 0) {
+        throw new Error('No deployments found for service');
+      }
+      targetDeploymentId = deployments[0].id;
+    }
+
+    const events = await adapter.getDeploymentEvents(targetDeploymentId, 200);
+    const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
+    return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
+  }
+
+  if (provider === 'render') {
+    const serviceId = bindings.services?.[serviceName]?.serviceId;
+    if (!serviceId) {
+      throw new Error(`Service ${serviceName} not bound to Render`);
+    }
+    const result = await adapterFactory.getProviderAdapter('render', project);
+    if (!result.success || !result.adapter) {
+      throw new Error(result.error || 'Failed to create Render adapter');
+    }
+    const adapter = result.adapter as unknown as {
+      listServiceDeployments: (serviceId: string, limit?: number) => Promise<Array<{ id: string }>>;
+      getDeploymentLogs: (serviceId: string, deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
+    };
+    if (
+      typeof adapter.listServiceDeployments !== 'function' ||
+      typeof adapter.getDeploymentLogs !== 'function'
+    ) {
+      throw new Error('Render build logs are not supported by this adapter version');
+    }
+
+    let targetDeploymentId = deploymentId;
+    if (!targetDeploymentId) {
+      const deployments = await adapter.listServiceDeployments(serviceId, 1);
+      if (deployments.length === 0) {
+        throw new Error('No deployments found for service');
+      }
+      targetDeploymentId = deployments[0].id;
+    }
+
+    const events = await adapter.getDeploymentLogs(serviceId, targetDeploymentId, 200);
+    const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
+    return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
+  }
+
+  if (provider === 'digitalocean') {
+    if (!bindings.projectId) {
+      throw new Error('Environment is not bound to DigitalOcean projectId');
+    }
+    const result = await adapterFactory.getProviderAdapter('digitalocean', project);
+    if (!result.success || !result.adapter) {
+      throw new Error(result.error || 'Failed to create DigitalOcean adapter');
+    }
+    const adapter = result.adapter as unknown as {
+      listDeployments: (appId: string, limit?: number) => Promise<Array<{ id: string }>>;
+      getDeploymentLogs: (appId: string, deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
+    };
+    if (
+      typeof adapter.listDeployments !== 'function' ||
+      typeof adapter.getDeploymentLogs !== 'function'
+    ) {
+      throw new Error('DigitalOcean build logs are not supported by this adapter version');
+    }
+
+    let targetDeploymentId = deploymentId;
+    if (!targetDeploymentId) {
+      const deployments = await adapter.listDeployments(bindings.projectId, 1);
+      if (deployments.length === 0) {
+        throw new Error('No deployments found for service');
+      }
+      targetDeploymentId = deployments[0].id;
+    }
+
+    const events = await adapter.getDeploymentLogs(bindings.projectId, targetDeploymentId, 200);
+    const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
+    return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
+  }
+
+  throw new Error(logsBuildUnsupportedMessage(provider));
+}
+
+/**
+ * Collect recent error-like log lines across every bound service in an
+ * environment, newest first.
+ */
+export async function collectRecentErrors(
+  provider: string,
+  project: Project,
+  environment: EnvironmentLike,
+  limit: number
+): Promise<{
+  errors: Array<{ service: string; timestamp: string; message: string; severity?: string }>;
+  totalFound: number;
+}> {
+  const bindings = environment.platformBindings as {
+    services?: Record<string, { serviceId: string }>;
+  };
+
+  const allErrors: Array<{ service: string; timestamp: string; message: string; severity?: string }> = [];
+  for (const serviceName of Object.keys(bindings.services ?? {})) {
+    const { logs } = await fetchProviderLogs(provider, project, environment, serviceName, 500);
+    for (const error of logs.filter(isErrorLike)) {
+      allErrors.push({
+        service: serviceName,
+        timestamp: error.timestamp,
+        message: error.message,
+        severity: error.severity,
+      });
+    }
+  }
+
+  allErrors.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  return { errors: allErrors.slice(0, limit), totalFound: allErrors.length };
+}
+
+export type ServiceErrorsSummary = {
+  summary: {
+    totalServices: number;
+    totalErrors: number;
+    failedDeployments: number;
+    healthyServices: number;
+  };
+  services: Array<{
+    service: string;
+    deploymentStatus: string;
+    errorCount: number;
+    recentErrors: Array<{ timestamp: string; message: string }>;
+  }>;
+};
+
+/** Summarize recent errors per bound service in an environment. */
+export async function collectErrorsSummary(
+  provider: string,
+  project: Project,
+  environment: EnvironmentLike
+): Promise<ServiceErrorsSummary> {
+  const bindings = environment.platformBindings as {
+    services?: Record<string, { serviceId: string }>;
+  };
+
+  const serviceErrors: ServiceErrorsSummary['services'] = [];
+  for (const serviceName of Object.keys(bindings.services ?? {})) {
+    const { deploymentStatus, logs } = await fetchProviderLogs(provider, project, environment, serviceName, 200);
+    const errors = logs.filter(isErrorLike);
+
+    serviceErrors.push({
+      service: serviceName,
+      deploymentStatus: deploymentStatus ?? 'unknown',
+      errorCount: errors.length,
+      recentErrors: errors.slice(0, 5).map((e) => ({
+        timestamp: e.timestamp,
+        message: e.message.substring(0, 200),
+      })),
+    });
+  }
+
+  const totalErrors = serviceErrors.reduce((sum, s) => sum + s.errorCount, 0);
+  const failedDeployments = serviceErrors.filter((s) =>
+    s.deploymentStatus === 'FAILED' || s.deploymentStatus === 'CRASHED'
+  );
+
+  return {
+    summary: {
+      totalServices: serviceErrors.length,
+      totalErrors,
+      failedDeployments: failedDeployments.length,
+      healthyServices: serviceErrors.filter((s) => s.errorCount === 0 && s.deploymentStatus === 'SUCCESS').length,
+    },
+    services: serviceErrors,
+  };
+}
+
+/** Check the status of Stripe webhook endpoints. Throws if Stripe is not connected. */
+export async function fetchStripeWebhookStatuses(
+  mode: 'sandbox' | 'live',
+  webhookId?: string
+): Promise<Array<{ id: string; url: string; status: string; enabledEvents: number; description?: string | null }>> {
+  const connection = connectionRepo.findByProvider('stripe');
+  if (!connection) {
+    throw new Error('No Stripe connection found');
+  }
+
+  const secretStore = getSecretStore();
+  const credentials = secretStore.decryptObject<StripeCredentials>(connection.credentialsEncrypted);
+  const adapter = new StripeAdapter();
+  adapter.connect(credentials);
+
+  const webhooks = await adapter.listWebhookEndpoints(mode as StripeMode);
+  return webhooks
+    .filter((w) => !webhookId || w.id === webhookId)
+    .map((w) => ({
+      id: w.id,
+      url: w.url,
+      status: w.status,
+      enabledEvents: w.enabled_events.length,
+      description: w.description,
+    }));
+}
+
 export function registerLogsTools(server: McpServer): void {
   // Simple error fetching - minimal parameters needed
   server.tool(
@@ -250,31 +706,7 @@ export function registerLogsTools(server: McpServer): void {
       }
 
       try {
-        const allErrors: Array<{
-          service: string;
-          timestamp: string;
-          message: string;
-          severity?: string;
-        }> = [];
-
-        // Fetch logs from all services
-        for (const serviceName of Object.keys(bindings.services)) {
-          const { logs } = await fetchProviderLogs(provider, project, env, serviceName, 500);
-          const errors = logs.filter(isErrorLike);
-
-          for (const error of errors) {
-            allErrors.push({
-              service: serviceName,
-              timestamp: error.timestamp,
-              message: error.message,
-              severity: error.severity,
-            });
-          }
-        }
-
-        // Sort by timestamp descending and limit
-        allErrors.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-        const recentErrors = allErrors.slice(0, limit);
+        const { errors, totalFound } = await collectRecentErrors(provider, project, env, limit);
 
         return {
           content: [{
@@ -284,9 +716,9 @@ export function registerLogsTools(server: McpServer): void {
               project: project.name,
               environment: env.name,
               provider,
-              errorCount: recentErrors.length,
-              totalFound: allErrors.length,
-              errors: recentErrors,
+              errorCount: errors.length,
+              totalFound,
+              errors,
             }),
           }],
         };
@@ -333,323 +765,36 @@ export function registerLogsTools(server: McpServer): void {
         };
       }
 
-      const bindings = environment.platformBindings as {
-        provider?: string;
-        projectId?: string;
-        environmentId?: string;
-        services?: Record<string, { serviceId: string }>;
-      };
+      const bindings = environment.platformBindings as { provider?: string };
       const provider = detectProviderName(project.defaultPlatform, bindings.provider);
 
-      try {
-        if (provider === 'railway') {
-          if (!bindings.projectId || !bindings.environmentId) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
-              }],
-            };
-          }
-
-          const connection = connectionRepo.findByProvider('railway');
-          if (!connection) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: 'No Railway connection found' }),
-              }],
-            };
-          }
-
-          const secretStore = getSecretStore();
-          const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-          const adapter = new RailwayAdapter();
-          await adapter.connect(credentials);
-
-          let serviceId: string | undefined;
-          if (serviceName && bindings.services?.[serviceName]) {
-            serviceId = bindings.services[serviceName].serviceId;
-          }
-
-          const deployments = await adapter.getDeployments(
-            bindings.projectId,
-            bindings.environmentId,
-            serviceId,
-            limit
-          );
-
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                project: projectName,
-                environment: environmentName,
-                provider,
-                service: serviceName || 'all',
-                count: deployments.length,
-                deployments: deployments.map((d) => ({
-                  id: d.id,
-                  status: d.status,
-                  createdAt: d.createdAt,
-                  url: d.staticUrl,
-                })),
-              }),
-            }],
-          };
-        }
-
-        if (provider === 'vercel') {
-          if (!bindings.projectId) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: 'Environment is not bound to Vercel projectId' }),
-              }],
-            };
-          }
-
-          const result = await adapterFactory.getProviderAdapter('vercel', project);
-          if (!result.success || !result.adapter) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: result.error || 'Failed to create Vercel adapter' }),
-              }],
-            };
-          }
-          const adapter = result.adapter as unknown as {
-            listDeployments: (projectId: string, limit?: number) => Promise<Array<{
-              id: string;
-              readyState?: string;
-              createdAt?: number;
-              url?: string;
-              name?: string;
-            }>>;
-          };
-          const deployments = await adapter.listDeployments(bindings.projectId, limit);
-
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                project: projectName,
-                environment: environmentName,
-                provider,
-                service: serviceName || 'all',
-                count: deployments.length,
-                deployments: deployments.map((d) => ({
-                  id: d.id,
-                  status: d.readyState ?? 'unknown',
-                  createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : undefined,
-                  url: d.url ? `https://${d.url}` : undefined,
-                  service: d.name,
-                })),
-              }),
-            }],
-          };
-        }
-
-        if (provider === 'render') {
-          const result = await adapterFactory.getProviderAdapter('render', project);
-          if (!result.success || !result.adapter) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: result.error || 'Failed to create Render adapter' }),
-              }],
-            };
-          }
-          const adapter = result.adapter as unknown as {
-            listServiceDeployments: (serviceId: string, limit?: number) => Promise<Array<{
-              id: string;
-              status: string;
-              createdAt: string;
-            }>>;
-          };
-          if (typeof adapter.listServiceDeployments !== 'function') {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({
-                  success: false,
-                  error: 'Render deployments are not supported by this adapter version',
-                }),
-              }],
-            };
-          }
-
-          const targetServices = serviceName
-            ? [{ name: serviceName, serviceId: bindings.services?.[serviceName]?.serviceId }]
-            : Object.entries(bindings.services ?? {}).map(([name, svc]) => ({ name, serviceId: svc.serviceId }));
-
-          const deployments: Array<{
-            id: string;
-            status: string;
-            createdAt?: string;
-            service?: string;
-          }> = [];
-
-          for (const svc of targetServices) {
-            if (!svc.serviceId) continue;
-            const items = await adapter.listServiceDeployments(svc.serviceId, limit);
-            for (const d of items) {
-              deployments.push({
-                id: d.id,
-                status: d.status,
-                createdAt: d.createdAt,
-                service: svc.name,
-              });
-            }
-          }
-
-          deployments.sort((a, b) => {
-            const at = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-            const bt = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-            return bt - at;
-          });
-          const sliced = deployments.slice(0, limit);
-
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                project: projectName,
-                environment: environmentName,
-                provider,
-                service: serviceName || 'all',
-                count: sliced.length,
-                deployments: sliced,
-              }),
-            }],
-          };
-        }
-
-        if (provider === 'digitalocean') {
-          if (!bindings.projectId) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: 'Environment is not bound to DigitalOcean projectId' }),
-              }],
-            };
-          }
-          const result = await adapterFactory.getProviderAdapter('digitalocean', project);
-          if (!result.success || !result.adapter) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: result.error || 'Failed to create DigitalOcean adapter' }),
-              }],
-            };
-          }
-          const adapter = result.adapter as unknown as {
-            listDeployments: (appId: string, limit?: number) => Promise<Array<{
-              id: string;
-              status: string;
-              createdAt?: string;
-              updatedAt?: string;
-            }>>;
-          };
-          if (typeof adapter.listDeployments !== 'function') {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({
-                  success: false,
-                  error: 'DigitalOcean deployments are not supported by this adapter version',
-                }),
-              }],
-            };
-          }
-
-          const deployments = await adapter.listDeployments(bindings.projectId, limit);
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                project: projectName,
-                environment: environmentName,
-                provider,
-                service: serviceName || 'all',
-                count: deployments.length,
-                deployments: deployments.map((d) => ({
-                  id: d.id,
-                  status: d.status,
-                  createdAt: d.createdAt,
-                  updatedAt: d.updatedAt,
-                })),
-              }),
-            }],
-          };
-        }
-
-        if (provider === 'cloudrun') {
-          const result = await adapterFactory.getProviderAdapter('cloudrun', project);
-          if (!result.success || !result.adapter) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: result.error || 'Failed to create Cloud Run adapter' }),
-              }],
-            };
-          }
-          const adapter = result.adapter as unknown as {
-            listDeployments: (
-              environment: { platformBindings: unknown; name: string },
-              serviceName?: string,
-              limit?: number
-            ) => Promise<Array<{
-              id: string;
-              status: string;
-              createdAt?: string;
-              updatedAt?: string;
-              url?: string;
-              service?: string;
-              type?: string;
-              logUri?: string;
-            }>>;
-          };
-          if (typeof adapter.listDeployments !== 'function') {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({
-                  success: false,
-                  error: 'Cloud Run deployments are not supported by this adapter version',
-                }),
-              }],
-            };
-          }
-
-          const deployments = await adapter.listDeployments(environment, serviceName, limit);
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                project: projectName,
-                environment: environmentName,
-                provider,
-                service: serviceName || 'all',
-                count: deployments.length,
-                deployments,
-              }),
-            }],
-          };
-        }
-
+      if (!supportsLogsDeploymentsProvider(provider)) {
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `logs_deployments currently supports ${LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS.join(', ')} only (provider: ${provider}).`,
+              error: logsDeploymentsUnsupportedMessage(provider),
               provider,
+            }),
+          }],
+        };
+      }
+
+      try {
+        const deployments = await fetchProviderDeployments(provider, project, environment, serviceName, limit);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              project: projectName,
+              environment: environmentName,
+              provider,
+              service: serviceName || 'all',
+              count: deployments.length,
+              deployments,
             }),
           }],
         };
@@ -788,8 +933,6 @@ export function registerLogsTools(server: McpServer): void {
 
       const bindings = environment.platformBindings as {
         provider?: string;
-        projectId?: string;
-        environmentId?: string;
         services?: Record<string, { serviceId: string }>;
       };
       const provider = detectProviderName(project.defaultPlatform, bindings.provider);
@@ -803,276 +946,33 @@ export function registerLogsTools(server: McpServer): void {
         };
       }
 
-      try {
-        if (provider === 'railway') {
-          if (!bindings.projectId || !bindings.environmentId) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: 'Environment not deployed to Railway' }),
-              }],
-            };
-          }
-
-          const connection = connectionRepo.findByProvider('railway');
-          if (!connection) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: 'No Railway connection found' }),
-              }],
-            };
-          }
-
-          const secretStore = getSecretStore();
-          const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-          const adapter = new RailwayAdapter();
-          await adapter.connect(credentials);
-
-          let targetDeploymentId = deploymentId;
-
-          if (!targetDeploymentId) {
-            const deployments = await adapter.getDeployments(
-              bindings.projectId,
-              bindings.environmentId,
-              bindings.services[serviceName].serviceId,
-              1
-            );
-
-            if (deployments.length === 0) {
-              return {
-                content: [{
-                  type: 'text' as const,
-                  text: JSON.stringify({ success: false, error: 'No deployments found for service' }),
-                }],
-              };
-            }
-
-            targetDeploymentId = deployments[0].id;
-          }
-
-          const buildLogs = await adapter.getBuildLogs(targetDeploymentId);
-
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                project: projectName,
-                environment: environmentName,
-                provider,
-                service: serviceName,
-                deploymentId: targetDeploymentId,
-                buildLogs: buildLogs || 'No build logs available',
-              }),
-            }],
-          };
-        }
-
-        if (provider === 'vercel') {
-          if (!bindings.projectId) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: 'Environment is not bound to Vercel projectId' }),
-              }],
-            };
-          }
-          const result = await adapterFactory.getProviderAdapter('vercel', project);
-          if (!result.success || !result.adapter) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: result.error || 'Failed to create Vercel adapter' }),
-              }],
-            };
-          }
-          const adapter = result.adapter as unknown as {
-            listDeployments: (projectId: string, limit?: number) => Promise<Array<{ id: string }>>;
-            getDeploymentEvents: (deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
-          };
-
-          let targetDeploymentId = deploymentId;
-          if (!targetDeploymentId) {
-            const deployments = await adapter.listDeployments(bindings.projectId, 1);
-            if (deployments.length === 0) {
-              return {
-                content: [{
-                  type: 'text' as const,
-                  text: JSON.stringify({ success: false, error: 'No deployments found for service' }),
-                }],
-              };
-            }
-            targetDeploymentId = deployments[0].id;
-          }
-
-          const events = await adapter.getDeploymentEvents(targetDeploymentId, 200);
-          const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
-
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                project: projectName,
-                environment: environmentName,
-                provider,
-                service: serviceName,
-                deploymentId: targetDeploymentId,
-                buildLogs: buildLogs || 'No build logs available',
-              }),
-            }],
-          };
-        }
-
-        if (provider === 'render') {
-          const serviceId = bindings.services?.[serviceName]?.serviceId;
-          if (!serviceId) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: `Service ${serviceName} not bound to Render` }),
-              }],
-            };
-          }
-          const result = await adapterFactory.getProviderAdapter('render', project);
-          if (!result.success || !result.adapter) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: result.error || 'Failed to create Render adapter' }),
-              }],
-            };
-          }
-          const adapter = result.adapter as unknown as {
-            listServiceDeployments: (serviceId: string, limit?: number) => Promise<Array<{ id: string }>>;
-            getDeploymentLogs: (serviceId: string, deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
-          };
-          if (
-            typeof adapter.listServiceDeployments !== 'function' ||
-            typeof adapter.getDeploymentLogs !== 'function'
-          ) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({
-                  success: false,
-                  error: 'Render build logs are not supported by this adapter version',
-                }),
-              }],
-            };
-          }
-
-          let targetDeploymentId = deploymentId;
-          if (!targetDeploymentId) {
-            const deployments = await adapter.listServiceDeployments(serviceId, 1);
-            if (deployments.length === 0) {
-              return {
-                content: [{
-                  type: 'text' as const,
-                  text: JSON.stringify({ success: false, error: 'No deployments found for service' }),
-                }],
-              };
-            }
-            targetDeploymentId = deployments[0].id;
-          }
-
-          const events = await adapter.getDeploymentLogs(serviceId, targetDeploymentId, 200);
-          const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
-
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                project: projectName,
-                environment: environmentName,
-                provider,
-                service: serviceName,
-                deploymentId: targetDeploymentId,
-                buildLogs: buildLogs || 'No build logs available',
-              }),
-            }],
-          };
-        }
-
-        if (provider === 'digitalocean') {
-          if (!bindings.projectId) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: 'Environment is not bound to DigitalOcean projectId' }),
-              }],
-            };
-          }
-          const result = await adapterFactory.getProviderAdapter('digitalocean', project);
-          if (!result.success || !result.adapter) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({ success: false, error: result.error || 'Failed to create DigitalOcean adapter' }),
-              }],
-            };
-          }
-          const adapter = result.adapter as unknown as {
-            listDeployments: (appId: string, limit?: number) => Promise<Array<{ id: string }>>;
-            getDeploymentLogs: (appId: string, deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
-          };
-          if (
-            typeof adapter.listDeployments !== 'function' ||
-            typeof adapter.getDeploymentLogs !== 'function'
-          ) {
-            return {
-              content: [{
-                type: 'text' as const,
-                text: JSON.stringify({
-                  success: false,
-                  error: 'DigitalOcean build logs are not supported by this adapter version',
-                }),
-              }],
-            };
-          }
-
-          let targetDeploymentId = deploymentId;
-          if (!targetDeploymentId) {
-            const deployments = await adapter.listDeployments(bindings.projectId, 1);
-            if (deployments.length === 0) {
-              return {
-                content: [{
-                  type: 'text' as const,
-                  text: JSON.stringify({ success: false, error: 'No deployments found for service' }),
-                }],
-              };
-            }
-            targetDeploymentId = deployments[0].id;
-          }
-
-          const events = await adapter.getDeploymentLogs(bindings.projectId, targetDeploymentId, 200);
-          const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
-
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                project: projectName,
-                environment: environmentName,
-                provider,
-                service: serviceName,
-                deploymentId: targetDeploymentId,
-                buildLogs: buildLogs || 'No build logs available',
-              }),
-            }],
-          };
-        }
-
+      if (!supportsLogsBuildProvider(provider)) {
         return {
           content: [{
             type: 'text' as const,
             text: JSON.stringify({
               success: false,
-              error: `logs_build currently supports ${LOGS_BUILD_SUPPORTED_PROVIDERS.join(', ')} only (provider: ${provider}).`,
+              error: logsBuildUnsupportedMessage(provider),
               provider,
+            }),
+          }],
+        };
+      }
+
+      try {
+        const result = await fetchProviderBuildLogs(provider, project, environment, serviceName, deploymentId);
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: true,
+              project: projectName,
+              environment: environmentName,
+              provider,
+              service: serviceName,
+              deploymentId: result.deploymentId,
+              buildLogs: result.buildLogs,
             }),
           }],
         };
@@ -1134,32 +1034,7 @@ export function registerLogsTools(server: McpServer): void {
       }
 
       try {
-        const serviceErrors: Array<{
-          service: string;
-          deploymentStatus: string;
-          errorCount: number;
-          recentErrors: Array<{ timestamp: string; message: string }>;
-        }> = [];
-
-        for (const serviceName of Object.keys(bindings.services)) {
-          const { deploymentStatus, logs } = await fetchProviderLogs(provider, project, environment, serviceName, 200);
-          const errors = logs.filter(isErrorLike);
-
-          serviceErrors.push({
-            service: serviceName,
-            deploymentStatus: deploymentStatus ?? 'unknown',
-            errorCount: errors.length,
-            recentErrors: errors.slice(0, 5).map((e) => ({
-              timestamp: e.timestamp,
-              message: e.message.substring(0, 200),
-            })),
-          });
-        }
-
-        const totalErrors = serviceErrors.reduce((sum, s) => sum + s.errorCount, 0);
-        const failedDeployments = serviceErrors.filter((s) =>
-          s.deploymentStatus === 'FAILED' || s.deploymentStatus === 'CRASHED'
-        );
+        const { summary, services } = await collectErrorsSummary(provider, project, environment);
 
         return {
           content: [{
@@ -1169,13 +1044,8 @@ export function registerLogsTools(server: McpServer): void {
               project: projectName,
               environment: environmentName,
               provider,
-              summary: {
-                totalServices: serviceErrors.length,
-                totalErrors,
-                failedDeployments: failedDeployments.length,
-                healthyServices: serviceErrors.filter((s) => s.errorCount === 0 && s.deploymentStatus === 'SUCCESS').length,
-              },
-              services: serviceErrors,
+              summary,
+              services,
             }),
           }],
         };
@@ -1201,33 +1071,8 @@ export function registerLogsTools(server: McpServer): void {
       webhookId: z.string().optional().describe('Specific webhook endpoint ID (optional)'),
     },
     async ({ mode, webhookId }) => {
-      const connection = connectionRepo.findByProvider('stripe');
-      if (!connection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No Stripe connection found' }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<StripeCredentials>(connection.credentialsEncrypted);
-      const adapter = new StripeAdapter();
-      adapter.connect(credentials);
-
       try {
-        const webhooks = await adapter.listWebhookEndpoints(mode as StripeMode);
-
-        const webhookStatuses = webhooks
-          .filter((w) => !webhookId || w.id === webhookId)
-          .map((w) => ({
-            id: w.id,
-            url: w.url,
-            status: w.status,
-            enabledEvents: w.enabled_events.length,
-            description: w.description,
-          }));
+        const webhookStatuses = await fetchStripeWebhookStatuses(mode, webhookId);
 
         // Note: Stripe doesn't expose webhook delivery logs via API directly
         // We can only see the endpoint status

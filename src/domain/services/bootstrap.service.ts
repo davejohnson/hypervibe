@@ -73,7 +73,8 @@ export async function executeBootstrap(params: {
   services: string[];
   crons?: DesiredState['crons'];
   domain?: string;
-  databaseProvider: (typeof DB_PROVIDERS)[number];
+  /** Omit to skip database provisioning entirely. */
+  databaseProvider?: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
   serviceConfig?: DesiredState['serviceConfig'];
   envVars?: DesiredState['envVars'];
@@ -228,14 +229,17 @@ export async function executeBootstrap(params: {
     };
   }
 
-  const existingDatabase = resolveExistingDatabaseState(environment.id, params.databaseProvider);
   let dbEnsureReceipt: Receipt | undefined;
   let dbProvision: {
     component: Component;
     receipt: { success: boolean; message: string; error?: string; data?: Record<string, unknown> };
     connectionUrl?: string;
     envVars?: Record<string, string>;
-  };
+  } | undefined;
+
+  if (params.databaseProvider) {
+  const databaseProvider = params.databaseProvider;
+  const existingDatabase = resolveExistingDatabaseState(environment.id, databaseProvider);
 
   if (existingDatabase.status === 'match' && existingDatabase.component) {
     if (params.databaseProvider === 'cloudsql') {
@@ -365,7 +369,7 @@ export async function executeBootstrap(params: {
         id: dbProvision.component.externalId ?? dbProvision.component.id,
         metadata: { environmentId: environment.id },
       },
-      compensate: async () => dbAdapterResult.adapter!.destroy(dbProvision.component),
+      compensate: async () => dbAdapterResult.adapter!.destroy(dbProvision!.component),
     });
 
     const existingComponent = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
@@ -397,6 +401,7 @@ export async function executeBootstrap(params: {
         }),
       });
     }
+  }
   }
 
   const hostingProject = project.defaultPlatform?.toLowerCase() === targetPlatform
@@ -461,7 +466,7 @@ export async function executeBootstrap(params: {
     : {};
   const deployEnvVars = {
     ...sourceEnvVars,
-    ...(dbProvision.envVars ?? {}),
+    ...(dbProvision?.envVars ?? {}),
     ...(params.envVars ?? {}),
   };
   const deploy = await orchestrator.execute({
@@ -489,17 +494,19 @@ export async function executeBootstrap(params: {
       created: tx.listResources(),
     },
     debug: {
-      dbProvision: {
-        provider: params.databaseProvider,
-        receiptData: dbProvision.receipt.data ?? null,
-        databaseEnsureReceipt: dbEnsureReceipt
-          ? {
-              success: dbEnsureReceipt.success,
-              message: dbEnsureReceipt.message,
-              data: dbEnsureReceipt.data ?? null,
-            }
-          : undefined,
-      },
+      dbProvision: dbProvision
+        ? {
+            provider: params.databaseProvider,
+            receiptData: dbProvision.receipt.data ?? null,
+            databaseEnsureReceipt: dbEnsureReceipt
+              ? {
+                  success: dbEnsureReceipt.success,
+                  message: dbEnsureReceipt.message,
+                  data: dbEnsureReceipt.data ?? null,
+                }
+              : undefined,
+          }
+        : null,
     },
   };
 

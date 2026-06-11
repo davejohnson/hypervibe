@@ -10,21 +10,21 @@ import type { AppStoreBetaGroup, AppStoreConnectBuild, AppStoreConnectCredential
 
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
-const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg']);
+export const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg']);
 
-const betaTesterInputSchema = z.object({
+export const betaTesterInputSchema = z.object({
   email: z.string().email().describe('Tester email address'),
   firstName: z.string().optional().describe('Tester first name'),
   lastName: z.string().optional().describe('Tester last name'),
 });
 
-type BetaTesterInput = z.infer<typeof betaTesterInputSchema>;
+export type BetaTesterInput = z.infer<typeof betaTesterInputSchema>;
 
 /**
  * Get an App Store Connect adapter, using scoped connection if available.
  * @param scopeHint - Optional scope hint (e.g., app bundle ID) for finding scoped tokens
  */
-function getAppStoreConnectAdapter(scopeHint?: string): { adapter: AppStoreConnectAdapter } | { error: string } {
+export function getAppStoreConnectAdapter(scopeHint?: string): { adapter: AppStoreConnectAdapter } | { error: string } {
   const connection = connectionRepo.findBestMatch('appstoreconnect', scopeHint);
   if (!connection) {
     return {
@@ -41,7 +41,7 @@ function getAppStoreConnectAdapter(scopeHint?: string): { adapter: AppStoreConne
   return { adapter };
 }
 
-async function resolveAppId(
+export async function resolveAppId(
   adapter: AppStoreConnectAdapter,
   appIdentifier?: string,
   appId?: string,
@@ -59,7 +59,7 @@ async function resolveAppId(
   return { appId: app.id, app };
 }
 
-async function resolveBuild(
+export async function resolveBuild(
   adapter: AppStoreConnectAdapter,
   params: {
     appId?: string;
@@ -91,7 +91,7 @@ async function resolveBuild(
   return { build: compliance.build, complianceSet: compliance.complianceSet };
 }
 
-async function resolveBetaGroup(
+export async function resolveBetaGroup(
   adapter: AppStoreConnectAdapter,
   params: {
     appId: string;
@@ -137,7 +137,7 @@ async function resolveBetaGroup(
   });
 }
 
-function summarizeBuild(build: AppStoreConnectBuild): Record<string, unknown> {
+export function summarizeBuild(build: AppStoreConnectBuild): Record<string, unknown> {
   return {
     id: build.id,
     version: build.version,

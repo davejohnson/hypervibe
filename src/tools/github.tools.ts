@@ -13,7 +13,7 @@ import type { Project } from '../domain/entities/project.entity.js';
 
 // ============= Workflow Templates =============
 
-const WORKFLOW_TEMPLATES: Record<string, {
+export const WORKFLOW_TEMPLATES: Record<string, {
   name: string;
   filename: string;
   content: string;
@@ -353,7 +353,7 @@ const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
 
 // GitHub Pages IP addresses for A records (apex domain)
-const GITHUB_PAGES_IPS = [
+export const GITHUB_PAGES_IPS = [
   '185.199.108.153',
   '185.199.109.153',
   '185.199.110.153',
@@ -364,7 +364,7 @@ const GITHUB_PAGES_IPS = [
  * Get a GitHub adapter, using scoped connection if available.
  * @param scopeHint - Optional scope hint (e.g., "owner/repo" or "owner/*") for finding scoped tokens
  */
-function getGitHubAdapter(scopeHint?: string): { adapter: GitHubAdapter } | { error: string } {
+export function getGitHubAdapter(scopeHint?: string): { adapter: GitHubAdapter } | { error: string } {
   const connection = connectionRepo.findBestMatch('github', scopeHint);
   if (!connection) {
     return { error: 'No GitHub connection found. Use connection_create with provider=github first.' };
@@ -396,14 +396,14 @@ function getCloudflareAdapter(scopeHint?: string): { adapter: CloudflareAdapter 
   return { adapter };
 }
 
-function isApexDomain(domain: string): boolean {
+export function isApexDomain(domain: string): boolean {
   // Simple check: apex domain has only one dot (e.g., example.com)
   // Subdomain has multiple dots (e.g., www.example.com, blog.example.com)
   const parts = domain.split('.');
   return parts.length === 2;
 }
 
-function getApexDomain(domain: string): string {
+export function getApexDomain(domain: string): string {
   const parts = domain.split('.');
   if (parts.length <= 2) {
     return domain;
@@ -412,16 +412,16 @@ function getApexDomain(domain: string): string {
   return parts.slice(-2).join('.');
 }
 
-type BranchDeployProvider = 'railway' | 'vercel' | 'render' | 'digitalocean';
-type BranchDeployEnvironmentKind = 'staging' | 'production';
+export type BranchDeployProvider = 'railway' | 'vercel' | 'render' | 'digitalocean';
+export type BranchDeployEnvironmentKind = 'staging' | 'production';
 
-interface BranchDeployTarget {
+export interface BranchDeployTarget {
   environmentName: string;
   kind: BranchDeployEnvironmentKind;
   branch: string;
 }
 
-interface BranchDeployWorkflow {
+export interface BranchDeployWorkflow {
   template: string;
   templateName: string;
   branch: string;
@@ -456,7 +456,7 @@ function resolveBranchDeployProject(owner: string, repo: string, projectName?: s
   );
 }
 
-function resolveBranchDeployTargets(project: Project): {
+export function resolveBranchDeployTargets(project: Project): {
   targets: BranchDeployTarget[];
   desiredBranches: { staging?: string; production?: string };
   migration: { includeStep: boolean; command?: string; note?: string };
@@ -595,7 +595,7 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
   }
 }
 
-function buildBranchDeployWorkflow(
+export function buildBranchDeployWorkflow(
   provider: BranchDeployProvider,
   target: BranchDeployTarget,
   migration: { includeStep: boolean; command?: string }
@@ -636,6 +636,69 @@ ${migrationStep}${deployBlock.steps}`;
     requiredSecrets: Array.from(new Set(requiredSecrets)),
     requiredVariables: [],
   };
+}
+
+export const AI_REVIEW_WORKFLOW_PATH = '.github/workflows/ai-code-review.yml';
+export const AI_REVIEW_DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+
+export function buildAiReviewWorkflowContent(claudeModel: string): string {
+  return `name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/github-script@v7
+        env:
+          ANTHROPIC_API_KEY: \${{ secrets.ANTHROPIC_API_KEY }}
+        with:
+          script: |
+            const diff = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              mediaType: { format: 'diff' },
+            });
+
+            const response = await fetch('https://api.anthropic.com/v1/messages', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': process.env.ANTHROPIC_API_KEY,
+                'anthropic-version': '2023-06-01',
+              },
+              body: JSON.stringify({
+                model: '${claudeModel}',
+                max_tokens: 4096,
+                messages: [{
+                  role: 'user',
+                  content: \`Review this pull request diff. Provide a concise code review focusing on bugs, security issues, and significant improvements. Be constructive and specific. If the code looks good, say so briefly.\\n\\nDiff:\\n\${diff.data.substring(0, 100000)}\`,
+                }],
+              }),
+            });
+
+            const result = await response.json();
+            const review = result.content?.[0]?.text ?? 'Unable to generate review.';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: \`## 🤖 AI Code Review\\n\\n\${review}\\n\\n---\\n*Powered by Claude (${claudeModel})*\`,
+            });
+`;
 }
 
 export function registerGitHubTools(server: McpServer): void {
@@ -1253,67 +1316,11 @@ Note: GitHub's repository contents API has a special case for \`.github/workflow
       }
 
       const { adapter } = result;
-      const claudeModel = model ?? 'claude-sonnet-4-20250514';
+      const claudeModel = model ?? AI_REVIEW_DEFAULT_MODEL;
 
-      const workflowContent = `name: AI Code Review
+      const workflowContent = buildAiReviewWorkflowContent(claudeModel);
 
-on:
-  pull_request:
-    types: [opened, synchronize]
-
-permissions:
-  contents: read
-  pull-requests: write
-
-jobs:
-  review:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/github-script@v7
-        env:
-          ANTHROPIC_API_KEY: \${{ secrets.ANTHROPIC_API_KEY }}
-        with:
-          script: |
-            const diff = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-              mediaType: { format: 'diff' },
-            });
-
-            const response = await fetch('https://api.anthropic.com/v1/messages', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'x-api-key': process.env.ANTHROPIC_API_KEY,
-                'anthropic-version': '2023-06-01',
-              },
-              body: JSON.stringify({
-                model: '${claudeModel}',
-                max_tokens: 4096,
-                messages: [{
-                  role: 'user',
-                  content: \`Review this pull request diff. Provide a concise code review focusing on bugs, security issues, and significant improvements. Be constructive and specific. If the code looks good, say so briefly.\\n\\nDiff:\\n\${diff.data.substring(0, 100000)}\`,
-                }],
-              }),
-            });
-
-            const result = await response.json();
-            const review = result.content?.[0]?.text ?? 'Unable to generate review.';
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: \`## 🤖 AI Code Review\\n\\n\${review}\\n\\n---\\n*Powered by Claude (${claudeModel})*\`,
-            });
-`;
-
-      const workflowPath = '.github/workflows/ai-code-review.yml';
+      const workflowPath = AI_REVIEW_WORKFLOW_PATH;
 
       // Preview mode
       if (!confirm) {

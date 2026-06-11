@@ -46,7 +46,7 @@ function getCloudflareAdapter(domain: string): { adapter: CloudflareAdapter } | 
   return { adapter };
 }
 
-async function resolveCloudflareEmailContext(domain: string): Promise<CloudflareEmailContext | { error: string }> {
+export async function resolveCloudflareEmailContext(domain: string): Promise<CloudflareEmailContext | { error: string }> {
   const adapterResult = getCloudflareAdapter(domain);
   if ('error' in adapterResult) return { error: adapterResult.error };
 
@@ -71,15 +71,15 @@ async function resolveCloudflareEmailContext(domain: string): Promise<Cloudflare
   };
 }
 
-function normalizeDomain(domain: string): string {
+export function normalizeDomain(domain: string): string {
   return domain.trim().toLowerCase().replace(/^@/, '');
 }
 
-function normalizeEmail(email: string): string {
+export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-function normalizeAlias(address: string, domain: string): string {
+export function normalizeAlias(address: string, domain: string): string {
   const trimmed = address.trim().toLowerCase();
   if (trimmed.includes('@')) {
     return trimmed;
@@ -87,7 +87,7 @@ function normalizeAlias(address: string, domain: string): string {
   return `${trimmed.replace(/^@/, '')}@${domain}`;
 }
 
-function routingRuleForAddress(rule: CloudflareEmailRoutingRule, address: string): boolean {
+export function routingRuleForAddress(rule: CloudflareEmailRoutingRule, address: string): boolean {
   return rule.matchers.some((matcher) =>
     matcher.type === 'literal'
     && matcher.field === 'to'
@@ -95,17 +95,17 @@ function routingRuleForAddress(rule: CloudflareEmailRoutingRule, address: string
   );
 }
 
-function forwardedTo(rule: CloudflareEmailRoutingRule): string[] {
+export function forwardedTo(rule: CloudflareEmailRoutingRule): string[] {
   return rule.actions
     .filter((action) => action.type === 'forward')
     .flatMap((action) => action.value ?? []);
 }
 
-function isVerifiedDestination(address: CloudflareEmailRoutingAddress): boolean {
+export function isVerifiedDestination(address: CloudflareEmailRoutingAddress): boolean {
   return Boolean(address.verified);
 }
 
-function summarizeDestination(address: CloudflareEmailRoutingAddress) {
+export function summarizeDestination(address: CloudflareEmailRoutingAddress) {
   return {
     id: address.id,
     email: address.email,
@@ -114,7 +114,7 @@ function summarizeDestination(address: CloudflareEmailRoutingAddress) {
   };
 }
 
-function summarizeRule(rule: CloudflareEmailRoutingRule) {
+export function summarizeRule(rule: CloudflareEmailRoutingRule) {
   return {
     id: rule.id,
     name: rule.name,
@@ -125,7 +125,7 @@ function summarizeRule(rule: CloudflareEmailRoutingRule) {
   };
 }
 
-function rulePayload(address: string, forwardTo: string) {
+export function rulePayload(address: string, forwardTo: string) {
   return {
     name: `Forward ${address} to ${forwardTo}`,
     enabled: true,
@@ -141,7 +141,7 @@ function rulePayload(address: string, forwardTo: string) {
   };
 }
 
-function catchAllPayload(action: 'drop' | 'forward', forwardTo: string | undefined, enabled: boolean) {
+export function catchAllPayload(action: 'drop' | 'forward', forwardTo: string | undefined, enabled: boolean) {
   return {
     name: action === 'forward' && forwardTo ? `Catch-all forward to ${forwardTo}` : 'Catch-all drop',
     enabled,
@@ -152,7 +152,7 @@ function catchAllPayload(action: 'drop' | 'forward', forwardTo: string | undefin
   };
 }
 
-async function ensureDestination(
+export async function ensureDestination(
   adapter: CloudflareAdapter,
   accountId: string,
   forwardTo: string,

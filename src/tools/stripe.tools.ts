@@ -16,7 +16,7 @@ const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const auditRepo = new AuditRepository();
 
-function getStripeAdapter(): { adapter: StripeAdapter; credentials: StripeCredentials } | { error: string } {
+export function getStripeAdapter(): { adapter: StripeAdapter; credentials: StripeCredentials } | { error: string } {
   const connection = connectionRepo.findByProvider('stripe');
   if (!connection) {
     return { error: 'No Stripe connection found. Use connection_create with provider=stripe first.' };

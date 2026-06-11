@@ -7,7 +7,7 @@ import type { TunnelCredentials } from '../domain/entities/connection.entity.js'
 
 const connectionRepo = new ConnectionRepository();
 
-function getTunnelConfig(): { provider: 'cloudflared' | 'ngrok'; ngrokAuthToken?: string } {
+export function getTunnelConfig(): { provider: 'cloudflared' | 'ngrok'; ngrokAuthToken?: string } {
   // Check if there's a tunnel connection with preferences
   const connection = connectionRepo.findByProvider('tunnel');
   if (connection) {

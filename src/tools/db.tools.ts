@@ -13,6 +13,7 @@ import { DatabaseAdapter } from '../adapters/providers/database/database.adapter
 import type { RailwayCredentials } from '../adapters/providers/railway/railway.adapter.js';
 import type { DatabaseCredentials } from '../adapters/providers/database/database.adapter.js';
 import type { Project } from '../domain/entities/project.entity.js';
+import type { Environment } from '../domain/entities/environment.entity.js';
 import type { Service } from '../domain/entities/service.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Receipt } from '../domain/ports/provider.port.js';
@@ -83,195 +84,10 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
-      // Get bindings
-      const bindings = env.platformBindings as {
-        provider?: string;
-        projectId?: string;
-        environmentId?: string;
-        services?: Record<string, { serviceId: string }>;
+      const payload = await runDatabaseMigration({ project, env, command, preset, serviceName, dryRun });
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
       };
-      const hostingProvider = hostingProviderForEnvironment(project, env);
-
-      // Resolve service
-      const services = serviceRepo.findByProjectId(project.id);
-      const targetService = serviceName
-        ? services.find((s) => s.name === serviceName)
-        : services[0];
-
-      if (!targetService) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: serviceName ? `Service not found: ${serviceName}` : 'No services found',
-            }),
-          }],
-        };
-      }
-
-      const serviceBinding = bindings.services?.[targetService.name];
-      if (!serviceBinding) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: `Service ${targetService.name} not deployed to ${hostingProvider}`,
-            }),
-          }],
-        };
-      }
-
-      // Determine migration command
-      let migrationCommand = command;
-      if (!migrationCommand && preset) {
-        migrationCommand = MIGRATION_PRESETS[preset];
-      }
-      if (!migrationCommand) {
-        // Default to prisma
-        migrationCommand = MIGRATION_PRESETS.prisma;
-      }
-
-      // Dry run - just show what would happen
-      if (dryRun) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: true,
-              dryRun: true,
-              message: 'Would run migration',
-              project: project.name,
-              environment: env.name,
-              provider: hostingProvider,
-              service: targetService.name,
-              command: migrationCommand,
-            }),
-          }],
-        };
-      }
-
-      if (hostingProvider !== 'railway') {
-        const adapterResult = await adapterFactory.getProviderAdapter(hostingProvider, project);
-        if (!adapterResult.success || !adapterResult.adapter) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({ success: false, error: adapterResult.error || `No ${hostingProvider} adapter available` }),
-            }],
-          };
-        }
-
-        if (typeof adapterResult.adapter.runJob !== 'function') {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: false,
-                error: `Provider ${hostingProvider} does not support one-off migration jobs`,
-              }),
-            }],
-          };
-        }
-
-        const job = await adapterResult.adapter.runJob(env, targetService, migrationCommand);
-        const success = job.receipt.success && job.status !== 'failed';
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success,
-              message: success ? 'Migration job started' : 'Migration job failed',
-              project: project.name,
-              environment: env.name,
-              provider: hostingProvider,
-              service: targetService.name,
-              command: migrationCommand,
-              jobId: job.jobId,
-              status: job.status,
-              output: job.output,
-              error: success ? undefined : (job.receipt.error || job.receipt.message),
-              receipt: job.receipt,
-            }),
-          }],
-        };
-      }
-
-      if (!bindings.projectId || !bindings.environmentId) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'Environment is marked as Railway but is missing Railway project/environment bindings' }),
-          }],
-        };
-      }
-
-      // Get Railway connection
-      const connection = connectionRepo.findBestMatchFromHints('railway', getProjectScopeHints(project));
-      if (!connection) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: 'No Railway connection found' }),
-          }],
-        };
-      }
-
-      const secretStore = getSecretStore();
-      const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-      const adapter = new RailwayAdapter();
-      await adapter.connect(credentials);
-
-      try {
-        const result = await adapter.executeCommand(
-          bindings.projectId,
-          bindings.environmentId,
-          serviceBinding.serviceId,
-          migrationCommand
-        );
-
-        if (result.success) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: true,
-                message: 'Migration completed',
-                project: project.name,
-                environment: env.name,
-                service: targetService.name,
-                command: migrationCommand,
-                output: result.output,
-              }),
-            }],
-          };
-        } else {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                success: false,
-                error: result.error,
-                project: project.name,
-                environment: env.name,
-                command: migrationCommand,
-                hint: 'If direct execution is not available, you can run migrations locally using: railway link && railway run ' + migrationCommand,
-              }),
-            }],
-          };
-        }
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: error instanceof Error ? error.message : String(error),
-            }),
-          }],
-        };
-      }
     }
   );
 
@@ -1408,72 +1224,9 @@ export function registerDbTools(server: McpServer): void {
         };
       }
 
-      // Execute reset
-      const parsedUrl = new URL(resolvedUrl);
-      const dbName = parsedUrl.pathname.replace(/^\//, '');
-
-      // Try DROP DATABASE approach first
-      let resetMethod: string;
-      const maintenanceUrl = new URL(resolvedUrl);
-      maintenanceUrl.pathname = '/postgres';
-      const maintenanceClient = new Client({ connectionString: maintenanceUrl.toString(), connectionTimeoutMillis: 10000 });
-
-      try {
-        await maintenanceClient.connect();
-
-        // Terminate other connections
-        await maintenanceClient.query(
-          'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
-          [dbName]
-        );
-
-        await maintenanceClient.query(`DROP DATABASE ${quoteIdentifier(dbName)}`);
-        await maintenanceClient.query(`CREATE DATABASE ${quoteIdentifier(dbName)}`);
-        resetMethod = 'drop_database';
-      } catch {
-        // Fallback: drop schema cascade
-        await maintenanceClient.end().catch(() => {});
-
-        const fallbackClient = new Client({ connectionString: resolvedUrl, connectionTimeoutMillis: 10000 });
-        try {
-          await fallbackClient.connect();
-          await fallbackClient.query('DROP SCHEMA public CASCADE');
-          await fallbackClient.query('CREATE SCHEMA public');
-          resetMethod = 'drop_schema';
-        } finally {
-          await fallbackClient.end().catch(() => {});
-        }
-      } finally {
-        await maintenanceClient.end().catch(() => {});
-      }
-
-      // Verify connectivity post-reset
-      const postCheck = await canConnect(resolvedUrl);
-
-      auditRepo.create({
-        action: 'db_reset',
-        resourceType: 'database',
-        resourceId: source || maskDatabaseUrl(resolvedUrl),
-        details: {
-          method: resetMethod,
-          tablesDropped: tableList.length,
-          tables: tableList.map((t) => t.table),
-        },
-      });
-
+      const payload = await executeDatabaseReset(resolvedUrl, source, tableList);
       return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            success: true,
-            source,
-            connectionUrl: maskDatabaseUrl(resolvedUrl),
-            method: resetMethod,
-            tablesDropped: tableList.length,
-            postResetConnectivity: postCheck.success,
-            message: `Database reset complete. ${tableList.length} table(s) dropped via ${resetMethod}.`,
-          }),
-        }],
+        content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
       };
     }
   );
@@ -1684,6 +1437,234 @@ export function registerDbTools(server: McpServer): void {
   );
 }
 
+/**
+ * Drop and recreate a postgres database (DROP DATABASE with schema-cascade
+ * fallback), terminating active connections first. Returns a plain payload
+ * so both db_reset and hv_db_migrate(mode=reset) can use it.
+ */
+export async function executeDatabaseReset(
+  resolvedUrl: string,
+  source: string,
+  tableList?: Array<{ table: string; estimatedRows: number }>
+): Promise<Record<string, unknown>> {
+  const tables = tableList
+    ?? Object.entries(await getTableEstimates(resolvedUrl))
+      .sort((a, b) => b[1] - a[1])
+      .map(([table, rows]) => ({ table, estimatedRows: rows }));
+
+  const parsedUrl = new URL(resolvedUrl);
+  const dbName = parsedUrl.pathname.replace(/^\//, '');
+
+  // Try DROP DATABASE approach first
+  let resetMethod: string;
+  const maintenanceUrl = new URL(resolvedUrl);
+  maintenanceUrl.pathname = '/postgres';
+  const maintenanceClient = new Client({ connectionString: maintenanceUrl.toString(), connectionTimeoutMillis: 10000 });
+
+  try {
+    await maintenanceClient.connect();
+
+    // Terminate other connections
+    await maintenanceClient.query(
+      'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()',
+      [dbName]
+    );
+
+    await maintenanceClient.query(`DROP DATABASE ${quoteIdentifier(dbName)}`);
+    await maintenanceClient.query(`CREATE DATABASE ${quoteIdentifier(dbName)}`);
+    resetMethod = 'drop_database';
+  } catch {
+    // Fallback: drop schema cascade
+    await maintenanceClient.end().catch(() => {});
+
+    const fallbackClient = new Client({ connectionString: resolvedUrl, connectionTimeoutMillis: 10000 });
+    try {
+      await fallbackClient.connect();
+      await fallbackClient.query('DROP SCHEMA public CASCADE');
+      await fallbackClient.query('CREATE SCHEMA public');
+      resetMethod = 'drop_schema';
+    } finally {
+      await fallbackClient.end().catch(() => {});
+    }
+  } finally {
+    await maintenanceClient.end().catch(() => {});
+  }
+
+  // Verify connectivity post-reset
+  const postCheck = await canConnect(resolvedUrl);
+
+  auditRepo.create({
+    action: 'db_reset',
+    resourceType: 'database',
+    resourceId: source || maskDatabaseUrl(resolvedUrl),
+    details: {
+      method: resetMethod,
+      tablesDropped: tables.length,
+      tables: tables.map((t) => t.table),
+    },
+  });
+
+  return {
+    success: true,
+    source,
+    connectionUrl: maskDatabaseUrl(resolvedUrl),
+    method: resetMethod,
+    tablesDropped: tables.length,
+    postResetConnectivity: postCheck.success,
+    message: `Database reset complete. ${tables.length} table(s) dropped via ${resetMethod}.`,
+  };
+}
+
+/**
+ * Run a database migration on a deployed environment. Returns a plain payload
+ * (no MCP envelope) so both db_migrate and hv_db_migrate can use it.
+ */
+export async function runDatabaseMigration(params: {
+  project: Project;
+  env: Environment;
+  command?: string;
+  preset?: keyof typeof MIGRATION_PRESETS;
+  serviceName?: string;
+  dryRun?: boolean;
+}): Promise<Record<string, unknown>> {
+  const { project, env, command, preset, serviceName, dryRun } = params;
+
+  // Get bindings
+  const bindings = env.platformBindings as {
+    provider?: string;
+    projectId?: string;
+    environmentId?: string;
+    services?: Record<string, { serviceId: string }>;
+  };
+  const hostingProvider = hostingProviderForEnvironment(project, env);
+
+  // Resolve service
+  const services = serviceRepo.findByProjectId(project.id);
+  const targetService = serviceName
+    ? services.find((s) => s.name === serviceName)
+    : services[0];
+
+  if (!targetService) {
+    return {
+      success: false,
+      error: serviceName ? `Service not found: ${serviceName}` : 'No services found',
+    };
+  }
+
+  const serviceBinding = bindings.services?.[targetService.name];
+  if (!serviceBinding) {
+    return {
+      success: false,
+      error: `Service ${targetService.name} not deployed to ${hostingProvider}`,
+    };
+  }
+
+  // Determine migration command
+  let migrationCommand = command;
+  if (!migrationCommand && preset) {
+    migrationCommand = MIGRATION_PRESETS[preset];
+  }
+  if (!migrationCommand) {
+    // Default to prisma
+    migrationCommand = MIGRATION_PRESETS.prisma;
+  }
+
+  // Dry run - just show what would happen
+  if (dryRun) {
+    return {
+      success: true,
+      dryRun: true,
+      message: 'Would run migration',
+      project: project.name,
+      environment: env.name,
+      provider: hostingProvider,
+      service: targetService.name,
+      command: migrationCommand,
+    };
+  }
+
+  if (hostingProvider !== 'railway') {
+    const adapterResult = await adapterFactory.getProviderAdapter(hostingProvider, project);
+    if (!adapterResult.success || !adapterResult.adapter) {
+      return { success: false, error: adapterResult.error || `No ${hostingProvider} adapter available` };
+    }
+
+    if (typeof adapterResult.adapter.runJob !== 'function') {
+      return {
+        success: false,
+        error: `Provider ${hostingProvider} does not support one-off migration jobs`,
+      };
+    }
+
+    const job = await adapterResult.adapter.runJob(env, targetService, migrationCommand);
+    const success = job.receipt.success && job.status !== 'failed';
+    return {
+      success,
+      message: success ? 'Migration job started' : 'Migration job failed',
+      project: project.name,
+      environment: env.name,
+      provider: hostingProvider,
+      service: targetService.name,
+      command: migrationCommand,
+      jobId: job.jobId,
+      status: job.status,
+      output: job.output,
+      error: success ? undefined : (job.receipt.error || job.receipt.message),
+      receipt: job.receipt,
+    };
+  }
+
+  if (!bindings.projectId || !bindings.environmentId) {
+    return { success: false, error: 'Environment is marked as Railway but is missing Railway project/environment bindings' };
+  }
+
+  // Get Railway connection
+  const connection = connectionRepo.findBestMatchFromHints('railway', getProjectScopeHints(project));
+  if (!connection) {
+    return { success: false, error: 'No Railway connection found' };
+  }
+
+  const secretStore = getSecretStore();
+  const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
+  const adapter = new RailwayAdapter();
+  await adapter.connect(credentials);
+
+  try {
+    const result = await adapter.executeCommand(
+      bindings.projectId,
+      bindings.environmentId,
+      serviceBinding.serviceId,
+      migrationCommand
+    );
+
+    if (result.success) {
+      return {
+        success: true,
+        message: 'Migration completed',
+        project: project.name,
+        environment: env.name,
+        service: targetService.name,
+        command: migrationCommand,
+        output: result.output,
+      };
+    } else {
+      return {
+        success: false,
+        error: result.error,
+        project: project.name,
+        environment: env.name,
+        command: migrationCommand,
+        hint: 'If direct execution is not available, you can run migrations locally using: railway link && railway run ' + migrationCommand,
+      };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 async function ensureDatabaseIfSupported(
   adapter: unknown,
   component: Component,
@@ -1696,7 +1677,7 @@ async function ensureDatabaseIfSupported(
   return ensureDatabase.call(adapter, component, databaseName);
 }
 
-async function resolveEnvironmentDatabaseUrl(
+export async function resolveEnvironmentDatabaseUrl(
   project: Project,
   env: { id: string; name: string; platformBindings: Record<string, unknown> },
   serviceName?: string
@@ -1862,7 +1843,7 @@ function databaseMigrationStrategyStatus(strategy: (typeof DB_MIGRATION_STRATEGI
   };
 }
 
-function maskDatabaseUrl(url: string): string {
+export function maskDatabaseUrl(url: string): string {
   // Mask both username and password: postgres://user:pass@host → postgres://***:***@host
   return url
     .replace(/\/\/([^:@/]+):([^@]*)@/, '//***:***@')

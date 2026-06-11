@@ -52,7 +52,7 @@ function response(data: Record<string, unknown>) {
   };
 }
 
-function resolveEnvironment(projectId: string, environmentName?: string): Environment | null {
+export function resolveHealthEnvironment(projectId: string, environmentName?: string): Environment | null {
   if (environmentName) {
     return envRepo.findByProjectAndName(projectId, environmentName);
   }
@@ -66,7 +66,7 @@ function resolveEnvironment(projectId: string, environmentName?: string): Enviro
   return environments.find((environment) => environment.name !== 'local') ?? environments[0] ?? null;
 }
 
-function resolveService(projectId: string, serviceName?: string): Service | null {
+export function resolveHealthService(projectId: string, serviceName?: string): Service | null {
   if (serviceName) {
     return serviceRepo.findByProjectAndName(projectId, serviceName);
   }
@@ -83,18 +83,18 @@ function withHttps(urlOrHost: string): string {
   return `https://${trimmed}`;
 }
 
-function normalizeBaseUrl(urlOrHost: string): string {
+export function normalizeBaseUrl(urlOrHost: string): string {
   const parsed = new URL(withHttps(urlOrHost));
   parsed.hash = '';
   return parsed.toString().replace(/\/+$/, '');
 }
 
-function joinUrl(baseUrl: string, path: string): string {
+export function joinUrl(baseUrl: string, path: string): string {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   return `${normalizeBaseUrl(baseUrl)}${normalizedPath}`;
 }
 
-function resolveServiceBaseUrl(environment: Environment, serviceName: string): string | null {
+export function resolveServiceBaseUrl(environment: Environment, serviceName: string): string | null {
   const bindings = environment.platformBindings as PlatformBindings;
   const serviceBinding = bindings.services?.[serviceName];
   const candidate = serviceBinding?.url ?? serviceBinding?.customDomains?.[0];
@@ -149,7 +149,7 @@ function parseJsonPreview(text: string, contentType: string | null): unknown | u
   }
 }
 
-async function runHttpCheck(params: {
+export async function runHttpCheck(params: {
   name: string;
   url: string;
   method: 'GET' | 'HEAD';
@@ -270,12 +270,12 @@ export function registerHealthTools(server: McpServer): void {
         if ('error' in resolved) return resolved.error;
         project = resolved.project;
 
-        environment = resolveEnvironment(project.id, environmentName);
+        environment = resolveHealthEnvironment(project.id, environmentName);
         if (!environment) {
           return response({ success: false, error: `No environment found for project ${project.name}` });
         }
 
-        service = resolveService(project.id, serviceName);
+        service = resolveHealthService(project.id, serviceName);
         if (!service) {
           return response({ success: false, error: `No service found for project ${project.name}` });
         }

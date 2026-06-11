@@ -61,12 +61,43 @@ import { registerWorkflowTools } from './tools/workflow.tools.js';
 import { registerGcpTools } from './tools/gcp.tools.js';
 import { registerHealthTools } from './tools/health.tools.js';
 import { registerEmailTools } from './tools/email.tools.js';
+import { createToolContext } from './tools/context.js';
+import { registerCoreTools } from './tools/core.tools.js';
+import { registerLifecycleTools } from './tools/lifecycle.tools.js';
+import { registerConnectionsTools } from './tools/connections.tools.js';
+import { registerHvDeployTools } from './tools/hv-deploy.tools.js';
+import { registerHvObservabilityTools } from './tools/hv-observability.tools.js';
+import { registerHvDbTools } from './tools/hv-db.tools.js';
+import { registerHvSecretsTools } from './tools/hv-secrets.tools.js';
+import { registerHvDomainsTools } from './tools/hv-domains.tools.js';
+import { registerHvEmailTools } from './tools/hv-email.tools.js';
+import { registerHvPaymentsTools } from './tools/hv-payments.tools.js';
+import { registerHvCiTools } from './tools/hv-ci.tools.js';
+import { registerHvAppstoreTools } from './tools/hv-appstore.tools.js';
+import { registerHvDevxTools } from './tools/hv-devx.tools.js';
 
 export function createServer(): McpServer {
   const server = new McpServer({
     name: 'hypervibe',
     version: '0.1.0',
   });
+
+  const ctx = createToolContext();
+
+  // New intent-level surface (hv_*) — replaces the legacy tools below at cutover.
+  registerCoreTools(server, ctx);
+  registerLifecycleTools(server, ctx);
+  registerConnectionsTools(server, ctx);
+  registerHvDeployTools(server, ctx);
+  registerHvObservabilityTools(server, ctx);
+  registerHvDbTools(server, ctx);
+  registerHvSecretsTools(server, ctx);
+  registerHvDomainsTools(server, ctx);
+  registerHvEmailTools(server, ctx);
+  registerHvPaymentsTools(server, ctx);
+  registerHvCiTools(server, ctx);
+  registerHvAppstoreTools(server, ctx);
+  registerHvDevxTools(server, ctx);
 
   // Register all tool groups
   registerProjectTools(server);

@@ -25,6 +25,22 @@ const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
 const auditRepo = new AuditRepository();
 
+export const SENDGRID_WEBHOOK_EVENT_DESCRIPTIONS: Record<string, string> = {
+  bounce: 'Email bounced (hard or soft)',
+  click: 'Recipient clicked a link',
+  deferred: 'Email delivery deferred by receiving server',
+  delivered: 'Email successfully delivered',
+  dropped: 'Email dropped (invalid, spam, etc.)',
+  open: 'Recipient opened the email',
+  processed: 'Email received by SendGrid',
+  spam_report: 'Recipient marked as spam',
+  unsubscribe: 'Recipient unsubscribed',
+  group_unsubscribe: 'Recipient unsubscribed from group',
+  group_resubscribe: 'Recipient resubscribed to group',
+};
+
+export const SENDGRID_WEBHOOK_EVENTS_DOC_URL = 'https://docs.sendgrid.com/for-developers/tracking-events/event';
+
 function missingScopeGroups(permissions: SendGridPermissionAudit, requireWebhook = false): Record<string, string[]> {
   const missing: Record<string, string[]> = {};
   if (!permissions.hasMailSend) missing.mailSend = permissions.missingScopes.mailSend;
@@ -38,11 +54,11 @@ function missingScopeGroups(permissions: SendGridPermissionAudit, requireWebhook
   return missing;
 }
 
-function sendGridSetupReady(permissions: SendGridPermissionAudit, requireWebhook = false): boolean {
+export function sendGridSetupReady(permissions: SendGridPermissionAudit, requireWebhook = false): boolean {
   return permissions.setupReady && (!requireWebhook || permissions.canConfigureEventWebhook);
 }
 
-function sendGridPermissionPayload(permissions: SendGridPermissionAudit, requireWebhook = false): Record<string, unknown> {
+export function sendGridPermissionPayload(permissions: SendGridPermissionAudit, requireWebhook = false): Record<string, unknown> {
   return {
     setupReady: sendGridSetupReady(permissions, requireWebhook),
     hasMailSend: permissions.hasMailSend,
@@ -66,7 +82,7 @@ function sendGridPermissionPayload(permissions: SendGridPermissionAudit, require
   };
 }
 
-function sendGridPermissionError(permissions: SendGridPermissionAudit, requireWebhook = false): string {
+export function sendGridPermissionError(permissions: SendGridPermissionAudit, requireWebhook = false): string {
   const missing = missingScopeGroups(permissions, requireWebhook);
   const groups = Object.entries(missing)
     .map(([group, scopes]) => `${group}: ${scopes.join(', ')}`)
@@ -74,7 +90,7 @@ function sendGridPermissionError(permissions: SendGridPermissionAudit, requireWe
   return `SendGrid API key is valid but cannot complete Hypervibe email setup. Missing ${groups}. ${permissions.recommendation}`;
 }
 
-function getSendGridAdapter(scopeHints?: string[]): { adapter: SendGridAdapter } | { error: string } {
+export function getSendGridAdapter(scopeHints?: string[]): { adapter: SendGridAdapter } | { error: string } {
   const connection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
   if (!connection) {
     return { error: 'No SendGrid connection found. Use connection_create with provider=sendgrid first.' };
@@ -1053,20 +1069,8 @@ export function registerSendGridTools(server: McpServer): void {
           text: JSON.stringify({
             success: true,
             events: SENDGRID_COMMON_WEBHOOK_EVENTS,
-            descriptions: {
-              bounce: 'Email bounced (hard or soft)',
-              click: 'Recipient clicked a link',
-              deferred: 'Email delivery deferred by receiving server',
-              delivered: 'Email successfully delivered',
-              dropped: 'Email dropped (invalid, spam, etc.)',
-              open: 'Recipient opened the email',
-              processed: 'Email received by SendGrid',
-              spam_report: 'Recipient marked as spam',
-              unsubscribe: 'Recipient unsubscribed',
-              group_unsubscribe: 'Recipient unsubscribed from group',
-              group_resubscribe: 'Recipient resubscribed to group',
-            },
-            documentation: 'https://docs.sendgrid.com/for-developers/tracking-events/event',
+            descriptions: SENDGRID_WEBHOOK_EVENT_DESCRIPTIONS,
+            documentation: SENDGRID_WEBHOOK_EVENTS_DOC_URL,
           }),
         }],
       };

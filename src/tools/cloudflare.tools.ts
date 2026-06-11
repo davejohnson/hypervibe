@@ -13,7 +13,7 @@ const auditRepo = new AuditRepository();
  * Get a Cloudflare adapter, using scoped connection if available.
  * @param scopeHint - Optional domain hint (e.g., "example.com") for finding scoped tokens
  */
-function getCloudflareAdapter(scopeHint?: string): { adapter: CloudflareAdapter; scope: string | null } | { error: string } {
+export function getCloudflareAdapter(scopeHint?: string): { adapter: CloudflareAdapter; scope: string | null } | { error: string } {
   const connection = connectionRepo.findBestMatch('cloudflare', scopeHint);
   if (!connection) {
     return { error: 'No Cloudflare connection found. Use connection_create with provider=cloudflare first.' };
