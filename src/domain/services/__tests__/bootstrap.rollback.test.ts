@@ -1,33 +1,71 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { initializeDatabase, SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
-import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
-import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
-import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
-import { adapterFactory } from '../../domain/services/adapter.factory.js';
-import type { IDatabaseAdapter } from '../../domain/ports/database.port.js';
+import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
+import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
+import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
+import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
+import { adapterFactory } from '../adapter.factory.js';
+import type { IDatabaseAdapter } from '../../ports/database.port.js';
+import { executeBootstrap } from '../bootstrap.service.js';
+import { resolveDesiredState, resolveDatabaseProviderForProject, normalizeCrons, type DesiredState } from '../spec.service.js';
 
 type JsonObj = Record<string, unknown>;
 
-async function callTool(client: Client, name: string, args: Record<string, unknown> = {}): Promise<JsonObj> {
-  const result = await client.request(
-    {
-      method: 'tools/call',
-      params: {
-        name,
-        arguments: args,
-      },
-    },
-    CallToolResultSchema
-  );
-  const text = result.content.find((c) => c.type === 'text')?.text;
-  if (!text) throw new Error(`Tool ${name} returned no text payload`);
-  return JSON.parse(text) as JsonObj;
+
+async function applyInfra(args: {
+  projectName: string;
+  environmentName?: string;
+  services?: string[];
+  crons?: Record<string, { schedule: string; command?: string; timeZone?: string }>;
+  serviceName?: string;
+  domain?: string;
+  databaseProvider?: 'supabase' | 'rds' | 'cloudsql' | 'railway';
+  setupEmail?: boolean;
+  serviceConfig?: Record<string, Record<string, unknown>>;
+  envVars?: Record<string, string>;
+  deploy?: Record<string, unknown>;
+  confirm?: boolean;
+}): Promise<JsonObj> {
+  // Replicates the legacy infra_apply handler: resolve desired state from
+  // project policies plus overrides, then run the bootstrap converge.
+  const project = new ProjectRepository().findByName(args.projectName);
+  const policyState = (project?.policies?.desiredState ?? {}) as Partial<DesiredState>;
+  const resolvedDatabaseProvider = project
+    ? resolveDatabaseProviderForProject(project, policyState, {
+      environmentName: args.environmentName,
+      databaseProvider: args.databaseProvider,
+    })
+    : args.databaseProvider;
+  const desired = resolveDesiredState(policyState, {
+    environmentName: args.environmentName,
+    services: args.services,
+    crons: normalizeCrons(args.crons),
+    serviceName: args.serviceName,
+    domain: args.domain,
+    databaseProvider: resolvedDatabaseProvider,
+    setupEmail: args.setupEmail,
+    serviceConfig: args.serviceConfig as Partial<DesiredState>['serviceConfig'],
+    envVars: args.envVars,
+    deploy: args.deploy as Partial<DesiredState>['deploy'],
+  });
+  const executed = await executeBootstrap({
+    projectName: args.projectName,
+    environmentName: desired.environmentName,
+    services: desired.services,
+    crons: desired.crons,
+    domain: desired.domain,
+    databaseProvider: desired.databaseProvider,
+    setupEmail: desired.setupEmail,
+    serviceConfig: desired.serviceConfig,
+    envVars: desired.envVars,
+    deploy: desired.deploy,
+  });
+  if (!executed.success && executed.summary.error) {
+    return { success: false, error: executed.summary.error, summary: executed.summary } as JsonObj;
+  }
+  return { success: executed.success, ...executed.summary } as JsonObj;
 }
 
 describe('infra_apply local rollback coverage', () => {
@@ -120,13 +158,7 @@ describe('infra_apply local rollback coverage', () => {
       adapter: fakeDatabaseAdapter,
     });
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'rollback-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
+    const payload = await applyInfra({
       projectName: project.name,
       environmentName: 'staging',
       serviceName: 'web',
@@ -139,7 +171,5 @@ describe('infra_apply local rollback coverage', () => {
     expect(String(payload.summary && (payload.summary as JsonObj).error)).toContain('forced failure');
     const restored = envRepo.findById(environment.id);
     expect(restored?.platformBindings).toEqual(originalBindings);
-
-    await Promise.all([client.close(), server.close()]);
   });
 });

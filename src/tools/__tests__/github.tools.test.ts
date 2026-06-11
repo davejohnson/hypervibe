@@ -11,6 +11,7 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
+import { resolveBranchDeployTargets, buildBranchDeployWorkflow } from '../github.tools.js';
 
 type JsonObj = Record<string, unknown>;
 
@@ -45,11 +46,9 @@ describe('github tools', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('deploy_branch_setup previews only the production workflow for a production-only project and uses desired deploy state', async () => {
+  it('builds only the production branch-deploy workflow using desired deploy state', () => {
     const projectRepo = new ProjectRepository();
     const envRepo = new EnvironmentRepository();
-    const connectionRepo = new ConnectionRepository();
-    const secretStore = getSecretStore();
 
     const project = projectRepo.create({
       name: 'billforge',
@@ -78,55 +77,26 @@ describe('github tools', () => {
       name: 'production',
     });
 
-    const connection = connectionRepo.create({
-      provider: 'github',
-      credentialsEncrypted: secretStore.encryptObject({ apiToken: 'token' }),
-    });
-    connectionRepo.updateStatus(connection.id, 'verified');
+    const { targets, migration } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
+    expect(targets).toEqual([
+      { environmentName: 'production', kind: 'production', branch: 'release' },
+    ]);
+    expect(migration.includeStep).toBe(true);
+    expect(migration.command).toBe('npm run migrate');
 
-    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, login: 'davejohnson' });
-
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'github-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'deploy_branch_setup', {
-      owner: 'davejohnson',
-      repo: 'billforge',
-      provider: 'railway',
-      requiredReviewers: 1,
-    });
-
-    expect(payload.success).toBe(true);
-    expect(payload.mode).toBe('preview');
-    expect(payload.project).toBe('billforge');
-    expect(payload.branchMapping).toEqual({ production: 'release' });
-    expect(payload.requiredSecrets).toEqual(['RAILWAY_TOKEN', 'DATABASE_URL']);
-    expect(payload.requiredVariables).toEqual([]);
-
-    const workflows = payload.workflows as Array<Record<string, unknown>>;
-    expect(workflows).toHaveLength(1);
-    expect(workflows[0]?.template).toBe('deploy-railway-production');
-    expect(workflows[0]?.branch).toBe('release');
-    expect(workflows[0]?.environment).toBe('production');
-    expect(typeof workflows[0]?.content).toBe('string');
-    expect((workflows[0]?.content as string)).toContain('branches: [release]');
-    expect((workflows[0]?.content as string)).toContain('environment: production');
-    expect((workflows[0]?.content as string)).toContain('run: npm run migrate');
-    expect((workflows[0]?.content as string)).not.toContain('vars.MIGRATION_COMMAND');
-
-    expect(payload.branchProtection).toBeNull();
-
-    const notes = payload.notes as string[];
-    expect(notes).toContain('Set secret DATABASE_URL in GitHub Environment "production" for the migration step.');
-    expect(notes.join(' ')).not.toContain('MIGRATION_COMMAND');
-
-    await Promise.all([client.close(), server.close()]);
+    const workflow = buildBranchDeployWorkflow('railway', targets[0], migration);
+    expect(workflow.template).toBe('deploy-railway-production');
+    expect(workflow.branch).toBe('release');
+    expect(workflow.environment).toBe('production');
+    expect(workflow.requiredSecrets).toEqual(['RAILWAY_TOKEN', 'DATABASE_URL']);
+    expect(workflow.requiredVariables).toEqual([]);
+    expect(workflow.content).toContain('branches: [release]');
+    expect(workflow.content).toContain('environment: production');
+    expect(workflow.content).toContain('run: npm run migrate');
+    expect(workflow.content).not.toContain('vars.MIGRATION_COMMAND');
   });
 
-  it('deploy_branch_setup fails fast when the GitHub connection is invalid', async () => {
+  it('hv_ci_setup deploy-branch fails fast when the GitHub connection is invalid', async () => {
     const projectRepo = new ProjectRepository();
     const envRepo = new EnvironmentRepository();
     const connectionRepo = new ConnectionRepository();
@@ -137,12 +107,7 @@ describe('github tools', () => {
       defaultPlatform: 'railway',
       gitRemoteUrl: 'https://github.com/davejohnson/billforge',
     });
-
-    envRepo.create({
-      projectId: project.id,
-      name: 'production',
-    });
-
+    envRepo.create({ projectId: project.id, name: 'production' });
     const connection = connectionRepo.create({
       provider: 'github',
       credentialsEncrypted: secretStore.encryptObject({ apiToken: 'token' }),
@@ -154,20 +119,23 @@ describe('github tools', () => {
       error: 'GitHub API error: Bad credentials',
     });
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'github-client-invalid', version: '1.0.0' });
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const { registerHvCiTools } = await import('../hv-ci.tools.js');
+    const { createToolContext } = await import('../context.js');
+    const server = new McpServer({ name: 'hv-ci-invalid-test', version: '1.0.0' });
+    registerHvCiTools(server, createToolContext());
+    const client = new Client({ name: 'hv-ci-invalid-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-    const payload = await callTool(client, 'deploy_branch_setup', {
-      owner: 'davejohnson',
-      repo: 'billforge',
-      provider: 'railway',
+    const payload = await callTool(client, 'hv_ci_setup', {
+      project: 'billforge',
+      kind: 'deploy-branch',
+      config: { provider: 'railway' },
     });
 
-    expect(payload.success).toBe(false);
-    expect(payload.error).toBe('GitHub API error: Bad credentials');
+    expect(payload.ok).toBe(false);
+    expect((payload.error as JsonObj).message).toBe('GitHub API error: Bad credentials');
 
     await Promise.all([client.close(), server.close()]);
   });
@@ -201,22 +169,24 @@ describe('github tools', () => {
     );
     const updateBranchProtection = vi.spyOn(GitHubAdapter.prototype, 'updateBranchProtection').mockResolvedValue();
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const { registerHvCiTools } = await import('../hv-ci.tools.js');
+    const { createToolContext } = await import('../context.js');
+    const server = new McpServer({ name: 'hv-ci-protection-test', version: '1.0.0' });
+    registerHvCiTools(server, createToolContext());
     const client = new Client({ name: 'github-client-protection-failure', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-    const payload = await callTool(client, 'deploy_branch_setup', {
-      owner: 'davejohnson',
-      repo: 'billforge',
-      provider: 'railway',
-      protectBranches: true,
-      confirm: true,
+    const payload = await callTool(client, 'hv_ci_setup', {
+      project: 'billforge',
+      kind: 'deploy-branch',
+      config: { provider: 'railway', protectBranches: true },
     });
 
-    expect(payload.success).toBe(false);
-    expect(payload.errors).toEqual([
+    expect(payload.ok).toBe(false);
+    const details = (payload.error as JsonObj).details as JsonObj;
+    expect(details.errors).toEqual([
       {
         template: 'deploy-railway-production',
         path: '.github/workflows/deploy-railway-production.yml',
@@ -224,23 +194,7 @@ describe('github tools', () => {
       },
     ]);
     expect(updateBranchProtection).not.toHaveBeenCalled();
-    expect(payload.branchProtection).toEqual({
-      enabled: false,
-      results: [],
-      rules: {
-        requireReviews: true,
-        requiredReviewers: 1,
-        dismissStaleReviews: true,
-        requireCodeOwnerReviews: false,
-        requireStatusChecks: false,
-        statusChecks: [],
-        strictStatusChecks: true,
-        enforceAdmins: true,
-        requireLinearHistory: false,
-        allowForcePushes: false,
-        allowDeletions: false,
-      },
-    });
+    expect(details.branchProtection).toEqual([]);
 
     await Promise.all([client.close(), server.close()]);
   });

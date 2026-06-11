@@ -128,10 +128,17 @@ Secret references use the format: `provider://path[#key][@version]`
 
 ## Available Tools
 
-Hypervibe exposes a large MCP surface area (project/env/deploy/db/dns/integrations/secrets/logs/mobile/appstore).
+Hypervibe exposes a focused surface of 42 intent-level `hv_*` tools. The core is a terraform-style loop:
+
+1. `hv_spec_set` — declare the desired state (services, database, domain, email, env vars) as a revisioned spec
+2. `hv_plan` — observe live infrastructure, diff against the spec, and get an executable plan
+3. `hv_apply planId=...` — converge. Stale plans are rejected; destroying data-bearing resources requires explicit confirmation
+4. `hv_status` — see drift between desired and observed state at any time
+
+Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/health, database query/migrate, secrets, domains/DNS, email, payments, CI, App Store/TestFlight, and local dev tools.
 
 - Full generated catalog: `docs/TOOLS.md`
-- Regenerate after tool changes: `npm run docs:tools`
+- Regenerate after tool changes: `npm run build && npm run docs:tools`
 
 ## Configuration
 

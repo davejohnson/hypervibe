@@ -15,6 +15,7 @@ import { adapterFactory } from '../../../domain/services/adapter.factory.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
 import type { IHostingAdapter } from '../../../domain/ports/hosting.port.js';
+import { syncHostingEnvVars, readHostingEnvVars } from '../hosting-env.service.js';
 
 type JsonObj = Record<string, unknown>;
 
@@ -311,40 +312,34 @@ describe('hosting env var tools', () => {
     await Promise.all([client.close(), server.close()]);
   });
 
-  it('integration_sync writes Stripe keys through the Cloud Run hosting adapter', async () => {
+  it('syncHostingEnvVars writes vars through the Cloud Run hosting adapter', async () => {
     await setupCloudRunProject();
     const { setEnvCalls } = stubCloudRunHostingAdapter();
 
-    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'integration-cloudrun-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const project = new ProjectRepository().findByName('cloudrun-integrations')!;
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    const service = new ServiceRepository().findByProjectAndName(project.id, 'web')!;
 
-    const payload = await callTool(client, 'integration_sync', {
-      provider: 'stripe',
-      projectName: 'cloudrun-integrations',
-      targetEnvironments: ['production'],
-      serviceName: 'web',
-      keys: {
+    const result = await syncHostingEnvVars({
+      project,
+      environment,
+      service,
+      vars: {
         STRIPE_SECRET_KEY: 'sk_test_123',
         STRIPE_PUBLISHABLE_KEY: 'pk_test_123',
       },
     });
 
-    expect(payload.success).toBe(true);
+    expect(result.success).toBe(true);
+    expect(result.provider).toBe('cloudrun');
     expect(setEnvCalls).toHaveLength(1);
     expect(setEnvCalls[0].vars).toEqual({
       STRIPE_SECRET_KEY: 'sk_test_123',
       STRIPE_PUBLISHABLE_KEY: 'pk_test_123',
     });
-    const results = payload.results as Array<Record<string, unknown>>;
-    expect(results[0].provider).toBe('cloudrun');
-
-    await Promise.all([client.close(), server.close()]);
   });
 
-  it('vars_get reads Cloud Run service variables through the hosting adapter', async () => {
+  it('readHostingEnvVars reads Cloud Run service variables through the hosting adapter', async () => {
     await setupCloudRunProject();
     stubCloudRunHostingAdapter(new Map([
       ['web', {
@@ -353,25 +348,19 @@ describe('hosting env var tools', () => {
       }],
     ]));
 
-    const { createLegacyTestServer } = await import('../../../tools/__tests__/legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'vars-get-cloudrun-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const project = new ProjectRepository().findByName('cloudrun-integrations')!;
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    const service = new ServiceRepository().findByProjectAndName(project.id, 'web')!;
 
-    const payload = await callTool(client, 'vars_get', {
-      projectName: 'cloudrun-integrations',
-      environmentName: 'production',
-      serviceName: 'web',
-    });
+    const result = await readHostingEnvVars({ project, environment, service });
 
-    expect(payload.success).toBe(true);
-    expect(payload.provider).toBe('cloudrun');
-    expect(payload.variables).toEqual({
-      STRIPE_SECRET_KEY: '***',
-      PUBLIC_VALUE: 'visible',
-    });
-
-    await Promise.all([client.close(), server.close()]);
+    expect(result.success).toBe(true);
+    expect(result.provider).toBe('cloudrun');
+    if (result.success) {
+      expect(result.variables).toEqual({
+        STRIPE_SECRET_KEY: 'sk_test_secret',
+        PUBLIC_VALUE: 'visible',
+      });
+    }
   });
 });

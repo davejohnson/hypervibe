@@ -107,25 +107,38 @@ This keeps tools simple and leverages Claude's intelligence.
 
 ## Architecture
 
-- **Tools** (`src/tools/`): MCP tool definitions, input validation
-- **Adapters** (`src/adapters/`): External integrations (Railway, secrets, DB)
-- **Domain** (`src/domain/`): Business logic, entities, orchestrators
-- **Repositories** (`src/adapters/db/repositories/`): SQLite data access
+- **Tools** (`src/tools/`): the 42 `hv_*` MCP tools (registered in `src/server.ts` via `ToolContext`); all responses use the `toolSuccess`/`toolError` envelope from `src/tools/respond.ts`
+- **Spec** (`src/domain/spec/`): the desired-state document (`ProjectSpec`, revisioned in the `project_specs` table via `SpecStore`)
+- **Plan** (`src/domain/plan/`): the reconciliation engine — observe live state, pure `diffEnvironment`, `ConvergeExecutor` with the planId handshake
+- **Adapters** (`src/adapters/`): External integrations (Railway, GCP, secrets, DB)
+- **Domain services** (`src/domain/services/`): orchestrators (deploy, bootstrap, import, rollback, domain)
+- **Repositories** (`src/adapters/db/repositories/`): SQLite data access (JSON columns validated via `parseJsonColumn`)
+
+Legacy `*.tools.ts` files that still exist but are not registered in `server.ts` are internal helper libraries pending extraction — do not register them or add new tools there.
+
+## The spec → plan → apply loop
+
+The core workflow is terraform-style:
+1. `hv_spec_set` — write the desired state (single source of truth, revisioned)
+2. `hv_plan` — observe live infrastructure (Railway/Cloud Run support observe; others fall back to local state marked `verified: false`), diff, persist the plan as a run → `planId`
+3. `hv_apply planId=...` — rejects stale plans (spec revision advanced, live state changed, plan expired/already applied); data-bearing destroys run only with explicit `confirmDestroy` action ids
+4. `hv_status` — read-only drift view
+
+There is no approval workflow: the human gate is MCP client tool-call approval plus explicit `confirm` flags.
 
 ## Platform Bindings
 
-Environments store Railway bindings in `platformBindings`:
+Environments store provider bindings in `platformBindings` using generic keys only (legacy `railwayProjectId`/`railwayEnvironmentId` were migrated away in sqlite migration 7):
 ```typescript
 {
-  railwayProjectId: "...",
-  railwayEnvironmentId: "...",
+  provider: "railway",
+  projectId: "...",       // external project/app id on the provider
+  environmentId: "...",   // external environment id (if supported)
   services: {
-    "api": { serviceId: "..." }
+    "api": { serviceId: "...", url: "...", customDomains: [...] }
   }
 }
 ```
-
-This links local entities to their Railway counterparts.
 
 ## Environment Variables: Local Dev Exceptions
 

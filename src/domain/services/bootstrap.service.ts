@@ -217,7 +217,7 @@ export async function executeBootstrap(params: {
     return {
       success: false,
       summary: {
-        error: `${cloudPrepareProfile.label} is not prepared for Hypervibe deploys. Run cloud_prepare provider="${targetPlatform}" confirm=true before infra_apply.`,
+        error: `${cloudPrepareProfile.label} is not prepared for Hypervibe deploys. Run hv_connect provider="${targetPlatform}" action="prepare" confirm=true before applying.`,
         action: 'cloud_prepare',
         provider: targetPlatform,
         requiredVersion: cloudPrepareProfile.version,

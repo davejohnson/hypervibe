@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { resolveDesiredState } from '../../domain/services/spec.service.js';
+import { resolveDesiredState } from '../spec.service.js';
 
-describe('infra.tools desired state resolution', () => {
+describe('spec.service desired state resolution', () => {
   it('uses defaults when neither policy nor overrides provide values', () => {
     const desired = resolveDesiredState(undefined, {});
     expect(desired).toEqual({

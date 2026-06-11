@@ -1,49 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { initializeDatabase, SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
-import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
-import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
+import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
+import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { runCloudPrepare } from '../cloud-prepare.execute.js';
 
-type JsonObj = Record<string, unknown>;
-
-async function callTool(client: Client, name: string, args: Record<string, unknown> = {}): Promise<JsonObj> {
-  const result = await client.request(
-    {
-      method: 'tools/call',
-      params: {
-        name,
-        arguments: args,
-      },
-    },
-    CallToolResultSchema
-  );
-  const text = result.content.find((c) => c.type === 'text')?.text;
-  if (!text) throw new Error(`Tool ${name} returned no text payload`);
-  return JSON.parse(text) as JsonObj;
-}
-
-describe('gcp tools', () => {
+describe('runCloudPrepare', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-gcp-tools-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-cloud-prepare-'));
     SqliteAdapter.resetInstance();
     initializeDatabase(path.join(tempDir, 'hypervibe.db'));
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('previews cloud_prepare from the existing Cloud Run deploy connection', async () => {
+  function seedProject() {
     const projectRepo = new ProjectRepository();
     const connectionRepo = new ConnectionRepository();
     const project = projectRepo.create({
@@ -65,19 +46,13 @@ describe('gcp tools', () => {
         }),
       }),
     });
+    return project;
+  }
 
-    expect(project.name).toBe('hls-property-care');
+  it('previews the bootstrap plan from the existing Cloud Run deploy connection', async () => {
+    const project = seedProject();
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'cloud-prepare-preview-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'cloud_prepare', {
-      projectName: 'hls-property-care',
-      provider: 'cloudrun',
-    });
+    const payload = await runCloudPrepare({ project, provider: 'cloudrun' });
 
     expect(payload).toMatchObject({
       success: true,
@@ -90,37 +65,16 @@ describe('gcp tools', () => {
         member: 'serviceAccount:hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com',
       },
     });
-    expect((payload.plan as { enableApis: string[] }).enableApis).toContain('cloudscheduler.googleapis.com');
-    expect((payload.plan as { grantRoles: string[] }).grantRoles).toContain('roles/logging.viewAccessor');
-    expect((payload.plan as { grantRoles: string[] }).grantRoles).toContain('roles/cloudscheduler.admin');
-
-    await Promise.all([client.close(), server.close()]);
+    const plan = payload.plan as { enableApis: string[]; grantRoles: string[] };
+    expect(plan.enableApis).toContain('cloudscheduler.googleapis.com');
+    expect(plan.grantRoles).toContain('roles/logging.viewAccessor');
+    expect(plan.grantRoles).toContain('roles/cloudscheduler.admin');
   });
 
   it('enables required APIs, grants deploy service account roles, and records preparation with a one-time admin token', async () => {
-    const projectRepo = new ProjectRepository();
-    const connectionRepo = new ConnectionRepository();
-    const project = projectRepo.create({
-      name: 'hls-property-care',
-      defaultPlatform: 'cloudrun',
-      gitRemoteUrl: 'git@github.com:davejohnson/hls-property-care.git',
-    });
-    connectionRepo.create({
-      provider: 'cloudrun',
-      scope: 'davejohnson/hls-property-care',
-      credentialsEncrypted: getSecretStore().encryptObject({
-        projectId: 'hls-property-care',
-        region: 'us-central1',
-        credentials: JSON.stringify({
-          type: 'service_account',
-          project_id: 'hls-property-care',
-          private_key: 'not-used',
-          client_email: 'hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com',
-        }),
-      }),
-    });
+    const project = seedProject();
 
-    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
 
@@ -143,14 +97,8 @@ describe('gcp tools', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'cloud-prepare-apply-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'cloud_prepare', {
-      projectName: 'hls-property-care',
+    const payload = await runCloudPrepare({
+      project,
       provider: 'cloudrun',
       adminAccessToken: 'admin-token',
       confirm: true,
@@ -168,10 +116,7 @@ describe('gcp tools', () => {
       'roles/cloudsql.client',
     ]));
     expect(payload.existingRoles).toEqual(['roles/run.admin']);
-    expect(payload).toMatchObject({
-      provider: 'cloudrun',
-      version: 'gcp-cloudrun-v1',
-    });
+    expect(payload).toMatchObject({ provider: 'cloudrun', version: 'gcp-cloudrun-v1' });
 
     const setIamCall = fetchMock.mock.calls.find(([url, init]) =>
       String(url).endsWith(':setIamPolicy') && init?.method === 'POST'
@@ -188,7 +133,7 @@ describe('gcp tools', () => {
       members: ['serviceAccount:hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com'],
     });
 
-    const updatedProject = projectRepo.findById(project.id);
+    const updatedProject = new ProjectRepository().findById(project.id);
     expect(updatedProject?.policies.cloudPreparation).toMatchObject({
       cloudrun: {
         provider: 'cloudrun',
@@ -197,7 +142,12 @@ describe('gcp tools', () => {
         deployServiceAccountEmail: 'hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com',
       },
     });
+  });
 
-    await Promise.all([client.close(), server.close()]);
+  it('requires admin credentials when confirming', async () => {
+    const project = seedProject();
+    const payload = await runCloudPrepare({ project, provider: 'cloudrun', confirm: true });
+    expect(payload.success).toBe(false);
+    expect(String(payload.error)).toContain('adminCredentialsJson or adminAccessToken');
   });
 });

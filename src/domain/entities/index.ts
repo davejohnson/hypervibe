@@ -6,4 +6,3 @@ export * from './connection.entity.js';
 export * from './run.entity.js';
 export * from './audit.entity.js';
 export * from './integration.entity.js';
-export * from './approval.entity.js';

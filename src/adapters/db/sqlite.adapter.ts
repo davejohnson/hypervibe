@@ -288,6 +288,16 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_project_specs_project ON project_specs(project_id, revision DESC);
     `,
   },
+  {
+    version: 9,
+    name: 'drop_approvals',
+    up: `
+      -- The approval workflow was removed: the agent could approve its own
+      -- requests, so the human gate is MCP client tool-call approval plus
+      -- explicit confirm flags.
+      DROP TABLE IF EXISTS approvals;
+    `,
+  },
 ];
 
 export class SqliteAdapter {

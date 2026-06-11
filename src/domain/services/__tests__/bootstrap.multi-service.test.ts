@@ -1,39 +1,77 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { initializeDatabase, SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
-import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
-import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
-import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
-import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
-import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { getSecretStore } from '../../adapters/secrets/secret-store.js';
-import { adapterFactory } from '../../domain/services/adapter.factory.js';
-import { CLOUD_PREPARE_PROFILES } from '../../domain/services/cloud-prepare.js';
-import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
-import type { IDatabaseAdapter } from '../../domain/ports/database.port.js';
-import type { IHostingAdapter } from '../../domain/ports/hosting.port.js';
+import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
+import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
+import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
+import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
+import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
+import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { adapterFactory } from '../adapter.factory.js';
+import { CLOUD_PREPARE_PROFILES } from '../cloud-prepare.js';
+import { CloudflareAdapter } from '../../../adapters/providers/cloudflare/cloudflare.adapter.js';
+import type { IDatabaseAdapter } from '../../ports/database.port.js';
+import type { IHostingAdapter } from '../../ports/hosting.port.js';
+import { executeBootstrap } from '../bootstrap.service.js';
+import { resolveDesiredState, resolveDatabaseProviderForProject, normalizeCrons, type DesiredState } from '../spec.service.js';
 
 type JsonObj = Record<string, unknown>;
 
-async function callTool(client: Client, name: string, args: Record<string, unknown> = {}): Promise<JsonObj> {
-  const result = await client.request(
-    {
-      method: 'tools/call',
-      params: {
-        name,
-        arguments: args,
-      },
-    },
-    CallToolResultSchema
-  );
-  const text = result.content.find((c) => c.type === 'text')?.text;
-  if (!text) throw new Error(`Tool ${name} returned no text payload`);
-  return JSON.parse(text) as JsonObj;
+
+async function applyInfra(args: {
+  projectName: string;
+  environmentName?: string;
+  services?: string[];
+  crons?: Record<string, { schedule: string; command?: string; timeZone?: string }>;
+  serviceName?: string;
+  domain?: string;
+  databaseProvider?: 'supabase' | 'rds' | 'cloudsql' | 'railway';
+  setupEmail?: boolean;
+  serviceConfig?: Record<string, Record<string, unknown>>;
+  envVars?: Record<string, string>;
+  deploy?: Record<string, unknown>;
+  confirm?: boolean;
+}): Promise<JsonObj> {
+  // Replicates the legacy infra_apply handler: resolve desired state from
+  // project policies plus overrides, then run the bootstrap converge.
+  const project = new ProjectRepository().findByName(args.projectName);
+  const policyState = (project?.policies?.desiredState ?? {}) as Partial<DesiredState>;
+  const resolvedDatabaseProvider = project
+    ? resolveDatabaseProviderForProject(project, policyState, {
+      environmentName: args.environmentName,
+      databaseProvider: args.databaseProvider,
+    })
+    : args.databaseProvider;
+  const desired = resolveDesiredState(policyState, {
+    environmentName: args.environmentName,
+    services: args.services,
+    crons: normalizeCrons(args.crons),
+    serviceName: args.serviceName,
+    domain: args.domain,
+    databaseProvider: resolvedDatabaseProvider,
+    setupEmail: args.setupEmail,
+    serviceConfig: args.serviceConfig as Partial<DesiredState>['serviceConfig'],
+    envVars: args.envVars,
+    deploy: args.deploy as Partial<DesiredState>['deploy'],
+  });
+  const executed = await executeBootstrap({
+    projectName: args.projectName,
+    environmentName: desired.environmentName,
+    services: desired.services,
+    crons: desired.crons,
+    domain: desired.domain,
+    databaseProvider: desired.databaseProvider,
+    setupEmail: desired.setupEmail,
+    serviceConfig: desired.serviceConfig,
+    envVars: desired.envVars,
+    deploy: desired.deploy,
+  });
+  if (!executed.success && executed.summary.error) {
+    return { success: false, error: executed.summary.error, summary: executed.summary } as JsonObj;
+  }
+  return { success: executed.success, ...executed.summary } as JsonObj;
 }
 
 describe('infra_apply multi-service convergence', () => {
@@ -177,13 +215,7 @@ describe('infra_apply multi-service convergence', () => {
       adapter: fakeHostingAdapter,
     });
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'multi-service-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
+    const payload = await applyInfra({
       projectName: project.name,
       environmentName: 'staging',
       services: ['web', 'worker'],
@@ -198,94 +230,6 @@ describe('infra_apply multi-service convergence', () => {
     expect(deployCalls).toEqual(['web', 'worker']);
     const createdServices = serviceRepo.findByProjectId(project.id).map((service) => service.name);
     expect(createdServices).toEqual(['web', 'worker']);
-
-    await Promise.all([client.close(), server.close()]);
-  });
-
-  it('marks db_provision ok in preview when a matching managed postgres already exists', async () => {
-    const projectRepo = new ProjectRepository();
-    const envRepo = new EnvironmentRepository();
-    const componentRepo = new ComponentRepository();
-    const project = projectRepo.create({ name: 'existing-db-project', defaultPlatform: 'railway' });
-    const environment = envRepo.create({ projectId: project.id, name: 'production' });
-
-    componentRepo.create({
-      environmentId: environment.id,
-      type: 'postgres',
-      bindings: {
-        provider: 'railway',
-        pluginName: 'postgres-db',
-        connectionUrl: 'postgres://shared-db',
-      },
-      externalId: 'rail-db-1',
-    });
-
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'existing-db-preview-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
-      projectName: project.name,
-      environmentName: 'production',
-      services: ['web', 'worker'],
-      databaseProvider: 'railway',
-      setupEmail: false,
-      confirm: false,
-    });
-
-    const plan = payload.plan as Array<Record<string, unknown>>;
-    const dbPlan = plan.find((item) => item.action === 'db_provision');
-    expect(payload.success).toBe(true);
-    expect(payload.mode).toBe('preview');
-    expect(dbPlan?.status).toBe('ok');
-    expect(dbPlan?.detail).toBe('Postgres already managed on railway');
-
-    await Promise.all([client.close(), server.close()]);
-  });
-
-  it('infers the existing managed postgres provider during infra_plan when databaseProvider is omitted', async () => {
-    const projectRepo = new ProjectRepository();
-    const envRepo = new EnvironmentRepository();
-    const componentRepo = new ComponentRepository();
-    const project = projectRepo.create({ name: 'existing-db-plan-project', defaultPlatform: 'railway' });
-    const environment = envRepo.create({ projectId: project.id, name: 'production' });
-
-    componentRepo.create({
-      environmentId: environment.id,
-      type: 'postgres',
-      bindings: {
-        provider: 'railway',
-        pluginName: 'postgres-db',
-        connectionUrl: 'postgres://shared-db',
-      },
-      externalId: 'rail-db-1',
-    });
-
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'existing-db-plan-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_plan', {
-      projectName: project.name,
-      environmentName: 'production',
-      services: ['web'],
-      domain: 'usebillforge.com',
-      setupEmail: false,
-    });
-
-    const desired = payload.desired as JsonObj;
-    const plan = payload.plan as Array<Record<string, unknown>>;
-    const dbPlan = plan.find((item) => item.action === 'db_provision');
-    expect(payload.success).toBe(true);
-    expect(desired.databaseProvider).toBe('railway');
-    expect(dbPlan?.status).toBe('ok');
-    expect(dbPlan?.detail).toBe('Postgres already managed on railway');
-
-    await Promise.all([client.close(), server.close()]);
   });
 
   it('reuses an existing managed postgres component during apply', async () => {
@@ -401,13 +345,7 @@ describe('infra_apply multi-service convergence', () => {
       adapter: fakeHostingAdapter,
     });
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'reuse-db-apply-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
+    const payload = await applyInfra({
       projectName: project.name,
       environmentName: 'production',
       services: ['web', 'worker'],
@@ -436,95 +374,6 @@ describe('infra_apply multi-service convergence', () => {
         },
       },
     ]);
-
-    await Promise.all([client.close(), server.close()]);
-  });
-
-  it('infra_desired_set preserves the existing managed postgres provider when databaseProvider is omitted', async () => {
-    const projectRepo = new ProjectRepository();
-    const envRepo = new EnvironmentRepository();
-    const componentRepo = new ComponentRepository();
-    const project = projectRepo.create({ name: 'desired-existing-db-project', defaultPlatform: 'railway' });
-    const environment = envRepo.create({ projectId: project.id, name: 'production' });
-
-    componentRepo.create({
-      environmentId: environment.id,
-      type: 'postgres',
-      bindings: {
-        provider: 'railway',
-        pluginName: 'postgres-db',
-        connectionUrl: 'postgres://shared-db',
-      },
-      externalId: 'rail-db-1',
-    });
-
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'desired-existing-db-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_desired_set', {
-      projectName: project.name,
-      environmentName: 'production',
-      services: ['web'],
-      setupEmail: false,
-    });
-
-    const desiredState = payload.desiredState as JsonObj;
-    expect(payload.success).toBe(true);
-    expect(desiredState.databaseProvider).toBe('railway');
-
-    await Promise.all([client.close(), server.close()]);
-  });
-
-  it('shows repo-linked deploy source configuration in preview when branch deploy is desired', async () => {
-    const projectRepo = new ProjectRepository();
-    const project = projectRepo.create({
-      name: 'branch-source-project',
-      defaultPlatform: 'railway',
-      gitRemoteUrl: 'https://github.com/davejohnson/billforge.git',
-    });
-
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'branch-source-preview-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
-      projectName: project.name,
-      environmentName: 'production',
-      services: ['web', 'worker'],
-      databaseProvider: 'railway',
-      setupEmail: false,
-      deploy: {
-        strategy: 'branch',
-        branches: {
-          production: 'main',
-        },
-      },
-      confirm: false,
-    });
-
-    const sourcePlan = (payload.plan as Array<Record<string, unknown>>).filter(
-      (item) => item.action === 'deploy_source_configure'
-    );
-    expect(sourcePlan).toHaveLength(2);
-    expect(sourcePlan).toEqual([
-      {
-        action: 'deploy_source_configure',
-        status: 'needed',
-        detail: 'Connect service "web" to GitHub davejohnson/billforge#main',
-      },
-      {
-        action: 'deploy_source_configure',
-        status: 'needed',
-        detail: 'Connect service "worker" to GitHub davejohnson/billforge#main',
-      },
-    ]);
-
-    await Promise.all([client.close(), server.close()]);
   });
 
   it('shows per-service runtime configuration in preview and persists it for apply', async () => {
@@ -652,66 +501,7 @@ describe('infra_apply multi-service convergence', () => {
       adapter: fakeHostingAdapter,
     });
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'service-config-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const previewPayload = await callTool(client, 'infra_apply', {
-      projectName: project.name,
-      environmentName: 'production',
-      services: ['web', 'worker'],
-      databaseProvider: 'railway',
-      setupEmail: false,
-      serviceConfig: {
-        web: {
-          startCommand: 'npm start',
-          healthCheckPath: '/health',
-        },
-        worker: {
-          startCommand: 'npm run worker',
-          cronSchedule: '0 * * * *',
-        },
-      },
-      confirm: false,
-    });
-
-    const runtimePlan = (previewPayload.plan as Array<Record<string, unknown>>).filter(
-      (item) => item.action === 'service_configure'
-    );
-    expect(runtimePlan).toEqual([
-      {
-        action: 'service_configure',
-        status: 'needed',
-        detail: 'Configure service "web" (start=npm start, health=/health)',
-      },
-    ]);
-    expect(previewPayload.desired).toMatchObject({
-      services: ['web'],
-      crons: {
-        worker: {
-          schedule: '0 * * * *',
-          command: 'npm run worker',
-        },
-      },
-    });
-    expect((previewPayload.plan as Array<Record<string, unknown>>).filter(
-      (item) => item.action === 'cron_create' || item.action === 'cron_deploy'
-    )).toEqual([
-      {
-        action: 'cron_create',
-        status: 'needed',
-        detail: 'Create cron job "worker"',
-      },
-      {
-        action: 'cron_deploy',
-        status: 'blocked',
-        detail: 'Missing verified Railway connection',
-      },
-    ]);
-
-    const applyPayload = await callTool(client, 'infra_apply', {
+    const applyPayload = await applyInfra({
       projectName: project.name,
       environmentName: 'production',
       services: ['web', 'worker'],
@@ -745,8 +535,6 @@ describe('infra_apply multi-service convergence', () => {
       startCommand: 'npm run worker',
       cronSchedule: '0 * * * *',
     });
-
-    await Promise.all([client.close(), server.close()]);
   });
 
   it('configures repo-linked deploy sources for all services during apply', async () => {
@@ -882,13 +670,7 @@ describe('infra_apply multi-service convergence', () => {
       adapter: fakeHostingAdapter,
     });
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'branch-source-apply-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
+    const payload = await applyInfra({
       projectName: project.name,
       environmentName: 'production',
       services: ['web', 'worker'],
@@ -914,8 +696,6 @@ describe('infra_apply multi-service convergence', () => {
       [{ serviceId: 'rail-web', repo: 'davejohnson/billforge', branch: 'main' }],
       [{ serviceId: 'rail-worker', repo: 'davejohnson/billforge', branch: 'main' }],
     ]);
-
-    await Promise.all([client.close(), server.close()]);
   });
 
   it('returns Railway GitHub app guidance when repo-linked deploy source access is denied', async () => {
@@ -1052,13 +832,7 @@ describe('infra_apply multi-service convergence', () => {
       adapter: fakeHostingAdapter,
     });
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'branch-source-repo-access-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
+    const payload = await applyInfra({
       projectName: project.name,
       environmentName: 'production',
       services: ['web'],
@@ -1082,8 +856,6 @@ describe('infra_apply multi-service convergence', () => {
       repo: 'davejohnson/billforge',
     });
     expect(summary.nextSteps).toContain('Then rerun infra_apply or setup_configure.');
-
-    await Promise.all([client.close(), server.close()]);
   });
 
   it('attaches a Railway custom domain and syncs the required DNS records to Cloudflare', async () => {
@@ -1259,13 +1031,7 @@ describe('infra_apply multi-service convergence', () => {
         action: 'created',
       });
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'domain-attach-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
+    const payload = await applyInfra({
       projectName: project.name,
       environmentName: 'production',
       services: ['web'],
@@ -1287,8 +1053,6 @@ describe('infra_apply multi-service convergence', () => {
     ]);
     expect(payload.customDomainAttached).toBe(true);
     expect(payload.domainDnsConfigured).toBe(true);
-
-    await Promise.all([client.close(), server.close()]);
   });
 
   it('allows protected infra_apply with confirm=true', async () => {
@@ -1387,13 +1151,7 @@ describe('infra_apply multi-service convergence', () => {
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: fakeDatabaseAdapter });
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeHostingAdapter });
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'protected-approved-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
+    const payload = await applyInfra({
       projectName: project.name,
       environmentName: 'production',
       services: ['web'],
@@ -1403,100 +1161,6 @@ describe('infra_apply multi-service convergence', () => {
     });
 
     expect(payload.success).toBe(true);
-
-    await Promise.all([client.close(), server.close()]);
-  });
-
-  it('passes project git source metadata and scoped GitHub token during direct Cloud Run deploy', async () => {
-    const projectRepo = new ProjectRepository();
-    const envRepo = new EnvironmentRepository();
-    const serviceRepo = new ServiceRepository();
-    const connectionRepo = new ConnectionRepository();
-    const secretStore = getSecretStore();
-    const project = projectRepo.create({
-      name: 'direct-cloudrun-source-project',
-      defaultPlatform: 'cloudrun',
-      gitRemoteUrl: 'git@github.com:davejohnson/hls-property-care.git',
-    });
-    envRepo.create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
-    });
-    serviceRepo.create({
-      projectId: project.id,
-      name: 'web',
-      buildConfig: { builder: 'dockerfile', startCommand: 'npm start' },
-      envVarSpec: {},
-    });
-    connectionRepo.create({
-      provider: 'github',
-      scope: 'davejohnson/hls-property-care',
-      credentialsEncrypted: secretStore.encryptObject({ apiToken: 'ghp_repo_token' }),
-    });
-
-    const deployEnvVars: Array<Record<string, string>> = [];
-    const fakeHostingAdapter: IHostingAdapter = {
-      name: 'cloudrun',
-      capabilities: {
-        supportedBuilders: ['dockerfile'],
-        supportsAutoWiring: false,
-        supportsHealthChecks: true,
-        supportsCronSchedule: true,
-        supportsReleaseCommand: false,
-        supportsMultiEnvironment: false,
-        managedTls: true,
-        supportsAutoScaling: false,
-        supportsObserve: false,
-      },
-      async connect() {},
-      async verify() {
-        return { success: true };
-      },
-      async ensureProject() {
-        return { success: true, message: 'bound', data: { projectId: 'gcp-project', environmentId: 'us-central1' } };
-      },
-      async deploy(service, _environment, envVars) {
-        deployEnvVars.push(envVars);
-        return {
-          serviceId: service.id,
-          externalId: `gcp-${service.name}`,
-          status: 'deployed',
-          receipt: { success: true, message: 'deployed', data: { environmentId: 'us-central1', imageUri: 'image' } },
-        };
-      },
-      async setEnvVars() {
-        return { success: true, message: 'vars synced' };
-      },
-      async getDeployStatus() {
-        return { status: 'deployed' };
-      },
-    };
-
-    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeHostingAdapter });
-
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'direct-cloudrun-source-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'deploy', {
-      projectName: project.name,
-      environmentName: 'production',
-      services: ['web'],
-      envVars: { NODE_ENV: 'production' },
-    });
-
-    expect(payload.success).toBe(true);
-    expect(deployEnvVars[0]).toMatchObject({
-      HYPERVIBE_SOURCE_REPO_URL: 'https://github.com/davejohnson/hls-property-care.git',
-      HYPERVIBE_SOURCE_REVISION: 'main',
-      HYPERVIBE_GITHUB_TOKEN: 'ghp_repo_token',
-      NODE_ENV: 'production',
-    });
-
-    await Promise.all([client.close(), server.close()]);
   });
 
   it('normalizes Cloud Run web services to public during infra_apply unless explicitly private', async () => {
@@ -1618,13 +1282,7 @@ describe('infra_apply multi-service convergence', () => {
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({ success: true, adapter: fakeDatabaseAdapter });
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeHostingAdapter });
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'cloudrun-public-web-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
+    const payload = await applyInfra({
       projectName: project.name,
       environmentName: 'production',
       services: ['web'],
@@ -1643,7 +1301,7 @@ describe('infra_apply multi-service convergence', () => {
     expect(deployedPublicFlags).toEqual([true]);
     expect(serviceRepo.findByProjectAndName(project.id, 'web')?.buildConfig.public).toBe(true);
 
-    const privatePayload = await callTool(client, 'infra_apply', {
+    const privatePayload = await applyInfra({
       projectName: project.name,
       environmentName: 'production',
       services: ['web'],
@@ -1662,8 +1320,6 @@ describe('infra_apply multi-service convergence', () => {
     expect(privatePayload.success).toBe(true);
     expect(deployedPublicFlags).toEqual([true, false]);
     expect(serviceRepo.findByProjectAndName(project.id, 'web')?.buildConfig.public).toBe(false);
-
-    await Promise.all([client.close(), server.close()]);
   });
 
   it('blocks Cloud Run infra_apply before provisioning when cloud_prepare has not been recorded', async () => {
@@ -1676,13 +1332,7 @@ describe('infra_apply multi-service convergence', () => {
     const databaseAdapterSpy = vi.spyOn(adapterFactory, 'getDatabaseAdapter');
     const hostingAdapterSpy = vi.spyOn(adapterFactory, 'getHostingAdapter');
 
-    const { createLegacyTestServer } = await import('./legacy-server.helper.js');
-    const server = createLegacyTestServer();
-    const client = new Client({ name: 'unprepared-cloudrun-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'infra_apply', {
+    const payload = await applyInfra({
       projectName: project.name,
       environmentName: 'production',
       services: ['web'],
@@ -1692,7 +1342,7 @@ describe('infra_apply multi-service convergence', () => {
     });
 
     expect(payload.success).toBe(false);
-    expect(payload.error).toContain('Run cloud_prepare provider="cloudrun" confirm=true before infra_apply');
+    expect(payload.error).toContain('Run hv_connect provider="cloudrun" action="prepare" confirm=true before applying');
     expect(payload.summary).toMatchObject({
       action: 'cloud_prepare',
       provider: 'cloudrun',
@@ -1700,7 +1350,5 @@ describe('infra_apply multi-service convergence', () => {
     });
     expect(databaseAdapterSpy).not.toHaveBeenCalled();
     expect(hostingAdapterSpy).not.toHaveBeenCalled();
-
-    await Promise.all([client.close(), server.close()]);
   });
 });

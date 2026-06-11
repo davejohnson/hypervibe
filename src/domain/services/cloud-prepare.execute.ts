@@ -1,14 +1,12 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
-import { resolveProject } from './resolve-project.js';
-import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
-import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
-import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import { getProjectScopeHints } from '../domain/services/project-scope.js';
+import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import type { Project } from '../entities/project.entity.js';
+import { getProjectScopeHints } from './project-scope.js';
 import {
   getCloudPrepareProfile,
   withCloudPreparationRecord,
-} from '../domain/services/cloud-prepare.js';
+} from './cloud-prepare.js';
 
 const connectionRepo = new ConnectionRepository();
 const projectRepo = new ProjectRepository();
@@ -42,168 +40,130 @@ interface IamPolicy {
   bindings?: IamBinding[];
 }
 
-export function registerGcpTools(server: McpServer): void {
-  server.tool(
-    'cloud_prepare',
-    'Prepare a cloud provider account/project for Hypervibe deploys. For Cloud Run this enables required GCP APIs and grants the deploy service account required roles. Admin credentials are used for this call only and are not saved.',
-    {
-      projectName: z.string().describe('Hypervibe project name'),
-      provider: z.enum(['cloudrun']).describe('Cloud provider/runtime to prepare'),
-      gcpProjectId: z.string().optional().describe('GCP project ID. Defaults to the Cloud Run connection projectId.'),
-      deployServiceAccountEmail: z.string().email().optional().describe('Deploy/runtime service account email. Defaults to the Cloud Run connection service account.'),
-      adminCredentialsJson: z.string().optional().describe('One-time admin service account JSON with Service Usage Admin and Project IAM Admin/Owner permissions. Not stored.'),
-      adminAccessToken: z.string().optional().describe('Advanced: one-time OAuth access token with permissions to enable APIs and update project IAM. Not stored.'),
-      confirm: z.boolean().optional().describe('Set true to enable APIs and grant IAM roles. Default previews the bootstrap plan.'),
-    },
-    async ({ projectName, provider, gcpProjectId, deployServiceAccountEmail, adminCredentialsJson, adminAccessToken, confirm = false }) => {
-      const project = resolveProject({ projectName });
-      if (!project) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: `Project not found: ${projectName}` }),
-          }],
-        };
-      }
-      const profile = getCloudPrepareProfile(provider);
-      if (!profile) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: `cloud_prepare does not support provider: ${provider}` }),
-          }],
-        };
-      }
+/**
+ * One-time cloud account preparation. For Cloud Run this enables required
+ * GCP APIs and grants the deploy service account required roles using
+ * one-time admin credentials (never stored). Returns a plain payload;
+ * exposed via hv_connect action="prepare".
+ */
+export async function runCloudPrepare(params: {
+  project: Project;
+  provider: string;
+  gcpProjectId?: string;
+  deployServiceAccountEmail?: string;
+  adminCredentialsJson?: string;
+  adminAccessToken?: string;
+  confirm?: boolean;
+}): Promise<Record<string, unknown> & { success: boolean }> {
+  const { project, provider, gcpProjectId, deployServiceAccountEmail, adminCredentialsJson, adminAccessToken, confirm = false } = params;
 
-      const resolved = resolveGcpBootstrapTarget({
-        project,
-        gcpProjectId,
-        deployServiceAccountEmail,
-      });
-      if (!resolved.success) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({ success: false, error: resolved.error }),
-          }],
-        };
-      }
+  const profile = getCloudPrepareProfile(provider);
+  if (!profile) {
+    return { success: false, error: `Cloud preparation does not support provider: ${provider}` };
+  }
 
-      const member = `serviceAccount:${resolved.deployServiceAccountEmail}`;
-      const plan = {
-        projectName: project.name,
+  const resolved = resolveGcpBootstrapTarget({
+    project,
+    gcpProjectId,
+    deployServiceAccountEmail,
+  });
+  if (!resolved.success) {
+    return { success: false, error: resolved.error };
+  }
+
+  const member = `serviceAccount:${resolved.deployServiceAccountEmail}`;
+  const plan = {
+    projectName: project.name,
+    provider: profile.provider,
+    version: profile.version,
+    gcpProjectId: resolved.gcpProjectId,
+    deployServiceAccountEmail: resolved.deployServiceAccountEmail,
+    enableApis: profile.requiredApis,
+    grantRoles: profile.requiredRoles,
+    member,
+  };
+
+  if (!confirm) {
+    return {
+      success: true,
+      mode: 'preview',
+      plan,
+      message: 'Call again with confirm=true and adminCredentialsJson or adminAccessToken to prepare this cloud through Hypervibe.',
+    };
+  }
+
+  if (!adminCredentialsJson && !adminAccessToken) {
+    return {
+      success: false,
+      error: 'confirm=true requires adminCredentialsJson or adminAccessToken. The deploy service account cannot grant itself project IAM.',
+      plan,
+      requiredAdminPermissions: [
+        'serviceusage.services.enable',
+        'resourcemanager.projects.getIamPolicy',
+        'resourcemanager.projects.setIamPolicy',
+      ],
+    };
+  }
+
+  try {
+    const token = adminAccessToken ?? await getAccessTokenFromServiceAccount(parseAdminCredentials(adminCredentialsJson));
+    const enabledApis = await enableRequiredApis({
+      token,
+      projectId: resolved.gcpProjectId,
+      services: profile.requiredApis,
+    });
+    const iamResult = await ensureProjectIamRoles({
+      token,
+      projectId: resolved.gcpProjectId,
+      member,
+      roles: profile.requiredRoles,
+    });
+    const updatedProject = projectRepo.update(project.id, {
+      policies: withCloudPreparationRecord(project.policies, profile.provider, {
         provider: profile.provider,
         version: profile.version,
+        preparedAt: new Date().toISOString(),
         gcpProjectId: resolved.gcpProjectId,
         deployServiceAccountEmail: resolved.deployServiceAccountEmail,
-        enableApis: profile.requiredApis,
-        grantRoles: profile.requiredRoles,
-        member,
-      };
+        requiredApis: profile.requiredApis,
+        requiredRoles: profile.requiredRoles,
+      }),
+    });
 
-      if (!confirm) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: true,
-              mode: 'preview',
-              plan,
-              message: 'Call again with confirm=true and adminCredentialsJson or adminAccessToken to prepare this cloud through Hypervibe.',
-            }),
-          }],
-        };
-      }
-
-      if (!adminCredentialsJson && !adminAccessToken) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: 'confirm=true requires adminCredentialsJson or adminAccessToken. The deploy service account cannot grant itself project IAM.',
-              plan,
-              requiredAdminPermissions: [
-                'serviceusage.services.enable',
-                'resourcemanager.projects.getIamPolicy',
-                'resourcemanager.projects.setIamPolicy',
-              ],
-            }),
-          }],
-        };
-      }
-
-      try {
-        const token = adminAccessToken ?? await getAccessTokenFromServiceAccount(parseAdminCredentials(adminCredentialsJson));
-        const enabledApis = await enableRequiredApis({
-          token,
-          projectId: resolved.gcpProjectId,
-          services: profile.requiredApis,
-        });
-        const iamResult = await ensureProjectIamRoles({
-          token,
-          projectId: resolved.gcpProjectId,
-          member,
-          roles: profile.requiredRoles,
-        });
-        const updatedProject = projectRepo.update(project.id, {
-          policies: withCloudPreparationRecord(project.policies, profile.provider, {
-            provider: profile.provider,
-            version: profile.version,
-            preparedAt: new Date().toISOString(),
-            gcpProjectId: resolved.gcpProjectId,
-            deployServiceAccountEmail: resolved.deployServiceAccountEmail,
-            requiredApis: profile.requiredApis,
-            requiredRoles: profile.requiredRoles,
-          }),
-        });
-
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: true,
-              message: 'Cloud prepared for Hypervibe deploys.',
-              project: project.name,
-              provider: profile.provider,
-              version: profile.version,
-              gcpProjectId: resolved.gcpProjectId,
-              deployServiceAccountEmail: resolved.deployServiceAccountEmail,
-              enabledApis,
-              grantedRoles: iamResult.updatedRoles,
-              existingRoles: iamResult.existingRoles,
-              preparation: updatedProject?.policies.cloudPreparation,
-              nextSteps: [
-                'connection_verify provider="cloudrun"',
-                'connection_verify provider="cloudsql"',
-                'infra_apply confirm=true',
-              ],
-            }),
-          }],
-        };
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
-              error: describePrepareError(error),
-              plan,
-              requiredAdminPermissions: [
-                'serviceusage.services.enable',
-                'resourcemanager.projects.getIamPolicy',
-                'resourcemanager.projects.setIamPolicy',
-              ],
-            }),
-          }],
-        };
-      }
-    }
-  );
+    return {
+      success: true,
+      message: 'Cloud prepared for Hypervibe deploys.',
+      project: project.name,
+      provider: profile.provider,
+      version: profile.version,
+      gcpProjectId: resolved.gcpProjectId,
+      deployServiceAccountEmail: resolved.deployServiceAccountEmail,
+      enabledApis,
+      grantedRoles: iamResult.updatedRoles,
+      existingRoles: iamResult.existingRoles,
+      preparation: updatedProject?.policies.cloudPreparation,
+      nextSteps: [
+        'hv_connect provider="cloudrun" action="verify"',
+        'hv_connect provider="cloudsql" action="verify"',
+        'hv_plan, then hv_apply',
+      ],
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: describePrepareError(error),
+      plan,
+      requiredAdminPermissions: [
+        'serviceusage.services.enable',
+        'resourcemanager.projects.getIamPolicy',
+        'resourcemanager.projects.setIamPolicy',
+      ],
+    };
+  }
 }
 
 function resolveGcpBootstrapTarget(params: {
-  project: NonNullable<ReturnType<typeof resolveProject>>;
+  project: Project;
   gcpProjectId?: string;
   deployServiceAccountEmail?: string;
 }): { success: true; gcpProjectId: string; deployServiceAccountEmail: string } | { success: false; error: string } {
