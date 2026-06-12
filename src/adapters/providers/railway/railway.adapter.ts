@@ -29,7 +29,7 @@ export class RailwayAdapter implements IProviderAdapter {
     supportsAutoWiring: true,
     supportsHealthChecks: true,
     supportsCronSchedule: true,
-    supportsReleaseCommand: false, // Railway uses start commands
+    supportsReleaseCommand: true, // mapped to Railway's preDeployCommand
     supportsMultiEnvironment: true,
     managedTls: true,
     supportsObserve: true,
@@ -1161,10 +1161,11 @@ export class RailwayAdapter implements IProviderAdapter {
 
       const runtimeConfig = {
         startCommand: service.buildConfig.startCommand,
+        releaseCommand: service.buildConfig.releaseCommand,
         healthcheckPath: service.buildConfig.healthCheckPath,
         cronSchedule: service.buildConfig.cronSchedule,
       };
-      if (runtimeConfig.startCommand || runtimeConfig.healthcheckPath || runtimeConfig.cronSchedule) {
+      if (runtimeConfig.startCommand || runtimeConfig.releaseCommand || runtimeConfig.healthcheckPath || runtimeConfig.cronSchedule) {
         const configReceipt = await this.updateServiceInstanceConfig({
           serviceId: railwayServiceId,
           environmentId: railwayEnvId,
@@ -1689,6 +1690,7 @@ export class RailwayAdapter implements IProviderAdapter {
     serviceId: string;
     environmentId: string;
     startCommand?: string;
+    releaseCommand?: string;
     healthcheckPath?: string;
     cronSchedule?: string;
   }): Promise<Receipt> {
@@ -1699,6 +1701,10 @@ export class RailwayAdapter implements IProviderAdapter {
     const input: Record<string, unknown> = {};
     if (params.startCommand) {
       input.startCommand = params.startCommand;
+    }
+    if (params.releaseCommand) {
+      // Railway models the release/predeploy step as preDeployCommand: [String!]
+      input.preDeployCommand = [params.releaseCommand];
     }
     if (params.healthcheckPath) {
       input.healthcheckPath = params.healthcheckPath;
@@ -2292,6 +2298,7 @@ export class RailwayAdapter implements IProviderAdapter {
       const customDomains = (instance?.domains?.customDomains ?? []).map((d) => d.domain);
 
       let startCommand = instance?.startCommand ?? undefined;
+      let releaseCommand: string | undefined;
       let healthCheckPath = instance?.healthcheckPath ?? undefined;
       let cronSchedule: string | undefined;
       let status: ObservedService['status'] = 'unknown';
@@ -2301,9 +2308,13 @@ export class RailwayAdapter implements IProviderAdapter {
           const instanceDetails = await this.getServiceInstanceDetails(node.id, environmentId);
           if (instanceDetails) {
             startCommand = instanceDetails.startCommand ?? startCommand;
+            releaseCommand = this.normalizePreDeployCommand(instanceDetails.preDeployCommand);
             healthCheckPath = instanceDetails.healthcheckPath ?? healthCheckPath;
             cronSchedule = instanceDetails.cronSchedule ?? undefined;
-            status = this.toObservedStatus(instanceDetails.latestDeployment?.status);
+            // No deployment at all means the service has no source connected.
+            status = instanceDetails.latestDeployment
+              ? this.toObservedStatus(instanceDetails.latestDeployment.status)
+              : 'empty';
           }
         } catch (error) {
           warnings.push(`Failed to read service instance for "${node.name}": ${this.describeError(error)}`);
@@ -2334,6 +2345,7 @@ export class RailwayAdapter implements IProviderAdapter {
         customDomains,
         config: {
           startCommand,
+          releaseCommand,
           healthCheckPath,
           cronSchedule,
         },
@@ -2372,9 +2384,10 @@ export class RailwayAdapter implements IProviderAdapter {
     environmentId: string
   ): Promise<{
     startCommand?: string;
+    preDeployCommand?: unknown;
     healthcheckPath?: string;
     cronSchedule?: string;
-    latestDeployment?: { status?: string };
+    latestDeployment?: { status?: string } | null;
   } | null> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
@@ -2384,6 +2397,7 @@ export class RailwayAdapter implements IProviderAdapter {
       query GetServiceInstance($serviceId: String!, $environmentId: String!) {
         serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
           startCommand
+          preDeployCommand
           healthcheckPath
           cronSchedule
           latestDeployment {
@@ -2396,12 +2410,27 @@ export class RailwayAdapter implements IProviderAdapter {
     const result = await this.client.request<{
       serviceInstance?: {
         startCommand?: string;
+        preDeployCommand?: unknown;
         healthcheckPath?: string;
         cronSchedule?: string;
-        latestDeployment?: { status?: string };
+        latestDeployment?: { status?: string } | null;
       } | null;
     }>(query, { serviceId, environmentId });
     return result.serviceInstance ?? null;
+  }
+
+  /**
+   * Railway returns preDeployCommand as a JSON scalar — a list of command
+   * strings (we always write a single-element list). Normalize to the
+   * spec's single releaseCommand string for drift comparison.
+   */
+  private normalizePreDeployCommand(value: unknown): string | undefined {
+    if (typeof value === 'string') return value || undefined;
+    if (Array.isArray(value)) {
+      const commands = value.filter((v): v is string => typeof v === 'string' && v.length > 0);
+      return commands.length > 0 ? commands.join(' && ') : undefined;
+    }
+    return undefined;
   }
 
   /** Same name-based datastore classification used by listPlugins. */

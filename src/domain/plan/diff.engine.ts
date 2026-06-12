@@ -37,6 +37,16 @@ export function diffEnvironment(input: {
     warnings.push('Observation was partial; some diffs may be incomplete.');
   }
 
+  // Railway delivers code only through repo-linked deploys (serviceConnect).
+  // Without strategy "branch", apply creates source-less services that never run code.
+  if (provider === 'railway' && Object.keys(spec.services).length > 0 && spec.deploy?.strategy !== 'branch') {
+    warnings.push(
+      `deploy.strategy is "${spec.deploy?.strategy ?? 'unset'}": Railway only deploys code via repo-linked deploys, `
+      + 'so apply will create services without a source and NO CODE WILL BE DEPLOYED. '
+      + 'Set deploy: { strategy: "branch" } in the spec (hv_spec_set) unless infrastructure-only is intended.'
+    );
+  }
+
   // ---- project / environment ------------------------------------------------
   const boundProvider = local.bindings?.provider;
   const providerChanged = Boolean(boundProvider && boundProvider !== provider);
@@ -107,14 +117,22 @@ export function diffEnvironment(input: {
       }
 
       const diff = diffServiceConfig(serviceSpec, live, spec.envVars);
-      if (diff.length > 0) {
+      const noCode = live.status === 'empty';
+      if (noCode || diff.length > 0) {
+        const reasons: string[] = [];
+        if (noCode) {
+          reasons.push(`Service "${name}" exists on ${provider} but has no code deployed (no source connected)`);
+        }
+        if (diff.length > 0) {
+          reasons.push(`Configuration drift on ${diff.map((d) => d.field).join(', ')}`);
+        }
         actions.push({
           id,
           type: 'update',
           resource,
           verified: true,
-          reason: `Configuration drift on ${diff.map((d) => d.field).join(', ')}`,
-          diff,
+          reason: reasons.join('; '),
+          ...(diff.length > 0 ? { diff } : {}),
         });
       } else {
         actions.push({ id, type: 'noop', resource, verified: true, reason: 'In sync' });
@@ -251,6 +269,7 @@ function diffServiceConfig(
   // Only fields the spec sets are managed; unset spec fields are ignored.
   const fields: Array<[keyof ServiceSpec & keyof ObservedService['config'], string]> = [
     ['startCommand', 'startCommand'],
+    ['releaseCommand', 'releaseCommand'],
     ['healthCheckPath', 'healthCheckPath'],
     ['cronSchedule', 'cronSchedule'],
     ['public', 'public'],

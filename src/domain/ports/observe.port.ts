@@ -18,6 +18,7 @@ export interface ObservedService {
   customDomains: string[];
   config: {
     startCommand?: string;
+    releaseCommand?: string;
     healthCheckPath?: string;
     cronSchedule?: string;
     public?: boolean;
@@ -26,7 +27,8 @@ export interface ObservedService {
   envVarKeys: string[];
   /** sha256 hex of each env var value, for drift comparison without exposure. */
   envVarHashes: Record<string, string>;
-  status: 'running' | 'failed' | 'unknown';
+  /** 'empty' = the service exists but has never deployed (no source/code). */
+  status: 'running' | 'failed' | 'empty' | 'unknown';
 }
 
 export interface ObservedDatabase {

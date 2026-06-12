@@ -33,6 +33,32 @@ describe('RailwayAdapter service instance updates', () => {
     });
   });
 
+  it('maps releaseCommand to Railway preDeployCommand as a single-element list', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      serviceInstanceUpdate: true,
+    });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.updateServiceInstanceConfig({
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      startCommand: 'npm start',
+      releaseCommand: 'npx prisma migrate deploy',
+    });
+
+    expect(receipt.success).toBe(true);
+    expect(request.mock.calls[0]?.[1]).toEqual({
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      input: {
+        startCommand: 'npm start',
+        preDeployCommand: ['npx prisma migrate deploy'],
+      },
+    });
+  });
+
   it('connects a service to a GitHub repo and branch via serviceConnect', async () => {
     const request = vi.fn().mockResolvedValueOnce({
       serviceConnect: {

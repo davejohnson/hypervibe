@@ -52,7 +52,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
     'Create or update the desired-state spec for a project (the single source of truth that hv_plan diffs against live infrastructure). Merges by default; pass replace=true to overwrite. In a merge, set a key to null to delete it (e.g. remove a service).',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|rds|cloudsql|railway }, domain?, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, branch? }, migrations? } } }'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|rds|cloudsql|railway }, domain?, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, branch? }, migrations? } } }. deploy.strategy "branch" connects the GitHub repo so hv_apply deploys code (required for code delivery on railway); "manual" (the default) provisions infrastructure only — services are created without a source.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
     },
     wrapHandler(async ({ project: projectRef, spec, replace }) => {

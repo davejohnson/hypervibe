@@ -263,6 +263,60 @@ describe('diffEnvironment — domain and workload', () => {
   });
 });
 
+describe('diffEnvironment — deploy source', () => {
+  it('warns when a railway spec has services but deploy.strategy is not "branch"', () => {
+    const result = diffEnvironment({ spec: spec(), envName: 'production', observed: observed(), local: local() });
+    expect(result.warnings.some((w) => w.includes('NO CODE WILL BE DEPLOYED'))).toBe(true);
+
+    const manual = diffEnvironment({
+      spec: spec({ deploy: { strategy: 'manual' } }),
+      envName: 'production',
+      observed: observed(),
+      local: local(),
+    });
+    expect(manual.warnings.some((w) => w.includes('NO CODE WILL BE DEPLOYED'))).toBe(true);
+
+    const branch = diffEnvironment({
+      spec: spec({ deploy: { strategy: 'branch', branch: 'main' } }),
+      envName: 'production',
+      observed: observed(),
+      local: local(),
+    });
+    expect(branch.warnings.some((w) => w.includes('NO CODE WILL BE DEPLOYED'))).toBe(false);
+  });
+
+  it('flags a live service that has never deployed as drift, not converged', () => {
+    const live = observedWeb({ status: 'empty' });
+    const result = diffEnvironment({
+      spec: spec({ deploy: { strategy: 'branch', branch: 'main' } }),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local(),
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.type).toBe('update');
+    expect(web.reason).toContain('no code deployed');
+  });
+
+  it('combines no-code drift with configuration drift in one update action', () => {
+    const live = observedWeb({
+      status: 'empty',
+      config: { startCommand: 'node old.js', healthCheckPath: '/health', public: true },
+    });
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local(),
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.type).toBe('update');
+    expect(web.reason).toContain('no code deployed');
+    expect(web.reason).toContain('Configuration drift');
+    expect(web.diff).toContainEqual({ field: 'startCommand', from: 'node old.js', to: 'npm start' });
+  });
+});
+
 describe('diffEnvironment — partial observation', () => {
   it('surfaces warnings when observation is partial', () => {
     const result = diffEnvironment({

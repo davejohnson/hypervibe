@@ -157,6 +157,51 @@ describe('RailwayAdapter observe', () => {
     expect(result.services[0]?.config.cronSchedule).toBe('0 * * * *');
   });
 
+  it('marks a service with no deployments as status empty', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(projectDetailsResponse)
+      .mockResolvedValueOnce({
+        serviceInstance: {
+          startCommand: 'npm start',
+          healthcheckPath: '/health',
+          cronSchedule: null,
+          latestDeployment: null,
+        },
+      })
+      .mockResolvedValueOnce({ variables: {} });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
+    );
+
+    expect(result.services[0]?.status).toBe('empty');
+  });
+
+  it('maps preDeployCommand back to config.releaseCommand', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(projectDetailsResponse)
+      .mockResolvedValueOnce({
+        serviceInstance: {
+          startCommand: 'npm start',
+          preDeployCommand: ['npx prisma migrate deploy'],
+          latestDeployment: { status: 'SUCCESS' },
+        },
+      })
+      .mockResolvedValueOnce({ variables: {} });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
+    );
+
+    expect(result.services[0]?.config.releaseCommand).toBe('npx prisma migrate deploy');
+  });
+
   it('returns projectExists false without calling Railway when no project is bound', async () => {
     const request = vi.fn();
 
