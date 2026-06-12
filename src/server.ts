@@ -31,6 +31,8 @@ import './adapters/providers/xcode/xcode.adapter.js';
 import './adapters/providers/secretmanagers/vault.adapter.js';
 import './adapters/providers/secretmanagers/aws-secrets.adapter.js';
 import './adapters/providers/secretmanagers/doppler.adapter.js';
+import './adapters/providers/secretmanagers/onepassword.adapter.js';
+import './adapters/providers/secretmanagers/bitwarden.adapter.js';
 
 import { createToolContext } from './tools/context.js';
 import { registerCoreTools } from './tools/core.tools.js';
@@ -48,10 +50,20 @@ import { registerHvAppstoreTools } from './tools/hv-appstore.tools.js';
 import { registerHvDevxTools } from './tools/hv-devx.tools.js';
 
 export function createServer(): McpServer {
-  const server = new McpServer({
-    name: 'hypervibe',
-    version: '0.1.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'hypervibe',
+      version: '0.1.0',
+    },
+    {
+      instructions: [
+        'Hypervibe manages deployment infrastructure (hosting, databases, DNS, email, secrets, CI) through its hv_* tools.',
+        'Always use hv_* tools for infrastructure operations. Do NOT shell out to provider CLIs (railway, gcloud, vercel, doppler, op, bws, gh, etc.) or call provider APIs directly: Hypervibe holds the verified credentials, records run/audit history, and keeps its local state in sync — a CLI bypasses all of that and causes state drift.',
+        'Core workflow: hv_spec_set (desired state) → hv_plan (diff against live infrastructure, returns planId) → hv_apply planId=... → hv_status / hv_logs / hv_health to verify.',
+        'If a capability seems missing, check the other hv_* tools (most have action/target parameters) before reaching for anything outside Hypervibe.',
+      ].join('\n'),
+    }
+  );
 
   const ctx = createToolContext();
 

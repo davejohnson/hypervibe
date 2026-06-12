@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
+import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { saveConnection, verifyConnection, deleteConnection } from '../domain/services/connection-ops.service.js';
 import type { ToolContext } from './context.js';
@@ -8,7 +9,7 @@ import { projectField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler } from './respond.js';
 
 export function registerConnectionsTools(server: McpServer, ctx: ToolContext): void {
-  const providerNames = providerRegistry.names();
+  const providerNames = [...new Set([...providerRegistry.names(), ...secretManagerRegistry.names()])];
   if (providerNames.length === 0) {
     throw new Error('No providers registered. Ensure adapters are imported before registering tools.');
   }
@@ -132,6 +133,14 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         const category = p.metadata.category;
         availableProviders[category] = availableProviders[category] ?? [];
         availableProviders[category].push({
+          name: p.metadata.name,
+          displayName: p.metadata.displayName,
+          ...(p.metadata.setupHelpUrl ? { setupHelpUrl: p.metadata.setupHelpUrl } : {}),
+        });
+      }
+      for (const p of secretManagerRegistry.all()) {
+        availableProviders['secrets'] = availableProviders['secrets'] ?? [];
+        availableProviders['secrets'].push({
           name: p.metadata.name,
           displayName: p.metadata.displayName,
           ...(p.metadata.setupHelpUrl ? { setupHelpUrl: p.metadata.setupHelpUrl } : {}),

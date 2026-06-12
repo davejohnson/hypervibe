@@ -7,6 +7,7 @@ export type SecretManagerProvider =
   | 'gcp-secrets'
   | 'azure-keyvault'
   | '1password'
+  | 'bitwarden'
   | 'doppler'
   | 'infisical';
 
@@ -221,8 +222,17 @@ export const AzureKeyVaultCredentialsSchema = z.object({
 });
 
 export const OnePasswordCredentialsSchema = z.object({
-  connectHost: z.string().url('Connect server URL required'),
-  connectToken: z.string().min(1, 'Connect token required'),
+  /** 1Password service account token (ops_...) — create one scoped to the vault(s) the project should read. */
+  serviceAccountToken: z.string().min(1, 'Service account token required'),
+});
+
+export const BitwardenCredentialsSchema = z.object({
+  /** Bitwarden Secrets Manager machine account access token. */
+  accessToken: z.string().min(1, 'Machine account access token required'),
+  organizationId: z.string().min(1, 'Organization id required'),
+  /** Self-hosted instances only. */
+  apiUrl: z.string().url().optional(),
+  identityUrl: z.string().url().optional(),
 });
 
 export const DopplerCredentialsSchema = z.object({
@@ -246,5 +256,6 @@ export type AwsSecretsCredentials = z.infer<typeof AwsSecretsCredentialsSchema>;
 export type GcpSecretsCredentials = z.infer<typeof GcpSecretsCredentialsSchema>;
 export type AzureKeyVaultCredentials = z.infer<typeof AzureKeyVaultCredentialsSchema>;
 export type OnePasswordCredentials = z.infer<typeof OnePasswordCredentialsSchema>;
+export type BitwardenCredentials = z.infer<typeof BitwardenCredentialsSchema>;
 export type DopplerCredentials = z.infer<typeof DopplerCredentialsSchema>;
 export type InfisicalCredentials = z.infer<typeof InfisicalCredentialsSchema>;

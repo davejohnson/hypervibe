@@ -2,6 +2,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { providerRegistry } from '../registry/provider.registry.js';
+import { secretManagerRegistry } from '../registry/secretmanager.registry.js';
 
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
@@ -32,8 +33,12 @@ export async function saveConnection(
 ): Promise<SaveConnectionOutcome> {
   const secretStore = getSecretStore();
 
-  // Validate credentials using the provider's schema
-  const validation = providerRegistry.validateCredentials(provider, credentials);
+  // Validate credentials using the provider's schema. Secret managers
+  // (vault, doppler, 1password, bitwarden, ...) live in their own registry.
+  const isSecretManager = !providerRegistry.get(provider) && secretManagerRegistry.has(provider);
+  const validation = isSecretManager
+    ? secretManagerRegistry.validateCredentials(provider, credentials)
+    : providerRegistry.validateCredentials(provider, credentials);
   if (!validation.success) {
     return { success: false, error: validation.error! };
   }
@@ -101,6 +106,35 @@ export async function verifyConnection(provider: string, scope?: string): Promis
 
   const secretStore = getSecretStore();
   const registeredProvider = providerRegistry.get(provider);
+
+  // Secret managers verify through their own registry/adapter interface.
+  if (!registeredProvider && secretManagerRegistry.has(provider)) {
+    try {
+      const decryptedCreds = secretStore.decryptObject(connection.credentialsEncrypted);
+      const adapter = secretManagerRegistry.createAdapter(provider, decryptedCreds);
+      await adapter.connect(decryptedCreds);
+      const result = await adapter.verify();
+      if (result.success) {
+        connectionRepo.updateStatus(connection.id, 'verified');
+        auditRepo.create({
+          action: 'connection.verified',
+          resourceType: 'connection',
+          resourceId: connection.id,
+          details: { provider, scope: scope || null },
+        });
+        return {
+          kind: 'verified',
+          message: `${provider} connection (${scopeDisplay}) verified${result.identity ? ` as ${result.identity}` : ''}`,
+          data: { ...(result.identity ? { identity: result.identity } : {}) },
+        };
+      }
+      connectionRepo.updateStatus(connection.id, 'failed');
+      return { kind: 'failed', error: result.error ?? 'Verification failed' };
+    } catch (error) {
+      connectionRepo.updateStatus(connection.id, 'failed');
+      return { kind: 'threw', error: error instanceof Error ? error.message : String(error) };
+    }
+  }
 
   if (!registeredProvider) {
     return { kind: 'unknown_provider', error: `Unknown provider: ${provider}` };

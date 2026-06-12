@@ -13,7 +13,7 @@ import type { Project } from '../domain/entities/project.entity.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
 
-const SECRET_MANAGERS = ['vault', 'aws-secrets', 'doppler'] as const;
+const SECRET_MANAGERS = ['vault', 'aws-secrets', 'doppler', '1password', 'bitwarden'] as const;
 const accessLogRepo = new SecretAccessLogRepository();
 
 function maskValue(value: string): string {
@@ -48,7 +48,7 @@ function githubRepoForProject(project: Project, repoArg?: string): { owner: stri
 export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_secrets_set',
-    'Set secrets and environment variables. target="hosting" (default) sets env vars on the deployed environment; "manager" stores values in a secret manager (vault/aws-secrets/doppler); "mapping" maps a secretRef to an env var resolved at deploy time; "github" sets a GitHub Actions repo secret. remove=true deletes (mapping/github targets).',
+    'Set secrets and environment variables. target="hosting" (default) sets env vars on the deployed environment; "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time (e.g. "1password://<vault>/<item>#<field>", "bitwarden://<secret-name>"); "github" sets a GitHub Actions repo secret. remove=true deletes (mapping/github targets).',
     {
       project: projectField,
       env: envField,
