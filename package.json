@@ -1,11 +1,29 @@
 {
-  "name": "hypervibe",
+  "name": "@davejohnson/hypervibe",
   "version": "0.1.0",
   "description": "MCP server for chat-driven infrastructure management",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/davejohnson/hypervibe.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "infrastructure",
+    "deploy",
+    "railway",
+    "cloud-run",
+    "terraform",
+    "agent"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "hypervibe": "dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc",
