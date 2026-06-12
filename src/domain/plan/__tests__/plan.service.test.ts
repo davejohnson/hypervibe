@@ -38,10 +38,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function mockObservingAdapter(observed: ObservedState) {
+function mockObservingAdapter(observed: ObservedState, extra: Record<string, unknown> = {}) {
   vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
     success: true,
     adapter: {
+      ...extra,
       name: 'railway',
       capabilities: {
         supportedBuilders: ['nixpacks'],
@@ -152,6 +153,103 @@ describe('PlanService.plan', () => {
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.verified).toBe(false);
     expect(plan.warnings.some((w) => w.includes('Cannot observe'))).toBe(true);
+  });
+
+  it('warns when the Railway GitHub App cannot access the branch-deploy repo', async () => {
+    project = new ProjectRepository().update(project.id, { gitRemoteUrl: 'https://github.com/dave/seq-planner.git' })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: {},
+          deploy: { strategy: 'branch', branch: 'main' },
+        },
+      },
+    });
+    mockObservingAdapter(
+      {
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: false,
+        services: [],
+        databases: [],
+        partial: false,
+        warnings: [],
+      },
+      { isGitHubRepoAccessible: async () => false }
+    );
+
+    const result = await new PlanService().plan(project, 'staging');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.warnings.some((w) => w.includes("Railway's GitHub App cannot access dave/seq-planner"))).toBe(true);
+    expect(plan.warnings.some((w) => w.includes('github.com/apps/railway-app'))).toBe(true);
+  });
+
+  it('warns when branch strategy is set but the project has no GitHub remote', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: {},
+          deploy: { strategy: 'branch', branch: 'main' },
+        },
+      },
+    });
+    mockObservingAdapter(
+      {
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: false,
+        services: [],
+        databases: [],
+        partial: false,
+        warnings: [],
+      },
+      { isGitHubRepoAccessible: async () => true }
+    );
+
+    const result = await new PlanService().plan(project, 'staging');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.warnings.some((w) => w.includes('no GitHub remote'))).toBe(true);
+  });
+
+  it('does not warn when the repo is accessible to Railway', async () => {
+    project = new ProjectRepository().update(project.id, { gitRemoteUrl: 'git@github.com:dave/seq-planner.git' })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: {},
+          deploy: { strategy: 'branch', branch: 'main' },
+        },
+      },
+    });
+    mockObservingAdapter(
+      {
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: false,
+        services: [],
+        databases: [],
+        partial: false,
+        warnings: [],
+      },
+      { isGitHubRepoAccessible: async () => true }
+    );
+
+    const result = await new PlanService().plan(project, 'staging');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.warnings.some((w) => w.includes('GitHub App'))).toBe(false);
+    expect(plan.warnings.some((w) => w.includes('no GitHub remote'))).toBe(false);
   });
 
   it('clears blocked when a verified connection exists', async () => {

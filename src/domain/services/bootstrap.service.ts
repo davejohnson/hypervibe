@@ -41,6 +41,7 @@ const connectionRepo = new ConnectionRepository();
 
 type SourceConfigurableHostingAdapter = {
   connectServiceToRepo?: (params: { serviceId: string; repo: string; branch: string }) => Promise<Receipt>;
+  isGitHubRepoAccessible?: (fullRepoName: string) => Promise<boolean | null>;
 };
 
 type DomainConfigurableHostingAdapter = {
@@ -593,12 +594,25 @@ export async function executeBootstrap(params: {
       };
     }
 
+    // serviceConnect succeeds even when the Railway GitHub App cannot see the
+    // repo (builds work, but the UI shows "repo not found" and pushes never
+    // auto-deploy). Verify and surface the GitHub-side fix when needed.
+    const repoAccess = typeof sourceAdapter.isGitHubRepoAccessible === 'function'
+      ? await sourceAdapter.isGitHubRepoAccessible(deploySource.source.repo)
+      : null;
+
     summary.deploySource = {
       strategy: 'branch',
       repo: deploySource.source.repo,
       branch: deploySource.source.branch,
       services: serviceWorkloads.map((service) => service.name),
       ...(cronWorkloads.length > 0 ? { crons: cronWorkloads.map((service) => service.name) } : {}),
+      ...(repoAccess === false
+        ? {
+            warning: `Railway's GitHub App cannot access ${deploySource.source.repo}: pushes to GitHub will NOT auto-deploy and Railway's UI will show "repo not found". Have the user grant the Railway GitHub App access to the repo.`,
+            help: buildRailwayGitHubRepoAccessHelp(deploySource.source.repo),
+          }
+        : {}),
     };
   }
 

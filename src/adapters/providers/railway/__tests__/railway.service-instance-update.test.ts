@@ -170,6 +170,138 @@ describe('RailwayAdapter service instance updates', () => {
     });
   });
 
+  it('creates a Railway service domain for public services and returns the url', async () => {
+    const request = vi.fn()
+      // resolveRailwayEnvironmentId -> listProjectEnvironmentIds
+      .mockResolvedValueOnce({
+        project: {
+          environments: {
+            edges: [{ node: { id: 'env-prod', name: 'production' } }],
+          },
+        },
+      })
+      // resolveServiceIdForProject -> listProjectServices
+      .mockResolvedValueOnce({
+        project: {
+          services: {
+            edges: [{ node: { id: 'svc-web', name: 'web' } }],
+          },
+        },
+      })
+      // redeploy
+      .mockResolvedValueOnce({
+        serviceInstanceRedeploy: true,
+      })
+      // ensureServiceDomain: query existing domains (none)
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{
+              node: {
+                environmentId: 'env-prod',
+                domains: { serviceDomains: [] },
+              },
+            }],
+          },
+        },
+      })
+      // ensureServiceDomain: serviceDomainCreate
+      .mockResolvedValueOnce({
+        serviceDomainCreate: { domain: 'web-production.up.railway.app' },
+      });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+    vi.spyOn(adapter, 'getPluginVariableReferences').mockResolvedValue({});
+
+    const environment: Environment = {
+      id: 'env-local',
+      projectId: 'proj-local',
+      name: 'production',
+      platformBindings: {
+        projectId: 'rail-project-1',
+        services: {},
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const service: Service = {
+      id: 'svc-local',
+      projectId: 'proj-local',
+      name: 'web',
+      buildConfig: {
+        builder: 'nixpacks',
+        public: true,
+      },
+      envVarSpec: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await adapter.deploy(service, environment, {});
+
+    expect(result.receipt.success).toBe(true);
+    expect(result.url).toBe('https://web-production.up.railway.app');
+    // serviceDomainCreate received the right input
+    expect(request.mock.calls[4]?.[1]).toEqual({
+      input: { serviceId: 'svc-web', environmentId: 'env-prod' },
+    });
+  });
+
+  it('does not create a service domain for non-public services', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        project: {
+          environments: {
+            edges: [{ node: { id: 'env-prod', name: 'production' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        project: {
+          services: {
+            edges: [{ node: { id: 'svc-worker', name: 'worker' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        serviceInstanceRedeploy: true,
+      });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+    vi.spyOn(adapter, 'getPluginVariableReferences').mockResolvedValue({});
+
+    const environment: Environment = {
+      id: 'env-local',
+      projectId: 'proj-local',
+      name: 'production',
+      platformBindings: {
+        projectId: 'rail-project-1',
+        services: {},
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const service: Service = {
+      id: 'svc-local',
+      projectId: 'proj-local',
+      name: 'worker',
+      buildConfig: {
+        builder: 'nixpacks',
+      },
+      envVarSpec: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await adapter.deploy(service, environment, {});
+
+    expect(result.receipt.success).toBe(true);
+    expect(result.url).toBeUndefined();
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
   it('applies runtime config before redeploying a service', async () => {
     const request = vi.fn()
       // resolveRailwayEnvironmentId -> listProjectEnvironmentIds

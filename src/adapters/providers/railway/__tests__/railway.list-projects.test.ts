@@ -70,3 +70,24 @@ describe('RailwayAdapter.listProjects', () => {
     await expect(adapter.listProjects()).rejects.toThrow('Not connected');
   });
 });
+
+describe('RailwayAdapter.isGitHubRepoAccessible', () => {
+  it('returns hasAccess from gitHubRepoAccessAvailable', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      gitHubRepoAccessAvailable: { hasAccess: false, isPublic: false },
+    });
+
+    const accessible = await adapterWith(request).isGitHubRepoAccessible('dave/seq-planner');
+
+    expect(accessible).toBe(false);
+    expect(request.mock.calls[0]?.[1]).toEqual({ fullRepoName: 'dave/seq-planner' });
+  });
+
+  it('returns null when the query fails or the adapter is not connected', async () => {
+    const request = vi.fn().mockRejectedValueOnce(new Error('Cannot query field'));
+    expect(await adapterWith(request).isGitHubRepoAccessible('dave/seq-planner')).toBeNull();
+
+    const adapter = new RailwayAdapter();
+    expect(await adapter.isGitHubRepoAccessible('dave/seq-planner')).toBeNull();
+  });
+});

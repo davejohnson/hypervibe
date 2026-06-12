@@ -11,6 +11,7 @@ import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
+import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import { diffEnvironment } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
 import { fingerprintObservedState, type PlanRunDocument } from './converge.executor.js';
@@ -132,6 +133,45 @@ export class PlanService {
     return blocked;
   }
 
+  /**
+   * For repo-linked (branch) deploys on Railway, verify the Railway GitHub
+   * App can actually see the repo. The API-level serviceConnect succeeds
+   * without it — builds work, but Railway's UI shows "repo not found" and
+   * pushes to GitHub never auto-deploy. Surfacing this at plan time lets the
+   * agent walk the user through the GitHub-side fix before applying.
+   */
+  private async checkBranchDeploySource(
+    project: Project,
+    environmentSpec: EnvironmentSpec
+  ): Promise<string[]> {
+    if (environmentSpec.hosting.provider !== 'railway' || environmentSpec.deploy?.strategy !== 'branch') {
+      return [];
+    }
+
+    const repo = parseGitHubRepoFromRemote(project.gitRemoteUrl);
+    if (!repo) {
+      return [
+        'deploy.strategy is "branch" but the project has no GitHub remote (gitRemoteUrl), so the repo-linked deploy source cannot be configured. Set the project git remote or use a different strategy.',
+      ];
+    }
+
+    const adapterResult = await adapterFactory.getProviderAdapter('railway', project);
+    const adapter = adapterResult.adapter as {
+      isGitHubRepoAccessible?: (repo: string) => Promise<boolean | null>;
+    } | undefined;
+    if (!adapterResult.success || typeof adapter?.isGitHubRepoAccessible !== 'function') {
+      return [];
+    }
+
+    const accessible = await adapter.isGitHubRepoAccessible(repo);
+    if (accessible === false) {
+      return [
+        `Railway's GitHub App cannot access ${repo}. Apply can still connect the repo via the API, but Railway's UI will show "repo not found" and pushes to GitHub will NOT auto-deploy. Have the user install/grant the Railway GitHub App access to ${repo} at https://github.com/apps/railway-app/installations/new, then re-run hv_plan.`,
+      ];
+    }
+    return [];
+  }
+
   async plan(project: Project, environmentName: string): Promise<EnvironmentPlan | { error: string }> {
     const specResult = this.specStore.get(project);
     if (!specResult) {
@@ -151,6 +191,7 @@ export class PlanService {
 
     const diff = diffEnvironment({ spec: environmentSpec, envName: environmentName, observed, local });
     const blocked = this.preflight(environmentSpec);
+    const sourceWarnings = await this.checkBranchDeploySource(project, environmentSpec);
 
     // Environment record creation is implicit in apply; surface it as an action
     // when the local record is missing so the plan is complete.
@@ -172,7 +213,7 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: diff.unmanaged,
-      warnings: [...observeWarnings, ...diff.warnings],
+      warnings: [...observeWarnings, ...diff.warnings, ...sourceWarnings],
     };
 
     // Plans for untracked environments can't reference an environment row;

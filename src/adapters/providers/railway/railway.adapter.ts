@@ -1370,14 +1370,31 @@ export class RailwayAdapter implements IProviderAdapter {
         });
       }
 
+      // Public services need a Railway-generated service domain; Railway does
+      // not create one automatically (the "Generate Domain" button in its UI).
+      let url: string | undefined;
+      let domainError: string | undefined;
+      if (service.buildConfig.public === true && railwayEnvId) {
+        const ensured = await this.ensureServiceDomain(railwayServiceId, railwayEnvId);
+        url = ensured.domain ? `https://${ensured.domain}` : undefined;
+        domainError = ensured.error;
+      }
+
       return {
         serviceId: service.id,
         externalId: railwayServiceId,
+        ...(url ? { url } : {}),
         status: 'deploying',
         receipt: {
           success: true,
           message: `Deployment triggered for ${service.name}`,
-          data: { railwayServiceId, environmentId: railwayEnvId, createdService },
+          data: {
+            railwayServiceId,
+            environmentId: railwayEnvId,
+            createdService,
+            ...(url ? { url } : {}),
+            ...(domainError ? { domainError } : {}),
+          },
         },
       };
     } catch (error) {
@@ -1670,7 +1687,7 @@ export class RailwayAdapter implements IProviderAdapter {
       if (errorMsg.includes('Cannot query field') || errorMsg.includes('Unknown field')) {
         return {
           success: false,
-          error: 'Direct command execution not available. Use Railway CLI instead: railway run ' + command,
+          error: `Railway's API does not support one-off command execution for this account. Configure the command as the service's releaseCommand (pre-deploy) in the spec instead: hv_spec_set serviceConfig releaseCommand="${command}".`,
         };
       }
 
@@ -2195,6 +2212,102 @@ export class RailwayAdapter implements IProviderAdapter {
         message: 'Failed to attach Railway custom domain',
         error: this.describeError(error),
       };
+    }
+  }
+
+  /**
+   * Return the service's Railway-generated domain for an environment,
+   * creating one when none exists. Returns null (with error) on failure
+   * rather than throwing, so a domain problem degrades to a missing URL
+   * instead of failing the deploy.
+   */
+  private async ensureServiceDomain(
+    serviceId: string,
+    environmentId: string
+  ): Promise<{ domain: string | null; error?: string }> {
+    if (!this.client) {
+      return { domain: null, error: 'Not connected. Call connect() first.' };
+    }
+    try {
+      const query = gql`
+        query ServiceDomains($serviceId: String!) {
+          service(id: $serviceId) {
+            serviceInstances {
+              edges {
+                node {
+                  environmentId
+                  domains {
+                    serviceDomains {
+                      domain
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `;
+      const existing = await this.client.request<{
+        service?: {
+          serviceInstances?: {
+            edges?: Array<{
+              node?: {
+                environmentId?: string;
+                domains?: { serviceDomains?: Array<{ domain?: string }> };
+              };
+            }>;
+          };
+        };
+      }>(query, { serviceId });
+      const instance = existing.service?.serviceInstances?.edges
+        ?.map((edge) => edge.node)
+        .find((node) => node?.environmentId === environmentId);
+      const current = instance?.domains?.serviceDomains?.[0]?.domain;
+      if (current) {
+        return { domain: current };
+      }
+
+      const mutation = gql`
+        mutation ServiceDomainCreate($input: ServiceDomainCreateInput!) {
+          serviceDomainCreate(input: $input) {
+            domain
+          }
+        }
+      `;
+      const created = await this.client.request<{ serviceDomainCreate?: { domain?: string } }>(
+        mutation,
+        { input: { serviceId, environmentId } }
+      );
+      return { domain: created.serviceDomainCreate?.domain ?? null };
+    } catch (error) {
+      return { domain: null, error: this.describeError(error) };
+    }
+  }
+
+  /**
+   * Whether Railway's GitHub integration (the Railway GitHub App) can access
+   * a repo ("owner/name"). serviceConnect can succeed without this — builds
+   * work, but Railway's UI shows "repo not found" and pushes never
+   * auto-deploy. Returns null when access could not be determined.
+   */
+  async isGitHubRepoAccessible(fullRepoName: string): Promise<boolean | null> {
+    if (!this.client) return null;
+    const query = gql`
+      query GitHubRepoAccess($fullRepoName: String!) {
+        gitHubRepoAccessAvailable(fullRepoName: $fullRepoName) {
+          hasAccess
+          isPublic
+        }
+      }
+    `;
+    try {
+      const result = await this.client.request<{
+        gitHubRepoAccessAvailable?: { hasAccess?: boolean; isPublic?: boolean };
+      }>(query, { fullRepoName });
+      const access = result.gitHubRepoAccessAvailable;
+      return typeof access?.hasAccess === 'boolean' ? access.hasAccess : null;
+    } catch {
+      return null;
     }
   }
 
