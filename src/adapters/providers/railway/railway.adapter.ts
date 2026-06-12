@@ -1547,29 +1547,67 @@ export class RailwayAdapter implements IProviderAdapter {
       throw new Error('Not connected. Call connect() first.');
     }
 
+    // The top-level `projects` query spans every workspace the token can
+    // access. `me { projects }` only returns personal-account projects, which
+    // silently hides workspace/team projects.
     const query = gql`
-      query ListProjects {
-        me {
-          projects {
-            edges {
-              node {
-                id
-                name
-                description
-                createdAt
-                updatedAt
-              }
+      query ListProjects($after: String) {
+        projects(first: 100, after: $after) {
+          edges {
+            node {
+              id
+              name
+              description
+              createdAt
+              updatedAt
             }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
           }
         }
       }
     `;
 
-    const result = await this.client.request<{
-      me: { projects: { edges: Array<{ node: RailwayProject }> } };
-    }>(query);
-
-    return result.me.projects.edges.map((e) => e.node);
+    try {
+      const all: RailwayProject[] = [];
+      let after: string | null = null;
+      do {
+        const result: {
+          projects: {
+            edges: Array<{ node: RailwayProject }>;
+            pageInfo: { hasNextPage: boolean; endCursor: string | null };
+          };
+        } = await this.client.request(query, { after });
+        all.push(...result.projects.edges.map((e) => e.node));
+        after = result.projects.pageInfo.hasNextPage ? result.projects.pageInfo.endCursor : null;
+      } while (after);
+      return all;
+    } catch {
+      // Fallback for token types that cannot use the top-level projects query.
+      const legacyQuery = gql`
+        query ListPersonalProjects {
+          me {
+            projects {
+              edges {
+                node {
+                  id
+                  name
+                  description
+                  createdAt
+                  updatedAt
+                }
+              }
+            }
+          }
+        }
+      `;
+      const result = await this.client.request<{
+        me: { projects: { edges: Array<{ node: RailwayProject }> } };
+      }>(legacyQuery);
+      return result.me.projects.edges.map((e) => e.node);
+    }
   }
 
   async getProjectDetails(projectId: string): Promise<RailwayProjectDetails | null> {
