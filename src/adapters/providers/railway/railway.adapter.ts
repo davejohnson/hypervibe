@@ -465,6 +465,44 @@ export class RailwayAdapter implements IProviderAdapter {
     const serviceName = `${type}-db`;
     const existingServiceId = await this.resolveServiceIdForProject(projectId, serviceName);
     if (existingServiceId) {
+      // An earlier provisioning attempt may have created this service without
+      // its bootstrap variables (the image then crashloops uninitialized).
+      // Verify and repair before reusing.
+      let repaired = false;
+      const requiredVar = this.datastoreRequiredVar(type);
+      if (requiredVar) {
+        const existingVars = await this.fetchServiceVariables(projectId, existingServiceId, environmentId)
+          .catch(() => null);
+        if (existingVars && !existingVars[requiredVar]) {
+          const bootstrapVars = this.buildDatastoreBootstrapVars(type, serviceName);
+          const varsSet = bootstrapVars
+            ? await this.upsertServiceVariables(projectId, existingServiceId, environmentId, bootstrapVars)
+            : { success: true as const };
+          const redeploy = varsSet.success
+            ? await this.redeployDatastoreService(existingServiceId, environmentId)
+            : varsSet;
+          if (!varsSet.success || !redeploy.success) {
+            return {
+              component: {
+                id: '',
+                environmentId: environment.id,
+                type,
+                bindings: {},
+                externalId: null,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              },
+              receipt: {
+                success: false,
+                message: `Existing ${type} service ${serviceName} is missing ${requiredVar} and repair failed`,
+                error: ('error' in varsSet ? varsSet.error : undefined) ?? ('error' in redeploy ? redeploy.error : undefined),
+              },
+            };
+          }
+          repaired = true;
+        }
+      }
+
       const component: Component = {
         id: '',
         environmentId: environment.id,
@@ -481,8 +519,10 @@ export class RailwayAdapter implements IProviderAdapter {
         component,
         receipt: {
           success: true,
-          message: `Using existing ${type} datastore service (${serviceName})`,
-          data: { serviceId: existingServiceId, serviceName, serviceBacked: true, reused: true },
+          message: repaired
+            ? `Using existing ${type} datastore service (${serviceName}); repaired missing bootstrap variables and redeployed`
+            : `Using existing ${type} datastore service (${serviceName})`,
+          data: { serviceId: existingServiceId, serviceName, serviceBacked: true, reused: true, ...(repaired ? { repaired: true } : {}) },
         },
       };
     }
@@ -531,6 +571,53 @@ export class RailwayAdapter implements IProviderAdapter {
             },
           };
         }
+      }
+
+      // Persist data across redeploys; without a volume the datastore is ephemeral.
+      const mountPath = this.datastoreVolumeMountPath(type);
+      if (mountPath) {
+        const volume = await this.attachServiceVolume(projectId, environmentId, result.serviceCreate.id, mountPath);
+        if (!volume.success) {
+          return {
+            component: {
+              id: '',
+              environmentId: environment.id,
+              type,
+              bindings: {},
+              externalId: null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+            receipt: {
+              success: false,
+              message: `Created ${type} service ${result.serviceCreate.name} but failed to attach a volume`,
+              error: volume.error,
+            },
+          };
+        }
+      }
+
+      // serviceCreate with source.image starts the first deployment before the
+      // variables/volume above exist (postgres crashloops with "superuser
+      // password is not specified"); redeploy so the container boots with them.
+      const redeploy = await this.redeployDatastoreService(result.serviceCreate.id, environmentId);
+      if (!redeploy.success) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type,
+            bindings: {},
+            externalId: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: false,
+            message: `Created ${type} service ${result.serviceCreate.name} but failed to redeploy it with bootstrap configuration`,
+            error: redeploy.error,
+          },
+        };
       }
 
       const component: Component = {
@@ -585,6 +672,9 @@ export class RailwayAdapter implements IProviderAdapter {
         POSTGRES_PASSWORD: password,
         POSTGRES_USER: 'postgres',
         POSTGRES_DB: 'postgres',
+        // Volume mounts contain lost+found; initdb refuses a non-empty dir,
+        // so point PGDATA at a subdirectory of the mount.
+        PGDATA: '/var/lib/postgresql/data/pgdata',
         DATABASE_URL: connectionUrl,
         DATABASE_PRIVATE_URL: connectionUrl,
         PGHOST: serviceHost,
@@ -634,6 +724,68 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     return null;
+  }
+
+  /** Env var that must exist for the datastore image to initialize; null = boots without vars. */
+  private datastoreRequiredVar(type: ComponentType): string | null {
+    if (type === 'postgres') return 'POSTGRES_PASSWORD';
+    if (type === 'mysql') return 'MYSQL_ROOT_PASSWORD';
+    if (type === 'mongodb') return 'MONGO_INITDB_ROOT_PASSWORD';
+    return null;
+  }
+
+  private datastoreVolumeMountPath(type: ComponentType): string | null {
+    if (type === 'postgres') return '/var/lib/postgresql/data';
+    if (type === 'mysql') return '/var/lib/mysql';
+    if (type === 'mongodb') return '/data/db';
+    if (type === 'redis') return '/data';
+    return null;
+  }
+
+  private async attachServiceVolume(
+    projectId: string,
+    environmentId: string,
+    serviceId: string,
+    mountPath: string
+  ): Promise<{ success: boolean; error?: string }> {
+    if (!this.client) {
+      return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+    const mutation = gql`
+      mutation VolumeCreate($input: VolumeCreateInput!) {
+        volumeCreate(input: $input) {
+          id
+        }
+      }
+    `;
+    try {
+      await this.client.request(mutation, {
+        input: { projectId, environmentId, serviceId, mountPath },
+      });
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: this.describeError(error) };
+    }
+  }
+
+  private async redeployDatastoreService(
+    serviceId: string,
+    environmentId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    if (!this.client) {
+      return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+    const mutation = gql`
+      mutation ServiceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
+        serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+      }
+    `;
+    try {
+      await this.client.request(mutation, { serviceId, environmentId });
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: this.describeError(error) };
+    }
   }
 
   private async upsertServiceVariables(
