@@ -140,6 +140,32 @@ Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/healt
 - Full generated catalog: `docs/TOOLS.md`
 - Regenerate after tool changes: `npm run build && npm run docs:tools`
 
+## Provider Credentials
+
+### GitHub token permissions
+
+Connect with `hv_connect provider=github credentials={"apiToken":"..."}`.
+
+**Recommended: a classic PAT with the `repo` and `workflow` scopes**, created by a user with **admin access** to the target repositories. That covers everything below.
+
+What hypervibe uses the GitHub token for, and the permission each operation needs:
+
+| Operation | Classic PAT scope | Fine-grained permission |
+|---|---|---|
+| Commit CI/config files (`hv_ci_setup`: workflows, AI review, Pages CNAME, SEO files) | `repo` (+ `workflow` for files under `.github/workflows/`) | Contents: read/write |
+| List/trigger Actions workflows, read runs (`hv_ci_status`, `hv_ci_trigger`) | `repo` | Actions: read/write |
+| Set/delete Actions repo secrets (`hv_secrets_set target="github"`) | `repo` | Secrets: read/write |
+| Branch protection (`hv_ci_setup kind="branch-protection"`) | `repo` + repo admin | Administration: read/write |
+| GitHub Pages (`hv_ci_setup kind="pages"`) | `repo` | Pages: read/write |
+| Manage the Railway GitHub App's repository access (selected-repos installs) | `repo` + repo admin — **classic PAT only**; GitHub's app-installation APIs do not accept fine-grained PATs | not supported |
+| Private repo source fetch for Cloud Run builds | `repo` | Contents: read |
+
+**What does *not* need a GitHub token:** Railway push-to-branch autodeploys. Those run through the [Railway GitHub App](https://github.com/apps/railway-app), which you grant repository access in GitHub's UI — no hypervibe credential involved.
+
+### Secret managers
+
+1Password uses a [service account token](https://developer.1password.com/docs/service-accounts/) — grant it only the vault(s) the project should read. Bitwarden Secrets Manager uses a [machine account access token](https://bitwarden.com/help/access-tokens/) plus the organization id. Both integrations are resolve-only: hypervibe reads values at deploy time and never writes them back or stores them locally.
+
 ## Configuration
 
 Hypervibe stores data locally:
