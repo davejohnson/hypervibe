@@ -12,6 +12,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
+import { classifyDeployEnvironment, resolveGitDeploySource } from '../services/deploy-source.js';
 import { diffEnvironment } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
 import { fingerprintObservedState, type PlanRunDocument } from './converge.executor.js';
@@ -134,13 +135,33 @@ export class PlanService {
   }
 
   /**
+   * Repo/branch each service should be linked to under spec.deploy.strategy
+   * "branch" — used by the diff to flag missing/mismatched deploy sources.
+   */
+  expectedDeploySource(
+    project: Project,
+    environmentName: string,
+    environmentSpec: EnvironmentSpec
+  ): { repo: string; branch: string } | undefined {
+    if (environmentSpec.deploy?.strategy !== 'branch') return undefined;
+    const kind = classifyDeployEnvironment(environmentName);
+    const resolved = resolveGitDeploySource(project, environmentName, {
+      strategy: 'branch',
+      ...(environmentSpec.deploy.branch && kind
+        ? { branches: { [kind]: environmentSpec.deploy.branch } }
+        : {}),
+    });
+    return resolved.source ?? undefined;
+  }
+
+  /**
    * For repo-linked (branch) deploys on Railway, verify the Railway GitHub
    * App can actually see the repo. The API-level serviceConnect succeeds
    * without it — builds work, but Railway's UI shows "repo not found" and
    * pushes to GitHub never auto-deploy. Surfacing this at plan time lets the
    * agent walk the user through the GitHub-side fix before applying.
    */
-  private async checkBranchDeploySource(
+  async checkBranchDeploySource(
     project: Project,
     environmentSpec: EnvironmentSpec
   ): Promise<string[]> {
@@ -189,7 +210,13 @@ export class PlanService {
     const { observed, warnings: observeWarnings } = await this.observeEnvironment(project, environment, environmentSpec);
     const local = this.buildLocalSnapshot(project, environment);
 
-    const diff = diffEnvironment({ spec: environmentSpec, envName: environmentName, observed, local });
+    const diff = diffEnvironment({
+      spec: environmentSpec,
+      envName: environmentName,
+      observed,
+      local,
+      expectedSource: this.expectedDeploySource(project, environmentName, environmentSpec),
+    });
     const blocked = this.preflight(environmentSpec);
     const sourceWarnings = await this.checkBranchDeploySource(project, environmentSpec);
 

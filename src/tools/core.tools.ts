@@ -187,8 +187,24 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
       const { observed, warnings } = await planService.observeEnvironment(project, environment, envSpec);
       const local = planService.buildLocalSnapshot(project, environment);
-      const diff = diffEnvironment({ spec: envSpec, envName, observed, local });
+      const diff = diffEnvironment({
+        spec: envSpec,
+        envName,
+        observed,
+        local,
+        expectedSource: planService.expectedDeploySource(project, envName, envSpec),
+      });
       const drift = diff.actions.filter((a) => a.type !== 'noop');
+
+      const expectedSource = planService.expectedDeploySource(project, envName, envSpec);
+      const observedSources = Object.fromEntries(
+        (observed?.services ?? [])
+          .filter((s) => s.source?.repo)
+          .map((s) => [s.name, `${s.source!.repo}${s.source!.branch ? `@${s.source!.branch}` : ''}`])
+      );
+      // Catches the "source connected but the Railway GitHub App cannot see
+      // the repo" state, where pushes silently do not deploy.
+      const sourceWarnings = await planService.checkBranchDeploySource(project, envSpec);
 
       return toolSuccess(
         {
@@ -200,9 +216,20 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           drift,
           unmanaged: diff.unmanaged,
           blocked: planService.preflight(envSpec),
+          deploySource: {
+            strategy: envSpec.deploy?.strategy ?? 'manual',
+            ...(expectedSource ? { expected: `${expectedSource.repo}@${expectedSource.branch}` } : {}),
+            observed: observedSources,
+            pushToDeploy: Boolean(
+              envSpec.deploy?.strategy === 'branch'
+              && expectedSource
+              && Object.keys(observedSources).length > 0
+              && sourceWarnings.length === 0
+            ),
+          },
         },
         {
-          warnings: [...warnings, ...diff.warnings],
+          warnings: [...warnings, ...diff.warnings, ...sourceWarnings],
           hint: drift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
         }
       );

@@ -25,8 +25,10 @@ export function diffEnvironment(input: {
   envName: string;
   observed: ObservedState | null;
   local: LocalSnapshot;
+  /** Repo/branch services should be linked to when spec.deploy.strategy is "branch". */
+  expectedSource?: { repo: string; branch: string };
 }): DiffResult {
-  const { spec, envName, observed, local } = input;
+  const { spec, envName, observed, local, expectedSource } = input;
   const verified = observed !== null;
   const actions: PlanAction[] = [];
   const unmanaged: DiffResult['unmanaged'] = [];
@@ -118,10 +120,16 @@ export function diffEnvironment(input: {
 
       const diff = diffServiceConfig(serviceSpec, live, spec.envVars);
       const noCode = live.status === 'empty';
-      if (noCode || diff.length > 0) {
+      const sourceIssue = spec.deploy?.strategy === 'branch' && expectedSource
+        ? diffDeploySource(expectedSource, live)
+        : undefined;
+      if (noCode || sourceIssue || diff.length > 0) {
         const reasons: string[] = [];
         if (noCode) {
           reasons.push(`Service "${name}" exists on ${provider} but has no code deployed (no source connected)`);
+        }
+        if (sourceIssue) {
+          reasons.push(sourceIssue);
         }
         if (diff.length > 0) {
           reasons.push(`Configuration drift on ${diff.map((d) => d.field).join(', ')}`);
@@ -257,6 +265,36 @@ export function diffEnvironment(input: {
   }
 
   return { actions, unmanaged, warnings };
+}
+
+/** Strip URL prefixes/.git and lowercase so "owner/repo" forms compare equal. */
+function normalizeRepo(repo?: string): string | undefined {
+  if (!repo) return undefined;
+  return repo
+    .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+    .replace(/^git@github\.com:/i, '')
+    .replace(/\.git$/i, '')
+    .replace(/^\/+|\/+$/g, '')
+    .toLowerCase() || undefined;
+}
+
+/** Returns a human-readable drift reason when the live deploy source diverges from the spec. */
+function diffDeploySource(
+  expected: { repo: string; branch: string },
+  live: ObservedService
+): string | undefined {
+  const liveRepo = normalizeRepo(live.source?.repo);
+  const wantedRepo = normalizeRepo(expected.repo);
+  if (!liveRepo) {
+    return `Deploy source is not connected (expected ${expected.repo}@${expected.branch}); pushes will not deploy`;
+  }
+  if (wantedRepo && liveRepo !== wantedRepo) {
+    return `Deploy source repo is ${live.source?.repo}, expected ${expected.repo}`;
+  }
+  if (live.source?.branch && live.source.branch !== expected.branch) {
+    return `Deploy source branch is ${live.source.branch}, expected ${expected.branch}`;
+  }
+  return undefined;
 }
 
 function diffServiceConfig(

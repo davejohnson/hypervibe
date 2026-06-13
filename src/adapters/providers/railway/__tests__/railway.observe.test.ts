@@ -157,6 +157,28 @@ describe('RailwayAdapter observe', () => {
     expect(result.services[0]?.config.cronSchedule).toBe('0 * * * *');
   });
 
+  it('surfaces the linked repo and branch as the service source', async () => {
+    const withTrigger = structuredClone(projectDetailsResponse);
+    (withTrigger.project.services.edges[0].node as { repoTriggers: unknown }).repoTriggers = {
+      edges: [{ node: { repository: 'dave/seq-planner', branch: 'main' } }],
+    };
+    const request = vi.fn()
+      .mockResolvedValueOnce(withTrigger)
+      .mockResolvedValueOnce({
+        serviceInstance: { startCommand: 'npm start', latestDeployment: { status: 'SUCCESS' } },
+      })
+      .mockResolvedValueOnce({ variables: {} });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
+    );
+
+    expect(result.services[0]?.source).toEqual({ repo: 'dave/seq-planner', branch: 'main' });
+  });
+
   it('marks a service with no deployments as status empty', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(projectDetailsResponse)

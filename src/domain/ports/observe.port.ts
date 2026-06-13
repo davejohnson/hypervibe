@@ -23,6 +23,8 @@ export interface ObservedService {
     cronSchedule?: string;
     public?: boolean;
   };
+  /** Repo-linked deploy source, when the provider links services to a git repo. */
+  source?: { repo?: string; branch?: string };
   /** Env var names present on the live service. Values are never returned. */
   envVarKeys: string[];
   /** sha256 hex of each env var value, for drift comparison without exposure. */

@@ -298,6 +298,54 @@ describe('diffEnvironment — deploy source', () => {
     expect(web.reason).toContain('no code deployed');
   });
 
+  it('flags a missing deploy source as drift when strategy is branch', () => {
+    const result = diffEnvironment({
+      spec: spec({ deploy: { strategy: 'branch', branch: 'main' } }),
+      envName: 'production',
+      observed: observed(),
+      local: local(),
+      expectedSource: { repo: 'dave/seq-planner', branch: 'main' },
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.type).toBe('update');
+    expect(web.reason).toContain('Deploy source is not connected');
+  });
+
+  it('flags branch mismatch and accepts matching sources in any repo format', () => {
+    const linked = observedWeb({ source: { repo: 'https://github.com/Dave/Seq-Planner.git', branch: 'main' } });
+    const matching = diffEnvironment({
+      spec: spec({ deploy: { strategy: 'branch', branch: 'main' } }),
+      envName: 'production',
+      observed: observed({ services: [linked] }),
+      local: local(),
+      expectedSource: { repo: 'dave/seq-planner', branch: 'main' },
+    });
+    expect(matching.actions.find((a) => a.id === 'service:web')!.type).toBe('noop');
+
+    const wrongBranch = observedWeb({ source: { repo: 'dave/seq-planner', branch: 'develop' } });
+    const mismatch = diffEnvironment({
+      spec: spec({ deploy: { strategy: 'branch', branch: 'main' } }),
+      envName: 'production',
+      observed: observed({ services: [wrongBranch] }),
+      local: local(),
+      expectedSource: { repo: 'dave/seq-planner', branch: 'main' },
+    });
+    const web = mismatch.actions.find((a) => a.id === 'service:web')!;
+    expect(web.type).toBe('update');
+    expect(web.reason).toContain('branch is develop, expected main');
+  });
+
+  it('ignores deploy source when strategy is not branch', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed(),
+      local: local(),
+      expectedSource: { repo: 'dave/seq-planner', branch: 'main' },
+    });
+    expect(result.actions.find((a) => a.id === 'service:web')!.type).toBe('noop');
+  });
+
   it('combines no-code drift with configuration drift in one update action', () => {
     const live = observedWeb({
       status: 'empty',

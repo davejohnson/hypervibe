@@ -349,7 +349,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_ci_status',
-    'Get CI/CD status for a project repository: workflows, recent runs for a workflow, GitHub Pages status, and branch protection rules.',
+    'Get GitHub Actions status for a project repository: workflows, recent runs for a workflow, GitHub Pages status, and branch protection rules. NOT deployment status — Railway push-to-branch autodeploys do not use GitHub Actions; check hv_status (deploySource.pushToDeploy) for that.',
     {
       project: projectField,
       repo: repoField,

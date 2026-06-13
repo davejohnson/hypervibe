@@ -2640,6 +2640,8 @@ export class RailwayAdapter implements IProviderAdapter {
         }
       }
 
+      const repoTrigger = node.repoTriggers?.edges?.[0]?.node;
+
       services.push({
         name: node.name,
         externalId: node.id,
@@ -2652,6 +2654,9 @@ export class RailwayAdapter implements IProviderAdapter {
           healthCheckPath,
           cronSchedule,
         },
+        ...(repoTrigger
+          ? { source: { repo: repoTrigger.repository, branch: repoTrigger.branch } }
+          : {}),
         envVarKeys,
         envVarHashes,
         status,
