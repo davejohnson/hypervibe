@@ -2604,6 +2604,7 @@ export class RailwayAdapter implements IProviderAdapter {
       let releaseCommand: string | undefined;
       let healthCheckPath = instance?.healthcheckPath ?? undefined;
       let cronSchedule: string | undefined;
+      let instanceSourceRepo: string | undefined;
       let status: ObservedService['status'] = 'unknown';
 
       if (environmentId) {
@@ -2614,6 +2615,7 @@ export class RailwayAdapter implements IProviderAdapter {
             releaseCommand = this.normalizePreDeployCommand(instanceDetails.preDeployCommand);
             healthCheckPath = instanceDetails.healthcheckPath ?? healthCheckPath;
             cronSchedule = instanceDetails.cronSchedule ?? undefined;
+            instanceSourceRepo = instanceDetails.source?.repo ?? undefined;
             // No deployment at all means the service has no source connected.
             status = instanceDetails.latestDeployment
               ? this.toObservedStatus(instanceDetails.latestDeployment.status)
@@ -2640,7 +2642,12 @@ export class RailwayAdapter implements IProviderAdapter {
         }
       }
 
+      // serviceConnect sets ServiceInstance.source.repo (per-environment);
+      // repoTriggers on the Service is for webhook-configured deploys.
+      // Use the instance source as primary, repoTriggers as fallback.
       const repoTrigger = node.repoTriggers?.edges?.[0]?.node;
+      const sourceRepo = instanceSourceRepo ?? repoTrigger?.repository;
+      const sourceBranch = repoTrigger?.branch;
 
       services.push({
         name: node.name,
@@ -2654,8 +2661,8 @@ export class RailwayAdapter implements IProviderAdapter {
           healthCheckPath,
           cronSchedule,
         },
-        ...(repoTrigger
-          ? { source: { repo: repoTrigger.repository, branch: repoTrigger.branch } }
+        ...(sourceRepo
+          ? { source: { repo: sourceRepo, ...(sourceBranch ? { branch: sourceBranch } : {}) } }
           : {}),
         envVarKeys,
         envVarHashes,
@@ -2695,6 +2702,7 @@ export class RailwayAdapter implements IProviderAdapter {
     preDeployCommand?: unknown;
     healthcheckPath?: string;
     cronSchedule?: string;
+    source?: { repo?: string } | null;
     latestDeployment?: { status?: string } | null;
   } | null> {
     if (!this.client) {
@@ -2708,6 +2716,9 @@ export class RailwayAdapter implements IProviderAdapter {
           preDeployCommand
           healthcheckPath
           cronSchedule
+          source {
+            repo
+          }
           latestDeployment {
             status
           }
@@ -2721,6 +2732,7 @@ export class RailwayAdapter implements IProviderAdapter {
         preDeployCommand?: unknown;
         healthcheckPath?: string;
         cronSchedule?: string;
+        source?: { repo?: string } | null;
         latestDeployment?: { status?: string } | null;
       } | null;
     }>(query, { serviceId, environmentId });
