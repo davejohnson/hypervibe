@@ -17,6 +17,11 @@ export interface CloudflareZone {
   };
 }
 
+export interface CloudflareAccount {
+  id: string;
+  name?: string;
+}
+
 export interface CloudflareDnsRecord {
   id: string;
   zone_id: string;
@@ -105,6 +110,63 @@ export interface CloudflareEmailRoutingDnsSettings {
   errors?: Array<{ code?: string; missing?: CloudflareEmailRoutingDnsRecord }>;
 }
 
+export interface RegistrarPricing {
+  currency: string;
+  registration_cost: string;
+  renewal_cost: string;
+}
+
+export interface RegistrarDomainCandidate {
+  name: string;
+  registrable: boolean;
+  pricing?: RegistrarPricing;
+  reason?: string;
+  tier?: 'standard' | 'premium' | string;
+}
+
+export interface RegistrarWorkflowStatus {
+  completed: boolean;
+  created_at: string;
+  updated_at: string;
+  links: {
+    self: string;
+    resource?: string;
+  };
+  state: 'pending' | 'in_progress' | 'action_required' | 'blocked' | 'succeeded' | 'failed' | string;
+  context?: Record<string, unknown>;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+export interface RegistrarRegistrantContact {
+  email: string;
+  phone: string;
+  postal_info: {
+    address: {
+      city: string;
+      country_code: string;
+      postal_code: string;
+      state: string;
+      street: string;
+    };
+    name: string;
+    organization?: string;
+  };
+  fax?: string;
+}
+
+export interface RegistrarRegistrationInput {
+  domainName: string;
+  autoRenew?: boolean;
+  contacts?: {
+    registrant?: RegistrarRegistrantContact;
+  };
+  privacyMode?: 'redaction' | 'off';
+  years?: number;
+}
+
 interface CloudflareResponse<T> {
   success: boolean;
   errors: Array<{ code: number; message: string }>;
@@ -121,6 +183,7 @@ interface CloudflareResponse<T> {
 // Credentials schema for self-registration
 export const CloudflareCredentialsSchema = z.object({
   apiToken: z.string().min(1, 'API token is required'),
+  accountId: z.string().min(1).optional(),
 });
 
 export type CloudflareCredentials = z.infer<typeof CloudflareCredentialsSchema>;
@@ -218,9 +281,112 @@ export class CloudflareAdapter implements IDnsProvider {
     return zones;
   }
 
+  async listAccounts(): Promise<CloudflareAccount[]> {
+    const accounts: CloudflareAccount[] = [];
+    let page = 1;
+    let hasMore = true;
+
+    while (hasMore) {
+      const response = await this.request<CloudflareAccount[]>('GET', `/accounts?page=${page}&per_page=50`);
+      accounts.push(...response.result);
+
+      if (response.result_info) {
+        hasMore = page < response.result_info.total_pages;
+        page++;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    return accounts;
+  }
+
+  async resolveAccountId(accountId?: string): Promise<string> {
+    const explicit = accountId?.trim() || this.credentials?.accountId?.trim();
+    if (explicit) {
+      return explicit;
+    }
+
+    const accounts = await this.listAccounts();
+    if (accounts.length === 1) {
+      return accounts[0].id;
+    }
+    if (accounts.length === 0) {
+      throw new Error('No Cloudflare accounts are visible to this API token.');
+    }
+    throw new Error(`Multiple Cloudflare accounts are visible (${accounts.map((account) => account.name ?? account.id).join(', ')}). Pass accountId or store it in the Cloudflare connection credentials.`);
+  }
+
   async findZoneByName(domain: string): Promise<CloudflareZone | null> {
     const response = await this.request<CloudflareZone[]>('GET', `/zones?name=${encodeURIComponent(domain)}`);
     return response.result[0] ?? null;
+  }
+
+  async searchRegistrarDomains(params: {
+    accountId: string;
+    query: string;
+    extensions?: string[];
+    limit?: number;
+  }): Promise<RegistrarDomainCandidate[]> {
+    const search = new URLSearchParams();
+    search.set('q', params.query);
+    if (params.limit !== undefined) {
+      search.set('limit', String(params.limit));
+    }
+    for (const extension of params.extensions ?? []) {
+      search.append('extensions', extension.replace(/^\./, ''));
+    }
+
+    const response = await this.request<{ domains: RegistrarDomainCandidate[] }>(
+      'GET',
+      `/accounts/${params.accountId}/registrar/domain-search?${search.toString()}`
+    );
+    return response.result.domains;
+  }
+
+  async checkRegistrarDomains(accountId: string, domains: string[]): Promise<RegistrarDomainCandidate[]> {
+    const response = await this.request<{ domains: RegistrarDomainCandidate[] }>(
+      'POST',
+      `/accounts/${accountId}/registrar/domain-check`,
+      { domains }
+    );
+    return response.result.domains;
+  }
+
+  async createRegistrarRegistration(
+    accountId: string,
+    input: RegistrarRegistrationInput
+  ): Promise<RegistrarWorkflowStatus> {
+    const body: Record<string, unknown> = {
+      domain_name: input.domainName,
+    };
+    if (input.autoRenew !== undefined) {
+      body.auto_renew = input.autoRenew;
+    }
+    if (input.contacts) {
+      body.contacts = input.contacts;
+    }
+    if (input.privacyMode) {
+      body.privacy_mode = input.privacyMode;
+    }
+    if (input.years !== undefined) {
+      body.years = input.years;
+    }
+
+    const response = await this.request<RegistrarWorkflowStatus>(
+      'POST',
+      `/accounts/${accountId}/registrar/registrations`,
+      body
+    );
+    return response.result;
+  }
+
+  async getRegistrarRegistrationStatus(accountId: string, domainName: string): Promise<RegistrarWorkflowStatus> {
+    const response = await this.request<RegistrarWorkflowStatus>(
+      'GET',
+      `/accounts/${accountId}/registrar/registrations/${encodeURIComponent(domainName)}/registration-status`
+    );
+    return response.result;
   }
 
   async getEmailRoutingSettings(zoneId: string): Promise<CloudflareEmailRoutingSettings> {

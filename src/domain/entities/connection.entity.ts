@@ -36,6 +36,7 @@ export interface StripeCredentials {
 
 export interface CloudflareCredentials {
   apiToken: string;
+  accountId?: string;
 }
 
 export interface SendGridCredentials {
