@@ -17,6 +17,14 @@ import { diffEnvironment } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
 import { fingerprintObservedState, type PlanRunDocument } from './converge.executor.js';
 import { buildDatabaseEnvVarsFromComponent } from '../services/database-env.js';
+import {
+  addDomainRegistrationDependency,
+  planCloudflareDomainRegistration,
+} from '../services/domain-registration.service.js';
+import {
+  environmentUsesGitHubActionsDeploy,
+  planGitHubActionsDeploy,
+} from '../services/ci-deploy.service.js';
 
 export interface EnvironmentPlan {
   planRunId: string;
@@ -127,6 +135,7 @@ export class PlanService {
     if (environmentSpec.database) required.add(environmentSpec.database.provider);
     if (environmentSpec.domain) required.add('cloudflare');
     if (environmentSpec.email.enabled) required.add('sendgrid');
+    if (environmentUsesGitHubActionsDeploy(environmentSpec)) required.add('github');
 
     for (const provider of required) {
       const verified = this.connectionRepo
@@ -244,10 +253,17 @@ export class PlanService {
     });
     const blocked = this.preflight(environmentSpec);
     const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
+    const domainRegistration = await planCloudflareDomainRegistration({ environmentSpec, environment });
 
     // Environment record creation is implicit in apply; surface it as an action
     // when the local record is missing so the plan is complete.
-    const actions: PlanAction[] = [...diff.actions];
+    let actions: PlanAction[] = [
+      ...(domainRegistration.action ? [domainRegistration.action] : []),
+      ...diff.actions,
+    ];
+    if (domainRegistration.action) {
+      actions = addDomainRegistrationDependency(actions, domainRegistration.action.id);
+    }
     if (!environment) {
       actions.unshift({
         id: `environment:${environmentName}`,
@@ -255,7 +271,21 @@ export class PlanService {
         resource: { kind: 'environment', name: environmentName, provider: environmentSpec.hosting.provider },
         verified: observed !== null,
         reason: `Environment "${environmentName}" is not tracked locally`,
+        ...(domainRegistration.action ? { dependsOn: [domainRegistration.action.id] } : {}),
       });
+    }
+    const ciDependsOn = actions
+      .filter((action) => action.type !== 'noop' && ['project', 'environment', 'service'].includes(action.resource.kind))
+      .map((action) => action.id);
+    const ciDeploy = await planGitHubActionsDeploy({
+      project: projectForPlan,
+      environmentName,
+      environmentSpec,
+      environment,
+      dependsOn: ciDependsOn,
+    });
+    if (ciDeploy.action) {
+      actions.push(ciDeploy.action);
     }
 
     const document: PlanRunDocument = {
@@ -265,7 +295,7 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: diff.unmanaged,
-      warnings: [...observeWarnings, ...diff.warnings, ...sourceWarnings],
+      warnings: [...observeWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings],
     };
 
     // Plans for untracked environments can't reference an environment row;

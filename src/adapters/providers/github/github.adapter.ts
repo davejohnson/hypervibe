@@ -259,6 +259,24 @@ export class GitHubAdapter {
   /**
    * Create or update a file in a repository via the Contents API.
    */
+  async getFileContent(owner: string, repo: string, path: string): Promise<string | null> {
+    try {
+      const existing = await this.request<{ content: string }>(
+        'GET',
+        `/repos/${owner}/${repo}/contents/${path}`
+      );
+      return atob(existing.content.replace(/\n/g, ''));
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Create or update a file in a repository via the Contents API.
+   */
   async createOrUpdateFile(
     owner: string,
     repo: string,

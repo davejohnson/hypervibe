@@ -44,6 +44,15 @@ export const migrationsSpecSchema = z.object({
   command: z.string().min(1).optional(),
 });
 
+export const domainRegistrationSpecSchema = z.object({
+  provider: z.literal('cloudflare').default('cloudflare'),
+  register: z.boolean().default(true),
+  accountId: z.string().min(1).optional(),
+  years: z.number().int().min(1).max(10).optional(),
+  autoRenew: z.boolean().optional(),
+  privacyMode: z.enum(['redaction', 'off']).optional(),
+});
+
 export const environmentSpecSchema = z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
@@ -53,6 +62,7 @@ export const environmentSpecSchema = z.object({
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
   domain: z.string().min(1).optional(),
+  domainRegistration: domainRegistrationSpecSchema.optional(),
   email: z.object({ enabled: z.boolean() }).default({ enabled: false }),
   envVars: z.record(z.string()).default({}),
   deploy: deploySpecSchema.optional(),
@@ -63,6 +73,14 @@ export const environmentSpecSchema = z.object({
     /** Services to watch (default: all services in this environment). */
     services: z.array(z.string().min(1)).optional(),
   }).optional(),
+}).superRefine((environment, ctx) => {
+  if (environment.domainRegistration && !environment.domain) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'domainRegistration requires domain',
+      path: ['domainRegistration'],
+    });
+  }
 });
 
 export const projectSpecSchema = z.object({
@@ -74,5 +92,6 @@ export const projectSpecSchema = z.object({
 
 export type ServiceSpec = z.infer<typeof serviceSpecSchema>;
 export type DatabaseSpec = z.infer<typeof databaseSpecSchema>;
+export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;

@@ -67,7 +67,7 @@ export function createServer(): McpServer {
 
   const ctx = createToolContext();
 
-  // The consolidated intent-level tool surface (43 hv_* tools).
+  // The consolidated intent-level tool surface (42 hv_* tools).
   registerCoreTools(server, ctx);
   registerLifecycleTools(server, ctx);
   registerConnectionsTools(server, ctx);

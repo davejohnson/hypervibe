@@ -3,7 +3,7 @@ import type { Component } from '../entities/component.entity.js';
 
 export type PlanActionType = 'create' | 'update' | 'replace' | 'destroy' | 'noop';
 
-export type PlanResourceKind = 'project' | 'environment' | 'service' | 'database' | 'domain';
+export type PlanResourceKind = 'project' | 'environment' | 'service' | 'database' | 'domain' | 'ci';
 
 export interface PlanFieldDiff {
   /** Field name; env vars appear as "env:KEY" with no values. */
@@ -27,10 +27,14 @@ export interface PlanAction {
   diff?: PlanFieldDiff[];
   /** Destroying this resource loses data (databases). */
   dataBearing?: boolean;
+  /** Creating/updating this resource can charge the provider account. */
+  billable?: boolean;
   /** Action is skipped by apply unless explicitly confirmed. */
   requiresConfirm?: boolean;
   /** Ids of actions that must complete first. */
   dependsOn?: string[];
+  /** Provider/action-specific non-secret context shown in plans and persisted with the plan. */
+  metadata?: Record<string, unknown>;
 }
 
 /** Local (SQLite) view of an environment, input to the diff. */

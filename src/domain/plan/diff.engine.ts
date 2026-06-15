@@ -51,7 +51,7 @@ export function diffEnvironment(input: {
     warnings.push(
       `deploy.strategy is "${spec.deploy?.strategy ?? 'unset'}": Railway apply will create services without a source, `
       + 'so NO CODE WILL BE DEPLOYED. '
-      + 'Set deploy: { strategy: "branch", trigger: "ci" } and run hv_ci_setup unless infrastructure-only is intended.'
+      + 'Set deploy: { strategy: "branch", trigger: "ci" } so hv_plan/hv_apply can manage the GitHub Actions deploy workflow unless infrastructure-only is intended.'
     );
   }
 

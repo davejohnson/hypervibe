@@ -681,7 +681,7 @@ export async function executeBootstrap(params: {
       services: serviceWorkloads.map((service) => service.name),
       ...(cronWorkloads.length > 0 ? { crons: cronWorkloads.map((service) => service.name) } : {}),
       nextSteps: [
-        'Run hv_ci_setup kind="deploy-branch" for this project to create the push-deploy workflow.',
+        'Run hv_plan and hv_apply for this environment to create or update the push-deploy GitHub Actions workflow.',
         'Store the required provider API and registry secrets in the GitHub repository.',
         'Push to the configured branch to build the image and deploy it through provider APIs.',
       ],

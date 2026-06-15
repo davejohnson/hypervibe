@@ -35,6 +35,8 @@ export type ActionHandler = (action: PlanAction) => Promise<ActionResult>;
 export interface ConvergeParams {
   planRunId: string;
   /** Action ids (requiresConfirm) the caller explicitly confirmed. */
+  confirmActions?: string[];
+  /** Legacy alias for confirm-gated destroys; kept for backwards compatibility. */
   confirmDestroy?: string[];
   /** Latest spec revision for the project (from SpecStore). */
   currentSpecRevision: number;
@@ -186,7 +188,7 @@ export class ConvergeExecutor {
       };
     }
 
-    const confirmed = new Set(params.confirmDestroy ?? []);
+    const confirmed = new Set([...(params.confirmActions ?? []), ...(params.confirmDestroy ?? [])]);
     let ordered: PlanAction[];
     try {
       ordered = orderActions(document.actions);
@@ -221,7 +223,7 @@ export class ConvergeExecutor {
         receipts.push({
           actionId: action.id,
           status: 'skipped_requires_confirm',
-          message: `Requires explicit confirmation: pass confirmDestroy: ["${action.id}"]`,
+          message: `Requires explicit confirmation: pass confirmActions: ["${action.id}"]`,
         });
         continue;
       }

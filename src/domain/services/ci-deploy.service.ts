@@ -1,0 +1,322 @@
+import { createHash } from 'crypto';
+import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
+import type { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
+import type { Environment } from '../entities/environment.entity.js';
+import type { Project } from '../entities/project.entity.js';
+import type { EnvironmentSpec } from '../spec/spec.schema.js';
+import type { PlanAction } from '../plan/plan.types.js';
+import {
+  buildBranchDeployWorkflow,
+  getGitHubAdapter,
+  resolveBranchDeployTargets,
+  type BranchDeployProvider,
+  type BranchDeployWorkflow,
+} from './github-ops.service.js';
+
+const OPERATION = 'githubActionsDeployBranch';
+const SUPPORTED_PROVIDERS = new Set(['railway', 'vercel', 'render', 'digitalocean', 'cloudrun', 'apprunner', 'heroku']);
+
+const connectionRepo = new ConnectionRepository();
+const secretStore = getSecretStore();
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+export function environmentUsesGitHubActionsDeploy(environmentSpec: EnvironmentSpec): boolean {
+  return environmentSpec.deploy?.strategy === 'branch' && (environmentSpec.deploy.trigger ?? 'ci') === 'ci';
+}
+
+export function isGitHubActionsDeployAction(action: PlanAction): boolean {
+  return action.metadata?.operation === OPERATION;
+}
+
+export function providerSecretsForGitHubActions(provider: string): Array<{ name: string; value: string }> {
+  const connection = connectionRepo.findByProvider(provider);
+  if (!connection || connection.status !== 'verified') {
+    return [];
+  }
+
+  const credentials = secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
+  switch (provider) {
+    case 'railway':
+      return typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0
+        ? [{ name: 'RAILWAY_API_TOKEN', value: credentials.apiToken }]
+        : [];
+    case 'digitalocean':
+      return typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0
+        ? [{ name: 'DIGITALOCEAN_ACCESS_TOKEN', value: credentials.apiToken }]
+        : [];
+    case 'render':
+      return typeof credentials.apiKey === 'string' && credentials.apiKey.length > 0
+        ? [{ name: 'RENDER_API_KEY', value: credentials.apiKey }]
+        : [];
+    case 'cloudrun': {
+      const secrets: Array<{ name: string; value: string }> = [];
+      if (typeof credentials.credentials === 'string' && credentials.credentials.length > 0) {
+        secrets.push({ name: 'GCP_SERVICE_ACCOUNT_JSON', value: credentials.credentials });
+      }
+      if (typeof credentials.projectId === 'string' && credentials.projectId.length > 0) {
+        secrets.push({ name: 'GCP_PROJECT_ID', value: credentials.projectId });
+      }
+      if (typeof credentials.region === 'string' && credentials.region.length > 0) {
+        secrets.push({ name: 'GCP_REGION', value: credentials.region });
+      }
+      return secrets;
+    }
+    case 'apprunner': {
+      const secrets: Array<{ name: string; value: string }> = [];
+      if (typeof credentials.accessKeyId === 'string' && credentials.accessKeyId.length > 0) {
+        secrets.push({ name: 'AWS_ACCESS_KEY_ID', value: credentials.accessKeyId });
+      }
+      if (typeof credentials.secretAccessKey === 'string' && credentials.secretAccessKey.length > 0) {
+        secrets.push({ name: 'AWS_SECRET_ACCESS_KEY', value: credentials.secretAccessKey });
+      }
+      if (typeof credentials.region === 'string' && credentials.region.length > 0) {
+        secrets.push({ name: 'AWS_REGION', value: credentials.region });
+      }
+      return secrets;
+    }
+    case 'heroku':
+      return typeof credentials.apiKey === 'string' && credentials.apiKey.length > 0
+        ? [{ name: 'HEROKU_API_KEY', value: credentials.apiKey }]
+        : [];
+    default:
+      return [];
+  }
+}
+
+function ciBindings(environment: Environment | null): Record<string, { contentHash?: string; syncedSecrets?: string[] }> {
+  const ci = asRecord(environment?.platformBindings?.ci);
+  return asRecord(ci?.deployBranch) as Record<string, { contentHash?: string; syncedSecrets?: string[] }> | null ?? {};
+}
+
+function buildAction(params: {
+  type: 'create' | 'update' | 'noop';
+  provider: string;
+  repo: string;
+  workflow: BranchDeployWorkflow;
+  reason: string;
+  verified: boolean;
+  availableSecretNames: string[];
+  dependsOn?: string[];
+}): PlanAction {
+  return {
+    id: `ci:github-actions:${params.workflow.environment}:deploy-branch`,
+    type: params.type,
+    resource: { kind: 'ci', name: `deploy-branch:${params.workflow.environment}`, provider: 'github' },
+    verified: params.verified,
+    reason: params.reason,
+    ...(params.dependsOn?.length ? { dependsOn: params.dependsOn } : {}),
+    metadata: {
+      operation: OPERATION,
+      repository: params.repo,
+      provider: params.provider,
+      workflow: {
+        path: params.workflow.path,
+        branch: params.workflow.branch,
+        requiredSecrets: params.workflow.requiredSecrets,
+        requiredVariables: params.workflow.requiredVariables,
+        contentHash: sha256(params.workflow.content),
+      },
+      availableProviderSecrets: params.availableSecretNames,
+    },
+  };
+}
+
+export async function planGitHubActionsDeploy(params: {
+  project: Project;
+  environmentName: string;
+  environmentSpec: EnvironmentSpec;
+  environment: Environment | null;
+  dependsOn?: string[];
+}): Promise<{ action?: PlanAction; warnings: string[] }> {
+  const { project, environmentName, environmentSpec, environment } = params;
+  const warnings: string[] = [];
+  if (!environmentUsesGitHubActionsDeploy(environmentSpec)) {
+    return { warnings };
+  }
+  if (!SUPPORTED_PROVIDERS.has(environmentSpec.hosting.provider)) {
+    warnings.push(`GitHub Actions branch deploys are not supported for provider "${environmentSpec.hosting.provider}".`);
+    return { warnings };
+  }
+
+  const repo = parseGitHubRepoFromRemote(project.gitRemoteUrl);
+  if (!repo) {
+    warnings.push('deploy.strategy is "branch" with trigger "ci", but the project has no GitHub remote (gitRemoteUrl), so the GitHub Actions deploy workflow cannot be configured.');
+    return { warnings };
+  }
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) {
+    warnings.push(`Could not parse GitHub repository from ${repo}.`);
+    return { warnings };
+  }
+
+  const { targets, migration } = resolveBranchDeployTargets(project);
+  const target = targets.find((candidate) => candidate.environmentName === environmentName);
+  if (!target) {
+    warnings.push(`No GitHub Actions deploy target found for environment "${environmentName}".`);
+    return { warnings };
+  }
+
+  const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider as BranchDeployProvider, target, migration);
+  const requiredProviderSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider)
+    .filter((secret) => workflow.requiredSecrets.includes(secret.name))
+    .map((secret) => secret.name);
+  const contentHash = sha256(workflow.content);
+  const binding = ciBindings(environment)[workflow.path];
+
+  const adapterResult = getGitHubAdapter(repo);
+  if ('error' in adapterResult) {
+    warnings.push(`Cannot observe GitHub Actions workflow for ${repo}: ${adapterResult.error}`);
+    return {
+      action: buildAction({
+        type: binding?.contentHash === contentHash ? 'noop' : 'update',
+        provider: environmentSpec.hosting.provider,
+        repo,
+        workflow,
+        reason: binding?.contentHash === contentHash
+          ? 'GitHub Actions deploy workflow was previously synced by Hypervibe'
+          : `GitHub Actions deploy workflow ${workflow.path} needs to be synced`,
+        verified: false,
+        availableSecretNames: requiredProviderSecrets,
+        dependsOn: params.dependsOn,
+      }),
+      warnings,
+    };
+  }
+
+  let currentContent: string | null = null;
+  let workflowReadVerified = false;
+  try {
+    currentContent = await adapterResult.adapter.getFileContent(owner, repoName, workflow.path);
+    workflowReadVerified = true;
+  } catch (error) {
+    warnings.push(`Cannot read GitHub Actions workflow ${workflow.path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const syncedSecrets = new Set(binding?.syncedSecrets ?? []);
+  const missingSecretSync = requiredProviderSecrets.some((name) => !syncedSecrets.has(name));
+  const type = currentContent === workflow.content && !missingSecretSync
+    ? 'noop'
+    : currentContent === null
+      ? 'create'
+      : 'update';
+  const reason = type === 'noop'
+    ? 'GitHub Actions deploy workflow is in sync'
+    : currentContent === null
+      ? `GitHub Actions deploy workflow ${workflow.path} is missing`
+      : missingSecretSync
+        ? `GitHub Actions deploy workflow ${workflow.path} exists but provider secrets need syncing`
+        : `GitHub Actions deploy workflow ${workflow.path} differs from desired content`;
+
+  return {
+    action: buildAction({
+      type,
+      provider: environmentSpec.hosting.provider,
+      repo,
+      workflow,
+      reason,
+      verified: workflowReadVerified,
+      availableSecretNames: requiredProviderSecrets,
+      dependsOn: type === 'noop' ? undefined : params.dependsOn,
+    }),
+    warnings,
+  };
+}
+
+export async function applyGitHubActionsDeploy(params: {
+  project: Project;
+  environmentName: string;
+  environmentSpec: EnvironmentSpec;
+}): Promise<{ success: boolean; message: string; error?: string; data?: Record<string, unknown> }> {
+  const { project, environmentName, environmentSpec } = params;
+  const repo = parseGitHubRepoFromRemote(project.gitRemoteUrl);
+  if (!repo) {
+    return { success: false, message: 'GitHub repository is missing', error: 'Set project gitRemoteUrl to a GitHub remote.' };
+  }
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) {
+    return { success: false, message: 'GitHub repository is invalid', error: `Could not parse ${repo}.` };
+  }
+  const adapterResult = getGitHubAdapter(repo);
+  if ('error' in adapterResult) {
+    return { success: false, message: 'GitHub adapter unavailable', error: adapterResult.error };
+  }
+  const adapter: GitHubAdapter = adapterResult.adapter;
+
+  const { targets, migration } = resolveBranchDeployTargets(project);
+  const target = targets.find((candidate) => candidate.environmentName === environmentName);
+  if (!target) {
+    return { success: false, message: 'No GitHub Actions deploy target', error: `No deploy target found for ${environmentName}.` };
+  }
+  const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider as BranchDeployProvider, target, migration);
+
+  const fileResult = await adapter.createOrUpdateFile(
+    owner,
+    repoName,
+    workflow.path,
+    workflow.content,
+    `Add ${workflow.templateName} workflow`
+  );
+
+  const syncedSecrets: string[] = [];
+  const secretErrors: Array<{ name: string; error: string }> = [];
+  for (const secret of providerSecretsForGitHubActions(environmentSpec.hosting.provider)) {
+    if (!workflow.requiredSecrets.includes(secret.name)) continue;
+    try {
+      await adapter.setRepositorySecret(owner, repoName, secret.name, secret.value);
+      syncedSecrets.push(secret.name);
+    } catch (error) {
+      secretErrors.push({ name: secret.name, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  persistWorkflowBinding(project, environmentName, workflow, syncedSecrets);
+  if (secretErrors.length > 0) {
+    return {
+      success: false,
+      message: `Synced ${workflow.path}, but some GitHub secrets failed`,
+      error: secretErrors.map((entry) => `${entry.name}: ${entry.error}`).join('; '),
+      data: { workflow: workflow.path, file: fileResult, syncedSecrets, secretErrors },
+    };
+  }
+  return {
+    success: true,
+    message: `Synced GitHub Actions deploy workflow ${workflow.path}`,
+    data: { workflow: workflow.path, file: fileResult, syncedSecrets },
+  };
+}
+
+function persistWorkflowBinding(
+  project: Project,
+  environmentName: string,
+  workflow: BranchDeployWorkflow,
+  syncedSecrets: string[]
+): void {
+  const envRepo = new EnvironmentRepository();
+  const environment = envRepo.findByProjectAndName(project.id, environmentName)
+    ?? envRepo.create({ projectId: project.id, name: environmentName });
+  const ci = asRecord(environment.platformBindings.ci) ?? {};
+  const deployBranch = asRecord(ci.deployBranch) ?? {};
+  envRepo.updatePlatformBindings(environment.id, {
+    ci: {
+      ...ci,
+      deployBranch: {
+        ...deployBranch,
+        [workflow.path]: {
+          contentHash: sha256(workflow.content),
+          syncedSecrets,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    },
+  });
+}

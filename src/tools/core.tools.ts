@@ -14,6 +14,15 @@ import {
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
+import {
+  applyCloudflareDomainRegistration,
+  isCloudflareDomainRegistrationAction,
+} from '../domain/services/domain-registration.service.js';
+import {
+  applyGitHubActionsDeploy,
+  environmentUsesGitHubActionsDeploy,
+  isGitHubActionsDeployAction,
+} from '../domain/services/ci-deploy.service.js';
 import { StateManager } from '../agent/state.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
@@ -81,6 +90,45 @@ function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Proje
     : project;
 }
 
+function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
+  const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string> }>();
+  const add = (provider: string, environment: string, reason: string) => {
+    const existing = required.get(provider) ?? { provider, environments: new Set<string>(), reasons: new Set<string>() };
+    existing.environments.add(environment);
+    existing.reasons.add(reason);
+    required.set(provider, existing);
+  };
+
+  for (const [envName, envSpec] of Object.entries(spec.environments)) {
+    add(envSpec.hosting.provider, envName, 'hosting');
+    if (envSpec.database) add(envSpec.database.provider, envName, 'database');
+    if (envSpec.domain) add('cloudflare', envName, envSpec.domainRegistration ? 'domain registration and DNS' : 'domain DNS');
+    if (envSpec.email.enabled) add('sendgrid', envName, 'transactional email');
+    if (environmentUsesGitHubActionsDeploy(envSpec)) add('github', envName, 'GitHub Actions deploy workflow');
+  }
+
+  const items = Array.from(required.values())
+    .sort((a, b) => a.provider.localeCompare(b.provider))
+    .map((entry) => {
+      const connections = ctx.repos.connections.findAllByProvider(entry.provider);
+      const verified = connections.some((connection) => connection.status === 'verified');
+      return {
+        provider: entry.provider,
+        status: verified ? 'verified' : connections.length > 0 ? 'unverified' : 'missing',
+        environments: Array.from(entry.environments).sort(),
+        reasons: Array.from(entry.reasons).sort(),
+        hint: verified
+          ? undefined
+          : `Connect ${entry.provider} with hv_connect before hv_plan/hv_apply. Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+      };
+    });
+
+  return {
+    required: items,
+    missing: items.filter((item) => item.status !== 'verified'),
+  };
+}
+
 function syncProjectGitRemoteUrl(ctx: ToolContext, project: Project, spec: ProjectSpec): Project {
   const gitRemoteUrl = spec.gitRemoteUrl?.trim();
   if (!gitRemoteUrl || gitRemoteUrl === project.gitRemoteUrl) {
@@ -98,7 +146,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
     'Create or update the desired-state spec for a project (the single source of truth that hv_plan diffs against live infrastructure). Merges by default; pass replace=true to overwrite. In a merge, set a key to null to delete it (e.g. remove a service).',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|rds|cloudsql|railway }, domain?, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations? } } }. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows, while trigger "native" opts into provider-native repo integrations such as the Railway GitHub App. "manual" provisions infrastructure only.'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|rds|cloudsql|railway }, domain?, domainRegistration?: { provider: cloudflare, register?: boolean, years?, autoRenew?, privacyMode? }, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations? } } }. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows, while trigger "native" opts into provider-native repo integrations such as the Railway GitHub App. "manual" provisions infrastructure only.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
     },
     wrapHandler(async ({ project: projectRef, spec, replace }) => {
@@ -138,14 +186,21 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       }
       validateHostingProviders(result.spec);
       project = syncProjectGitRemoteUrl(ctx, project, result.spec);
+      const connections = requiredConnectionChecklist(ctx, result.spec);
 
       return toolSuccess(
         {
           project: { id: project.id, name: project.name, gitRemoteUrl: project.gitRemoteUrl ?? null },
           revision: result.revision,
           spec: result.spec,
+          connections,
         },
-        { next: ['hv_plan'] }
+        {
+          hint: connections.missing.length > 0
+            ? `Connect required providers first: ${connections.missing.map((item) => item.provider).join(', ')}.`
+            : undefined,
+          next: connections.missing.length > 0 ? ['hv_connect', 'hv_plan'] : ['hv_plan'],
+        }
       );
     })
   );
@@ -163,11 +218,13 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         });
       }
       const gitRemoteUrl = project.gitRemoteUrl ?? result.spec.gitRemoteUrl ?? null;
+      const connections = requiredConnectionChecklist(ctx, result.spec);
       return toolSuccess({
         project: { id: project.id, name: project.name, gitRemoteUrl },
         projectMeta: { gitRemoteUrl },
         revision: result.revision,
         spec: result.spec,
+        connections,
         environments: Object.fromEntries(
           Object.entries(result.spec.environments).map(([name, env]) => [name, {
             hosting: env.hosting.provider,
@@ -197,7 +254,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         ? `Blocked: connect ${result.blocked.map((b) => b.provider).join(', ')} with hv_connect before applying. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`
         : pending.length === 0
           ? 'Everything is in sync — nothing to apply.'
-          : `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmDestroy=${JSON.stringify(confirmIds)} to also run the confirm-gated destroys` : ''}.`;
+          : `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} for confirm-gated billable or destructive actions` : ''}.`;
 
       return toolSuccess(
         {
@@ -291,7 +348,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
             ...(expectedSource ? { expected: `${expectedSource.repo}@${expectedSource.branch}` } : {}),
             observed: observedSources,
             ...(deployStrategy === 'branch' && deployTrigger === 'ci'
-              ? { ci: { provider: 'github-actions', setup: 'hv_ci_setup kind="deploy-branch"' } }
+              ? { ci: { provider: 'github-actions', setup: 'managed-by-hv_plan-hv_apply' } }
               : {}),
             pushToDeploy: Boolean(
               deployStrategy === 'branch'
@@ -307,7 +364,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           hint: sourceWarnings.length > 0
             ? 'Fix Railway GitHub App repository access and project-member GitHub contributor access, then rerun hv_status or hv_plan.'
             : deployStrategy === 'branch' && deployTrigger === 'ci'
-              ? 'Use hv_ci_setup kind="deploy-branch" to create the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
+              ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
               : drift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
         }
       );
@@ -316,13 +373,14 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_apply',
-    'Apply a plan produced by hv_plan. Rejects stale plans (spec changed, infrastructure changed, plan expired, or already applied). Confirm-gated destroys (data-bearing resources) run only when their action ids are passed in confirmDestroy.',
+    'Apply a plan produced by hv_plan. Rejects stale plans (spec changed, infrastructure changed, plan expired, or already applied). Confirm-gated billable/destructive actions run only when their action ids are passed in confirmActions. Legacy confirmDestroy is still accepted for database destroys.',
     {
       project: projectField,
       planId: z.string().describe('Plan id returned by hv_plan'),
+      confirmActions: z.array(z.string()).optional().describe('Action ids for confirm-gated billable or destructive actions (e.g. ["domain:example.com:register", "database:railway:destroy"])'),
       confirmDestroy: z.array(z.string()).optional().describe('Action ids of confirm-gated destroys to execute (e.g. ["database:railway:destroy"])'),
     },
-    wrapHandler(async ({ project: projectRef, planId, confirmDestroy }) => {
+    wrapHandler(async ({ project: projectRef, planId, confirmActions, confirmDestroy }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = specStore.get(project);
       if (!specResult) {
@@ -372,6 +430,12 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       };
 
       const handler = async (action: PlanAction): Promise<ActionResult> => {
+        if (isCloudflareDomainRegistrationAction(action)) {
+          return applyCloudflareDomainRegistration({ project: applyProject, envName, environmentSpec: envSpec, action });
+        }
+        if (isGitHubActionsDeployAction(action)) {
+          return applyGitHubActionsDeploy({ project: applyProject, environmentName: envName, environmentSpec: envSpec });
+        }
         if (action.resource.kind === 'database' && action.type === 'create') {
           return createDatabase(ctx, applyProject, envName, action);
         }
@@ -395,7 +459,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
       const result = await executor.execute({
         planRunId: planId,
-        confirmDestroy,
+        confirmActions: Array.from(new Set([...(confirmActions ?? []), ...(confirmDestroy ?? [])])),
         currentSpecRevision: specResult.revision,
         freshObservedFingerprint: freshFingerprint,
         handler,
@@ -422,7 +486,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         },
         {
           hint: skipped.length > 0
-            ? `Skipped confirm-gated destroys: ${skipped.map((r) => r.actionId).join(', ')}. Re-run hv_plan, then hv_apply with confirmDestroy to execute them.`
+            ? `Skipped confirm-gated actions: ${skipped.map((r) => r.actionId).join(', ')}. Re-run hv_plan, then hv_apply with confirmActions to execute them.`
             : result.success
               ? 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',

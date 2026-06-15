@@ -8,6 +8,9 @@ import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
+import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.port.js';
 
@@ -140,12 +143,42 @@ describe('hv_spec_set / hv_spec_get', () => {
     expect(bad.hint).toContain('railway');
     await t.close();
   });
+
+  it('returns required connection setup immediately from the desired spec', async () => {
+    const t = await makeClient();
+    const set = await t.call('hv_spec_set', {
+      spec: {
+        project: 'connection-check-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/connection-check-app.git',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            domain: 'connection-check-app.com',
+            domainRegistration: { provider: 'cloudflare' },
+            email: { enabled: true },
+            deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          },
+        },
+      },
+    });
+    expect(set.ok).toBe(true);
+    expect(set.data.connections.missing.map((entry: { provider: string }) => entry.provider).sort()).toEqual([
+      'cloudflare',
+      'github',
+      'railway',
+      'sendgrid',
+    ]);
+    expect(set.hint).toContain('Connect required providers first');
+    expect(set.next).toEqual(['hv_connect', 'hv_plan']);
+    await t.close();
+  });
 });
 
 describe('hv_plan / hv_status / hv_apply', () => {
-  function verifyConnection(provider: string) {
+  function verifyConnection(provider: string, credentials: Record<string, unknown> = { apiToken: `${provider}-token` }) {
     const repo = new ConnectionRepository();
-    const conn = repo.create({ provider, credentialsEncrypted: 'x' });
+    const conn = repo.create({ provider, credentialsEncrypted: getSecretStore().encryptObject(credentials) });
     repo.updateStatus(conn.id, 'verified');
   }
 
@@ -189,6 +222,217 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.data.summary.create).toBeGreaterThan(0);
     expect(plan.data.blocked).toContainEqual(expect.objectContaining({ provider: 'railway' }));
     expect(plan.hint).toContain('hv_connect');
+    await t.close();
+  });
+
+  it('plans Cloudflare domain registration from desired state as a confirm-gated action', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'domain-plan-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            domain: 'apreskeys.com',
+            domainRegistration: { provider: 'cloudflare', years: 1, autoRenew: false },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('cloudflare', { apiToken: 'cf-token', accountId: 'acct-1' });
+    mockObserved(null);
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue(null);
+    vi.spyOn(CloudflareAdapter.prototype, 'checkRegistrarDomains').mockResolvedValue([
+      {
+        name: 'apreskeys.com',
+        registrable: true,
+        tier: 'standard',
+        pricing: { currency: 'USD', registration_cost: '10.00', renewal_cost: '10.00' },
+      },
+    ]);
+
+    const plan = await t.call('hv_plan', { project: 'domain-plan-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    const register = plan.data.actions.find((action: { id: string }) => action.id === 'domain:apreskeys.com:register');
+    expect(register).toMatchObject({
+      type: 'create',
+      resource: { kind: 'domain', name: 'apreskeys.com', provider: 'cloudflare' },
+      requiresConfirm: true,
+      billable: true,
+    });
+    expect(JSON.stringify(register.metadata)).toContain('10.00');
+    const attach = plan.data.actions.find((action: { id: string }) => action.id === 'domain:apreskeys.com');
+    expect(attach.dependsOn).toContain('domain:apreskeys.com:register');
+    expect(plan.hint).toContain('confirmActions');
+    await t.close();
+  });
+
+  it('applies Cloudflare domain registration only when the plan action is explicitly confirmed', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'domain-apply-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            domain: 'apreskeys.com',
+            domainRegistration: { provider: 'cloudflare', years: 1, autoRenew: true },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('cloudflare', { apiToken: 'cf-token', accountId: 'acct-1' });
+    const project = new ProjectRepository().findByName('domain-apply-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'rp-1', services: { web: { serviceId: 'svc-1' } } },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      services: [{
+        name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: ['apreskeys.com'],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [], envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue(null);
+    vi.spyOn(CloudflareAdapter.prototype, 'checkRegistrarDomains').mockResolvedValue([
+      {
+        name: 'apreskeys.com',
+        registrable: true,
+        tier: 'standard',
+        pricing: { currency: 'USD', registration_cost: '10.00', renewal_cost: '10.00' },
+      },
+    ]);
+    const create = vi.spyOn(CloudflareAdapter.prototype, 'createRegistrarRegistration').mockResolvedValue({
+      completed: true,
+      created_at: '2026-06-15T00:00:00.000Z',
+      updated_at: '2026-06-15T00:00:01.000Z',
+      links: { self: '/status', resource: '/domain' },
+      state: 'succeeded',
+    });
+
+    const plan = await t.call('hv_plan', { project: 'domain-apply-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    const unconfirmed = await t.call('hv_apply', { project: 'domain-apply-app', planId: plan.data.planId });
+    expect(unconfirmed.ok).toBe(true);
+    expect(unconfirmed.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'domain:apreskeys.com:register',
+      status: 'skipped_requires_confirm',
+    }));
+    expect(create).not.toHaveBeenCalled();
+
+    const plan2 = await t.call('hv_plan', { project: 'domain-apply-app', env: 'production' });
+    const confirmed = await t.call('hv_apply', {
+      project: 'domain-apply-app',
+      planId: plan2.data.planId,
+      confirmActions: ['domain:apreskeys.com:register'],
+    });
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'domain:apreskeys.com:register',
+      status: 'succeeded',
+    }));
+    expect(create).toHaveBeenCalledWith('acct-1', {
+      domainName: 'apreskeys.com',
+      autoRenew: true,
+      years: 1,
+    });
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    expect(environment.platformBindings.domainRegistrations).toMatchObject({
+      'apreskeys.com': { provider: 'cloudflare', accountId: 'acct-1', state: 'succeeded', completed: true },
+    });
+    await t.close();
+  });
+
+  it('plans and applies GitHub Actions deploy workflow setup from deploy.trigger="ci"', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'ci-plan-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/ci-plan-app.git',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('github', { apiToken: 'gh-token' });
+    const project = new ProjectRepository().findByName('ci-plan-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-1' } },
+      },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [], envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    const writeWorkflow = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
+      created: true,
+      updated: false,
+    });
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+
+    const plan = await t.call('hv_plan', { project: 'ci-plan-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    const ci = plan.data.actions.find((action: { id: string }) => action.id === 'ci:github-actions:production:deploy-branch');
+    expect(ci).toMatchObject({
+      type: 'create',
+      resource: { kind: 'ci', name: 'deploy-branch:production', provider: 'github' },
+    });
+    expect(ci.metadata.workflow.path).toBe('.github/workflows/deploy-railway-production.yml');
+
+    const apply = await t.call('hv_apply', { project: 'ci-plan-app', planId: plan.data.planId });
+    expect(apply.ok).toBe(true);
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'ci:github-actions:production:deploy-branch',
+      status: 'succeeded',
+    }));
+    expect(writeWorkflow).toHaveBeenCalledWith(
+      'davejohnson',
+      'ci-plan-app',
+      '.github/workflows/deploy-railway-production.yml',
+      expect.stringContaining('Deploy Railway (production)'),
+      'Add Deploy Railway (production) workflow'
+    );
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-plan-app', 'RAILWAY_API_TOKEN', 'railway-token');
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    expect(environment.platformBindings.ci).toBeDefined();
     await t.close();
   });
 
