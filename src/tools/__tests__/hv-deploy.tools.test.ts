@@ -69,6 +69,64 @@ describe('hv_deploy', () => {
     expect(result.error.code).toBe('CONFIRM_REQUIRED');
     await t.close();
   });
+
+  it('fails when provider status is deployed but the configured web health endpoint is not serving', async () => {
+    const project = new ProjectRepository().create({ name: 'rail-health-app', defaultPlatform: 'railway' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+    new ServiceRepository().create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { workloadKind: 'web', healthCheckPath: '/health' },
+      envVarSpec: {},
+    });
+
+    const fakeAdapter: IHostingAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['dockerfile'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: true,
+        supportsReleaseCommand: true,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: true,
+        supportsObserve: true,
+      },
+      async connect() {},
+      async verify() { return { success: true }; },
+      async ensureProject() { return { success: true, message: 'ok', data: { projectId: 'rail-project', environmentId: 'rail-env' } }; },
+      async deploy() {
+        return {
+          serviceId: 'web',
+          externalId: 'rail-web',
+          url: 'https://web-production-e5e09.up.railway.app',
+          status: 'deployed',
+          receipt: { success: true, message: 'deployed' },
+        };
+      },
+      async setEnvVars() { return { success: true, message: 'ok' }; },
+      async getDeployStatus() {
+        return { status: 'deployed', url: 'https://web-production-e5e09.up.railway.app' };
+      },
+    };
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeAdapter });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('Application not found', { status: 404 }) as any
+    );
+
+    const t = await makeClient();
+    const result = await t.call('hv_deploy', { project: 'rail-health-app', env: 'staging' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('PROVIDER_ERROR');
+    expect(result.error.details.status).toBe('failed');
+    expect(result.error.details.errors.join('\n')).toContain('web: HTTP 404 at https://web-production-e5e09.up.railway.app/health');
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://web-production-e5e09.up.railway.app/health',
+      expect.objectContaining({ method: 'GET' })
+    );
+    await t.close();
+  });
 });
 
 describe('hv_deploy database env injection', () => {

@@ -82,6 +82,7 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
         environment,
         services: servicesToDeploy,
         envVars: Object.keys(deployEnvVars).length > 0 ? deployEnvVars : undefined,
+        verifyHttpHealth: true,
         adapter,
       });
 

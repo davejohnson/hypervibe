@@ -67,7 +67,7 @@ jobs:
       providerServiceIds: [],
       providerServiceArns: [],
     }, { includeStep: false }).content,
-    requiredSecrets: ['RAILWAY_API_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN'],
+    requiredSecrets: ['RAILWAY_API_TOKEN'],
     requiredVariables: ['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS'],
   },
   'deploy-railway-staging': {
@@ -81,7 +81,7 @@ jobs:
       providerServiceIds: [],
       providerServiceArns: [],
     }, { includeStep: false }).content,
-    requiredSecrets: ['RAILWAY_API_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN'],
+    requiredSecrets: ['RAILWAY_API_TOKEN'],
     requiredVariables: ['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS'],
   },
   'deploy-railway-production': {
@@ -95,7 +95,7 @@ jobs:
       providerServiceIds: [],
       providerServiceArns: [],
     }, { includeStep: false }).content,
-    requiredSecrets: ['RAILWAY_API_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN'],
+    requiredSecrets: ['RAILWAY_API_TOKEN'],
     requiredVariables: ['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS'],
   },
   'deploy-vercel-staging': {
@@ -163,7 +163,7 @@ jobs:
       providerServiceIds: [],
       providerServiceArns: [],
     }, { includeStep: false }).content,
-    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN'],
+    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN'],
     requiredVariables: ['DO_APP_ID', 'DO_SERVICE_NAMES'],
   },
   'deploy-digitalocean-production': {
@@ -177,7 +177,7 @@ jobs:
       providerServiceIds: [],
       providerServiceArns: [],
     }, { includeStep: false }).content,
-    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN'],
+    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN'],
     requiredVariables: ['DO_APP_ID', 'DO_SERVICE_NAMES'],
   },
   'lint': {
@@ -546,8 +546,8 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: \${{ secrets.GHCR_USERNAME }}
-          password: \${{ secrets.GHCR_TOKEN }}
+          username: \${{ github.actor }}
+          password: \${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
@@ -560,8 +560,8 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
           RAILWAY_API_TOKEN: \${{ secrets.RAILWAY_API_TOKEN }}
           RAILWAY_ENVIRONMENT_ID: ${railwayEnvironmentId}
           RAILWAY_SERVICE_IDS: ${railwayServiceIds}
-          GHCR_USERNAME: \${{ secrets.GHCR_USERNAME }}
-          GHCR_TOKEN: \${{ secrets.GHCR_TOKEN }}
+          GHCR_USERNAME: \${{ github.actor }}
+          GHCR_TOKEN: \${{ secrets.GITHUB_TOKEN }}
           IMAGE_URI: \${{ steps.image.outputs.uri }}
         with:
           script: |
@@ -612,7 +612,7 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
               });
             }
 `,
-        requiredSecrets: ['RAILWAY_API_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN'],
+        requiredSecrets: ['RAILWAY_API_TOKEN'],
         requiredVariables,
       };
     }
@@ -688,8 +688,8 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: \${{ secrets.GHCR_USERNAME }}
-          password: \${{ secrets.GHCR_TOKEN }}
+          username: \${{ github.actor }}
+          password: \${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
@@ -702,8 +702,8 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
           DIGITALOCEAN_ACCESS_TOKEN: \${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           DO_APP_ID: ${doAppId}
           DO_SERVICE_NAMES: ${doServiceNames}
-          GHCR_USERNAME: \${{ secrets.GHCR_USERNAME }}
-          GHCR_TOKEN: \${{ secrets.GHCR_TOKEN }}
+          GHCR_USERNAME: \${{ github.actor }}
+          GHCR_TOKEN: \${{ secrets.GITHUB_TOKEN }}
           IMAGE_REGISTRY_OWNER: \${{ steps.image.outputs.registry_owner }}
           IMAGE_REPOSITORY: \${{ steps.image.outputs.repository }}
           IMAGE_TAG: \${{ steps.image.outputs.tag }}
@@ -763,7 +763,7 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
             });
             if (!deployment.ok) throw new Error('DigitalOcean deployment failed: ' + deployment.status + ' ' + await deployment.text());
 `,
-        requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN'],
+        requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN'],
         requiredVariables,
       };
     }
@@ -1209,7 +1209,7 @@ export function buildBranchDeployWorkflow(
     ? [...deployBlock.requiredSecrets, 'DATABASE_URL']
     : [...deployBlock.requiredSecrets];
   const requiredVariables = [...deployBlock.requiredVariables];
-  const permissionsBlock = provider === 'railway'
+  const permissionsBlock = provider === 'railway' || provider === 'digitalocean'
     ? `    permissions:
       contents: read
       packages: write

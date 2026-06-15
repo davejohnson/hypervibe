@@ -13,6 +13,7 @@ import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflar
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.port.js';
+import { bootstrapActionResultFromSummary } from '../core.tools.js';
 
 let tempDir: string;
 
@@ -58,6 +59,49 @@ const SPEC = {
     },
   },
 };
+
+describe('bootstrap action receipt mapping', () => {
+  it('fails domain actions when bootstrap records domain attachment or DNS errors', () => {
+    const result = bootstrapActionResultFromSummary(
+      {
+        id: 'domain:apreskeys.com',
+        resource: { kind: 'domain', name: 'apreskeys.com', provider: 'railway' },
+      },
+      {
+        success: true,
+        summary: {
+          customDomainAttached: false,
+          customDomainError: 'Problem processing request',
+          domainDnsConfigured: false,
+          domainDnsError: 'No Cloudflare connection available for apreskeys.com',
+        },
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Problem processing request');
+    expect(result.error).toContain('No Cloudflare connection available for apreskeys.com');
+  });
+
+  it('surfaces provider-specific bootstrap errors instead of generic bootstrap failed', () => {
+    const result = bootstrapActionResultFromSummary(
+      {
+        id: 'service:web',
+        resource: { kind: 'service', name: 'web', provider: 'railway' },
+      },
+      {
+        success: false,
+        summary: {
+          sendgridApiKeySyncError: 'SendGrid API key is valid but cannot complete setupEmail. Missing domain-auth scopes.',
+        },
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Missing domain-auth scopes');
+    expect(result.error).not.toBe('bootstrap failed');
+  });
+});
 
 describe('hv_spec_set / hv_spec_get', () => {
   it('creates a project, stores the spec, and bumps revisions on merge', async () => {

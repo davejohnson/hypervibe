@@ -137,6 +137,55 @@ function syncProjectGitRemoteUrl(ctx: ToolContext, project: Project, spec: Proje
   return ctx.repos.projects.update(project.id, { gitRemoteUrl }) ?? { ...project, gitRemoteUrl };
 }
 
+function booleanField(record: Record<string, unknown>, key: string): boolean | undefined {
+  const value = record[key];
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function bootstrapGeneralError(summary: Record<string, unknown>): string {
+  const messages = [
+    stringField(summary, 'error'),
+    stringField(summary, 'sendgridApiKeySyncError'),
+    stringField(summary, 'sendgridDnsError'),
+    stringField(summary, 'customDomainError'),
+    stringField(summary, 'domainDnsError'),
+  ].filter((message): message is string => Boolean(message));
+
+  return Array.from(new Set(messages)).join('; ') || 'bootstrap failed';
+}
+
+function bootstrapDomainError(summary: Record<string, unknown>): string | undefined {
+  const messages: string[] = [];
+  if (booleanField(summary, 'customDomainAttached') === false || stringField(summary, 'customDomainError')) {
+    messages.push(stringField(summary, 'customDomainError') ?? 'Custom domain was not attached by the hosting provider.');
+  }
+  if (booleanField(summary, 'domainDnsConfigured') === false || stringField(summary, 'domainDnsError')) {
+    messages.push(stringField(summary, 'domainDnsError') ?? 'Domain DNS was not configured.');
+  }
+  return messages.length > 0 ? Array.from(new Set(messages)).join('; ') : undefined;
+}
+
+export function bootstrapActionResultFromSummary(
+  action: Pick<PlanAction, 'id' | 'resource'>,
+  result: { success: boolean; summary: Record<string, unknown> }
+): ActionResult {
+  const actionError = action.resource.kind === 'domain'
+    ? bootstrapDomainError(result.summary)
+    : undefined;
+
+  if (!actionError && result.success) {
+    return { success: true, message: `Converged (${action.id})` };
+  }
+
+  const error = actionError ?? bootstrapGeneralError(result.summary);
+  return {
+    success: false,
+    message: `Apply failed while converging ${action.id}`,
+    error,
+    data: result.summary,
+  };
+}
+
 export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
   const specStore = new SpecStore();
   const planService = new PlanService();
@@ -450,15 +499,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           return destroyService(ctx, applyProject, specResult.spec, envName, action);
         }
         const result = await ensureBootstrap();
-        if (result.success) {
-          return { success: true, message: `Converged (${action.id})` };
-        }
-        return {
-          success: false,
-          message: `Apply failed while converging ${action.id}`,
-          error: String(result.summary.error ?? 'bootstrap failed'),
-          data: result.summary,
-        };
+        return bootstrapActionResultFromSummary(action, result);
       };
 
       const result = await executor.execute({

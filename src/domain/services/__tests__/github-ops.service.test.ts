@@ -98,13 +98,18 @@ describe('github tools', () => {
     expect(workflow.template).toBe('deploy-railway-production');
     expect(workflow.branch).toBe('release');
     expect(workflow.environment).toBe('production');
-    expect(workflow.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN', 'DATABASE_URL']);
+    expect(workflow.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'DATABASE_URL']);
     expect(workflow.requiredVariables).toEqual(['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS']);
     expect(workflow.content).toContain('branches: [release]');
     expect(workflow.content).toContain('environment: production');
     expect(workflow.content).toContain('run: npm run migrate');
     expect(workflow.content).toContain('docker/build-push-action@v6');
+    expect(workflow.content).toContain('packages: write');
+    expect(workflow.content).toContain('username: ${{ github.actor }}');
+    expect(workflow.content).toContain('password: ${{ secrets.GITHUB_TOKEN }}');
     expect(workflow.content).toContain('serviceInstanceUpdate');
+    expect(workflow.content).not.toContain('secrets.GHCR_USERNAME');
+    expect(workflow.content).not.toContain('secrets.GHCR_TOKEN');
     expect(workflow.content).not.toContain('railway-github-action');
     expect(workflow.content).not.toContain('vars.MIGRATION_COMMAND');
   });
@@ -197,11 +202,16 @@ describe('github tools', () => {
       ...baseTarget,
       providerProjectId: 'do-app-id',
     }, { includeStep: false });
-    expect(digitalOceanWorkflow.requiredSecrets).toEqual(['DIGITALOCEAN_ACCESS_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN']);
+    expect(digitalOceanWorkflow.requiredSecrets).toEqual(['DIGITALOCEAN_ACCESS_TOKEN']);
     expect(digitalOceanWorkflow.requiredVariables).toEqual([]);
     expect(digitalOceanWorkflow.content).toContain("DO_APP_ID: 'do-app-id'");
     expect(digitalOceanWorkflow.content).toContain("registry_type: 'GHCR'");
     expect(digitalOceanWorkflow.content).toContain('docker/build-push-action@v6');
+    expect(digitalOceanWorkflow.content).toContain('packages: write');
+    expect(digitalOceanWorkflow.content).toContain('username: ${{ github.actor }}');
+    expect(digitalOceanWorkflow.content).toContain('password: ${{ secrets.GITHUB_TOKEN }}');
+    expect(digitalOceanWorkflow.content).not.toContain('secrets.GHCR_USERNAME');
+    expect(digitalOceanWorkflow.content).not.toContain('secrets.GHCR_TOKEN');
 
     const herokuWorkflow = buildBranchDeployWorkflow('heroku', {
       ...baseTarget,

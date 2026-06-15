@@ -18,6 +18,7 @@ export interface DeployOptions {
   environment: Environment;
   services?: Service[];
   envVars?: Record<string, string>;
+  verifyHttpHealth?: boolean;
   /** The hosting adapter to use for deployment (can be IProviderAdapter or IHostingAdapter) */
   adapter: IProviderAdapter | IHostingAdapter;
 }
@@ -31,6 +32,13 @@ export interface DeployResult {
   errors: string[];
   createdResources?: Array<{ provider: string; type: string; id?: string; name?: string; metadata?: Record<string, unknown> }>;
   rollback?: InfraTransactionRollbackResult;
+}
+
+interface HttpHealthResult {
+  ok: boolean;
+  url: string;
+  status?: number;
+  error?: string;
 }
 
 export class DeployOrchestrator {
@@ -406,7 +414,7 @@ export class DeployOrchestrator {
             services[service.name] = {
               ...existingServiceBinding,
               serviceId: result.externalId,
-              url: result.url,
+              url: result.url ?? existingServiceBinding.url,
               workloadKind: serviceWorkloadKind(service),
             };
             const deployData = (result.receipt.data ?? {}) as Record<string, unknown>;
@@ -494,22 +502,40 @@ export class DeployOrchestrator {
 
           const failures: string[] = [];
           const pending: string[] = [];
-          const health: Array<{ service: string; status: string; url?: string }> = [];
+          const health: Array<{ service: string; status: string; url?: string; http?: HttpHealthResult }> = [];
 
           for (const service of services) {
-            const deployTarget = bindings.services?.[service.name]?.serviceId;
+            const serviceBinding = bindings.services?.[service.name];
+            const deployTarget = serviceBinding?.serviceId;
             if (!deployTarget) {
               continue;
             }
 
             const check = await this.waitForHealthyDeployment(options, environment, deployTarget);
-            health.push({ service: service.name, status: check.status, url: check.url });
+            const url = check.url ?? serviceBinding?.url;
+            const entry: { service: string; status: string; url?: string; http?: HttpHealthResult } = {
+              service: service.name,
+              status: check.status,
+              url,
+            };
 
             if (check.status === 'failed' || check.status === 'canceled' || check.status === 'cancelled') {
               failures.push(`${service.name}: status=${check.status}`);
             } else if (check.status !== 'deployed') {
               pending.push(`${service.name}: status=${check.status}`);
+            } else if (options.verifyHttpHealth === true && serviceWorkloadKind(service) === 'web' && service.buildConfig.healthCheckPath) {
+              if (!url) {
+                pending.push(`${service.name}: deployed but no URL is available for ${service.buildConfig.healthCheckPath}`);
+              } else {
+                const http = await this.checkHttpHealth(url, service.buildConfig.healthCheckPath);
+                entry.http = http;
+                if (!http.ok) {
+                  const detail = http.status ? `HTTP ${http.status}` : http.error ?? 'request failed';
+                  failures.push(`${service.name}: ${detail} at ${http.url}`);
+                }
+              }
             }
+            health.push(entry);
           }
 
           const warning = pending.length > 0
@@ -572,5 +598,56 @@ export class DeployOrchestrator {
     }
 
     return last;
+  }
+
+  private buildHealthUrl(baseUrl: string, healthCheckPath: string): string {
+    const path = healthCheckPath.trim() || '/';
+    if (/^https?:\/\//i.test(path)) {
+      return path;
+    }
+    const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+    return new URL(path, normalizedBase).toString();
+  }
+
+  private async checkHttpHealth(baseUrl: string, healthCheckPath: string): Promise<HttpHealthResult> {
+    let url: string;
+    try {
+      url = this.buildHealthUrl(baseUrl, healthCheckPath);
+    } catch (error) {
+      return {
+        ok: false,
+        url: `${baseUrl}${healthCheckPath}`,
+        error: `Invalid health check URL: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      if (response.ok) {
+        return { ok: true, url, status: response.status };
+      }
+      const body = await response.text().catch(() => '');
+      const excerpt = body.replace(/\s+/g, ' ').trim().slice(0, 200);
+      return {
+        ok: false,
+        url,
+        status: response.status,
+        ...(excerpt ? { error: excerpt } : {}),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        url,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }
