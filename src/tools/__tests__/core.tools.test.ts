@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -172,6 +172,104 @@ describe('hv_spec_set / hv_spec_get', () => {
     expect(set.hint).toContain('Connect required providers first');
     expect(set.next).toEqual(['hv_connect', 'hv_plan']);
     await t.close();
+  });
+
+  it('hydrates a local project from repo-backed desired state and sees teammate spec edits', async () => {
+    const oldCwd = process.cwd();
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const repoDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'hypervibe-team-spec-')));
+    mkdirSync(path.join(repoDir, '.git'));
+    mkdirSync(path.join(repoDir, '.hypervibe'));
+    const specPath = path.join(repoDir, '.hypervibe', 'spec.json');
+    const repoSpec = {
+      version: 1,
+      project: 'team-shared-app',
+      gitRemoteUrl: 'git@github.com:davejohnson/team-shared-app.git',
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: { NODE_ENV: 'production' },
+        },
+      },
+    };
+    writeFileSync(specPath, `${JSON.stringify(repoSpec, null, 2)}\n`, 'utf8');
+    writeFileSync(path.join(repoDir, '.hypervibe', 'bindings.json'), `${JSON.stringify({
+      version: 1,
+      project: 'team-shared-app',
+      environments: {
+        production: {
+          platformBindings: {
+            provider: 'railway',
+            projectId: 'rp-shared',
+            environmentId: 're-production',
+            apiToken: 'should-not-hydrate',
+            connectionString: 'postgres://user:secret@example.com/db',
+            services: { web: { serviceId: 'svc-web', deployToken: 'should-not-hydrate' } },
+          },
+        },
+      },
+    }, null, 2)}\n`, 'utf8');
+
+    let t: Awaited<ReturnType<typeof makeClient>> | null = null;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      process.chdir(repoDir);
+      t = await makeClient();
+
+      const get = await t.call('hv_spec_get', {});
+      expect(get.ok).toBe(true);
+      expect(get.data.project.name).toBe('team-shared-app');
+      expect(get.data.project.gitRemoteUrl).toBe('git@github.com:davejohnson/team-shared-app.git');
+      expect(get.data.specSource).toEqual({ kind: 'repo', path: specPath });
+      const project = new ProjectRepository().findByName('team-shared-app')!;
+      expect(project).toBeTruthy();
+      expect(new EnvironmentRepository().findByProjectAndName(project.id, 'production')!.platformBindings).toMatchObject({
+        provider: 'railway',
+        projectId: 'rp-shared',
+        environmentId: 're-production',
+        services: { web: { serviceId: 'svc-web' } },
+      });
+      const hydratedBindings = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!.platformBindings as {
+        apiToken?: string;
+        connectionString?: string;
+        services?: { web?: { deployToken?: string } };
+      };
+      expect(hydratedBindings.apiToken).toBeUndefined();
+      expect(hydratedBindings.connectionString).toBeUndefined();
+      expect(hydratedBindings.services?.web?.deployToken).toBeUndefined();
+
+      writeFileSync(specPath, `${JSON.stringify({
+        ...repoSpec,
+        environments: {
+          production: {
+            ...repoSpec.environments.production,
+            services: {
+              ...repoSpec.environments.production.services,
+              daily: { workloadKind: 'cron', startCommand: 'npm run cron', cronSchedule: '0 8 * * *' },
+            },
+          },
+        },
+      }, null, 2)}\n`, 'utf8');
+
+      const updated = await t.call('hv_spec_get', {});
+      expect(updated.ok).toBe(true);
+      expect(updated.data.revision).toBe(2);
+      expect(updated.data.environments.production.services).toEqual(['web', 'daily']);
+      expect(updated.data.spec.environments.production.services.daily).toMatchObject({
+        workloadKind: 'cron',
+        cronSchedule: '0 8 * * *',
+      });
+    } finally {
+      if (t) await t.close();
+      process.chdir(oldCwd);
+      if (oldDisable === undefined) {
+        delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      } else {
+        process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
+      }
+      rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 });
 

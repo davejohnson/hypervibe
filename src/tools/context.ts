@@ -12,6 +12,9 @@ import { adapterFactory } from '../domain/services/adapter.factory.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import { resolveProject } from '../domain/services/resolve-project.js';
+import { detectGitRemoteUrl } from '../lib/git-remote.js';
+import { readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
+import { readRepoBindingsFile } from '../domain/spec/repo-bindings-file.js';
 import { HvError } from './respond.js';
 
 export interface Repos {
@@ -59,11 +62,84 @@ export function createToolContext(): ToolContext {
     audit: new AuditRepository(),
   };
 
+  const firstHostingProvider = (spec: import('../domain/spec/spec.schema.js').ProjectSpec): string => {
+    return Object.values(spec.environments)[0]?.hosting.provider ?? 'cloudrun';
+  };
+
+  const hydrateRepoBindings = (project: Project): void => {
+    let bindings;
+    try {
+      bindings = readRepoBindingsFile(project.name);
+    } catch {
+      return;
+    }
+    if (!bindings) return;
+
+    for (const [envName, entry] of Object.entries(bindings.document.environments)) {
+      const existing = repos.environments.findByProjectAndName(project.id, envName);
+      const platformBindings = entry.platformBindings;
+      if (!existing) {
+        repos.environments.create({ projectId: project.id, name: envName, platformBindings });
+        continue;
+      }
+      if (JSON.stringify(existing.platformBindings) !== JSON.stringify(platformBindings)) {
+        repos.environments.update(existing.id, { platformBindings });
+      }
+    }
+  };
+
+  const resolveRepoBackedProject = (ref?: string): Project | null => {
+    let repoSpec;
+    try {
+      repoSpec = readRepoSpecFile();
+    } catch {
+      return null;
+    }
+    if (!repoSpec) return null;
+    if (ref && ref !== repoSpec.spec.project) return null;
+
+    const existing = repos.projects.findByName(repoSpec.spec.project);
+    const gitRemoteUrl = repoSpec.spec.gitRemoteUrl ?? detectGitRemoteUrl() ?? undefined;
+    if (existing) {
+      const project = gitRemoteUrl && existing.gitRemoteUrl !== gitRemoteUrl
+        ? repos.projects.update(existing.id, { gitRemoteUrl }) ?? existing
+        : existing;
+      hydrateRepoBindings(project);
+      return project;
+    }
+
+    const project = repos.projects.create({
+      name: repoSpec.spec.project,
+      defaultPlatform: firstHostingProvider(repoSpec.spec),
+      ...(gitRemoteUrl ? { gitRemoteUrl } : {}),
+    });
+    hydrateRepoBindings(project);
+    return project;
+  };
+
+  const hydrateAndReturn = (project: Project | null): Project | null => {
+    if (project) {
+      hydrateRepoBindings(project);
+    }
+    return project;
+  };
+
   const resolve = (opts?: { project?: string }): Project | null => {
     const ref = opts?.project?.trim();
-    if (!ref) return resolveProject({});
+    if (!ref) {
+      const remoteUrl = detectGitRemoteUrl();
+      if (remoteUrl) {
+        const remoteProject = repos.projects.findByGitRemoteUrl(remoteUrl);
+        if (remoteProject) {
+          return hydrateAndReturn(remoteProject);
+        }
+      }
+      const repoBacked = resolveRepoBackedProject();
+      if (repoBacked) return repoBacked;
+      return hydrateAndReturn(resolveProject({}));
+    }
     // Accept either a project id or name in one field.
-    return repos.projects.findById(ref) ?? repos.projects.findByName(ref) ?? null;
+    return hydrateAndReturn(repos.projects.findById(ref) ?? repos.projects.findByName(ref)) ?? resolveRepoBackedProject(ref);
   };
 
   return {

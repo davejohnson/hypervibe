@@ -140,6 +140,32 @@ Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/healt
 - Full generated catalog: `docs/TOOLS.md`
 - Regenerate after tool changes: `npm run build && npm run docs:tools`
 
+## Team-Shared Desired State
+
+Hypervibe treats infrastructure as a repo-backed definition, not as one user's private local state. When run from a git worktree, `hv_spec_set` writes the desired infrastructure shape to:
+
+```text
+.hypervibe/spec.json
+```
+
+Commit that file with the app. It is the shared source of truth for environments, services, cron jobs, databases, domains, email, env vars, deploy strategy, and migrations. When a teammate clones the repo and runs `hv_spec_get`, `hv_plan`, or `hv_status`, Hypervibe reads this file, creates a local project cache if needed, and reports any missing provider connections before apply.
+
+Hypervibe also maintains non-secret provider identity bindings in:
+
+```text
+.hypervibe/bindings.json
+```
+
+This file lets teammates observe and converge the same provider resources instead of planning duplicate projects/services. It is for non-secret IDs such as provider project IDs, environment IDs, service IDs, custom domain bindings, and CI workflow sync metadata. Credentials, tokens, passwords, database URLs, and secret values stay out of the repo and remain local/provider-side.
+
+Typical team flow:
+
+1. One person changes infrastructure through Hypervibe, such as adding a cron service.
+2. Hypervibe updates `.hypervibe/spec.json` and, after apply, `.hypervibe/bindings.json`.
+3. They commit those files.
+4. Teammates pull, run `hv_plan`, and see the same desired shape and provider bindings.
+5. Each teammate connects their own provider credentials locally with `hv_connect` when needed.
+
 ## Provider Credentials
 
 ### GitHub token permissions

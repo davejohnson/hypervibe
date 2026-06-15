@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
@@ -124,6 +124,60 @@ describe('SpecStore', () => {
 
     expect(store.getRevision(project.id, 1)!.environments.staging.services).not.toHaveProperty('worker');
     expect(store.getRevision(project.id, 1)!.gitRemoteUrl).toBe('git@github.com:davejohnson/spec-one.git');
+  });
+
+  it('writes repo-backed specs and imports file edits as new local revisions', () => {
+    const oldCwd = process.cwd();
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const repoDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'hypervibe-repo-spec-')));
+    mkdirSync(path.join(repoDir, '.git'));
+
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      process.chdir(repoDir);
+      const project = makeProject();
+      const store = new SpecStore();
+
+      const v1 = store.replace(project, {
+        version: 1,
+        project: project.name,
+        environments: { staging: { hosting: { provider: 'railway' }, services: { web: {} } } },
+      });
+
+      const specPath = path.join(repoDir, '.hypervibe', 'spec.json');
+      expect(v1.source).toEqual({ kind: 'repo', path: specPath });
+      expect(JSON.parse(readFileSync(specPath, 'utf8')).project).toBe(project.name);
+
+      const edited = {
+        ...v1.spec,
+        environments: {
+          staging: {
+            ...v1.spec.environments.staging,
+            services: {
+              ...v1.spec.environments.staging.services,
+              daily: { workloadKind: 'cron', startCommand: 'npm run cron', cronSchedule: '0 8 * * *' },
+            },
+          },
+        },
+      };
+      writeFileSync(specPath, `${JSON.stringify(edited, null, 2)}\n`, 'utf8');
+
+      const v2 = store.get(project)!;
+      expect(v2.revision).toBe(2);
+      expect(v2.source).toEqual({ kind: 'repo', path: specPath });
+      expect(v2.spec.environments.staging.services.daily).toMatchObject({
+        workloadKind: 'cron',
+        cronSchedule: '0 8 * * *',
+      });
+    } finally {
+      process.chdir(oldCwd);
+      if (oldDisable === undefined) {
+        delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      } else {
+        process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
+      }
+      rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 
   it('rejects invalid specs', () => {

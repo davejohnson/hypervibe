@@ -3,6 +3,8 @@ import { getDb } from '../sqlite.adapter.js';
 import { parseJsonColumn } from '../json.codec.js';
 import { platformBindingsColumnSchema } from '../column.schemas.js';
 import type { Environment, CreateEnvironmentInput } from '../../../domain/entities/environment.entity.js';
+import { ProjectRepository } from './project.repository.js';
+import { writeRepoBindingsForEnvironment } from '../../../domain/spec/repo-bindings-file.js';
 
 export class EnvironmentRepository {
   create(input: CreateEnvironmentInput): Environment {
@@ -22,7 +24,9 @@ export class EnvironmentRepository {
       now
     );
 
-    return this.findById(id)!;
+    const environment = this.findById(id)!;
+    this.syncRepoBindings(environment);
+    return environment;
   }
 
   findById(id: string): Environment | null {
@@ -60,7 +64,9 @@ export class EnvironmentRepository {
       id
     );
 
-    return this.findById(id);
+    const updated = this.findById(id);
+    if (updated) this.syncRepoBindings(updated);
+    return updated;
   }
 
   updatePlatformBindings(id: string, bindings: Record<string, unknown>): Environment | null {
@@ -77,7 +83,9 @@ export class EnvironmentRepository {
       WHERE id = ?
     `).run(JSON.stringify(merged), now, id);
 
-    return this.findById(id);
+    const updated = this.findById(id);
+    if (updated) this.syncRepoBindings(updated);
+    return updated;
   }
 
   delete(id: string): boolean {
@@ -95,5 +103,19 @@ export class EnvironmentRepository {
       createdAt: new Date(row.created_at as string),
       updatedAt: new Date(row.updated_at as string),
     };
+  }
+
+  private syncRepoBindings(environment: Environment): void {
+    if (Object.keys(environment.platformBindings).length === 0) {
+      return;
+    }
+    try {
+      const project = new ProjectRepository().findById(environment.projectId);
+      if (project) {
+        writeRepoBindingsForEnvironment(project, environment);
+      }
+    } catch (error) {
+      console.warn(`[hypervibe] Failed to sync repo bindings for environment ${environment.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }

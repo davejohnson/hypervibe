@@ -29,6 +29,7 @@ import {
 export interface EnvironmentPlan {
   planRunId: string;
   specRevision: number;
+  specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
   environmentName: string;
   /** True when the plan was diffed against live provider state. */
   verified: boolean;
@@ -314,6 +315,7 @@ export class PlanService {
     return {
       planRunId: run.id,
       specRevision: specResult.revision,
+      specSource: specResult.source ?? { kind: 'local' },
       environmentName,
       verified: observed !== null,
       observed,

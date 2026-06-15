@@ -1,0 +1,1 @@
+process.env.HYPERVIBE_DISABLE_REPO_SPEC ??= '1';

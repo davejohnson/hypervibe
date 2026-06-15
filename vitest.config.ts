@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    setupFiles: ['src/test/setup.ts'],
     include: ['src/**/*.test.ts', 'test/**/*.test.ts'],
     // Run tests sequentially to avoid state bleeding
     fileParallelism: false,

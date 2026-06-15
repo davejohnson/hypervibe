@@ -1,6 +1,7 @@
 import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
 import type { Project } from '../entities/project.entity.js';
 import { projectSpecSchema, type ProjectSpec, type EnvironmentSpec, type ServiceSpec } from './spec.schema.js';
+import { readRepoSpecFile, writeRepoSpecFile } from './repo-spec-file.js';
 
 /** Shape of the legacy policies.desiredState blob (pre-spec). */
 interface LegacyDesiredState {
@@ -139,6 +140,15 @@ export function deepMergeSpec(base: unknown, patch: unknown): unknown {
 export interface SpecResult {
   spec: ProjectSpec;
   revision: number;
+  source?: { kind: 'repo'; path: string } | { kind: 'local' };
+}
+
+function sameSpec(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function repoSpecMatchesProject(spec: ProjectSpec, project: Project): boolean {
+  return spec.project === project.name;
 }
 
 /**
@@ -154,11 +164,25 @@ export class SpecStore {
    * blob into revision 1 the first time a project is read.
    */
   get(project: Project): SpecResult | null {
+    const repoSpec = readRepoSpecFile();
+    if (repoSpec && repoSpecMatchesProject(repoSpec.spec, project)) {
+      const latest = this.repo.findLatest(project.id);
+      if (latest) {
+        const parsed = projectSpecSchema.safeParse(latest.document);
+        if (parsed.success && sameSpec(parsed.data, repoSpec.spec)) {
+          return { spec: repoSpec.spec, revision: latest.revision, source: { kind: 'repo', path: repoSpec.path } };
+        }
+      }
+
+      const row = this.repo.insert(project.id, (latest?.revision ?? 0) + 1, repoSpec.spec);
+      return { spec: repoSpec.spec, revision: row.revision, source: { kind: 'repo', path: repoSpec.path } };
+    }
+
     const latest = this.repo.findLatest(project.id);
     if (latest) {
       const parsed = projectSpecSchema.safeParse(latest.document);
       if (parsed.success) {
-        return { spec: parsed.data, revision: latest.revision };
+        return { spec: parsed.data, revision: latest.revision, source: { kind: 'local' } };
       }
       console.warn(`[hypervibe] Invalid spec document for project ${project.id} (revision ${latest.revision})`);
       return null;
@@ -167,7 +191,12 @@ export class SpecStore {
     const converted = desiredStateToSpec(project);
     if (!converted) return null;
     const row = this.repo.insert(project.id, 1, converted);
-    return { spec: converted, revision: row.revision };
+    const written = writeRepoSpecFile(converted);
+    return {
+      spec: converted,
+      revision: row.revision,
+      source: written ? { kind: 'repo', path: written.path } : { kind: 'local' },
+    };
   }
 
   getRevision(projectId: string, revision: number): ProjectSpec | null {
@@ -182,7 +211,12 @@ export class SpecStore {
     const parsed = projectSpecSchema.parse(spec);
     const latest = this.repo.findLatest(project.id);
     const row = this.repo.insert(project.id, (latest?.revision ?? 0) + 1, parsed);
-    return { spec: parsed, revision: row.revision };
+    const written = writeRepoSpecFile(parsed);
+    return {
+      spec: parsed,
+      revision: row.revision,
+      source: written ? { kind: 'repo', path: written.path } : { kind: 'local' },
+    };
   }
 
   /** Deep-merge a patch into the latest spec (or a fresh skeleton). */

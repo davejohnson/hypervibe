@@ -143,7 +143,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_spec_set',
-    'Create or update the desired-state spec for a project (the single source of truth that hv_plan diffs against live infrastructure). Merges by default; pass replace=true to overwrite. In a merge, set a key to null to delete it (e.g. remove a service).',
+    'Create or update the desired-state spec for a project (the single source of truth that hv_plan diffs against live infrastructure). When run inside a git worktree, Hypervibe writes .hypervibe/spec.json so teams share the same infrastructure intent. Merges by default; pass replace=true to overwrite. In a merge, set a key to null to delete it (e.g. remove a service).',
     {
       project: projectField,
       spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|rds|cloudsql|railway }, domain?, domainRegistration?: { provider: cloudflare, register?: boolean, years?, autoRenew?, privacyMode? }, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations? } } }. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows, while trigger "native" opts into provider-native repo integrations such as the Railway GitHub App. "manual" provisions infrastructure only.'),
@@ -192,6 +192,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         {
           project: { id: project.id, name: project.name, gitRemoteUrl: project.gitRemoteUrl ?? null },
           revision: result.revision,
+          specSource: result.source ?? { kind: 'local' },
           spec: result.spec,
           connections,
         },
@@ -207,7 +208,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_spec_get',
-    'Read the current desired-state spec and revision for a project.',
+    'Read the current desired-state spec and revision for a project. If .hypervibe/spec.json exists in the current git worktree, it is treated as the shared desired state and synced into the local cache.',
     { project: projectField },
     wrapHandler(async ({ project: projectRef }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -223,6 +224,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         project: { id: project.id, name: project.name, gitRemoteUrl },
         projectMeta: { gitRemoteUrl },
         revision: result.revision,
+        specSource: result.source ?? { kind: 'local' },
         spec: result.spec,
         connections,
         environments: Object.fromEntries(
@@ -239,7 +241,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_plan',
-    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. The returned planId is required by hv_apply.',
+    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply.',
     { project: projectField, env: envField },
     wrapHandler(async ({ project: projectRef, env }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -261,6 +263,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           planId: result.planRunId,
           environment: result.environmentName,
           specRevision: result.specRevision,
+          specSource: result.specSource ?? { kind: 'local' },
           verified: result.verified,
           summary: summarizeActions(result.actions),
           actions: result.actions,
@@ -278,7 +281,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_status',
-    'Show desired vs observed state for an environment: drift, unmanaged resources, and blocked connections. Read-only; does not persist a plan.',
+    'Show desired vs observed state for an environment: drift, unmanaged resources, and blocked connections. Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
     { project: projectField, env: envField },
     wrapHandler(async ({ project: projectRef, env }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -336,6 +339,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         {
           environment: envName,
           specRevision: specResult.revision,
+          specSource: specResult.source ?? { kind: 'local' },
           verified: observed !== null,
           inSync: drift.length === 0,
           summary: summarizeActions(diff.actions),
