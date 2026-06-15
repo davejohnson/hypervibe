@@ -31,6 +31,7 @@ export interface DesiredState {
   envVars?: Record<string, string>;
   deploy?: {
     strategy?: 'branch' | 'manual';
+    trigger?: 'ci' | 'native';
     branches?: {
       staging?: string;
       production?: string;

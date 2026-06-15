@@ -22,8 +22,8 @@ export interface SaveConnectionOutcome {
 }
 
 /**
- * Validate, encrypt, and upsert provider credentials (shared by the legacy
- * connection_create tool and hv_connect). Runs provider dependency
+ * Validate, encrypt, and upsert provider credentials for hv_connect.
+ * Runs provider dependency
  * installation hooks and writes an audit entry.
  */
 export async function saveConnection(
@@ -90,7 +90,7 @@ export type VerifyConnectionOutcome =
 
 /**
  * Verify a stored provider connection by instantiating its adapter and
- * calling verify() (shared by connection_verify and hv_connect). Updates the
+ * calling verify() for hv_connect action="verify". Updates the
  * connection status and writes audit entries.
  */
 export async function verifyConnection(provider: string, scope?: string): Promise<VerifyConnectionOutcome> {
@@ -100,7 +100,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
   if (!connection) {
     return {
       kind: 'not_found',
-      error: `No connection found for provider: ${provider} (${scopeDisplay}). Use connection_create first.`,
+      error: `No connection found for provider: ${provider} (${scopeDisplay}). Use hv_connect first. Recommended: export scalar tokens and pass credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
     };
   }
 

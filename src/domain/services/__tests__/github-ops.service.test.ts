@@ -12,6 +12,7 @@ import { ConnectionRepository } from '../../../adapters/db/repositories/connecti
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
 import { resolveBranchDeployTargets, buildBranchDeployWorkflow } from '../github-ops.service.js';
+import { SpecStore } from '../../spec/spec.store.js';
 
 type JsonObj = Record<string, unknown>;
 
@@ -79,7 +80,16 @@ describe('github tools', () => {
 
     const { targets, migration } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
     expect(targets).toEqual([
-      { environmentName: 'production', kind: 'production', branch: 'release' },
+      {
+        environmentName: 'production',
+        kind: 'production',
+        branch: 'release',
+        serviceNames: [],
+        providerProjectId: undefined,
+        providerEnvironmentId: undefined,
+        providerServiceIds: [],
+        providerServiceArns: [],
+      },
     ]);
     expect(migration.includeStep).toBe(true);
     expect(migration.command).toBe('npm run migrate');
@@ -88,12 +98,128 @@ describe('github tools', () => {
     expect(workflow.template).toBe('deploy-railway-production');
     expect(workflow.branch).toBe('release');
     expect(workflow.environment).toBe('production');
-    expect(workflow.requiredSecrets).toEqual(['RAILWAY_TOKEN', 'DATABASE_URL']);
-    expect(workflow.requiredVariables).toEqual([]);
+    expect(workflow.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN', 'DATABASE_URL']);
+    expect(workflow.requiredVariables).toEqual(['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS']);
     expect(workflow.content).toContain('branches: [release]');
     expect(workflow.content).toContain('environment: production');
     expect(workflow.content).toContain('run: npm run migrate');
+    expect(workflow.content).toContain('docker/build-push-action@v6');
+    expect(workflow.content).toContain('serviceInstanceUpdate');
+    expect(workflow.content).not.toContain('railway-github-action');
     expect(workflow.content).not.toContain('vars.MIGRATION_COMMAND');
+  });
+
+  it('embeds Railway environment and service ids from stored specs when available', () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const project = projectRepo.create({
+      name: 'billforge',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/davejohnson/billforge',
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project',
+        environmentId: 'rail-env',
+        services: {
+          web: { serviceId: 'rail-web' },
+          worker: { serviceId: 'rail-worker' },
+        },
+      },
+    });
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {}, worker: { workloadKind: 'worker' } },
+          deploy: { strategy: 'branch', branch: 'main' },
+        },
+      },
+    });
+
+    const { targets } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
+    expect(targets[0].providerEnvironmentId).toBe('rail-env');
+    expect(targets[0].providerServiceIds).toEqual(['rail-web', 'rail-worker']);
+
+    const workflow = buildBranchDeployWorkflow('railway', targets[0], { includeStep: false });
+    expect(workflow.requiredVariables).toEqual([]);
+    expect(workflow.content).toContain("RAILWAY_ENVIRONMENT_ID: 'rail-env'");
+    expect(workflow.content).toContain("RAILWAY_SERVICE_IDS: 'rail-web,rail-worker'");
+  });
+
+  it('builds provider API branch deploy workflows without provider CLIs', () => {
+    const baseTarget = {
+      environmentName: 'production',
+      kind: 'production' as const,
+      branch: 'main',
+      serviceNames: ['web'],
+      providerProjectId: undefined,
+      providerEnvironmentId: undefined,
+      providerServiceIds: [],
+      providerServiceArns: [],
+    };
+
+    const renderWorkflow = buildBranchDeployWorkflow('render', {
+      ...baseTarget,
+      providerServiceIds: ['srv-render'],
+    }, { includeStep: false });
+    expect(renderWorkflow.requiredSecrets).toEqual(['RENDER_API_KEY']);
+    expect(renderWorkflow.requiredVariables).toEqual([]);
+    expect(renderWorkflow.content).toContain("RENDER_SERVICE_IDS: 'srv-render'");
+    expect(renderWorkflow.content).toContain('https://api.render.com/v1/services/');
+    expect(renderWorkflow.content).not.toContain('RENDER_DEPLOY_HOOK_URL');
+
+    const cloudRunWorkflow = buildBranchDeployWorkflow('cloudrun', {
+      ...baseTarget,
+      providerServiceIds: ['cloudrun-web'],
+    }, { includeStep: false });
+    expect(cloudRunWorkflow.requiredSecrets).toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION']);
+    expect(cloudRunWorkflow.requiredVariables).toEqual([]);
+    expect(cloudRunWorkflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'cloudrun-web'");
+    expect(cloudRunWorkflow.content).toContain('https://run.googleapis.com/v2/projects/');
+    expect(cloudRunWorkflow.content).toContain('docker/build-push-action@v6');
+
+    const appRunnerWorkflow = buildBranchDeployWorkflow('apprunner', {
+      ...baseTarget,
+      providerServiceArns: ['arn:aws:apprunner:us-east-1:123456789012:service/app/abc'],
+    }, { includeStep: false });
+    expect(appRunnerWorkflow.requiredSecrets).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION']);
+    expect(appRunnerWorkflow.requiredVariables).toEqual([]);
+    expect(appRunnerWorkflow.content).toContain("APPRUNNER_SERVICE_ARNS: 'arn:aws:apprunner:us-east-1:123456789012:service/app/abc'");
+    expect(appRunnerWorkflow.content).toContain("appRunnerRequest('UpdateService'");
+
+    const digitalOceanWorkflow = buildBranchDeployWorkflow('digitalocean', {
+      ...baseTarget,
+      providerProjectId: 'do-app-id',
+    }, { includeStep: false });
+    expect(digitalOceanWorkflow.requiredSecrets).toEqual(['DIGITALOCEAN_ACCESS_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN']);
+    expect(digitalOceanWorkflow.requiredVariables).toEqual([]);
+    expect(digitalOceanWorkflow.content).toContain("DO_APP_ID: 'do-app-id'");
+    expect(digitalOceanWorkflow.content).toContain("registry_type: 'GHCR'");
+    expect(digitalOceanWorkflow.content).toContain('docker/build-push-action@v6');
+
+    const herokuWorkflow = buildBranchDeployWorkflow('heroku', {
+      ...baseTarget,
+      providerProjectId: 'heroku-app-id',
+    }, { includeStep: false });
+    expect(herokuWorkflow.requiredSecrets).toEqual(['HEROKU_API_KEY']);
+    expect(herokuWorkflow.requiredVariables).toEqual([]);
+    expect(herokuWorkflow.content).toContain("HEROKU_APP: 'heroku-app-id'");
+    expect(herokuWorkflow.content).toContain('registry.heroku.com');
+
+    const combinedContent = [
+      renderWorkflow.content,
+      cloudRunWorkflow.content,
+      appRunnerWorkflow.content,
+      digitalOceanWorkflow.content,
+      herokuWorkflow.content,
+    ].join('\n');
+    expect(combinedContent).not.toMatch(/railway-github-action|vercel deploy|doctl apps|gcloud |heroku container|heroku git/);
   });
 
   it('hv_ci_setup deploy-branch fails fast when the GitHub connection is invalid', async () => {

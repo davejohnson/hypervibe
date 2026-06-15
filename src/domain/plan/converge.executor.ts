@@ -90,6 +90,7 @@ export function fingerprintObservedState(observed: ObservedState): string {
         workloadKind: s.workloadKind,
         customDomains: [...s.customDomains].sort(),
         config: s.config,
+        source: s.source ?? null,
         envVarHashes: Object.fromEntries(Object.entries(s.envVarHashes).sort(([a], [b]) => a.localeCompare(b))),
       })),
     databases: [...observed.databases]

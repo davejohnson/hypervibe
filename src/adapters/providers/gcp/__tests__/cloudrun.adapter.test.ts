@@ -702,10 +702,207 @@ describe('CloudRunAdapter', () => {
     const patchBody = JSON.parse(String(patchCall?.[1]?.body));
     expect(patchBody).not.toHaveProperty('spec');
     expect(patchBody.template.containers[0].image).toBe('us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:main');
-    expect(patchBody.template.containers[0].env).toEqual([
-      { name: 'DATABASE_URL', value: 'postgres://new' },
-      { name: 'SECRET_VALUE', valueSource: { secretKeyRef: { secret: 'secret', version: 'latest' } } },
-    ]);
+    expect(patchBody.template.containers[0].env).toContainEqual({ name: 'DATABASE_URL', value: 'postgres://new' });
+    expect(patchBody.template.containers[0].env).toContainEqual({
+      name: 'SECRET_VALUE',
+      valueSource: { secretKeyRef: { secret: 'secret', version: 'latest' } },
+    });
+  });
+
+  it('removes stale Cloud SQL wiring when syncing Supabase database vars', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key_id: 'key-id',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+        client_id: 'client-id',
+        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+        token_uri: 'https://oauth2.googleapis.com/token',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url.includes('run.googleapis.com') && method === 'GET') {
+        return Response.json({
+          name: 'gcp-project-web',
+          template: {
+            containers: [{
+              image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:main',
+              env: [
+                { name: 'DATABASE_URL', value: 'postgres://old-cloudsql' },
+                { name: 'CLOUD_SQL_CONNECTION_NAME', value: 'gcp-project:us-central1:app' },
+                { name: 'INSTANCE_CONNECTION_NAME', value: 'gcp-project:us-central1:app' },
+                { name: 'NODE_ENV', value: 'production' },
+              ],
+              volumeMounts: [
+                { name: 'cloudsql', mountPath: '/cloudsql' },
+                { name: 'cache', mountPath: '/cache' },
+              ],
+              resources: { limits: { cpu: '1', memory: '512Mi' } },
+            }],
+            volumes: [
+              { name: 'cloudsql', cloudSqlInstance: { instances: ['gcp-project:us-central1:app'] } },
+              { name: 'cache', emptyDir: {} },
+            ],
+          },
+        });
+      }
+      if (url.includes('run.googleapis.com') && method === 'PATCH') {
+        return Response.json({ name: 'gcp-project-web' });
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const now = new Date();
+    const environment: Environment = {
+      id: 'env-1',
+      projectId: 'project-1',
+      name: 'production',
+      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const service: Service = {
+      id: 'service-1',
+      projectId: 'project-1',
+      name: 'web',
+      buildConfig: { builder: 'dockerfile' },
+      envVarSpec: {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await adapter.setEnvVars(environment, service, {
+      DATABASE_URL: 'postgresql://postgres:pw@db.supabase.co:5432/postgres',
+      DIRECT_URL: 'postgresql://postgres:pw@db.supabase.co:5432/postgres',
+      DATABASE_HOST: 'db.supabase.co',
+      PGHOST: 'db.supabase.co',
+      DATABASE_SSL: 'true',
+    });
+
+    expect(result.success).toBe(true);
+    const patchCall = fetchMock.mock.calls.find(([url, init]) =>
+      String(url).includes('run.googleapis.com') && init?.method === 'PATCH'
+    );
+    expect(String(patchCall?.[0])).toContain('updateMask=template.containers,template.volumes');
+    const patchBody = JSON.parse(String(patchCall?.[1]?.body));
+    const container = patchBody.template.containers[0];
+    const env = Object.fromEntries(container.env.map((entry: { name: string; value?: string }) => [entry.name, entry.value]));
+    expect(env.DATABASE_URL).toBe('postgresql://postgres:pw@db.supabase.co:5432/postgres');
+    expect(env.DATABASE_SSL).toBe('true');
+    expect(env.CLOUD_SQL_CONNECTION_NAME).toBeUndefined();
+    expect(env.INSTANCE_CONNECTION_NAME).toBeUndefined();
+    expect(env.NODE_ENV).toBe('production');
+    expect(container.volumeMounts).toEqual([{ name: 'cache', mountPath: '/cache' }]);
+    expect(patchBody.template.volumes).toEqual([{ name: 'cache', emptyDir: {} }]);
+  });
+
+  it('removes stale Supabase SSL and pooler vars when syncing Cloud SQL database vars', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key_id: 'key-id',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+        client_id: 'client-id',
+        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+        token_uri: 'https://oauth2.googleapis.com/token',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+
+      if (url.includes('run.googleapis.com') && method === 'GET') {
+        return Response.json({
+          name: 'gcp-project-web',
+          template: {
+            containers: [{
+              image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:main',
+              env: [
+                { name: 'DATABASE_URL', value: 'postgresql://postgres:pw@db.supabase.co:5432/postgres' },
+                { name: 'DIRECT_URL', value: 'postgresql://postgres:pw@db.supabase.co:5432/postgres' },
+                { name: 'DATABASE_POOLER_URL', value: 'postgresql://postgres:pw@db.supabase.co:6543/postgres?pgbouncer=true' },
+                { name: 'DATABASE_SSL', value: 'true' },
+                { name: 'NODE_ENV', value: 'production' },
+              ],
+              resources: { limits: { cpu: '1', memory: '512Mi' } },
+            }],
+          },
+        });
+      }
+      if (url.includes('run.googleapis.com') && method === 'PATCH') {
+        return Response.json({ name: 'gcp-project-web' });
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const now = new Date();
+    const environment: Environment = {
+      id: 'env-1',
+      projectId: 'project-1',
+      name: 'production',
+      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const service: Service = {
+      id: 'service-1',
+      projectId: 'project-1',
+      name: 'web',
+      buildConfig: { builder: 'dockerfile' },
+      envVarSpec: {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await adapter.setEnvVars(environment, service, {
+      DATABASE_URL: 'postgresql://app:pw@/app?host=%2Fcloudsql%2Fgcp-project%3Aus-central1%3Aapp',
+      DIRECT_URL: 'postgresql://app:pw@/app?host=%2Fcloudsql%2Fgcp-project%3Aus-central1%3Aapp',
+      CLOUD_SQL_CONNECTION_NAME: 'gcp-project:us-central1:app',
+      INSTANCE_CONNECTION_NAME: 'gcp-project:us-central1:app',
+      DATABASE_HOST: '/cloudsql/gcp-project:us-central1:app',
+      PGHOST: '/cloudsql/gcp-project:us-central1:app',
+    });
+
+    expect(result.success).toBe(true);
+    const patchCall = fetchMock.mock.calls.find(([url, init]) =>
+      String(url).includes('run.googleapis.com') && init?.method === 'PATCH'
+    );
+    const patchBody = JSON.parse(String(patchCall?.[1]?.body));
+    const container = patchBody.template.containers[0];
+    const env = Object.fromEntries(container.env.map((entry: { name: string; value?: string }) => [entry.name, entry.value]));
+    expect(env.DATABASE_URL).toContain('/app?host=%2Fcloudsql%2Fgcp-project%3Aus-central1%3Aapp');
+    expect(env.DATABASE_SSL).toBeUndefined();
+    expect(env.DATABASE_POOLER_URL).toBeUndefined();
+    expect(env.CLOUD_SQL_CONNECTION_NAME).toBe('gcp-project:us-central1:app');
+    expect(env.NODE_ENV).toBe('production');
+    expect(container.volumeMounts).toContainEqual({ name: 'cloudsql', mountPath: '/cloudsql' });
+    expect(patchBody.template.volumes).toContainEqual({
+      name: 'cloudsql',
+      cloudSqlInstance: { instances: ['gcp-project:us-central1:app'] },
+    });
   });
 
   it('fails migration jobs clearly when no service image is recorded', async () => {

@@ -23,7 +23,7 @@ export function getAppStoreConnectAdapter(scopeHint?: string): { adapter: AppSto
   const connection = connectionRepo.findBestMatch('appstoreconnect', scopeHint);
   if (!connection) {
     return {
-      error: 'No App Store Connect connection found. Use connection_create with provider=appstoreconnect first. ' +
+      error: 'No App Store Connect connection found. Use hv_connect provider=appstoreconnect credentialsRef="file:/absolute/path/to/appstoreconnect.json" first. Raw credentials={...} is still accepted if intentional. ' +
         'You need an App Store Connect API key: https://appstoreconnect.apple.com/access/api',
     };
   }

@@ -31,6 +31,7 @@ describe('desiredStateToSpec', () => {
     const project = {
       name: 'myapp',
       defaultPlatform: 'railway',
+      gitRemoteUrl: 'git@github.com:davejohnson/myapp.git',
       policies: {
         desiredState: {
           environmentName: 'production',
@@ -49,6 +50,7 @@ describe('desiredStateToSpec', () => {
 
     const spec = desiredStateToSpec(project)!;
     expect(spec.version).toBe(1);
+    expect(spec.gitRemoteUrl).toBe('git@github.com:davejohnson/myapp.git');
     const env = spec.environments.production;
     expect(env.hosting.provider).toBe('railway');
     expect(env.services.api).toMatchObject({ workloadKind: 'web', startCommand: 'npm start', public: true });
@@ -106,17 +108,22 @@ describe('SpecStore', () => {
     const v1 = store.replace(project, {
       version: 1,
       project: project.name,
+      gitRemoteUrl: 'git@github.com:davejohnson/spec-one.git',
       environments: { staging: { hosting: { provider: 'railway' }, services: { api: {} } } },
     });
     expect(v1.revision).toBe(1);
+    expect(v1.spec.gitRemoteUrl).toBe('git@github.com:davejohnson/spec-one.git');
 
     const v2 = store.merge(project, {
+      gitRemoteUrl: 'https://github.com/davejohnson/spec-two.git',
       environments: { staging: { services: { worker: { workloadKind: 'worker' } } } },
     });
     expect(v2.revision).toBe(2);
+    expect(v2.spec.gitRemoteUrl).toBe('https://github.com/davejohnson/spec-two.git');
     expect(Object.keys(v2.spec.environments.staging.services)).toEqual(['api', 'worker']);
 
     expect(store.getRevision(project.id, 1)!.environments.staging.services).not.toHaveProperty('worker');
+    expect(store.getRevision(project.id, 1)!.gitRemoteUrl).toBe('git@github.com:davejohnson/spec-one.git');
   });
 
   it('rejects invalid specs', () => {

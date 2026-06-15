@@ -678,6 +678,7 @@ describe('infra_apply multi-service convergence', () => {
       setupEmail: false,
       deploy: {
         strategy: 'branch',
+        trigger: 'native',
         branches: {
           production: 'main',
         },
@@ -688,6 +689,7 @@ describe('infra_apply multi-service convergence', () => {
     expect(payload.success).toBe(true);
     expect(payload.deploySource).toEqual({
       strategy: 'branch',
+      trigger: 'native',
       repo: 'davejohnson/billforge',
       branch: 'main',
       services: ['web', 'worker'],
@@ -696,6 +698,13 @@ describe('infra_apply multi-service convergence', () => {
       [{ serviceId: 'rail-web', repo: 'davejohnson/billforge', branch: 'main' }],
       [{ serviceId: 'rail-worker', repo: 'davejohnson/billforge', branch: 'main' }],
     ]);
+
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    const bindings = environment.platformBindings as {
+      services?: Record<string, { source?: { repo?: string; branch?: string } }>;
+    };
+    expect(bindings.services?.web?.source).toEqual({ repo: 'davejohnson/billforge', branch: 'main' });
+    expect(bindings.services?.worker?.source).toEqual({ repo: 'davejohnson/billforge', branch: 'main' });
   });
 
   it('returns Railway GitHub app guidance when repo-linked deploy source access is denied', async () => {
@@ -840,6 +849,7 @@ describe('infra_apply multi-service convergence', () => {
       setupEmail: false,
       deploy: {
         strategy: 'branch',
+        trigger: 'native',
         branches: {
           production: 'main',
         },
@@ -855,7 +865,11 @@ describe('infra_apply multi-service convergence', () => {
       helpTool: 'railway_setup_help',
       repo: 'davejohnson/billforge',
     });
-    expect(summary.nextSteps).toContain('Then rerun infra_apply or setup_configure.');
+    const nextSteps = summary.nextSteps as string[];
+    expect(nextSteps.some((step) => step.includes('grant it access to davejohnson/billforge'))).toBe(true);
+    expect(nextSteps.some((step) => step.includes('project member has connected their GitHub account'))).toBe(true);
+    expect(nextSteps.some((step) => step.includes('pending permission updates'))).toBe(true);
+    expect(nextSteps.some((step) => step.includes('rerun hv_status or hv_plan'))).toBe(true);
   });
 
   it('attaches a Railway custom domain and syncs the required DNS records to Cloudflare', async () => {

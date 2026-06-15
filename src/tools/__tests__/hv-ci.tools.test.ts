@@ -105,9 +105,85 @@ describe('hv_ci_setup', () => {
     expect(res.data.workflows).toEqual([
       expect.objectContaining({ template: 'deploy-railway-production', branch: 'release', path: '.github/workflows/deploy-railway-production.yml', created: true }),
     ]);
-    expect(res.data.requiredSecrets).toContain('RAILWAY_TOKEN');
+    expect(res.data.requiredSecrets).toEqual(expect.arrayContaining(['RAILWAY_API_TOKEN', 'GHCR_USERNAME', 'GHCR_TOKEN']));
+    expect(res.data.requiredSecrets).not.toContain('RAILWAY_TOKEN');
+    expect(createFile.mock.calls[0][3]).toContain('serviceInstanceUpdate');
+    expect(createFile.mock.calls[0][3]).toContain('docker/build-push-action@v6');
+    expect(createFile.mock.calls[0][3]).not.toContain('railway-github-action');
     expect(createFile).toHaveBeenCalledTimes(1);
     expect(protect).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('accepts statusChecks=false for branch-deploy setup', async () => {
+    const project = seedProject({
+      desiredState: {
+        deploy: { strategy: 'branch', branches: { production: 'release' } },
+      },
+    });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, login: 'davejohnson' });
+    vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: true, updated: false } as any);
+    const protect = vi.spyOn(GitHubAdapter.prototype, 'updateBranchProtection').mockResolvedValue();
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_setup', {
+      project: 'billforge',
+      kind: 'deploy-branch',
+      config: { provider: 'railway', protectBranches: true, statusChecks: false },
+    });
+    expect(res.ok).toBe(true);
+    expect(protect).toHaveBeenCalledWith('davejohnson', 'billforge', 'release', expect.objectContaining({
+      requireStatusChecks: false,
+      statusChecks: [],
+    }));
+    await t.close();
+  });
+
+  it('writes cloud provider API workflows and syncs verified provider secrets', async () => {
+    const project = new ProjectRepository().create({
+      name: 'cloudapp',
+      defaultPlatform: 'cloudrun',
+      gitRemoteUrl: 'https://github.com/davejohnson/cloudapp',
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        services: {
+          web: { serviceId: 'gcp-project-web' },
+        },
+      },
+    });
+    const connectionRepo = new ConnectionRepository();
+    const cloudRunConnection = connectionRepo.create({
+      provider: 'cloudrun',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        credentials: '{"client_email":"deploy@gcp-project.iam.gserviceaccount.com","private_key":"-----BEGIN PRIVATE KEY-----\\nkey\\n-----END PRIVATE KEY-----\\n"}',
+        projectId: 'gcp-project',
+        region: 'us-central1',
+      }),
+    });
+    connectionRepo.updateStatus(cloudRunConnection.id, 'verified');
+
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, login: 'davejohnson' });
+    const createFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: true, updated: false } as any);
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_setup', { project: 'cloudapp', kind: 'deploy-branch', config: { provider: 'cloudrun' } });
+    expect(res.ok).toBe(true);
+    expect(res.data.requiredSecrets).toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION']);
+    expect(res.data.requiredVariables).toEqual([]);
+    expect(res.data.syncedSecrets).toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION']);
+    expect(res.data.manualSecrets).toEqual([]);
+    expect(setSecret).toHaveBeenCalledTimes(3);
+    expect(createFile.mock.calls[0][3]).toContain("CLOUDRUN_SERVICE_NAMES: 'gcp-project-web'");
+    expect(createFile.mock.calls[0][3]).toContain('https://run.googleapis.com/v2/projects/');
+    expect(createFile.mock.calls[0][3]).not.toContain('gcloud ');
     await t.close();
   });
 

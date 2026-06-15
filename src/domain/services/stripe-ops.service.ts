@@ -8,7 +8,7 @@ const connectionRepo = new ConnectionRepository();
 export function getStripeAdapter(): { adapter: StripeAdapter; credentials: StripeCredentials } | { error: string } {
   const connection = connectionRepo.findByProvider('stripe');
   if (!connection) {
-    return { error: 'No Stripe connection found. Use connection_create with provider=stripe first.' };
+    return { error: 'No Stripe connection found. Use hv_connect provider=stripe first. Recommended: export the API key and pass credentialsRef="env:STRIPE_SECRET_KEY" credentialsKey="apiKey"; raw credentials={...} is still accepted if intentional.' };
   }
 
   const secretStore = getSecretStore();

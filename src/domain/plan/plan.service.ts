@@ -16,6 +16,7 @@ import { classifyDeployEnvironment, resolveGitDeploySource } from '../services/d
 import { diffEnvironment } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
 import { fingerprintObservedState, type PlanRunDocument } from './converge.executor.js';
+import { buildDatabaseEnvVarsFromComponent } from '../services/database-env.js';
 
 export interface EnvironmentPlan {
   planRunId: string;
@@ -29,6 +30,13 @@ export interface EnvironmentPlan {
   warnings: string[];
   /** Missing/unverified provider connections that block apply. */
   blocked: Array<{ provider: string; reason: string }>;
+}
+
+function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Project {
+  const gitRemoteUrl = spec.gitRemoteUrl?.trim();
+  return gitRemoteUrl && gitRemoteUrl !== project.gitRemoteUrl
+    ? { ...project, gitRemoteUrl }
+    : project;
 }
 
 /**
@@ -127,7 +135,7 @@ export class PlanService {
       if (!verified) {
         blocked.push({
           provider,
-          reason: `No verified ${provider} connection. Add one with hv_connect.`,
+          reason: `No verified ${provider} connection. Add one with hv_connect. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
         });
       }
     }
@@ -135,8 +143,8 @@ export class PlanService {
   }
 
   /**
-   * Repo/branch each service should be linked to under spec.deploy.strategy
-   * "branch" — used by the diff to flag missing/mismatched deploy sources.
+   * Repo/branch each service should be linked to under native branch deploys
+   * — used by the diff to flag missing/mismatched deploy sources.
    */
   expectedDeploySource(
     project: Project,
@@ -144,6 +152,7 @@ export class PlanService {
     environmentSpec: EnvironmentSpec
   ): { repo: string; branch: string } | undefined {
     if (environmentSpec.deploy?.strategy !== 'branch') return undefined;
+    if (environmentSpec.deploy.trigger !== 'native') return undefined;
     const kind = classifyDeployEnvironment(environmentName);
     const resolved = resolveGitDeploySource(project, environmentName, {
       strategy: 'branch',
@@ -155,7 +164,7 @@ export class PlanService {
   }
 
   /**
-   * For repo-linked (branch) deploys on Railway, verify the Railway GitHub
+   * For native repo-linked branch deploys on Railway, verify the Railway GitHub
    * App can actually see the repo. The API-level serviceConnect succeeds
    * without it — builds work, but Railway's UI shows "repo not found" and
    * pushes to GitHub never auto-deploy. Surfacing this at plan time lets the
@@ -165,7 +174,11 @@ export class PlanService {
     project: Project,
     environmentSpec: EnvironmentSpec
   ): Promise<string[]> {
-    if (environmentSpec.hosting.provider !== 'railway' || environmentSpec.deploy?.strategy !== 'branch') {
+    if (
+      environmentSpec.hosting.provider !== 'railway'
+      || environmentSpec.deploy?.strategy !== 'branch'
+      || environmentSpec.deploy.trigger !== 'native'
+    ) {
       return [];
     }
 
@@ -187,7 +200,10 @@ export class PlanService {
     const accessible = await adapter.isGitHubRepoAccessible(repo);
     if (accessible === false) {
       return [
-        `Railway's GitHub App cannot access ${repo}. Apply can still connect the repo via the API, but Railway's UI will show "repo not found" and pushes to GitHub will NOT auto-deploy. Have the user install/grant the Railway GitHub App access to ${repo} at https://github.com/apps/railway-app/installations/new, then re-run hv_plan.`,
+        `Railway's GitHub App cannot access ${repo}. Hypervibe can connect the repo via Railway's API for native deploys, but pushes to GitHub will NOT auto-deploy until Railway can see the repo.`,
+        `User action required: install/open the Railway GitHub App at https://github.com/apps/railway-app/installations/new and grant it access to ${repo}. If the app uses "Only select repositories", add ${repo} to that list.`,
+        'User action required: make sure at least one Railway project member has connected GitHub and has contributor access to the repository.',
+        'User action required: accept any pending Railway GitHub App permission updates in GitHub. After changes, wait a few minutes for Railway caches to refresh, then rerun hv_status or hv_plan.',
       ];
     }
     return [];
@@ -198,6 +214,7 @@ export class PlanService {
     if (!specResult) {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec_set.` };
     }
+    const projectForPlan = projectWithSpecGitRemoteUrl(project, specResult.spec);
     const environmentSpec = specResult.spec.environments[environmentName];
     if (!environmentSpec) {
       const available = Object.keys(specResult.spec.environments);
@@ -207,18 +224,26 @@ export class PlanService {
     }
 
     const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
-    const { observed, warnings: observeWarnings } = await this.observeEnvironment(project, environment, environmentSpec);
-    const local = this.buildLocalSnapshot(project, environment);
+    const { observed, warnings: observeWarnings } = await this.observeEnvironment(projectForPlan, environment, environmentSpec);
+    const local = this.buildLocalSnapshot(projectForPlan, environment);
+    const localDb = local.components.find((component) => component.type === environmentSpec.database?.engine);
+    const localDbProvider = localDb
+      ? String((localDb.bindings as Record<string, unknown>).provider ?? '') || undefined
+      : undefined;
+    const managedDatabaseEnvVars = environmentSpec.database && localDb && localDbProvider === environmentSpec.database.provider
+      ? buildDatabaseEnvVarsFromComponent(localDb).envVars
+      : undefined;
 
     const diff = diffEnvironment({
       spec: environmentSpec,
       envName: environmentName,
       observed,
       local,
-      expectedSource: this.expectedDeploySource(project, environmentName, environmentSpec),
+      expectedSource: this.expectedDeploySource(projectForPlan, environmentName, environmentSpec),
+      managedDatabaseEnvVars,
     });
     const blocked = this.preflight(environmentSpec);
-    const sourceWarnings = await this.checkBranchDeploySource(project, environmentSpec);
+    const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
 
     // Environment record creation is implicit in apply; surface it as an action
     // when the local record is missing so the plan is complete.

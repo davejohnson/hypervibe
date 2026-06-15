@@ -12,7 +12,7 @@ const connectionRepo = new ConnectionRepository();
 export function getCloudflareAdapter(scopeHint?: string): { adapter: CloudflareAdapter; scope: string | null } | { error: string } {
   const connection = connectionRepo.findBestMatch('cloudflare', scopeHint);
   if (!connection) {
-    return { error: 'No Cloudflare connection found. Use connection_create with provider=cloudflare first.' };
+    return { error: 'No Cloudflare connection found. Use hv_connect provider=cloudflare first. Recommended: export the API token and pass credentialsRef="env:CLOUDFLARE_API_TOKEN" credentialsKey="apiToken"; raw credentials={...} is still accepted if intentional.' };
   }
 
   const secretStore = getSecretStore();

@@ -77,6 +77,9 @@ export function buildDatabaseEnvVarsFromComponent(component: Component): { envVa
       envVars.DB_HOST = host;
       envVars.PGHOST = host;
     }
+    if (provider === 'supabase') {
+      envVars.DATABASE_SSL = 'true';
+    }
   }
 
   if (stringBinding(bindings, 'pooledUrl')) {

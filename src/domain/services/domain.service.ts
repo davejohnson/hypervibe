@@ -77,7 +77,7 @@ export async function setupCustomDomain(params: {
     return {
       success: false,
       reason: 'no_connection',
-      error: `No Cloudflare connection available for ${domain}. Use connection_create with provider=cloudflare first.`,
+      error: `No Cloudflare connection available for ${domain}. Use hv_connect provider=cloudflare first. Recommended: export the API token and pass credentialsRef="env:CLOUDFLARE_API_TOKEN" credentialsKey="apiToken"; raw credentials={...} is still accepted if intentional.`,
     };
   }
   const cfAdapter = new CloudflareAdapter();

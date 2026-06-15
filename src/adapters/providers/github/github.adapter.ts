@@ -1,7 +1,9 @@
 import { z } from 'zod';
+import { createRequire } from 'module';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 
 const GITHUB_API_URL = 'https://api.github.com';
+const require = createRequire(import.meta.url);
 
 // Credentials schema for self-registration
 export const GitHubCredentialsSchema = z.object({
@@ -312,39 +314,13 @@ export class GitHubAdapter {
       key: string;
     }>('GET', `/repos/${owner}/${repo}/actions/secrets/public-key`);
 
-    // GitHub expects libsodium sealed box encryption.
-    // Shell out to a Node script that uses tweetnacl + tweetnacl-sealedbox-js.
-    const { spawn: spawnChild } = await import('child_process');
-    const encrypted = await new Promise<string>((resolve, reject) => {
-      // Pass the public key as arg, secret via stdin to avoid shell escaping issues
-      const child = spawnChild('node', ['-e', `
-const nacl = require('tweetnacl');
-const sealedBox = require('tweetnacl-sealedbox-js');
-const pubKey = Buffer.from(process.argv[1], 'base64');
-let input = '';
-process.stdin.on('data', d => input += d);
-process.stdin.on('end', () => {
-  const enc = sealedBox.seal(Buffer.from(input), pubKey);
-  process.stdout.write(Buffer.from(enc).toString('base64'));
-});
-      `, publicKeyResponse.key], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
-
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-      child.on('close', (code: number | null) => {
-        if (code === 0 && stdout) {
-          resolve(stdout);
-        } else {
-          reject(new Error(stderr || `Encryption failed (exit ${code}). Install dependencies: npm install tweetnacl tweetnacl-sealedbox-js`));
-        }
-      });
-      child.on('error', reject);
-
-      child.stdin?.write(secretValue);
-      child.stdin?.end();
-    });
+    // GitHub expects libsodium sealed-box encryption for Actions secrets.
+    const sealedBox = require('tweetnacl-sealedbox-js') as {
+      seal: (message: Uint8Array, publicKey: Uint8Array) => Uint8Array;
+    };
+    const encrypted = Buffer.from(
+      sealedBox.seal(Buffer.from(secretValue), Buffer.from(publicKeyResponse.key, 'base64'))
+    ).toString('base64');
 
     // Set the secret
     await this.request<unknown>('PUT', `/repos/${owner}/${repo}/actions/secrets/${secretName}`, {

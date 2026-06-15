@@ -27,7 +27,7 @@ async function resolveTarget(
     const connection = ctx.repos.connections.findBestMatch('database', opts.connectionName);
     if (!connection) {
       throw new HvError('NOT_FOUND', `No database connection found for: ${opts.connectionName}.`, {
-        hint: `Create one with hv_connect provider="database" scope="${opts.connectionName}".`,
+        hint: `Create one with hv_connect provider="database" scope="${opts.connectionName}". Recommended: put JSON credentials in a local file and use credentialsRef="file:/absolute/path"; raw credentials={...} is still accepted if intentional.`,
       });
     }
     const creds = ctx.secretStore.decryptObject<DatabaseCredentials>(connection.credentialsEncrypted);
@@ -144,25 +144,26 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_db_url',
-    'Get the database connection URL for an environment. Masked by default; reveal=true returns the full URL (for local migrations/debugging).',
+    'Get the database connection URL for an environment. Values are always masked in tool output to avoid leaking credentials into chat transcripts.',
     {
       project: projectField,
       env: envField,
       service: z.string().optional().describe('Service name when resolving from bindings'),
-      reveal: z.boolean().optional().describe('Return the unmasked URL (default false)'),
+      reveal: z.boolean().optional().describe('Deprecated: raw URLs are not returned in tool output'),
     },
     wrapHandler(async ({ project, env, service, reveal }) => {
       const target = await resolveTarget(ctx, { project, env, service });
       return toolSuccess(
         {
           source: target.source,
-          databaseUrl: reveal ? target.url : maskDatabaseUrl(target.url),
-          masked: !reveal,
+          databaseUrl: maskDatabaseUrl(target.url),
+          masked: true,
+          ...(reveal ? { revealSuppressed: true } : {}),
         },
         {
           hint: reveal
-            ? 'Use for local debugging only. Prefer hv_db_query/hv_db_migrate for managed workflows.'
-            : 'Pass reveal=true if you need the full URL.',
+            ? 'Raw database URLs are not returned in chat/tool output. Prefer hv_db_query/hv_db_migrate for managed workflows, or retrieve the credential directly from the provider/secret manager when a human must use it.'
+            : 'Use hv_db_query/hv_db_migrate for managed database work without exposing the connection URL.',
         }
       );
     })

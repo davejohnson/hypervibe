@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { lookup } from 'dns/promises';
+import pg from 'pg';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
@@ -19,6 +21,7 @@ export const SupabaseCredentialsSchema = z.object({
 export type SupabaseCredentials = z.infer<typeof SupabaseCredentialsSchema>;
 
 const SUPABASE_API_URL = 'https://api.supabase.com/v1';
+const { Client } = pg;
 
 interface SupabaseProject {
   id: string;
@@ -120,6 +123,7 @@ export class SupabaseAdapter implements IDatabaseAdapter {
 
       // Create project name from environment
       const projectName = options?.databaseName || `${environment.name}-db`;
+      const dbPassword = this.generatePassword();
 
       // Create Supabase project
       const project = await this.request<SupabaseProject>('POST', '/projects', {
@@ -127,7 +131,7 @@ export class SupabaseAdapter implements IDatabaseAdapter {
         name: projectName,
         region: options?.region || 'us-east-1',
         plan: options?.size || 'free',
-        db_pass: this.generatePassword(),
+        db_pass: dbPassword,
       });
 
       // Build connection URLs
@@ -135,11 +139,14 @@ export class SupabaseAdapter implements IDatabaseAdapter {
       const host = project.database?.host || `db.${project.id}.supabase.co`;
       const port = project.database?.port || 5432;
       const user = project.database?.user || 'postgres';
-      const password = project.database?.password || '';
+      const password = project.database?.password || dbPassword;
       const database = project.database?.name || 'postgres';
 
-      const directUrl = `postgresql://${user}:${password}@${host}:${port}/${database}`;
-      const pooledUrl = `postgresql://${user}:${password}@${host}:6543/${database}?pgbouncer=true`;
+      const auth = `${encodeURIComponent(user)}:${encodeURIComponent(password)}`;
+      const encodedDatabase = encodeURIComponent(database);
+      const directUrl = `postgresql://${auth}@${host}:${port}/${encodedDatabase}`;
+      const pooledUrl = `postgresql://${auth}@${host}:6543/${encodedDatabase}?pgbouncer=true`;
+      const readiness = await this.waitForDatabaseReadiness(project.id, host, directUrl);
 
       const component: Component = {
         id: '',
@@ -165,14 +172,24 @@ export class SupabaseAdapter implements IDatabaseAdapter {
         component,
         receipt: {
           success: true,
-          message: `Created Supabase project: ${project.name}`,
-          data: { projectId: project.id, region: project.region },
+          message: readiness.ready
+            ? `Created Supabase project: ${project.name}`
+            : `Created Supabase project: ${project.name}; database is still becoming reachable`,
+          data: {
+            projectId: project.id,
+            region: project.region,
+            ready: readiness.ready,
+            status: readiness.status,
+            attempts: readiness.attempts,
+            ...(readiness.error ? { readinessError: readiness.error } : {}),
+          },
         },
         connectionUrl: directUrl,
         envVars: {
           DATABASE_URL: directUrl,
           DIRECT_URL: directUrl,
           DATABASE_POOLER_URL: pooledUrl,
+          DATABASE_SSL: 'true',
           PGHOST: host,
           PGPORT: String(port),
           PGUSER: user,
@@ -318,6 +335,65 @@ export class SupabaseAdapter implements IDatabaseAdapter {
     }
 
     return response.json() as Promise<T>;
+  }
+
+  private async waitForDatabaseReadiness(
+    projectId: string,
+    host: string,
+    connectionUrl: string
+  ): Promise<{ ready: boolean; attempts: number; status?: string; error?: string }> {
+    const maxAttempts = Number(process.env.HYPERVIBE_SUPABASE_READY_ATTEMPTS ?? 20);
+    const delayMs = Number(process.env.HYPERVIBE_SUPABASE_READY_DELAY_MS ?? 15000);
+    let lastStatus: string | undefined;
+    let lastError: string | undefined;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const latest = await this.request<SupabaseProject>('GET', `/projects/${projectId}`);
+        lastStatus = latest.status;
+        await lookup(host);
+        const client = new Client({
+          connectionString: connectionUrl,
+          ssl: { rejectUnauthorized: false },
+          connectionTimeoutMillis: 10000,
+        });
+        try {
+          await client.connect();
+          await client.query('select 1');
+          return { ready: true, attempts: attempt, status: lastStatus };
+        } finally {
+          await client.end().catch(() => {});
+        }
+      } catch (error) {
+        lastError = this.formatError(error);
+      }
+
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+
+    return {
+      ready: false,
+      attempts: maxAttempts,
+      status: lastStatus,
+      error: lastError,
+    };
+  }
+
+  private formatError(error: unknown): string {
+    if (!(error instanceof Error)) {
+      return String(error);
+    }
+    const cause = (error as Error & { cause?: unknown }).cause;
+    if (cause && typeof cause === 'object') {
+      const causeRecord = cause as Record<string, unknown>;
+      const details = [causeRecord.code, causeRecord.errno, causeRecord.syscall, causeRecord.hostname]
+        .filter((value): value is string | number => typeof value === 'string' || typeof value === 'number')
+        .join(' ');
+      return details ? `${error.message} (${details})` : error.message;
+    }
+    return error.message;
   }
 
   private generatePassword(): string {

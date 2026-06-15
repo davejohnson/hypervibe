@@ -133,6 +133,30 @@ describe('diffEnvironment — config drift', () => {
     expect(envDiff.to).toBeUndefined();
   });
 
+  it('detects managed database env var drift after a database component exists', () => {
+    const live = observedWeb({
+      envVarKeys: ['NODE_ENV', 'DATABASE_URL'],
+      envVarHashes: {
+        NODE_ENV: hashEnvValue('production'),
+        DATABASE_URL: hashEnvValue('postgres://old'),
+      },
+    });
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local(),
+      managedDatabaseEnvVars: {
+        DATABASE_URL: 'postgres://new',
+        DATABASE_SSL: 'true',
+      },
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.type).toBe('update');
+    expect(web.diff).toContainEqual({ field: 'env:DATABASE_URL' });
+    expect(web.diff).toContainEqual({ field: 'env:DATABASE_SSL' });
+  });
+
   it('ignores config fields the spec does not manage', () => {
     const minimal = environmentSpecSchema.parse({
       hosting: { provider: 'railway' },
@@ -150,7 +174,7 @@ describe('diffEnvironment — config drift', () => {
 });
 
 describe('diffEnvironment — provider switches', () => {
-  it('emits confirm-gated destroy for database provider change, ordered after create', () => {
+  it('creates the new database without destroying the old one in the initial provider change plan', () => {
     const result = diffEnvironment({
       spec: spec({ database: { provider: 'cloudsql' } }),
       envName: 'production',
@@ -158,13 +182,35 @@ describe('diffEnvironment — provider switches', () => {
       local: local(),
     });
     const create = result.actions.find((a) => a.id === 'database:cloudsql')!;
-    const destroy = result.actions.find((a) => a.id === 'database:railway:destroy')!;
     expect(create.type).toBe('create');
+    expect(create.reason).toContain('Create the new database first');
+    expect(result.actions.find((a) => a.id === 'database:railway:destroy')).toBeUndefined();
+    expect(confirmGatedActionIds(result.actions)).toEqual([]);
+  });
+
+  it('emits confirm-gated destroy for the previous database after cutover is recorded', () => {
+    const result = diffEnvironment({
+      spec: spec({ database: { provider: 'supabase' } }),
+      envName: 'production',
+      observed: observed({
+        databases: [{ provider: 'supabase', engine: 'postgres', externalId: 'supabase-1', status: 'running' }],
+      }),
+      local: local({
+        components: [{
+          id: 'c1', environmentId: 'e1', type: 'postgres',
+          bindings: { provider: 'supabase', previousProvider: 'cloudsql' }, externalId: 'supabase-1',
+          createdAt: new Date(), updatedAt: new Date(),
+        }],
+      }),
+    });
+    const create = result.actions.find((a) => a.id === 'database:supabase')!;
+    const destroy = result.actions.find((a) => a.id === 'database:cloudsql:destroy')!;
+    expect(create.type).toBe('noop');
     expect(destroy.type).toBe('destroy');
     expect(destroy.dataBearing).toBe(true);
     expect(destroy.requiresConfirm).toBe(true);
-    expect(destroy.dependsOn).toEqual(['database:cloudsql']);
-    expect(confirmGatedActionIds(result.actions)).toEqual(['database:railway:destroy']);
+    expect(destroy.reason).toContain('confirm only after cutover is verified');
+    expect(confirmGatedActionIds(result.actions)).toEqual(['database:cloudsql:destroy']);
   });
 
   it('replaces services when the hosting provider changes', () => {
@@ -236,6 +282,55 @@ describe('diffEnvironment — unmanaged resources', () => {
     // observed db exists but no local component → unmanaged, not destroy
     expect(result.unmanaged).toContainEqual(expect.objectContaining({ kind: 'database', name: 'postgres' }));
     expect(result.actions.filter((a) => a.type === 'destroy')).toEqual([]);
+  });
+
+  it('plans destroy for services removed from the spec when local bindings prove ownership', () => {
+    const removed = observedWeb({ name: 'daily', externalId: 'svc-daily', workloadKind: 'cron' });
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({ services: [observedWeb(), removed] }),
+      local: local({
+        services: [localService('web'), localService('daily')],
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'svc-1' }, daily: { serviceId: 'svc-daily' } },
+        },
+      }),
+    });
+
+    expect(result.unmanaged).not.toContainEqual(expect.objectContaining({ kind: 'service', name: 'daily' }));
+    expect(result.actions).toContainEqual(expect.objectContaining({
+      id: 'service:daily:destroy',
+      type: 'destroy',
+      resource: expect.objectContaining({ kind: 'service', name: 'daily', provider: 'railway' }),
+      verified: true,
+    }));
+  });
+
+  it('plans unverified destroy for locally bound services removed from the spec when observation is unavailable', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: null,
+      local: local({
+        services: [localService('web'), localService('daily')],
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'svc-1' }, daily: { serviceId: 'svc-daily' } },
+        },
+      }),
+    });
+
+    expect(result.actions).toContainEqual(expect.objectContaining({
+      id: 'service:daily:destroy',
+      type: 'destroy',
+      verified: false,
+    }));
   });
 });
 
@@ -333,6 +428,20 @@ describe('diffEnvironment — deploy source', () => {
     const web = mismatch.actions.find((a) => a.id === 'service:web')!;
     expect(web.type).toBe('update');
     expect(web.reason).toContain('branch is develop, expected main');
+  });
+
+  it('flags a linked source with an unknown branch so apply reconnects it', () => {
+    const linkedWithoutBranch = observedWeb({ source: { repo: 'dave/seq-planner' } });
+    const result = diffEnvironment({
+      spec: spec({ deploy: { strategy: 'branch', branch: 'main' } }),
+      envName: 'production',
+      observed: observed({ services: [linkedWithoutBranch] }),
+      local: local(),
+      expectedSource: { repo: 'dave/seq-planner', branch: 'main' },
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.type).toBe('update');
+    expect(web.reason).toContain('branch is not recorded');
   });
 
   it('ignores deploy source when strategy is not branch', () => {

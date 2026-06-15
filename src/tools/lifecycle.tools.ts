@@ -32,7 +32,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
       const adapter = await connectRailwayForImport();
       if (!adapter) {
         return toolError('MISSING_CONNECTION', 'No Railway connection configured.', {
-          hint: 'Connect Railway with hv_connect provider="railway" first.',
+          hint: 'Connect Railway with hv_connect provider="railway" first. Recommended: export the token and use credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN" credentialsKey="apiToken"; raw credentials={...} is still accepted if intentional.',
           next: ['hv_connect'],
         });
       }
@@ -124,7 +124,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'hv_destroy',
-    'Delete LOCAL Hypervibe records only: a project (cascade), an environment, or a service (including its platform binding). Never touches provider resources — to destroy live infrastructure, remove it from the spec with hv_spec_set, then run hv_plan and hv_apply (destroys there are confirm-gated). Without confirm=true this returns CONFIRM_REQUIRED listing exactly what would be deleted.',
+    'Delete LOCAL Hypervibe records only: a project (cascade), an environment, or a service (including its platform binding). Never touches provider resources — to destroy live infrastructure, remove it from the spec with hv_spec_set, then run hv_plan and hv_apply. Data-bearing destroys are confirm-gated with confirmDestroy. Without confirm=true this returns CONFIRM_REQUIRED listing exactly what local records would be deleted.',
     {
       project: projectField,
       env: envField,
@@ -134,7 +134,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
     },
     wrapHandler(async ({ project: projectRef, env, scope, name, confirm }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const providerNote = 'Provider resources were not touched — destroy live infrastructure via hv_spec_set + hv_plan + hv_apply.';
+      const providerNote = 'Provider resources were not touched — destroy live infrastructure via hv_spec_set + hv_plan + hv_apply. Data-bearing destroys require confirmDestroy.';
 
       if (scope === 'project') {
         const environments = ctx.repos.environments.findByProjectId(project.id);

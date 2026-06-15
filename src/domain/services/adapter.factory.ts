@@ -131,14 +131,14 @@ export class AdapterFactory {
     if (!connection) {
       return {
         success: false,
-        error: `No connection found for ${providerName}. Use connection_create first.`,
+        error: `No connection found for ${providerName}. Use hv_connect first. Recommended: export scalar tokens and pass credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
       };
     }
 
     if (connection.status !== 'verified') {
       return {
         success: false,
-        error: `Connection for ${providerName} is not verified (status: ${connection.status}). Use connection_verify first.`,
+        error: `Connection for ${providerName} is not verified (status: ${connection.status}). Use hv_connect provider="${providerName}" action="verify" first.`,
       };
     }
 
@@ -185,4 +185,3 @@ export class AdapterFactory {
 
 // Export singleton instance for convenience
 export const adapterFactory = new AdapterFactory();
-

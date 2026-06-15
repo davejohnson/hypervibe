@@ -49,7 +49,7 @@ export interface LocalSnapshot {
 
 export interface DiffResult {
   actions: PlanAction[];
-  /** Live resources present on the provider but absent from the spec — reported, never destroyed. */
+  /** Live resources absent from the spec with no local binding proving Hypervibe ownership. */
   unmanaged: Array<{ kind: PlanResourceKind | 'envVar'; name: string; detail?: string }>;
   warnings: string[];
 }

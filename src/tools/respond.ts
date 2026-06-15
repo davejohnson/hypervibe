@@ -42,9 +42,110 @@ export interface ResponseExtras {
   next?: string[];
 }
 
+const REDACTED = '[redacted]';
+
+const SENSITIVE_KEYS = new Set([
+  'apikey',
+  'apitoken',
+  'authorization',
+  'authtoken',
+  'clientsecret',
+  'connectionstring',
+  'connectionurl',
+  'credentials',
+  'credentialsencrypted',
+  'databasepassword',
+  'databaseurl',
+  'dbpassword',
+  'directurl',
+  'password',
+  'passphrase',
+  'pgpassword',
+  'privatekey',
+  'refreshtoken',
+  'secret',
+  'secretkey',
+  'signingsecret',
+  'token',
+  'webhooksecret',
+]);
+
+function normalizedKey(key: string): string {
+  return key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
+function isSensitiveKey(key: string): boolean {
+  const normalized = normalizedKey(key);
+  if (SENSITIVE_KEYS.has(normalized)) {
+    return true;
+  }
+  if (/^(database|db|pg).*(url|password)$/.test(normalized)) {
+    return true;
+  }
+  if (/^(access|refresh|admin|api|auth).*token$/.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
+function redactSensitiveString(value: string): string {
+  if (value.includes(REDACTED) || value.includes('***')) {
+    return value;
+  }
+
+  return value
+    .replace(/-----BEGIN [^-]+PRIVATE KEY-----[\s\S]*?-----END [^-]+PRIVATE KEY-----/g, REDACTED)
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)([^@\s/]+:[^@\s/]+)@/gi, `$1${REDACTED}@`)
+    .replace(/\bgithub_pat_[A-Za-z0-9_]+/g, REDACTED)
+    .replace(/\bgh[oprsu]_[A-Za-z0-9_]{20,}/g, REDACTED)
+    .replace(/\bglpat-[A-Za-z0-9_-]{20,}/g, REDACTED)
+    .replace(/\bsk_(?:live|test)_[A-Za-z0-9]{16,}/g, REDACTED)
+    .replace(/\brk_(?:live|test)_[A-Za-z0-9]{16,}/g, REDACTED)
+    .replace(/\bwhsec_[A-Za-z0-9]{16,}/g, REDACTED)
+    .replace(/\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g, REDACTED)
+    .replace(/\bsbp_[A-Za-z0-9_]{16,}/g, REDACTED)
+    .replace(/\bsb_secret_[A-Za-z0-9_]{16,}/g, REDACTED)
+    .replace(/\bxox[abprs]-[A-Za-z0-9-]{16,}/g, REDACTED);
+}
+
+function redactForResponse(value: unknown, keyHint?: string, seen = new WeakSet<object>()): unknown {
+  if (typeof value === 'string') {
+    if (keyHint && isSensitiveKey(keyHint)) {
+      return value.includes(REDACTED) || value.includes('***') ? value : REDACTED;
+    }
+    return redactSensitiveString(value);
+  }
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (value instanceof Date) {
+    return value;
+  }
+  if (seen.has(value)) {
+    return REDACTED;
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    const output = value.map((entry) => redactForResponse(entry, keyHint, seen));
+    seen.delete(value);
+    return output;
+  }
+
+  const output: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    output[key] = isSensitiveKey(key) && entry && typeof entry === 'object'
+      ? REDACTED
+      : redactForResponse(entry, key, seen);
+  }
+  seen.delete(value);
+  return output;
+}
+
 function envelope(payload: ToolEnvelope): ToolResponse {
+  const safePayload = redactForResponse(payload) as ToolEnvelope;
   return {
-    content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
+    content: [{ type: 'text' as const, text: JSON.stringify(safePayload) }],
   };
 }
 

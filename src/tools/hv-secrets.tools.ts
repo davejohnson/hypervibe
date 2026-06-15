@@ -25,7 +25,7 @@ async function managerAdapter(ctx: ToolContext, provider: (typeof SECRET_MANAGER
   const connection = ctx.repos.connections.findByProvider(provider);
   if (!connection || connection.status !== 'verified') {
     throw new HvError('MISSING_CONNECTION', `No verified connection for ${provider}.`, {
-      hint: `Connect it with hv_connect provider="${provider}".`,
+      hint: `Connect it with hv_connect provider="${provider}". Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or put JSON credentials in a local file and use credentialsRef="file:/absolute/path". Raw credentials={...} is still accepted if intentional.`,
     });
   }
   const credentials = ctx.secretStore.decryptObject(connection.credentialsEncrypted);
@@ -84,7 +84,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const { owner, repo: repoName } = githubRepoForProject(project, repo);
         if (!key) throw new HvError('VALIDATION', 'key is required for target="github".');
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
-        if ('error' in gh) return toolError('MISSING_CONNECTION', gh.error, { hint: 'Connect GitHub with hv_connect provider="github".' });
+        if ('error' in gh) return toolError('MISSING_CONNECTION', gh.error, { hint: 'Connect GitHub with hv_connect provider="github". Recommended: export the token and use credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"; raw credentials={...} is still accepted if intentional.' });
         if (remove) {
           await gh.adapter.deleteSecret(owner, repoName, key);
           ctx.repos.audit.create({ action: 'github.secret_deleted', resourceType: 'github_secret', resourceId: `${owner}/${repoName}/${key}`, details: { secretName: key } });
@@ -146,7 +146,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'hv_secrets_get',
-    'Read a secret (from a secret manager) or a hosting env var. Values are masked unless reveal=true.',
+    'Read a secret (from a secret manager) or a hosting env var. Values are always masked in tool output to avoid leaking credentials into chat transcripts.',
     {
       project: projectField,
       env: envField,
@@ -155,7 +155,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       path: z.string().optional().describe('Secret path (with provider)'),
       version: z.string().optional().describe('Secret version (manager reads)'),
       service: z.string().optional().describe('Service to read hosting vars from'),
-      reveal: z.boolean().optional().describe('Return unmasked values (default false)'),
+      reveal: z.boolean().optional().describe('Deprecated: raw secret values are not returned in tool output'),
     },
     wrapHandler(async ({ project: projectRef, env, key, provider, path, version, service, reveal }) => {
       if (provider && path) {
@@ -164,12 +164,18 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         accessLogRepo.create({ action: 'read', provider: provider as SecretManagerProvider, secretPath: path, success: true });
         let secretRef = `${provider}://${path}`;
         if (key) secretRef += `#${key}`;
-        return toolSuccess({
-          secretRef,
-          value: reveal ? secret.value : maskValue(secret.value),
-          masked: !reveal,
-          version: secret.version,
-        });
+        return toolSuccess(
+          {
+            secretRef,
+            value: maskValue(secret.value),
+            masked: true,
+            ...(reveal ? { revealSuppressed: true } : {}),
+            version: secret.version,
+          },
+          reveal ? {
+            hint: 'Raw secret values are not returned in chat/tool output. Use hv_secrets_sync or provider-native secret tooling for workflows that need the value.',
+          } : undefined
+        );
       }
 
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -191,9 +197,20 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       }
       const selected = key ? { [key]: all[key] } : all;
       const varsOut = Object.fromEntries(
-        Object.entries(selected).map(([k, v]) => [k, reveal ? v : maskValue(v)])
+        Object.entries(selected).map(([k, v]) => [k, maskValue(v)])
       );
-      return toolSuccess({ environment: environment.name, service: targetService.name, masked: !reveal, vars: varsOut });
+      return toolSuccess(
+        {
+          environment: environment.name,
+          service: targetService.name,
+          masked: true,
+          ...(reveal ? { revealSuppressed: true } : {}),
+          vars: varsOut,
+        },
+        reveal ? {
+          hint: 'Raw environment variable values are not returned in chat/tool output. Use hv_secrets_sync or provider-native secret tooling for workflows that need the value.',
+        } : undefined
+      );
     })
   );
 

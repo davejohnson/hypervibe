@@ -20,6 +20,32 @@ export type RailwayCredentials = z.infer<typeof RailwayCredentialsSchema>;
 
 const RAILWAY_API_URL = 'https://backboard.railway.app/graphql/v2';
 
+function normalizeRailwayGitRepo(repo?: string): string | undefined {
+  if (!repo) {
+    return undefined;
+  }
+
+  return repo
+    .trim()
+    .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+    .replace(/^git@github\.com:/i, '')
+    .replace(/\.git$/i, '')
+    .replace(/^\/+|\/+$/g, '')
+    .toLowerCase() || undefined;
+}
+
+function cachedBranchForSource(
+  cachedSource: { repo?: string; branch?: string } | undefined,
+  sourceRepo: string | undefined
+): string | undefined {
+  if (!cachedSource?.branch || !sourceRepo) {
+    return undefined;
+  }
+  return normalizeRailwayGitRepo(cachedSource.repo) === normalizeRailwayGitRepo(sourceRepo)
+    ? cachedSource.branch
+    : undefined;
+}
+
 export class RailwayAdapter implements IProviderAdapter {
   readonly name = 'railway';
 
@@ -1232,7 +1258,7 @@ export class RailwayAdapter implements IProviderAdapter {
       `Not authorized to create ${type} on Railway project ${projectId}.`,
       'Use an Account token or a Workspace token with write access to this workspace/project.',
       'If you are using OAuth, ensure project/workspace member scopes were granted.',
-      'Then run connection_verify provider=\"railway\" again to refresh connection context.',
+      'Then run hv_connect provider="railway" action="verify" again to refresh connection context.',
     ].join(' ');
   }
 
@@ -2533,7 +2559,7 @@ export class RailwayAdapter implements IProviderAdapter {
     const bindings = environment.platformBindings as {
       projectId?: string;
       environmentId?: string;
-      services?: Record<string, { serviceId?: string }>;
+      services?: Record<string, { serviceId?: string; source?: { repo?: string; branch?: string } }>;
     };
     const projectId = bindings.projectId;
     if (!projectId) {
@@ -2646,8 +2672,9 @@ export class RailwayAdapter implements IProviderAdapter {
       // repoTriggers on the Service is for webhook-configured deploys.
       // Use the instance source as primary, repoTriggers as fallback.
       const repoTrigger = node.repoTriggers?.edges?.[0]?.node;
-      const sourceRepo = instanceSourceRepo ?? repoTrigger?.repository;
-      const sourceBranch = repoTrigger?.branch;
+      const cachedSource = bindings.services?.[node.name]?.source;
+      const sourceRepo = instanceSourceRepo ?? repoTrigger?.repository ?? cachedSource?.repo;
+      const sourceBranch = repoTrigger?.branch ?? cachedBranchForSource(cachedSource, sourceRepo);
 
       services.push({
         name: node.name,

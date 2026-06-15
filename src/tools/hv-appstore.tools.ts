@@ -22,7 +22,7 @@ import type {
 import { XcodeAdapter } from '../adapters/providers/xcode/xcode.adapter.js';
 
 const SETUP_HINT =
-  'Create an App Store Connect API key at https://appstoreconnect.apple.com/access/api (Admin role; the .p8 file can only be downloaded once), then store it with hv_connect/connection_create provider=appstoreconnect credentials={"keyId","issuerId","privateKey"}. ' +
+  'Create an App Store Connect API key at https://appstoreconnect.apple.com/access/api (Admin role; the .p8 file can only be downloaded once), then store it with hv_connect provider=appstoreconnect credentialsRef="file:/absolute/path/to/appstoreconnect.json". Raw credentials={...} is still accepted if the user intentionally wants chat entry. ' +
   'For multiple apps/teams use a scoped connection (scope="<bundle id>"). Uploads additionally require the Xcode command line tools (xcode-select --install).';
 
 /** Shared field used by every App Store Connect tool. */

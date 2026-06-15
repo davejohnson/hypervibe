@@ -11,6 +11,28 @@ describe('toolSuccess', () => {
     expect(body).toEqual({ ok: true, data: { id: '1' } });
   });
 
+  it('redacts sensitive fields and credential-looking strings', () => {
+    const body = parse(toolSuccess({
+      apiToken: 'ghp_abcdefghijklmnopqrstuvwxyz123456',
+      secretName: 'DATABASE_URL',
+      nested: {
+        connectionUrl: 'postgresql://postgres:secretpw@db.example.com:5432/app',
+        message: 'failed for postgresql://postgres:secretpw@db.example.com:5432/app',
+      },
+    }));
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain('secretpw');
+    expect(serialized).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz123456');
+    expect(body.data).toMatchObject({
+      apiToken: '[redacted]',
+      secretName: 'DATABASE_URL',
+      nested: {
+        connectionUrl: '[redacted]',
+        message: 'failed for postgresql://[redacted]@db.example.com:5432/app',
+      },
+    });
+  });
+
   it('supports hint, warnings, and next', () => {
     const body = parse(toolSuccess({ id: '1' }, { hint: 'run hv_plan', warnings: ['w'], next: ['hv_plan'] }));
     expect(body.hint).toBe('run hv_plan');

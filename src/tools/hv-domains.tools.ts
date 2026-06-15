@@ -123,7 +123,7 @@ export function registerHvDomainsTools(server: McpServer, ctx: ToolContext): voi
       const zoneId = await resolveZoneId(adapter, zone);
       if (!zoneId) {
         return toolError('NOT_FOUND', `Cloudflare zone "${zone}" not found.`, {
-          hint: `The current token may not cover this domain. Add a scoped connection: connection_create provider=cloudflare scope=${zone}.`,
+          hint: `The current token may not cover this domain. Add a scoped connection with hv_connect provider=cloudflare scope=${zone} credentialsRef="env:CLOUDFLARE_API_TOKEN" credentialsKey="apiToken".`,
         });
       }
 

@@ -23,6 +23,41 @@ export const CloudRunCredentialsSchema = z.object({
 
 export type CloudRunCredentials = z.infer<typeof CloudRunCredentialsSchema>;
 
+const MANAGED_DATABASE_ENV_KEYS = new Set([
+  'DATABASE_URL',
+  'DIRECT_URL',
+  'DATABASE_POOLER_URL',
+  'DATABASE_SSL',
+  'CLOUD_SQL_CONNECTION_NAME',
+  'INSTANCE_CONNECTION_NAME',
+  'DATABASE_HOST',
+  'DB_HOST',
+  'PGHOST',
+  'DATABASE_PORT',
+  'DB_PORT',
+  'PGPORT',
+  'DATABASE_USER',
+  'DB_USER',
+  'PGUSER',
+  'DATABASE_PASSWORD',
+  'DB_PASSWORD',
+  'PGPASSWORD',
+  'DATABASE_NAME',
+  'DB_NAME',
+  'PGDATABASE',
+]);
+
+const MANAGED_DATABASE_SYNC_KEYS = new Set([
+  'DATABASE_URL',
+  'DIRECT_URL',
+  'DATABASE_POOLER_URL',
+  'DATABASE_HOST',
+  'DB_HOST',
+  'PGHOST',
+  'CLOUD_SQL_CONNECTION_NAME',
+  'INSTANCE_CONNECTION_NAME',
+]);
+
 interface CloudRunService {
   name: string;
   uid: string;
@@ -442,21 +477,32 @@ export class CloudRunAdapter implements IProviderAdapter {
       // provision time) must not silently wipe it. Passed vars always win.
       const runtimeVars = this.runtimeEnvVarsForService(service, envVars);
       const existingContainer = cloudRunService ? this.primaryContainer(cloudRunService) : undefined;
-      const env = this.mergeEnvVars(existingContainer?.env, runtimeVars);
-      const cloudSqlNames = Array.from(new Set([
-        ...this.cloudSqlConnectionNamesFromEnv(runtimeVars),
-        ...this.cloudSqlConnectionNamesFromEnvVars(existingContainer?.env),
-      ]));
+      const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
+      const env = this.mergeEnvVars(existingContainer?.env, runtimeVars, { replaceManagedDatabaseVars });
+      const cloudSqlNames = replaceManagedDatabaseVars
+        ? this.cloudSqlConnectionNamesFromEnv(runtimeVars)
+        : Array.from(new Set([
+            ...this.cloudSqlConnectionNamesFromEnv(runtimeVars),
+            ...this.cloudSqlConnectionNamesFromEnvVars(existingContainer?.env),
+          ]));
       const cloudSql = this.cloudSqlVolumeConfig(cloudSqlNames);
+      const volumeMounts = cloudSql
+        ? this.mergeVolumeMounts(existingContainer?.volumeMounts, [cloudSql.volumeMount])
+        : replaceManagedDatabaseVars
+          ? this.removeCloudSqlVolumeMounts(existingContainer?.volumeMounts)
+          : existingContainer?.volumeMounts;
+      const templateVolumes = cloudSql
+        ? this.mergeVolumes(this.serviceVolumes(cloudRunService), [cloudSql.volume])
+        : replaceManagedDatabaseVars
+          ? this.removeCloudSqlVolumes(this.serviceVolumes(cloudRunService))
+          : this.serviceVolumes(cloudRunService);
 
       // Build container spec
       const containerSpec = {
         image: imageUri,
         ports: [{ containerPort: parseInt(envVars['PORT'] || '8080', 10) }],
         env,
-        ...(cloudSql
-          ? { volumeMounts: this.mergeVolumeMounts(existingContainer?.volumeMounts, [cloudSql.volumeMount]) }
-          : existingContainer?.volumeMounts ? { volumeMounts: existingContainer.volumeMounts } : {}),
+        ...(volumeMounts && volumeMounts.length > 0 ? { volumeMounts } : {}),
         resources: {
           limits: {
             cpu: envVars['CPU'] || '1',
@@ -477,8 +523,8 @@ export class CloudRunAdapter implements IProviderAdapter {
         template: {
           labels,
           containers: [containerSpec],
-          ...(cloudSql
-            ? { volumes: this.mergeVolumes(this.serviceVolumes(cloudRunService), [cloudSql.volume]) }
+          ...(templateVolumes && (templateVolumes.length > 0 || replaceManagedDatabaseVars)
+            ? { volumes: templateVolumes }
             : {}),
           ...(this.serviceAccountCreds?.client_email
             ? { serviceAccount: this.serviceAccountCreds.client_email }
@@ -574,7 +620,7 @@ export class CloudRunAdapter implements IProviderAdapter {
         receipt: {
           success: false,
           message: `Deployment failed for ${service.name}`,
-          error: String(error),
+          error: this.formatError(error),
         },
       };
     }
@@ -614,13 +660,20 @@ export class CloudRunAdapter implements IProviderAdapter {
       // injected outside this call (e.g. DATABASE_URL at provision time).
       const currentJob = await this.getCloudRunJob(jobName, token);
       const currentJobContainer = currentJob ? this.primaryJobContainer(currentJob) : undefined;
-      const env = this.mergeEnvVars(currentJobContainer?.env, runtimeVars);
+      const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
+      const env = this.mergeEnvVars(currentJobContainer?.env, runtimeVars, { replaceManagedDatabaseVars });
       const labels = {
         'infraprint-environment': this.labelValue(environment.name),
         'infraprint-service': this.labelValue(service.name),
         'infraprint-resource': 'scheduled-job',
       };
       const command = service.buildConfig.startCommand?.trim() || 'npm start';
+      const cloudSqlConnectionNames = replaceManagedDatabaseVars
+        ? this.cloudSqlConnectionNamesFromEnv(runtimeVars)
+        : Array.from(new Set([
+            ...this.cloudSqlConnectionNamesFromEnv(runtimeVars),
+            ...this.cloudSqlConnectionNamesFromEnvVars(currentJobContainer?.env),
+          ]));
       const jobSpec = this.cloudRunJobSpec({
         imageUri,
         command,
@@ -635,10 +688,8 @@ export class CloudRunAdapter implements IProviderAdapter {
         labels,
         existingVolumes: currentJob?.template?.template?.volumes,
         existingVolumeMounts: currentJobContainer?.volumeMounts,
-        cloudSqlConnectionNames: Array.from(new Set([
-          ...this.cloudSqlConnectionNamesFromEnv(runtimeVars),
-          ...this.cloudSqlConnectionNamesFromEnvVars(currentJobContainer?.env),
-        ])),
+        cloudSqlConnectionNames,
+        replaceManagedDatabaseVars,
       });
 
       const { created: createdJob } = await this.upsertCloudRunJob({
@@ -694,7 +745,7 @@ export class CloudRunAdapter implements IProviderAdapter {
         receipt: {
           success: false,
           message: `Scheduled job deployment failed for ${service.name}`,
-          error: String(error),
+          error: this.formatError(error),
         },
       };
     }
@@ -730,7 +781,7 @@ export class CloudRunAdapter implements IProviderAdapter {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: this.formatError(error),
       };
     }
   }
@@ -783,10 +834,11 @@ export class CloudRunAdapter implements IProviderAdapter {
           };
         }
 
+        const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
         const jobSpec = this.cloudRunJobSpec({
           imageUri: currentContainer.image,
           command: service.buildConfig.startCommand?.trim() || 'npm start',
-          env: this.mergeEnvVars(currentContainer.env, runtimeVars),
+          env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars }),
           resources: currentContainer.resources,
           serviceAccount: currentJob?.template?.template?.serviceAccount
             ?? currentJob?.template?.template?.serviceAccountName
@@ -794,6 +846,7 @@ export class CloudRunAdapter implements IProviderAdapter {
           existingVolumes: currentJob?.template?.template?.volumes,
           existingVolumeMounts: currentContainer.volumeMounts,
           cloudSqlConnectionNames: this.cloudSqlConnectionNamesFromEnv(runtimeVars),
+          replaceManagedDatabaseVars,
         });
         await this.upsertCloudRunJob({
           token,
@@ -832,7 +885,24 @@ export class CloudRunAdapter implements IProviderAdapter {
         };
       }
 
-      const cloudSql = this.cloudSqlVolumeConfigFromEnv(runtimeVars);
+      const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
+      const cloudSqlNames = replaceManagedDatabaseVars
+        ? this.cloudSqlConnectionNamesFromEnv(runtimeVars)
+        : Array.from(new Set([
+            ...this.cloudSqlConnectionNamesFromEnv(runtimeVars),
+            ...this.cloudSqlConnectionNamesFromEnvVars(currentContainer.env),
+          ]));
+      const cloudSql = this.cloudSqlVolumeConfig(cloudSqlNames);
+      const volumeMounts = cloudSql
+        ? this.mergeVolumeMounts(currentContainer.volumeMounts, [cloudSql.volumeMount])
+        : replaceManagedDatabaseVars
+          ? this.removeCloudSqlVolumeMounts(currentContainer.volumeMounts)
+          : currentContainer.volumeMounts;
+      const templateVolumes = cloudSql
+        ? this.mergeVolumes(this.serviceVolumes(currentService), [cloudSql.volume])
+        : replaceManagedDatabaseVars
+          ? this.removeCloudSqlVolumes(this.serviceVolumes(currentService))
+          : this.serviceVolumes(currentService);
       const containerSpec = {
         ...(currentContainer.name ? { name: currentContainer.name } : {}),
         image: currentContainer.image,
@@ -840,17 +910,15 @@ export class CloudRunAdapter implements IProviderAdapter {
         ...(currentContainer.command ? { command: currentContainer.command } : {}),
         ...(currentContainer.args ? { args: currentContainer.args } : {}),
         ...(currentContainer.resources ? { resources: currentContainer.resources } : {}),
-        ...(cloudSql
-          ? { volumeMounts: this.mergeVolumeMounts(currentContainer.volumeMounts, [cloudSql.volumeMount]) }
-          : currentContainer.volumeMounts ? { volumeMounts: currentContainer.volumeMounts } : {}),
-        env: this.mergeEnvVars(currentContainer.env, runtimeVars),
+        ...(volumeMounts && volumeMounts.length > 0 ? { volumeMounts } : {}),
+        env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars }),
       };
       const templateUpdate: Record<string, unknown> = {
         containers: [containerSpec],
       };
       const updateMask = ['template.containers'];
-      if (cloudSql) {
-        templateUpdate.volumes = this.mergeVolumes(this.serviceVolumes(currentService), [cloudSql.volume]);
+      if (cloudSql || replaceManagedDatabaseVars) {
+        templateUpdate.volumes = templateVolumes ?? [];
         updateMask.push('template.volumes');
       }
 
@@ -882,7 +950,7 @@ export class CloudRunAdapter implements IProviderAdapter {
       return {
         success: false,
         message: 'Failed to set environment variables',
-        error: String(error),
+        error: this.formatError(error),
       };
     }
   }
@@ -1028,7 +1096,7 @@ export class CloudRunAdapter implements IProviderAdapter {
         receipt: {
           success: false,
           message: `Cloud Run migration job failed for ${service.name}`,
-          error: String(error),
+          error: this.formatError(error),
         },
       };
     }
@@ -1907,7 +1975,7 @@ export class CloudRunAdapter implements IProviderAdapter {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: this.formatError(error),
       };
     }
   }
@@ -2280,11 +2348,14 @@ export class CloudRunAdapter implements IProviderAdapter {
     existingVolumes?: Array<Record<string, unknown>>;
     existingVolumeMounts?: Array<Record<string, unknown>>;
     cloudSqlConnectionNames?: string[];
+    replaceManagedDatabaseVars?: boolean;
   }): Record<string, unknown> {
     const cloudSql = this.cloudSqlVolumeConfig(params.cloudSqlConnectionNames);
     const volumeMounts = cloudSql
       ? this.mergeVolumeMounts(params.existingVolumeMounts, [cloudSql.volumeMount])
-      : params.existingVolumeMounts;
+      : params.replaceManagedDatabaseVars
+        ? this.removeCloudSqlVolumeMounts(params.existingVolumeMounts)
+        : params.existingVolumeMounts;
     const container = {
       image: params.imageUri,
       command: ['/bin/sh'],
@@ -2295,7 +2366,9 @@ export class CloudRunAdapter implements IProviderAdapter {
     };
     const volumes = cloudSql
       ? this.mergeVolumes(params.existingVolumes, [cloudSql.volume])
-      : params.existingVolumes;
+      : params.replaceManagedDatabaseVars
+        ? this.removeCloudSqlVolumes(params.existingVolumes)
+        : params.existingVolumes;
 
     return {
       ...(params.labels ? { labels: params.labels } : {}),
@@ -2303,7 +2376,7 @@ export class CloudRunAdapter implements IProviderAdapter {
         ...(params.labels ? { labels: params.labels } : {}),
         template: {
           containers: [container],
-          ...(volumes && volumes.length > 0 ? { volumes } : {}),
+          ...(volumes && (volumes.length > 0 || params.replaceManagedDatabaseVars) ? { volumes } : {}),
           ...(params.serviceAccount ? { serviceAccount: params.serviceAccount } : {}),
           maxRetries: 1,
           timeout: '3600s',
@@ -2801,13 +2874,29 @@ export class CloudRunAdapter implements IProviderAdapter {
     return [...byName.values()];
   }
 
+  private removeCloudSqlVolumeMounts(
+    existing: Array<Record<string, unknown>> | undefined
+  ): Array<Record<string, unknown>> {
+    return (existing ?? []).filter((entry) => entry.name !== 'cloudsql');
+  }
+
+  private removeCloudSqlVolumes(
+    existing: Array<Record<string, unknown>> | undefined
+  ): Array<Record<string, unknown>> {
+    return (existing ?? []).filter((entry) => entry.name !== 'cloudsql');
+  }
+
   private mergeEnvVars(
     existing: Array<Record<string, unknown>> | undefined,
-    updates: Record<string, string>
+    updates: Record<string, string>,
+    options: { replaceManagedDatabaseVars?: boolean } = {}
   ): Array<Record<string, unknown>> {
     const byName = new Map<string, Record<string, unknown>>();
     for (const entry of existing ?? []) {
       if (typeof entry.name === 'string') {
+        if (options.replaceManagedDatabaseVars && MANAGED_DATABASE_ENV_KEYS.has(entry.name)) {
+          continue;
+        }
         byName.set(entry.name, { ...entry });
       }
     }
@@ -2815,6 +2904,31 @@ export class CloudRunAdapter implements IProviderAdapter {
       byName.set(name, { name, value });
     }
     return [...byName.values()];
+  }
+
+  private isManagedDatabaseEnvSync(updates: Record<string, string>): boolean {
+    return Object.keys(updates).some((key) => MANAGED_DATABASE_SYNC_KEYS.has(key));
+  }
+
+  private formatError(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    const cause = error instanceof Error
+      ? (error as Error & { cause?: unknown }).cause
+      : undefined;
+    if (!cause || typeof cause !== 'object') {
+      return message;
+    }
+
+    const causeRecord = cause as Record<string, unknown>;
+    const fields = ['code', 'errno', 'syscall', 'hostname', 'host', 'address', 'port']
+      .map((field) => {
+        const value = causeRecord[field];
+        return typeof value === 'string' || typeof value === 'number' ? `${field}=${value}` : undefined;
+      })
+      .filter((value): value is string => Boolean(value));
+    const causeMessage = cause instanceof Error && cause.message !== message ? cause.message : undefined;
+    const details = [causeMessage, ...fields].filter((value): value is string => Boolean(value));
+    return details.length > 0 ? `${message} (${details.join(', ')})` : message;
   }
 
   private imageUriForService(service: Service, envVars: Record<string, string>): string | undefined {

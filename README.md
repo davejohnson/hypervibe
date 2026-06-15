@@ -144,7 +144,13 @@ Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/healt
 
 ### GitHub token permissions
 
-Connect with `hv_connect provider=github credentials={"apiToken":"..."}`.
+Recommended: connect without pasting the token into chat by exporting it locally:
+
+```bash
+export HYPERVIBE_GITHUB_TOKEN=ghp_...
+```
+
+Then call `hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"`. For JSON credentials, save the JSON to a local file and use `credentialsRef="file:/absolute/path/to/credentials.json"`. If the user intentionally wants to enter credentials in chat, `credentials={...}` is still accepted.
 
 **Recommended: a classic PAT with the `repo` and `workflow` scopes**, created by a user with **admin access** to the target repositories. That covers everything below.
 
@@ -157,10 +163,40 @@ What hypervibe uses the GitHub token for, and the permission each operation need
 | Set/delete Actions repo secrets (`hv_secrets_set target="github"`) | `repo` | Secrets: read/write |
 | Branch protection (`hv_ci_setup kind="branch-protection"`) | `repo` + repo admin | Administration: read/write |
 | GitHub Pages (`hv_ci_setup kind="pages"`) | `repo` | Pages: read/write |
-| Manage the Railway GitHub App's repository access (selected-repos installs) | `repo` + repo admin — **classic PAT only**; GitHub's app-installation APIs do not accept fine-grained PATs | not supported |
+| Generated push deploys (`hv_ci_setup kind="deploy-branch"`) | `repo` + `workflow`; add Secrets read/write if Hypervibe should sync provider API tokens | Contents: read/write, Actions: read/write, Secrets: read/write |
+| Manage the Railway GitHub App's repository access for `deploy.trigger: "native"` selected-repos installs | `repo` + repo admin — **classic PAT only**; GitHub's app-installation APIs do not accept fine-grained PATs | not supported |
 | Private repo source fetch for Cloud Run builds | `repo` | Contents: read |
 
-**What does *not* need a GitHub token:** Railway push-to-branch autodeploys. Those run through the [Railway GitHub App](https://github.com/apps/railway-app), which you grant repository access in GitHub's UI — no hypervibe credential involved.
+### Push deploys
+
+`deploy.strategy: "branch"` defaults to `deploy.trigger: "ci"`. Hypervibe sets up push deploys by writing GitHub Actions workflows that call provider APIs directly; it does not install or depend on provider CLIs.
+
+Typical setup:
+
+- Define the environment with `deploy: { strategy: "branch", branch: "main" }` or an explicit `trigger: "ci"`.
+- Run `hv_apply` first so Hypervibe records provider project, environment, service ID, and service ARN bindings.
+- Run `hv_ci_setup kind="deploy-branch" config={"provider":"<provider>"}`.
+- Check the returned `requiredSecrets`, `syncedSecrets`, `manualSecrets`, and `requiredVariables`. Hypervibe syncs provider API credentials to GitHub Actions secrets when the provider connection is verified and the GitHub token can write repo secrets.
+
+Provider workflow behavior:
+
+| Provider | Generated GitHub Actions deploy path | Usually synced from verified connection | Manual GitHub values when Hypervibe does not already know IDs |
+|---|---|---|---|
+| `railway` | Build/push OCI image to GHCR, update `ServiceInstance.source.image` via Railway GraphQL, then trigger deploy via Railway GraphQL | `RAILWAY_API_TOKEN` | Secrets: `GHCR_USERNAME`, `GHCR_TOKEN`; variables: `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_SERVICE_IDS` |
+| `cloudrun` | Build/push OCI image to Google Artifact Registry, patch Cloud Run services through Google APIs | `GCP_SERVICE_ACCOUNT_JSON`, `GCP_PROJECT_ID`, `GCP_REGION` | Variable: `CLOUDRUN_SERVICE_NAMES`; optional variable: `GCP_ARTIFACT_REPOSITORY` |
+| `apprunner` | Build/push OCI image to ECR, update App Runner services through AWS signed API requests | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | Variable: `APPRUNNER_SERVICE_ARNS`; optional variable: `AWS_ECR_REPOSITORY` |
+| `render` | Trigger Render service deploys through the Render API | `RENDER_API_KEY` | Variable: `RENDER_SERVICE_IDS` |
+| `digitalocean` | Build/push OCI image to GHCR, update App Platform services to use that image through the DigitalOcean API, then trigger deployment | `DIGITALOCEAN_ACCESS_TOKEN` | Secrets: `GHCR_USERNAME`, `GHCR_TOKEN`; variables: `DO_APP_ID`, `DO_SERVICE_NAMES` |
+| `heroku` | Build/push OCI image to Heroku Container Registry and release the `web` process through the Heroku API | `HEROKU_API_KEY` | Variable: `HEROKU_APP` |
+| `vercel` | Trigger a Vercel deploy hook from GitHub Actions | none | Secret: `VERCEL_DEPLOY_HOOK_URL` |
+
+`deploy.trigger: "native"` opts into provider-native repo integrations instead. For Railway native push autodeploys, grant the [Railway GitHub App](https://github.com/apps/railway-app) access in GitHub:
+
+- Install/open the [Railway GitHub App](https://github.com/apps/railway-app/installations/new) and grant it access to the repo. If it is installed for "Only select repositories", add the target repo.
+- Make sure at least one Railway project member has connected GitHub and has contributor access to the repo.
+- Accept any pending permission updates for the Railway GitHub App in GitHub.
+- After permission changes, wait a few minutes for Railway caches to refresh, then rerun `hv_status` or `hv_plan`.
+- If Railway still cannot see the repo, disconnect/reconnect the service source in Railway, refresh Add -> GitHub Repository, or reinstall the Railway GitHub App.
 
 ### Secret managers
 

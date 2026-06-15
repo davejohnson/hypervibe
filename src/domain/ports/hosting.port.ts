@@ -59,6 +59,11 @@ export interface HostingBindings {
     resourceType?: string;
     jobName?: string;
     schedulerJobName?: string;
+    serviceArn?: string;
+    source?: {
+      repo?: string;
+      branch?: string;
+    };
   }>;
 }
 

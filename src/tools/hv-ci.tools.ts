@@ -1,5 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { GitHubAdapter } from '../adapters/providers/github/github.adapter.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
@@ -19,10 +21,18 @@ import type { ToolContext } from './context.js';
 import { projectField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
 
+const connectionRepo = new ConnectionRepository();
+const secretStore = getSecretStore();
+
 const repoField = z
   .string()
   .optional()
   .describe('GitHub repository as "owner/repo". Defaults from the project gitRemoteUrl.');
+
+const statusChecksField = z.preprocess(
+  (value) => value === false ? undefined : value,
+  z.array(z.string()).optional()
+);
 
 interface RepoRef {
   owner: string;
@@ -62,9 +72,9 @@ function parseKindConfig<T extends z.ZodTypeAny>(schema: T, config: unknown, kin
 
 const deployBranchConfigSchema = z.object({
   repo: z.string().optional(),
-  provider: z.enum(['railway', 'vercel', 'render', 'digitalocean']),
+  provider: z.enum(['railway', 'vercel', 'render', 'digitalocean', 'cloudrun', 'apprunner', 'heroku']),
   protectBranches: z.boolean().optional(),
-  statusChecks: z.array(z.string()).optional(),
+  statusChecks: statusChecksField,
   requiredReviewers: z.number().optional(),
 });
 
@@ -87,7 +97,7 @@ const branchProtectionConfigSchema = z.object({
   dismissStaleReviews: z.boolean().optional(),
   requireCodeOwnerReviews: z.boolean().optional(),
   requireStatusChecks: z.boolean().optional(),
-  statusChecks: z.array(z.string()).optional(),
+  statusChecks: statusChecksField,
   strictStatusChecks: z.boolean().optional(),
   enforceAdmins: z.boolean().optional(),
   requireLinearHistory: z.boolean().optional(),
@@ -100,11 +110,66 @@ const workflowConfigSchema = z.object({
   template: z.string(),
 });
 
+function providerSecretsForGitHubActions(provider: string): Array<{ name: string; value: string }> {
+  const connection = connectionRepo.findByProvider(provider);
+  if (!connection || connection.status !== 'verified') {
+    return [];
+  }
+
+  const credentials = secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
+  switch (provider) {
+    case 'railway':
+      return typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0
+        ? [{ name: 'RAILWAY_API_TOKEN', value: credentials.apiToken }]
+        : [];
+    case 'digitalocean':
+      return typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0
+        ? [{ name: 'DIGITALOCEAN_ACCESS_TOKEN', value: credentials.apiToken }]
+        : [];
+    case 'render':
+      return typeof credentials.apiKey === 'string' && credentials.apiKey.length > 0
+        ? [{ name: 'RENDER_API_KEY', value: credentials.apiKey }]
+        : [];
+    case 'cloudrun': {
+      const secrets: Array<{ name: string; value: string }> = [];
+      if (typeof credentials.credentials === 'string' && credentials.credentials.length > 0) {
+        secrets.push({ name: 'GCP_SERVICE_ACCOUNT_JSON', value: credentials.credentials });
+      }
+      if (typeof credentials.projectId === 'string' && credentials.projectId.length > 0) {
+        secrets.push({ name: 'GCP_PROJECT_ID', value: credentials.projectId });
+      }
+      if (typeof credentials.region === 'string' && credentials.region.length > 0) {
+        secrets.push({ name: 'GCP_REGION', value: credentials.region });
+      }
+      return secrets;
+    }
+    case 'apprunner': {
+      const secrets: Array<{ name: string; value: string }> = [];
+      if (typeof credentials.accessKeyId === 'string' && credentials.accessKeyId.length > 0) {
+        secrets.push({ name: 'AWS_ACCESS_KEY_ID', value: credentials.accessKeyId });
+      }
+      if (typeof credentials.secretAccessKey === 'string' && credentials.secretAccessKey.length > 0) {
+        secrets.push({ name: 'AWS_SECRET_ACCESS_KEY', value: credentials.secretAccessKey });
+      }
+      if (typeof credentials.region === 'string' && credentials.region.length > 0) {
+        secrets.push({ name: 'AWS_REGION', value: credentials.region });
+      }
+      return secrets;
+    }
+    case 'heroku':
+      return typeof credentials.apiKey === 'string' && credentials.apiKey.length > 0
+        ? [{ name: 'HEROKU_API_KEY', value: credentials.apiKey }]
+        : [];
+    default:
+      return [];
+  }
+}
+
 export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_ci_setup',
     'Set up CI/CD on GitHub for a project. Dispatches on kind; config holds the kind-specific fields (config.repo="owner/repo" overrides the project gitRemoteUrl for every kind). ' +
-      'kind="deploy-branch": branch-based deploy workflows from the project environments; config { provider (railway|vercel|render|digitalocean, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
+      'kind="deploy-branch": branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs); config { provider (railway|vercel|render|digitalocean|cloudrun|apprunner|heroku, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
       'kind="ai-review": Claude PR review workflow; config { apiKey (required), model? }. ' +
       'kind="pages": GitHub Pages with a custom domain via Cloudflare DNS; config { domain (required) }. ' +
       'kind="branch-protection": protection rules; config { branch (required), requireReviews?, requiredReviewers?, dismissStaleReviews?, requireCodeOwnerReviews?, requireStatusChecks?, statusChecks?, strictStatusChecks?, enforceAdmins?, requireLinearHistory?, allowForcePushes?, allowDeletions? }. ' +
@@ -142,6 +207,24 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
               created.push({ template: workflow.template, branch: workflow.branch, path: workflow.path, created: fileResult.created, updated: fileResult.updated });
             } catch (error) {
               errors.push({ template: workflow.template, path: workflow.path, error: error instanceof Error ? error.message : String(error) });
+            }
+          }
+
+          const requiredSecrets = Array.from(new Set(workflows.flatMap((workflow) => workflow.requiredSecrets)));
+          const syncedSecrets: string[] = [];
+          const secretSyncErrors: Array<{ name: string; error: string }> = [];
+          for (const secret of providerSecretsForGitHubActions(cfg.provider)) {
+            if (!requiredSecrets.includes(secret.name)) {
+              continue;
+            }
+            try {
+              await adapter.setRepositorySecret(owner, repo, secret.name, secret.value);
+              syncedSecrets.push(secret.name);
+            } catch (error) {
+              secretSyncErrors.push({
+                name: secret.name,
+                error: error instanceof Error ? error.message : String(error),
+              });
             }
           }
 
@@ -185,7 +268,11 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
             workflows: created,
             errors: errors.length > 0 ? errors : undefined,
             branchProtection: cfg.protectBranches ? protectionResults : undefined,
-            requiredSecrets: Array.from(new Set(workflows.flatMap((workflow) => workflow.requiredSecrets))),
+            requiredSecrets,
+            requiredVariables: Array.from(new Set(workflows.flatMap((workflow) => workflow.requiredVariables))),
+            syncedSecrets: syncedSecrets.length > 0 ? syncedSecrets : undefined,
+            manualSecrets: requiredSecrets.filter((name) => !syncedSecrets.includes(name)),
+            secretSyncErrors: secretSyncErrors.length > 0 ? secretSyncErrors : undefined,
             skippedEnvironments: skippedEnvironments.length > 0 ? skippedEnvironments : undefined,
           };
           const protectionFailures = protectionResults.filter((r) => !r.success);
@@ -193,7 +280,10 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
             return toolError('PROVIDER_ERROR', 'Branch deploy setup had errors.', { details: data });
           }
           return toolSuccess(data, {
-            hint: `Set the required secrets (${data.requiredSecrets.join(', ')}) in the GitHub repository, then pushes to the mapped branches will deploy.`,
+            warnings: secretSyncErrors.length > 0
+              ? secretSyncErrors.map((entry) => `Failed to sync GitHub Actions secret ${entry.name}: ${entry.error}`)
+              : undefined,
+            hint: `Set the manual secrets (${data.manualSecrets.join(', ') || 'none'})${data.requiredVariables.length > 0 ? ` and variables (${data.requiredVariables.join(', ')})` : ''} in the GitHub repository, then pushes to the mapped branches will deploy.`,
           });
         }
         case 'ai-review': {
@@ -252,7 +342,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
           const zone = await cfResult.adapter.findZoneByName(apex);
           if (!zone) {
             return toolError('NOT_FOUND', `Cloudflare zone "${apex}" not found.`, {
-              hint: `Add the domain to Cloudflare or create a scoped connection: connection_create provider=cloudflare scope=${apex}.`,
+              hint: `Add the domain to Cloudflare or create a scoped connection with hv_connect provider=cloudflare scope=${apex} credentialsRef="env:CLOUDFLARE_API_TOKEN" credentialsKey="apiToken".`,
             });
           }
 
@@ -349,7 +439,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_ci_status',
-    'Get GitHub Actions status for a project repository: workflows, recent runs for a workflow, GitHub Pages status, and branch protection rules. NOT deployment status — Railway push-to-branch autodeploys do not use GitHub Actions; check hv_status (deploySource.pushToDeploy) for that.',
+    'Get GitHub Actions status for a project repository: workflows, recent runs for a workflow, GitHub Pages status, and branch protection rules. For deploy.strategy="branch" with trigger="ci", use this to check push-deploy workflow runs.',
     {
       project: projectField,
       repo: repoField,

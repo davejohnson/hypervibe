@@ -101,7 +101,7 @@ describe('hv_db_migrate', () => {
 });
 
 describe('hv_db_url', () => {
-  it('masks credentials by default and reveals on request', async () => {
+  it('masks credentials by default and suppresses raw reveal in tool output', async () => {
     seedDbProject();
     const t = await makeClient();
 
@@ -112,7 +112,10 @@ describe('hv_db_url', () => {
     expect(masked.data.databaseUrl).toContain('***');
 
     const revealed = await t.call('hv_db_url', { project: 'db-app', env: 'staging', reveal: true });
-    expect(revealed.data.databaseUrl).toContain('secretpw');
+    expect(revealed.data.masked).toBe(true);
+    expect(revealed.data.revealSuppressed).toBe(true);
+    expect(revealed.data.databaseUrl).not.toContain('secretpw');
+    expect(revealed.hint).toContain('Raw database URLs are not returned');
     await t.close();
   });
 

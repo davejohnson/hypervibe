@@ -24,7 +24,7 @@ import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from
 import type { Component } from '../entities/component.entity.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
-import type { IHostingAdapter } from '../ports/hosting.port.js';
+import type { HostingBindings, IHostingAdapter } from '../ports/hosting.port.js';
 import {
   DB_PROVIDERS,
   type DesiredState,
@@ -66,6 +66,43 @@ async function ensureDatabaseIfSupported(
 
 function defaultPublicForWorkload(workloadKind: WorkloadKind): boolean {
   return workloadKind === 'web';
+}
+
+function recordConnectedDeploySource(params: {
+  environmentId: string;
+  provider: string;
+  serviceName: string;
+  serviceId: string;
+  repo: string;
+  branch: string;
+  tx: InfraTransaction;
+}): void {
+  const latestEnvironment = envRepo.findById(params.environmentId);
+  if (!latestEnvironment) {
+    return;
+  }
+
+  const bindings = latestEnvironment.platformBindings as Partial<HostingBindings>;
+  const services = { ...(bindings.services ?? {}) };
+  services[params.serviceName] = {
+    ...(services[params.serviceName] ?? {}),
+    serviceId: params.serviceId,
+    source: {
+      repo: params.repo,
+      branch: params.branch,
+    },
+  };
+
+  snapshotEnvironmentBindings({
+    tx: params.tx,
+    envRepo,
+    environmentId: params.environmentId,
+    label: `environment_bindings_deploy_source_${params.serviceName}`,
+  });
+  envRepo.updatePlatformBindings(params.environmentId, {
+    provider: params.provider,
+    services,
+  });
 }
 
 export async function executeBootstrap(params: {
@@ -381,8 +418,18 @@ export async function executeBootstrap(params: {
         component: existingComponent,
         label: 'component_record_update',
       });
+      const existingBindings = existingComponent.bindings as Record<string, unknown>;
+      const existingProvider = typeof existingBindings.provider === 'string' ? existingBindings.provider : undefined;
+      const nextBindings = existingProvider && existingProvider !== params.databaseProvider
+        ? {
+            ...(dbProvision.component.bindings as Record<string, unknown>),
+            previousProvider: existingProvider,
+            previousExternalId: existingComponent.externalId ?? undefined,
+            previousBindings: existingComponent.bindings,
+          }
+        : dbProvision.component.bindings;
       componentRepo.update(existingComponent.id, {
-        bindings: dbProvision.component.bindings,
+        bindings: nextBindings,
         externalId: dbProvision.component.externalId ?? undefined,
       });
     } else {
@@ -450,6 +497,7 @@ export async function executeBootstrap(params: {
 
   const orchestrator = new DeployOrchestrator();
   const deploySource = resolveGitDeploySource(project, params.environmentName, params.deploy);
+  const deployTrigger = params.deploy?.trigger ?? 'ci';
   const sourceRepoUrl = normalizeGitRemoteForBuild(project.gitRemoteUrl);
   const secretStore = getSecretStore();
   const githubConnection = sourceRepoUrl && hostingAdapter.name === 'cloudrun'
@@ -523,7 +571,7 @@ export async function executeBootstrap(params: {
     };
   }
 
-  if (params.deploy?.strategy === 'branch') {
+  if (params.deploy?.strategy === 'branch' && deployTrigger === 'native') {
     if (!deploySource.source) {
       const cleanup = await tx.rollback();
       return {
@@ -573,6 +621,16 @@ export async function executeBootstrap(params: {
         if (!repoAccessHelp && isRailwayGitHubRepoAccessError(error)) {
           repoAccessHelp = buildRailwayGitHubRepoAccessHelp(deploySource.source.repo);
         }
+      } else {
+        recordConnectedDeploySource({
+          environmentId: environment.id,
+          provider: hostingAdapter.name,
+          serviceName: service.name,
+          serviceId,
+          repo: deploySource.source.repo,
+          branch: deploySource.source.branch,
+          tx,
+        });
       }
     }
 
@@ -603,16 +661,30 @@ export async function executeBootstrap(params: {
 
     summary.deploySource = {
       strategy: 'branch',
+      trigger: 'native',
       repo: deploySource.source.repo,
       branch: deploySource.source.branch,
       services: serviceWorkloads.map((service) => service.name),
       ...(cronWorkloads.length > 0 ? { crons: cronWorkloads.map((service) => service.name) } : {}),
       ...(repoAccess === false
         ? {
-            warning: `Railway's GitHub App cannot access ${deploySource.source.repo}: pushes to GitHub will NOT auto-deploy and Railway's UI will show "repo not found". Have the user grant the Railway GitHub App access to the repo.`,
+            warning: `Railway's GitHub App cannot access ${deploySource.source.repo}: native Railway pushes to GitHub will NOT auto-deploy until the user grants the Railway GitHub App access, confirms a Railway project member has connected GitHub contributor access, accepts any pending app permission updates, and waits for Railway caches to refresh.`,
             help: buildRailwayGitHubRepoAccessHelp(deploySource.source.repo),
           }
         : {}),
+    };
+  } else if (params.deploy?.strategy === 'branch') {
+    summary.deploySource = {
+      strategy: 'branch',
+      trigger: 'ci',
+      ...(deploySource.source ? { repo: deploySource.source.repo, branch: deploySource.source.branch } : {}),
+      services: serviceWorkloads.map((service) => service.name),
+      ...(cronWorkloads.length > 0 ? { crons: cronWorkloads.map((service) => service.name) } : {}),
+      nextSteps: [
+        'Run hv_ci_setup kind="deploy-branch" for this project to create the push-deploy workflow.',
+        'Store the required provider API and registry secrets in the GitHub repository.',
+        'Push to the configured branch to build the image and deploy it through provider APIs.',
+      ],
     };
   }
 

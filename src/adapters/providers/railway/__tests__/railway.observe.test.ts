@@ -179,6 +179,36 @@ describe('RailwayAdapter observe', () => {
     expect(result.services[0]?.source).toEqual({ repo: 'dave/seq-planner', branch: 'main' });
   });
 
+  it('uses ServiceInstance.source as primary and cached binding branch when repoTriggers are absent', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(projectDetailsResponse)
+      .mockResolvedValueOnce({
+        serviceInstance: {
+          source: { repo: 'dave/seq-planner' },
+          latestDeployment: { status: 'SUCCESS' },
+        },
+      })
+      .mockResolvedValueOnce({ variables: {} });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({
+        projectId: 'rail-project-1',
+        environmentId: 'env-prod',
+        services: {
+          web: {
+            serviceId: 'svc-web',
+            source: { repo: 'https://github.com/dave/seq-planner.git', branch: 'main' },
+          },
+        },
+      })
+    );
+
+    expect(result.services[0]?.source).toEqual({ repo: 'dave/seq-planner', branch: 'main' });
+  });
+
   it('marks a service with no deployments as status empty', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(projectDetailsResponse)

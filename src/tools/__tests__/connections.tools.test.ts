@@ -7,6 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 // Importing the adapter registers the railway provider in the registry.
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import { registerConnectionsTools } from '../connections.tools.js';
@@ -22,6 +23,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  delete process.env.HV_TEST_RAILWAY_TOKEN;
   SqliteAdapter.resetInstance();
   rmSync(tempDir, { recursive: true, force: true });
 });
@@ -66,6 +68,29 @@ describe('hv_connect', () => {
 
     const connection = new ConnectionRepository().findByProvider('railway');
     expect(connection?.status).toBe('verified');
+    await t.close();
+  });
+
+  it('add can resolve a token from a local env ref without echoing it', async () => {
+    process.env.HV_TEST_RAILWAY_TOKEN = 'token-from-env-ref';
+    vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'railway',
+      credentialsRef: 'env:HV_TEST_RAILWAY_TOKEN',
+      credentialsKey: 'apiToken',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.status).toBe('verified');
+    expect(result.data.credentialsSource).toBe('env');
+    expect(JSON.stringify(result)).not.toContain('token-from-env-ref');
+
+    const connection = new ConnectionRepository().findByProvider('railway')!;
+    const decrypted = getSecretStore().decryptObject<{ apiToken: string }>(connection.credentialsEncrypted);
+    expect(decrypted.apiToken).toBe('token-from-env-ref');
     await t.close();
   });
 

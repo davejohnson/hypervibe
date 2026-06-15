@@ -15,8 +15,8 @@ import type { PlanAction, PlanFieldDiff, DiffResult, LocalSnapshot } from './pla
  *   confirm-gated (dataBearing) and depends on the create.
  * - Hosting provider change → replace services (create on new provider before
  *   destroying old, handled by the converge executor).
- * - Live resources absent from the spec are reported as unmanaged, never destroyed —
- *   except databases tracked by a local component, which get a confirm-gated destroy.
+ * - Live resources absent from the spec are destroyed only when local bindings
+ *   prove Hypervibe manages them. Otherwise they are reported as unmanaged.
  * - Email/SendGrid is not part of the diff (not observable here); hv_plan
  *   appends provider-precondition items separately.
  */
@@ -27,25 +27,31 @@ export function diffEnvironment(input: {
   local: LocalSnapshot;
   /** Repo/branch services should be linked to when spec.deploy.strategy is "branch". */
   expectedSource?: { repo: string; branch: string };
+  /** Managed database env vars derived from the currently desired database component. */
+  managedDatabaseEnvVars?: Record<string, string>;
 }): DiffResult {
-  const { spec, envName, observed, local, expectedSource } = input;
+  const { spec, envName, observed, local, expectedSource, managedDatabaseEnvVars } = input;
   const verified = observed !== null;
   const actions: PlanAction[] = [];
   const unmanaged: DiffResult['unmanaged'] = [];
   const warnings: string[] = [...(observed?.warnings ?? [])];
   const provider = spec.hosting.provider;
+  const desiredEnvVars = {
+    ...(managedDatabaseEnvVars ?? {}),
+    ...spec.envVars,
+  };
 
   if (observed?.partial) {
     warnings.push('Observation was partial; some diffs may be incomplete.');
   }
 
-  // Railway delivers code only through repo-linked deploys (serviceConnect).
-  // Without strategy "branch", apply creates source-less services that never run code.
+  // Without a branch deploy strategy, apply creates source-less services that
+  // only receive code later if the user runs an out-of-band deploy.
   if (provider === 'railway' && Object.keys(spec.services).length > 0 && spec.deploy?.strategy !== 'branch') {
     warnings.push(
-      `deploy.strategy is "${spec.deploy?.strategy ?? 'unset'}": Railway only deploys code via repo-linked deploys, `
-      + 'so apply will create services without a source and NO CODE WILL BE DEPLOYED. '
-      + 'Set deploy: { strategy: "branch" } in the spec (hv_spec_set) unless infrastructure-only is intended.'
+      `deploy.strategy is "${spec.deploy?.strategy ?? 'unset'}": Railway apply will create services without a source, `
+      + 'so NO CODE WILL BE DEPLOYED. '
+      + 'Set deploy: { strategy: "branch", trigger: "ci" } and run hv_ci_setup unless infrastructure-only is intended.'
     );
   }
 
@@ -118,7 +124,7 @@ export function diffEnvironment(input: {
         continue;
       }
 
-      const diff = diffServiceConfig(serviceSpec, live, spec.envVars);
+      const diff = diffServiceConfig(serviceSpec, live, desiredEnvVars);
       const noCode = live.status === 'empty';
       const sourceIssue = spec.deploy?.strategy === 'branch' && expectedSource
         ? diffDeploySource(expectedSource, live)
@@ -173,10 +179,41 @@ export function diffEnvironment(input: {
     }
   }
 
-  // Live services not in the spec: report, never destroy.
+  const serviceDestroyAction = (name: string, verifiedDestroy: boolean, reason: string): PlanAction => ({
+    id: `service:${name}:destroy`,
+    type: 'destroy',
+    resource: { kind: 'service', name, provider },
+    verified: verifiedDestroy,
+    reason,
+  });
+
+  // Services absent from the spec: destroy previously managed bindings, but
+  // only report truly unknown live resources as unmanaged.
+  const plannedServiceDestroys = new Set<string>();
   for (const live of observed?.services ?? []) {
-    if (!spec.services[live.name]) {
+    if (spec.services[live.name]) continue;
+    const bound = Boolean(localServiceBindings[live.name]?.serviceId);
+    if (bound) {
+      actions.push(serviceDestroyAction(
+        live.name,
+        true,
+        `Service "${live.name}" was removed from the spec and is managed by Hypervibe`
+      ));
+      plannedServiceDestroys.add(live.name);
+    } else {
       unmanaged.push({ kind: 'service', name: live.name, detail: `Running on ${provider} but absent from spec` });
+    }
+  }
+
+  if (!observed) {
+    for (const [name, binding] of Object.entries(localServiceBindings)) {
+      if (spec.services[name] || plannedServiceDestroys.has(name) || !binding?.serviceId) continue;
+      actions.push(serviceDestroyAction(
+        name,
+        false,
+        `Service "${name}" was removed from the spec and has a local ${provider} binding`
+      ));
+      plannedServiceDestroys.add(name);
     }
   }
 
@@ -184,6 +221,9 @@ export function diffEnvironment(input: {
   const localDb = local.components.find((c) => c.type === 'postgres');
   const localDbProvider = localDb
     ? String((localDb.bindings as Record<string, unknown>)?.provider ?? '') || undefined
+    : undefined;
+  const previousDbProvider = localDb
+    ? String((localDb.bindings as Record<string, unknown>)?.previousProvider ?? '') || undefined
     : undefined;
   const observedDb = observed?.databases.find((d) => d.engine === 'postgres');
   const currentDbProvider = observedDb?.provider ?? localDbProvider;
@@ -202,23 +242,16 @@ export function diffEnvironment(input: {
         dependsOn: wanted === provider ? projectDep : undefined,
       });
     } else if (currentDbProvider !== wanted) {
+      warnings.push(
+        `Database provider change from ${currentDbProvider} to ${wanted} is staged: this plan creates the new database only. Hypervibe does not migrate data automatically and will not delete the old database in this plan.`
+      );
       actions.push({
         id: createId,
         type: 'create',
         resource: { kind: 'database', name: spec.database.engine, provider: wanted },
         verified: dbVerified,
-        reason: `Database provider changes from ${currentDbProvider} to ${wanted}`,
+        reason: `Database provider changes from ${currentDbProvider} to ${wanted}. Create the new database first; services and old database deletion are planned after the new database is recorded locally.`,
         dependsOn: wanted === provider ? projectDep : undefined,
-      });
-      actions.push({
-        id: `database:${currentDbProvider}:destroy`,
-        type: 'destroy',
-        resource: { kind: 'database', name: spec.database.engine, provider: currentDbProvider },
-        verified: dbVerified,
-        reason: `Old ${currentDbProvider} database is replaced by ${wanted}. Data is NOT migrated automatically — migrate first, then confirm.`,
-        dataBearing: true,
-        requiresConfirm: true,
-        dependsOn: [createId],
       });
     } else {
       actions.push({
@@ -228,6 +261,20 @@ export function diffEnvironment(input: {
         verified: dbVerified,
         reason: 'Database in sync',
       });
+      if (previousDbProvider && previousDbProvider !== wanted) {
+        warnings.push(
+          `Database cutover from ${previousDbProvider} to ${wanted} is pending: restore data into ${wanted}, apply the service env updates, verify health, then confirm the old ${previousDbProvider} destroy.`
+        );
+        actions.push({
+          id: `database:${previousDbProvider}:destroy`,
+          type: 'destroy',
+          resource: { kind: 'database', name: spec.database.engine, provider: previousDbProvider },
+          verified: dbVerified,
+          reason: `Previous ${previousDbProvider} database is no longer active. Data is NOT migrated automatically — confirm only after cutover is verified.`,
+          dataBearing: true,
+          requiresConfirm: true,
+        });
+      }
     }
   } else if (localDb && currentDbProvider) {
     // Spec no longer declares a database but we manage one: confirm-gated destroy.
@@ -290,6 +337,9 @@ function diffDeploySource(
   }
   if (wantedRepo && liveRepo !== wantedRepo) {
     return `Deploy source repo is ${live.source?.repo}, expected ${expected.repo}`;
+  }
+  if (!live.source?.branch) {
+    return `Deploy source branch is not recorded (expected ${expected.branch}); reconnect the deploy source`;
   }
   if (live.source?.branch && live.source.branch !== expected.branch) {
     return `Deploy source branch is ${live.source.branch}, expected ${expected.branch}`;

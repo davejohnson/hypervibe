@@ -88,14 +88,14 @@ export async function runCloudPrepare(params: {
       success: true,
       mode: 'preview',
       plan,
-      message: 'Call again with confirm=true and adminCredentialsJson or adminAccessToken to prepare this cloud through Hypervibe.',
+      message: 'Recommended: export admin tokens or save service-account JSON to a local file, then call again with confirm=true and adminCredentialsJsonRef or adminAccessTokenRef. If the user intentionally wants to enter credentials in chat, adminCredentialsJson/adminAccessToken are still accepted.',
     };
   }
 
   if (!adminCredentialsJson && !adminAccessToken) {
     return {
       success: false,
-      error: 'confirm=true requires adminCredentialsJson or adminAccessToken. The deploy service account cannot grant itself project IAM.',
+      error: 'confirm=true requires adminCredentialsJsonRef/adminCredentialsJson or adminAccessTokenRef/adminAccessToken. The deploy service account cannot grant itself project IAM.',
       plan,
       requiredAdminPermissions: [
         'serviceusage.services.enable',

@@ -61,6 +61,7 @@ export function specToBootstrapParams(
     const kind = classifyEnvName(environmentName);
     deploy = {
       strategy: env.deploy.strategy,
+      ...(env.deploy.trigger ? { trigger: env.deploy.trigger } : {}),
       ...(env.deploy.branch && kind
         ? { branches: { [kind]: env.deploy.branch } }
         : {}),

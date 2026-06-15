@@ -227,4 +227,16 @@ describe('fingerprintObservedState', () => {
     };
     expect(fingerprintObservedState(changed)).not.toBe(fingerprintObservedState(base));
   });
+
+  it('changes when deploy source changes', () => {
+    const withSource: ObservedState = {
+      ...base,
+      services: [{ ...base.services[0], source: { repo: 'dave/app', branch: 'main' } }],
+    };
+    const withOtherBranch: ObservedState = {
+      ...base,
+      services: [{ ...base.services[0], source: { repo: 'dave/app', branch: 'staging' } }],
+    };
+    expect(fingerprintObservedState(withSource)).not.toBe(fingerprintObservedState(withOtherBranch));
+  });
 });

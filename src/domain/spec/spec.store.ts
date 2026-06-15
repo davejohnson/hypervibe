@@ -19,7 +19,11 @@ interface LegacyDesiredState {
     public?: boolean;
   }>;
   envVars?: Record<string, string>;
-  deploy?: { strategy?: 'branch' | 'manual'; branches?: { staging?: string; production?: string } };
+  deploy?: {
+    strategy?: 'branch' | 'manual';
+    trigger?: 'ci' | 'native';
+    branches?: { staging?: string; production?: string };
+  };
   migrations?: { mode?: 'none' | 'releaseCommand' | 'tool'; runInDeploy?: boolean; command?: string };
 }
 
@@ -81,7 +85,13 @@ export function desiredStateToSpec(project: Project): ProjectSpec | null {
     email: { enabled: Boolean(desired.setupEmail) },
     envVars: desired.envVars ?? {},
     ...(desired.deploy?.strategy
-      ? { deploy: { strategy: desired.deploy.strategy, ...(branch ? { branch } : {}) } }
+      ? {
+        deploy: {
+          strategy: desired.deploy.strategy,
+          ...(desired.deploy.trigger ? { trigger: desired.deploy.trigger } : {}),
+          ...(branch ? { branch } : {}),
+        },
+      }
       : {}),
     ...(desired.migrations?.mode
       ? {
@@ -97,6 +107,7 @@ export function desiredStateToSpec(project: Project): ProjectSpec | null {
   return projectSpecSchema.parse({
     version: 1,
     project: project.name,
+    ...(project.gitRemoteUrl ? { gitRemoteUrl: project.gitRemoteUrl } : {}),
     environments: { [envName]: environment },
   });
 }

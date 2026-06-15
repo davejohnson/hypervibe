@@ -34,6 +34,7 @@ export const databaseSpecSchema = z.object({
 
 export const deploySpecSchema = z.object({
   strategy: z.enum(['branch', 'manual']).default('manual'),
+  trigger: z.enum(['ci', 'native']).optional(),
   branch: z.string().min(1).optional(),
 });
 
@@ -67,6 +68,7 @@ export const environmentSpecSchema = z.object({
 export const projectSpecSchema = z.object({
   version: z.literal(1),
   project: z.string().min(1),
+  gitRemoteUrl: z.string().min(1).optional(),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 });
 

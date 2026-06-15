@@ -413,7 +413,7 @@ export class DeployOrchestrator {
             if (typeof deployData.imageUri === 'string') {
               services[service.name].imageUri = deployData.imageUri;
             }
-            for (const key of ['resourceType', 'jobName', 'schedulerJobName'] as const) {
+            for (const key of ['resourceType', 'jobName', 'schedulerJobName', 'serviceArn'] as const) {
               if (typeof deployData[key] === 'string') {
                 services[service.name][key] = deployData[key];
               }

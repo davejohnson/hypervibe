@@ -16,9 +16,12 @@ import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { StateManager } from '../agent/state.js';
 import type { Project } from '../domain/entities/project.entity.js';
+import type { Component } from '../domain/entities/component.entity.js';
+import type { Environment } from '../domain/entities/environment.entity.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
 
 function deploymentProviders(): string[] {
   return providerRegistry.getByCategory('deployment').map((p) => p.metadata.name);
@@ -43,6 +46,49 @@ function summarizeActions(actions: PlanAction[]) {
   return counts;
 }
 
+function normalizeGitSourceRepo(repo?: string): string | undefined {
+  if (!repo) {
+    return undefined;
+  }
+
+  return repo
+    .trim()
+    .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
+    .replace(/^git@github\.com:/i, '')
+    .replace(/\.git$/i, '')
+    .replace(/^\/+|\/+$/g, '')
+    .toLowerCase() || undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringField(record: Record<string, unknown> | null, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function gitRemoteUrlFromSpecInput(spec: Record<string, unknown>): string | undefined {
+  const value = spec.gitRemoteUrl;
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Project {
+  const gitRemoteUrl = spec.gitRemoteUrl?.trim();
+  return gitRemoteUrl && gitRemoteUrl !== project.gitRemoteUrl
+    ? { ...project, gitRemoteUrl }
+    : project;
+}
+
+function syncProjectGitRemoteUrl(ctx: ToolContext, project: Project, spec: ProjectSpec): Project {
+  const gitRemoteUrl = spec.gitRemoteUrl?.trim();
+  if (!gitRemoteUrl || gitRemoteUrl === project.gitRemoteUrl) {
+    return project;
+  }
+  return ctx.repos.projects.update(project.id, { gitRemoteUrl }) ?? { ...project, gitRemoteUrl };
+}
+
 export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
   const specStore = new SpecStore();
   const planService = new PlanService();
@@ -52,7 +98,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
     'Create or update the desired-state spec for a project (the single source of truth that hv_plan diffs against live infrastructure). Merges by default; pass replace=true to overwrite. In a merge, set a key to null to delete it (e.g. remove a service).',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|rds|cloudsql|railway }, domain?, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, branch? }, migrations? } } }. deploy.strategy "branch" connects the GitHub repo so hv_apply deploys code (required for code delivery on railway); "manual" (the default) provisions infrastructure only — services are created without a source.'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|rds|cloudsql|railway }, domain?, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations? } } }. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows, while trigger "native" opts into provider-native repo integrations such as the Railway GitHub App. "manual" provisions infrastructure only.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
     },
     wrapHandler(async ({ project: projectRef, spec, replace }) => {
@@ -65,7 +111,11 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
             hint: 'Pass project (or spec.project) to create a new project.',
           });
         }
-        project = ctx.repos.projects.create({ name });
+        const gitRemoteUrl = gitRemoteUrlFromSpecInput(spec);
+        project = ctx.repos.projects.create({
+          name,
+          ...(gitRemoteUrl ? { gitRemoteUrl } : {}),
+        });
       }
 
       let result;
@@ -87,10 +137,11 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         throw error;
       }
       validateHostingProviders(result.spec);
+      project = syncProjectGitRemoteUrl(ctx, project, result.spec);
 
       return toolSuccess(
         {
-          project: { id: project.id, name: project.name },
+          project: { id: project.id, name: project.name, gitRemoteUrl: project.gitRemoteUrl ?? null },
           revision: result.revision,
           spec: result.spec,
         },
@@ -111,8 +162,10 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           hint: 'Define one with hv_spec_set.',
         });
       }
+      const gitRemoteUrl = project.gitRemoteUrl ?? result.spec.gitRemoteUrl ?? null;
       return toolSuccess({
-        project: { id: project.id, name: project.name },
+        project: { id: project.id, name: project.name, gitRemoteUrl },
+        projectMeta: { gitRemoteUrl },
         revision: result.revision,
         spec: result.spec,
         environments: Object.fromEntries(
@@ -141,7 +194,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       const confirmIds = result.actions.filter((a) => a.requiresConfirm).map((a) => a.id);
       const pending = result.actions.filter((a) => a.type !== 'noop');
       const hint = result.blocked.length > 0
-        ? `Blocked: connect ${result.blocked.map((b) => b.provider).join(', ')} with hv_connect before applying.`
+        ? `Blocked: connect ${result.blocked.map((b) => b.provider).join(', ')} with hv_connect before applying. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`
         : pending.length === 0
           ? 'Everything is in sync — nothing to apply.'
           : `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmDestroy=${JSON.stringify(confirmIds)} to also run the confirm-gated destroys` : ''}.`;
@@ -185,26 +238,42 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       }
 
       const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-      const { observed, warnings } = await planService.observeEnvironment(project, environment, envSpec);
-      const local = planService.buildLocalSnapshot(project, environment);
+      const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);
+      const { observed, warnings } = await planService.observeEnvironment(projectForStatus, environment, envSpec);
+      const local = planService.buildLocalSnapshot(projectForStatus, environment);
       const diff = diffEnvironment({
         spec: envSpec,
         envName,
         observed,
         local,
-        expectedSource: planService.expectedDeploySource(project, envName, envSpec),
+        expectedSource: planService.expectedDeploySource(projectForStatus, envName, envSpec),
       });
       const drift = diff.actions.filter((a) => a.type !== 'noop');
 
-      const expectedSource = planService.expectedDeploySource(project, envName, envSpec);
+      const expectedSource = planService.expectedDeploySource(projectForStatus, envName, envSpec);
       const observedSources = Object.fromEntries(
         (observed?.services ?? [])
           .filter((s) => s.source?.repo)
           .map((s) => [s.name, `${s.source!.repo}${s.source!.branch ? `@${s.source!.branch}` : ''}`])
       );
-      // Catches the "source connected but the Railway GitHub App cannot see
-      // the repo" state, where pushes silently do not deploy.
-      const sourceWarnings = await planService.checkBranchDeploySource(project, envSpec);
+      // Catches the native Railway "source connected but the Railway GitHub
+      // App cannot see the repo" state, where pushes silently do not deploy.
+      const sourceWarnings = await planService.checkBranchDeploySource(projectForStatus, envSpec);
+      const observedServicesByName = new Map((observed?.services ?? []).map((service) => [service.name, service]));
+      const expectedServiceNames = Object.keys(envSpec.services);
+      const expectedRepo = normalizeGitSourceRepo(expectedSource?.repo);
+      const allServicesLinkedToExpectedSource = Boolean(
+        expectedSource
+        && expectedServiceNames.length > 0
+        && expectedServiceNames.every((serviceName) => {
+          const source = observedServicesByName.get(serviceName)?.source;
+          return normalizeGitSourceRepo(source?.repo) === expectedRepo
+            && source?.branch === expectedSource.branch;
+        })
+      );
+
+      const deployStrategy = envSpec.deploy?.strategy ?? 'manual';
+      const deployTrigger = deployStrategy === 'branch' ? envSpec.deploy?.trigger ?? 'ci' : undefined;
 
       return toolSuccess(
         {
@@ -217,20 +286,29 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           unmanaged: diff.unmanaged,
           blocked: planService.preflight(envSpec),
           deploySource: {
-            strategy: envSpec.deploy?.strategy ?? 'manual',
+            strategy: deployStrategy,
+            ...(deployTrigger ? { trigger: deployTrigger } : {}),
             ...(expectedSource ? { expected: `${expectedSource.repo}@${expectedSource.branch}` } : {}),
             observed: observedSources,
+            ...(deployStrategy === 'branch' && deployTrigger === 'ci'
+              ? { ci: { provider: 'github-actions', setup: 'hv_ci_setup kind="deploy-branch"' } }
+              : {}),
             pushToDeploy: Boolean(
-              envSpec.deploy?.strategy === 'branch'
+              deployStrategy === 'branch'
+              && deployTrigger === 'native'
               && expectedSource
-              && Object.keys(observedSources).length > 0
+              && allServicesLinkedToExpectedSource
               && sourceWarnings.length === 0
             ),
           },
         },
         {
           warnings: [...warnings, ...diff.warnings, ...sourceWarnings],
-          hint: drift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
+          hint: sourceWarnings.length > 0
+            ? 'Fix Railway GitHub App repository access and project-member GitHub contributor access, then rerun hv_status or hv_plan.'
+            : deployStrategy === 'branch' && deployTrigger === 'ci'
+              ? 'Use hv_ci_setup kind="deploy-branch" to create the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
+              : drift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
         }
       );
     })
@@ -266,19 +344,21 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       if (blocked.length > 0) {
         return toolError('MISSING_CONNECTION', `Missing verified connections: ${blocked.map((b) => b.provider).join(', ')}.`, {
           details: blocked,
-          hint: 'Connect them with hv_connect, then re-run hv_plan and hv_apply.',
+          hint: 'Connect them with hv_connect, then re-run hv_plan and hv_apply. Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or put JSON credentials in a local file and use credentialsRef="file:/absolute/path". Raw credentials={...} is still accepted if intentional.',
         });
       }
 
+      const projectForApply = syncProjectGitRemoteUrl(ctx, project, specResult.spec);
+
       // Re-observe for the TOCTOU fingerprint check.
       const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-      const { observed } = await planService.observeEnvironment(project, environment, envSpec);
+      const { observed } = await planService.observeEnvironment(projectForApply, environment, envSpec);
       const freshFingerprint = observed ? fingerprintObservedState(observed) : null;
 
       // The bootstrap path derives the hosting adapter from project.defaultPlatform.
-      let applyProject: Project = project;
-      if (project.defaultPlatform !== envSpec.hosting.provider) {
-        applyProject = ctx.repos.projects.update(project.id, { defaultPlatform: envSpec.hosting.provider }) ?? project;
+      let applyProject: Project = projectForApply;
+      if (projectForApply.defaultPlatform !== envSpec.hosting.provider) {
+        applyProject = ctx.repos.projects.update(projectForApply.id, { defaultPlatform: envSpec.hosting.provider }) ?? projectForApply;
       }
 
       // Converge: bootstrap handles create/update/replace as one idempotent
@@ -292,8 +372,14 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       };
 
       const handler = async (action: PlanAction): Promise<ActionResult> => {
+        if (action.resource.kind === 'database' && action.type === 'create') {
+          return createDatabase(ctx, applyProject, envName, action);
+        }
         if (action.resource.kind === 'database' && action.type === 'destroy') {
           return destroyDatabase(ctx, applyProject, envName, action);
+        }
+        if (action.resource.kind === 'service' && action.type === 'destroy') {
+          return destroyService(ctx, applyProject, specResult.spec, envName, action);
         }
         const result = await ensureBootstrap();
         if (result.success) {
@@ -375,6 +461,82 @@ function syncAutofixWatches(
   }
 }
 
+function projectSpecReferencesService(spec: ProjectSpec, serviceName: string): boolean {
+  return Object.values(spec.environments).some((environmentSpec) => Boolean(environmentSpec.services[serviceName]));
+}
+
+function environmentHasBinding(environment: Environment, serviceName: string): boolean {
+  return Boolean(serviceBindingFor(environment, serviceName));
+}
+
+async function destroyService(
+  ctx: ToolContext,
+  project: Project,
+  spec: ProjectSpec,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return { success: false, message: 'Environment not found locally', error: `No local environment "${envName}"` };
+  }
+
+  const binding = serviceBindingFor(environment, action.resource.name);
+  const serviceId = stringField(binding ?? null, 'serviceId');
+  if (!serviceId) {
+    return {
+      success: false,
+      message: 'Service destroy target is missing a local provider binding',
+      error: `No local serviceId binding for "${action.resource.name}" in ${envName}.`,
+    };
+  }
+
+  const adapterResult = await adapterFactory.getHostingAdapter(project);
+  if (!adapterResult.success || !adapterResult.adapter) {
+    return { success: false, message: 'Hosting adapter unavailable', error: adapterResult.error };
+  }
+  if (adapterResult.adapter.name !== action.resource.provider) {
+    return {
+      success: false,
+      message: 'Hosting adapter does not match the planned service destroy',
+      error: `Plan targets ${action.resource.provider}, but the resolved hosting adapter is ${adapterResult.adapter.name}.`,
+    };
+  }
+  if (typeof adapterResult.adapter.deleteService !== 'function') {
+    return {
+      success: false,
+      message: 'Provider does not support service deletion via Hypervibe',
+      error: `Manual cleanup required: ${action.resource.provider} service ${serviceId}`,
+    };
+  }
+
+  const deleted = await adapterResult.adapter.deleteService(serviceId);
+  if (!deleted.success) {
+    return {
+      success: false,
+      message: `Failed to delete ${action.resource.provider} service ${action.resource.name}`,
+      error: deleted.error,
+    };
+  }
+
+  removeServiceBinding(environment.id, environment, action.resource.name);
+  const stillBound = ctx.repos.environments
+    .findByProjectId(project.id)
+    .some((candidate) => environmentHasBinding(candidate, action.resource.name));
+  const stillDesired = projectSpecReferencesService(spec, action.resource.name);
+  if (!stillBound && !stillDesired) {
+    const service = ctx.repos.services.findByProjectAndName(project.id, action.resource.name);
+    if (service) {
+      ctx.repos.services.delete(service.id);
+    }
+  }
+
+  return {
+    success: true,
+    message: `Destroyed ${action.resource.provider} service ${action.resource.name} and removed the ${envName} binding`,
+  };
+}
+
 async function destroyDatabase(
   ctx: ToolContext,
   project: Project,
@@ -390,15 +552,117 @@ async function destroyDatabase(
     return { success: true, message: `No local ${action.resource.name} component to destroy — nothing to do` };
   }
 
+  const bindings = asRecord(component.bindings) ?? {};
+  const componentProvider = stringField(bindings, 'provider');
+  const previousProvider = stringField(bindings, 'previousProvider');
+  const previousBindings = asRecord(bindings.previousBindings);
+  const destroysPrevious = componentProvider !== action.resource.provider
+    && previousProvider === action.resource.provider
+    && previousBindings;
+  let componentToDestroy: Component = component;
+
+  if (componentProvider !== action.resource.provider) {
+    if (!destroysPrevious) {
+      return {
+        success: false,
+        message: 'Database destroy target does not match the locally tracked component',
+        error: `Refusing to destroy ${action.resource.provider}; local ${action.resource.name} is tracked as ${componentProvider ?? 'unknown'}.`,
+      };
+    }
+    componentToDestroy = {
+      ...component,
+      bindings: previousBindings,
+      externalId: stringField(bindings, 'previousExternalId') ?? stringField(previousBindings, 'instanceId') ?? null,
+    };
+  }
+
   const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Database adapter unavailable', error: adapterResult.error };
   }
 
-  const destroyed = await adapterResult.adapter.destroy(component);
+  const destroyed = await adapterResult.adapter.destroy(componentToDestroy);
   if (!destroyed.success) {
     return { success: false, message: destroyed.message, error: destroyed.error };
   }
+  if (destroysPrevious) {
+    const nextBindings = { ...bindings };
+    delete nextBindings.previousProvider;
+    delete nextBindings.previousExternalId;
+    delete nextBindings.previousBindings;
+    ctx.repos.components.update(component.id, {
+      bindings: nextBindings,
+      externalId: component.externalId ?? undefined,
+    });
+    return { success: true, message: `Destroyed previous ${action.resource.provider} ${action.resource.name}` };
+  }
   ctx.repos.components.delete(component.id);
   return { success: true, message: `Destroyed ${action.resource.provider} ${action.resource.name} and removed local component` };
+}
+
+async function createDatabase(
+  ctx: ToolContext,
+  project: Project,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return { success: false, message: 'Environment not found locally', error: `No local environment "${envName}"` };
+  }
+
+  const adapterResult = await adapterFactory.getDatabaseAdapter(action.resource.provider, project);
+  if (!adapterResult.success || !adapterResult.adapter) {
+    return { success: false, message: 'Database adapter unavailable', error: adapterResult.error };
+  }
+
+  const provisioned = await adapterResult.adapter.provision(action.resource.name as 'postgres', environment, {
+    databaseName: 'app',
+  });
+  if (!provisioned.receipt.success) {
+    return {
+      success: false,
+      message: provisioned.receipt.message,
+      error: provisioned.receipt.error,
+      data: provisioned.receipt.data,
+    };
+  }
+
+  const existing = ctx.repos.components.findByEnvironmentAndType(environment.id, action.resource.name);
+  const newBindings = asRecord(provisioned.component.bindings) ?? {};
+  const existingBindings = asRecord(existing?.bindings) ?? null;
+  const existingProvider = stringField(existingBindings, 'provider');
+  const bindingsToStore = existing && existingProvider && existingProvider !== action.resource.provider
+    ? {
+        ...newBindings,
+        previousProvider: existingProvider,
+        previousExternalId: existing.externalId ?? undefined,
+        previousBindings: existing.bindings,
+      }
+    : newBindings;
+
+  if (existing) {
+    ctx.repos.components.update(existing.id, {
+      bindings: bindingsToStore,
+      externalId: provisioned.component.externalId ?? undefined,
+    });
+  } else {
+    ctx.repos.components.create({
+      environmentId: environment.id,
+      type: action.resource.name,
+      bindings: bindingsToStore,
+      externalId: provisioned.component.externalId ?? undefined,
+    });
+  }
+
+  return {
+    success: true,
+    message: `${provisioned.receipt.message}. Database recorded locally; run hv_plan again after data restore to repoint services.`,
+    data: {
+      provider: action.resource.provider,
+      componentId: provisioned.component.externalId ?? provisioned.component.id,
+      previousProvider: existingProvider && existingProvider !== action.resource.provider ? existingProvider : undefined,
+      receiptData: provisioned.receipt.data,
+    },
+  };
 }

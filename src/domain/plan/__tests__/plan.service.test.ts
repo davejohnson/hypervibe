@@ -165,7 +165,7 @@ describe('PlanService.plan', () => {
           hosting: { provider: 'railway' },
           services: { web: { startCommand: 'npm start' } },
           envVars: {},
-          deploy: { strategy: 'branch', branch: 'main' },
+          deploy: { strategy: 'branch', trigger: 'native', branch: 'main' },
         },
       },
     });
@@ -186,6 +186,8 @@ describe('PlanService.plan', () => {
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.warnings.some((w) => w.includes("Railway's GitHub App cannot access dave/seq-planner"))).toBe(true);
     expect(plan.warnings.some((w) => w.includes('github.com/apps/railway-app'))).toBe(true);
+    expect(plan.warnings.some((w) => w.includes('project member has connected GitHub'))).toBe(true);
+    expect(plan.warnings.some((w) => w.includes('pending Railway GitHub App permission updates'))).toBe(true);
   });
 
   it('warns when branch strategy is set but the project has no GitHub remote', async () => {
@@ -197,7 +199,7 @@ describe('PlanService.plan', () => {
           hosting: { provider: 'railway' },
           services: { web: { startCommand: 'npm start' } },
           envVars: {},
-          deploy: { strategy: 'branch', branch: 'main' },
+          deploy: { strategy: 'branch', trigger: 'native', branch: 'main' },
         },
       },
     });
@@ -219,6 +221,40 @@ describe('PlanService.plan', () => {
     expect(plan.warnings.some((w) => w.includes('no GitHub remote'))).toBe(true);
   });
 
+  it('uses spec gitRemoteUrl when the project record has no GitHub remote', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: 'git@github.com:dave/spec-backed.git',
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: {},
+          deploy: { strategy: 'branch', trigger: 'native', branch: 'main' },
+        },
+      },
+    });
+    const isGitHubRepoAccessible = vi.fn(async () => true);
+    mockObservingAdapter(
+      {
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: false,
+        services: [],
+        databases: [],
+        partial: false,
+        warnings: [],
+      },
+      { isGitHubRepoAccessible }
+    );
+
+    const result = await new PlanService().plan(project, 'staging');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(isGitHubRepoAccessible).toHaveBeenCalledWith('dave/spec-backed');
+    expect(plan.warnings.some((w) => w.includes('no GitHub remote'))).toBe(false);
+  });
+
   it('does not warn when the repo is accessible to Railway', async () => {
     project = new ProjectRepository().update(project.id, { gitRemoteUrl: 'git@github.com:dave/seq-planner.git' })!;
     new SpecStore().replace(project, {
@@ -229,7 +265,7 @@ describe('PlanService.plan', () => {
           hosting: { provider: 'railway' },
           services: { web: { startCommand: 'npm start' } },
           envVars: {},
-          deploy: { strategy: 'branch', branch: 'main' },
+          deploy: { strategy: 'branch', trigger: 'native', branch: 'main' },
         },
       },
     });

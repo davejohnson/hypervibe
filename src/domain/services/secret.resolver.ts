@@ -201,7 +201,7 @@ export class SecretResolver {
     // Find connection for this provider
     const connection = this.connectionRepo.findBestMatchFromHints(provider, scopeHints);
     if (!connection) {
-      throw new Error(`No connection found for secret manager '${provider}'. Use connection_create first.`);
+      throw new Error(`No connection found for secret manager '${provider}'. Use hv_connect first. Recommended: export tokens and pass credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`);
     }
 
     if (connection.status !== 'verified') {

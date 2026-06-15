@@ -61,7 +61,7 @@ export function sendGridPermissionError(permissions: SendGridPermissionAudit, re
 export function getSendGridAdapter(scopeHints?: string[]): { adapter: SendGridAdapter } | { error: string } {
   const connection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
   if (!connection) {
-    return { error: 'No SendGrid connection found. Use connection_create with provider=sendgrid first.' };
+    return { error: 'No SendGrid connection found. Use hv_connect provider=sendgrid first. Recommended: export the API key and pass credentialsRef="env:SENDGRID_API_KEY" credentialsKey="apiKey"; raw credentials={...} is still accepted if intentional.' };
   }
 
   const secretStore = getSecretStore();
