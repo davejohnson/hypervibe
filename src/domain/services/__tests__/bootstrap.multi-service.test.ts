@@ -707,6 +707,96 @@ describe('infra_apply multi-service convergence', () => {
     expect(bindings.services?.worker?.source).toEqual({ repo: 'davejohnson/billforge', branch: 'main' });
   });
 
+  it('marks CI-triggered branch deploys as pending the GitHub Actions workflow', async () => {
+    const projectRepo = new ProjectRepository();
+    const project = projectRepo.create({
+      name: 'ci-pending-project',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'git@github.com:davejohnson/ci-pending-project.git',
+    });
+
+    const fakeHostingAdapter: IHostingAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: true,
+        supportsReleaseCommand: true,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: false,
+        supportsObserve: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return {
+          success: true,
+          message: 'bound',
+          data: { projectId: 'rail-project-1', environmentId: 'rail-env-1' },
+        };
+      },
+      async deploy(service) {
+        return {
+          serviceId: `provider-${service.name}`,
+          externalId: `provider-${service.name}`,
+          url: `https://${service.name}.example.com`,
+          status: 'deployed',
+          receipt: {
+            success: true,
+            message: 'service provisioned',
+            data: { environmentId: 'rail-env-1' },
+          },
+        };
+      },
+      async setEnvVars() {
+        return { success: true, message: 'vars synced' };
+      },
+      async getDeployStatus() {
+        return { status: 'deployed', url: 'https://web.example.com' };
+      },
+    };
+
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeHostingAdapter,
+    });
+
+    const result = await executeBootstrap({
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      setupEmail: false,
+      deploy: {
+        strategy: 'branch',
+        trigger: 'ci',
+        branches: { production: 'main' },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.summary.deploymentMode).toBe('provision');
+    expect(result.summary.appDeployment).toMatchObject({
+      status: 'pending_ci',
+      reason: expect.stringContaining('GitHub Actions branch workflow'),
+    });
+    expect(result.summary.appDeploymentPending).toBe(true);
+    expect(result.summary.deploySource).toMatchObject({
+      strategy: 'branch',
+      trigger: 'ci',
+      repo: 'davejohnson/ci-pending-project',
+      branch: 'main',
+      services: ['web'],
+    });
+    const nextSteps = (result.summary.deploySource as { nextSteps: string[] }).nextSteps;
+    expect(nextSteps.some((step) => step.includes('sync available provider secrets'))).toBe(true);
+    expect(nextSteps.some((step) => step.includes('Push to main'))).toBe(true);
+    expect(nextSteps.some((step) => step.includes('hv_ci_status'))).toBe(true);
+  });
+
   it('returns Railway GitHub app guidance when repo-linked deploy source access is denied', async () => {
     const projectRepo = new ProjectRepository();
     const project = projectRepo.create({

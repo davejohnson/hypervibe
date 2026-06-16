@@ -213,8 +213,43 @@ describe('hv_spec_set / hv_spec_get', () => {
       'railway',
       'sendgrid',
     ]);
+    expect(set.data.connections.missing.find((entry: { provider: string }) => entry.provider === 'cloudflare')).toMatchObject({
+      scope: 'connection-check-app.com',
+      hint: expect.stringContaining('connection-check-app.com'),
+    });
     expect(set.hint).toContain('Connect required providers first');
     expect(set.next).toEqual(['hv_connect', 'hv_plan']);
+    await t.close();
+  });
+
+  it('does not treat a verified Cloudflare connection for another zone as domain-ready', async () => {
+    const repo = new ConnectionRepository();
+    const otherZone = repo.create({
+      provider: 'cloudflare',
+      scope: 'other.com',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'cf-token' }),
+    });
+    repo.updateStatus(otherZone.id, 'verified');
+
+    const t = await makeClient();
+    const set = await t.call('hv_spec_set', {
+      spec: {
+        project: 'wrong-zone-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            domain: 'apreskeys.com',
+          },
+        },
+      },
+    });
+    expect(set.ok).toBe(true);
+    expect(set.data.connections.missing).toContainEqual(expect.objectContaining({
+      provider: 'cloudflare',
+      status: 'missing',
+      scope: 'apreskeys.com',
+    }));
     await t.close();
   });
 

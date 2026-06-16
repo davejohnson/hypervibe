@@ -674,16 +674,27 @@ export async function executeBootstrap(params: {
         : {}),
     };
   } else if (params.deploy?.strategy === 'branch') {
+    const branch = deploySource.source?.branch
+      ?? params.deploy.branches?.production
+      ?? params.deploy.branches?.staging
+      ?? 'main';
+    summary.deploymentMode = 'provision';
+    summary.appDeployment = {
+      status: 'pending_ci',
+      reason: 'Infrastructure is configured; application code deploys when the GitHub Actions branch workflow runs.',
+    };
+    summary.appDeploymentPending = true;
     summary.deploySource = {
       strategy: 'branch',
       trigger: 'ci',
-      ...(deploySource.source ? { repo: deploySource.source.repo, branch: deploySource.source.branch } : {}),
+      ...(deploySource.source ? { repo: deploySource.source.repo } : {}),
+      branch,
       services: serviceWorkloads.map((service) => service.name),
       ...(cronWorkloads.length > 0 ? { crons: cronWorkloads.map((service) => service.name) } : {}),
       nextSteps: [
-        'Run hv_plan and hv_apply for this environment to create or update the push-deploy GitHub Actions workflow.',
-        'Store the required provider API and registry secrets in the GitHub repository.',
-        'Push to the configured branch to build the image and deploy it through provider APIs.',
+        'Run hv_plan and hv_apply for this environment to create or update the GitHub Actions deploy workflow and sync available provider secrets.',
+        `Push to ${branch} or trigger the workflow to build the image and deploy it through provider APIs.`,
+        'Use hv_ci_status to inspect workflow runs, then hv_health after a successful workflow run.',
       ],
     };
   }

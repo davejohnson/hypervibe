@@ -11,6 +11,8 @@ import { RunRepository } from '../../../adapters/db/repositories/run.repository.
 import { SpecStore } from '../../spec/spec.store.js';
 import { adapterFactory } from '../../services/adapter.factory.js';
 import { PlanService } from '../plan.service.js';
+import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
 import { hashEnvValue, type ObservedState } from '../../ports/observe.port.js';
 import type { Project } from '../../entities/project.entity.js';
 
@@ -139,6 +141,36 @@ describe('PlanService.plan', () => {
     const result = await new PlanService().plan(project, 'staging');
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.blocked).toContainEqual(expect.objectContaining({ provider: 'railway' }));
+  });
+
+  it('requires a Cloudflare connection that matches the requested domain scope', () => {
+    const connRepo = new ConnectionRepository();
+    const other = connRepo.create({ provider: 'cloudflare', scope: 'other.com', credentialsEncrypted: 'x' });
+    connRepo.updateStatus(other.id, 'verified');
+
+    const service = new PlanService();
+    const blocked = service.preflight({
+      hosting: { provider: 'railway' },
+      services: {},
+      domain: 'apreskeys.com',
+      email: { enabled: false },
+      envVars: {},
+    });
+    expect(blocked).toContainEqual(expect.objectContaining({
+      provider: 'cloudflare',
+      reason: expect.stringContaining('apreskeys.com'),
+    }));
+
+    const matching = connRepo.create({ provider: 'cloudflare', scope: 'apreskeys.com', credentialsEncrypted: 'x' });
+    connRepo.updateStatus(matching.id, 'verified');
+    const unblocked = service.preflight({
+      hosting: { provider: 'railway' },
+      services: {},
+      domain: 'apreskeys.com',
+      email: { enabled: false },
+      envVars: {},
+    });
+    expect(unblocked.some((entry) => entry.provider === 'cloudflare')).toBe(false);
   });
 
   it('warns when observation fails for a tracked environment', async () => {
@@ -286,6 +318,39 @@ describe('PlanService.plan', () => {
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.warnings.some((w) => w.includes('GitHub App'))).toBe(false);
     expect(plan.warnings.some((w) => w.includes('no GitHub remote'))).toBe(false);
+  });
+
+  it('orders GitHub Actions deploy setup before domain attachment', async () => {
+    project = new ProjectRepository().update(project.id, { gitRemoteUrl: 'git@github.com:dave/apreskeys.com.git' })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          domain: 'apreskeys.com',
+          email: { enabled: false },
+          envVars: {},
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+    const connRepo = new ConnectionRepository();
+    const github = connRepo.create({
+      provider: 'github',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'gh-token', login: 'dave' }),
+    });
+    connRepo.updateStatus(github.id, 'verified');
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+
+    const result = await new PlanService().plan(project, 'production');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const ids = plan.actions.map((action) => action.id);
+    expect(ids.indexOf('ci:github-actions:production:deploy-branch')).toBeGreaterThanOrEqual(0);
+    expect(ids.indexOf('domain:apreskeys.com')).toBeGreaterThanOrEqual(0);
+    expect(ids.indexOf('ci:github-actions:production:deploy-branch')).toBeLessThan(ids.indexOf('domain:apreskeys.com'));
   });
 
   it('clears blocked when a verified connection exists', async () => {

@@ -48,6 +48,11 @@ function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Proje
     : project;
 }
 
+function apexOf(domain: string): string {
+  const parts = domain.trim().toLowerCase().split('.').filter(Boolean);
+  return parts.length <= 2 ? parts.join('.') : parts.slice(-2).join('.');
+}
+
 /**
  * Builds an environment plan: load spec → observe live state (when the
  * provider supports it) → pure diff → persist as a 'plan' run whose id is
@@ -132,20 +137,33 @@ export class PlanService {
   /** Connections that must exist+verify before apply can run. */
   preflight(environmentSpec: EnvironmentSpec): Array<{ provider: string; reason: string }> {
     const blocked: Array<{ provider: string; reason: string }> = [];
-    const required = new Set<string>([environmentSpec.hosting.provider]);
-    if (environmentSpec.database) required.add(environmentSpec.database.provider);
-    if (environmentSpec.domain) required.add('cloudflare');
-    if (environmentSpec.email.enabled) required.add('sendgrid');
-    if (environmentUsesGitHubActionsDeploy(environmentSpec)) required.add('github');
+    const required: Array<{ provider: string; scopeHints?: string[] }> = [
+      { provider: environmentSpec.hosting.provider },
+    ];
+    if (environmentSpec.database) required.push({ provider: environmentSpec.database.provider });
+    if (environmentSpec.domain) {
+      required.push({ provider: 'cloudflare', scopeHints: [environmentSpec.domain, apexOf(environmentSpec.domain)] });
+    }
+    if (environmentSpec.email.enabled) required.push({ provider: 'sendgrid' });
+    if (environmentUsesGitHubActionsDeploy(environmentSpec)) required.push({ provider: 'github' });
 
-    for (const provider of required) {
-      const verified = this.connectionRepo
-        .findAllByProvider(provider)
-        .some((c) => c.status === 'verified');
+    const seen = new Set<string>();
+    for (const requirement of required) {
+      const key = `${requirement.provider}:${requirement.scopeHints?.join('|') ?? '*'}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const scoped = requirement.scopeHints?.length
+        ? this.connectionRepo.findBestMatchFromHints(requirement.provider, requirement.scopeHints)
+        : null;
+      const verified = requirement.scopeHints?.length
+        ? scoped?.status === 'verified'
+        : this.connectionRepo
+          .findAllByProvider(requirement.provider)
+          .some((c) => c.status === 'verified');
       if (!verified) {
         blocked.push({
-          provider,
-          reason: `No verified ${provider} connection. Add one with hv_connect. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+          provider: requirement.provider,
+          reason: `No verified ${requirement.provider}${requirement.scopeHints?.[0] ? ` connection for ${requirement.scopeHints[0]}` : ' connection'}. Add one with hv_connect. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
         });
       }
     }
@@ -286,7 +304,12 @@ export class PlanService {
       dependsOn: ciDependsOn,
     });
     if (ciDeploy.action) {
-      actions.push(ciDeploy.action);
+      const firstDomainIndex = actions.findIndex((action) => action.resource.kind === 'domain');
+      if (firstDomainIndex === -1) {
+        actions.push(ciDeploy.action);
+      } else {
+        actions.splice(firstDomainIndex, 0, ciDeploy.action);
+      }
     }
 
     const document: PlanRunDocument = {

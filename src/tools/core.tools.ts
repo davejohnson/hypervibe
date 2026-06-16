@@ -90,19 +90,36 @@ function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Proje
     : project;
 }
 
+function apexOfDomain(domain: string): string {
+  const parts = domain.trim().toLowerCase().split('.').filter(Boolean);
+  return parts.length <= 2 ? parts.join('.') : parts.slice(-2).join('.');
+}
+
 function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
-  const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string> }>();
-  const add = (provider: string, environment: string, reason: string) => {
-    const existing = required.get(provider) ?? { provider, environments: new Set<string>(), reasons: new Set<string>() };
+  const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string> }>();
+  const add = (provider: string, environment: string, reason: string, scopeHints: string[] = []) => {
+    const key = `${provider}:${scopeHints.length > 0 ? scopeHints.join('|') : '*'}`;
+    const existing = required.get(key) ?? {
+      provider,
+      environments: new Set<string>(),
+      reasons: new Set<string>(),
+      scopeHints: new Set<string>(),
+    };
     existing.environments.add(environment);
     existing.reasons.add(reason);
-    required.set(provider, existing);
+    scopeHints.forEach((scopeHint) => existing.scopeHints.add(scopeHint));
+    required.set(key, existing);
   };
 
   for (const [envName, envSpec] of Object.entries(spec.environments)) {
     add(envSpec.hosting.provider, envName, 'hosting');
     if (envSpec.database) add(envSpec.database.provider, envName, 'database');
-    if (envSpec.domain) add('cloudflare', envName, envSpec.domainRegistration ? 'domain registration and DNS' : 'domain DNS');
+    if (envSpec.domain) {
+      add('cloudflare', envName, envSpec.domainRegistration ? 'domain registration and DNS' : 'domain DNS', [
+        envSpec.domain,
+        apexOfDomain(envSpec.domain),
+      ]);
+    }
     if (envSpec.email.enabled) add('sendgrid', envName, 'transactional email');
     if (environmentUsesGitHubActionsDeploy(envSpec)) add('github', envName, 'GitHub Actions deploy workflow');
   }
@@ -111,15 +128,31 @@ function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
     .sort((a, b) => a.provider.localeCompare(b.provider))
     .map((entry) => {
       const connections = ctx.repos.connections.findAllByProvider(entry.provider);
-      const verified = connections.some((connection) => connection.status === 'verified');
+      const scopeHints = Array.from(entry.scopeHints);
+      const scopedConnection = scopeHints.length > 0
+        ? ctx.repos.connections.findBestMatchFromHints(entry.provider, scopeHints)
+        : null;
+      const verified = scopeHints.length > 0
+        ? scopedConnection?.status === 'verified'
+        : connections.some((connection) => connection.status === 'verified');
+      const scope = scopeHints[0];
+      let status = 'missing';
+      if (verified) {
+        status = 'verified';
+      } else if (scopeHints.length > 0 && scopedConnection) {
+        status = 'unverified';
+      } else if (scopeHints.length === 0 && connections.length > 0) {
+        status = 'unverified';
+      }
       return {
         provider: entry.provider,
-        status: verified ? 'verified' : connections.length > 0 ? 'unverified' : 'missing',
+        status,
         environments: Array.from(entry.environments).sort(),
         reasons: Array.from(entry.reasons).sort(),
+        ...(scope ? { scope } : {}),
         hint: verified
           ? undefined
-          : `Connect ${entry.provider} with hv_connect before hv_plan/hv_apply. Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+          : `Connect ${entry.provider}${scope ? ` for ${scope}` : ''} with hv_connect before hv_plan/hv_apply. Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
       };
     });
 
