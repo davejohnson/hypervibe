@@ -695,7 +695,12 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.ok).toBe(true);
     const ci = plan.data.actions.find((action: { id: string }) => action.id === 'ci:github-actions:production:deploy-branch');
     expect(ci.metadata.missingProviderSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
+    expect(plan.data.actionScopedBlocked).toContainEqual(expect.objectContaining({
+      provider: 'github',
+      reason: expect.stringContaining('packageReadToken'),
+    }));
     expect(plan.warnings).toContainEqual(expect.stringContaining('package-read token'));
+    expect(plan.next).toEqual(['hv_connect', 'hv_apply']);
 
     const apply = await t.call('hv_apply', { project: 'ci-missing-image-token-app', planId: plan.data.planId });
     expect(apply.ok).toBe(true);

@@ -228,9 +228,24 @@ function splitActionScopedConnectionBlocks(
     entry.provider === 'cloudflare' && hasIndependentPendingAction
   );
   const actionScopedProviders = new Set(actionScopedBlocked.map((entry) => entry.provider));
+  const ciCredentialBlocks = actions.flatMap((action) => {
+    const missing = Array.isArray(action.metadata?.missingProviderSecrets)
+      ? action.metadata.missingProviderSecrets.filter((value): value is string => typeof value === 'string')
+      : [];
+    if (missing.length === 0 || !isGitHubActionsDeployAction(action)) {
+      return [];
+    }
+    const hasImageRegistrySecret = missing.some((name) => name.startsWith('IMAGE_REGISTRY_'));
+    return [{
+      provider: hasImageRegistrySecret ? 'github' : String(action.metadata?.provider ?? action.resource.provider),
+      reason: hasImageRegistrySecret
+        ? `GitHub Actions deploy ${action.resource.name} is missing GHCR image pull credentials (${missing.join(', ')}). Connect GitHub with credentials packageReadToken or packagesToken before relying on push-to-deploy.`
+        : `GitHub Actions deploy ${action.resource.name} is missing provider secrets (${missing.join(', ')}). Connect and verify ${String(action.metadata?.provider ?? action.resource.provider)} before relying on push-to-deploy.`,
+    }];
+  });
   return {
     hardBlocked: blocked.filter((entry) => !actionScopedProviders.has(entry.provider)),
-    actionScopedBlocked,
+    actionScopedBlocked: [...actionScopedBlocked, ...ciCredentialBlocks],
   };
 }
 
@@ -377,12 +392,14 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       const pending = result.actions.filter((a) => a.type !== 'noop');
       const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(result.blocked, result.actions);
       const actionScopedWarnings = actionScopedBlocked.map((entry) =>
-        `${entry.reason} This blocks only the domain action; independent service and CI actions can still be applied from this plan.`
+        `${entry.reason} This blocks only the related action; independent service and CI actions can still be applied from this plan.`
       );
       const hint = hardBlocked.length > 0
         ? `Blocked: connect ${hardBlocked.map((b) => b.provider).join(', ')} with hv_connect before applying. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`
         : pending.length === 0
           ? 'Everything is in sync — nothing to apply.'
+          : actionScopedBlocked.length > 0
+            ? `Action-scoped credentials are missing: ${Array.from(new Set(actionScopedBlocked.map((b) => b.provider))).join(', ')}. Connect them with hv_connect for full convergence, or apply this plan to converge independent actions and fail only blocked actions.`
           : `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} for confirm-gated billable or destructive actions` : ''}.`;
 
       return toolSuccess(
@@ -401,7 +418,9 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         {
           hint,
           warnings: [...result.warnings, ...actionScopedWarnings],
-          next: hardBlocked.length === 0 && pending.length > 0 ? ['hv_apply'] : undefined,
+          next: hardBlocked.length === 0 && pending.length > 0
+            ? actionScopedBlocked.length > 0 ? ['hv_connect', 'hv_apply'] : ['hv_apply']
+            : undefined,
         }
       );
     })
@@ -539,7 +558,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         });
       }
       const actionScopedWarnings = actionScopedBlocked.map((entry) =>
-        `${entry.reason} This blocks only the domain action; independent service and CI actions will still be applied.`
+        `${entry.reason} This blocks only the related action; independent service and CI actions will still be applied.`
       );
 
       const projectForApply = syncProjectGitRemoteUrl(ctx, project, specResult.spec);
