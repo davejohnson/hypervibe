@@ -713,6 +713,81 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('applies independent CI deploy setup before failing a missing Cloudflare domain action', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'ci-domain-soft-block-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/ci-domain-soft-block-app.git',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            domain: 'apreskeys.com',
+            deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('github', { apiToken: 'gh-token', login: 'davejohnson', packageReadToken: 'gh-package-token' });
+    const project = new ProjectRepository().findByName('ci-domain-soft-block-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-1', url: 'https://web-production.up.railway.app' } },
+      },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [], envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
+      created: true,
+      updated: false,
+    });
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+
+    const plan = await t.call('hv_plan', { project: 'ci-domain-soft-block-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    expect(plan.data.blocked).toEqual([]);
+    expect(plan.data.actionScopedBlocked).toContainEqual(expect.objectContaining({ provider: 'cloudflare' }));
+    expect(plan.next).toContain('hv_apply');
+
+    const apply = await t.call('hv_apply', { project: 'ci-domain-soft-block-app', planId: plan.data.planId });
+    expect(apply.ok).toBe(true);
+    expect(apply.data.applied).toBe(false);
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'ci:github-actions:production:deploy-branch',
+      status: 'succeeded',
+    }));
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'domain:apreskeys.com',
+      status: 'failed',
+      error: expect.stringContaining('No Cloudflare connection available for apreskeys.com'),
+    }));
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-domain-soft-block-app', 'RAILWAY_API_TOKEN', 'railway-token');
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-domain-soft-block-app', 'IMAGE_REGISTRY_TOKEN', 'gh-package-token');
+    await t.close();
+  });
+
   it('reports drift via hv_status against observed state', async () => {
     const t = await makeClient();
     await t.call('hv_spec_set', { spec: SPEC });

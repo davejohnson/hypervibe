@@ -23,6 +23,7 @@ import {
   environmentUsesGitHubActionsDeploy,
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
+import { setupCustomDomain } from '../domain/services/domain.service.js';
 import { StateManager } from '../agent/state.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
@@ -211,6 +212,28 @@ function bootstrapSuccessData(summary: Record<string, unknown>): Record<string, 
   return data;
 }
 
+function splitActionScopedConnectionBlocks(
+  blocked: Array<{ provider: string; reason: string }>,
+  actions: PlanAction[]
+): {
+  hardBlocked: Array<{ provider: string; reason: string }>;
+  actionScopedBlocked: Array<{ provider: string; reason: string }>;
+} {
+  const hasIndependentPendingAction = actions.some((action) =>
+    action.type !== 'noop'
+    && action.resource.kind !== 'domain'
+    && !isCloudflareDomainRegistrationAction(action)
+  );
+  const actionScopedBlocked = blocked.filter((entry) =>
+    entry.provider === 'cloudflare' && hasIndependentPendingAction
+  );
+  const actionScopedProviders = new Set(actionScopedBlocked.map((entry) => entry.provider));
+  return {
+    hardBlocked: blocked.filter((entry) => !actionScopedProviders.has(entry.provider)),
+    actionScopedBlocked,
+  };
+}
+
 export function bootstrapActionResultFromSummary(
   action: Pick<PlanAction, 'id' | 'resource'>,
   result: { success: boolean; summary: Record<string, unknown> }
@@ -352,8 +375,12 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
       const confirmIds = result.actions.filter((a) => a.requiresConfirm).map((a) => a.id);
       const pending = result.actions.filter((a) => a.type !== 'noop');
-      const hint = result.blocked.length > 0
-        ? `Blocked: connect ${result.blocked.map((b) => b.provider).join(', ')} with hv_connect before applying. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`
+      const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(result.blocked, result.actions);
+      const actionScopedWarnings = actionScopedBlocked.map((entry) =>
+        `${entry.reason} This blocks only the domain action; independent service and CI actions can still be applied from this plan.`
+      );
+      const hint = hardBlocked.length > 0
+        ? `Blocked: connect ${hardBlocked.map((b) => b.provider).join(', ')} with hv_connect before applying. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`
         : pending.length === 0
           ? 'Everything is in sync — nothing to apply.'
           : `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} for confirm-gated billable or destructive actions` : ''}.`;
@@ -368,12 +395,13 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           summary: summarizeActions(result.actions),
           actions: result.actions,
           unmanaged: result.unmanaged,
-          blocked: result.blocked,
+          blocked: hardBlocked,
+          actionScopedBlocked: actionScopedBlocked.length > 0 ? actionScopedBlocked : undefined,
         },
         {
           hint,
-          warnings: result.warnings,
-          next: result.blocked.length === 0 && pending.length > 0 ? ['hv_apply'] : undefined,
+          warnings: [...result.warnings, ...actionScopedWarnings],
+          next: hardBlocked.length === 0 && pending.length > 0 ? ['hv_apply'] : undefined,
         }
       );
     })
@@ -503,12 +531,16 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       }
 
       const blocked = planService.preflight(envSpec);
-      if (blocked.length > 0) {
-        return toolError('MISSING_CONNECTION', `Missing verified connections: ${blocked.map((b) => b.provider).join(', ')}.`, {
-          details: blocked,
+      const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions);
+      if (hardBlocked.length > 0) {
+        return toolError('MISSING_CONNECTION', `Missing verified connections: ${hardBlocked.map((b) => b.provider).join(', ')}.`, {
+          details: hardBlocked,
           hint: 'Connect them with hv_connect, then re-run hv_plan and hv_apply. Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or put JSON credentials in a local file and use credentialsRef="file:/absolute/path". Raw credentials={...} is still accepted if intentional.',
         });
       }
+      const actionScopedWarnings = actionScopedBlocked.map((entry) =>
+        `${entry.reason} This blocks only the domain action; independent service and CI actions will still be applied.`
+      );
 
       const projectForApply = syncProjectGitRemoteUrl(ctx, project, specResult.spec);
 
@@ -549,6 +581,9 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         if (action.resource.kind === 'service' && action.type === 'destroy') {
           return destroyService(ctx, applyProject, specResult.spec, envName, action);
         }
+        if (action.resource.kind === 'domain') {
+          return applyDomain(ctx, applyProject, envName, action);
+        }
         const result = await ensureBootstrap();
         return bootstrapActionResultFromSummary(action, result);
       };
@@ -586,6 +621,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
             : result.success
               ? 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',
+          warnings: actionScopedWarnings,
           next: ['hv_status'],
         }
       );
@@ -627,6 +663,41 @@ function projectSpecReferencesService(spec: ProjectSpec, serviceName: string): b
 
 function environmentHasBinding(environment: Environment, serviceName: string): boolean {
   return Boolean(serviceBindingFor(environment, serviceName));
+}
+
+async function applyDomain(
+  ctx: ToolContext,
+  project: Project,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return {
+      success: false,
+      message: 'Environment not found locally',
+      error: `No local environment "${envName}"`,
+    };
+  }
+
+  const result = await setupCustomDomain({
+    project,
+    environment,
+    domain: action.resource.name,
+  });
+  if (result.success) {
+    return {
+      success: true,
+      message: `Configured domain ${action.resource.name}`,
+      data: result as unknown as Record<string, unknown>,
+    };
+  }
+  return {
+    success: false,
+    message: `Domain setup failed for ${action.resource.name}`,
+    error: result.error ?? result.dnsError ?? result.customDomainError ?? 'Domain setup failed',
+    data: result as unknown as Record<string, unknown>,
+  };
 }
 
 async function destroyService(
