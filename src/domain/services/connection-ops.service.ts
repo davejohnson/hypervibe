@@ -166,6 +166,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         version?: string;
         warning?: string;
         login?: string;
+        scopes?: string[];
         workspaceId?: string;
         workspaces?: Array<{ id: string; name?: string }>;
       }>
@@ -183,9 +184,23 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         }
       }
       if (provider === 'github' && result.login) {
-        const creds = decryptedCreds as { apiToken?: string; login?: string };
-        if (creds.login !== result.login) {
-          const nextCreds = { ...creds, login: result.login };
+        const creds = decryptedCreds as {
+          apiToken?: string;
+          login?: string;
+          packageReadToken?: string;
+          packagesToken?: string;
+        };
+        const tokenHasPackageRead =
+          result.scopes?.includes('read:packages') === true
+          || result.scopes?.includes('write:packages') === true;
+        const nextCreds = {
+          ...creds,
+          ...(creds.login !== result.login ? { login: result.login } : {}),
+          ...(tokenHasPackageRead && creds.apiToken && !creds.packageReadToken && !creds.packagesToken
+            ? { packageReadToken: creds.apiToken }
+            : {}),
+        };
+        if (JSON.stringify(nextCreds) !== JSON.stringify(creds)) {
           const nextEncrypted = secretStore.encryptObject(nextCreds);
           connectionRepo.updateCredentials(connection.id, nextEncrypted);
         }
@@ -217,6 +232,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
           ...(result.version && { version: result.version }),
           ...(result.warning && { warning: result.warning }),
           ...(result.login && { login: result.login }),
+          ...(result.scopes && { scopes: result.scopes }),
           ...(result.workspaceId && { workspaceId: result.workspaceId }),
           ...(result.workspaces && result.workspaces.length > 0 && { workspaces: result.workspaces }),
         },

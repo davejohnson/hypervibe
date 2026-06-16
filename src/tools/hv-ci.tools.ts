@@ -14,7 +14,11 @@ import {
   AI_REVIEW_DEFAULT_MODEL,
   buildAiReviewWorkflowContent,
 } from '../domain/services/github-ops.service.js';
-import { providerSecretsForGitHubActions } from '../domain/services/ci-deploy.service.js';
+import {
+  missingProviderSecretsMessage,
+  providerSecretsForGitHubActions,
+  requiredProviderSecretNamesForGitHubActions,
+} from '../domain/services/ci-deploy.service.js';
 import { getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.js';
 import type { ToolContext } from './context.js';
 import { projectField } from './schemas.js';
@@ -152,6 +156,8 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
           }
 
           const requiredSecrets = Array.from(new Set(workflows.flatMap((workflow) => workflow.requiredSecrets)));
+          const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(cfg.provider)
+            .filter((name) => requiredSecrets.includes(name));
           const syncedSecrets: string[] = [];
           const secretSyncErrors: Array<{ name: string; error: string }> = [];
           for (const secret of providerSecretsForGitHubActions(cfg.provider, { githubLogin: verification.login })) {
@@ -168,6 +174,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
               });
             }
           }
+          const missingProviderSecrets = requiredProviderSecrets.filter((name) => !syncedSecrets.includes(name));
 
           const protectedBranches = Array.from(new Set(targets.map((target) => target.branch)));
           const protectionResults: Array<{ branch: string; success: boolean; error?: string }> = [];
@@ -213,6 +220,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
             requiredVariables: Array.from(new Set(workflows.flatMap((workflow) => workflow.requiredVariables))),
             syncedSecrets: syncedSecrets.length > 0 ? syncedSecrets : undefined,
             manualSecrets: requiredSecrets.filter((name) => !syncedSecrets.includes(name)),
+            missingProviderSecrets: missingProviderSecrets.length > 0 ? missingProviderSecrets : undefined,
             secretSyncErrors: secretSyncErrors.length > 0 ? secretSyncErrors : undefined,
             skippedEnvironments: skippedEnvironments.length > 0 ? skippedEnvironments : undefined,
           };
@@ -220,10 +228,14 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
           if (errors.length > 0 || protectionFailures.length > 0) {
             return toolError('PROVIDER_ERROR', 'Branch deploy setup had errors.', { details: data });
           }
+          const warnings = [
+            ...secretSyncErrors.map((entry) => `Failed to sync GitHub Actions secret ${entry.name}: ${entry.error}`),
+            ...(missingProviderSecrets.length > 0
+              ? [missingProviderSecretsMessage(cfg.provider, missingProviderSecrets)]
+              : []),
+          ];
           return toolSuccess(data, {
-            warnings: secretSyncErrors.length > 0
-              ? secretSyncErrors.map((entry) => `Failed to sync GitHub Actions secret ${entry.name}: ${entry.error}`)
-              : undefined,
+            warnings: warnings.length > 0 ? warnings : undefined,
             hint: `Set the manual secrets (${data.manualSecrets.join(', ') || 'none'})${data.requiredVariables.length > 0 ? ` and variables (${data.requiredVariables.join(', ')})` : ''} in the GitHub repository, then pushes to the mapped branches will deploy.`,
           });
         }

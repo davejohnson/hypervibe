@@ -576,7 +576,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
     });
     verifyRailwayConnection();
-    verifyConnection('github', { apiToken: 'gh-token' });
+    verifyConnection('github', { apiToken: 'gh-token', login: 'davejohnson', packageReadToken: 'gh-package-token' });
     const project = new ProjectRepository().findByName('ci-plan-app')!;
     new EnvironmentRepository().create({
       projectId: project.id,
@@ -634,8 +634,82 @@ describe('hv_plan / hv_status / hv_apply', () => {
       'Add Deploy Railway (production) workflow'
     );
     expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-plan-app', 'RAILWAY_API_TOKEN', 'railway-token');
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-plan-app', 'IMAGE_REGISTRY_TOKEN', 'gh-package-token');
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
     expect(environment.platformBindings.ci).toBeDefined();
+    await t.close();
+  });
+
+  it('fails CI workflow apply when Railway image pull credentials are missing', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'ci-missing-image-token-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/ci-missing-image-token-app.git',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('github', { apiToken: 'gh-token', login: 'davejohnson' });
+    const project = new ProjectRepository().findByName('ci-missing-image-token-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-1' } },
+      },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [], envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
+      created: true,
+      updated: false,
+    });
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+
+    const plan = await t.call('hv_plan', { project: 'ci-missing-image-token-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    const ci = plan.data.actions.find((action: { id: string }) => action.id === 'ci:github-actions:production:deploy-branch');
+    expect(ci.metadata.missingProviderSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
+    expect(plan.warnings).toContainEqual(expect.stringContaining('package-read token'));
+
+    const apply = await t.call('hv_apply', { project: 'ci-missing-image-token-app', planId: plan.data.planId });
+    expect(apply.ok).toBe(true);
+    expect(apply.data.applied).toBe(false);
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'ci:github-actions:production:deploy-branch',
+      status: 'failed',
+      error: expect.stringContaining('package-read token'),
+      data: expect.objectContaining({
+        missingProviderSecrets: ['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+      }),
+    }));
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'RAILWAY_API_TOKEN', 'railway-token');
+    expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'IMAGE_REGISTRY_TOKEN', expect.any(String));
     await t.close();
   });
 

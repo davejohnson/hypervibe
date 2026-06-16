@@ -20,6 +20,49 @@ const OPERATION = 'githubActionsDeployBranch';
 const SUPPORTED_PROVIDERS = new Set(['railway', 'vercel', 'render', 'digitalocean', 'cloudrun', 'apprunner', 'heroku']);
 const PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL = new Set(['railway', 'digitalocean']);
 
+export function requiredProviderSecretNamesForGitHubActions(provider: string): string[] {
+  const names: string[] = [];
+  switch (provider) {
+    case 'railway':
+      names.push('RAILWAY_API_TOKEN');
+      break;
+    case 'digitalocean':
+      names.push('DIGITALOCEAN_ACCESS_TOKEN');
+      break;
+    case 'render':
+      names.push('RENDER_API_KEY');
+      break;
+    case 'cloudrun':
+      names.push('GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION');
+      break;
+    case 'apprunner':
+      names.push('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION');
+      break;
+    case 'heroku':
+      names.push('HEROKU_API_KEY');
+      break;
+    default:
+      break;
+  }
+  if (PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL.has(provider)) {
+    names.push('IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN');
+  }
+  return names;
+}
+
+export function missingProviderSecretsMessage(provider: string, missingProviderSecrets: string[]): string {
+  const parts = [`Missing provider secrets: ${missingProviderSecrets.join(', ')}.`];
+  const missingImageRegistrySecrets = missingProviderSecrets.some((name) => name.startsWith('IMAGE_REGISTRY_'));
+  const missingProviderApiSecrets = missingProviderSecrets.some((name) => !name.startsWith('IMAGE_REGISTRY_'));
+  if (missingProviderApiSecrets) {
+    parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions.`);
+  }
+  if (missingImageRegistrySecrets) {
+    parts.push('For Railway/DigitalOcean GHCR image pulls, reconnect GitHub with a package-read token using credentials packageReadToken or packagesToken.');
+  }
+  return parts.join(' ');
+}
+
 const connectionRepo = new ConnectionRepository();
 const secretStore = getSecretStore();
 
@@ -106,8 +149,7 @@ export function providerSecretsForGitHubActions(
         ?? (typeof credentials.username === 'string' ? credentials.username : undefined);
       const token =
         (typeof credentials.packagesToken === 'string' && credentials.packagesToken.length > 0 ? credentials.packagesToken : undefined)
-        ?? (typeof credentials.packageReadToken === 'string' && credentials.packageReadToken.length > 0 ? credentials.packageReadToken : undefined)
-        ?? (typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0 ? credentials.apiToken : undefined);
+        ?? (typeof credentials.packageReadToken === 'string' && credentials.packageReadToken.length > 0 ? credentials.packageReadToken : undefined);
 
       if (username && token) {
         secrets.push(
@@ -134,6 +176,7 @@ function buildAction(params: {
   reason: string;
   verified: boolean;
   availableSecretNames: string[];
+  missingProviderSecrets?: string[];
   dependsOn?: string[];
 }): PlanAction {
   return {
@@ -155,6 +198,7 @@ function buildAction(params: {
         contentHash: sha256(params.workflow.content),
       },
       availableProviderSecrets: params.availableSecretNames,
+      ...(params.missingProviderSecrets?.length ? { missingProviderSecrets: params.missingProviderSecrets } : {}),
     },
   };
 }
@@ -195,9 +239,18 @@ export async function planGitHubActionsDeploy(params: {
   }
 
   const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider as BranchDeployProvider, target, migration);
-  const requiredProviderSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider)
+  const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(environmentSpec.hosting.provider)
+    .filter((name) => workflow.requiredSecrets.includes(name));
+  const availableSecretNames = providerSecretsForGitHubActions(environmentSpec.hosting.provider)
     .filter((secret) => workflow.requiredSecrets.includes(secret.name))
     .map((secret) => secret.name);
+  const missingProviderSecrets = requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name));
+  if (missingProviderSecrets.length > 0) {
+    warnings.push(
+      `GitHub Actions deploy workflow ${workflow.path} requires provider secrets that Hypervibe cannot sync: ${missingProviderSecrets.join(', ')}. `
+      + missingProviderSecretsMessage(environmentSpec.hosting.provider, missingProviderSecrets)
+    );
+  }
   const contentHash = sha256(workflow.content);
   const binding = ciBindings(environment)[workflow.path];
 
@@ -214,7 +267,8 @@ export async function planGitHubActionsDeploy(params: {
           ? 'GitHub Actions deploy workflow was previously synced by Hypervibe'
           : `GitHub Actions deploy workflow ${workflow.path} needs to be synced`,
         verified: false,
-        availableSecretNames: requiredProviderSecrets,
+        availableSecretNames,
+        missingProviderSecrets,
         dependsOn: params.dependsOn,
       }),
       warnings,
@@ -231,7 +285,9 @@ export async function planGitHubActionsDeploy(params: {
   }
 
   const syncedSecrets = new Set(binding?.syncedSecrets ?? []);
-  const missingSecretSync = requiredProviderSecrets.some((name) => !syncedSecrets.has(name));
+  const missingSecretSync =
+    missingProviderSecrets.length > 0
+    || requiredProviderSecrets.some((name) => !syncedSecrets.has(name));
   const type = currentContent === workflow.content && !missingSecretSync
     ? 'noop'
     : currentContent === null
@@ -253,7 +309,8 @@ export async function planGitHubActionsDeploy(params: {
       workflow,
       reason,
       verified: workflowReadVerified,
-      availableSecretNames: requiredProviderSecrets,
+      availableSecretNames,
+      missingProviderSecrets,
       dependsOn: type === 'noop' ? undefined : params.dependsOn,
     }),
     warnings,
@@ -286,6 +343,12 @@ export async function applyGitHubActionsDeploy(params: {
     return { success: false, message: 'No GitHub Actions deploy target', error: `No deploy target found for ${environmentName}.` };
   }
   const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider as BranchDeployProvider, target, migration);
+  const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(environmentSpec.hosting.provider)
+    .filter((name) => workflow.requiredSecrets.includes(name));
+  const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider)
+    .filter((secret) => workflow.requiredSecrets.includes(secret.name));
+  const availableSecretNames = availableSecrets.map((secret) => secret.name);
+  const missingProviderSecrets = requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name));
 
   const fileResult = await adapter.createOrUpdateFile(
     owner,
@@ -297,8 +360,7 @@ export async function applyGitHubActionsDeploy(params: {
 
   const syncedSecrets: string[] = [];
   const secretErrors: Array<{ name: string; error: string }> = [];
-  for (const secret of providerSecretsForGitHubActions(environmentSpec.hosting.provider)) {
-    if (!workflow.requiredSecrets.includes(secret.name)) continue;
+  for (const secret of availableSecrets) {
     try {
       await adapter.setRepositorySecret(owner, repoName, secret.name, secret.value);
       syncedSecrets.push(secret.name);
@@ -308,6 +370,14 @@ export async function applyGitHubActionsDeploy(params: {
   }
 
   persistWorkflowBinding(project, environmentName, workflow, syncedSecrets);
+  if (missingProviderSecrets.length > 0) {
+    return {
+      success: false,
+      message: `Synced ${workflow.path}, but required provider secrets are missing`,
+      error: missingProviderSecretsMessage(environmentSpec.hosting.provider, missingProviderSecrets),
+      data: { workflow: workflow.path, file: fileResult, syncedSecrets, missingProviderSecrets },
+    };
+  }
   if (secretErrors.length > 0) {
     return {
       success: false,

@@ -15,6 +15,7 @@ import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
 import { hashEnvValue, type ObservedState } from '../../ports/observe.port.js';
 import type { Project } from '../../entities/project.entity.js';
+import { buildBranchDeployWorkflow } from '../../services/github-ops.service.js';
 
 let project: Project;
 
@@ -351,6 +352,93 @@ describe('PlanService.plan', () => {
     expect(ids.indexOf('ci:github-actions:production:deploy-branch')).toBeGreaterThanOrEqual(0);
     expect(ids.indexOf('domain:apreskeys.com')).toBeGreaterThanOrEqual(0);
     expect(ids.indexOf('ci:github-actions:production:deploy-branch')).toBeLessThan(ids.indexOf('domain:apreskeys.com'));
+  });
+
+  it('replans CI deploys when recorded image registry secrets are not available from current credentials', async () => {
+    project = new ProjectRepository().update(project.id, { gitRemoteUrl: 'git@github.com:dave/apreskeys.com.git' })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          email: { enabled: false },
+          envVars: {},
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+    const connRepo = new ConnectionRepository();
+    const github = connRepo.create({
+      provider: 'github',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'gh-token', login: 'dave' }),
+    });
+    connRepo.updateStatus(github.id, 'verified');
+    const railway = connRepo.create({
+      provider: 'railway',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
+    });
+    connRepo.updateStatus(railway.id, 'verified');
+
+    const workflow = buildBranchDeployWorkflow('railway', {
+      environmentName: 'production',
+      kind: 'production',
+      branch: 'main',
+      serviceNames: ['web'],
+      providerProjectId: 'rp-1',
+      providerEnvironmentId: 'rail-env-1',
+      providerServiceIds: ['svc-1'],
+      providerServiceArns: [],
+    }, { includeStep: false });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-1' } },
+        ci: {
+          deployBranch: {
+            [workflow.path]: {
+              contentHash: 'old',
+              syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+            },
+          },
+        },
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web',
+        externalId: 'svc-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+
+    const result = await new PlanService().plan(project, 'production');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const ci = plan.actions.find((action) => action.id === 'ci:github-actions:production:deploy-branch')!;
+    expect(ci.type).toBe('update');
+    expect(ci.reason).toContain('provider secrets need syncing');
+    expect(ci.metadata?.missingProviderSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
+    expect(plan.warnings).toContainEqual(expect.stringContaining('package-read token'));
   });
 
   it('clears blocked when a verified connection exists', async () => {

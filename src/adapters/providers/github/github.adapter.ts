@@ -23,6 +23,13 @@ export interface GitHubUser {
   email?: string;
 }
 
+export interface GitHubVerifyResult {
+  success: boolean;
+  error?: string;
+  login?: string;
+  scopes?: string[];
+}
+
 export interface GitHubPagesConfig {
   url?: string;
   status?: string;
@@ -139,10 +146,37 @@ export class GitHubAdapter {
     return response.json() as Promise<T>;
   }
 
-  async verify(): Promise<{ success: boolean; error?: string; login?: string }> {
+  async verify(): Promise<GitHubVerifyResult> {
     try {
-      const user = await this.request<GitHubUser>('GET', '/user');
-      return { success: true, login: user.login };
+      if (!this.credentials) {
+        throw new Error('Not connected. Call connect() first.');
+      }
+      const response = await fetch(`${GITHUB_API_URL}/user`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${this.credentials.apiToken}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      });
+      if (!response.ok) {
+        let errorMessage = `GitHub API error: ${response.status} ${response.statusText}`;
+        try {
+          const errorBody = await response.json() as { message?: string };
+          if (errorBody.message) {
+            errorMessage = `GitHub API error: ${errorBody.message}`;
+          }
+        } catch {
+          // Ignore JSON parse errors.
+        }
+        throw new Error(errorMessage);
+      }
+      const user = await response.json() as GitHubUser;
+      const scopes = (response.headers.get('x-oauth-scopes') ?? '')
+        .split(',')
+        .map((scope) => scope.trim())
+        .filter(Boolean);
+      return { success: true, login: user.login, ...(scopes.length > 0 ? { scopes } : {}) };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }

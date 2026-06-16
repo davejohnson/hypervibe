@@ -99,6 +99,7 @@ describe('hv_ci_setup', () => {
     connectionRepo.updateCredentials(githubConnection.id, secretStore.encryptObject({
       apiToken: 'gh-token',
       login: 'davejohnson',
+      packageReadToken: 'gh-package-token',
     }));
     connectionRepo.updateStatus(githubConnection.id, 'verified');
     const railwayConnection = connectionRepo.create({
@@ -132,7 +133,7 @@ describe('hv_ci_setup', () => {
     expect(createFile.mock.calls[0][3]).not.toContain('railway-github-action');
     expect(setSecret).toHaveBeenCalledWith('davejohnson', 'billforge', 'RAILWAY_API_TOKEN', 'railway-token');
     expect(setSecret).toHaveBeenCalledWith('davejohnson', 'billforge', 'IMAGE_REGISTRY_USERNAME', 'davejohnson');
-    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'billforge', 'IMAGE_REGISTRY_TOKEN', 'gh-token');
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'billforge', 'IMAGE_REGISTRY_TOKEN', 'gh-package-token');
     expect(createFile).toHaveBeenCalledTimes(1);
     expect(protect).not.toHaveBeenCalled();
     await t.close();
@@ -161,6 +162,43 @@ describe('hv_ci_setup', () => {
       requireStatusChecks: false,
       statusChecks: [],
     }));
+    await t.close();
+  });
+
+  it('reports missing package pull credentials for Railway branch deploys', async () => {
+    const project = seedProject({
+      desiredState: {
+        deploy: { strategy: 'branch', branches: { production: 'release' } },
+      },
+    });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    const connectionRepo = new ConnectionRepository();
+    const secretStore = getSecretStore();
+    const githubConnection = connectionRepo.findByProvider('github')!;
+    connectionRepo.updateCredentials(githubConnection.id, secretStore.encryptObject({
+      apiToken: 'gh-token',
+      login: 'davejohnson',
+    }));
+    connectionRepo.updateStatus(githubConnection.id, 'verified');
+    const railwayConnection = connectionRepo.create({
+      provider: 'railway',
+      credentialsEncrypted: secretStore.encryptObject({ apiToken: 'railway-token' }),
+    });
+    connectionRepo.updateStatus(railwayConnection.id, 'verified');
+
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, login: 'davejohnson' });
+    vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: true, updated: false } as any);
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_setup', { project: 'billforge', kind: 'deploy-branch', config: { provider: 'railway' } });
+    expect(res.ok).toBe(true);
+    expect(res.data.syncedSecrets).toEqual(['RAILWAY_API_TOKEN']);
+    expect(res.data.manualSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
+    expect(res.data.missingProviderSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
+    expect(res.warnings).toContainEqual(expect.stringContaining('packageReadToken'));
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'billforge', 'RAILWAY_API_TOKEN', 'railway-token');
+    expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'billforge', 'IMAGE_REGISTRY_TOKEN', expect.any(String));
     await t.close();
   });
 

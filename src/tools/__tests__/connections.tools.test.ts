@@ -99,6 +99,7 @@ describe('hv_connect', () => {
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
       login: 'davejohnson',
+      scopes: ['repo', 'read:packages'],
     });
 
     const t = await makeClient();
@@ -112,9 +113,10 @@ describe('hv_connect', () => {
     expect(result.data.login).toBe('davejohnson');
 
     const connection = new ConnectionRepository().findByProvider('github')!;
-    const decrypted = getSecretStore().decryptObject<{ apiToken: string; login?: string }>(connection.credentialsEncrypted);
+    const decrypted = getSecretStore().decryptObject<{ apiToken: string; login?: string; packageReadToken?: string }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('gh-token');
     expect(decrypted.login).toBe('davejohnson');
+    expect(decrypted.packageReadToken).toBe('gh-token');
     await t.close();
   });
 
