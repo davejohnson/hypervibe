@@ -198,6 +198,19 @@ function bootstrapDomainError(summary: Record<string, unknown>): string | undefi
   return messages.length > 0 ? Array.from(new Set(messages)).join('; ') : undefined;
 }
 
+function bootstrapSuccessData(summary: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (booleanField(summary, 'appDeploymentPending') !== true) {
+    return undefined;
+  }
+  const data: Record<string, unknown> = { appDeploymentPending: true };
+  for (const key of ['deploymentMode', 'appDeployment', 'deploySource'] as const) {
+    if (summary[key] !== undefined) {
+      data[key] = summary[key];
+    }
+  }
+  return data;
+}
+
 export function bootstrapActionResultFromSummary(
   action: Pick<PlanAction, 'id' | 'resource'>,
   result: { success: boolean; summary: Record<string, unknown> }
@@ -207,7 +220,12 @@ export function bootstrapActionResultFromSummary(
     : undefined;
 
   if (!actionError && result.success) {
-    return { success: true, message: `Converged (${action.id})` };
+    const data = bootstrapSuccessData(result.summary);
+    return {
+      success: true,
+      message: `Converged (${action.id})`,
+      ...(data ? { data } : {}),
+    };
   }
 
   const error = actionError ?? bootstrapGeneralError(result.summary);

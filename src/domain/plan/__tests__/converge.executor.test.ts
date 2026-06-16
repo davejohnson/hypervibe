@@ -167,6 +167,28 @@ describe('ConvergeExecutor execution', () => {
     expect(handler).toHaveBeenCalledOnce();
   });
 
+  it('returns and persists handler data on action receipts', async () => {
+    const handlerData = {
+      appDeploymentPending: true,
+      appDeployment: { status: 'pending_ci' },
+    };
+    const handler = vi.fn().mockResolvedValue({ success: true, message: 'ok', data: handlerData });
+    const planId = storePlan([action({ id: 'service:web' })]);
+
+    const result = await new ConvergeExecutor().execute({ planRunId: planId, currentSpecRevision: 1, handler });
+    expect(result.success).toBe(true);
+    expect(result.receipts.find((receipt) => receipt.actionId === 'service:web')).toMatchObject({
+      status: 'succeeded',
+      data: handlerData,
+    });
+
+    const applyRun = runRepo().findById(result.applyRunId!)!;
+    expect(applyRun.receipts.find((receipt) => receipt.step === 'service:web')?.result).toMatchObject({
+      message: 'ok',
+      ...handlerData,
+    });
+  });
+
   it('aborts remaining actions after a failure and records a failed apply run', async () => {
     const handler = vi.fn(async (a: PlanAction) =>
       a.id === 'service:web'

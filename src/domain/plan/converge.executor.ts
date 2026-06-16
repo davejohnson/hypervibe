@@ -63,6 +63,7 @@ export interface ActionReceipt {
   status: ActionReceiptStatus;
   message?: string;
   error?: string;
+  data?: Record<string, unknown>;
 }
 
 export interface ConvergeResult {
@@ -240,13 +241,13 @@ export class ConvergeExecutor {
         continue;
       }
 
-      const recordReceipt = (status: ActionReceiptStatus, message?: string, error?: string) => {
-        receipts.push({ actionId: action.id, status, message, error });
+      const recordReceipt = (status: ActionReceiptStatus, message?: string, error?: string, data?: Record<string, unknown>) => {
+        receipts.push({ actionId: action.id, status, message, error, data });
         this.runRepo.addReceipt(applyRun.id, {
           step: action.id,
           status: status === 'succeeded' ? 'success' : status === 'failed' ? 'failure' : 'skipped',
           error,
-          result: message ? { message } : undefined,
+          result: message || data ? { ...(message ? { message } : {}), ...(data ?? {}) } : undefined,
           timestamp: new Date().toISOString(),
         } as RunReceipt);
       };
@@ -255,11 +256,11 @@ export class ConvergeExecutor {
         const result = await params.handler(action);
         if (result.success) {
           completed.add(action.id);
-          recordReceipt('succeeded', result.message);
+          recordReceipt('succeeded', result.message, undefined, result.data);
         } else {
           failed = true;
           firstError = result.error ?? result.message;
-          recordReceipt('failed', result.message, result.error);
+          recordReceipt('failed', result.message, result.error, result.data);
         }
       } catch (error) {
         failed = true;

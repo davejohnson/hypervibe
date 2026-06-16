@@ -101,6 +101,32 @@ describe('bootstrap action receipt mapping', () => {
     expect(result.error).toContain('Missing domain-auth scopes');
     expect(result.error).not.toBe('bootstrap failed');
   });
+
+  it('returns CI-pending bootstrap metadata on successful service actions', () => {
+    const result = bootstrapActionResultFromSummary(
+      {
+        id: 'service:web',
+        resource: { kind: 'service', name: 'web', provider: 'railway' },
+      },
+      {
+        success: true,
+        summary: {
+          deploymentMode: 'provision',
+          appDeploymentPending: true,
+          appDeployment: { status: 'pending_ci' },
+          deploySource: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({
+      deploymentMode: 'provision',
+      appDeploymentPending: true,
+      appDeployment: { status: 'pending_ci' },
+      deploySource: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+    });
+  });
 });
 
 describe('hv_spec_set / hv_spec_get', () => {
