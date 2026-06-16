@@ -165,6 +165,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         zones?: string[];
         version?: string;
         warning?: string;
+        login?: string;
         workspaceId?: string;
         workspaces?: Array<{ id: string; name?: string }>;
       }>
@@ -177,6 +178,14 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         const creds = decryptedCreds as { apiToken?: string; workspaceId?: string; teamId?: string };
         if (!creds.workspaceId) {
           const nextCreds = { ...creds, workspaceId: result.workspaceId };
+          const nextEncrypted = secretStore.encryptObject(nextCreds);
+          connectionRepo.updateCredentials(connection.id, nextEncrypted);
+        }
+      }
+      if (provider === 'github' && result.login) {
+        const creds = decryptedCreds as { apiToken?: string; login?: string };
+        if (creds.login !== result.login) {
+          const nextCreds = { ...creds, login: result.login };
           const nextEncrypted = secretStore.encryptObject(nextCreds);
           connectionRepo.updateCredentials(connection.id, nextEncrypted);
         }
@@ -207,6 +216,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
           ...(result.accountId && { accountId: result.accountId }),
           ...(result.version && { version: result.version }),
           ...(result.warning && { warning: result.warning }),
+          ...(result.login && { login: result.login }),
           ...(result.workspaceId && { workspaceId: result.workspaceId }),
           ...(result.workspaces && result.workspaces.length > 0 && { workspaces: result.workspaces }),
         },

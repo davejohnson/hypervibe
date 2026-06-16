@@ -10,6 +10,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 // Importing the adapter registers the railway provider in the registry.
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
+import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../context.js';
 
@@ -91,6 +92,29 @@ describe('hv_connect', () => {
     const connection = new ConnectionRepository().findByProvider('railway')!;
     const decrypted = getSecretStore().decryptObject<{ apiToken: string }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('token-from-env-ref');
+    await t.close();
+  });
+
+  it('stores the verified GitHub login for package pull credential sync', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'github',
+      credentials: { apiToken: 'gh-token' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.status).toBe('verified');
+    expect(result.data.login).toBe('davejohnson');
+
+    const connection = new ConnectionRepository().findByProvider('github')!;
+    const decrypted = getSecretStore().decryptObject<{ apiToken: string; login?: string }>(connection.credentialsEncrypted);
+    expect(decrypted.apiToken).toBe('gh-token');
+    expect(decrypted.login).toBe('davejohnson');
     await t.close();
   });
 

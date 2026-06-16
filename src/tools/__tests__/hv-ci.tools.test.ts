@@ -93,9 +93,23 @@ describe('hv_ci_setup', () => {
       },
     });
     new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    const connectionRepo = new ConnectionRepository();
+    const secretStore = getSecretStore();
+    const githubConnection = connectionRepo.findByProvider('github')!;
+    connectionRepo.updateCredentials(githubConnection.id, secretStore.encryptObject({
+      apiToken: 'gh-token',
+      login: 'davejohnson',
+    }));
+    connectionRepo.updateStatus(githubConnection.id, 'verified');
+    const railwayConnection = connectionRepo.create({
+      provider: 'railway',
+      credentialsEncrypted: secretStore.encryptObject({ apiToken: 'railway-token' }),
+    });
+    connectionRepo.updateStatus(railwayConnection.id, 'verified');
 
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, login: 'davejohnson' });
     const createFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: true, updated: false } as any);
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
     const protect = vi.spyOn(GitHubAdapter.prototype, 'updateBranchProtection').mockResolvedValue();
     const t = await makeClient();
 
@@ -109,11 +123,16 @@ describe('hv_ci_setup', () => {
     expect(res.data.requiredSecrets).not.toContain('RAILWAY_TOKEN');
     expect(res.data.requiredSecrets).not.toContain('GHCR_USERNAME');
     expect(res.data.requiredSecrets).not.toContain('GHCR_TOKEN');
+    expect(res.data.syncedSecrets).toEqual(['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
+    expect(res.data.manualSecrets).toEqual([]);
     expect(createFile.mock.calls[0][3]).toContain('serviceInstanceUpdate');
     expect(createFile.mock.calls[0][3]).toContain('docker/build-push-action@v6');
     expect(createFile.mock.calls[0][3]).toContain('secrets.GITHUB_TOKEN');
     expect(createFile.mock.calls[0][3]).toContain('secrets.IMAGE_REGISTRY_TOKEN');
     expect(createFile.mock.calls[0][3]).not.toContain('railway-github-action');
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'billforge', 'RAILWAY_API_TOKEN', 'railway-token');
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'billforge', 'IMAGE_REGISTRY_USERNAME', 'davejohnson');
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'billforge', 'IMAGE_REGISTRY_TOKEN', 'gh-token');
     expect(createFile).toHaveBeenCalledTimes(1);
     expect(protect).not.toHaveBeenCalled();
     await t.close();

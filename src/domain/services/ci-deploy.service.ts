@@ -18,6 +18,7 @@ import {
 
 const OPERATION = 'githubActionsDeployBranch';
 const SUPPORTED_PROVIDERS = new Set(['railway', 'vercel', 'render', 'digitalocean', 'cloudrun', 'apprunner', 'heroku']);
+const PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL = new Set(['railway', 'digitalocean']);
 
 const connectionRepo = new ConnectionRepository();
 const secretStore = getSecretStore();
@@ -38,59 +39,86 @@ export function isGitHubActionsDeployAction(action: PlanAction): boolean {
   return action.metadata?.operation === OPERATION;
 }
 
-export function providerSecretsForGitHubActions(provider: string): Array<{ name: string; value: string }> {
+export function providerSecretsForGitHubActions(
+  provider: string,
+  options: { githubLogin?: string } = {}
+): Array<{ name: string; value: string }> {
+  const secrets: Array<{ name: string; value: string }> = [];
   const connection = connectionRepo.findByProvider(provider);
-  if (!connection || connection.status !== 'verified') {
-    return [];
+
+  if (connection?.status === 'verified') {
+    const credentials = secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
+    switch (provider) {
+      case 'railway':
+        if (typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0) {
+          secrets.push({ name: 'RAILWAY_API_TOKEN', value: credentials.apiToken });
+        }
+        break;
+      case 'digitalocean':
+        if (typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0) {
+          secrets.push({ name: 'DIGITALOCEAN_ACCESS_TOKEN', value: credentials.apiToken });
+        }
+        break;
+      case 'render':
+        if (typeof credentials.apiKey === 'string' && credentials.apiKey.length > 0) {
+          secrets.push({ name: 'RENDER_API_KEY', value: credentials.apiKey });
+        }
+        break;
+      case 'cloudrun':
+        if (typeof credentials.credentials === 'string' && credentials.credentials.length > 0) {
+          secrets.push({ name: 'GCP_SERVICE_ACCOUNT_JSON', value: credentials.credentials });
+        }
+        if (typeof credentials.projectId === 'string' && credentials.projectId.length > 0) {
+          secrets.push({ name: 'GCP_PROJECT_ID', value: credentials.projectId });
+        }
+        if (typeof credentials.region === 'string' && credentials.region.length > 0) {
+          secrets.push({ name: 'GCP_REGION', value: credentials.region });
+        }
+        break;
+      case 'apprunner':
+        if (typeof credentials.accessKeyId === 'string' && credentials.accessKeyId.length > 0) {
+          secrets.push({ name: 'AWS_ACCESS_KEY_ID', value: credentials.accessKeyId });
+        }
+        if (typeof credentials.secretAccessKey === 'string' && credentials.secretAccessKey.length > 0) {
+          secrets.push({ name: 'AWS_SECRET_ACCESS_KEY', value: credentials.secretAccessKey });
+        }
+        if (typeof credentials.region === 'string' && credentials.region.length > 0) {
+          secrets.push({ name: 'AWS_REGION', value: credentials.region });
+        }
+        break;
+      case 'heroku':
+        if (typeof credentials.apiKey === 'string' && credentials.apiKey.length > 0) {
+          secrets.push({ name: 'HEROKU_API_KEY', value: credentials.apiKey });
+        }
+        break;
+      default:
+        break;
+    }
   }
 
-  const credentials = secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
-  switch (provider) {
-    case 'railway':
-      return typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0
-        ? [{ name: 'RAILWAY_API_TOKEN', value: credentials.apiToken }]
-        : [];
-    case 'digitalocean':
-      return typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0
-        ? [{ name: 'DIGITALOCEAN_ACCESS_TOKEN', value: credentials.apiToken }]
-        : [];
-    case 'render':
-      return typeof credentials.apiKey === 'string' && credentials.apiKey.length > 0
-        ? [{ name: 'RENDER_API_KEY', value: credentials.apiKey }]
-        : [];
-    case 'cloudrun': {
-      const secrets: Array<{ name: string; value: string }> = [];
-      if (typeof credentials.credentials === 'string' && credentials.credentials.length > 0) {
-        secrets.push({ name: 'GCP_SERVICE_ACCOUNT_JSON', value: credentials.credentials });
+  if (PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL.has(provider)) {
+    const githubConnection = connectionRepo.findByProvider('github');
+    if (githubConnection?.status === 'verified') {
+      const credentials = secretStore.decryptObject<Record<string, unknown>>(githubConnection.credentialsEncrypted);
+      const username =
+        options.githubLogin
+        ?? (typeof credentials.login === 'string' ? credentials.login : undefined)
+        ?? (typeof credentials.username === 'string' ? credentials.username : undefined);
+      const token =
+        (typeof credentials.packagesToken === 'string' && credentials.packagesToken.length > 0 ? credentials.packagesToken : undefined)
+        ?? (typeof credentials.packageReadToken === 'string' && credentials.packageReadToken.length > 0 ? credentials.packageReadToken : undefined)
+        ?? (typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0 ? credentials.apiToken : undefined);
+
+      if (username && token) {
+        secrets.push(
+          { name: 'IMAGE_REGISTRY_USERNAME', value: username },
+          { name: 'IMAGE_REGISTRY_TOKEN', value: token }
+        );
       }
-      if (typeof credentials.projectId === 'string' && credentials.projectId.length > 0) {
-        secrets.push({ name: 'GCP_PROJECT_ID', value: credentials.projectId });
-      }
-      if (typeof credentials.region === 'string' && credentials.region.length > 0) {
-        secrets.push({ name: 'GCP_REGION', value: credentials.region });
-      }
-      return secrets;
     }
-    case 'apprunner': {
-      const secrets: Array<{ name: string; value: string }> = [];
-      if (typeof credentials.accessKeyId === 'string' && credentials.accessKeyId.length > 0) {
-        secrets.push({ name: 'AWS_ACCESS_KEY_ID', value: credentials.accessKeyId });
-      }
-      if (typeof credentials.secretAccessKey === 'string' && credentials.secretAccessKey.length > 0) {
-        secrets.push({ name: 'AWS_SECRET_ACCESS_KEY', value: credentials.secretAccessKey });
-      }
-      if (typeof credentials.region === 'string' && credentials.region.length > 0) {
-        secrets.push({ name: 'AWS_REGION', value: credentials.region });
-      }
-      return secrets;
-    }
-    case 'heroku':
-      return typeof credentials.apiKey === 'string' && credentials.apiKey.length > 0
-        ? [{ name: 'HEROKU_API_KEY', value: credentials.apiKey }]
-        : [];
-    default:
-      return [];
   }
+
+  return secrets;
 }
 
 function ciBindings(environment: Environment | null): Record<string, { contentHash?: string; syncedSecrets?: string[] }> {

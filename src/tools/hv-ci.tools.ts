@@ -154,7 +154,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
           const requiredSecrets = Array.from(new Set(workflows.flatMap((workflow) => workflow.requiredSecrets)));
           const syncedSecrets: string[] = [];
           const secretSyncErrors: Array<{ name: string; error: string }> = [];
-          for (const secret of providerSecretsForGitHubActions(cfg.provider)) {
+          for (const secret of providerSecretsForGitHubActions(cfg.provider, { githubLogin: verification.login })) {
             if (!requiredSecrets.includes(secret.name)) {
               continue;
             }
