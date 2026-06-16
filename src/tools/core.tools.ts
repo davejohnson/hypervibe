@@ -249,6 +249,18 @@ function splitActionScopedConnectionBlocks(
   };
 }
 
+function actionScopedBlocksRequiringConnectBeforeApply(
+  actionScopedBlocked: Array<{ provider: string; reason: string }>
+): Array<{ provider: string; reason: string }> {
+  return actionScopedBlocked.filter((entry) => entry.provider !== 'cloudflare');
+}
+
+function actionScopedBlocksAllowedDuringApply(
+  actionScopedBlocked: Array<{ provider: string; reason: string }>
+): Array<{ provider: string; reason: string }> {
+  return actionScopedBlocked.filter((entry) => entry.provider === 'cloudflare');
+}
+
 export function bootstrapActionResultFromSummary(
   action: Pick<PlanAction, 'id' | 'resource'>,
   result: { success: boolean; summary: Record<string, unknown> }
@@ -391,16 +403,38 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       const confirmIds = result.actions.filter((a) => a.requiresConfirm).map((a) => a.id);
       const pending = result.actions.filter((a) => a.type !== 'noop');
       const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(result.blocked, result.actions);
-      const actionScopedWarnings = actionScopedBlocked.map((entry) =>
-        `${entry.reason} This blocks only the related action; independent service and CI actions can still be applied from this plan.`
-      );
-      const hint = hardBlocked.length > 0
-        ? `Blocked: connect ${hardBlocked.map((b) => b.provider).join(', ')} with hv_connect before applying. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`
-        : pending.length === 0
-          ? 'Everything is in sync — nothing to apply.'
-          : actionScopedBlocked.length > 0
-            ? `Action-scoped credentials are missing: ${Array.from(new Set(actionScopedBlocked.map((b) => b.provider))).join(', ')}. Connect them with hv_connect for full convergence, or apply this plan to converge independent actions and fail only blocked actions.`
-          : `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} for confirm-gated billable or destructive actions` : ''}.`;
+      const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
+      const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
+      const actionScopedWarnings = [
+        ...connectBeforeApply.map((entry) =>
+          `${entry.reason} Connect this provider before applying the plan.`
+        ),
+        ...softActionScopedBlocked.map((entry) =>
+          `${entry.reason} This blocks only the related action; independent service and CI actions can still be applied from this plan.`
+        ),
+      ];
+      let hint: string;
+      let next: string[] | undefined;
+
+      if (hardBlocked.length > 0) {
+        hint = `Blocked: connect ${hardBlocked.map((b) => b.provider).join(', ')} with hv_connect before applying. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`;
+      } else if (connectBeforeApply.length > 0) {
+        hint = `Blocked: connect ${Array.from(new Set(connectBeforeApply.map((b) => b.provider))).join(', ')} with hv_connect before applying. GitHub Actions push-to-deploy cannot converge until these credentials are available.`;
+      } else if (pending.length === 0) {
+        hint = 'Everything is in sync — nothing to apply.';
+      } else if (softActionScopedBlocked.length > 0) {
+        hint = `Action-scoped credentials are missing: ${Array.from(new Set(softActionScopedBlocked.map((b) => b.provider))).join(', ')}. Connect them with hv_connect for full convergence, or apply this plan to converge independent actions and fail only blocked actions.`;
+      } else {
+        hint = `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} for confirm-gated billable or destructive actions` : ''}.`;
+      }
+
+      if (hardBlocked.length === 0 && pending.length > 0) {
+        next = connectBeforeApply.length > 0
+          ? ['hv_connect', 'hv_plan']
+          : softActionScopedBlocked.length > 0
+            ? ['hv_connect', 'hv_apply']
+            : ['hv_apply'];
+      }
 
       return toolSuccess(
         {
@@ -418,9 +452,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         {
           hint,
           warnings: [...result.warnings, ...actionScopedWarnings],
-          next: hardBlocked.length === 0 && pending.length > 0
-            ? actionScopedBlocked.length > 0 ? ['hv_connect', 'hv_apply'] : ['hv_apply']
-            : undefined,
+          next,
         }
       );
     })
@@ -551,13 +583,16 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
       const blocked = planService.preflight(envSpec);
       const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions);
-      if (hardBlocked.length > 0) {
-        return toolError('MISSING_CONNECTION', `Missing verified connections: ${hardBlocked.map((b) => b.provider).join(', ')}.`, {
-          details: hardBlocked,
+      const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
+      const applyBlocked = [...hardBlocked, ...connectBeforeApply];
+      if (applyBlocked.length > 0) {
+        return toolError('MISSING_CONNECTION', `Missing verified connections: ${Array.from(new Set(applyBlocked.map((b) => b.provider))).join(', ')}.`, {
+          details: applyBlocked,
           hint: 'Connect them with hv_connect, then re-run hv_plan and hv_apply. Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or put JSON credentials in a local file and use credentialsRef="file:/absolute/path". Raw credentials={...} is still accepted if intentional.',
         });
       }
-      const actionScopedWarnings = actionScopedBlocked.map((entry) =>
+      const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
+      const actionScopedWarnings = softActionScopedBlocked.map((entry) =>
         `${entry.reason} This blocks only the related action; independent service and CI actions will still be applied.`
       );
 

@@ -700,20 +700,16 @@ describe('hv_plan / hv_status / hv_apply', () => {
       reason: expect.stringContaining('packageReadToken'),
     }));
     expect(plan.warnings).toContainEqual(expect.stringContaining('package-read token'));
-    expect(plan.next).toEqual(['hv_connect', 'hv_apply']);
+    expect(plan.next).toEqual(['hv_connect', 'hv_plan']);
 
     const apply = await t.call('hv_apply', { project: 'ci-missing-image-token-app', planId: plan.data.planId });
-    expect(apply.ok).toBe(true);
-    expect(apply.data.applied).toBe(false);
-    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'ci:github-actions:production:deploy-branch',
-      status: 'failed',
-      error: expect.stringContaining('package-read token'),
-      data: expect.objectContaining({
-        missingProviderSecrets: ['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
-      }),
+    expect(apply.ok).toBe(false);
+    expect(apply.error.code).toBe('MISSING_CONNECTION');
+    expect(apply.error.details).toContainEqual(expect.objectContaining({
+      provider: 'github',
+      reason: expect.stringContaining('packageReadToken'),
     }));
-    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'RAILWAY_API_TOKEN', 'railway-token');
+    expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'RAILWAY_API_TOKEN', 'railway-token');
     expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'IMAGE_REGISTRY_TOKEN', expect.any(String));
     await t.close();
   });
