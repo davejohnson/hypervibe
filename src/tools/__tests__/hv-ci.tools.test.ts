@@ -105,13 +105,14 @@ describe('hv_ci_setup', () => {
     expect(res.data.workflows).toEqual([
       expect.objectContaining({ template: 'deploy-railway-production', branch: 'release', path: '.github/workflows/deploy-railway-production.yml', created: true }),
     ]);
-    expect(res.data.requiredSecrets).toEqual(['RAILWAY_API_TOKEN']);
+    expect(res.data.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
     expect(res.data.requiredSecrets).not.toContain('RAILWAY_TOKEN');
     expect(res.data.requiredSecrets).not.toContain('GHCR_USERNAME');
     expect(res.data.requiredSecrets).not.toContain('GHCR_TOKEN');
     expect(createFile.mock.calls[0][3]).toContain('serviceInstanceUpdate');
     expect(createFile.mock.calls[0][3]).toContain('docker/build-push-action@v6');
     expect(createFile.mock.calls[0][3]).toContain('secrets.GITHUB_TOKEN');
+    expect(createFile.mock.calls[0][3]).toContain('secrets.IMAGE_REGISTRY_TOKEN');
     expect(createFile.mock.calls[0][3]).not.toContain('railway-github-action');
     expect(createFile).toHaveBeenCalledTimes(1);
     expect(protect).not.toHaveBeenCalled();

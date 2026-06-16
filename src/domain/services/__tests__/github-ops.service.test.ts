@@ -98,7 +98,7 @@ describe('github tools', () => {
     expect(workflow.template).toBe('deploy-railway-production');
     expect(workflow.branch).toBe('release');
     expect(workflow.environment).toBe('production');
-    expect(workflow.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'DATABASE_URL']);
+    expect(workflow.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN', 'DATABASE_URL']);
     expect(workflow.requiredVariables).toEqual(['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS']);
     expect(workflow.content).toContain('branches: [release]');
     expect(workflow.content).toContain('environment: production');
@@ -108,6 +108,10 @@ describe('github tools', () => {
     expect(workflow.content).toContain('username: ${{ github.actor }}');
     expect(workflow.content).toContain('password: ${{ secrets.GITHUB_TOKEN }}');
     expect(workflow.content).toContain('serviceInstanceUpdate');
+    expect(workflow.content).toContain('IMAGE_REGISTRY_USERNAME: ${{ secrets.IMAGE_REGISTRY_USERNAME }}');
+    expect(workflow.content).toContain('IMAGE_REGISTRY_TOKEN: ${{ secrets.IMAGE_REGISTRY_TOKEN }}');
+    expect(workflow.content).toContain('username: process.env.IMAGE_REGISTRY_USERNAME');
+    expect(workflow.content).toContain('password: process.env.IMAGE_REGISTRY_TOKEN');
     expect(workflow.content).not.toContain('secrets.GHCR_USERNAME');
     expect(workflow.content).not.toContain('secrets.GHCR_TOKEN');
     expect(workflow.content).not.toContain('railway-github-action');
@@ -202,7 +206,7 @@ describe('github tools', () => {
       ...baseTarget,
       providerProjectId: 'do-app-id',
     }, { includeStep: false });
-    expect(digitalOceanWorkflow.requiredSecrets).toEqual(['DIGITALOCEAN_ACCESS_TOKEN']);
+    expect(digitalOceanWorkflow.requiredSecrets).toEqual(['DIGITALOCEAN_ACCESS_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
     expect(digitalOceanWorkflow.requiredVariables).toEqual([]);
     expect(digitalOceanWorkflow.content).toContain("DO_APP_ID: 'do-app-id'");
     expect(digitalOceanWorkflow.content).toContain("registry_type: 'GHCR'");
@@ -210,6 +214,9 @@ describe('github tools', () => {
     expect(digitalOceanWorkflow.content).toContain('packages: write');
     expect(digitalOceanWorkflow.content).toContain('username: ${{ github.actor }}');
     expect(digitalOceanWorkflow.content).toContain('password: ${{ secrets.GITHUB_TOKEN }}');
+    expect(digitalOceanWorkflow.content).toContain('IMAGE_REGISTRY_USERNAME: ${{ secrets.IMAGE_REGISTRY_USERNAME }}');
+    expect(digitalOceanWorkflow.content).toContain('IMAGE_REGISTRY_TOKEN: ${{ secrets.IMAGE_REGISTRY_TOKEN }}');
+    expect(digitalOceanWorkflow.content).toContain("registry_credentials: process.env.IMAGE_REGISTRY_USERNAME + ':' + process.env.IMAGE_REGISTRY_TOKEN");
     expect(digitalOceanWorkflow.content).not.toContain('secrets.GHCR_USERNAME');
     expect(digitalOceanWorkflow.content).not.toContain('secrets.GHCR_TOKEN');
 

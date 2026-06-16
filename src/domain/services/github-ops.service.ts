@@ -67,7 +67,7 @@ jobs:
       providerServiceIds: [],
       providerServiceArns: [],
     }, { includeStep: false }).content,
-    requiredSecrets: ['RAILWAY_API_TOKEN'],
+    requiredSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
     requiredVariables: ['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS'],
   },
   'deploy-railway-staging': {
@@ -81,7 +81,7 @@ jobs:
       providerServiceIds: [],
       providerServiceArns: [],
     }, { includeStep: false }).content,
-    requiredSecrets: ['RAILWAY_API_TOKEN'],
+    requiredSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
     requiredVariables: ['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS'],
   },
   'deploy-railway-production': {
@@ -95,7 +95,7 @@ jobs:
       providerServiceIds: [],
       providerServiceArns: [],
     }, { includeStep: false }).content,
-    requiredSecrets: ['RAILWAY_API_TOKEN'],
+    requiredSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
     requiredVariables: ['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS'],
   },
   'deploy-vercel-staging': {
@@ -163,7 +163,7 @@ jobs:
       providerServiceIds: [],
       providerServiceArns: [],
     }, { includeStep: false }).content,
-    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN'],
+    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
     requiredVariables: ['DO_APP_ID', 'DO_SERVICE_NAMES'],
   },
   'deploy-digitalocean-production': {
@@ -177,7 +177,7 @@ jobs:
       providerServiceIds: [],
       providerServiceArns: [],
     }, { includeStep: false }).content,
-    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN'],
+    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
     requiredVariables: ['DO_APP_ID', 'DO_SERVICE_NAMES'],
   },
   'lint': {
@@ -560,13 +560,13 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
           RAILWAY_API_TOKEN: \${{ secrets.RAILWAY_API_TOKEN }}
           RAILWAY_ENVIRONMENT_ID: ${railwayEnvironmentId}
           RAILWAY_SERVICE_IDS: ${railwayServiceIds}
-          GHCR_USERNAME: \${{ github.actor }}
-          GHCR_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REGISTRY_USERNAME: \${{ secrets.IMAGE_REGISTRY_USERNAME }}
+          IMAGE_REGISTRY_TOKEN: \${{ secrets.IMAGE_REGISTRY_TOKEN }}
           IMAGE_URI: \${{ steps.image.outputs.uri }}
         with:
           script: |
             const endpoint = 'https://backboard.railway.app/graphql/v2';
-            const required = ['RAILWAY_API_TOKEN', 'RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS', 'GHCR_USERNAME', 'GHCR_TOKEN', 'IMAGE_URI'];
+            const required = ['RAILWAY_API_TOKEN', 'RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN', 'IMAGE_URI'];
             for (const key of required) {
               if (!process.env[key]) throw new Error(key + ' is required');
             }
@@ -600,8 +600,8 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
                 input: {
                   source: { image: process.env.IMAGE_URI },
                   registryCredentials: {
-                    username: process.env.GHCR_USERNAME,
-                    password: process.env.GHCR_TOKEN,
+                    username: process.env.IMAGE_REGISTRY_USERNAME,
+                    password: process.env.IMAGE_REGISTRY_TOKEN,
                   },
                 },
               });
@@ -612,7 +612,7 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
               });
             }
 `,
-        requiredSecrets: ['RAILWAY_API_TOKEN'],
+        requiredSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
         requiredVariables,
       };
     }
@@ -702,8 +702,8 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
           DIGITALOCEAN_ACCESS_TOKEN: \${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           DO_APP_ID: ${doAppId}
           DO_SERVICE_NAMES: ${doServiceNames}
-          GHCR_USERNAME: \${{ github.actor }}
-          GHCR_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REGISTRY_USERNAME: \${{ secrets.IMAGE_REGISTRY_USERNAME }}
+          IMAGE_REGISTRY_TOKEN: \${{ secrets.IMAGE_REGISTRY_TOKEN }}
           IMAGE_REGISTRY_OWNER: \${{ steps.image.outputs.registry_owner }}
           IMAGE_REPOSITORY: \${{ steps.image.outputs.repository }}
           IMAGE_TAG: \${{ steps.image.outputs.tag }}
@@ -711,7 +711,7 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
           script: |
             if (!process.env.DIGITALOCEAN_ACCESS_TOKEN) throw new Error('DIGITALOCEAN_ACCESS_TOKEN is required');
             if (!process.env.DO_APP_ID) throw new Error('DO_APP_ID is required');
-            const required = ['DO_SERVICE_NAMES', 'GHCR_USERNAME', 'GHCR_TOKEN', 'IMAGE_REGISTRY_OWNER', 'IMAGE_REPOSITORY', 'IMAGE_TAG'];
+            const required = ['DO_SERVICE_NAMES', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN', 'IMAGE_REGISTRY_OWNER', 'IMAGE_REPOSITORY', 'IMAGE_TAG'];
             for (const key of required) {
               if (!process.env[key]) throw new Error(key + ' is required');
             }
@@ -749,7 +749,7 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
                 registry: process.env.IMAGE_REGISTRY_OWNER,
                 repository: process.env.IMAGE_REPOSITORY,
                 tag: process.env.IMAGE_TAG,
-                registry_credentials: process.env.GHCR_USERNAME + ':' + process.env.GHCR_TOKEN,
+                registry_credentials: process.env.IMAGE_REGISTRY_USERNAME + ':' + process.env.IMAGE_REGISTRY_TOKEN,
               };
             }
             await digitalOcean('PUT', '/apps/' + process.env.DO_APP_ID, { spec });
@@ -763,7 +763,7 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
             });
             if (!deployment.ok) throw new Error('DigitalOcean deployment failed: ' + deployment.status + ' ' + await deployment.text());
 `,
-        requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN'],
+        requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
         requiredVariables,
       };
     }
