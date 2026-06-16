@@ -273,6 +273,25 @@ describe('RailwayAdapter observe', () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it('formats structured build logs from Railway', async () => {
+    const request = vi.fn().mockResolvedValue({
+      buildLogs: [
+        { timestamp: '2026-06-16T21:00:00Z', severity: 'error', message: 'Failed to pull image from registry' },
+        { timestamp: '2026-06-16T21:00:01Z', severity: 'info', message: 'Check image credentials' },
+      ],
+    });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const logs = await adapter.getBuildLogs('dep-1');
+
+    expect(request.mock.calls[0][0]).toContain('buildLogs(deploymentId: $deploymentId)');
+    expect(request.mock.calls[0][0]).toContain('message');
+    expect(logs).toContain('2026-06-16T21:00:00Z error Failed to pull image from registry');
+    expect(logs).toContain('2026-06-16T21:00:01Z info Check image credentials');
+  });
+
   it('returns projectExists false when the project query fails', async () => {
     const request = vi.fn().mockRejectedValueOnce(new Error('Project not found'));
 

@@ -6,6 +6,7 @@ import { buildDatabaseEnvVarsFromComponent } from '../domain/services/database-e
 import { requiresProductionConfirm } from '../domain/services/policy.service.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { executeRollback, ROLLBACK_NOTE } from '../domain/services/rollback.service.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { ToolContext } from './context.js';
@@ -20,6 +21,28 @@ function assertConfirmed(project: Project, environment: Environment, confirm: bo
       { hint: `Re-run ${action} with confirm=true to proceed.` }
     );
   }
+}
+
+function defaultBranchForEnvironment(envName: string): string {
+  return envName.toLowerCase().includes('prod') ? 'main' : 'staging';
+}
+
+function railwayCiDeployGuidance(project: Project, envName: string): { branch: string; workflow: string } | null {
+  const specResult = new SpecStore().get(project);
+  const envSpec = specResult?.spec.environments[envName];
+  if (
+    envSpec?.hosting.provider !== 'railway'
+    || envSpec.deploy?.strategy !== 'branch'
+    || (envSpec.deploy.trigger ?? 'ci') !== 'ci'
+  ) {
+    return null;
+  }
+
+  const branch = envSpec.deploy.branch ?? defaultBranchForEnvironment(envName);
+  return {
+    branch,
+    workflow: `deploy-railway-${defaultBranchForEnvironment(envName) === 'main' ? 'production' : 'staging'}.yml`,
+  };
 }
 
 export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void {
@@ -42,6 +65,18 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
         ?? ctx.repos.environments.create({ projectId: project.id, name: envName });
 
       assertConfirmed(project, environment, confirm, 'hv_deploy');
+
+      const railwayCi = railwayCiDeployGuidance(project, envName);
+      if (railwayCi) {
+        return toolError(
+          'VALIDATION',
+          `Environment "${envName}" uses Railway GitHub Actions branch deploys. hv_deploy does not build or push the image for this mode.`,
+          {
+            hint: `Run hv_plan/hv_apply to sync the workflow, then push to ${railwayCi.branch} or run hv_ci_trigger workflow="${railwayCi.workflow}" ref="${railwayCi.branch}". Check progress with hv_ci_status, then hv_health.`,
+            next: ['hv_plan', 'hv_apply', 'hv_ci_trigger', 'hv_ci_status'],
+          }
+        );
+      }
 
       const adapterResult = await ctx.adapterFactory.getHostingAdapter(project);
       if (!adapterResult.success || !adapterResult.adapter) {

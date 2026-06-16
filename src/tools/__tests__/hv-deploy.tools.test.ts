@@ -12,6 +12,7 @@ import { ServiceRepository } from '../../adapters/db/repositories/service.reposi
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import type { IHostingAdapter } from '../../domain/ports/hosting.port.js';
+import { SpecStore } from '../../domain/spec/spec.store.js';
 import { createToolContext } from '../context.js';
 import { registerHvDeployTools } from '../hv-deploy.tools.js';
 
@@ -67,6 +68,40 @@ describe('hv_deploy', () => {
     const result = await t.call('hv_deploy', { project: 'gate-app', env: 'production' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('CONFIRM_REQUIRED');
+    await t.close();
+  });
+
+  it('does not direct-deploy Railway GitHub Actions branch deploy environments', async () => {
+    const project = new ProjectRepository().create({
+      name: 'rail-ci-app',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/davejohnson/rail-ci-app',
+    });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { workloadKind: 'web' } },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+    const adapterSpy = vi.spyOn(adapterFactory, 'getHostingAdapter');
+
+    const t = await makeClient();
+    const result = await t.call('hv_deploy', { project: 'rail-ci-app', env: 'production' });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('does not build or push the image');
+    expect(result.hint).toContain('hv_ci_trigger');
+    expect(result.hint).toContain('deploy-railway-production.yml');
+    expect(adapterSpy).not.toHaveBeenCalled();
     await t.close();
   });
 

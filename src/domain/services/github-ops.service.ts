@@ -554,6 +554,14 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
           context: .
           push: true
           tags: \${{ steps.image.outputs.uri }}
+      - name: Verify Railway image pull credentials
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: \${{ secrets.IMAGE_REGISTRY_USERNAME }}
+          password: \${{ secrets.IMAGE_REGISTRY_TOKEN }}
+      - name: Verify Railway can read image
+        run: docker buildx imagetools inspect "\${{ steps.image.outputs.uri }}" >/dev/null
       - name: Deploy image to Railway
         uses: actions/github-script@v7
         env:
@@ -593,6 +601,78 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
 
             const updateMutation = 'mutation UpdateServiceImage($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }';
             const deployMutation = 'mutation DeployServiceImage($serviceId: String!, $environmentId: String!, $commitSha: String) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId, commitSha: $commitSha) }';
+            const deploymentQuery = 'query DeploymentStatus($id: String!) { deployment(id: $id) { id status url staticUrl diagnosis meta } }';
+            const buildLogsQuery = 'query BuildLogs($deploymentId: String!, $limit: Int) { buildLogs(deploymentId: $deploymentId, limit: $limit) { timestamp severity message } }';
+            const deploymentLogsQuery = 'query DeploymentLogs($deploymentId: String!, $limit: Int) { deploymentLogs(deploymentId: $deploymentId, limit: $limit) { timestamp severity message } }';
+            const successStatuses = new Set(['SUCCESS']);
+            const failedStatuses = new Set(['CRASHED', 'FAILED', 'REMOVED', 'SKIPPED']);
+
+            function shortJson(value) {
+              if (value === null || value === undefined) return '';
+              if (typeof value === 'string') return value;
+              try {
+                return JSON.stringify(value);
+              } catch {
+                return String(value);
+              }
+            }
+
+            function summarizeDeployment(deployment) {
+              const parts = [];
+              const diagnosis = shortJson(deployment.diagnosis);
+              const meta = shortJson(deployment.meta);
+              if (diagnosis) parts.push('diagnosis=' + diagnosis);
+              if (meta) parts.push('meta=' + meta);
+              return parts.join(' ');
+            }
+
+            function formatLogs(logs) {
+              return (logs || [])
+                .slice(-25)
+                .map((log) => [log.timestamp, log.severity, log.message].filter(Boolean).join(' '))
+                .filter(Boolean)
+                .join('\\n');
+            }
+
+            async function logsFor(deploymentId) {
+              const sections = [];
+              for (const entry of [
+                ['build logs', buildLogsQuery, 'buildLogs'],
+                ['deployment logs', deploymentLogsQuery, 'deploymentLogs'],
+              ]) {
+                try {
+                  const data = await railway(entry[1], { deploymentId, limit: 100 });
+                  const lines = formatLogs(data[entry[2]]);
+                  if (lines) sections.push(entry[0] + ':\\n' + lines);
+                } catch (error) {
+                  core.warning('Could not read Railway ' + entry[0] + ' for ' + deploymentId + ': ' + error.message);
+                }
+              }
+              return sections.join('\\n\\n');
+            }
+
+            async function waitForDeployment(deploymentId, serviceId) {
+              for (let attempt = 0; attempt < 90; attempt++) {
+                const data = await railway(deploymentQuery, { id: deploymentId });
+                const deployment = data.deployment;
+                const status = deployment.status;
+                core.info('Railway deployment ' + deploymentId + ' for service ' + serviceId + ' status: ' + status);
+                if (successStatuses.has(status)) return deployment;
+                if (failedStatuses.has(status)) {
+                  const summary = summarizeDeployment(deployment);
+                  const logs = await logsFor(deploymentId);
+                  throw new Error(
+                    'Railway deployment ' + deploymentId + ' for service ' + serviceId + ' failed with status ' + status
+                    + (summary ? '. ' + summary : '')
+                    + (logs ? '\\n\\nRecent Railway logs:\\n' + logs : '')
+                  );
+                }
+                await new Promise((resolve) => setTimeout(resolve, 5000));
+              }
+              const logs = await logsFor(deploymentId);
+              throw new Error('Timed out waiting for Railway deployment ' + deploymentId + ' for service ' + serviceId + (logs ? '\\n\\nRecent Railway logs:\\n' + logs : ''));
+            }
+
             for (const serviceId of serviceIds) {
               await railway(updateMutation, {
                 serviceId,
@@ -605,11 +685,12 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
                   },
                 },
               });
-              await railway(deployMutation, {
+              const deploymentId = await railway(deployMutation, {
                 serviceId,
                 environmentId: process.env.RAILWAY_ENVIRONMENT_ID,
                 commitSha: process.env.GITHUB_SHA,
               });
+              await waitForDeployment(deploymentId, serviceId);
             }
 `,
         requiredSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
@@ -1223,6 +1304,7 @@ export function buildBranchDeployWorkflow(
 on:
   push:
     branches: [${target.branch}]
+  workflow_dispatch:
 
 jobs:
   deploy:

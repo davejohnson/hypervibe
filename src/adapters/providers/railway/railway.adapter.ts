@@ -2531,16 +2531,27 @@ export class RailwayAdapter implements IProviderAdapter {
 
     const query = gql`
       query GetBuildLogs($deploymentId: String!) {
-        buildLogs(deploymentId: $deploymentId)
+        buildLogs(deploymentId: $deploymentId) {
+          timestamp
+          message
+          severity
+        }
       }
     `;
 
     try {
-      const result = await this.client.request<{ buildLogs: string }>(query, { deploymentId });
-      return result.buildLogs ?? '';
+      const result = await this.client.request<{ buildLogs: RailwayLogEntry[] }>(query, { deploymentId });
+      return this.formatRailwayLogEntries(result.buildLogs ?? []);
     } catch {
       return '';
     }
+  }
+
+  private formatRailwayLogEntries(logs: RailwayLogEntry[]): string {
+    return logs
+      .map((log) => [log.timestamp, log.severity, log.message].filter(Boolean).join(' '))
+      .filter((line) => line.length > 0)
+      .join('\n');
   }
 
   /**
