@@ -38,7 +38,7 @@ export interface EnvironmentPlan {
   unmanaged: DiffResult['unmanaged'];
   warnings: string[];
   /** Missing/unverified provider connections that block apply. */
-  blocked: Array<{ provider: string; reason: string }>;
+  blocked: Array<{ provider: string; reason: string; scope?: string }>;
 }
 
 function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Project {
@@ -135,8 +135,8 @@ export class PlanService {
   }
 
   /** Connections that must exist+verify before apply can run. */
-  preflight(environmentSpec: EnvironmentSpec): Array<{ provider: string; reason: string }> {
-    const blocked: Array<{ provider: string; reason: string }> = [];
+  preflight(environmentSpec: EnvironmentSpec): Array<{ provider: string; reason: string; scope?: string }> {
+    const blocked: Array<{ provider: string; reason: string; scope?: string }> = [];
     const required: Array<{ provider: string; scopeHints?: string[] }> = [
       { provider: environmentSpec.hosting.provider },
     ];
@@ -161,9 +161,11 @@ export class PlanService {
           .findAllByProvider(requirement.provider)
           .some((c) => c.status === 'verified');
       if (!verified) {
+        const scope = requirement.scopeHints?.[0];
         blocked.push({
           provider: requirement.provider,
-          reason: `No verified ${requirement.provider}${requirement.scopeHints?.[0] ? ` connection for ${requirement.scopeHints[0]}` : ' connection'}. Add one with hv_connect. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+          reason: `No verified ${requirement.provider}${scope ? ` connection for ${scope}` : ' connection'}. Add one with hv_connect. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+          ...(scope ? { scope } : {}),
         });
       }
     }

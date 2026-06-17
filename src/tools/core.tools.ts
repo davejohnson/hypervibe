@@ -129,6 +129,84 @@ function apexOfDomain(domain: string): string {
   return parts.length <= 2 ? parts.join('.') : parts.slice(-2).join('.');
 }
 
+type ConnectionBlock = {
+  provider: string;
+  reason?: string;
+  scope?: string;
+};
+
+function uniqueConnectionBlocks(blocks: ConnectionBlock[]): ConnectionBlock[] {
+  const seen = new Set<string>();
+  const output: ConnectionBlock[] = [];
+  for (const block of blocks) {
+    const key = `${block.provider}:${block.scope ?? ''}:${block.reason ?? ''}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(block);
+  }
+  return output;
+}
+
+function connectionProviders(blocks: ConnectionBlock[]): string[] {
+  return Array.from(new Set(blocks.map((block) => block.provider))).sort();
+}
+
+function providerConnectionCommand(block: ConnectionBlock): string {
+  const scope = block.scope ? ` scope="${block.scope}"` : '';
+  switch (block.provider) {
+    case 'cloudflare':
+      return `export CLOUDFLARE_API_TOKEN=... then hv_connect provider="cloudflare"${scope} credentialsRef="env:CLOUDFLARE_API_TOKEN" credentialsKey="apiToken"`;
+    case 'cloudrun':
+      return `hv_connect provider="cloudrun"${scope} credentialsRef="file:/absolute/path/cloudrun.json" (JSON with projectId, credentials service-account JSON, and optional region)`;
+    case 'cloudsql':
+      return `hv_connect provider="cloudsql"${scope} credentialsRef="file:/absolute/path/cloudsql.json" (JSON with projectId, credentials service-account JSON, and optional region)`;
+    case 'database':
+      return `export DATABASE_CONNECTION_URL=... then hv_connect provider="database"${scope} credentialsRef="env:DATABASE_CONNECTION_URL" credentialsKey="connectionUrl"`;
+    case 'digitalocean':
+      return `export DIGITALOCEAN_ACCESS_TOKEN=... then hv_connect provider="digitalocean"${scope} credentialsRef="env:DIGITALOCEAN_ACCESS_TOKEN" credentialsKey="apiToken"`;
+    case 'github':
+      return `export HYPERVIBE_GITHUB_TOKEN=... then hv_connect provider="github"${scope} credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"`;
+    case 'apprunner':
+      return `hv_connect provider="apprunner"${scope} credentialsRef="file:/absolute/path/aws-apprunner.json" (JSON with accessKeyId, secretAccessKey, and region)`;
+    case 'heroku':
+      return `export HEROKU_API_KEY=... then hv_connect provider="heroku"${scope} credentialsRef="env:HEROKU_API_KEY" credentialsKey="apiKey"`;
+    case 'rds':
+      return `hv_connect provider="rds"${scope} credentialsRef="file:/absolute/path/aws-rds.json" (JSON with accessKeyId, secretAccessKey, and region)`;
+    case 'railway':
+      return `export HYPERVIBE_RAILWAY_TOKEN=... then hv_connect provider="railway"${scope} credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN" credentialsKey="apiToken"`;
+    case 'render':
+      return `export RENDER_API_KEY=... then hv_connect provider="render"${scope} credentialsRef="env:RENDER_API_KEY" credentialsKey="apiKey"`;
+    case 'sendgrid':
+      return `export SENDGRID_API_KEY=... then hv_connect provider="sendgrid"${scope} credentialsRef="env:SENDGRID_API_KEY" credentialsKey="apiKey"`;
+    case 'stripe':
+      return `hv_connect provider="stripe"${scope} credentialsRef="file:/absolute/path/stripe.json" (JSON with sandboxSecretKey or liveSecretKey)`;
+    case 'supabase':
+      return `export SUPABASE_ACCESS_TOKEN=... then hv_connect provider="supabase"${scope} credentialsRef="env:SUPABASE_ACCESS_TOKEN" credentialsKey="accessToken"`;
+    case 'vercel':
+      return `export VERCEL_TOKEN=... then hv_connect provider="vercel"${scope} credentialsRef="env:VERCEL_TOKEN" credentialsKey="token"`;
+    default:
+      return `hv_connect provider="${block.provider}"${scope} credentialsRef="env:NAME" credentialsKey="apiToken"`;
+  }
+}
+
+function connectionRecoveryHint(
+  blocks: ConnectionBlock[],
+  options: { after?: string; includePackageRead?: boolean } = {}
+): string {
+  const uniqueBlocks = uniqueConnectionBlocks(blocks);
+  const providers = connectionProviders(uniqueBlocks).join(', ');
+  const commands = uniqueBlocks.map(providerConnectionCommand).join('; ');
+  const packageReadNeeded = options.includePackageRead
+    || uniqueBlocks.some((block) => /packageReadToken|packagesToken|IMAGE_REGISTRY_|GHCR|GitHub Actions/i.test(block.reason ?? ''));
+  const packageReadHint = packageReadNeeded
+    ? ' For GitHub Actions image deploys, the GitHub connection must also include GHCR/package read access; use a token with read:packages as apiToken, or use credentialsRef="file:/absolute/path/github.json" containing apiToken plus packageReadToken or packagesToken.'
+    : '';
+  const after = options.after ? ` ${options.after}` : '';
+  return `Hypervibe can store and verify the missing provider connections with hv_connect (${providers}). ${commands}.${packageReadHint} Prefer exported env vars or a local JSON file; raw credentials={...} is still accepted if the user intentionally wants chat entry.${after}`;
+}
+
 function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
   const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string> }>();
   const add = (provider: string, environment: string, reason: string, scopeHints: string[] = []) => {
@@ -186,7 +264,14 @@ function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
         ...(scope ? { scope } : {}),
         hint: verified
           ? undefined
-          : `Connect ${entry.provider}${scope ? ` for ${scope}` : ''} with hv_connect before hv_plan/hv_apply. Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+          : connectionRecoveryHint(
+            [{
+              provider: entry.provider,
+              reason: Array.from(entry.reasons).join(', '),
+              ...(scope ? { scope } : {}),
+            }],
+            { after: 'Then run hv_plan.' }
+          ),
       };
     });
 
@@ -246,11 +331,11 @@ function bootstrapSuccessData(summary: Record<string, unknown>): Record<string, 
 }
 
 function splitActionScopedConnectionBlocks(
-  blocked: Array<{ provider: string; reason: string }>,
+  blocked: ConnectionBlock[],
   actions: PlanAction[]
 ): {
-  hardBlocked: Array<{ provider: string; reason: string }>;
-  actionScopedBlocked: Array<{ provider: string; reason: string }>;
+  hardBlocked: ConnectionBlock[];
+  actionScopedBlocked: ConnectionBlock[];
 } {
   const hasIndependentPendingAction = actions.some((action) =>
     action.type !== 'noop'
@@ -283,14 +368,14 @@ function splitActionScopedConnectionBlocks(
 }
 
 function actionScopedBlocksRequiringConnectBeforeApply(
-  actionScopedBlocked: Array<{ provider: string; reason: string }>
-): Array<{ provider: string; reason: string }> {
+  actionScopedBlocked: ConnectionBlock[]
+): ConnectionBlock[] {
   return actionScopedBlocked.filter((entry) => entry.provider !== 'cloudflare');
 }
 
 function actionScopedBlocksAllowedDuringApply(
-  actionScopedBlocked: Array<{ provider: string; reason: string }>
-): Array<{ provider: string; reason: string }> {
+  actionScopedBlocked: ConnectionBlock[]
+): ConnectionBlock[] {
   return actionScopedBlocked.filter((entry) => entry.provider === 'cloudflare');
 }
 
@@ -397,7 +482,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         },
         {
           hint: connections.missing.length > 0
-            ? `Connect required providers first: ${connections.missing.map((item) => item.provider).join(', ')}.`
+            ? connectionRecoveryHint(connections.missing, { after: 'Then run hv_plan.' })
             : undefined,
           warnings,
           next: connections.missing.length > 0 ? ['hv_connect', 'hv_plan'] : ['hv_plan'],
@@ -467,13 +552,18 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       let next: string[] | undefined;
 
       if (hardBlocked.length > 0) {
-        hint = `Blocked: connect ${hardBlocked.map((b) => b.provider).join(', ')} with hv_connect before applying. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`;
+        hint = connectionRecoveryHint(hardBlocked, { after: 'Then re-run hv_plan and hv_apply.' });
       } else if (connectBeforeApply.length > 0) {
-        hint = `Blocked: connect ${Array.from(new Set(connectBeforeApply.map((b) => b.provider))).join(', ')} with hv_connect before applying. GitHub Actions push-to-deploy cannot converge until these credentials are available.`;
+        hint = connectionRecoveryHint(connectBeforeApply, {
+          includePackageRead: true,
+          after: 'Then re-run hv_plan and hv_apply. GitHub Actions push-to-deploy cannot converge until these credentials are available.',
+        });
       } else if (pending.length === 0) {
         hint = 'Everything is in sync — nothing to apply.';
       } else if (softActionScopedBlocked.length > 0) {
-        hint = `Action-scoped credentials are missing: ${Array.from(new Set(softActionScopedBlocked.map((b) => b.provider))).join(', ')}. Connect them with hv_connect for full convergence, or apply this plan to converge independent actions and fail only blocked actions.`;
+        hint = connectionRecoveryHint(softActionScopedBlocked, {
+          after: 'Connect them for full convergence, or apply this plan to converge independent actions and fail only blocked actions.',
+        });
       } else {
         hint = `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} for confirm-gated billable or destructive actions` : ''}.`;
       }
@@ -636,9 +726,10 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
       const applyBlocked = [...hardBlocked, ...connectBeforeApply];
       if (applyBlocked.length > 0) {
-        return toolError('MISSING_CONNECTION', `Missing verified connections: ${Array.from(new Set(applyBlocked.map((b) => b.provider))).join(', ')}.`, {
+        return toolError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(applyBlocked).join(', ')}.`, {
           details: applyBlocked,
-          hint: 'Connect them with hv_connect, then re-run hv_plan and hv_apply. Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or put JSON credentials in a local file and use credentialsRef="file:/absolute/path". Raw credentials={...} is still accepted if intentional.',
+          hint: connectionRecoveryHint(applyBlocked, { after: 'Then re-run hv_plan and hv_apply.' }),
+          next: ['hv_connect', 'hv_plan', 'hv_apply'],
         });
       }
       const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
