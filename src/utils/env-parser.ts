@@ -30,14 +30,19 @@ export function parseEnvContent(content: string): Record<string, string> {
       continue;
     }
 
+    // Support shell-style exported env files too: export KEY=value
+    const assignment = trimmed.startsWith('export ')
+      ? trimmed.slice('export '.length).trim()
+      : trimmed;
+
     // Find the first = sign
-    const eqIndex = trimmed.indexOf('=');
+    const eqIndex = assignment.indexOf('=');
     if (eqIndex === -1) {
       continue;
     }
 
-    const key = trimmed.substring(0, eqIndex).trim();
-    let value = trimmed.substring(eqIndex + 1).trim();
+    const key = assignment.substring(0, eqIndex).trim();
+    let value = assignment.substring(eqIndex + 1).trim();
 
     // Remove surrounding quotes if present
     if ((value.startsWith('"') && value.endsWith('"')) ||
@@ -46,7 +51,7 @@ export function parseEnvContent(content: string): Record<string, string> {
     }
 
     // Handle escape sequences in double-quoted strings
-    if (trimmed.substring(eqIndex + 1).trim().startsWith('"')) {
+    if (assignment.substring(eqIndex + 1).trim().startsWith('"')) {
       value = value.replace(/\\n/g, '\n');
       value = value.replace(/\\t/g, '\t');
       value = value.replace(/\\\\/g, '\\');

@@ -32,7 +32,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
       const adapter = await connectRailwayForImport();
       if (!adapter) {
         return toolError('MISSING_CONNECTION', 'No Railway connection configured.', {
-          hint: 'Connect Railway with hv_connect provider="railway" first. Recommended: export the token and use credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN" credentialsKey="apiToken"; raw credentials={...} is still accepted if intentional.',
+          hint: 'Connect Railway with hv_connect provider="railway" first. Recommended: use credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN" for an exported token or credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_RAILWAY_TOKEN" for an existing .env file; raw credentials={...} is still accepted if intentional.',
           next: ['hv_connect'],
         });
       }

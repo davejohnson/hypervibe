@@ -5,6 +5,9 @@ import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { saveConnection, verifyConnection, deleteConnection } from '../domain/services/connection-ops.service.js';
+import { SecretResolver } from '../domain/services/secret.resolver.js';
+import { parseSecretRef } from '../domain/ports/secretmanager.port.js';
+import { parseEnvFile } from '../utils/env-parser.js';
 import type { ToolContext } from './context.js';
 import { projectField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler } from './respond.js';
@@ -29,27 +32,136 @@ function resolveLocalSecretRef(ref: string): string {
     }
     return readFileSync(filePath, 'utf8').trim();
   }
-  throw new Error('Unsupported credentialsRef. Use env:NAME or file:/absolute/path.');
+  throw new Error('Unsupported credentialsRef. Use env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like 1password://vault/item#field.');
 }
 
-function parseCredentialRef(ref: string, credentialsKey?: string): Record<string, unknown> {
-  const raw = resolveLocalSecretRef(ref);
+function splitFragment(value: string): { target: string; fragment?: string } {
+  const hashIndex = value.lastIndexOf('#');
+  if (hashIndex === -1) {
+    return { target: value };
+  }
+  return {
+    target: value.slice(0, hashIndex),
+    fragment: value.slice(hashIndex + 1),
+  };
+}
+
+function defaultScalarCredentialKey(provider: string): string | undefined {
+  switch (provider) {
+    case 'cloudflare':
+    case 'digitalocean':
+    case 'github':
+    case 'railway':
+      return 'apiToken';
+    case 'database':
+      return 'connectionUrl';
+    case 'doppler':
+    case 'vercel':
+      return 'token';
+    case 'heroku':
+    case 'render':
+      return 'apiKey';
+    case '1password':
+      return 'serviceAccountToken';
+    case 'sendgrid':
+      return 'apiKey';
+    case 'supabase':
+      return 'accessToken';
+    default:
+      return undefined;
+  }
+}
+
+function scalarCredentialObject(provider: string, value: string, credentialsKey: string | undefined, source: string): Record<string, unknown> {
+  const key = credentialsKey ?? defaultScalarCredentialKey(provider);
+  if (!key) {
+    throw new Error(`${source} resolved to a scalar value. Pass credentialsKey to map it into the provider credentials object.`);
+  }
+  return { [key]: value };
+}
+
+function parseRawCredentialValue(provider: string, raw: string, credentialsKey: string | undefined, source: string): Record<string, unknown> {
   const trimmed = raw.trim();
   if (trimmed.startsWith('{')) {
     const parsed = JSON.parse(trimmed) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('credentialsRef JSON must resolve to an object.');
+      throw new Error(`${source} JSON must resolve to an object.`);
     }
     return parsed as Record<string, unknown>;
   }
-  if (!credentialsKey) {
-    throw new Error('credentialsRef resolved to a scalar value. Pass credentialsKey to map it into the provider credentials object.');
+  return scalarCredentialObject(provider, trimmed, credentialsKey, source);
+}
+
+function parseDotenvCredentialRef(
+  provider: string,
+  ref: string,
+  credentialsKey?: string,
+  credentialsMap?: Record<string, string>
+): Record<string, unknown> {
+  const raw = ref.slice('dotenv:'.length).trim();
+  const { target: filePath, fragment } = splitFragment(raw);
+  if (!filePath) {
+    throw new Error('credentialsRef dotenv: reference is missing the .env file path.');
   }
-  return { [credentialsKey]: raw };
+  if (credentialsMap && fragment) {
+    throw new Error('Pass either credentialsMap or a dotenv #KEY fragment, not both.');
+  }
+
+  const values = parseEnvFile(filePath);
+  if (credentialsMap) {
+    const output: Record<string, unknown> = {};
+    for (const [providerKey, envKey] of Object.entries(credentialsMap)) {
+      if (!(envKey in values)) {
+        throw new Error(`credentialsMap key "${providerKey}" references missing .env variable "${envKey}".`);
+      }
+      output[providerKey] = values[envKey];
+    }
+    return output;
+  }
+
+  if (!fragment) {
+    throw new Error('credentialsRef dotenv: references must include #ENV_VAR, or pass credentialsMap for multiple values.');
+  }
+  if (!(fragment in values)) {
+    throw new Error(`.env variable "${fragment}" was not found.`);
+  }
+  return scalarCredentialObject(provider, values[fragment], credentialsKey, `dotenv:${filePath}#${fragment}`);
+}
+
+async function parseCredentialRef(
+  provider: string,
+  ref: string,
+  credentialsKey?: string,
+  credentialsMap?: Record<string, string>,
+  context?: { projectId?: string }
+): Promise<Record<string, unknown>> {
+  if (ref.trim().startsWith('dotenv:')) {
+    return parseDotenvCredentialRef(provider, ref, credentialsKey, credentialsMap);
+  }
+  if (credentialsMap) {
+    throw new Error('credentialsMap is only supported with credentialsRef="dotenv:/path/.env".');
+  }
+
+  const secretRef = parseSecretRef(ref.trim());
+  if (secretRef) {
+    const resolved = await new SecretResolver().resolveSecret(secretRef.raw, context);
+    if ('error' in resolved) {
+      throw new Error(`Failed to resolve credentialsRef secret: ${resolved.error}`);
+    }
+    return parseRawCredentialValue(provider, resolved.value, credentialsKey, 'credentialsRef secret');
+  }
+
+  const raw = resolveLocalSecretRef(ref);
+  return parseRawCredentialValue(provider, raw, credentialsKey, 'credentialsRef');
 }
 
 function refKind(ref: string): string {
-  return ref.trim().startsWith('file:') ? 'file' : ref.trim().startsWith('env:') ? 'env' : 'unknown';
+  const trimmed = ref.trim();
+  if (trimmed.startsWith('file:')) return 'file';
+  if (trimmed.startsWith('env:')) return 'env';
+  if (trimmed.startsWith('dotenv:')) return 'dotenv';
+  if (parseSecretRef(trimmed)) return 'secret-manager';
+  return 'unknown';
 }
 
 function warningExtras(data: Record<string, unknown>): { warnings: string[] } | undefined {
@@ -66,13 +178,14 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
 
   server.tool(
     'hv_connect',
-    'Manage provider connections. action="add" (default) stores credentials and immediately verifies them; action="verify" re-verifies an existing connection; action="remove" deletes one; action="prepare" runs one-time cloud account preparation (Cloud Run: enables required GCP APIs and grants deploy IAM roles using one-time admin credentials that are never stored — preview first, then pass confirm=true). Credentials are encrypted at rest and never returned. Recommended: use credentialsRef="env:NAME" credentialsKey="apiToken" for exported tokens or credentialsRef="file:/absolute/path" for token/JSON files. Raw credentials={...} is still accepted if the user intentionally wants to enter credentials in chat.',
+    'Manage provider connections. action="add" (default) stores credentials and immediately verifies them; action="verify" re-verifies an existing connection; action="remove" deletes one; action="prepare" runs one-time cloud account preparation (Cloud Run: enables required GCP APIs and grants deploy IAM roles using one-time admin credentials that are never stored — preview first, then pass confirm=true). Credentials are encrypted at rest and never returned. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if the user intentionally wants to enter credentials in chat.',
     {
       provider: z.enum(providerNames as [string, ...string[]]).describe('Provider name (see hv_connections_list for what is available)'),
       action: z.enum(['add', 'verify', 'remove', 'prepare']).optional().describe('What to do (default: "add")'),
       credentials: z.record(z.unknown()).optional().describe('action="add": provider-specific credentials object. credentialsRef is recommended, but raw credentials are accepted when the user intentionally wants to enter them in chat.'),
-      credentialsRef: z.string().optional().describe('action="add": recommended local credential reference resolved by Hypervibe. Supports env:NAME for exported tokens or file:/absolute/path for token/JSON files. The resolved value may be a JSON credentials object or a scalar when credentialsKey is set.'),
-      credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken.'),
+      credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, or secret-manager refs like 1password://vault/item#field. The resolved value may be a JSON credentials object or a scalar.'),
+      credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. Optional for common single-token providers.'),
+      credentialsMap: z.record(z.string()).optional().describe('action="add": for credentialsRef="dotenv:/path/.env", maps provider credential keys to .env variable names, e.g. {"apiToken":"GITHUB_TOKEN","packageReadToken":"GITHUB_PACKAGES_TOKEN"}.'),
       scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global.'),
       project: projectField,
       gcpProjectId: z.string().optional().describe('action="prepare": GCP project ID (defaults to the Cloud Run connection projectId)'),
@@ -89,6 +202,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
       credentials,
       credentialsRef,
       credentialsKey,
+      credentialsMap,
       scope,
       project: projectRef,
       gcpProjectId,
@@ -138,18 +252,23 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         }
         if (!credentials && !credentialsRef) {
           return toolError('VALIDATION', 'credentials are required for action="add".', {
-            hint: 'Recommended: export scalar tokens and pass credentialsRef="env:NAME" credentialsKey="apiToken", or save JSON credentials to a local file and pass credentialsRef="file:/absolute/path". Raw credentials={...} is still accepted if the user intentionally wants to enter it in chat.',
+            hint: 'Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.',
           });
         }
 
         let credentialsToSave: Record<string, unknown>;
         try {
+          const projectForSecretRef = projectRef
+            ? ctx.resolveProject({ project: projectRef })
+            : ctx.resolveProject({});
           credentialsToSave = credentialsRef
-            ? parseCredentialRef(credentialsRef, credentialsKey)
+            ? await parseCredentialRef(provider, credentialsRef, credentialsKey, credentialsMap, {
+              ...(projectForSecretRef ? { projectId: projectForSecretRef.id } : {}),
+            })
             : credentials!;
         } catch (error) {
           return toolError('VALIDATION', error instanceof Error ? error.message : String(error), {
-            hint: 'Use credentialsRef="env:NAME" for exported tokens or credentialsRef="file:/absolute/path" for token/JSON files. For a raw token ref, also pass credentialsKey, e.g. credentialsKey="apiToken". Raw credentials={...} is still accepted if intentional.',
+            hint: 'Use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if intentional.',
           });
         }
 
@@ -245,7 +364,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         { connections, availableProviders },
         {
           hint: connections.length === 0
-            ? 'No connections yet. Recommended: hv_connect provider="<name>" credentialsRef="env:NAME" credentialsKey="apiToken", or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if the user intentionally wants chat entry.'
+            ? 'No connections yet. Recommended: hv_connect provider="<name>" credentialsRef="env:NAME", credentialsRef="dotenv:/absolute/path/.env#KEY", or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if the user intentionally wants chat entry.'
             : undefined,
         }
       );

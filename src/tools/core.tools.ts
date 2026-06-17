@@ -157,37 +157,37 @@ function providerConnectionCommand(block: ConnectionBlock): string {
   const scope = block.scope ? ` scope="${block.scope}"` : '';
   switch (block.provider) {
     case 'cloudflare':
-      return `export CLOUDFLARE_API_TOKEN=... then hv_connect provider="cloudflare"${scope} credentialsRef="env:CLOUDFLARE_API_TOKEN" credentialsKey="apiToken"`;
+      return `export CLOUDFLARE_API_TOKEN=... then hv_connect provider="cloudflare"${scope} credentialsRef="env:CLOUDFLARE_API_TOKEN"`;
     case 'cloudrun':
       return `hv_connect provider="cloudrun"${scope} credentialsRef="file:/absolute/path/cloudrun.json" (JSON with projectId, credentials service-account JSON, and optional region)`;
     case 'cloudsql':
       return `hv_connect provider="cloudsql"${scope} credentialsRef="file:/absolute/path/cloudsql.json" (JSON with projectId, credentials service-account JSON, and optional region)`;
     case 'database':
-      return `export DATABASE_CONNECTION_URL=... then hv_connect provider="database"${scope} credentialsRef="env:DATABASE_CONNECTION_URL" credentialsKey="connectionUrl"`;
+      return `export DATABASE_CONNECTION_URL=... then hv_connect provider="database"${scope} credentialsRef="env:DATABASE_CONNECTION_URL"`;
     case 'digitalocean':
-      return `export DIGITALOCEAN_ACCESS_TOKEN=... then hv_connect provider="digitalocean"${scope} credentialsRef="env:DIGITALOCEAN_ACCESS_TOKEN" credentialsKey="apiToken"`;
+      return `export DIGITALOCEAN_ACCESS_TOKEN=... then hv_connect provider="digitalocean"${scope} credentialsRef="env:DIGITALOCEAN_ACCESS_TOKEN"`;
     case 'github':
-      return `export HYPERVIBE_GITHUB_TOKEN=... then hv_connect provider="github"${scope} credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"`;
+      return `export HYPERVIBE_GITHUB_TOKEN=... then hv_connect provider="github"${scope} credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"`;
     case 'apprunner':
       return `hv_connect provider="apprunner"${scope} credentialsRef="file:/absolute/path/aws-apprunner.json" (JSON with accessKeyId, secretAccessKey, and region)`;
     case 'heroku':
-      return `export HEROKU_API_KEY=... then hv_connect provider="heroku"${scope} credentialsRef="env:HEROKU_API_KEY" credentialsKey="apiKey"`;
+      return `export HEROKU_API_KEY=... then hv_connect provider="heroku"${scope} credentialsRef="env:HEROKU_API_KEY"`;
     case 'rds':
       return `hv_connect provider="rds"${scope} credentialsRef="file:/absolute/path/aws-rds.json" (JSON with accessKeyId, secretAccessKey, and region)`;
     case 'railway':
-      return `export HYPERVIBE_RAILWAY_TOKEN=... then hv_connect provider="railway"${scope} credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN" credentialsKey="apiToken"`;
+      return `export HYPERVIBE_RAILWAY_TOKEN=... then hv_connect provider="railway"${scope} credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN"`;
     case 'render':
-      return `export RENDER_API_KEY=... then hv_connect provider="render"${scope} credentialsRef="env:RENDER_API_KEY" credentialsKey="apiKey"`;
+      return `export RENDER_API_KEY=... then hv_connect provider="render"${scope} credentialsRef="env:RENDER_API_KEY"`;
     case 'sendgrid':
-      return `export SENDGRID_API_KEY=... then hv_connect provider="sendgrid"${scope} credentialsRef="env:SENDGRID_API_KEY" credentialsKey="apiKey"`;
+      return `export SENDGRID_API_KEY=... then hv_connect provider="sendgrid"${scope} credentialsRef="env:SENDGRID_API_KEY"`;
     case 'stripe':
       return `hv_connect provider="stripe"${scope} credentialsRef="file:/absolute/path/stripe.json" (JSON with sandboxSecretKey or liveSecretKey)`;
     case 'supabase':
-      return `export SUPABASE_ACCESS_TOKEN=... then hv_connect provider="supabase"${scope} credentialsRef="env:SUPABASE_ACCESS_TOKEN" credentialsKey="accessToken"`;
+      return `export SUPABASE_ACCESS_TOKEN=... then hv_connect provider="supabase"${scope} credentialsRef="env:SUPABASE_ACCESS_TOKEN"`;
     case 'vercel':
-      return `export VERCEL_TOKEN=... then hv_connect provider="vercel"${scope} credentialsRef="env:VERCEL_TOKEN" credentialsKey="token"`;
+      return `export VERCEL_TOKEN=... then hv_connect provider="vercel"${scope} credentialsRef="env:VERCEL_TOKEN"`;
     default:
-      return `hv_connect provider="${block.provider}"${scope} credentialsRef="env:NAME" credentialsKey="apiToken"`;
+      return `hv_connect provider="${block.provider}"${scope} credentialsRef="env:NAME"`;
   }
 }
 
@@ -201,10 +201,10 @@ function connectionRecoveryHint(
   const packageReadNeeded = options.includePackageRead
     || uniqueBlocks.some((block) => /packageReadToken|packagesToken|IMAGE_REGISTRY_|GHCR|GitHub Actions/i.test(block.reason ?? ''));
   const packageReadHint = packageReadNeeded
-    ? ' For GitHub Actions image deploys, the GitHub connection must also include GHCR/package read access; use a token with read:packages as apiToken, or use credentialsRef="file:/absolute/path/github.json" containing apiToken plus packageReadToken or packagesToken.'
+    ? ' For GitHub Actions image deploys, the GitHub connection must also include GHCR/package read access; use credentialsRef="dotenv:/absolute/path/.env" with credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}, or use credentialsRef="file:/absolute/path/github.json" containing apiToken plus packageReadToken or packagesToken.'
     : '';
   const after = options.after ? ` ${options.after}` : '';
-  return `Hypervibe can store and verify the missing provider connections with hv_connect (${providers}). ${commands}.${packageReadHint} Prefer exported env vars or a local JSON file; raw credentials={...} is still accepted if the user intentionally wants chat entry.${after}`;
+  return `Hypervibe can store and verify the missing provider connections with hv_connect (${providers}). ${commands}.${packageReadHint} Prefer exported env vars, existing .env files via credentialsRef="dotenv:/absolute/path/.env#KEY", or local JSON for structured credentials; raw credentials={...} is still accepted if the user intentionally wants chat entry.${after}`;
 }
 
 function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {

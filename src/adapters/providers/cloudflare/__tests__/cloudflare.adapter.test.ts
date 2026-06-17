@@ -40,6 +40,21 @@ describe('CloudflareAdapter.verify', () => {
     expect(result.warning).toContain('could not find a Cloudflare zone');
   });
 
+  it('normalizes copied Authorization header values before calling Cloudflare', async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => cfResponse({ id: 'token-1' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: ' "Bearer cf-real-token" ' });
+
+    const result = await adapter.verify();
+
+    expect(result.success).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer cf-real-token');
+  });
+
   it('verifies a valid token even when zone access cannot be confirmed', async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       const href = String(url);

@@ -100,7 +100,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
   if (!connection) {
     return {
       kind: 'not_found',
-      error: `No connection found for provider: ${provider} (${scopeDisplay}). Use hv_connect first. Recommended: export scalar tokens and pass credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+      error: `No connection found for provider: ${provider} (${scopeDisplay}). Use hv_connect first. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
     };
   }
 

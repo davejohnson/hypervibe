@@ -307,10 +307,11 @@ describe('hv_spec_set / hv_spec_get', () => {
       hint: expect.stringContaining('connection-check-app.com'),
     });
     expect(set.hint).toContain('Hypervibe can store and verify the missing provider connections with hv_connect');
-    expect(set.hint).toContain('hv_connect provider="cloudflare" scope="connection-check-app.com" credentialsRef="env:CLOUDFLARE_API_TOKEN" credentialsKey="apiToken"');
-    expect(set.hint).toContain('hv_connect provider="github" credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"');
-    expect(set.hint).toContain('hv_connect provider="railway" credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN" credentialsKey="apiToken"');
-    expect(set.hint).toContain('hv_connect provider="sendgrid" credentialsRef="env:SENDGRID_API_KEY" credentialsKey="apiKey"');
+    expect(set.hint).toContain('hv_connect provider="cloudflare" scope="connection-check-app.com" credentialsRef="env:CLOUDFLARE_API_TOKEN"');
+    expect(set.hint).toContain('hv_connect provider="github" credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"');
+    expect(set.hint).toContain('hv_connect provider="railway" credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN"');
+    expect(set.hint).toContain('hv_connect provider="sendgrid" credentialsRef="env:SENDGRID_API_KEY"');
+    expect(set.hint).toContain('credentialsRef="dotenv:/absolute/path/.env#KEY"');
     expect(set.next).toEqual(['hv_connect', 'hv_plan']);
     await t.close();
   });
@@ -776,8 +777,9 @@ describe('hv_plan / hv_status / hv_apply', () => {
       provider: 'github',
       reason: expect.stringContaining('packageReadToken'),
     }));
-    expect(apply.hint).toContain('hv_connect provider="github" credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"');
-    expect(apply.hint).toContain('packageReadToken or packagesToken');
+    expect(apply.hint).toContain('hv_connect provider="github" credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"');
+    expect(apply.hint).toContain('packageReadToken');
+    expect(apply.hint).toContain('credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}');
     expect(apply.hint).toContain('credentialsRef="file:/absolute/path/github.json"');
     expect(apply.next).toEqual(['hv_connect', 'hv_plan', 'hv_apply']);
     expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'RAILWAY_API_TOKEN', 'railway-token');
@@ -922,7 +924,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const apply = await t.call('hv_apply', { project: 'core-spec-app', planId: plan.data.planId });
     expect(apply.ok).toBe(false);
     expect(apply.error.code).toBe('MISSING_CONNECTION');
-    expect(apply.hint).toContain('hv_connect provider="railway" credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN" credentialsKey="apiToken"');
+    expect(apply.hint).toContain('hv_connect provider="railway" credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN"');
     expect(apply.next).toEqual(['hv_connect', 'hv_plan', 'hv_apply']);
     await t.close();
   });

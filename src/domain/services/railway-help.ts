@@ -67,7 +67,7 @@ export function buildRailwayGitHubRepoAccessHelp(repo?: string): RailwayGitHubRe
       requiredScopes: ['repo'],
       adminAccessRequired: true,
       note: 'Only needed if Hypervibe will manage the Railway GitHub App selected-repository scope. Native Railway push autodeploys use the Railway GitHub App, not a Hypervibe GitHub token. Default Hypervibe branch deploys use GitHub Actions/provider APIs. Fine-grained PATs are not sufficient for GitHub App installation repository-scope updates.',
-      connectCommand: 'hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"',
+      connectCommand: 'hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"',
       verifyCommand: 'hv_connect provider=github action="verify"',
     },
   };
@@ -84,11 +84,13 @@ export function buildRailwaySetupHelpInstructions(repo?: string): string {
 
 1. Go to https://railway.app/account/tokens
 2. Create an Account token or a Workspace token with write access to the target workspace/project
-3. Recommended: put it in a local environment variable or file, then save and verify it in Hypervibe. If the user intentionally wants to enter the token in chat, raw credentials are still accepted.
+3. Recommended: export it or reference the existing \`.env\` file directly, then save and verify it in Hypervibe. If the user intentionally wants to enter the token in chat, raw credentials are still accepted.
 
 \`\`\`
 export HYPERVIBE_RAILWAY_TOKEN=<railway_token>
-hv_connect provider=railway credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN" credentialsKey="apiToken"
+hv_connect provider=railway credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN"
+# or:
+hv_connect provider=railway credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_RAILWAY_TOKEN"
 \`\`\`
 
 ## Railway GitHub App for Native Repo-Linked Deploys
@@ -127,11 +129,13 @@ Native Railway push autodeploys do **not** need a Hypervibe GitHub token. If you
 
 1. Create a **classic** GitHub PAT with the \`repo\` scope
 2. Make sure the PAT belongs to a user with **admin access** to the repository
-3. Recommended: put it in a local environment variable or file, then save and verify it in Hypervibe. If the user intentionally wants to enter the token in chat, raw credentials are still accepted.
+3. Recommended: export it or reference the existing \`.env\` file directly, then save and verify it in Hypervibe. If the user intentionally wants to enter the token in chat, raw credentials are still accepted.
 
 \`\`\`
 export HYPERVIBE_GITHUB_TOKEN=ghp_your_classic_pat_here
-hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"
+hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"
+# or:
+hv_connect provider=github credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"
 hv_connect provider=github action="verify"
 \`\`\`
 

@@ -295,7 +295,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
           const zone = await cfResult.adapter.findZoneByName(apex);
           if (!zone) {
             return toolError('NOT_FOUND', `Cloudflare zone "${apex}" not found.`, {
-              hint: `Add the domain to Cloudflare or create a scoped connection with hv_connect provider=cloudflare scope=${apex} credentialsRef="env:CLOUDFLARE_API_TOKEN" credentialsKey="apiToken".`,
+              hint: `Add the domain to Cloudflare or create a scoped connection with hv_connect provider=cloudflare scope=${apex} credentialsRef="env:CLOUDFLARE_API_TOKEN"; for existing .env files use credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN".`,
             });
           }
 

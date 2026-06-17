@@ -27,7 +27,7 @@ async function resolveTarget(
     const connection = ctx.repos.connections.findBestMatch('database', opts.connectionName);
     if (!connection) {
       throw new HvError('NOT_FOUND', `No database connection found for: ${opts.connectionName}.`, {
-        hint: `Create one with hv_connect provider="database" scope="${opts.connectionName}". Recommended: put JSON credentials in a local file and use credentialsRef="file:/absolute/path"; raw credentials={...} is still accepted if intentional.`,
+        hint: `Create one with hv_connect provider="database" scope="${opts.connectionName}". Recommended: use credentialsRef="env:DATABASE_CONNECTION_URL", credentialsRef="dotenv:/absolute/path/.env#DATABASE_CONNECTION_URL", or credentialsRef="file:/absolute/path" for JSON credentials; raw credentials={...} is still accepted if intentional.`,
       });
     }
     const creds = ctx.secretStore.decryptObject<DatabaseCredentials>(connection.credentialsEncrypted);

@@ -182,7 +182,7 @@ export class SecretRotator {
   private async getAdapter(provider: SecretManagerProvider): Promise<ISecretManagerAdapter> {
     const connection = this.connectionRepo.findByProvider(provider);
     if (!connection) {
-      throw new Error(`No connection found for secret manager '${provider}'. Use hv_connect first. Recommended: export tokens and pass credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`);
+      throw new Error(`No connection found for secret manager '${provider}'. Use hv_connect first. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`);
     }
 
     if (connection.status !== 'verified') {

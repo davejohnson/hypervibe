@@ -170,13 +170,21 @@ Typical team flow:
 
 ### Cloudflare token permissions
 
-Recommended: connect without pasting the token into chat:
+Recommended: connect without pasting the token into chat. If the value is already exported:
 
 ```bash
 export CLOUDFLARE_API_TOKEN=...
 ```
 
-Then call `hv_connect provider=cloudflare scope="example.com" credentialsRef="env:CLOUDFLARE_API_TOKEN" credentialsKey="apiToken"`.
+Then call `hv_connect provider=cloudflare scope="example.com" credentialsRef="env:CLOUDFLARE_API_TOKEN"`.
+
+If the value is in an existing `.env` file, reference the key directly instead of copying it to a temporary file:
+
+```text
+hv_connect provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"
+```
+
+Hypervibe accepts either a raw token or a copied authorization value such as `Bearer <token>` for Cloudflare.
 
 For DNS automation on an existing zone, the token should be scoped to that zone and include zone read plus DNS edit permissions. If the token is valid but Hypervibe cannot confirm zone access during `hv_connect`, the connection is still saved and verified with a warning; `hv_plan`/`hv_apply` will surface any remaining DNS or registrar-specific blockers.
 
@@ -188,7 +196,7 @@ Recommended: connect without pasting the token into chat by exporting it locally
 export HYPERVIBE_GITHUB_TOKEN=ghp_...
 ```
 
-Then call `hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"`. For JSON credentials, save the JSON to a local file and use `credentialsRef="file:/absolute/path/to/credentials.json"`. If the user intentionally wants to enter credentials in chat, `credentials={...}` is still accepted.
+Then call `hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"`. For existing `.env` files, use `credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"`. For JSON credentials, save the JSON to a local file and use `credentialsRef="file:/absolute/path/to/credentials.json"`. If the user intentionally wants to enter credentials in chat, `credentials={...}` is still accepted.
 
 **Recommended: a classic PAT with the `repo` and `workflow` scopes**, created by a user with **admin access** to the target repositories. That covers everything below.
 

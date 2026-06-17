@@ -25,7 +25,7 @@ async function managerAdapter(ctx: ToolContext, provider: (typeof SECRET_MANAGER
   const connection = ctx.repos.connections.findByProvider(provider);
   if (!connection || connection.status !== 'verified') {
     throw new HvError('MISSING_CONNECTION', `No verified connection for ${provider}.`, {
-      hint: `Connect it with hv_connect provider="${provider}". Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or put JSON credentials in a local file and use credentialsRef="file:/absolute/path". Raw credentials={...} is still accepted if intentional.`,
+      hint: `Connect it with hv_connect provider="${provider}". Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
     });
   }
   const credentials = ctx.secretStore.decryptObject(connection.credentialsEncrypted);
@@ -84,7 +84,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const { owner, repo: repoName } = githubRepoForProject(project, repo);
         if (!key) throw new HvError('VALIDATION', 'key is required for target="github".');
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
-        if ('error' in gh) return toolError('MISSING_CONNECTION', gh.error, { hint: 'Connect GitHub with hv_connect provider="github". Recommended: export the token and use credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"; raw credentials={...} is still accepted if intentional.' });
+        if ('error' in gh) return toolError('MISSING_CONNECTION', gh.error, { hint: 'Connect GitHub with hv_connect provider="github". Recommended: use credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" for an exported token or credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN" for an existing .env file; raw credentials={...} is still accepted if intentional.' });
         if (remove) {
           await gh.adapter.deleteSecret(owner, repoName, key);
           ctx.repos.audit.create({ action: 'github.secret_deleted', resourceType: 'github_secret', resourceId: `${owner}/${repoName}/${key}`, details: { secretName: key } });

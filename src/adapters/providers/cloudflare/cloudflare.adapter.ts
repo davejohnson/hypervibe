@@ -188,6 +188,20 @@ export const CloudflareCredentialsSchema = z.object({
 
 export type CloudflareCredentials = z.infer<typeof CloudflareCredentialsSchema>;
 
+function normalizeApiToken(token: string): string {
+  let normalized = token.trim();
+  if (
+    (normalized.startsWith('"') && normalized.endsWith('"'))
+    || (normalized.startsWith("'") && normalized.endsWith("'"))
+  ) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  return normalized
+    .replace(/^authorization:\s*bearer\s+/i, '')
+    .replace(/^bearer\s+/i, '')
+    .trim();
+}
+
 export class CloudflareAdapter implements IDnsProvider {
   readonly name = 'cloudflare';
   private credentials: CloudflareCredentials | null = null;
@@ -206,7 +220,7 @@ export class CloudflareAdapter implements IDnsProvider {
     }
 
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.credentials.apiToken}`,
+      Authorization: `Bearer ${normalizeApiToken(this.credentials.apiToken)}`,
       'Content-Type': 'application/json',
     };
 

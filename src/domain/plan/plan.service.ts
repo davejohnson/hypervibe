@@ -164,7 +164,7 @@ export class PlanService {
         const scope = requirement.scopeHints?.[0];
         blocked.push({
           provider: requirement.provider,
-          reason: `No verified ${requirement.provider}${scope ? ` connection for ${scope}` : ' connection'}. Add one with hv_connect. Recommended: export tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or use credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+          reason: `No verified ${requirement.provider}${scope ? ` connection for ${scope}` : ' connection'}. Add one with hv_connect. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
           ...(scope ? { scope } : {}),
         });
       }

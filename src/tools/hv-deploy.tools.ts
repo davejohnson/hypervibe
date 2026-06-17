@@ -84,7 +84,7 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
         return toolError(
           'MISSING_CONNECTION',
           adapterResult.error || `No verified ${platform} connection.`,
-          { hint: 'Connect the hosting provider first with hv_connect. Recommended: export scalar tokens and use credentialsRef="env:NAME" credentialsKey="apiToken", or put JSON credentials in a local file and use credentialsRef="file:/absolute/path". Raw credentials={...} is still accepted if intentional.' }
+          { hint: 'Connect the hosting provider first with hv_connect. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.' }
         );
       }
       const adapter = adapterResult.adapter;

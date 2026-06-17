@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseToolEnvelope } from './tool-result.js';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -93,6 +93,65 @@ describe('hv_connect', () => {
     const connection = new ConnectionRepository().findByProvider('railway')!;
     const decrypted = getSecretStore().decryptObject<{ apiToken: string }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('token-from-env-ref');
+    await t.close();
+  });
+
+  it('add can resolve a token directly from an existing .env file', async () => {
+    const envPath = path.join(tempDir, '.env');
+    writeFileSync(envPath, [
+      '# local provider tokens',
+      'export HYPERVIBE_RAILWAY_TOKEN=token-from-dotenv-ref',
+      '',
+    ].join('\n'));
+    vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'railway',
+      credentialsRef: `dotenv:${envPath}#HYPERVIBE_RAILWAY_TOKEN`,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.status).toBe('verified');
+    expect(result.data.credentialsSource).toBe('dotenv');
+    expect(JSON.stringify(result)).not.toContain('token-from-dotenv-ref');
+
+    const connection = new ConnectionRepository().findByProvider('railway')!;
+    const decrypted = getSecretStore().decryptObject<{ apiToken: string }>(connection.credentialsEncrypted);
+    expect(decrypted.apiToken).toBe('token-from-dotenv-ref');
+    await t.close();
+  });
+
+  it('add can map multiple provider credential fields from an existing .env file', async () => {
+    const envPath = path.join(tempDir, '.env');
+    writeFileSync(envPath, [
+      'HYPERVIBE_GITHUB_TOKEN=gh-api-token',
+      'HYPERVIBE_GITHUB_PACKAGES_TOKEN=gh-package-token',
+    ].join('\n'));
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'github',
+      credentialsRef: `dotenv:${envPath}`,
+      credentialsMap: {
+        apiToken: 'HYPERVIBE_GITHUB_TOKEN',
+        packageReadToken: 'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('gh-api-token');
+    expect(JSON.stringify(result)).not.toContain('gh-package-token');
+
+    const connection = new ConnectionRepository().findByProvider('github')!;
+    const decrypted = getSecretStore().decryptObject<{ apiToken: string; packageReadToken?: string }>(connection.credentialsEncrypted);
+    expect(decrypted.apiToken).toBe('gh-api-token');
+    expect(decrypted.packageReadToken).toBe('gh-package-token');
     await t.close();
   });
 

@@ -221,7 +221,7 @@ export const GITHUB_PAGES_IPS = [
 export function getGitHubAdapter(scopeHint?: string): { adapter: GitHubAdapter } | { error: string } {
   const connection = connectionRepo.findBestMatch('github', scopeHint);
   if (!connection) {
-    return { error: 'No GitHub connection found. Use hv_connect provider=github first. Recommended: export the token and pass credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" credentialsKey="apiToken"; raw credentials={...} is still accepted if intentional.' };
+    return { error: 'No GitHub connection found. Use hv_connect provider=github first. Recommended: use credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" for an exported token or credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN" for an existing .env file; raw credentials={...} is still accepted if intentional.' };
   }
 
   const secretStore = getSecretStore();
