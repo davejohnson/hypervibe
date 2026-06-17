@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseToolEnvelope } from './tool-result.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -57,9 +58,7 @@ describe('hv_email_forwarding (Cloudflare email routing)', () => {
       client,
       async call(name: string, args: Record<string, unknown> = {}): Promise<JsonObj> {
         const result = await client.callTool({ name, arguments: args });
-        const text = (result.content as Array<{ type: string; text: string }>).find((c) => c.type === 'text')?.text;
-        if (!text) throw new Error(`Tool ${name} returned no text payload`);
-        return JSON.parse(text) as JsonObj;
+        return parseToolEnvelope(result) as JsonObj;
       },
     };
   }

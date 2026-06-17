@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseToolEnvelope } from '../../../tools/__tests__/tool-result.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -36,9 +37,7 @@ async function callTool(client: Client, name: string, args: Record<string, unkno
     },
     CallToolResultSchema
   );
-  const text = result.content.find((c) => c.type === 'text')?.text;
-  if (!text) throw new Error(`Tool ${name} returned no text payload`);
-  return JSON.parse(text) as JsonObj;
+  return parseToolEnvelope(result) as unknown as JsonObj;
 }
 
 describe('hosting env var tools', () => {

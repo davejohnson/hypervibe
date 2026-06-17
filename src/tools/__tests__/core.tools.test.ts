@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseToolEnvelope } from './tool-result.js';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -39,8 +40,7 @@ async function makeClient() {
     client,
     async call(name: string, args: Record<string, unknown>) {
       const result = await client.callTool({ name, arguments: args });
-      const content = (result.content as Array<{ type: string; text: string }>)[0];
-      return JSON.parse(content.text) as Record<string, any>;
+      return parseToolEnvelope(result) as Record<string, any>;
     },
     async close() {
       await client.close();

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { parseToolEnvelope } from './tool-result.js';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -79,10 +80,11 @@ describe('server tool surface', () => {
     ];
     for (const probe of probes) {
       const result = await client.callTool({ name: probe.name, arguments: probe.args });
-      const body = JSON.parse((result.content as Array<{ text: string }>)[0].text) as { ok: boolean; error?: { code: string; message: string } };
+      const body = parseToolEnvelope(result);
       expect(body.ok, `${probe.name} should return ok:false`).toBe(false);
       expect(body.error?.code, `${probe.name} should carry an error code`).toBeTruthy();
       expect(body.error?.message, `${probe.name} should carry an error message`).toBeTruthy();
+      expect((result.content as Array<{ text: string }>)[0].text.trim().startsWith('{')).toBe(false);
     }
     await client.close();
     await server.close();

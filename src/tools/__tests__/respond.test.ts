@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { toolSuccess, toolError, wrapHandler, HvError, type ToolEnvelope } from '../respond.js';
+import { parseToolEnvelope } from './tool-result.js';
 
 function parse(response: { content: Array<{ type: 'text'; text: string }> }): ToolEnvelope {
-  return JSON.parse(response.content[0].text) as ToolEnvelope;
+  return parseToolEnvelope(response);
 }
 
 describe('toolSuccess', () => {
   it('wraps data in the envelope', () => {
-    const body = parse(toolSuccess({ id: '1' }));
+    const response = toolSuccess({ id: '1' });
+    const body = parse(response);
     expect(body).toEqual({ ok: true, data: { id: '1' } });
+    expect(response.content[0].text).toContain('OK');
+    expect(response.content[0].text).toContain('Id: 1');
+    expect(response.content[0].text.trim().startsWith('{')).toBe(false);
   });
 
   it('redacts sensitive fields and credential-looking strings', () => {
@@ -48,10 +53,13 @@ describe('toolSuccess', () => {
 
 describe('toolError', () => {
   it('returns a coded error', () => {
-    const body = parse(toolError('NOT_FOUND', 'no such project', { hint: 'list projects with hv_spec_get' }));
+    const response = toolError('NOT_FOUND', 'no such project', { hint: 'list projects with hv_spec_get' });
+    const body = parse(response);
     expect(body.ok).toBe(false);
     expect(body.error).toEqual({ code: 'NOT_FOUND', message: 'no such project' });
     expect(body.hint).toBe('list projects with hv_spec_get');
+    expect(response.isError).toBe(true);
+    expect(response.content[0].text).toContain('Error: NOT_FOUND - no such project');
   });
 
   it('includes details when provided', () => {
