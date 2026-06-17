@@ -157,6 +157,45 @@ function titleForKey(key: string): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function statusIcon(status?: string): string {
+  const normalized = status?.toLowerCase();
+  if (!normalized) return '•';
+  if (['ok', 'success', 'succeeded', 'complete', 'completed', 'verified', 'active', 'running', 'in_sync'].includes(normalized)) {
+    return '✅';
+  }
+  if (['failed', 'failure', 'error', 'errored', 'rejected', 'missing', 'unverified', 'blocked'].includes(normalized)) {
+    return '❌';
+  }
+  if (['warning', 'warn', 'skipped', 'noop', 'pending', 'queued', 'unknown'].includes(normalized)) {
+    return '⚠️';
+  }
+  return '•';
+}
+
+function actionIcon(type?: string): string {
+  switch (type?.toLowerCase()) {
+    case 'create':
+      return '➕';
+    case 'update':
+      return '🔧';
+    case 'destroy':
+    case 'delete':
+      return '🧨';
+    case 'replace':
+      return '♻️';
+    case 'noop':
+      return '✅';
+    default:
+      return '•';
+  }
+}
+
+function emphasizeLabel(line: string): string {
+  const match = /^([A-Za-z][A-Za-z0-9 _/-]{0,47}):\s*(.*)$/.exec(line);
+  if (!match) return line;
+  return `**${match[1]}**: ${match[2]}`;
+}
+
 function scalarText(value: unknown): string {
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
@@ -227,7 +266,8 @@ function summarizeAction(value: unknown): string {
     : undefined;
   const provider = resource && typeof resource.provider === 'string' ? `on ${resource.provider}` : undefined;
   const reason = typeof value.reason === 'string' ? `- ${value.reason}` : undefined;
-  return [id ?? resourceName ?? 'action', type, provider, reason].filter(Boolean).join(' ');
+  const actionName = id ?? resourceName ?? 'action';
+  return [actionIcon(type), `\`${actionName}\``, type, provider, reason].filter(Boolean).join(' ');
 }
 
 function summarizeReceipt(value: unknown): string {
@@ -236,7 +276,7 @@ function summarizeReceipt(value: unknown): string {
   const status = typeof value.status === 'string' ? value.status : undefined;
   const message = typeof value.message === 'string' ? value.message : undefined;
   const error = typeof value.error === 'string' ? `error: ${value.error}` : undefined;
-  return [actionId ?? 'receipt', status, message, error].filter(Boolean).join(' - ');
+  return [statusIcon(status), actionId ? `\`${actionId}\`` : 'receipt', status, message, error].filter(Boolean).join(' - ');
 }
 
 function summarizeConnection(value: unknown): string {
@@ -245,7 +285,7 @@ function summarizeConnection(value: unknown): string {
   const status = typeof value.status === 'string' ? value.status : undefined;
   const scope = typeof value.scope === 'string' ? `for ${value.scope}` : undefined;
   const reasons = Array.isArray(value.reasons) ? `(${value.reasons.join(', ')})` : undefined;
-  return [provider, scope, status, reasons].filter(Boolean).join(' ');
+  return [statusIcon(status), `**${provider}**`, scope, status, reasons].filter(Boolean).join(' ');
 }
 
 function summarizeValue(value: unknown): string {
@@ -362,16 +402,23 @@ function formatRecordLines(record: Record<string, unknown>): string[] {
 function formatEnvelope(payload: ToolEnvelope): string {
   const lines: string[] = [];
   const appendListLines = (entries: string[]) => {
-    entries.forEach((line) => lines.push(line.startsWith('  - ') ? line : `- ${line}`));
+    entries.forEach((line) => {
+      if (line.startsWith('  - ')) {
+        lines.push(`  • ${emphasizeLabel(line.slice(4))}`);
+      } else {
+        lines.push(`▸ ${emphasizeLabel(line)}`);
+      }
+    });
   };
   if (payload.ok) {
-    lines.push('OK');
+    lines.push('🟢 **Hypervibe OK**');
   } else {
-    lines.push(`Error: ${payload.error?.code ?? 'UNKNOWN'} - ${payload.error?.message ?? 'Unknown error'}`);
+    lines.push(`🔴 **${payload.error?.code ?? 'UNKNOWN'}**`);
+    lines.push(payload.error?.message ?? 'Unknown error');
   }
 
   if (payload.data !== undefined) {
-    lines.push('', 'Data');
+    lines.push('', '📦 **Data**');
     const dataLines = isRecord(payload.data)
       ? formatRecordLines(payload.data)
       : [summarizeValue(payload.data)];
@@ -379,7 +426,7 @@ function formatEnvelope(payload: ToolEnvelope): string {
   }
 
   if (!payload.ok && payload.error?.details !== undefined) {
-    lines.push('', 'Details');
+    lines.push('', '🔎 **Details**');
     const detailLines = isRecord(payload.error.details)
       ? formatRecordLines(payload.error.details)
       : Array.isArray(payload.error.details)
@@ -389,16 +436,16 @@ function formatEnvelope(payload: ToolEnvelope): string {
   }
 
   if (payload.warnings?.length) {
-    lines.push('', 'Warnings');
-    payload.warnings.forEach((warning) => lines.push(`- ${warning}`));
+    lines.push('', '🟡 **Warnings**');
+    payload.warnings.forEach((warning) => lines.push(`• ${warning}`));
   }
 
   if (payload.hint) {
-    lines.push('', 'Hint', payload.hint);
+    lines.push('', '💡 **Hint**', payload.hint);
   }
 
   if (payload.next?.length) {
-    lines.push('', 'Next', payload.next.join(' -> '));
+    lines.push('', '➡️ **Next**', payload.next.map((step) => `\`${step}\``).join(' → '));
   }
 
   return lines.join('\n');

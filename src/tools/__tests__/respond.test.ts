@@ -11,8 +11,8 @@ describe('toolSuccess', () => {
     const response = toolSuccess({ id: '1' });
     const body = parse(response);
     expect(body).toEqual({ ok: true, data: { id: '1' } });
-    expect(response.content[0].text).toContain('OK');
-    expect(response.content[0].text).toContain('Id: 1');
+    expect(response.content[0].text).toContain('🟢 **Hypervibe OK**');
+    expect(response.content[0].text).toContain('▸ **Id**: 1');
     expect(response.content[0].text.trim().startsWith('{')).toBe(false);
   });
 
@@ -45,6 +45,19 @@ describe('toolSuccess', () => {
     expect(body.next).toEqual(['hv_plan']);
   });
 
+  it('formats action ids with colons without corrupting markdown labels', () => {
+    const response = toolSuccess({
+      actions: [{
+        id: 'service:web',
+        type: 'create',
+        resource: { kind: 'service', name: 'web', provider: 'railway' },
+        reason: 'Missing',
+      }],
+    });
+    expect(response.content[0].text).toContain('➕ `service:web` create on railway - Missing');
+    expect(response.content[0].text).not.toContain('**➕ `service**');
+  });
+
   it('omits empty fields', () => {
     const body = parse(toolSuccess(undefined, { warnings: [] }));
     expect(body).toEqual({ ok: true });
@@ -59,7 +72,8 @@ describe('toolError', () => {
     expect(body.error).toEqual({ code: 'NOT_FOUND', message: 'no such project' });
     expect(body.hint).toBe('list projects with hv_spec_get');
     expect(response.isError).toBe(true);
-    expect(response.content[0].text).toContain('Error: NOT_FOUND - no such project');
+    expect(response.content[0].text).toContain('🔴 **NOT_FOUND**');
+    expect(response.content[0].text).toContain('no such project');
   });
 
   it('includes details when provided', () => {
