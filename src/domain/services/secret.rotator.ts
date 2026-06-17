@@ -6,6 +6,7 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { secretManagerRegistry } from '../registry/secretmanager.registry.js';
 import { adapterFactory } from './adapter.factory.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 import {
   parseSecretRef,
   type ISecretManagerAdapter,
@@ -182,11 +183,11 @@ export class SecretRotator {
   private async getAdapter(provider: SecretManagerProvider): Promise<ISecretManagerAdapter> {
     const connection = this.connectionRepo.findByProvider(provider);
     if (!connection) {
-      throw new Error(`No connection found for secret manager '${provider}'. Use hv_connect first. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`);
+      throw new Error(`No connection found for secret manager '${provider}'. ${formatConnectionGuidance(provider)}`);
     }
 
     if (connection.status !== 'verified') {
-      throw new Error(`Connection for '${provider}' is not verified (status: ${connection.status})`);
+      throw new Error(`Connection for '${provider}' is not verified (status: ${connection.status}). ${formatConnectionGuidance(provider)}`);
     }
 
     const credentials = this.secretStore.decryptObject(connection.credentialsEncrypted);

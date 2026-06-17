@@ -6,6 +6,7 @@ import {
 } from '../../adapters/providers/sendgrid/sendgrid.adapter.js';
 import type { SendGridCredentials } from '../../adapters/providers/sendgrid/sendgrid.adapter.js';
 import type { SendGridPermissionAudit } from '../../adapters/providers/sendgrid/sendgrid.adapter.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 
 const connectionRepo = new ConnectionRepository();
 
@@ -55,13 +56,13 @@ export function sendGridPermissionError(permissions: SendGridPermissionAudit, re
   const groups = Object.entries(missing)
     .map(([group, scopes]) => `${group}: ${scopes.join(', ')}`)
     .join('; ');
-  return `SendGrid API key is valid but cannot complete Hypervibe email setup. Missing ${groups}. ${permissions.recommendation}`;
+  return `SendGrid API key is valid but cannot complete Hypervibe email setup. Missing ${groups}. ${permissions.recommendation} ${formatConnectionGuidance('sendgrid', { intro: 'Confirm the SendGrid API key type and permissions.' })}`;
 }
 
 export function getSendGridAdapter(scopeHints?: string[]): { adapter: SendGridAdapter } | { error: string } {
   const connection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
   if (!connection) {
-    return { error: 'No SendGrid connection found. Use hv_connect provider=sendgrid first. Recommended: use credentialsRef="env:SENDGRID_API_KEY" for an exported key or credentialsRef="dotenv:/absolute/path/.env#SENDGRID_API_KEY" for an existing .env file; raw credentials={...} is still accepted if intentional.' };
+    return { error: `No SendGrid connection found. ${formatConnectionGuidance('sendgrid')}` };
   }
 
   const secretStore = getSecretStore();

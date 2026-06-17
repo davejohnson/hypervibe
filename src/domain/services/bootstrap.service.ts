@@ -21,6 +21,7 @@ import { resolveProject } from './resolve-project.js';
 import { normalizeGitRemoteForBuild } from '../../lib/git-remote.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
 import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from './railway-help.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 import type { Component } from '../entities/component.entity.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
@@ -725,7 +726,7 @@ export async function executeBootstrap(params: {
           summary: {
             ...summary,
             sendgridApiKeySynced: false,
-            sendgridApiKeySyncError: `SendGrid API key is valid but cannot complete setupEmail. ${sendgridPermissions.recommendation}`,
+            sendgridApiKeySyncError: `SendGrid API key is valid but cannot complete setupEmail. ${sendgridPermissions.recommendation} ${formatConnectionGuidance('sendgrid', { intro: 'Confirm the SendGrid API key type and permissions.' })}`,
             sendgridMissingScopes: missingSendgridScopes,
           },
         };
@@ -776,12 +777,12 @@ export async function executeBootstrap(params: {
           }
         } else {
           summary.sendgridDnsSynced = false;
-          summary.sendgridDnsError = 'No Cloudflare connection available for domain DNS setup';
+          summary.sendgridDnsError = `No Cloudflare connection available for domain DNS setup. ${formatConnectionGuidance('cloudflare', { scope: params.domain })}`;
         }
       }
     } else {
       summary.sendgridApiKeySynced = false;
-      summary.sendgridApiKeySyncError = 'No SendGrid connection found';
+      summary.sendgridApiKeySyncError = `No SendGrid connection found. ${formatConnectionGuidance('sendgrid')}`;
     }
   }
 
@@ -823,7 +824,7 @@ export async function executeBootstrap(params: {
 
           if (!cfConnection) {
             summary.domainDnsConfigured = false;
-            summary.domainDnsError = `No Cloudflare connection available for ${params.domain}`;
+            summary.domainDnsError = `No Cloudflare connection available for ${params.domain}. ${formatConnectionGuidance('cloudflare', { scope: params.domain })}`;
           } else {
             const cfCreds = secretStore.decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted);
             const cfAdapter = new CloudflareAdapter();
@@ -885,7 +886,7 @@ export async function executeBootstrap(params: {
         }
       } else {
         summary.domainDnsConfigured = false;
-        summary.domainDnsError = `No Cloudflare connection available for ${params.domain}`;
+        summary.domainDnsError = `No Cloudflare connection available for ${params.domain}. ${formatConnectionGuidance('cloudflare', { scope: params.domain })}`;
       }
     } catch {
       summary.domainDnsConfigured = false;

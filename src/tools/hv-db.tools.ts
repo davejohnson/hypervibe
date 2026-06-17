@@ -9,6 +9,7 @@ import {
 } from '../domain/services/database-ops.service.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
+import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
 
@@ -27,7 +28,7 @@ async function resolveTarget(
     const connection = ctx.repos.connections.findBestMatch('database', opts.connectionName);
     if (!connection) {
       throw new HvError('NOT_FOUND', `No database connection found for: ${opts.connectionName}.`, {
-        hint: `Create one with hv_connect provider="database" scope="${opts.connectionName}". Recommended: use credentialsRef="env:DATABASE_CONNECTION_URL", credentialsRef="dotenv:/absolute/path/.env#DATABASE_CONNECTION_URL", or credentialsRef="file:/absolute/path" for JSON credentials; raw credentials={...} is still accepted if intentional.`,
+        hint: formatConnectionGuidance('database', { scope: opts.connectionName }),
       });
     }
     const creds = ctx.secretStore.decryptObject<DatabaseCredentials>(connection.credentialsEncrypted);

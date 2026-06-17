@@ -11,6 +11,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import { adapterFactory } from './adapter.factory.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 
 const serviceRepo = new ServiceRepository();
 const componentRepo = new ComponentRepository();
@@ -215,7 +216,7 @@ export async function runDatabaseMigration(params: {
   // Get Railway connection
   const connection = connectionRepo.findBestMatchFromHints('railway', getProjectScopeHints(project));
   if (!connection) {
-    return { success: false, error: 'No Railway connection found' };
+    return { success: false, error: `No Railway connection found. ${formatConnectionGuidance('railway')}` };
   }
 
   const secretStore = getSecretStore();

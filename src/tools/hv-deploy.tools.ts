@@ -9,6 +9,7 @@ import { executeRollback, ROLLBACK_NOTE } from '../domain/services/rollback.serv
 import { SpecStore } from '../domain/spec/spec.store.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
+import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
@@ -84,7 +85,7 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
         return toolError(
           'MISSING_CONNECTION',
           adapterResult.error || `No verified ${platform} connection.`,
-          { hint: 'Connect the hosting provider first with hv_connect. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.' }
+          { hint: formatConnectionGuidance(platform) }
         );
       }
       const adapter = adapterResult.adapter;

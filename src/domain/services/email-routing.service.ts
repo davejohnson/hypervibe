@@ -7,6 +7,7 @@ import type {
   CloudflareEmailRoutingRule,
   CloudflareZone,
 } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 
 const connectionRepo = new ConnectionRepository();
 
@@ -20,7 +21,7 @@ type CloudflareEmailContext = {
 function getCloudflareAdapter(domain: string): { adapter: CloudflareAdapter } | { error: string } {
   const connection = connectionRepo.findBestMatch('cloudflare', domain);
   if (!connection) {
-    return { error: 'No Cloudflare connection found. Use hv_connect provider=cloudflare first. Recommended: use credentialsRef="env:CLOUDFLARE_API_TOKEN" for an exported token or credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN" for an existing .env file; raw credentials={...} is still accepted if intentional.' };
+    return { error: `No Cloudflare connection found. ${formatConnectionGuidance('cloudflare', { scope: domain })}` };
   }
 
   const secretStore = getSecretStore();
@@ -44,7 +45,7 @@ export async function resolveCloudflareEmailContext(domain: string): Promise<Clo
 
   if (!zone.account?.id) {
     return {
-      error: `Cloudflare zone "${domain}" did not include an account ID. Use an API token with Zone:Zone:Read plus Account Email Routing permissions.`,
+      error: `Cloudflare zone "${domain}" did not include an account ID. Use an API token with Zone:Zone:Read plus Account Email Routing permissions. ${formatConnectionGuidance('cloudflare', { scope: domain })}`,
     };
   }
 

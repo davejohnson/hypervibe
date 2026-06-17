@@ -2,6 +2,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import type { CloudflareCredentials } from '../entities/connection.entity.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 
 const connectionRepo = new ConnectionRepository();
 
@@ -21,7 +22,7 @@ function adapterFromConnection(connection: NonNullable<ReturnType<ConnectionRepo
 export function getCloudflareAdapter(scopeHint?: string): { adapter: CloudflareAdapter; scope: string | null } | { error: string } {
   const connection = connectionRepo.findBestMatch('cloudflare', scopeHint);
   if (!connection) {
-    return { error: 'No Cloudflare connection found. Use hv_connect provider=cloudflare first. Recommended: use credentialsRef="env:CLOUDFLARE_API_TOKEN" for an exported token or credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN" for an existing .env file; raw credentials={...} is still accepted if intentional.' };
+    return { error: `No Cloudflare connection found. ${formatConnectionGuidance('cloudflare', { scope: scopeHint })}` };
   }
 
   return adapterFromConnection(connection);
@@ -36,7 +37,7 @@ export function getAnyVerifiedCloudflareAdapter(): { adapter: CloudflareAdapter;
     .findAllByProvider('cloudflare')
     .find((candidate) => candidate.status === 'verified');
   if (!connection) {
-    return { error: 'No verified Cloudflare connection found. Use hv_connect provider=cloudflare first. Scoped domain connections are fine for listing zones visible to that token.' };
+    return { error: `No verified Cloudflare connection found. Scoped domain connections are fine for listing zones visible to that token. ${formatConnectionGuidance('cloudflare')}` };
   }
   return adapterFromConnection(connection);
 }

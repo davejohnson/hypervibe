@@ -7,6 +7,7 @@ import {
 import { adapterFactory } from './adapter.factory.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
@@ -77,7 +78,7 @@ export async function setupCustomDomain(params: {
     return {
       success: false,
       reason: 'no_connection',
-      error: `No Cloudflare connection available for ${domain}. Use hv_connect provider=cloudflare first. Recommended: use credentialsRef="env:CLOUDFLARE_API_TOKEN" for an exported token or credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN" for an existing .env file; raw credentials={...} is still accepted if intentional.`,
+      error: `No Cloudflare connection available for ${domain}. ${formatConnectionGuidance('cloudflare', { scope: domain })}`,
     };
   }
   const cfAdapter = new CloudflareAdapter();
@@ -87,7 +88,7 @@ export async function setupCustomDomain(params: {
     return {
       success: false,
       reason: 'no_zone',
-      error: `Cloudflare zone not found for ${domain}. Add the domain to Cloudflare or use a token scoped to it.`,
+      error: `Cloudflare zone not found for ${domain}. Add the domain to Cloudflare or use a token scoped to it. ${formatConnectionGuidance('cloudflare', { scope: domain })}`,
     };
   }
 

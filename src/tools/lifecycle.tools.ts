@@ -11,6 +11,7 @@ import {
   removeServiceBinding,
   removeServiceFromDesiredState,
 } from '../domain/services/spec.service.js';
+import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler } from './respond.js';
@@ -32,7 +33,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
       const adapter = await connectRailwayForImport();
       if (!adapter) {
         return toolError('MISSING_CONNECTION', 'No Railway connection configured.', {
-          hint: 'Connect Railway with hv_connect provider="railway" first. Recommended: use credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN" for an exported token or credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_RAILWAY_TOKEN" for an existing .env file; raw credentials={...} is still accepted if intentional.',
+          hint: formatConnectionGuidance('railway'),
           next: ['hv_connect'],
         });
       }

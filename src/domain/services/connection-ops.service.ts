@@ -3,6 +3,7 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { secretManagerRegistry } from '../registry/secretmanager.registry.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
@@ -100,7 +101,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
   if (!connection) {
     return {
       kind: 'not_found',
-      error: `No connection found for provider: ${provider} (${scopeDisplay}). Use hv_connect first. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+      error: `No connection found for provider: ${provider} (${scopeDisplay}). ${formatConnectionGuidance(provider, { scope })}`,
     };
   }
 
@@ -129,10 +130,22 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         };
       }
       connectionRepo.updateStatus(connection.id, 'failed');
-      return { kind: 'failed', error: result.error ?? 'Verification failed' };
+      return {
+        kind: 'failed',
+        error: `${result.error ?? 'Verification failed'} ${formatConnectionGuidance(provider, {
+          scope,
+          intro: 'Confirm the secret-manager credential type and permissions.',
+        })}`,
+      };
     } catch (error) {
       connectionRepo.updateStatus(connection.id, 'failed');
-      return { kind: 'threw', error: error instanceof Error ? error.message : String(error) };
+      return {
+        kind: 'threw',
+        error: `${error instanceof Error ? error.message : String(error)} ${formatConnectionGuidance(provider, {
+          scope,
+          intro: 'Confirm the secret-manager credential type and permissions.',
+        })}`,
+      };
     }
   }
 
@@ -246,11 +259,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         details: { provider, scope: scope || null, reason: result.error },
       });
 
-      const helpUrl = registeredProvider.metadata.setupHelpUrl;
-      let errorMsg = `${registeredProvider.metadata.displayName} verification failed: ${result.error}`;
-      if (helpUrl) {
-        errorMsg += `. See ${helpUrl} for setup instructions.`;
-      }
+      const errorMsg = `${registeredProvider.metadata.displayName} verification failed: ${result.error}. ${formatConnectionGuidance(provider, { scope })}`;
 
       return { kind: 'failed', error: errorMsg };
     }
@@ -263,7 +272,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
       details: { provider, scope: scope || null, error: String(error) },
     });
 
-    return { kind: 'threw', error: `Verification failed: ${error}` };
+    return { kind: 'threw', error: `Verification failed: ${error}. ${formatConnectionGuidance(provider, { scope })}` };
   }
 }
 

@@ -8,6 +8,7 @@ import { SecretAccessLogRepository } from '../adapters/db/repositories/secret-ma
 import { parseSecretRef, type SecretManagerProvider } from '../domain/ports/secretmanager.port.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
+import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { projectField, envField } from './schemas.js';
@@ -25,7 +26,7 @@ async function managerAdapter(ctx: ToolContext, provider: (typeof SECRET_MANAGER
   const connection = ctx.repos.connections.findByProvider(provider);
   if (!connection || connection.status !== 'verified') {
     throw new HvError('MISSING_CONNECTION', `No verified connection for ${provider}.`, {
-      hint: `Connect it with hv_connect provider="${provider}". Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+      hint: formatConnectionGuidance(provider),
     });
   }
   const credentials = ctx.secretStore.decryptObject(connection.credentialsEncrypted);
@@ -84,7 +85,11 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const { owner, repo: repoName } = githubRepoForProject(project, repo);
         if (!key) throw new HvError('VALIDATION', 'key is required for target="github".');
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
-        if ('error' in gh) return toolError('MISSING_CONNECTION', gh.error, { hint: 'Connect GitHub with hv_connect provider="github". Recommended: use credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" for an exported token or credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN" for an existing .env file; raw credentials={...} is still accepted if intentional.' });
+        if ('error' in gh) {
+          return toolError('MISSING_CONNECTION', gh.error, {
+            hint: formatConnectionGuidance('github', { scope: `${owner}/${repoName}` }),
+          });
+        }
         if (remove) {
           await gh.adapter.deleteSecret(owner, repoName, key);
           ctx.repos.audit.create({ action: 'github.secret_deleted', resourceType: 'github_secret', resourceId: `${owner}/${repoName}/${key}`, details: { secretName: key } });
@@ -252,7 +257,11 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const project = ctx.resolveProjectOrThrow({ project: projectRef });
         const { owner, repo: repoName } = githubRepoForProject(project, repo);
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
-        if ('error' in gh) return toolError('MISSING_CONNECTION', gh.error, {});
+        if ('error' in gh) {
+          return toolError('MISSING_CONNECTION', gh.error, {
+            hint: formatConnectionGuidance('github', { scope: `${owner}/${repoName}` }),
+          });
+        }
         const ghSecrets = await gh.adapter.listSecrets(owner, repoName);
         sections.github = { repository: `${owner}/${repoName}`, secrets: ghSecrets.secrets.map((s) => s.name) };
       }

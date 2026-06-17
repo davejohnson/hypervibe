@@ -5,6 +5,7 @@ import { StripeAdapter } from '../../adapters/providers/stripe/stripe.adapter.js
 import type { RailwayCredentials } from '../../adapters/providers/railway/railway.adapter.js';
 import type { StripeCredentials, StripeMode } from '../../adapters/providers/stripe/stripe.adapter.js';
 import { adapterFactory } from './adapter.factory.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 import type { Project } from '../entities/project.entity.js';
 
 const connectionRepo = new ConnectionRepository();
@@ -77,7 +78,7 @@ export async function fetchProviderLogs(
     }
     const connection = connectionRepo.findByProvider('railway');
     if (!connection) {
-      throw new Error('No Railway connection found');
+      throw new Error(`No Railway connection found. ${formatConnectionGuidance('railway')}`);
     }
 
     const secretStore = getSecretStore();
@@ -231,7 +232,7 @@ export async function fetchProviderDeployments(
     }
     const connection = connectionRepo.findByProvider('railway');
     if (!connection) {
-      throw new Error('No Railway connection found');
+      throw new Error(`No Railway connection found. ${formatConnectionGuidance('railway')}`);
     }
 
     const secretStore = getSecretStore();
@@ -401,7 +402,7 @@ export async function fetchProviderBuildLogs(
     }
     const connection = connectionRepo.findByProvider('railway');
     if (!connection) {
-      throw new Error('No Railway connection found');
+      throw new Error(`No Railway connection found. ${formatConnectionGuidance('railway')}`);
     }
 
     const secretStore = getSecretStore();
@@ -622,7 +623,7 @@ export async function fetchStripeWebhookStatuses(
 ): Promise<Array<{ id: string; url: string; status: string; enabledEvents: number; description?: string | null }>> {
   const connection = connectionRepo.findByProvider('stripe');
   if (!connection) {
-    throw new Error('No Stripe connection found');
+    throw new Error(`No Stripe connection found. ${formatConnectionGuidance('stripe')}`);
   }
 
   const secretStore = getSecretStore();

@@ -32,6 +32,7 @@ import type { ToolContext } from './context.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
 import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
+import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 
 function deploymentProviders(): string[] {
   return providerRegistry.getByCategory('deployment').map((p) => p.metadata.name);
@@ -154,41 +155,7 @@ function connectionProviders(blocks: ConnectionBlock[]): string[] {
 }
 
 function providerConnectionCommand(block: ConnectionBlock): string {
-  const scope = block.scope ? ` scope="${block.scope}"` : '';
-  switch (block.provider) {
-    case 'cloudflare':
-      return `export CLOUDFLARE_API_TOKEN=... then hv_connect provider="cloudflare"${scope} credentialsRef="env:CLOUDFLARE_API_TOKEN"`;
-    case 'cloudrun':
-      return `hv_connect provider="cloudrun"${scope} credentialsRef="file:/absolute/path/cloudrun.json" (JSON with projectId, credentials service-account JSON, and optional region)`;
-    case 'cloudsql':
-      return `hv_connect provider="cloudsql"${scope} credentialsRef="file:/absolute/path/cloudsql.json" (JSON with projectId, credentials service-account JSON, and optional region)`;
-    case 'database':
-      return `export DATABASE_CONNECTION_URL=... then hv_connect provider="database"${scope} credentialsRef="env:DATABASE_CONNECTION_URL"`;
-    case 'digitalocean':
-      return `export DIGITALOCEAN_ACCESS_TOKEN=... then hv_connect provider="digitalocean"${scope} credentialsRef="env:DIGITALOCEAN_ACCESS_TOKEN"`;
-    case 'github':
-      return `export HYPERVIBE_GITHUB_TOKEN=... then hv_connect provider="github"${scope} credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"`;
-    case 'apprunner':
-      return `hv_connect provider="apprunner"${scope} credentialsRef="file:/absolute/path/aws-apprunner.json" (JSON with accessKeyId, secretAccessKey, and region)`;
-    case 'heroku':
-      return `export HEROKU_API_KEY=... then hv_connect provider="heroku"${scope} credentialsRef="env:HEROKU_API_KEY"`;
-    case 'rds':
-      return `hv_connect provider="rds"${scope} credentialsRef="file:/absolute/path/aws-rds.json" (JSON with accessKeyId, secretAccessKey, and region)`;
-    case 'railway':
-      return `export HYPERVIBE_RAILWAY_TOKEN=... then hv_connect provider="railway"${scope} credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN"`;
-    case 'render':
-      return `export RENDER_API_KEY=... then hv_connect provider="render"${scope} credentialsRef="env:RENDER_API_KEY"`;
-    case 'sendgrid':
-      return `export SENDGRID_API_KEY=... then hv_connect provider="sendgrid"${scope} credentialsRef="env:SENDGRID_API_KEY"`;
-    case 'stripe':
-      return `hv_connect provider="stripe"${scope} credentialsRef="file:/absolute/path/stripe.json" (JSON with sandboxSecretKey or liveSecretKey)`;
-    case 'supabase':
-      return `export SUPABASE_ACCESS_TOKEN=... then hv_connect provider="supabase"${scope} credentialsRef="env:SUPABASE_ACCESS_TOKEN"`;
-    case 'vercel':
-      return `export VERCEL_TOKEN=... then hv_connect provider="vercel"${scope} credentialsRef="env:VERCEL_TOKEN"`;
-    default:
-      return `hv_connect provider="${block.provider}"${scope} credentialsRef="env:NAME"`;
-  }
+  return formatConnectionGuidance(block.provider, { scope: block.scope });
 }
 
 function connectionRecoveryHint(

@@ -20,6 +20,7 @@ import {
   requiredProviderSecretNamesForGitHubActions,
 } from '../domain/services/ci-deploy.service.js';
 import { getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.js';
+import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
 import { projectField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
@@ -54,7 +55,9 @@ function resolveRepoOrThrow(ctx: ToolContext, projectRef: string | undefined, re
 function githubAdapterOrThrow({ owner, repo }: RepoRef): GitHubAdapter {
   const result = getGitHubAdapter(`${owner}/${repo}`);
   if ('error' in result) {
-    throw new HvError('MISSING_CONNECTION', result.error);
+    throw new HvError('MISSING_CONNECTION', result.error, {
+      hint: formatConnectionGuidance('github', { scope: `${owner}/${repo}` }),
+    });
   }
   return result.adapter;
 }
@@ -282,7 +285,9 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
 
           const cfResult = getCloudflareAdapter(apex);
           if ('error' in cfResult) {
-            return toolError('MISSING_CONNECTION', cfResult.error);
+            return toolError('MISSING_CONNECTION', cfResult.error, {
+              hint: formatConnectionGuidance('cloudflare', { scope: apex }),
+            });
           }
 
           let pages = await adapter.getPagesConfig(owner, repo);
@@ -295,7 +300,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
           const zone = await cfResult.adapter.findZoneByName(apex);
           if (!zone) {
             return toolError('NOT_FOUND', `Cloudflare zone "${apex}" not found.`, {
-              hint: `Add the domain to Cloudflare or create a scoped connection with hv_connect provider=cloudflare scope=${apex} credentialsRef="env:CLOUDFLARE_API_TOKEN"; for existing .env files use credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN".`,
+              hint: `Add the domain to Cloudflare or create a scoped connection for it. ${formatConnectionGuidance('cloudflare', { scope: apex })}`,
             });
           }
 

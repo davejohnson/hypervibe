@@ -8,6 +8,7 @@ import { saveConnection, verifyConnection, deleteConnection } from '../domain/se
 import { SecretResolver } from '../domain/services/secret.resolver.js';
 import { parseSecretRef } from '../domain/ports/secretmanager.port.js';
 import { parseEnvFile } from '../utils/env-parser.js';
+import { formatConnectionGuidance, getConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
 import { projectField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler } from './respond.js';
@@ -252,7 +253,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         }
         if (!credentials && !credentialsRef) {
           return toolError('VALIDATION', 'credentials are required for action="add".', {
-            hint: 'Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.',
+            hint: `Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
 
@@ -268,14 +269,14 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
             : credentials!;
         } catch (error) {
           return toolError('VALIDATION', error instanceof Error ? error.message : String(error), {
-            hint: 'Use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if intentional.',
+            hint: `Use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
 
         const saved = await saveConnection(provider, credentialsToSave, scope);
         if (!saved.success) {
           return toolError('VALIDATION', saved.error!, {
-            hint: 'Fix the credentials object to match the provider schema and retry.',
+            hint: `Fix the credentials object to match the provider schema and retry. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
 
@@ -284,7 +285,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         if (verified.kind !== 'verified') {
           return toolError('PROVIDER_ERROR', verified.error ?? 'Verification failed.', {
             details: { connection: saved.connection },
-            hint: 'The connection was saved but failed verification. Check the credentials and re-run hv_connect action="verify" (or "add" with corrected credentials).',
+            hint: `The connection was saved but failed verification. Confirm the token type and permissions, then re-run hv_connect action="verify" or action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
 
@@ -317,13 +318,13 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         }
         case 'not_found':
           return toolError('NOT_FOUND', verified.error, {
-            hint: 'Add the connection first with hv_connect action="add".',
+            hint: `Add the connection first with hv_connect action="add". ${formatConnectionGuidance(provider, { scope })}`,
           });
         case 'unknown_provider':
           return toolError('UNSUPPORTED', verified.error);
         default:
           return toolError('PROVIDER_ERROR', verified.error, {
-            hint: 'Check the credentials and re-run hv_connect action="add" with corrected credentials.',
+            hint: `Confirm the token type and permissions, then re-run hv_connect action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
       }
     })
@@ -341,22 +342,41 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         lastVerifiedAt: c.lastVerifiedAt,
       }));
 
-      const availableProviders: Record<string, Array<{ name: string; displayName: string; setupHelpUrl?: string }>> = {};
+      const availableProviders: Record<string, Array<{
+        name: string;
+        displayName: string;
+        setupHelpUrl?: string;
+        tokenType?: string;
+        requiredPermissions?: string[];
+        credentialExample?: string;
+      }>> = {};
       for (const p of providerRegistry.all()) {
         const category = p.metadata.category;
+        const guidance = getConnectionGuidance(p.metadata.name);
         availableProviders[category] = availableProviders[category] ?? [];
         availableProviders[category].push({
           name: p.metadata.name,
           displayName: p.metadata.displayName,
           ...(p.metadata.setupHelpUrl ? { setupHelpUrl: p.metadata.setupHelpUrl } : {}),
+          ...(guidance ? {
+            tokenType: guidance.tokenType,
+            requiredPermissions: guidance.permissions,
+            credentialExample: guidance.credentialExample,
+          } : {}),
         });
       }
       for (const p of secretManagerRegistry.all()) {
+        const guidance = getConnectionGuidance(p.metadata.name);
         availableProviders['secrets'] = availableProviders['secrets'] ?? [];
         availableProviders['secrets'].push({
           name: p.metadata.name,
           displayName: p.metadata.displayName,
           ...(p.metadata.setupHelpUrl ? { setupHelpUrl: p.metadata.setupHelpUrl } : {}),
+          ...(guidance ? {
+            tokenType: guidance.tokenType,
+            requiredPermissions: guidance.permissions,
+            credentialExample: guidance.credentialExample,
+          } : {}),
         });
       }
 

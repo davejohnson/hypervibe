@@ -2,13 +2,14 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { StripeAdapter } from '../../adapters/providers/stripe/stripe.adapter.js';
 import type { StripeCredentials } from '../../adapters/providers/stripe/stripe.adapter.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 
 const connectionRepo = new ConnectionRepository();
 
 export function getStripeAdapter(): { adapter: StripeAdapter; credentials: StripeCredentials } | { error: string } {
   const connection = connectionRepo.findByProvider('stripe');
   if (!connection) {
-    return { error: 'No Stripe connection found. Use hv_connect provider=stripe first. Recommended: use credentialsRef="dotenv:/absolute/path/.env" with credentialsMap={"sandboxSecretKey":"STRIPE_SECRET_KEY"} or credentialsRef="file:/absolute/path/stripe.json" for structured credentials; raw credentials={...} is still accepted if intentional.' };
+    return { error: `No Stripe connection found. ${formatConnectionGuidance('stripe')}` };
   }
 
   const secretStore = getSecretStore();

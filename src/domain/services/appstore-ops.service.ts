@@ -3,6 +3,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { AppStoreConnectAdapter } from '../../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
 import type { AppStoreBetaGroup, AppStoreConnectBuild, AppStoreConnectCredentials } from '../../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 
 const connectionRepo = new ConnectionRepository();
 export const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg']);
@@ -23,8 +24,7 @@ export function getAppStoreConnectAdapter(scopeHint?: string): { adapter: AppSto
   const connection = connectionRepo.findBestMatch('appstoreconnect', scopeHint);
   if (!connection) {
     return {
-      error: 'No App Store Connect connection found. Use hv_connect provider=appstoreconnect credentialsRef="file:/absolute/path/to/appstoreconnect.json" first. Raw credentials={...} is still accepted if intentional. ' +
-        'You need an App Store Connect API key: https://appstoreconnect.apple.com/access/api',
+      error: `No App Store Connect connection found. ${formatConnectionGuidance('appstoreconnect', { scope: scopeHint })}`,
     };
   }
 

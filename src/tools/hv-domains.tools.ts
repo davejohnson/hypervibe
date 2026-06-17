@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { CloudflareAdapter, CloudflareDnsRecord } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { setupCustomDomain } from '../domain/services/domain.service.js';
 import { getAnyVerifiedCloudflareAdapter, getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.js';
+import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
@@ -43,6 +44,7 @@ export function registerHvDomainsTools(server: McpServer, ctx: ToolContext): voi
       const result = await setupCustomDomain({ project, environment, domain, serviceName: service });
       if (result.error && !result.zone) {
         return toolError(result.reason === 'no_connection' ? 'MISSING_CONNECTION' : 'NOT_FOUND', result.error, {
+          hint: result.reason === 'no_connection' ? formatConnectionGuidance('cloudflare', { scope: domain }) : undefined,
           next: result.reason === 'no_zone' ? ['hv_dns_record'] : undefined,
         });
       }
@@ -101,7 +103,9 @@ export function registerHvDomainsTools(server: McpServer, ctx: ToolContext): voi
       if (action === 'zones') {
         const adapterResult = getAnyVerifiedCloudflareAdapter();
         if ('error' in adapterResult) {
-          return toolError('MISSING_CONNECTION', adapterResult.error);
+          return toolError('MISSING_CONNECTION', adapterResult.error, {
+            hint: formatConnectionGuidance('cloudflare'),
+          });
         }
         const { adapter, scope } = adapterResult;
         const zones = await adapter.listZones();
@@ -116,7 +120,9 @@ export function registerHvDomainsTools(server: McpServer, ctx: ToolContext): voi
 
       const adapterResult = getCloudflareAdapter(zone?.includes('.') ? zone : undefined);
       if ('error' in adapterResult) {
-        return toolError('MISSING_CONNECTION', adapterResult.error);
+        return toolError('MISSING_CONNECTION', adapterResult.error, {
+          hint: formatConnectionGuidance('cloudflare', { scope: zone }),
+        });
       }
       const { adapter } = adapterResult;
 
@@ -128,7 +134,7 @@ export function registerHvDomainsTools(server: McpServer, ctx: ToolContext): voi
       const zoneId = await resolveZoneId(adapter, zone);
       if (!zoneId) {
         return toolError('NOT_FOUND', `Cloudflare zone "${zone}" not found.`, {
-          hint: `The current token may not cover this domain. Add a scoped connection with hv_connect provider=cloudflare scope=${zone} credentialsRef="env:CLOUDFLARE_API_TOKEN"; for existing .env files use credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN".`,
+          hint: `The current token may not cover this domain. ${formatConnectionGuidance('cloudflare', { scope: zone })}`,
         });
       }
 

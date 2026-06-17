@@ -15,6 +15,7 @@ import {
   type BranchDeployProvider,
   type BranchDeployWorkflow,
 } from './github-ops.service.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 
 const OPERATION = 'githubActionsDeployBranch';
 const SUPPORTED_PROVIDERS = new Set(['railway', 'vercel', 'render', 'digitalocean', 'cloudrun', 'apprunner', 'heroku']);
@@ -55,10 +56,10 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
   const missingImageRegistrySecrets = missingProviderSecrets.some((name) => name.startsWith('IMAGE_REGISTRY_'));
   const missingProviderApiSecrets = missingProviderSecrets.some((name) => !name.startsWith('IMAGE_REGISTRY_'));
   if (missingProviderApiSecrets) {
-    parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions.`);
+    parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions. ${formatConnectionGuidance(provider)}`);
   }
   if (missingImageRegistrySecrets) {
-    parts.push('For Railway/DigitalOcean GHCR image pulls, reconnect GitHub with a package-read token using credentials packageReadToken or packagesToken.');
+    parts.push(`For Railway/DigitalOcean GHCR image pulls, reconnect GitHub with a package-read token using credentials packageReadToken or packagesToken. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and package permissions.' })}`);
   }
   return parts.join(' ');
 }

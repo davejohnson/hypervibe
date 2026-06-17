@@ -8,6 +8,7 @@ import type { IDatabaseAdapter } from '../ports/database.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { createRailwayDatabaseAdapter } from '../../adapters/providers/railway/railway-database.factory.js';
 import { getProjectScopeHints } from './project-scope.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 
 /**
  * Result of resolving an adapter
@@ -131,14 +132,14 @@ export class AdapterFactory {
     if (!connection) {
       return {
         success: false,
-        error: `No connection found for ${providerName}. Use hv_connect first. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional.`,
+        error: `No connection found for ${providerName}. ${formatConnectionGuidance(providerName)}`,
       };
     }
 
     if (connection.status !== 'verified') {
       return {
         success: false,
-        error: `Connection for ${providerName} is not verified (status: ${connection.status}). Use hv_connect provider="${providerName}" action="verify" first.`,
+        error: `Connection for ${providerName} is not verified (status: ${connection.status}). Re-run hv_connect provider="${providerName}" action="verify" after confirming token type and permissions. ${formatConnectionGuidance(providerName)}`,
       };
     }
 

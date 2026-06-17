@@ -6,6 +6,7 @@ import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js
 import type { GitHubCredentials } from '../../adapters/providers/github/github.adapter.js';
 import type { Project } from '../entities/project.entity.js';
 import { projectSpecSchema } from '../spec/spec.schema.js';
+import { formatConnectionGuidance } from './connection-guidance.js';
 
 // ============= Workflow Templates =============
 
@@ -221,7 +222,7 @@ export const GITHUB_PAGES_IPS = [
 export function getGitHubAdapter(scopeHint?: string): { adapter: GitHubAdapter } | { error: string } {
   const connection = connectionRepo.findBestMatch('github', scopeHint);
   if (!connection) {
-    return { error: 'No GitHub connection found. Use hv_connect provider=github first. Recommended: use credentialsRef="env:HYPERVIBE_GITHUB_TOKEN" for an exported token or credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN" for an existing .env file; raw credentials={...} is still accepted if intentional.' };
+    return { error: `No GitHub connection found. ${formatConnectionGuidance('github', { scope: scopeHint })}` };
   }
 
   const secretStore = getSecretStore();
