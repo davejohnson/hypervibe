@@ -3,6 +3,9 @@ import { providerRegistry } from '../../../domain/registry/provider.registry.js'
 import type { IDnsProvider, DnsZone, DnsRecord } from '../../../domain/ports/dns.port.js';
 
 const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4';
+const CLOUDFLARE_USER_TOKEN_URL = 'https://dash.cloudflare.com/profile/api-tokens';
+const CLOUDFLARE_ACCOUNT_TOKEN_URL = 'https://dash.cloudflare.com/?to=/:account/api-tokens';
+const CLOUDFLARE_DNS_PERMISSIONS = 'Zone > Zone > Read and Zone > DNS > Edit/Write';
 
 export interface CloudflareZone {
   id: string;
@@ -202,6 +205,45 @@ function normalizeApiToken(token: string): string {
     .trim();
 }
 
+function tokenSetupHelp(kind: 'user' | 'account' | 'unknown', domain?: string): string {
+  const scope = domain ? ` for ${domain}` : '';
+  if (kind === 'account') {
+    return [
+      `Cloudflare rejected this Account API Token${scope}.`,
+      `Create or review Account API Tokens in Cloudflare at Manage Account > Account API Tokens: ${CLOUDFLARE_ACCOUNT_TOKEN_URL}`,
+      `For DNS automation, grant ${CLOUDFLARE_DNS_PERMISSIONS} for the target zone.`,
+      'Account API Tokens also require accountId in the Hypervibe credentials.',
+      'Cloudflare Registrar domain registration is not supported by Account API Tokens; use a User API Token if Hypervibe needs to buy domains.',
+    ].join(' ');
+  }
+  if (kind === 'user') {
+    return [
+      `Cloudflare rejected this User API Token${scope}.`,
+      `Create a User API Token in Cloudflare at My Profile > API Tokens: ${CLOUDFLARE_USER_TOKEN_URL}`,
+      `Use Create Token, start from the Edit zone DNS template, and grant ${CLOUDFLARE_DNS_PERMISSIONS} for the target zone.`,
+      'Use the token secret itself as apiToken/CLOUDFLARE_API_TOKEN, not the token name, token id, or legacy Global API Key.',
+    ].join(' ');
+  }
+  return [
+    `Cloudflare rejected this API token${scope}.`,
+    `For the safest Hypervibe default, create a User API Token at My Profile > API Tokens: ${CLOUDFLARE_USER_TOKEN_URL}`,
+    `Use Create Token, start from the Edit zone DNS template, and grant ${CLOUDFLARE_DNS_PERMISSIONS} for the target zone.`,
+    `If you intentionally use an Account API Token, create it under Manage Account > Account API Tokens: ${CLOUDFLARE_ACCOUNT_TOKEN_URL}`,
+    'Account API Tokens require accountId and cannot be used for Cloudflare Registrar domain registration.',
+  ].join(' ');
+}
+
+function tokenKind(token: string): 'user' | 'account' | 'unknown' {
+  const normalized = normalizeApiToken(token);
+  if (normalized.startsWith('cfut_')) return 'user';
+  if (normalized.startsWith('cfat_')) return 'account';
+  return 'unknown';
+}
+
+function combineWarnings(...warnings: Array<string | undefined>): string | undefined {
+  return warnings.filter(Boolean).join(' ');
+}
+
 export class CloudflareAdapter implements IDnsProvider {
   readonly name = 'cloudflare';
   private credentials: CloudflareCredentials | null = null;
@@ -244,26 +286,72 @@ export class CloudflareAdapter implements IDnsProvider {
     return data;
   }
 
-  async verify(domain?: string): Promise<{ success: boolean; error?: string; zones?: string[]; warning?: string }> {
-    try {
-      await this.request<{ id: string }>('GET', '/user/tokens/verify');
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      // Global API Keys return 401 on /user/tokens/verify since that endpoint only works with API Tokens
-      if (msg.includes('Authentication') || msg.includes('401') || msg.includes('Invalid access token')) {
+  private async verifyToken(domain?: string): Promise<{ success: true; kind: 'user' | 'account' | 'unknown'; warning?: string } | { success: false; error: string }> {
+    if (!this.credentials) {
+      return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+    const kind = tokenKind(this.credentials.apiToken);
+
+    if (kind === 'account') {
+      const accountId = this.credentials.accountId?.trim();
+      if (!accountId) {
         return {
           success: false,
-          error: `Token verification failed — this may be a legacy Global API Key, which is not supported. Please create an API Token instead at https://dash.cloudflare.com/profile/api-tokens (use the "Edit zone DNS" template for DNS management).`,
+          error: `${tokenSetupHelp('account', domain)} Add CLOUDFLARE_ACCOUNT_ID and connect with credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}.`,
+        };
+      }
+      try {
+        await this.request<{ id: string; status?: string }>('GET', `/accounts/${accountId}/tokens/verify`);
+        return {
+          success: true,
+          kind,
+          warning: 'Cloudflare Account API Token verified. DNS automation can use account tokens, but Cloudflare Registrar domain registration is not supported by Account API Tokens; use a User API Token if Hypervibe needs to buy domains.',
+        };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return { success: false, error: `${tokenSetupHelp('account', domain)} Cloudflare response: ${msg}` };
+      }
+    }
+
+    try {
+      await this.request<{ id: string }>('GET', '/user/tokens/verify');
+      return { success: true, kind };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (this.credentials.accountId?.trim()) {
+        try {
+          await this.request<{ id: string; status?: string }>('GET', `/accounts/${this.credentials.accountId.trim()}/tokens/verify`);
+          return {
+            success: true,
+            kind: 'account',
+            warning: 'Cloudflare Account API Token verified. DNS automation can use account tokens, but Cloudflare Registrar domain registration is not supported by Account API Tokens; use a User API Token if Hypervibe needs to buy domains.',
+          };
+        } catch {
+          // Keep the user-token verification error below; it is usually clearer.
+        }
+      }
+      // Global API Keys return 401 on /user/tokens/verify since that endpoint only works with API Tokens
+      if (msg.includes('Authentication') || msg.includes('401') || msg.includes('Invalid access token') || msg.includes('Invalid API Token')) {
+        return {
+          success: false,
+          error: `${tokenSetupHelp(kind, domain)} Cloudflare response: ${msg}`,
         };
       }
       return { success: false, error: msg };
+    }
+  }
+
+  async verify(domain?: string): Promise<{ success: boolean; error?: string; zones?: string[]; warning?: string }> {
+    const verified = await this.verifyToken(domain);
+    if (!verified.success) {
+      return verified;
     }
 
     if (domain) {
       try {
         const zone = await this.findZoneByName(domain);
         if (zone) {
-          return { success: true, zones: [zone.name] };
+          return { success: true, zones: [zone.name], ...(verified.warning ? { warning: verified.warning } : {}) };
         }
 
         const zones = await this.listZones();
@@ -271,18 +359,24 @@ export class CloudflareAdapter implements IDnsProvider {
         return {
           success: true,
           zones: zoneNames,
-          warning: `Token is valid, but Hypervibe could not find a Cloudflare zone for "${domain}". If the zone already exists, make sure the token includes Zone:Read plus DNS:Edit for that zone. If Hypervibe will register the domain first, this is expected until Cloudflare creates the zone.`,
+          warning: combineWarnings(
+            verified.warning,
+            `Token is valid, but Hypervibe could not find a Cloudflare zone for "${domain}". If the zone already exists, make sure the token includes ${CLOUDFLARE_DNS_PERMISSIONS} for that zone. If Hypervibe will register the domain first, this is expected until Cloudflare creates the zone.`
+          ),
         };
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         return {
           success: true,
-          warning: `Token is valid, but Hypervibe could not confirm Cloudflare zone access for "${domain}" (${msg}). DNS automation needs zone visibility or an existing zone-scoped token with DNS permissions; domain registration may still be possible with account/registrar permissions.`,
+          warning: combineWarnings(
+            verified.warning,
+            `Token is valid, but Hypervibe could not confirm Cloudflare zone access for "${domain}" (${msg}). DNS automation needs zone visibility or an existing zone-scoped token with DNS permissions; domain registration may still be possible with account/registrar permissions.`
+          ),
         };
       }
     }
 
-    return { success: true };
+    return { success: true, ...(verified.warning ? { warning: verified.warning } : {}) };
   }
 
   async listZones(): Promise<CloudflareZone[]> {

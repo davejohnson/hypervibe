@@ -170,7 +170,29 @@ Typical team flow:
 
 ### Cloudflare token permissions
 
-Recommended: connect without pasting the token into chat. If the value is already exported:
+Recommended default: use a **User API Token**, not an Account API Token, because Hypervibe may need both DNS automation and Cloudflare Registrar/domain-purchase APIs. Account API Tokens can work for DNS when paired with `accountId`, but Cloudflare Registrar is not compatible with Account API Tokens.
+
+Create the recommended User API Token here:
+
+```text
+Cloudflare dashboard -> My Profile -> API Tokens -> Create Token -> Edit zone DNS
+https://dash.cloudflare.com/profile/api-tokens
+```
+
+Set these permissions and resources:
+
+```text
+Permissions:
+- Zone -> Zone -> Read
+- Zone -> DNS -> Edit/Write
+
+Zone Resources:
+- Include -> Specific zone -> example.com
+```
+
+Use the generated token secret itself as `CLOUDFLARE_API_TOKEN`; do not use the token name, token id, or legacy Global API Key. New User API Tokens usually start with `cfut_`; Account API Tokens usually start with `cfat_`.
+
+Connect without pasting the token into chat. If the value is already exported:
 
 ```bash
 export CLOUDFLARE_API_TOKEN=...
@@ -186,7 +208,13 @@ hv_connect provider=cloudflare scope="example.com" credentialsRef="dotenv:/absol
 
 Hypervibe accepts either a raw token or a copied authorization value such as `Bearer <token>` for Cloudflare.
 
-For DNS automation on an existing zone, the token should be scoped to that zone and include zone read plus DNS edit permissions. If the token is valid but Hypervibe cannot confirm zone access during `hv_connect`, the connection is still saved and verified with a warning; `hv_plan`/`hv_apply` will surface any remaining DNS or registrar-specific blockers.
+For an Account API Token, create it under `Manage Account -> Account API Tokens`, include the same zone permissions above, and connect it with `accountId`:
+
+```text
+hv_connect provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}
+```
+
+If the token is valid but Hypervibe cannot confirm zone access during `hv_connect`, the connection is still saved and verified with a warning; `hv_plan`/`hv_apply` will surface any remaining DNS or registrar-specific blockers.
 
 ### GitHub token permissions
 

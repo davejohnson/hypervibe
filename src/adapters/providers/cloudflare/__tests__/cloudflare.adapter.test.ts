@@ -55,6 +55,75 @@ describe('CloudflareAdapter.verify', () => {
     expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer cf-real-token');
   });
 
+  it('verifies account API tokens through the account endpoint', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.endsWith('/accounts/account-1/tokens/verify')) {
+        return cfResponse({ id: 'token-1', status: 'active' });
+      }
+      if (href.includes('/zones?name=')) {
+        return cfResponse([{ id: 'zone-1', name: 'apreskeys.com', status: 'active', paused: false, type: 'full', name_servers: [] }]);
+      }
+      throw new Error(`unexpected url: ${href}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfat_123456789012345678901234567890123456789012345678', accountId: 'account-1' });
+
+    const result = await adapter.verify('apreskeys.com');
+
+    expect(result.success).toBe(true);
+    expect(result.zones).toEqual(['apreskeys.com']);
+    expect(result.warning).toContain('Account API Token verified');
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/user/tokens/verify'), expect.anything());
+  });
+
+  it('falls back to account token verification for unprefixed tokens when accountId is present', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.endsWith('/user/tokens/verify')) {
+        return cfResponse(null, {
+          success: false,
+          status: 401,
+          errors: [{ code: 1000, message: 'Invalid API Token' }],
+        });
+      }
+      if (href.endsWith('/accounts/account-1/tokens/verify')) {
+        return cfResponse({ id: 'token-1', status: 'active' });
+      }
+      if (href.includes('/zones?name=')) {
+        return cfResponse([]);
+      }
+      if (href.includes('/zones?page=')) {
+        return cfResponse([]);
+      }
+      throw new Error(`unexpected url: ${href}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'legacyAccountTokenValueWithoutPrefix', accountId: 'account-1' });
+
+    const result = await adapter.verify('invoiceperfect.com');
+
+    expect(result.success).toBe(true);
+    expect(result.warning).toContain('Account API Token verified');
+  });
+
+  it('explains that account API tokens need accountId', async () => {
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfat_123456789012345678901234567890123456789012345678' });
+
+    const result = await adapter.verify('apreskeys.com');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Manage Account > Account API Tokens');
+    expect(result.error).toContain('CLOUDFLARE_ACCOUNT_ID');
+    expect(result.error).toContain('Zone > Zone > Read');
+    expect(result.error).toContain('Zone > DNS > Edit/Write');
+  });
+
   it('verifies a valid token even when zone access cannot be confirmed', async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       const href = String(url);
@@ -101,6 +170,9 @@ describe('CloudflareAdapter.verify', () => {
     const result = await adapter.verify('apreskeys.com');
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Token verification failed');
+    expect(result.error).toContain('My Profile > API Tokens');
+    expect(result.error).toContain('Edit zone DNS');
+    expect(result.error).toContain('Zone > Zone > Read');
+    expect(result.error).toContain('Zone > DNS > Edit/Write');
   });
 });
