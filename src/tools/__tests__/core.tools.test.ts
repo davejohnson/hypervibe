@@ -307,8 +307,9 @@ describe('hv_spec_set / hv_spec_get', () => {
       hint: expect.stringContaining('connection-check-app.com'),
     });
     expect(set.hint).toContain('Hypervibe can store and verify the missing provider connections with hv_connect');
-    expect(set.hint).toContain('Cloudflare User API Token');
-    expect(set.hint).toContain('https://dash.cloudflare.com/profile/api-tokens');
+    expect(set.hint).toContain('Cloudflare Account API Token');
+    expect(set.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
+    expect(set.hint).toContain('Zone -> Zone Settings -> Read or Edit');
     expect(set.hint).toContain('Zone -> DNS -> Edit/Write');
     expect(set.hint).toContain('scope="connection-check-app.com"');
     expect(set.hint).toContain('classic personal access token');

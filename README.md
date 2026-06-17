@@ -170,13 +170,13 @@ Typical team flow:
 
 ### Cloudflare token permissions
 
-Recommended default: use a **User API Token**, not an Account API Token, because Hypervibe may need both DNS automation and Cloudflare Registrar/domain-purchase APIs. Account API Tokens can work for DNS when paired with `accountId`, but Cloudflare Registrar is not compatible with Account API Tokens.
+Recommended default for DNS, custom domains, and email routing: use a **Cloudflare Account API Token** plus `accountId`. Cloudflare recommends Account API Tokens for automation credentials that are not associated with a specific user.
 
-Create the recommended User API Token here:
+Create the recommended Account API Token here:
 
 ```text
-Cloudflare dashboard -> My Profile -> API Tokens -> Create Token -> Edit zone DNS
-https://dash.cloudflare.com/profile/api-tokens
+Cloudflare dashboard -> Manage Account -> Account API Tokens
+https://dash.cloudflare.com/?to=/:account/api-tokens
 ```
 
 Set these permissions and resources:
@@ -184,6 +184,7 @@ Set these permissions and resources:
 ```text
 Permissions:
 - Zone -> Zone -> Read
+- Zone -> Zone Settings -> Read or Edit
 - Zone -> DNS -> Edit/Write
 
 Zone Resources:
@@ -192,26 +193,18 @@ Zone Resources:
 
 Use the generated token secret itself as `CLOUDFLARE_API_TOKEN`; do not use the token name, token id, or legacy Global API Key. New User API Tokens usually start with `cfut_`; Account API Tokens usually start with `cfat_`.
 
-Connect without pasting the token into chat. If the value is already exported:
-
-```bash
-export CLOUDFLARE_API_TOKEN=...
-```
-
-Then call `hv_connect provider=cloudflare scope="example.com" credentialsRef="env:CLOUDFLARE_API_TOKEN"`.
-
-If the value is in an existing `.env` file, reference the key directly instead of copying it to a temporary file:
+Connect without pasting the token into chat. If the values are in an existing `.env` file, reference the keys directly instead of copying them to a temporary file:
 
 ```text
-hv_connect provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"
+hv_connect provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}
 ```
 
 Hypervibe accepts either a raw token or a copied authorization value such as `Bearer <token>` for Cloudflare.
 
-For an Account API Token, create it under `Manage Account -> Account API Tokens`, include the same zone permissions above, and connect it with `accountId`:
+If Hypervibe needs Cloudflare Registrar/domain purchase, use a **User API Token** instead because Cloudflare Registrar is not compatible with Account API Tokens. Create it under `My Profile -> API Tokens -> Create Token -> Edit zone DNS`, add the same zone permissions above, and connect it without `accountId`:
 
 ```text
-hv_connect provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}
+hv_connect provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"
 ```
 
 If the token is valid but Hypervibe cannot confirm zone access during `hv_connect`, the connection is still saved and verified with a warning; `hv_plan`/`hv_apply` will surface any remaining DNS or registrar-specific blockers.

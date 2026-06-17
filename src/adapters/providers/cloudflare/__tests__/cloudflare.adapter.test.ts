@@ -121,6 +121,7 @@ describe('CloudflareAdapter.verify', () => {
     expect(result.error).toContain('Manage Account > Account API Tokens');
     expect(result.error).toContain('CLOUDFLARE_ACCOUNT_ID');
     expect(result.error).toContain('Zone > Zone > Read');
+    expect(result.error).toContain('Zone > Zone Settings > Read or Edit');
     expect(result.error).toContain('Zone > DNS > Edit/Write');
   });
 
@@ -170,9 +171,10 @@ describe('CloudflareAdapter.verify', () => {
     const result = await adapter.verify('apreskeys.com');
 
     expect(result.success).toBe(false);
+    expect(result.error).toContain('Manage Account > Account API Tokens');
     expect(result.error).toContain('My Profile > API Tokens');
-    expect(result.error).toContain('Edit zone DNS');
     expect(result.error).toContain('Zone > Zone > Read');
+    expect(result.error).toContain('Zone > Zone Settings > Read or Edit');
     expect(result.error).toContain('Zone > DNS > Edit/Write');
   });
 });

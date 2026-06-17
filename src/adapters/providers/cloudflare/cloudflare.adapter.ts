@@ -5,7 +5,7 @@ import type { IDnsProvider, DnsZone, DnsRecord } from '../../../domain/ports/dns
 const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4';
 const CLOUDFLARE_USER_TOKEN_URL = 'https://dash.cloudflare.com/profile/api-tokens';
 const CLOUDFLARE_ACCOUNT_TOKEN_URL = 'https://dash.cloudflare.com/?to=/:account/api-tokens';
-const CLOUDFLARE_DNS_PERMISSIONS = 'Zone > Zone > Read and Zone > DNS > Edit/Write';
+const CLOUDFLARE_DNS_PERMISSIONS = 'Zone > Zone > Read, Zone > Zone Settings > Read or Edit, and Zone > DNS > Edit/Write';
 
 export interface CloudflareZone {
   id: string;
@@ -226,10 +226,10 @@ function tokenSetupHelp(kind: 'user' | 'account' | 'unknown', domain?: string): 
   }
   return [
     `Cloudflare rejected this API token${scope}.`,
-    `For the safest Hypervibe default, create a User API Token at My Profile > API Tokens: ${CLOUDFLARE_USER_TOKEN_URL}`,
-    `Use Create Token, start from the Edit zone DNS template, and grant ${CLOUDFLARE_DNS_PERMISSIONS} for the target zone.`,
-    `If you intentionally use an Account API Token, create it under Manage Account > Account API Tokens: ${CLOUDFLARE_ACCOUNT_TOKEN_URL}`,
-    'Account API Tokens require accountId and cannot be used for Cloudflare Registrar domain registration.',
+    `For durable DNS/email automation, create an Account API Token under Manage Account > Account API Tokens: ${CLOUDFLARE_ACCOUNT_TOKEN_URL}`,
+    `Grant ${CLOUDFLARE_DNS_PERMISSIONS} for the target zone.`,
+    'Account API Tokens require accountId in the Hypervibe credentials.',
+    `If Hypervibe needs Cloudflare Registrar/domain purchase, use a User API Token at My Profile > API Tokens instead: ${CLOUDFLARE_USER_TOKEN_URL}`,
   ].join(' ');
 }
 

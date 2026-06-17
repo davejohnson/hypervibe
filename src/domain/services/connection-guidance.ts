@@ -60,17 +60,19 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   cloudflare: {
     provider: 'cloudflare',
     displayName: 'Cloudflare',
-    tokenType: 'Cloudflare User API Token for the default Hypervibe flow',
-    setupUrl: 'https://dash.cloudflare.com/profile/api-tokens',
+    tokenType: 'Cloudflare Account API Token for durable DNS/email automation; User API Token only when Account API Tokens are unsupported',
+    setupUrl: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
     permissions: [
       'Zone -> Zone -> Read.',
+      'Zone -> Zone Settings -> Read or Edit.',
       'Zone -> DNS -> Edit/Write.',
       'Zone Resources: Include -> Specific zone -> the target domain.',
     ],
-    credentialExample: 'hv_connect provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"',
+    credentialExample: 'hv_connect provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}',
     notes: [
-      'Use My Profile -> API Tokens -> Create Token -> Edit zone DNS. Do not use the legacy Global API Key.',
-      'Account API Tokens can work for DNS when paired with accountId, but Cloudflare Registrar/domain purchase is not supported by Account API Tokens.',
+      'Create Account API Tokens from Manage Account -> Account API Tokens when possible; Cloudflare recommends them for credentials not associated with users.',
+      'For User API Tokens, use My Profile -> API Tokens -> Create Token -> Edit zone DNS and add Zone Settings. Do not use the legacy Global API Key.',
+      'Cloudflare Registrar/domain purchase is not supported by Account API Tokens; use a User API Token if Hypervibe needs to buy domains.',
     ],
   },
   cloudrun: {

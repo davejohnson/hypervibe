@@ -24,11 +24,13 @@ describe('connection guidance', () => {
   it('tells users the Cloudflare token type, URL, permissions, and scoped connect command', () => {
     const guidance = formatConnectionGuidance('cloudflare', { scope: 'invoiceperfect.com' });
 
-    expect(guidance).toContain('Cloudflare User API Token');
-    expect(guidance).toContain('https://dash.cloudflare.com/profile/api-tokens');
+    expect(guidance).toContain('Cloudflare Account API Token');
+    expect(guidance).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
     expect(guidance).toContain('Zone -> Zone -> Read');
+    expect(guidance).toContain('Zone -> Zone Settings -> Read or Edit');
     expect(guidance).toContain('Zone -> DNS -> Edit/Write');
     expect(guidance).toContain('scope="invoiceperfect.com"');
+    expect(guidance).toContain('accountId');
     expect(guidance).toContain('Do not use the legacy Global API Key');
   });
 
