@@ -230,24 +230,9 @@ export class CloudflareAdapter implements IDnsProvider {
     return data;
   }
 
-  async verify(domain?: string): Promise<{ success: boolean; error?: string; zones?: string[] }> {
+  async verify(domain?: string): Promise<{ success: boolean; error?: string; zones?: string[]; warning?: string }> {
     try {
       await this.request<{ id: string }>('GET', '/user/tokens/verify');
-
-      if (domain) {
-        const zone = await this.findZoneByName(domain);
-        if (!zone) {
-          const zones = await this.listZones();
-          const zoneNames = zones.map(z => z.name);
-          return {
-            success: false,
-            error: `Token is valid but does not have access to "${domain}". Accessible zones: ${zoneNames.join(', ') || 'none'}`,
-            zones: zoneNames,
-          };
-        }
-      }
-
-      return { success: true };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       // Global API Keys return 401 on /user/tokens/verify since that endpoint only works with API Tokens
@@ -259,6 +244,31 @@ export class CloudflareAdapter implements IDnsProvider {
       }
       return { success: false, error: msg };
     }
+
+    if (domain) {
+      try {
+        const zone = await this.findZoneByName(domain);
+        if (zone) {
+          return { success: true, zones: [zone.name] };
+        }
+
+        const zones = await this.listZones();
+        const zoneNames = zones.map(z => z.name);
+        return {
+          success: true,
+          zones: zoneNames,
+          warning: `Token is valid, but Hypervibe could not find a Cloudflare zone for "${domain}". If the zone already exists, make sure the token includes Zone:Read plus DNS:Edit for that zone. If Hypervibe will register the domain first, this is expected until Cloudflare creates the zone.`,
+        };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return {
+          success: true,
+          warning: `Token is valid, but Hypervibe could not confirm Cloudflare zone access for "${domain}" (${msg}). DNS automation needs zone visibility or an existing zone-scoped token with DNS permissions; domain registration may still be possible with account/registrar permissions.`,
+        };
+      }
+    }
+
+    return { success: true };
   }
 
   async listZones(): Promise<CloudflareZone[]> {

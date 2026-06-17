@@ -9,9 +9,10 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
-// Importing the adapter registers the railway provider in the registry.
+// Importing adapters registers providers in the registry.
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
+import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../context.js';
 
@@ -117,6 +118,28 @@ describe('hv_connect', () => {
     expect(decrypted.apiToken).toBe('gh-token');
     expect(decrypted.login).toBe('davejohnson');
     expect(decrypted.packageReadToken).toBe('gh-token');
+    await t.close();
+  });
+
+  it('surfaces provider verification warnings without failing the connection', async () => {
+    vi.spyOn(CloudflareAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      warning: 'Token is valid, but zone access was not confirmed.',
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'cloudflare',
+      scope: 'apreskeys.com',
+      credentials: { apiToken: 'cf-token' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.status).toBe('verified');
+    expect(result.warnings).toEqual(['Token is valid, but zone access was not confirmed.']);
+
+    const connection = new ConnectionRepository().findByProviderAndScope('cloudflare', 'apreskeys.com');
+    expect(connection?.status).toBe('verified');
     await t.close();
   });
 

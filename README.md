@@ -168,6 +168,18 @@ Typical team flow:
 
 ## Provider Credentials
 
+### Cloudflare token permissions
+
+Recommended: connect without pasting the token into chat:
+
+```bash
+export CLOUDFLARE_API_TOKEN=...
+```
+
+Then call `hv_connect provider=cloudflare scope="example.com" credentialsRef="env:CLOUDFLARE_API_TOKEN" credentialsKey="apiToken"`.
+
+For DNS automation on an existing zone, the token should be scoped to that zone and include zone read plus DNS edit permissions. If the token is valid but Hypervibe cannot confirm zone access during `hv_connect`, the connection is still saved and verified with a warning; `hv_plan`/`hv_apply` will surface any remaining DNS or registrar-specific blockers.
+
 ### GitHub token permissions
 
 Recommended: connect without pasting the token into chat by exporting it locally:

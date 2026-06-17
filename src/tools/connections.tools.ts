@@ -52,6 +52,12 @@ function refKind(ref: string): string {
   return ref.trim().startsWith('file:') ? 'file' : ref.trim().startsWith('env:') ? 'env' : 'unknown';
 }
 
+function warningExtras(data: Record<string, unknown>): { warnings: string[] } | undefined {
+  return typeof data.warning === 'string' && data.warning.trim()
+    ? { warnings: [data.warning] }
+    : undefined;
+}
+
 export function registerConnectionsTools(server: McpServer, ctx: ToolContext): void {
   const providerNames = [...new Set([...providerRegistry.names(), ...secretManagerRegistry.names()])];
   if (providerNames.length === 0) {
@@ -163,7 +169,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
           });
         }
 
-        return toolSuccess({
+        const data = {
           provider,
           scope: scope || 'global',
           status: 'verified',
@@ -172,20 +178,24 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
           ...verified.data,
           ...(saved.dependenciesInstalled ? { dependenciesInstalled: saved.dependenciesInstalled } : {}),
           ...(saved.dependencyErrors ? { dependencyErrors: saved.dependencyErrors } : {}),
-        });
+        };
+        return toolSuccess(data, warningExtras(data));
       }
 
       // action === 'verify'
       const verified = await verifyConnection(provider, scope);
       switch (verified.kind) {
         case 'verified':
-          return toolSuccess({
+        {
+          const data = {
             provider,
             scope: scope || 'global',
             status: 'verified',
             message: verified.message,
             ...verified.data,
-          });
+          };
+          return toolSuccess(data, warningExtras(data));
+        }
         case 'not_found':
           return toolError('NOT_FOUND', verified.error, {
             hint: 'Add the connection first with hv_connect action="add".',
