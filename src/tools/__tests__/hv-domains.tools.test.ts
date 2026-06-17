@@ -47,10 +47,10 @@ async function makeClient() {
   };
 }
 
-function seedCloudflareConnection(credentials: Record<string, unknown> = { apiToken: 'cf-token' }) {
+function seedCloudflareConnection(credentials: Record<string, unknown> = { apiToken: 'cf-token' }, scope?: string) {
   const repo = new ConnectionRepository();
   const encrypted = getSecretStore().encryptObject(credentials);
-  const conn = repo.create({ provider: 'cloudflare', credentialsEncrypted: encrypted });
+  const conn = repo.create({ provider: 'cloudflare', credentialsEncrypted: encrypted, scope });
   repo.updateStatus(conn.id, 'verified');
 }
 
@@ -72,6 +72,19 @@ describe('hv_dns_record', () => {
     const result = await t.call('hv_dns_record', { action: 'zones' });
     expect(result.ok).toBe(true);
     expect(JSON.stringify(result.data)).toContain('example.com');
+    await t.close();
+  });
+
+  it('lists zones using a verified scoped Cloudflare connection when no global connection exists', async () => {
+    seedCloudflareConnection({ apiToken: 'cf-token' }, 'invoiceperfect.com');
+    vi.spyOn(CloudflareAdapter.prototype, 'listZones').mockResolvedValue([
+      { id: 'zone-1', name: 'invoiceperfect.com', status: 'active', paused: false, name_servers: [] } as never,
+    ]);
+    const t = await makeClient();
+    const result = await t.call('hv_dns_record', { action: 'zones' });
+    expect(result.ok).toBe(true);
+    expect(result.data.tokenScope).toBe('invoiceperfect.com');
+    expect(result.data.zones).toContainEqual(expect.objectContaining({ name: 'invoiceperfect.com' }));
     await t.close();
   });
 

@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { CloudflareAdapter, CloudflareDnsRecord } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { setupCustomDomain } from '../domain/services/domain.service.js';
-import { getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.js';
+import { getAnyVerifiedCloudflareAdapter, getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
@@ -98,22 +98,27 @@ export function registerHvDomainsTools(server: McpServer, ctx: ToolContext): voi
       ttl: z.number().optional().describe('TTL in seconds (1 = automatic)'),
     },
     wrapHandler(async ({ action, zone, type, name, content, proxied, ttl }) => {
-      const adapterResult = getCloudflareAdapter(zone?.includes('.') ? zone : undefined);
-      if ('error' in adapterResult) {
-        return toolError('MISSING_CONNECTION', adapterResult.error);
-      }
-      const { adapter, scope } = adapterResult;
-
       if (action === 'zones') {
+        const adapterResult = getAnyVerifiedCloudflareAdapter();
+        if ('error' in adapterResult) {
+          return toolError('MISSING_CONNECTION', adapterResult.error);
+        }
+        const { adapter, scope } = adapterResult;
         const zones = await adapter.listZones();
         return toolSuccess({
           count: zones.length,
           tokenScope: scope ?? 'global',
           zones: zones.map((z) => ({ id: z.id, name: z.name, status: z.status, paused: z.paused, nameServers: z.name_servers })),
         }, {
-          hint: 'Only zones visible to the current API token are listed. Missing a domain? Add a scoped Cloudflare connection for it.',
+          hint: 'Only zones visible to the selected Cloudflare token are listed. Missing a domain? Add a scoped Cloudflare connection for it.',
         });
       }
+
+      const adapterResult = getCloudflareAdapter(zone?.includes('.') ? zone : undefined);
+      if ('error' in adapterResult) {
+        return toolError('MISSING_CONNECTION', adapterResult.error);
+      }
+      const { adapter } = adapterResult;
 
       if (!zone) {
         throw new HvError('VALIDATION', `zone is required for action "${action}".`, {
