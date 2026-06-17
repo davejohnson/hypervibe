@@ -20,4 +20,6 @@ When adding capabilities that create, mutate, purchase, migrate, or destroy infr
 
 Provider credentials and required external connections should be discovered as early as possible from the spec and reported before apply. Prefer `credentialsRef` with exported environment variables or local JSON files; raw credentials in chat are still accepted when the user intentionally chooses that path.
 
+For push deploys, `deploy.trigger: "ci"` is the portable default. It means Hypervibe manages generated GitHub Actions workflows that call provider APIs directly. Do not switch a project to `deploy.trigger: "native"` just to avoid missing CI/package/image credentials; that changes the desired infrastructure contract. Provider-native deploys are an explicit opt-in and may require provider-specific external app access such as the Railway GitHub App.
+
 Do not introduce dependencies on provider CLIs for infrastructure operations. Hypervibe should use its provider adapters and recorded connections so state, audit history, and drift detection stay coherent.

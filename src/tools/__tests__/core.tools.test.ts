@@ -214,6 +214,69 @@ describe('hv_spec_set / hv_spec_get', () => {
     await t.close();
   });
 
+  it('requires confirmation before switching branch deploys to provider-native integrations', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'native-switch-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/native-switch-app.git',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          },
+        },
+      },
+    });
+
+    const bad = await t.call('hv_spec_set', {
+      project: 'native-switch-app',
+      spec: {
+        environments: {
+          production: {
+            deploy: { strategy: 'branch', trigger: 'native', branch: 'main' },
+          },
+        },
+      },
+    });
+
+    expect(bad.ok).toBe(false);
+    expect(bad.error.code).toBe('CONFIRM_REQUIRED');
+    expect(bad.error.details).toContainEqual(expect.objectContaining({
+      environment: 'production',
+      provider: 'railway',
+    }));
+    expect(bad.hint).toContain('Do not switch from trigger="ci" to trigger="native"');
+
+    const get = await t.call('hv_spec_get', { project: 'native-switch-app' });
+    expect(get.data.spec.environments.production.deploy.trigger).toBe('ci');
+    await t.close();
+  });
+
+  it('allows provider-native branch deploys when explicitly confirmed', async () => {
+    const t = await makeClient();
+    const set = await t.call('hv_spec_set', {
+      confirmNativeDeploy: true,
+      spec: {
+        project: 'native-confirmed-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/native-confirmed-app.git',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            deploy: { strategy: 'branch', trigger: 'native', branch: 'main' },
+          },
+        },
+      },
+    });
+
+    expect(set.ok).toBe(true);
+    expect(set.data.spec.environments.production.deploy.trigger).toBe('native');
+    expect(set.warnings).toContainEqual(expect.stringContaining('Railway native deploys require the Railway GitHub App'));
+    await t.close();
+  });
+
   it('returns required connection setup immediately from the desired spec', async () => {
     const t = await makeClient();
     const set = await t.call('hv_spec_set', {

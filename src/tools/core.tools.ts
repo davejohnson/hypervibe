@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
-import { SpecStore } from '../domain/spec/spec.store.js';
+import { deepMergeSpec, SpecStore } from '../domain/spec/spec.store.js';
 import { projectSpecSchema, type ProjectSpec } from '../domain/spec/spec.schema.js';
 import { specToBootstrapParams } from '../domain/spec/spec-bootstrap.js';
 import { PlanService } from '../domain/plan/plan.service.js';
@@ -46,6 +46,39 @@ function validateHostingProviders(spec: ProjectSpec): void {
       });
     }
   }
+}
+
+function providerNativeDeployChanges(
+  nextSpec: ProjectSpec,
+  previousSpec: ProjectSpec | null
+): Array<{ environment: string; provider: string; branch?: string }> {
+  const changes: Array<{ environment: string; provider: string; branch?: string }> = [];
+  for (const [environmentName, environment] of Object.entries(nextSpec.environments)) {
+    if (environment.deploy?.strategy !== 'branch' || environment.deploy.trigger !== 'native') {
+      continue;
+    }
+    const previousEnvironment = previousSpec?.environments[environmentName];
+    const alreadyNative =
+      previousEnvironment?.hosting.provider === environment.hosting.provider
+      && previousEnvironment.deploy?.strategy === 'branch'
+      && previousEnvironment.deploy.trigger === 'native';
+    if (!alreadyNative) {
+      changes.push({
+        environment: environmentName,
+        provider: environment.hosting.provider,
+        ...(environment.deploy.branch ? { branch: environment.deploy.branch } : {}),
+      });
+    }
+  }
+  return changes;
+}
+
+function nativeDeployConfirmationHint(changes: Array<{ environment: string; provider: string; branch?: string }>): string {
+  const hasRailway = changes.some((change) => change.provider === 'railway');
+  const providerDetail = hasRailway
+    ? ' Railway native deploys require the Railway GitHub App and project-member GitHub access.'
+    : '';
+  return `Provider-native branch deploys are provider-specific and are not Hypervibe's portable default. Do not switch from trigger="ci" to trigger="native" to avoid GitHub package-read/image credentials.${providerDetail} If the user explicitly wants provider-native deploys, rerun hv_spec_set with confirmNativeDeploy=true.`;
 }
 
 function summarizeActions(actions: PlanAction[]) {
@@ -296,10 +329,11 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
     'Create or update the desired-state spec for a project (the single source of truth that hv_plan diffs against live infrastructure). When run inside a git worktree, Hypervibe writes .hypervibe/spec.json so teams share the same infrastructure intent. Merges by default; pass replace=true to overwrite. In a merge, set a key to null to delete it (e.g. remove a service).',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|rds|cloudsql|railway }, domain?, domainRegistration?: { provider: cloudflare, register?: boolean, years?, autoRenew?, privacyMode? }, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations? } } }. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows, while trigger "native" opts into provider-native repo integrations such as the Railway GitHub App. "manual" provisions infrastructure only.'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|rds|cloudsql|railway }, domain?, domainRegistration?: { provider: cloudflare, register?: boolean, years?, autoRenew?, privacyMode? }, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations? } } }. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows. trigger "native" is provider-specific, requires confirmNativeDeploy=true when newly introduced, and must not be used merely to avoid CI/package credentials. "manual" provisions infrastructure only.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
+      confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external app access such as the Railway GitHub App.'),
     },
-    wrapHandler(async ({ project: projectRef, spec, replace }) => {
+    wrapHandler(async ({ project: projectRef, spec, replace, confirmNativeDeploy }) => {
       let project = ctx.resolveProject({ project: projectRef });
       if (!project) {
         const name = (typeof spec.project === 'string' && spec.project.trim())
@@ -318,13 +352,25 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
       let result;
       try {
-        result = replace
-          ? specStore.replace(project, {
+        const previousSpec = specStore.get(project)?.spec ?? null;
+        const baseSpec = previousSpec ?? { version: 1 as const, project: project.name, environments: {} };
+        const candidateInput = replace
+          ? {
             version: 1,
             project: project.name,
             ...spec,
-          })
-          : specStore.merge(project, spec);
+          }
+          : deepMergeSpec(baseSpec, spec);
+        const candidateSpec = projectSpecSchema.parse(candidateInput);
+        const nativeChanges = providerNativeDeployChanges(candidateSpec, previousSpec);
+        if (nativeChanges.length > 0 && !confirmNativeDeploy) {
+          throw new HvError('CONFIRM_REQUIRED', 'Provider-native branch deploys require explicit confirmation.', {
+            details: nativeChanges,
+            hint: nativeDeployConfirmationHint(nativeChanges),
+          });
+        }
+        validateHostingProviders(candidateSpec);
+        result = specStore.replace(project, candidateSpec);
       } catch (error) {
         if (error instanceof z.ZodError) {
           throw new HvError('VALIDATION', 'Spec failed validation.', {
@@ -334,9 +380,12 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         }
         throw error;
       }
-      validateHostingProviders(result.spec);
       project = syncProjectGitRemoteUrl(ctx, project, result.spec);
       const connections = requiredConnectionChecklist(ctx, result.spec);
+      const nativeDeploys = providerNativeDeployChanges(result.spec, null);
+      const warnings = nativeDeploys.length > 0
+        ? [nativeDeployConfirmationHint(nativeDeploys)]
+        : [];
 
       return toolSuccess(
         {
@@ -350,6 +399,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           hint: connections.missing.length > 0
             ? `Connect required providers first: ${connections.missing.map((item) => item.provider).join(', ')}.`
             : undefined,
+          warnings,
           next: connections.missing.length > 0 ? ['hv_connect', 'hv_plan'] : ['hv_plan'],
         }
       );
