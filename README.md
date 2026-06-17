@@ -240,6 +240,25 @@ No data is sent to external servers except the providers you connect.
 
 You can override the storage location by setting `HYPERVIBE_DATA_DIR` when launching the MCP server.
 
+## Updating Existing Projects
+
+Hypervibe has three kinds of state to keep current:
+
+- **The installed Hypervibe package** in Codex, Claude, or another MCP client.
+- **Local Hypervibe state** in `~/.hypervibe`, especially the SQLite database schema and encrypted provider connections.
+- **Repo-backed project state** in `.hypervibe/spec.json` and `.hypervibe/bindings.json`, which should be committed with the app.
+
+Normal upgrade flow:
+
+1. Update the MCP server package in the client config, for example by using the latest published `@davejohnson/hypervibe` package.
+2. Restart the MCP client/server so the new Hypervibe code starts.
+3. Run `hv_upgrade`.
+4. If it reports pending SQLite migrations, run `hv_upgrade action="migrate"` and restart the MCP server once more.
+5. In each app repo, pull the latest `.hypervibe/spec.json` and `.hypervibe/bindings.json`, then run `hv_status` or `hv_plan`.
+6. Commit any intended changes Hypervibe makes to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, generated CI workflows, or other repo files.
+
+SQLite migrations are also run automatically at Hypervibe startup, so most users should only need `hv_upgrade` as a visibility/check tool. Provider credentials remain local and encrypted; teammates may still need to run `hv_connect` for their own Railway, GitHub, Cloudflare, SendGrid, AWS, or GCP access after upgrading.
+
 ## Adding New Providers
 
 Providers self-register through the plugin system:

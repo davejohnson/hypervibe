@@ -60,6 +60,37 @@ async function seedRuns() {
   return { project, environment, older, newer };
 }
 
+describe('hv_upgrade', () => {
+  it('reports package, storage, schema, repo, and local state status', async () => {
+    new ProjectRepository().create({ name: 'upgrade-app' });
+    const t = await makeClient();
+
+    const status = await t.call('hv_upgrade');
+    expect(status.ok).toBe(true);
+    expect(status.data.hypervibe.version).toBeTypeOf('string');
+    expect(status.data.storage.databasePath).toContain('test.db');
+    expect(status.data.sqlite.needsMigration).toBe(false);
+    expect(status.data.sqlite.currentVersion).toBe(status.data.sqlite.latestVersion);
+    expect(status.data.localState.projects).toBe(1);
+    expect(status.data.repo).toHaveProperty('spec');
+    expect(status.next).toEqual(['hv_status', 'hv_plan']);
+    await t.close();
+  });
+
+  it('can explicitly migrate a stale local database', async () => {
+    SqliteAdapter.resetInstance();
+    SqliteAdapter.getInstance(path.join(tempDir, 'stale.db'));
+    const t = await makeClient();
+
+    const migrated = await t.call('hv_upgrade', { action: 'migrate' });
+    expect(migrated.ok).toBe(true);
+    expect(migrated.data.sqlite.needsMigration).toBe(false);
+    expect(migrated.data.sqlite.currentVersion).toBe(migrated.data.sqlite.latestVersion);
+    expect(migrated.data.sqlite.appliedNow.length).toBeGreaterThan(0);
+    await t.close();
+  });
+});
+
 describe('hv_runs', () => {
   it('lists seeded runs with the latest run surfaced first', async () => {
     const { newer } = await seedRuns();

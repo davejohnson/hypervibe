@@ -41,7 +41,7 @@ const groups = new Map([
   ['Payments', /^hv_(payments_|stripe_)/],
   ['CI', /^hv_ci_/],
   ['App Store & iOS', /^hv_(appstore_|testflight_|appid_|xcode_)/],
-  ['Developer experience', /^hv_(tunnel|local_bootstrap|visualize|runs)$/],
+  ['Developer experience', /^hv_(upgrade|tunnel|local_bootstrap|visualize|runs)$/],
 ]);
 
 const generatedAt = new Date().toISOString();

@@ -42,7 +42,7 @@ const EXPECTED_TOOLS = [
   'hv_appstore_status', 'hv_testflight_upload', 'hv_testflight_distribute',
   'hv_appstore_submit', 'hv_appstore_assets', 'hv_appid_register', 'hv_xcode_deploy',
   // DevX
-  'hv_tunnel', 'hv_local_bootstrap', 'hv_visualize', 'hv_runs',
+  'hv_upgrade', 'hv_tunnel', 'hv_local_bootstrap', 'hv_visualize', 'hv_runs',
 ].sort();
 
 async function makeClient() {
@@ -55,12 +55,12 @@ async function makeClient() {
 }
 
 describe('server tool surface', () => {
-  it('registers exactly the 42 pinned hv_* tools', async () => {
+  it('registers exactly the 43 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
-    expect(names).toHaveLength(42);
+    expect(names).toHaveLength(43);
     await client.close();
     await server.close();
   });

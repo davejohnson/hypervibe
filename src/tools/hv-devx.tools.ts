@@ -6,15 +6,138 @@ import path from 'path';
 import type { ToolContext } from './context.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { SqliteAdapter } from '../adapters/db/sqlite.adapter.js';
 import { tunnelManager, getTunnelConfig } from '../adapters/providers/tunnel/tunnel.manager.js';
 import { ComposeGenerator } from '../adapters/providers/local/compose.generator.js';
 import type { ComponentType } from '../domain/entities/component.entity.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { generateVisualizationHtml } from './visualize.template.js';
+import { findRepoRoot, readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
+import { readRepoBindingsFile } from '../domain/spec/repo-bindings-file.js';
 
 const componentTypeField = z.enum(['postgres', 'redis', 'mysql', 'mongodb']);
 
+function readPackageVersion(): string {
+  try {
+    const packageJson = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version?: unknown };
+    return typeof packageJson.version === 'string' ? packageJson.version : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function repoUpgradeState(): Record<string, unknown> {
+  const root = findRepoRoot();
+  const state: Record<string, unknown> = {
+    root,
+    spec: { present: false },
+    bindings: { present: false },
+  };
+
+  try {
+    const specFile = readRepoSpecFile();
+    state.spec = specFile
+      ? {
+        present: true,
+        valid: true,
+        path: specFile.path,
+        project: specFile.spec.project,
+        environments: Object.keys(specFile.spec.environments),
+      }
+      : { present: false };
+  } catch (error) {
+    state.spec = {
+      present: true,
+      valid: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  try {
+    const bindingsFile = readRepoBindingsFile();
+    state.bindings = bindingsFile
+      ? {
+        present: true,
+        valid: true,
+        path: bindingsFile.path,
+        project: bindingsFile.document.project,
+        environments: Object.keys(bindingsFile.document.environments),
+      }
+      : { present: false };
+  } catch (error) {
+    state.bindings = {
+      present: true,
+      valid: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  return state;
+}
+
 export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
+  server.tool(
+    'hv_upgrade',
+    'Inspect or apply Hypervibe local upgrade tasks after updating the package. action="status" reports package version, SQLite schema migrations, repo-backed spec/bindings files, and local connection/project counts. action="migrate" explicitly applies pending local SQLite migrations; startup normally does this automatically.',
+    {
+      action: z.enum(['status', 'migrate']).optional().describe('Upgrade operation (default: status)'),
+      project: projectField,
+    },
+    wrapHandler(async ({ action = 'status', project: projectRef }) => {
+      const adapter = SqliteAdapter.getInstance();
+      const appliedNow = action === 'migrate' ? adapter.migrate() : [];
+      const schema = adapter.getMigrationStatus();
+      const projects = ctx.repos.projects.findAll();
+      const connections = ctx.repos.connections.findAll();
+      const project = projectRef
+        ? ctx.resolveProjectOrThrow({ project: projectRef })
+        : ctx.resolveProject({});
+
+      return toolSuccess(
+        {
+          hypervibe: {
+            version: readPackageVersion(),
+            upgradeAction: action,
+          },
+          storage: {
+            dataDir: schema.dataDir,
+            databasePath: schema.databasePath,
+          },
+          sqlite: {
+            currentVersion: schema.currentVersion,
+            latestVersion: schema.latestVersion,
+            needsMigration: schema.needsMigration,
+            appliedCount: schema.applied.length,
+            pending: schema.pending,
+            appliedNow: appliedNow.map((migration) => ({ version: migration.version, name: migration.name })),
+          },
+          localState: {
+            projects: projects.length,
+            connections: connections.length,
+            verifiedConnections: connections.filter((connection) => connection.status === 'verified').length,
+          },
+          repo: repoUpgradeState(),
+          ...(project
+            ? {
+              project: {
+                id: project.id,
+                name: project.name,
+                gitRemoteUrl: project.gitRemoteUrl,
+                environments: ctx.repos.environments.findByProjectId(project.id).map((environment) => environment.name),
+              },
+            }
+            : {}),
+        },
+        {
+          hint: schema.needsMigration
+            ? 'Run hv_upgrade action="migrate", then restart the MCP server and run hv_status or hv_plan in each repo.'
+            : 'Hypervibe local state is on the current schema. After a package update, run hv_status or hv_plan in each repo to reconcile repo spec/bindings and live infrastructure drift.',
+          next: schema.needsMigration ? ['hv_upgrade action="migrate"', 'hv_status', 'hv_plan'] : ['hv_status', 'hv_plan'],
+        }
+      );
+    })
+  );
+
   server.tool(
     'hv_tunnel',
     'Manage webhook tunnels that expose a local port to the internet (for testing webhooks from Stripe, SendGrid, etc.). action="start" needs port; "stop"/"status" need tunnelId (or port, from which the id is derived); "list" shows all active tunnels.',

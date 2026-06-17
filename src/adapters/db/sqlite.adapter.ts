@@ -300,12 +300,26 @@ const migrations: Migration[] = [
   },
 ];
 
+export const CURRENT_SCHEMA_VERSION = migrations[migrations.length - 1]?.version ?? 0;
+
+export interface SchemaMigrationStatus {
+  dataDir: string;
+  databasePath: string;
+  currentVersion: number;
+  latestVersion: number;
+  applied: Array<{ version: number; name: string; appliedAt?: string }>;
+  pending: Array<{ version: number; name: string }>;
+  needsMigration: boolean;
+}
+
 export class SqliteAdapter {
   private db: Database.Database;
+  private dbPath: string;
   private static instance: SqliteAdapter | null = null;
 
   private constructor(dbPath?: string) {
     const finalPath = dbPath ?? path.join(DATA_DIR, 'hypervibe.db');
+    this.dbPath = finalPath;
     const dir = path.dirname(finalPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -333,8 +347,11 @@ export class SqliteAdapter {
     return this.db;
   }
 
-  migrate(): void {
-    // Ensure schema_migrations exists first
+  getDatabasePath(): string {
+    return this.dbPath;
+  }
+
+  private ensureMigrationsTable(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY,
@@ -342,6 +359,31 @@ export class SqliteAdapter {
         applied_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+  }
+
+  getMigrationStatus(): SchemaMigrationStatus {
+    this.ensureMigrationsTable();
+    const applied = this.db
+      .prepare('SELECT version, name, applied_at as appliedAt FROM schema_migrations ORDER BY version ASC')
+      .all() as Array<{ version: number; name: string; appliedAt?: string }>;
+    const appliedVersions = new Set(applied.map((row) => row.version));
+    const pending = migrations
+      .filter((migration) => !appliedVersions.has(migration.version))
+      .map((migration) => ({ version: migration.version, name: migration.name }));
+
+    return {
+      dataDir: DATA_DIR,
+      databasePath: this.dbPath,
+      currentVersion: applied.length > 0 ? Math.max(...applied.map((row) => row.version)) : 0,
+      latestVersion: CURRENT_SCHEMA_VERSION,
+      applied,
+      pending,
+      needsMigration: pending.length > 0,
+    };
+  }
+
+  migrate(): Migration[] {
+    this.ensureMigrationsTable();
 
     const appliedVersions = new Set(
       this.db
@@ -350,6 +392,7 @@ export class SqliteAdapter {
         .map((row: unknown) => (row as { version: number }).version)
     );
 
+    const appliedNow: Migration[] = [];
     for (const migration of migrations) {
       if (!appliedVersions.has(migration.version)) {
         this.db.transaction(() => {
@@ -358,9 +401,11 @@ export class SqliteAdapter {
             .prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)')
             .run(migration.version, migration.name);
         })();
+        appliedNow.push(migration);
         console.error(`Applied migration ${migration.version}: ${migration.name}`);
       }
     }
+    return appliedNow;
   }
 
   close(): void {
