@@ -107,7 +107,7 @@ This keeps tools simple and leverages Claude's intelligence.
 
 ## Architecture
 
-- **Tools** (`src/tools/`): the 42 `hv_*` MCP tools (registered in `src/server.ts` via `ToolContext`); all responses use the `toolSuccess`/`toolError` envelope from `src/tools/respond.ts`
+- **Tools** (`src/tools/`): the pinned `hv_*` MCP tool surface (registered in `src/server.ts` via `ToolContext`); all responses use the `toolSuccess`/`toolError` envelope from `src/tools/respond.ts`
 - **Spec** (`src/domain/spec/`): the desired-state document (`ProjectSpec`, revisioned in the `project_specs` table via `SpecStore`)
 - **Plan** (`src/domain/plan/`): the reconciliation engine — observe live state, pure `diffEnvironment`, `ConvergeExecutor` with the planId handshake
 - **Adapters** (`src/adapters/`): External integrations (Railway, GCP, secrets, DB)

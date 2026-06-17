@@ -448,10 +448,10 @@
         <aside class="panel fadeUp delay2" aria-label="Quick install">
           <div class="panelInner">
             <div class="panelTitle">Codex MCP Install</div>
-            <pre><code>codex mcp add hypervibe -- npx hypervibe
+            <pre><code>codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest
 codex mcp list</code></pre>
             <p style="margin: 10px 2px 0; font-family: var(--mono); color: var(--muted); font-size: 12.5px;">
-              Hypervibe runs as an MCP server via <code>npx hypervibe</code>.
+              Hypervibe runs as an MCP server via <code>npx -y @davejohnson/hypervibe@latest</code>.
             </p>
           </div>
         </aside>
@@ -464,7 +464,7 @@ codex mcp list</code></pre>
   "mcpServers": {
     "hypervibe": {
       "command": "npx",
-      "args": ["hypervibe"]
+      "args": ["-y", "@davejohnson/hypervibe@latest"]
     }
   }
 }</code></pre>
@@ -494,7 +494,7 @@ codex mcp list</code></pre>
       <section id="install" class="section fadeUp delay1">
         <h2>Install</h2>
         <p class="sub">Register the MCP server with your client.</p>
-        <pre><code>codex mcp add hypervibe -- npx hypervibe
+        <pre><code>codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest
 codex mcp list</code></pre>
       </section>
 

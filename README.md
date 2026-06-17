@@ -43,7 +43,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 ### 1. Install As Codex MCP
 
 ```bash
-codex mcp add hypervibe -- npx hypervibe
+codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest
 codex mcp list
 ```
 
@@ -56,7 +56,7 @@ Add to `~/.claude/settings.json`:
   "mcpServers": {
     "hypervibe": {
       "command": "npx",
-      "args": ["hypervibe"]
+      "args": ["-y", "@davejohnson/hypervibe@latest"]
     }
   }
 }
@@ -128,7 +128,7 @@ Secret references use the format: `provider://path[#key][@version]`
 
 ## Available Tools
 
-Hypervibe exposes a focused surface of 42 intent-level `hv_*` tools. The core is a terraform-style loop:
+Hypervibe exposes a focused surface of intent-level `hv_*` tools. The core is a terraform-style loop:
 
 1. `hv_spec_set` — declare the desired state (services, database, domain, email, env vars) as a revisioned spec
 2. `hv_plan` — observe live infrastructure, diff against the spec, and get an executable plan
@@ -248,16 +248,17 @@ Hypervibe has three kinds of state to keep current:
 - **Local Hypervibe state** in `~/.hypervibe`, especially the SQLite database schema and encrypted provider connections.
 - **Repo-backed project state** in `.hypervibe/spec.json` and `.hypervibe/bindings.json`, which should be committed with the app.
 
-Normal upgrade flow:
+The default install command uses `@davejohnson/hypervibe@latest`, so users should not need to know or remember a package-upgrade command. When Codex, Claude, or another MCP client restarts the Hypervibe server, `npx` resolves the latest published package and Hypervibe automatically runs any pending SQLite migrations at startup.
 
-1. Update the MCP server package in the client config, for example by using the latest published `@davejohnson/hypervibe` package.
-2. Restart the MCP client/server so the new Hypervibe code starts.
-3. Run `hv_upgrade`.
-4. If it reports pending SQLite migrations, run `hv_upgrade action="migrate"` and restart the MCP server once more.
-5. In each app repo, pull the latest `.hypervibe/spec.json` and `.hypervibe/bindings.json`, then run `hv_status` or `hv_plan`.
-6. Commit any intended changes Hypervibe makes to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, generated CI workflows, or other repo files.
+Normal update flow:
 
-SQLite migrations are also run automatically at Hypervibe startup, so most users should only need `hv_upgrade` as a visibility/check tool. Provider credentials remain local and encrypted; teammates may still need to run `hv_connect` for their own Railway, GitHub, Cloudflare, SendGrid, AWS, or GCP access after upgrading.
+1. Restart the MCP client/server so `npx -y @davejohnson/hypervibe@latest` starts the newest published package.
+2. In each app repo, pull the latest `.hypervibe/spec.json` and `.hypervibe/bindings.json`, then run `hv_status` or `hv_plan`.
+3. Commit any intended changes Hypervibe makes to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, generated CI workflows, or other repo files.
+
+`hv_upgrade` is a diagnostic/repair tool, not a required user ritual. Use it when something looks stale or after changing the MCP install command; it reports the running package version, local SQLite schema version, pending migrations, repo spec/bindings status, and connection counts. If it reports pending SQLite migrations, run `hv_upgrade action="migrate"` and restart the MCP server once more.
+
+Provider credentials remain local and encrypted. Teammates may still need to run `hv_connect` for their own Railway, GitHub, Cloudflare, SendGrid, AWS, or GCP access after installing Hypervibe, but ordinary Hypervibe package and SQLite schema upgrades should happen on restart.
 
 ## Adding New Providers
 
