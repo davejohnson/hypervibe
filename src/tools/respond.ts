@@ -193,7 +193,7 @@ function actionIcon(type?: string): string {
 function emphasizeLabel(line: string): string {
   const match = /^([A-Za-z][A-Za-z0-9 _/-]{0,47}):\s*(.*)$/.exec(line);
   if (!match) return line;
-  return `**${match[1]}**: ${match[2]}`;
+  return `${match[1]}: ${match[2]}`;
 }
 
 function scalarText(value: unknown): string {
@@ -285,7 +285,7 @@ function summarizeConnection(value: unknown): string {
   const status = typeof value.status === 'string' ? value.status : undefined;
   const scope = typeof value.scope === 'string' ? `for ${value.scope}` : undefined;
   const reasons = Array.isArray(value.reasons) ? `(${value.reasons.join(', ')})` : undefined;
-  return [statusIcon(status), `**${provider}**`, scope, status, reasons].filter(Boolean).join(' ');
+  return [statusIcon(status), provider, scope, status, reasons].filter(Boolean).join(' ');
 }
 
 function summarizeValue(value: unknown): string {
@@ -411,14 +411,14 @@ function formatEnvelope(payload: ToolEnvelope): string {
     });
   };
   if (payload.ok) {
-    lines.push('🟢 **Hypervibe OK**');
+    lines.push('🟢 Hypervibe OK');
   } else {
-    lines.push(`🔴 **${payload.error?.code ?? 'UNKNOWN'}**`);
+    lines.push(`🔴 ${payload.error?.code ?? 'UNKNOWN'}`);
     lines.push(payload.error?.message ?? 'Unknown error');
   }
 
   if (payload.data !== undefined) {
-    lines.push('', '📦 **Data**');
+    lines.push('', '📦 Data');
     const dataLines = isRecord(payload.data)
       ? formatRecordLines(payload.data)
       : [summarizeValue(payload.data)];
@@ -426,7 +426,7 @@ function formatEnvelope(payload: ToolEnvelope): string {
   }
 
   if (!payload.ok && payload.error?.details !== undefined) {
-    lines.push('', '🔎 **Details**');
+    lines.push('', '🔎 Details');
     const detailLines = isRecord(payload.error.details)
       ? formatRecordLines(payload.error.details)
       : Array.isArray(payload.error.details)
@@ -436,16 +436,16 @@ function formatEnvelope(payload: ToolEnvelope): string {
   }
 
   if (payload.warnings?.length) {
-    lines.push('', '🟡 **Warnings**');
+    lines.push('', '🟡 Warnings');
     payload.warnings.forEach((warning) => lines.push(`• ${warning}`));
   }
 
   if (payload.hint) {
-    lines.push('', '💡 **Hint**', payload.hint);
+    lines.push('', '💡 Hint', payload.hint);
   }
 
   if (payload.next?.length) {
-    lines.push('', '➡️ **Next**', payload.next.map((step) => `\`${step}\``).join(' → '));
+    lines.push('', '➡️ Next', payload.next.map((step) => `\`${step}\``).join(' → '));
   }
 
   return lines.join('\n');
