@@ -184,8 +184,9 @@ export function providerSecretsForGitHubActions(
         ?? (typeof credentials.login === 'string' ? credentials.login : undefined)
         ?? (typeof credentials.username === 'string' ? credentials.username : undefined);
       const token =
-        (typeof credentials.packageReadToken === 'string' && credentials.packageReadToken.length > 0 ? credentials.packageReadToken : undefined)
-        ?? (typeof credentials.packagesToken === 'string' && credentials.packagesToken.length > 0 ? credentials.packagesToken : undefined);
+        typeof credentials.packageReadToken === 'string' && credentials.packageReadToken.length > 0
+          ? credentials.packageReadToken
+          : undefined;
 
       if (username && token) {
         secrets.push(

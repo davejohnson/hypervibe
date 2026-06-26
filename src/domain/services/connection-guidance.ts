@@ -138,7 +138,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'A read:packages-only token is not enough for CI deploy setup because it cannot write workflows or repository secrets.',
       'For the simplest setup, create one classic PAT with repo, workflow, and read:packages, then map both apiToken and packageReadToken to the same .env variable.',
       'For least privilege, use two classic PATs: HYPERVIBE_GITHUB_TOKEN with repo + workflow, and HYPERVIBE_GITHUB_PACKAGES_TOKEN with read:packages.',
-      'packagesToken is accepted only as a backward-compatible alias; use packageReadToken in new configs and docs.',
     ],
   },
   heroku: {

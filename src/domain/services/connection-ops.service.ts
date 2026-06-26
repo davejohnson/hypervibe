@@ -202,19 +202,14 @@ export async function verifyConnection(provider: string, scope?: string): Promis
           apiToken?: string;
           login?: string;
           packageReadToken?: string;
-          packagesToken?: string;
         };
         const tokenHasPackageRead =
           result.scopes?.includes('read:packages') === true
           || result.scopes?.includes('write:packages') === true;
-        const legacyPackagesToken = typeof creds.packagesToken === 'string' && creds.packagesToken.length > 0
-          ? creds.packagesToken
-          : undefined;
         const nextCreds = {
           ...creds,
           ...(creds.login !== result.login ? { login: result.login } : {}),
-          ...(legacyPackagesToken && !creds.packageReadToken ? { packageReadToken: legacyPackagesToken } : {}),
-          ...(tokenHasPackageRead && creds.apiToken && !creds.packageReadToken && !creds.packagesToken
+          ...(tokenHasPackageRead && creds.apiToken && !creds.packageReadToken
             ? { packageReadToken: creds.apiToken }
             : {}),
         };

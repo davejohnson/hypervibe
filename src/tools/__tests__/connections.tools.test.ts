@@ -201,7 +201,7 @@ describe('hv_connect', () => {
     await t.close();
   });
 
-  it('normalizes legacy GitHub packagesToken to packageReadToken', async () => {
+  it('rejects the non-canonical GitHub packagesToken credential key', async () => {
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
       login: 'davejohnson',
@@ -214,15 +214,14 @@ describe('hv_connect', () => {
       scope: 'davejohnson/apreskeys.com',
       credentials: {
         apiToken: 'gh-api-token',
-        packagesToken: 'legacy-package-token',
+        packagesToken: 'package-token',
       },
     });
 
-    expect(result.ok).toBe(true);
-    const connection = new ConnectionRepository().findByProviderAndScope('github', 'davejohnson/apreskeys.com')!;
-    const decrypted = getSecretStore().decryptObject<{ packageReadToken?: string; packagesToken?: string }>(connection.credentialsEncrypted);
-    expect(decrypted.packageReadToken).toBe('legacy-package-token');
-    expect(decrypted.packagesToken).toBe('legacy-package-token');
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('packagesToken');
+    expect(new ConnectionRepository().findByProviderAndScope('github', 'davejohnson/apreskeys.com')).toBeNull();
     await t.close();
   });
 

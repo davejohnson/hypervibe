@@ -10,9 +10,8 @@ export const GitHubCredentialsSchema = z.object({
   apiToken: z.string().min(1, 'API token is required'),
   login: z.string().min(1).optional(),
   username: z.string().min(1).optional(),
-  packagesToken: z.string().min(1).optional(),
   packageReadToken: z.string().min(1).optional(),
-});
+}).strict();
 
 export type GitHubCredentials = z.infer<typeof GitHubCredentialsSchema>;
 
