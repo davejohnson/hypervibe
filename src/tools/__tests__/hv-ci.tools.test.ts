@@ -22,10 +22,11 @@ beforeEach(() => {
   tempDir = mkdtempSync(path.join(tmpdir(), 'hypervibe-hv-ci-'));
   SqliteAdapter.getInstance(path.join(tempDir, 'test.db')).migrate();
 
-  new ConnectionRepository().create({
+  const github = new ConnectionRepository().create({
     provider: 'github',
     credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'gh-token' }),
   });
+  new ConnectionRepository().updateStatus(github.id, 'verified');
 });
 
 afterEach(() => {
@@ -361,6 +362,27 @@ describe('hv_ci_status', () => {
     expect(res.ok).toBe(true);
     expect(res.data.workflows).toEqual([{ id: 7, name: 'Tests', path: '.github/workflows/test.yml', state: 'active' }]);
     expect(res.data.branchProtection).toEqual({ branch: 'main', protected: false });
+    await t.close();
+  });
+
+  it('uses a verified fallback GitHub connection when an exact scoped connection is unverified', async () => {
+    seedProject();
+    const connectionRepo = new ConnectionRepository();
+    connectionRepo.create({
+      provider: 'github',
+      scope: 'davejohnson/billforge',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'bad-scoped-token' }),
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
+      total_count: 1,
+      workflows: [{ id: 7, name: 'Tests', path: '.github/workflows/test.yml', state: 'active', created_at: '2026-01-01' } as any],
+    });
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', { project: 'billforge', include: ['workflows'] });
+
+    expect(res.ok).toBe(true);
+    expect(res.data.workflows).toEqual([{ id: 7, name: 'Tests', path: '.github/workflows/test.yml', state: 'active' }]);
     await t.close();
   });
 

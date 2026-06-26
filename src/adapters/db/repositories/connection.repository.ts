@@ -107,6 +107,30 @@ export class ConnectionRepository {
   }
 
   /**
+   * Find the best verified matching connection for a provider and scope hint.
+   * Same priority as findBestMatch, but skips pending/failed connections so a
+   * stale scoped row does not shadow a usable global or wildcard connection.
+   */
+  findBestVerifiedMatch(provider: string, scopeHint?: string | null): Connection | null {
+    const exactOrBest = this.findBestMatch(provider, scopeHint);
+    if (exactOrBest?.status === 'verified') {
+      return exactOrBest;
+    }
+
+    if (!scopeHint) {
+      return this.findAllByProvider(provider).find((connection) => connection.status === 'verified') ?? null;
+    }
+
+    const candidates = this.findAllByProvider(provider)
+      .filter((connection) => connection.status === 'verified')
+      .map((connection) => ({ connection, rank: this.scopeMatchRank(connection.scope, scopeHint) }))
+      .filter((entry): entry is { connection: Connection; rank: number } => entry.rank !== null)
+      .sort((a, b) => a.rank - b.rank);
+
+    return candidates[0]?.connection ?? null;
+  }
+
+  /**
    * Find the best matching connection using multiple scope hints.
    * Tries each hint in order, then falls back to global.
    */
@@ -123,6 +147,24 @@ export class ConnectionRepository {
     }
 
     return this.findByProvider(provider);
+  }
+
+  /**
+   * Find the best verified matching connection using multiple scope hints.
+   */
+  findBestVerifiedMatchFromHints(provider: string, scopeHints?: string[]): Connection | null {
+    if (!scopeHints || scopeHints.length === 0) {
+      return this.findBestVerifiedMatch(provider);
+    }
+
+    for (const hint of scopeHints) {
+      const match = this.findBestVerifiedMatch(provider, hint);
+      if (match) {
+        return match;
+      }
+    }
+
+    return this.findBestVerifiedMatch(provider);
   }
 
   findAll(): Connection[] {
@@ -204,5 +246,18 @@ export class ConnectionRepository {
       createdAt: new Date(row.created_at as string),
       updatedAt: new Date(row.updated_at as string),
     };
+  }
+
+  private scopeMatchRank(connectionScope: string | null, scopeHint: string): number | null {
+    if (connectionScope === scopeHint) {
+      return 0;
+    }
+    if (connectionScope?.endsWith('/*') && scopeHint.startsWith(connectionScope.slice(0, -1))) {
+      return 1;
+    }
+    if (connectionScope === null) {
+      return 2;
+    }
+    return null;
   }
 }

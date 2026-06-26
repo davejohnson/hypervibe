@@ -123,9 +123,9 @@ export function providerSecretsForGitHubActions(
   options: { githubLogin?: string; githubRepo?: string } = {}
 ): ProviderSecret[] {
   const secrets: ProviderSecret[] = [];
-  const connection = connectionRepo.findByProvider(provider);
+  const connection = connectionRepo.findBestVerifiedMatch(provider);
 
-  if (connection?.status === 'verified') {
+  if (connection) {
     const credentials = secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
     switch (provider) {
       case 'railway':
@@ -176,8 +176,15 @@ export function providerSecretsForGitHubActions(
   }
 
   if (PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL.has(provider)) {
-    const githubConnection = connectionRepo.findBestMatch('github', options.githubRepo);
-    if (githubConnection?.status === 'verified') {
+    const githubConnections = connectionRepo.findAllByProvider('github')
+      .filter((connection) => connection.status === 'verified')
+      .flatMap((connection) => {
+        const rank = githubConnectionRank(connection.scope, options.githubRepo);
+        return rank === null ? [] : [{ connection, rank }];
+      })
+      .sort((a, b) => a.rank - b.rank);
+
+    for (const { connection: githubConnection } of githubConnections) {
       const credentials = secretStore.decryptObject<Record<string, unknown>>(githubConnection.credentialsEncrypted);
       const username =
         options.githubLogin
@@ -193,11 +200,28 @@ export function providerSecretsForGitHubActions(
           { name: 'IMAGE_REGISTRY_USERNAME', value: username },
           { name: 'IMAGE_REGISTRY_TOKEN', value: token }
         );
+        break;
       }
     }
   }
 
   return secrets;
+}
+
+function githubConnectionRank(scope: string | null, repo?: string): number | null {
+  if (!repo) {
+    return scope === null ? 0 : 1;
+  }
+  if (scope === repo) {
+    return 0;
+  }
+  if (scope?.endsWith('/*') && repo.startsWith(scope.slice(0, -1))) {
+    return 1;
+  }
+  if (scope === null) {
+    return 2;
+  }
+  return null;
 }
 
 function ciBindings(environment: Environment | null): Record<string, WorkflowCiBinding> {

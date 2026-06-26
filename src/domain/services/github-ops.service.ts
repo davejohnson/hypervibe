@@ -220,9 +220,9 @@ export const GITHUB_PAGES_IPS = [
  * @param scopeHint - Optional scope hint (e.g., "owner/repo" or "owner/*") for finding scoped tokens
  */
 export function getGitHubAdapter(scopeHint?: string): { adapter: GitHubAdapter } | { error: string } {
-  const connection = connectionRepo.findBestMatch('github', scopeHint);
+  const connection = connectionRepo.findBestVerifiedMatch('github', scopeHint);
   if (!connection) {
-    return { error: `No GitHub connection found. ${formatConnectionGuidance('github', { scope: scopeHint })}` };
+    return { error: `No verified GitHub connection found. ${formatConnectionGuidance('github', { scope: scopeHint })}` };
   }
 
   const secretStore = getSecretStore();

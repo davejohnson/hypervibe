@@ -647,6 +647,113 @@ describe('PlanService.plan', () => {
     expect(ci.metadata?.staleProviderSecrets).toBeUndefined();
   });
 
+  it('falls back to a verified global GitHub package credential when a repo-scoped connection is unverified', async () => {
+    const ciProject = new ProjectRepository().create({
+      name: 'ci-shadowed-secret-app',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/dave/ci-shadowed-secret-app',
+    });
+    new SpecStore().replace(ciProject, {
+      version: 1,
+      project: ciProject.name,
+      gitRemoteUrl: ciProject.gitRemoteUrl,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          email: { enabled: false },
+          envVars: {},
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+    const connRepo = new ConnectionRepository();
+    const globalGithub = connRepo.create({
+      provider: 'github',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        apiToken: 'global-gh-token',
+        login: 'dave',
+        packageReadToken: 'global-package-token',
+      }),
+    });
+    connRepo.updateStatus(globalGithub.id, 'verified');
+    connRepo.create({
+      provider: 'github',
+      scope: 'dave/ci-shadowed-secret-app',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        apiToken: 'bad-scoped-token',
+        login: 'dave',
+      }),
+    });
+    const railway = connRepo.create({
+      provider: 'railway',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
+    });
+    connRepo.updateStatus(railway.id, 'verified');
+
+    const workflow = buildBranchDeployWorkflow('railway', {
+      environmentName: 'production',
+      kind: 'production',
+      branch: 'main',
+      serviceNames: ['web'],
+      providerProjectId: 'rp-1',
+      providerEnvironmentId: 'rail-env-1',
+      providerServiceIds: ['svc-1'],
+      providerServiceArns: [],
+    }, { includeStep: false });
+    new EnvironmentRepository().create({
+      projectId: ciProject.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-1' } },
+        ci: {
+          deployBranch: {
+            [workflow.path]: {
+              contentHash: sha256(workflow.content),
+              syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+              syncedSecretHashes: {
+                RAILWAY_API_TOKEN: sha256('railway-token'),
+                IMAGE_REGISTRY_USERNAME: sha256('dave'),
+                IMAGE_REGISTRY_TOKEN: sha256('global-package-token'),
+              },
+            },
+          },
+        },
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web',
+        externalId: 'svc-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+
+    const result = await new PlanService().plan(ciProject, 'production');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const ci = plan.actions.find((action) => action.id === 'ci:github-actions:production:deploy-branch')!;
+    expect(ci.type).toBe('noop');
+    expect(ci.metadata?.missingProviderSecrets).toBeUndefined();
+    expect(ci.metadata?.staleProviderSecrets).toBeUndefined();
+  });
+
   it('clears blocked when a verified connection exists', async () => {
     const connRepo = new ConnectionRepository();
     const created = connRepo.create({ provider: 'railway', credentialsEncrypted: 'x' });
