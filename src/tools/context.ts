@@ -66,6 +66,47 @@ export function createToolContext(): ToolContext {
     return Object.values(spec.environments)[0]?.hosting.provider ?? 'cloudrun';
   };
 
+  const asRecord = (value: unknown): Record<string, unknown> | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+  const mergeRepoPlatformBindings = (
+    existing: Record<string, unknown>,
+    repoBindings: Record<string, unknown>
+  ): Record<string, unknown> => {
+    const merged = { ...existing, ...repoBindings };
+    const existingCi = asRecord(existing.ci);
+    const repoCi = asRecord(repoBindings.ci);
+    const existingDeployBranch = asRecord(existingCi?.deployBranch);
+    const repoDeployBranch = asRecord(repoCi?.deployBranch);
+    if (!existingCi || !repoCi || !existingDeployBranch || !repoDeployBranch) {
+      return merged;
+    }
+
+    const deployBranch: Record<string, unknown> = { ...repoDeployBranch };
+    for (const [workflowPath, repoEntry] of Object.entries(repoDeployBranch)) {
+      const existingEntry = asRecord(existingDeployBranch[workflowPath]);
+      const repoEntryRecord = asRecord(repoEntry);
+      const syncedSecretHashes = asRecord(existingEntry?.syncedSecretHashes);
+      if (!existingEntry || !repoEntryRecord || !syncedSecretHashes) {
+        continue;
+      }
+      deployBranch[workflowPath] = {
+        ...existingEntry,
+        ...repoEntryRecord,
+        syncedSecretHashes,
+      };
+    }
+
+    return {
+      ...merged,
+      ci: {
+        ...existingCi,
+        ...repoCi,
+        deployBranch,
+      },
+    };
+  };
+
   const hydrateRepoBindings = (project: Project): void => {
     let bindings;
     try {
@@ -83,7 +124,9 @@ export function createToolContext(): ToolContext {
         continue;
       }
       if (JSON.stringify(existing.platformBindings) !== JSON.stringify(platformBindings)) {
-        repos.environments.update(existing.id, { platformBindings });
+        repos.environments.update(existing.id, {
+          platformBindings: mergeRepoPlatformBindings(existing.platformBindings, platformBindings),
+        });
       }
     }
   };

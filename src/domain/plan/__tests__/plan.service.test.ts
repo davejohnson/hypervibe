@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
+import { createHash } from 'crypto';
 import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
@@ -18,6 +19,10 @@ import type { Project } from '../../entities/project.entity.js';
 import { buildBranchDeployWorkflow } from '../../services/github-ops.service.js';
 
 let project: Project;
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
 
 beforeEach(() => {
   SqliteAdapter.resetInstance();
@@ -440,6 +445,106 @@ describe('PlanService.plan', () => {
     expect(ci.metadata?.missingProviderSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
     expect(plan.warnings).toContainEqual(expect.stringContaining('apiToken needs repo + workflow'));
     expect(plan.warnings).toContainEqual(expect.stringContaining('packageReadToken or packagesToken needs read:packages'));
+  });
+
+  it('replans CI deploys when a previously synced GitHub Actions secret value is stale', async () => {
+    const ciProject = new ProjectRepository().create({
+      name: 'ci-stale-secret-app',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/dave/ci-stale-secret-app',
+    });
+    new SpecStore().replace(ciProject, {
+      version: 1,
+      project: ciProject.name,
+      gitRemoteUrl: ciProject.gitRemoteUrl,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          email: { enabled: false },
+          envVars: {},
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+    const connRepo = new ConnectionRepository();
+    const github = connRepo.create({
+      provider: 'github',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        apiToken: 'gh-token',
+        login: 'dave',
+        packageReadToken: 'new-package-token',
+      }),
+    });
+    connRepo.updateStatus(github.id, 'verified');
+    const railway = connRepo.create({
+      provider: 'railway',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
+    });
+    connRepo.updateStatus(railway.id, 'verified');
+
+    const workflow = buildBranchDeployWorkflow('railway', {
+      environmentName: 'production',
+      kind: 'production',
+      branch: 'main',
+      serviceNames: ['web'],
+      providerProjectId: 'rp-1',
+      providerEnvironmentId: 'rail-env-1',
+      providerServiceIds: ['svc-1'],
+      providerServiceArns: [],
+    }, { includeStep: false });
+    new EnvironmentRepository().create({
+      projectId: ciProject.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-1' } },
+        ci: {
+          deployBranch: {
+            [workflow.path]: {
+              contentHash: sha256(workflow.content),
+              syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+              syncedSecretHashes: {
+                RAILWAY_API_TOKEN: sha256('railway-token'),
+                IMAGE_REGISTRY_USERNAME: sha256('dave'),
+                IMAGE_REGISTRY_TOKEN: sha256('old-package-token'),
+              },
+            },
+          },
+        },
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web',
+        externalId: 'svc-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+
+    const result = await new PlanService().plan(ciProject, 'production');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const ci = plan.actions.find((action) => action.id === 'ci:github-actions:production:deploy-branch')!;
+    expect(ci.type).toBe('update');
+    expect(ci.reason).toContain('provider secrets need syncing');
+    expect(ci.metadata?.missingProviderSecrets).toBeUndefined();
+    expect(ci.metadata?.staleProviderSecrets).toEqual(['IMAGE_REGISTRY_TOKEN']);
   });
 
   it('clears blocked when a verified connection exists', async () => {

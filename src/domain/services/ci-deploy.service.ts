@@ -95,6 +95,13 @@ export function githubCiDeployPermissionProblem(
 const connectionRepo = new ConnectionRepository();
 const secretStore = getSecretStore();
 
+type ProviderSecret = { name: string; value: string };
+type WorkflowCiBinding = {
+  contentHash?: string;
+  syncedSecrets?: string[];
+  syncedSecretHashes?: Record<string, string>;
+};
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
@@ -114,8 +121,8 @@ export function isGitHubActionsDeployAction(action: PlanAction): boolean {
 export function providerSecretsForGitHubActions(
   provider: string,
   options: { githubLogin?: string } = {}
-): Array<{ name: string; value: string }> {
-  const secrets: Array<{ name: string; value: string }> = [];
+): ProviderSecret[] {
+  const secrets: ProviderSecret[] = [];
   const connection = connectionRepo.findByProvider(provider);
 
   if (connection?.status === 'verified') {
@@ -192,9 +199,13 @@ export function providerSecretsForGitHubActions(
   return secrets;
 }
 
-function ciBindings(environment: Environment | null): Record<string, { contentHash?: string; syncedSecrets?: string[] }> {
+function ciBindings(environment: Environment | null): Record<string, WorkflowCiBinding> {
   const ci = asRecord(environment?.platformBindings?.ci);
-  return asRecord(ci?.deployBranch) as Record<string, { contentHash?: string; syncedSecrets?: string[] }> | null ?? {};
+  return asRecord(ci?.deployBranch) as Record<string, WorkflowCiBinding> | null ?? {};
+}
+
+function secretHashes(secrets: ProviderSecret[]): Record<string, string> {
+  return Object.fromEntries(secrets.map((secret) => [secret.name, sha256(secret.value)]));
 }
 
 function buildAction(params: {
@@ -206,6 +217,7 @@ function buildAction(params: {
   verified: boolean;
   availableSecretNames: string[];
   missingProviderSecrets?: string[];
+  staleProviderSecrets?: string[];
   dependsOn?: string[];
 }): PlanAction {
   return {
@@ -228,6 +240,7 @@ function buildAction(params: {
       },
       availableProviderSecrets: params.availableSecretNames,
       ...(params.missingProviderSecrets?.length ? { missingProviderSecrets: params.missingProviderSecrets } : {}),
+      ...(params.staleProviderSecrets?.length ? { staleProviderSecrets: params.staleProviderSecrets } : {}),
     },
   };
 }
@@ -270,9 +283,10 @@ export async function planGitHubActionsDeploy(params: {
   const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider as BranchDeployProvider, target, migration);
   const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(environmentSpec.hosting.provider)
     .filter((name) => workflow.requiredSecrets.includes(name));
-  const availableSecretNames = providerSecretsForGitHubActions(environmentSpec.hosting.provider)
-    .filter((secret) => workflow.requiredSecrets.includes(secret.name))
-    .map((secret) => secret.name);
+  const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider)
+    .filter((secret) => workflow.requiredSecrets.includes(secret.name));
+  const availableSecretNames = availableSecrets.map((secret) => secret.name);
+  const availableSecretHashes = secretHashes(availableSecrets);
   const missingProviderSecrets = requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name));
   if (missingProviderSecrets.length > 0) {
     warnings.push(
@@ -314,9 +328,16 @@ export async function planGitHubActionsDeploy(params: {
   }
 
   const syncedSecrets = new Set(binding?.syncedSecrets ?? []);
+  const syncedSecretHashes = asRecord(binding?.syncedSecretHashes) ?? {};
+  const staleProviderSecrets = requiredProviderSecrets.filter((name) =>
+    syncedSecrets.has(name)
+    && availableSecretHashes[name] !== undefined
+    && syncedSecretHashes[name] !== availableSecretHashes[name]
+  );
   const missingSecretSync =
     missingProviderSecrets.length > 0
-    || requiredProviderSecrets.some((name) => !syncedSecrets.has(name));
+    || requiredProviderSecrets.some((name) => !syncedSecrets.has(name))
+    || staleProviderSecrets.length > 0;
   const type = currentContent === workflow.content && !missingSecretSync
     ? 'noop'
     : currentContent === null
@@ -340,6 +361,7 @@ export async function planGitHubActionsDeploy(params: {
       verified: workflowReadVerified,
       availableSecretNames,
       missingProviderSecrets,
+      staleProviderSecrets,
       dependsOn: type === 'noop' ? undefined : params.dependsOn,
     }),
     warnings,
@@ -408,24 +430,25 @@ export async function applyGitHubActionsDeploy(params: {
     `Add ${workflow.templateName} workflow`
   );
 
-  const syncedSecrets: string[] = [];
+  const syncedSecrets: ProviderSecret[] = [];
   const secretErrors: Array<{ name: string; error: string }> = [];
   for (const secret of availableSecrets) {
     try {
       await adapter.setRepositorySecret(owner, repoName, secret.name, secret.value);
-      syncedSecrets.push(secret.name);
+      syncedSecrets.push(secret);
     } catch (error) {
       secretErrors.push({ name: secret.name, error: error instanceof Error ? error.message : String(error) });
     }
   }
 
   persistWorkflowBinding(project, environmentName, workflow, syncedSecrets);
+  const syncedSecretNames = syncedSecrets.map((secret) => secret.name);
   if (missingProviderSecrets.length > 0) {
     return {
       success: false,
       message: `Synced ${workflow.path}, but required provider secrets are missing`,
       error: missingProviderSecretsMessage(environmentSpec.hosting.provider, missingProviderSecrets),
-      data: { workflow: workflow.path, file: fileResult, syncedSecrets, missingProviderSecrets },
+      data: { workflow: workflow.path, file: fileResult, syncedSecrets: syncedSecretNames, missingProviderSecrets },
     };
   }
   if (secretErrors.length > 0) {
@@ -433,13 +456,13 @@ export async function applyGitHubActionsDeploy(params: {
       success: false,
       message: `Synced ${workflow.path}, but some GitHub secrets failed`,
       error: secretErrors.map((entry) => `${entry.name}: ${entry.error}`).join('; '),
-      data: { workflow: workflow.path, file: fileResult, syncedSecrets, secretErrors },
+      data: { workflow: workflow.path, file: fileResult, syncedSecrets: syncedSecretNames, secretErrors },
     };
   }
   return {
     success: true,
     message: `Synced GitHub Actions deploy workflow ${workflow.path}`,
-    data: { workflow: workflow.path, file: fileResult, syncedSecrets },
+    data: { workflow: workflow.path, file: fileResult, syncedSecrets: syncedSecretNames },
   };
 }
 
@@ -447,7 +470,7 @@ function persistWorkflowBinding(
   project: Project,
   environmentName: string,
   workflow: BranchDeployWorkflow,
-  syncedSecrets: string[]
+  syncedSecrets: ProviderSecret[]
 ): void {
   const envRepo = new EnvironmentRepository();
   const environment = envRepo.findByProjectAndName(project.id, environmentName)
@@ -461,7 +484,8 @@ function persistWorkflowBinding(
         ...deployBranch,
         [workflow.path]: {
           contentHash: sha256(workflow.content),
-          syncedSecrets,
+          syncedSecrets: syncedSecrets.map((secret) => secret.name),
+          syncedSecretHashes: secretHashes(syncedSecrets),
           updatedAt: new Date().toISOString(),
         },
       },

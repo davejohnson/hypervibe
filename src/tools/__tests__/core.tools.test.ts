@@ -419,6 +419,38 @@ describe('hv_spec_set / hv_spec_get', () => {
       expect(hydratedBindings.connectionString).toBeUndefined();
       expect(hydratedBindings.services?.web?.deployToken).toBeUndefined();
 
+      const envRepo = new EnvironmentRepository();
+      const hydratedEnvironment = envRepo.findByProjectAndName(project.id, 'production')!;
+      envRepo.updatePlatformBindings(hydratedEnvironment.id, {
+        ci: {
+          deployBranch: {
+            '.github/workflows/deploy-railway-production.yml': {
+              contentHash: 'workflow-hash',
+              syncedSecrets: ['IMAGE_REGISTRY_TOKEN'],
+              syncedSecretHashes: { IMAGE_REGISTRY_TOKEN: 'local-secret-hash' },
+            },
+          },
+        },
+      });
+      await t.close();
+      t = await makeClient();
+      await t.call('hv_spec_get', {});
+      expect(
+        new EnvironmentRepository()
+          .findByProjectAndName(project.id, 'production')!
+          .platformBindings
+      ).toMatchObject({
+        ci: {
+          deployBranch: {
+            '.github/workflows/deploy-railway-production.yml': {
+              contentHash: 'workflow-hash',
+              syncedSecrets: ['IMAGE_REGISTRY_TOKEN'],
+              syncedSecretHashes: { IMAGE_REGISTRY_TOKEN: 'local-secret-hash' },
+            },
+          },
+        },
+      });
+
       writeFileSync(specPath, `${JSON.stringify({
         ...repoSpec,
         environments: {
@@ -717,6 +749,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-plan-app', 'IMAGE_REGISTRY_TOKEN', 'gh-package-token');
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
     expect(environment.platformBindings.ci).toBeDefined();
+    const ciBindingText = JSON.stringify(environment.platformBindings.ci);
+    expect(ciBindingText).toContain('syncedSecretHashes');
+    expect(ciBindingText).toContain('IMAGE_REGISTRY_TOKEN');
+    expect(ciBindingText).not.toContain('gh-package-token');
+    expect(ciBindingText).not.toContain('railway-token');
     await t.close();
   });
 
