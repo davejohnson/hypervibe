@@ -139,6 +139,37 @@ describe('hv_ci_setup', () => {
     await t.close();
   });
 
+  it('rejects a read:packages-only GitHub apiToken for branch deploy setup', async () => {
+    const project = seedProject({
+      desiredState: {
+        deploy: { strategy: 'branch', branches: { production: 'main' } },
+      },
+    });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+      scopes: ['read:packages'],
+    });
+    const createFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: true, updated: false } as any);
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_setup', { project: 'billforge', kind: 'deploy-branch', config: { provider: 'railway' } });
+
+    expect(res.ok).toBe(false);
+    expect(res.error.code).toBe('MISSING_CONNECTION');
+    expect(res.data).toBeUndefined();
+    expect(res.error.message).toContain('GitHub connection is missing CI deploy permissions');
+    expect(res.error.details.missingScopes).toEqual(['repo', 'workflow']);
+    expect(res.hint).toContain('read:packages-only token is only enough for GHCR image pulls');
+    expect(res.hint).toContain('repo');
+    expect(res.hint).toContain('workflow');
+    expect(res.hint).toContain('packageReadToken');
+    expect(res.next).toEqual(['hv_connect', 'hv_ci_setup']);
+    expect(createFile).not.toHaveBeenCalled();
+    await t.close();
+  });
+
   it('accepts statusChecks=false for branch-deploy setup', async () => {
     const project = seedProject({
       desiredState: {

@@ -40,9 +40,13 @@ describe('connection guidance', () => {
     });
 
     expect(guidance).toContain('classic personal access token');
-    expect(guidance).toContain('https://github.com/settings/tokens');
+    expect(guidance).toContain('https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages');
     expect(guidance).toContain('repo');
     expect(guidance).toContain('workflow');
     expect(guidance).toContain('read:packages');
+    expect(guidance).toContain('read:packages-only token is not enough');
+    expect(guidance).toContain('apiToken');
+    expect(guidance).toContain('packageReadToken');
+    expect(guidance).toContain('fine-grained PAT');
   });
 });

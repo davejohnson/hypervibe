@@ -15,6 +15,7 @@ import {
   buildAiReviewWorkflowContent,
 } from '../domain/services/github-ops.service.js';
 import {
+  githubCiDeployPermissionProblem,
   missingProviderSecretsMessage,
   providerSecretsForGitHubActions,
   requiredProviderSecretNamesForGitHubActions,
@@ -117,7 +118,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_ci_setup',
     'Set up explicit CI/CD tasks on GitHub for a project. For desired-state push deploys, prefer hv_spec_set deploy.strategy="branch" trigger="ci", then hv_plan/hv_apply; that manages the deploy workflow and provider API secrets as infrastructure. Dispatches on kind; config holds the kind-specific fields (config.repo="owner/repo" overrides the project gitRemoteUrl for every kind). ' +
-      'kind="deploy-branch": explicit/backfill branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs); config { provider (railway|vercel|render|digitalocean|cloudrun|apprunner|heroku, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
+      'kind="deploy-branch": explicit/backfill branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs). Requires a GitHub apiToken that can write workflow files and repo secrets (classic PAT scopes repo + workflow for private repos); Railway/DigitalOcean image deploys also require packageReadToken or packagesToken with read:packages for GHCR pull credentials. config { provider (railway|vercel|render|digitalocean|cloudrun|apprunner|heroku, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
       'kind="ai-review": Claude PR review workflow; config { apiKey (required), model? }. ' +
       'kind="pages": GitHub Pages with a custom domain via Cloudflare DNS; config { domain (required) }. ' +
       'kind="branch-protection": protection rules; config { branch (required), requireReviews?, requiredReviewers?, dismissStaleReviews?, requireCodeOwnerReviews?, requireStatusChecks?, statusChecks?, strictStatusChecks?, enforceAdmins?, requireLinearHistory?, allowForcePushes?, allowDeletions? }. ' +
@@ -137,6 +138,18 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
           const verification = await adapter.verify();
           if (!verification.success) {
             return toolError('PROVIDER_ERROR', verification.error || 'GitHub connection verification failed');
+          }
+          const permissionProblem = githubCiDeployPermissionProblem(verification, { repo: `${owner}/${repo}` });
+          if (permissionProblem) {
+            return toolError('MISSING_CONNECTION', 'GitHub connection is missing CI deploy permissions.', {
+              details: {
+                repository: `${owner}/${repo}`,
+                missingScopes: permissionProblem.missingScopes,
+                currentScopes: verification.scopes,
+              },
+              hint: permissionProblem.hint,
+              next: ['hv_connect', 'hv_ci_setup'],
+            });
           }
 
           const { targets, migration, skippedEnvironments } = resolveBranchDeployTargets(project);
@@ -229,7 +242,13 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
           };
           const protectionFailures = protectionResults.filter((r) => !r.success);
           if (errors.length > 0 || protectionFailures.length > 0) {
-            return toolError('PROVIDER_ERROR', 'Branch deploy setup had errors.', { details: data });
+            return toolError('PROVIDER_ERROR', 'Branch deploy setup had errors.', {
+              details: data,
+              hint: formatConnectionGuidance('github', {
+                scope: `${owner}/${repo}`,
+                intro: 'If GitHub rejected workflow or secret changes, confirm the GitHub token type and CI deploy permissions.',
+              }),
+            });
           }
           const warnings = [
             ...secretSyncErrors.map((entry) => `Failed to sync GitHub Actions secret ${entry.name}: ${entry.error}`),

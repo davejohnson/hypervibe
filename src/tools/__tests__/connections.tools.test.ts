@@ -159,7 +159,7 @@ describe('hv_connect', () => {
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
       login: 'davejohnson',
-      scopes: ['repo', 'read:packages'],
+      scopes: ['repo', 'workflow', 'read:packages'],
     });
 
     const t = await makeClient();
@@ -177,6 +177,27 @@ describe('hv_connect', () => {
     expect(decrypted.apiToken).toBe('gh-token');
     expect(decrypted.login).toBe('davejohnson');
     expect(decrypted.packageReadToken).toBe('gh-token');
+    await t.close();
+  });
+
+  it('warns when a verified GitHub token only has package-read scope', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+      scopes: ['read:packages'],
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'github',
+      scope: 'davejohnson/apreskeys.com',
+      credentials: { apiToken: 'gh-package-only-token' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.status).toBe('verified');
+    expect(result.warnings).toContainEqual(expect.stringContaining('missing classic PAT scope(s): repo, workflow'));
+    expect(result.warnings).toContainEqual(expect.stringContaining('read:packages-only token is only enough for GHCR image pulls'));
     await t.close();
   });
 

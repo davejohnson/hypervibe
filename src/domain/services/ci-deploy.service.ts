@@ -20,6 +20,7 @@ import { formatConnectionGuidance } from './connection-guidance.js';
 const OPERATION = 'githubActionsDeployBranch';
 const SUPPORTED_PROVIDERS = new Set(['railway', 'vercel', 'render', 'digitalocean', 'cloudrun', 'apprunner', 'heroku']);
 const PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL = new Set(['railway', 'digitalocean']);
+const GITHUB_CI_REQUIRED_CLASSIC_SCOPES = ['repo', 'workflow'];
 
 export function requiredProviderSecretNamesForGitHubActions(provider: string): string[] {
   const names: string[] = [];
@@ -59,9 +60,36 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
     parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions. ${formatConnectionGuidance(provider)}`);
   }
   if (missingImageRegistrySecrets) {
-    parts.push(`For Railway/DigitalOcean GHCR image pulls, reconnect GitHub with a package-read token using credentials packageReadToken or packagesToken. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and package permissions.' })}`);
+    parts.push(`For Railway/DigitalOcean GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials. The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken or packagesToken needs read:packages for durable GHCR image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
   }
   return parts.join(' ');
+}
+
+export function githubCiDeployPermissionProblem(
+  verification: { scopes?: string[] },
+  options: { repo?: string } = {}
+): { missingScopes: string[]; hint: string } | null {
+  // GitHub exposes x-oauth-scopes for classic PATs. Fine-grained PATs may not
+  // report classic scopes here, so only enforce when the scope header exists.
+  if (!verification.scopes?.length) {
+    return null;
+  }
+  const scopes = new Set(verification.scopes);
+  const missingScopes = GITHUB_CI_REQUIRED_CLASSIC_SCOPES.filter((scope) => !scopes.has(scope));
+  if (missingScopes.length === 0) {
+    return null;
+  }
+  return {
+    missingScopes,
+    hint: [
+      `The GitHub apiToken is verified but missing classic PAT scope(s): ${missingScopes.join(', ')}.`,
+      'A read:packages-only token is only enough for GHCR image pulls; it cannot create/update deploy workflows or repository secrets.',
+      formatConnectionGuidance('github', {
+        scope: options.repo,
+        intro: 'Reconnect GitHub with CI deploy permissions.',
+      }),
+    ].join(' '),
+  };
 }
 
 const connectionRepo = new ConnectionRepository();
@@ -337,6 +365,27 @@ export async function applyGitHubActionsDeploy(params: {
     return { success: false, message: 'GitHub adapter unavailable', error: adapterResult.error };
   }
   const adapter: GitHubAdapter = adapterResult.adapter;
+  const verification = await adapter.verify();
+  if (!verification.success) {
+    return {
+      success: false,
+      message: 'GitHub connection verification failed',
+      error: verification.error ?? 'GitHub connection verification failed',
+    };
+  }
+  const permissionProblem = githubCiDeployPermissionProblem(verification, { repo });
+  if (permissionProblem) {
+    return {
+      success: false,
+      message: 'GitHub connection is missing CI deploy permissions',
+      error: permissionProblem.hint,
+      data: {
+        repository: repo,
+        missingScopes: permissionProblem.missingScopes,
+        currentScopes: verification.scopes,
+      },
+    };
+  }
 
   const { targets, migration } = resolveBranchDeployTargets(project);
   const target = targets.find((candidate) => candidate.environmentName === environmentName);

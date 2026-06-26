@@ -126,15 +126,19 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   github: {
     provider: 'github',
     displayName: 'GitHub',
-    tokenType: 'classic personal access token',
-    setupUrl: 'https://github.com/settings/tokens',
+    tokenType: 'classic personal access token for Hypervibe GitHub API operations; optional second classic PAT for GHCR package reads',
+    setupUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
     permissions: [
-      'repo for private repository contents, secrets, branch protection, and GitHub Pages operations.',
-      'workflow to create or update GitHub Actions workflows.',
-      'read:packages for package/image pull credentials; write:packages only if Hypervibe must push packages with the PAT.',
+      'For CI deploy management, apiToken must have repo and workflow so Hypervibe can create/update .github/workflows files, read/trigger Actions, and manage repository secrets for private repos.',
+      'For Railway/DigitalOcean GHCR image pulls, packageReadToken or packagesToken must have read:packages. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.',
+      'If using a fine-grained PAT for apiToken, grant Contents read/write, Workflows write, Actions write, and Secrets write on the target repo; GHCR package access still requires a classic PAT because fine-grained PATs do not support Packages.',
     ],
-    credentialExample: 'hv_connect provider="github" credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"',
-    notes: ['Fine-grained PATs may not work for every Hypervibe GitHub operation yet; classic PATs are the safest default.'],
+    credentialExample: 'hv_connect provider="github" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}',
+    notes: [
+      'A read:packages-only token is not enough for CI deploy setup because it cannot write workflows or repository secrets.',
+      'For the simplest setup, create one classic PAT with repo, workflow, and read:packages, then map both apiToken and packageReadToken to the same .env variable.',
+      'For least privilege, use two classic PATs: HYPERVIBE_GITHUB_TOKEN with repo + workflow, and HYPERVIBE_GITHUB_PACKAGES_TOKEN with read:packages.',
+    ],
   },
   heroku: {
     provider: 'heroku',

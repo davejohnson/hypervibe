@@ -219,7 +219,43 @@ export HYPERVIBE_GITHUB_TOKEN=ghp_...
 
 Then call `hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"`. For existing `.env` files, use `credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"`. For JSON credentials, save the JSON to a local file and use `credentialsRef="file:/absolute/path/to/credentials.json"`. If the user intentionally wants to enter credentials in chat, `credentials={...}` is still accepted.
 
-**Recommended: a classic PAT with the `repo` and `workflow` scopes**, created by a user with **admin access** to the target repositories. That covers everything below.
+**Recommended for CI deploys: a classic PAT with `repo`, `workflow`, and `read:packages`**, created by a user with access to the target repositories. Create it from:
+
+```text
+https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys
+```
+
+That one token can be used for both:
+
+- `apiToken`: GitHub API work such as writing `.github/workflows/*`, reading/triggering Actions, and creating repository secrets.
+- `packageReadToken`: durable GHCR image-pull credentials for providers like Railway and DigitalOcean.
+
+For an existing `.env` file with one token:
+
+```text
+HYPERVIBE_GITHUB_TOKEN=ghp_...
+```
+
+Connect it like this:
+
+```text
+hv_connect provider=github scope="owner/repo" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_TOKEN"}
+```
+
+For least privilege, use two classic PATs:
+
+```text
+HYPERVIBE_GITHUB_TOKEN=ghp_...             # scopes: repo, workflow
+HYPERVIBE_GITHUB_PACKAGES_TOKEN=ghp_...    # scopes: read:packages
+```
+
+Then connect:
+
+```text
+hv_connect provider=github scope="owner/repo" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}
+```
+
+A token with only `read:packages` is **not** enough for Hypervibe CI deploy setup. It can be used as `packageReadToken`, but the `apiToken` still needs `repo` + `workflow` for classic PATs so Hypervibe can manage workflows and repository secrets.
 
 What hypervibe uses the GitHub token for, and the permission each operation needs:
 
@@ -233,6 +269,8 @@ What hypervibe uses the GitHub token for, and the permission each operation need
 | Generated push deploys (`hv_ci_setup kind="deploy-branch"`) | `repo` + `workflow`; add Secrets read/write if Hypervibe should sync provider API tokens | Contents: read/write, Actions: read/write, Secrets: read/write |
 | Manage the Railway GitHub App's repository access for `deploy.trigger: "native"` selected-repos installs | `repo` + repo admin — **classic PAT only**; GitHub's app-installation APIs do not accept fine-grained PATs | not supported |
 | Private repo source fetch for Cloud Run builds | `repo` | Contents: read |
+
+Fine-grained PATs can work for some GitHub API operations when granted the permissions in the table, but GitHub Packages/GHCR package authentication still requires a classic PAT. If you use a fine-grained PAT as `apiToken`, still provide a classic PAT with `read:packages` as `packageReadToken` for Railway/DigitalOcean GHCR deploys.
 
 ### Push deploys
 
@@ -257,7 +295,7 @@ Provider workflow behavior:
 | `heroku` | Build/push OCI image to Heroku Container Registry and release the `web` process through the Heroku API | `HEROKU_API_KEY` | Variable: `HEROKU_APP` |
 | `vercel` | Trigger a Vercel deploy hook from GitHub Actions | none | Secret: `VERCEL_DEPLOY_HOOK_URL` |
 
-For Railway and DigitalOcean GHCR deploys, the generated workflow grants `packages: write` and uses `${{ github.actor }}` plus `${{ secrets.GITHUB_TOKEN }}` only for the workflow-time image push. The hosting provider also needs durable image-pull credentials because GitHub's workflow token is short-lived and only exists inside the Actions job. Hypervibe syncs those pull credentials into `IMAGE_REGISTRY_USERNAME` and `IMAGE_REGISTRY_TOKEN` from the verified GitHub connection when it has a login and package-read-capable token. If you prefer least privilege, connect GitHub with `packagesToken`/`packageReadToken` set to a package token with `read:packages`; otherwise Hypervibe falls back to the GitHub connection `apiToken`. Do not use `${{ secrets.GITHUB_TOKEN }}` for `IMAGE_REGISTRY_TOKEN`.
+For Railway and DigitalOcean GHCR deploys, the generated workflow grants `packages: write` and uses `${{ github.actor }}` plus `${{ secrets.GITHUB_TOKEN }}` only for the workflow-time image push. The hosting provider also needs durable image-pull credentials because GitHub's workflow token is short-lived and only exists inside the Actions job. Hypervibe syncs those pull credentials into `IMAGE_REGISTRY_USERNAME` and `IMAGE_REGISTRY_TOKEN` from the verified GitHub connection when it has a login and a package-read-capable `packageReadToken`/`packagesToken`. Do not use `${{ secrets.GITHUB_TOKEN }}` for `IMAGE_REGISTRY_TOKEN`, and do not use a `read:packages`-only token as the GitHub `apiToken`.
 
 `deploy.trigger: "native"` opts into provider-native repo integrations instead. For Railway native push autodeploys, grant the [Railway GitHub App](https://github.com/apps/railway-app) access in GitHub:
 

@@ -680,6 +680,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
       warnings: [],
     });
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+      scopes: ['repo', 'workflow', 'read:packages'],
+    });
     const writeWorkflow = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
       created: true,
       updated: false,
@@ -760,6 +765,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
       warnings: [],
     });
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+      scopes: ['repo', 'workflow', 'read:packages'],
+    });
     vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
       created: true,
       updated: false,
@@ -772,9 +782,9 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(ci.metadata.missingProviderSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
     expect(plan.data.actionScopedBlocked).toContainEqual(expect.objectContaining({
       provider: 'github',
-      reason: expect.stringContaining('packageReadToken'),
+      reason: expect.stringContaining('repo/workflow API access plus packageReadToken'),
     }));
-    expect(plan.warnings).toContainEqual(expect.stringContaining('package-read token'));
+    expect(plan.warnings).toContainEqual(expect.stringContaining('GitHub apiToken needs repo + workflow'));
     expect(plan.next).toEqual(['hv_connect', 'hv_plan']);
 
     const apply = await t.call('hv_apply', { project: 'ci-missing-image-token-app', planId: plan.data.planId });
@@ -782,13 +792,15 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.error.code).toBe('MISSING_CONNECTION');
     expect(apply.error.details).toContainEqual(expect.objectContaining({
       provider: 'github',
-      reason: expect.stringContaining('packageReadToken'),
+      reason: expect.stringContaining('repo/workflow API access plus packageReadToken'),
     }));
     expect(apply.hint).toContain('classic personal access token');
-    expect(apply.hint).toContain('https://github.com/settings/tokens');
+    expect(apply.hint).toContain('https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages');
+    expect(apply.hint).toContain('apiToken needs repo + workflow');
     expect(apply.hint).toContain('read:packages');
     expect(apply.hint).toContain('packageReadToken');
     expect(apply.hint).toContain('credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}');
+    expect(apply.hint).toContain('map both keys to the same classic PAT');
     expect(apply.hint).toContain('credentialsRef="file:/absolute/path/github.json"');
     expect(apply.next).toEqual(['hv_connect', 'hv_plan', 'hv_apply']);
     expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'RAILWAY_API_TOKEN', 'railway-token');
@@ -842,6 +854,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
       warnings: [],
     });
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+      scopes: ['repo', 'workflow', 'read:packages'],
+    });
     vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
       created: true,
       updated: false,

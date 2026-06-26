@@ -4,6 +4,7 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { secretManagerRegistry } from '../registry/secretmanager.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
+import { githubCiDeployPermissionProblem } from './ci-deploy.service.js';
 
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
@@ -235,6 +236,13 @@ export async function verifyConnection(provider: string, scope?: string): Promis
       if (result.version) {
         message += ` (v${result.version})`;
       }
+      const githubPermissionProblem = provider === 'github'
+        ? githubCiDeployPermissionProblem({ scopes: result.scopes }, { repo: scope })
+        : null;
+      const warning = [
+        result.warning,
+        githubPermissionProblem?.hint,
+      ].filter(Boolean).join(' ');
 
       return {
         kind: 'verified',
@@ -243,7 +251,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
           ...(result.email && { email: result.email }),
           ...(result.accountId && { accountId: result.accountId }),
           ...(result.version && { version: result.version }),
-          ...(result.warning && { warning: result.warning }),
+          ...(warning && { warning }),
           ...(result.login && { login: result.login }),
           ...(result.scopes && { scopes: result.scopes }),
           ...(result.workspaceId && { workspaceId: result.workspaceId }),

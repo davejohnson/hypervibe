@@ -168,7 +168,7 @@ function connectionRecoveryHint(
   const packageReadNeeded = options.includePackageRead
     || uniqueBlocks.some((block) => /packageReadToken|packagesToken|IMAGE_REGISTRY_|GHCR|GitHub Actions/i.test(block.reason ?? ''));
   const packageReadHint = packageReadNeeded
-    ? ' For GitHub Actions image deploys, the GitHub connection must also include GHCR/package read access; use credentialsRef="dotenv:/absolute/path/.env" with credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}, or use credentialsRef="file:/absolute/path/github.json" containing apiToken plus packageReadToken or packagesToken.'
+    ? ' For GitHub Actions image deploys, the GitHub connection must include both GitHub API access and GHCR package-read access: apiToken needs repo + workflow for workflow/secrets management, while packageReadToken or packagesToken needs read:packages for durable image pulls. A read:packages-only token is not enough as apiToken. Use credentialsRef="dotenv:/absolute/path/.env" with credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}; for one-token setup, map both keys to the same classic PAT with repo + workflow + read:packages. Or use credentialsRef="file:/absolute/path/github.json" containing apiToken plus packageReadToken or packagesToken.'
     : '';
   const after = options.after ? ` ${options.after}` : '';
   return `Hypervibe can store and verify the missing provider connections with hv_connect (${providers}). ${commands}.${packageReadHint} Prefer exported env vars, existing .env files via credentialsRef="dotenv:/absolute/path/.env#KEY", or local JSON for structured credentials; raw credentials={...} is still accepted if the user intentionally wants chat entry.${after}`;
@@ -324,7 +324,7 @@ function splitActionScopedConnectionBlocks(
     return [{
       provider: hasImageRegistrySecret ? 'github' : String(action.metadata?.provider ?? action.resource.provider),
       reason: hasImageRegistrySecret
-        ? `GitHub Actions deploy ${action.resource.name} is missing GHCR image pull credentials (${missing.join(', ')}). Connect GitHub with credentials packageReadToken or packagesToken before relying on push-to-deploy.`
+        ? `GitHub Actions deploy ${action.resource.name} is missing GHCR image pull credentials (${missing.join(', ')}). Connect GitHub with apiToken for repo/workflow API access plus packageReadToken or packagesToken for read:packages before relying on push-to-deploy.`
         : `GitHub Actions deploy ${action.resource.name} is missing provider secrets (${missing.join(', ')}). Connect and verify ${String(action.metadata?.provider ?? action.resource.provider)} before relying on push-to-deploy.`,
     }];
   });

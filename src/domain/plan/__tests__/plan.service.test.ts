@@ -438,7 +438,8 @@ describe('PlanService.plan', () => {
     expect(ci.type).toBe('update');
     expect(ci.reason).toContain('provider secrets need syncing');
     expect(ci.metadata?.missingProviderSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
-    expect(plan.warnings).toContainEqual(expect.stringContaining('package-read token'));
+    expect(plan.warnings).toContainEqual(expect.stringContaining('apiToken needs repo + workflow'));
+    expect(plan.warnings).toContainEqual(expect.stringContaining('packageReadToken or packagesToken needs read:packages'));
   });
 
   it('clears blocked when a verified connection exists', async () => {
