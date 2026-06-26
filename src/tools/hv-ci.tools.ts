@@ -36,9 +36,37 @@ const statusChecksField = z.preprocess(
   z.array(z.string()).optional()
 );
 
+const numericIdField = z.preprocess(
+  (value) => {
+    if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+      return Number(value.trim());
+    }
+    return value;
+  },
+  z.number().int().positive()
+);
+
 interface RepoRef {
   owner: string;
   repo: string;
+}
+
+interface WorkflowJobSummary {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  url: string;
+  steps: Array<{
+    number: number;
+    name: string;
+    status: string;
+    conclusion: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+  }>;
 }
 
 function resolveRepoOrThrow(ctx: ToolContext, projectRef: string | undefined, repoOverride: string | undefined) {
@@ -72,6 +100,60 @@ function parseKindConfig<T extends z.ZodTypeAny>(schema: T, config: unknown, kin
     });
   }
   return parsed.data;
+}
+
+function summarizeWorkflowJob(job: {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  html_url: string;
+  steps?: Array<{
+    name: string;
+    status: string;
+    conclusion: string | null;
+    number: number;
+    started_at: string | null;
+    completed_at: string | null;
+  }>;
+}): WorkflowJobSummary {
+  return {
+    id: job.id,
+    name: job.name,
+    status: job.status,
+    conclusion: job.conclusion,
+    startedAt: job.started_at,
+    completedAt: job.completed_at,
+    url: job.html_url,
+    steps: (job.steps ?? []).map((step) => ({
+      number: step.number,
+      name: step.name,
+      status: step.status,
+      conclusion: step.conclusion,
+      startedAt: step.started_at,
+      completedAt: step.completed_at,
+    })),
+  };
+}
+
+function isUnsuccessfulJob(job: { status: string; conclusion: string | null }): boolean {
+  if (job.conclusion) {
+    return !['success', 'skipped'].includes(job.conclusion);
+  }
+  return job.status !== 'completed';
+}
+
+function tailLogText(text: string, requestedLines: number) {
+  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const tail = lines.slice(-requestedLines);
+  return {
+    text: tail.join('\n'),
+    lineCount: lines.length,
+    returnedLines: tail.length,
+    truncated: lines.length > tail.length,
+  };
 }
 
 const deployBranchConfigSchema = z.object({
@@ -419,15 +501,18 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_ci_status',
-    'Get GitHub Actions status for a project repository: workflows, recent runs for a workflow, GitHub Pages status, and branch protection rules. For deploy.strategy="branch" with trigger="ci", use this to check push-deploy workflow runs.',
+    'Get GitHub Actions status for a project repository: workflows, recent runs for a workflow, run jobs/steps, bounded job log tails, GitHub Pages status, and branch protection rules. For deploy.strategy="branch" with trigger="ci", use this to check push-deploy workflow runs and inspect failed job logs through Hypervibe\'s stored GitHub connection.',
     {
       project: projectField,
       repo: repoField,
-      include: z.array(z.enum(['workflows', 'runs', 'pages', 'branch-protection'])).optional().describe('Sections to include (default: ["workflows"])'),
+      include: z.array(z.enum(['workflows', 'runs', 'jobs', 'logs', 'pages', 'branch-protection'])).optional().describe('Sections to include (default: ["workflows"]). jobs/logs require runId. logs returns a bounded tail, not a full archive.'),
       workflow: z.string().optional().describe('Workflow id or filename (required when include contains "runs")'),
+      runId: numericIdField.optional().describe('GitHub Actions run id, required when include contains "jobs" or "logs".'),
+      jobId: numericIdField.optional().describe('Optional GitHub Actions job id for include=["logs"]. Defaults to failed jobs for the run, or the first job if none failed.'),
+      logLines: z.number().int().positive().max(500).optional().describe('Number of log lines to return per job for include=["logs"] (default 120, max 500).'),
       branch: z.string().optional().describe('Branch for branch-protection (default "main")'),
     },
-    wrapHandler(async ({ project: projectRef, repo: repoOverride, include, workflow, branch }) => {
+    wrapHandler(async ({ project: projectRef, repo: repoOverride, include, workflow, runId, jobId, logLines, branch }) => {
       const { owner, repo } = resolveRepoOrThrow(ctx, projectRef, repoOverride);
       const adapter = githubAdapterOrThrow({ owner, repo });
       const sections = include?.length ? include : ['workflows' as const];
@@ -457,6 +542,55 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
                 event: r.event,
                 createdAt: r.created_at,
                 url: r.html_url,
+              }));
+              break;
+            }
+            case 'jobs': {
+              if (!runId) {
+                throw new HvError('VALIDATION', 'runId is required when include contains "jobs".', {
+                  hint: 'Get the run id from hv_ci_status include=["runs"], then rerun with include=["jobs"] and runId=<id>.',
+                });
+              }
+              const jobs = await adapter.listWorkflowRunJobs(owner, repo, runId, { per_page: 100 });
+              data.jobs = jobs.jobs.map(summarizeWorkflowJob);
+              break;
+            }
+            case 'logs': {
+              if (!runId) {
+                throw new HvError('VALIDATION', 'runId is required when include contains "logs".', {
+                  hint: 'Get the run id from hv_ci_status include=["runs"], then rerun with include=["logs"] and runId=<id>.',
+                });
+              }
+              const jobs = await adapter.listWorkflowRunJobs(owner, repo, runId, { per_page: 100 });
+              const targetJobs = jobId
+                ? jobs.jobs.filter((job) => job.id === jobId)
+                : jobs.jobs.filter(isUnsuccessfulJob).slice(0, 3);
+              const jobsForLogs = targetJobs.length > 0
+                ? targetJobs
+                : (jobId
+                    ? [{ id: jobId, name: `job ${jobId}`, status: 'unknown', conclusion: null }]
+                    : jobs.jobs.slice(0, 1));
+              const resolvedLogLines = logLines ?? 120;
+              data.logs = await Promise.all(jobsForLogs.map(async (job) => {
+                try {
+                  const text = await adapter.getWorkflowJobLogs(owner, repo, job.id);
+                  const tail = tailLogText(text, resolvedLogLines);
+                  return {
+                    jobId: job.id,
+                    name: job.name,
+                    status: job.status,
+                    conclusion: job.conclusion,
+                    ...tail,
+                  };
+                } catch (error) {
+                  return {
+                    jobId: job.id,
+                    name: job.name,
+                    status: job.status,
+                    conclusion: job.conclusion,
+                    error: error instanceof Error ? error.message : String(error),
+                  };
+                }
               }));
               break;
             }

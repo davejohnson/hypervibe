@@ -372,6 +372,105 @@ describe('hv_ci_status', () => {
     expect(res.error.code).toBe('VALIDATION');
     await t.close();
   });
+
+  it('returns GitHub Actions jobs and steps for a workflow run', async () => {
+    seedProject();
+    const listJobs = vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunJobs').mockResolvedValue({
+      total_count: 1,
+      jobs: [{
+        id: 99,
+        run_id: 123,
+        name: 'deploy',
+        status: 'completed',
+        conclusion: 'failure',
+        started_at: '2026-06-26T20:16:10Z',
+        completed_at: '2026-06-26T20:17:10Z',
+        html_url: 'https://github.com/davejohnson/billforge/actions/runs/123/job/99',
+        steps: [{
+          number: 4,
+          name: 'Deploy image',
+          status: 'completed',
+          conclusion: 'failure',
+          started_at: '2026-06-26T20:16:40Z',
+          completed_at: '2026-06-26T20:17:00Z',
+        }],
+      }],
+    });
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', { project: 'billforge', include: ['jobs'], runId: '123' });
+
+    expect(res.ok).toBe(true);
+    expect(listJobs).toHaveBeenCalledWith('davejohnson', 'billforge', 123, { per_page: 100 });
+    expect(res.data.jobs).toEqual([{
+      id: 99,
+      name: 'deploy',
+      status: 'completed',
+      conclusion: 'failure',
+      startedAt: '2026-06-26T20:16:10Z',
+      completedAt: '2026-06-26T20:17:10Z',
+      url: 'https://github.com/davejohnson/billforge/actions/runs/123/job/99',
+      steps: [{
+        number: 4,
+        name: 'Deploy image',
+        status: 'completed',
+        conclusion: 'failure',
+        startedAt: '2026-06-26T20:16:40Z',
+        completedAt: '2026-06-26T20:17:00Z',
+      }],
+    }]);
+    await t.close();
+  });
+
+  it('returns bounded log tails for failed GitHub Actions jobs', async () => {
+    seedProject();
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunJobs').mockResolvedValue({
+      total_count: 2,
+      jobs: [
+        {
+          id: 98,
+          run_id: 123,
+          name: 'test',
+          status: 'completed',
+          conclusion: 'success',
+          started_at: '2026-06-26T20:16:00Z',
+          completed_at: '2026-06-26T20:16:30Z',
+          html_url: 'https://github.com/davejohnson/billforge/actions/runs/123/job/98',
+          steps: [],
+        },
+        {
+          id: 99,
+          run_id: 123,
+          name: 'deploy',
+          status: 'completed',
+          conclusion: 'failure',
+          started_at: '2026-06-26T20:16:30Z',
+          completed_at: '2026-06-26T20:17:00Z',
+          html_url: 'https://github.com/davejohnson/billforge/actions/runs/123/job/99',
+          steps: [],
+        },
+      ],
+    });
+    const logs = vi.spyOn(GitHubAdapter.prototype, 'getWorkflowJobLogs').mockResolvedValue('line one\nline two\nline three');
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', { project: 'billforge', include: ['logs'], runId: 123, logLines: 2 });
+
+    expect(res.ok).toBe(true);
+    expect(logs).toHaveBeenCalledTimes(1);
+    expect(logs).toHaveBeenCalledWith('davejohnson', 'billforge', 99);
+    expect(res.data.logs).toEqual([{
+      jobId: 99,
+      name: 'deploy',
+      status: 'completed',
+      conclusion: 'failure',
+      text: 'line two\nline three',
+      lineCount: 3,
+      returnedLines: 2,
+      truncated: true,
+    }]);
+    await t.close();
+  });
 });
 
 describe('hv_ci_trigger', () => {

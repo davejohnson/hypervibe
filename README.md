@@ -227,7 +227,7 @@ https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&descri
 
 That one token can be used for both:
 
-- `apiToken`: GitHub API work such as writing `.github/workflows/*`, reading/triggering Actions, and creating repository secrets.
+- `apiToken`: GitHub API work such as writing `.github/workflows/*`, reading Actions runs/jobs/logs, triggering workflows, and creating repository secrets.
 - `packageReadToken`: durable GHCR image-pull credentials for providers like Railway and DigitalOcean.
 
 For an existing `.env` file with one token:
@@ -262,7 +262,7 @@ What hypervibe uses the GitHub token for, and the permission each operation need
 | Operation | Classic PAT scope | Fine-grained permission |
 |---|---|---|
 | Commit CI/config files (`hv_ci_setup`: workflows, AI review, Pages CNAME, SEO files) | `repo` (+ `workflow` for files under `.github/workflows/`) | Contents: read/write |
-| List/trigger Actions workflows, read runs (`hv_ci_status`, `hv_ci_trigger`) | `repo` | Actions: read/write |
+| List/trigger Actions workflows, read runs/jobs/logs (`hv_ci_status`, `hv_ci_trigger`) | `repo` | Actions: read/write |
 | Set/delete Actions repo secrets (`hv_secrets_set target="github"`) | `repo` | Secrets: read/write |
 | Branch protection (`hv_ci_setup kind="branch-protection"`) | `repo` + repo admin | Administration: read/write |
 | GitHub Pages (`hv_ci_setup kind="pages"`) | `repo` | Pages: read/write |

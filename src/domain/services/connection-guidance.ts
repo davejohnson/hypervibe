@@ -129,7 +129,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     tokenType: 'classic personal access token for Hypervibe GitHub API operations; optional second classic PAT for GHCR package reads',
     setupUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
     permissions: [
-      'For CI deploy management, apiToken must have repo and workflow so Hypervibe can create/update .github/workflows files, read/trigger Actions, and manage repository secrets for private repos.',
+      'For CI deploy management, apiToken must have repo and workflow so Hypervibe can create/update .github/workflows files, read Actions runs/jobs/logs, trigger workflows, and manage repository secrets for private repos.',
       'For Railway/DigitalOcean GHCR image pulls, packageReadToken must have read:packages. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.',
       'If using a fine-grained PAT for apiToken, grant Contents read/write, Workflows write, Actions write, and Secrets write on the target repo; GHCR package access still requires a classic PAT because fine-grained PATs do not support Packages.',
     ],

@@ -145,6 +145,39 @@ export class GitHubAdapter {
     return response.json() as Promise<T>;
   }
 
+  private async requestText(
+    method: 'GET',
+    endpoint: string
+  ): Promise<string> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const response = await fetch(`${GITHUB_API_URL}${endpoint}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.credentials.apiToken}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+
+    if (!response.ok) {
+      let errorMessage = `GitHub API error: ${response.status} ${response.statusText}`;
+      try {
+        const errorBody = await response.json() as { message?: string };
+        if (errorBody.message) {
+          errorMessage = `GitHub API error: ${errorBody.message}`;
+        }
+      } catch {
+        // Ignore JSON parse errors
+      }
+      throw new Error(errorMessage);
+    }
+
+    return await response.text();
+  }
+
   async verify(): Promise<GitHubVerifyResult> {
     try {
       if (!this.credentials) {
@@ -478,6 +511,69 @@ export class GitHubAdapter {
         html_url: string;
       }>;
     }>('GET', `/repos/${owner}/${repo}/actions/workflows/${workflowId}/runs${query}`);
+  }
+
+  /**
+   * List jobs and steps for a workflow run.
+   */
+  async listWorkflowRunJobs(
+    owner: string,
+    repo: string,
+    runId: string | number,
+    options?: { per_page?: number }
+  ): Promise<{
+    total_count: number;
+    jobs: Array<{
+      id: number;
+      run_id: number;
+      name: string;
+      status: string;
+      conclusion: string | null;
+      started_at: string | null;
+      completed_at: string | null;
+      html_url: string;
+      steps?: Array<{
+        name: string;
+        status: string;
+        conclusion: string | null;
+        number: number;
+        started_at: string | null;
+        completed_at: string | null;
+      }>;
+    }>;
+  }> {
+    const params = new URLSearchParams();
+    if (options?.per_page) params.set('per_page', String(options.per_page));
+    const query = params.toString() ? `?${params.toString()}` : '';
+
+    return await this.request<{
+      total_count: number;
+      jobs: Array<{
+        id: number;
+        run_id: number;
+        name: string;
+        status: string;
+        conclusion: string | null;
+        started_at: string | null;
+        completed_at: string | null;
+        html_url: string;
+        steps?: Array<{
+          name: string;
+          status: string;
+          conclusion: string | null;
+          number: number;
+          started_at: string | null;
+          completed_at: string | null;
+        }>;
+      }>;
+    }>('GET', `/repos/${owner}/${repo}/actions/runs/${runId}/jobs${query}`);
+  }
+
+  /**
+   * Download plain text logs for a workflow job.
+   */
+  async getWorkflowJobLogs(owner: string, repo: string, jobId: string | number): Promise<string> {
+    return await this.requestText('GET', `/repos/${owner}/${repo}/actions/jobs/${jobId}/logs`);
   }
 
   /**
