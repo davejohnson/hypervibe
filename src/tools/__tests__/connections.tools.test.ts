@@ -201,6 +201,31 @@ describe('hv_connect', () => {
     await t.close();
   });
 
+  it('normalizes legacy GitHub packagesToken to packageReadToken', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+      scopes: ['repo', 'workflow', 'read:packages'],
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'github',
+      scope: 'davejohnson/apreskeys.com',
+      credentials: {
+        apiToken: 'gh-api-token',
+        packagesToken: 'legacy-package-token',
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    const connection = new ConnectionRepository().findByProviderAndScope('github', 'davejohnson/apreskeys.com')!;
+    const decrypted = getSecretStore().decryptObject<{ packageReadToken?: string; packagesToken?: string }>(connection.credentialsEncrypted);
+    expect(decrypted.packageReadToken).toBe('legacy-package-token');
+    expect(decrypted.packagesToken).toBe('legacy-package-token');
+    await t.close();
+  });
+
   it('surfaces provider verification warnings without failing the connection', async () => {
     vi.spyOn(CloudflareAdapter.prototype, 'verify').mockResolvedValue({
       success: true,

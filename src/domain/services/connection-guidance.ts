@@ -130,7 +130,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     setupUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
     permissions: [
       'For CI deploy management, apiToken must have repo and workflow so Hypervibe can create/update .github/workflows files, read/trigger Actions, and manage repository secrets for private repos.',
-      'For Railway/DigitalOcean GHCR image pulls, packageReadToken or packagesToken must have read:packages. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.',
+      'For Railway/DigitalOcean GHCR image pulls, packageReadToken must have read:packages. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.',
       'If using a fine-grained PAT for apiToken, grant Contents read/write, Workflows write, Actions write, and Secrets write on the target repo; GHCR package access still requires a classic PAT because fine-grained PATs do not support Packages.',
     ],
     credentialExample: 'hv_connect provider="github" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}',
@@ -138,6 +138,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'A read:packages-only token is not enough for CI deploy setup because it cannot write workflows or repository secrets.',
       'For the simplest setup, create one classic PAT with repo, workflow, and read:packages, then map both apiToken and packageReadToken to the same .env variable.',
       'For least privilege, use two classic PATs: HYPERVIBE_GITHUB_TOKEN with repo + workflow, and HYPERVIBE_GITHUB_PACKAGES_TOKEN with read:packages.',
+      'packagesToken is accepted only as a backward-compatible alias; use packageReadToken in new configs and docs.',
     ],
   },
   heroku: {

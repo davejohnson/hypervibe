@@ -170,6 +170,47 @@ describe('hv_ci_setup', () => {
     await t.close();
   });
 
+  it('uses repo-scoped GitHub package credentials for Railway branch deploys', async () => {
+    const project = seedProject({
+      desiredState: {
+        deploy: { strategy: 'branch', branches: { production: 'main' } },
+      },
+    });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    const connectionRepo = new ConnectionRepository();
+    const secretStore = getSecretStore();
+    const scopedGithubConnection = connectionRepo.create({
+      provider: 'github',
+      scope: 'davejohnson/billforge',
+      credentialsEncrypted: secretStore.encryptObject({
+        apiToken: 'gh-token',
+        login: 'davejohnson',
+        packageReadToken: 'scoped-package-token',
+      }),
+    });
+    connectionRepo.updateStatus(scopedGithubConnection.id, 'verified');
+    const railwayConnection = connectionRepo.create({
+      provider: 'railway',
+      credentialsEncrypted: secretStore.encryptObject({ apiToken: 'railway-token' }),
+    });
+    connectionRepo.updateStatus(railwayConnection.id, 'verified');
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+      scopes: ['repo', 'workflow', 'read:packages'],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: true, updated: false } as any);
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_setup', { project: 'billforge', kind: 'deploy-branch', config: { provider: 'railway' } });
+
+    expect(res.ok).toBe(true);
+    expect(res.data.syncedSecrets).toEqual(['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'billforge', 'IMAGE_REGISTRY_TOKEN', 'scoped-package-token');
+    await t.close();
+  });
+
   it('accepts statusChecks=false for branch-deploy setup', async () => {
     const project = seedProject({
       desiredState: {

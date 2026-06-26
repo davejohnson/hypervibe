@@ -60,7 +60,7 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
     parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions. ${formatConnectionGuidance(provider)}`);
   }
   if (missingImageRegistrySecrets) {
-    parts.push(`For Railway/DigitalOcean GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials. The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken or packagesToken needs read:packages for durable GHCR image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
+    parts.push(`For Railway/DigitalOcean GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials. The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable GHCR image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
   }
   return parts.join(' ');
 }
@@ -120,7 +120,7 @@ export function isGitHubActionsDeployAction(action: PlanAction): boolean {
 
 export function providerSecretsForGitHubActions(
   provider: string,
-  options: { githubLogin?: string } = {}
+  options: { githubLogin?: string; githubRepo?: string } = {}
 ): ProviderSecret[] {
   const secrets: ProviderSecret[] = [];
   const connection = connectionRepo.findByProvider(provider);
@@ -176,7 +176,7 @@ export function providerSecretsForGitHubActions(
   }
 
   if (PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL.has(provider)) {
-    const githubConnection = connectionRepo.findByProvider('github');
+    const githubConnection = connectionRepo.findBestMatch('github', options.githubRepo);
     if (githubConnection?.status === 'verified') {
       const credentials = secretStore.decryptObject<Record<string, unknown>>(githubConnection.credentialsEncrypted);
       const username =
@@ -184,8 +184,8 @@ export function providerSecretsForGitHubActions(
         ?? (typeof credentials.login === 'string' ? credentials.login : undefined)
         ?? (typeof credentials.username === 'string' ? credentials.username : undefined);
       const token =
-        (typeof credentials.packagesToken === 'string' && credentials.packagesToken.length > 0 ? credentials.packagesToken : undefined)
-        ?? (typeof credentials.packageReadToken === 'string' && credentials.packageReadToken.length > 0 ? credentials.packageReadToken : undefined);
+        (typeof credentials.packageReadToken === 'string' && credentials.packageReadToken.length > 0 ? credentials.packageReadToken : undefined)
+        ?? (typeof credentials.packagesToken === 'string' && credentials.packagesToken.length > 0 ? credentials.packagesToken : undefined);
 
       if (username && token) {
         secrets.push(
@@ -283,7 +283,7 @@ export async function planGitHubActionsDeploy(params: {
   const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider as BranchDeployProvider, target, migration);
   const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(environmentSpec.hosting.provider)
     .filter((name) => workflow.requiredSecrets.includes(name));
-  const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider)
+  const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider, { githubRepo: repo })
     .filter((secret) => workflow.requiredSecrets.includes(secret.name));
   const availableSecretNames = availableSecrets.map((secret) => secret.name);
   const availableSecretHashes = secretHashes(availableSecrets);
@@ -417,7 +417,7 @@ export async function applyGitHubActionsDeploy(params: {
   const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider as BranchDeployProvider, target, migration);
   const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(environmentSpec.hosting.provider)
     .filter((name) => workflow.requiredSecrets.includes(name));
-  const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider)
+  const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider, { githubRepo: repo })
     .filter((secret) => workflow.requiredSecrets.includes(secret.name));
   const availableSecretNames = availableSecrets.map((secret) => secret.name);
   const missingProviderSecrets = requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name));
