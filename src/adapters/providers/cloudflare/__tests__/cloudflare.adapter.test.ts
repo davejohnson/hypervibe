@@ -119,6 +119,10 @@ describe('CloudflareAdapter.verify', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('Manage Account > Account API Tokens');
+    expect(result.error).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
+    expect(result.error).toContain('My Profile > API Tokens');
+    expect(result.error).toContain('https://dash.cloudflare.com/profile/api-tokens');
+    expect(result.error).toContain('cfat_');
     expect(result.error).toContain('CLOUDFLARE_ACCOUNT_ID');
     expect(result.error).toContain('Zone > Zone > Read');
     expect(result.error).toContain('Zone > Zone Settings > Read or Edit');
@@ -172,7 +176,11 @@ describe('CloudflareAdapter.verify', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('Manage Account > Account API Tokens');
+    expect(result.error).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
     expect(result.error).toContain('My Profile > API Tokens');
+    expect(result.error).toContain('https://dash.cloudflare.com/profile/api-tokens');
+    expect(result.error).toContain('cfat_');
+    expect(result.error).toContain('cfut_');
     expect(result.error).toContain('Zone > Zone > Read');
     expect(result.error).toContain('Zone > Zone Settings > Read or Edit');
     expect(result.error).toContain('Zone > DNS > Edit/Write');

@@ -25,7 +25,15 @@ describe('connection guidance', () => {
     const guidance = formatConnectionGuidance('cloudflare', { scope: 'invoiceperfect.com' });
 
     expect(guidance).toContain('Cloudflare Account API Token');
+    expect(guidance).toContain('Cloudflare User API Token');
+    expect(guidance).toContain('DNS, custom domains, and email routing');
+    expect(guidance).toContain('Registrar/domain purchase');
+    expect(guidance).toContain('Cloudflare Dashboard -> Manage Account -> Account API Tokens');
     expect(guidance).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
+    expect(guidance).toContain('Cloudflare Dashboard -> My Profile -> API Tokens');
+    expect(guidance).toContain('https://dash.cloudflare.com/profile/api-tokens');
+    expect(guidance).toContain('cfat_');
+    expect(guidance).toContain('cfut_');
     expect(guidance).toContain('Zone -> Zone -> Read');
     expect(guidance).toContain('Zone -> Zone Settings -> Read or Edit');
     expect(guidance).toContain('Zone -> DNS -> Edit/Write');

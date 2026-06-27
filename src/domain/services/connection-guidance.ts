@@ -60,7 +60,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   cloudflare: {
     provider: 'cloudflare',
     displayName: 'Cloudflare',
-    tokenType: 'Cloudflare Account API Token for durable DNS/email automation; User API Token only when Account API Tokens are unsupported',
+    tokenType: 'Cloudflare Account API Token for DNS, custom domains, and email routing; Cloudflare User API Token for Registrar/domain purchase',
     setupUrl: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
     permissions: [
       'Zone -> Zone -> Read.',
@@ -70,9 +70,10 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'hv_connect provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}',
     notes: [
-      'Create Account API Tokens from Manage Account -> Account API Tokens when possible; Cloudflare recommends them for credentials not associated with users.',
-      'For User API Tokens, use My Profile -> API Tokens -> Create Token -> Edit zone DNS and add Zone Settings. Do not use the legacy Global API Key.',
-      'Cloudflare Registrar/domain purchase is not supported by Account API Tokens; use a User API Token if Hypervibe needs to buy domains.',
+      'Recommended for ordinary DNS/custom-domain/email work: create an Account API Token from Cloudflare Dashboard -> Manage Account -> Account API Tokens: https://dash.cloudflare.com/?to=/:account/api-tokens. Account tokens usually start with cfat_ and Hypervibe also needs accountId/CLOUDFLARE_ACCOUNT_ID.',
+      'For Registrar/domain purchase: create a User API Token from Cloudflare Dashboard -> My Profile -> API Tokens: https://dash.cloudflare.com/profile/api-tokens. User tokens usually start with cfut_. Cloudflare Registrar is not supported by Account API Tokens.',
+      'For either token type, use Create Token, start from the Edit zone DNS template when available, then confirm Zone -> Zone -> Read, Zone -> Zone Settings -> Read or Edit, and Zone -> DNS -> Edit/Write for the target zone.',
+      'Use the token secret itself as apiToken/CLOUDFLARE_API_TOKEN; do not use the token name or token id. Do not use the legacy Global API Key.',
     ],
   },
   cloudrun: {

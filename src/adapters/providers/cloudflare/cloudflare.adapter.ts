@@ -209,16 +209,16 @@ function tokenSetupHelp(kind: 'user' | 'account' | 'unknown', domain?: string): 
   const scope = domain ? ` for ${domain}` : '';
   if (kind === 'account') {
     return [
-      `Cloudflare rejected this Account API Token${scope}.`,
+      `Cloudflare rejected this Account API Token${scope}. Account tokens usually start with cfat_.`,
       `Create or review Account API Tokens in Cloudflare at Manage Account > Account API Tokens: ${CLOUDFLARE_ACCOUNT_TOKEN_URL}`,
       `For DNS automation, grant ${CLOUDFLARE_DNS_PERMISSIONS} for the target zone.`,
       'Account API Tokens also require accountId in the Hypervibe credentials.',
-      'Cloudflare Registrar domain registration is not supported by Account API Tokens; use a User API Token if Hypervibe needs to buy domains.',
+      `Cloudflare Registrar domain registration is not supported by Account API Tokens; use a User API Token from My Profile > API Tokens if Hypervibe needs to buy domains: ${CLOUDFLARE_USER_TOKEN_URL}`,
     ].join(' ');
   }
   if (kind === 'user') {
     return [
-      `Cloudflare rejected this User API Token${scope}.`,
+      `Cloudflare rejected this User API Token${scope}. User tokens usually start with cfut_.`,
       `Create a User API Token in Cloudflare at My Profile > API Tokens: ${CLOUDFLARE_USER_TOKEN_URL}`,
       `Use Create Token, start from the Edit zone DNS template, and grant ${CLOUDFLARE_DNS_PERMISSIONS} for the target zone.`,
       'Use the token secret itself as apiToken/CLOUDFLARE_API_TOKEN, not the token name, token id, or legacy Global API Key.',
@@ -226,10 +226,11 @@ function tokenSetupHelp(kind: 'user' | 'account' | 'unknown', domain?: string): 
   }
   return [
     `Cloudflare rejected this API token${scope}.`,
-    `For durable DNS/email automation, create an Account API Token under Manage Account > Account API Tokens: ${CLOUDFLARE_ACCOUNT_TOKEN_URL}`,
+    `For DNS/custom-domain/email automation, create an Account API Token under Manage Account > Account API Tokens: ${CLOUDFLARE_ACCOUNT_TOKEN_URL}`,
     `Grant ${CLOUDFLARE_DNS_PERMISSIONS} for the target zone.`,
-    'Account API Tokens require accountId in the Hypervibe credentials.',
+    'Account API Tokens usually start with cfat_ and require accountId in the Hypervibe credentials.',
     `If Hypervibe needs Cloudflare Registrar/domain purchase, use a User API Token at My Profile > API Tokens instead: ${CLOUDFLARE_USER_TOKEN_URL}`,
+    'User API Tokens usually start with cfut_. Do not use the legacy Global API Key.',
   ].join(' ');
 }
 
@@ -882,7 +883,7 @@ providerRegistry.register({
     displayName: 'Cloudflare',
     category: 'dns',
     credentialsSchema: CloudflareCredentialsSchema,
-    setupHelpUrl: 'https://dash.cloudflare.com/profile/api-tokens',
+    setupHelpUrl: CLOUDFLARE_ACCOUNT_TOKEN_URL,
   },
   factory: (credentials) => {
     const adapter = new CloudflareAdapter();

@@ -204,6 +204,11 @@ Hypervibe accepts either a raw token or a copied authorization value such as `Be
 If Hypervibe needs Cloudflare Registrar/domain purchase, use a **User API Token** instead because Cloudflare Registrar is not compatible with Account API Tokens. Create it under `My Profile -> API Tokens -> Create Token -> Edit zone DNS`, add the same zone permissions above, and connect it without `accountId`:
 
 ```text
+Cloudflare dashboard -> My Profile -> API Tokens
+https://dash.cloudflare.com/profile/api-tokens
+```
+
+```text
 hv_connect provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"
 ```
 
