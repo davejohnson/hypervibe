@@ -8,16 +8,17 @@ import { adapterFactory } from './adapter.factory.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
+import {
+  customDomainAttachBindingMissingMessage,
+  customDomainAttachUnsupportedMessage,
+  providerRequiresCustomDomainAttach,
+  supportsCustomDomainAttach,
+  type DomainAttachCapableAdapter,
+} from './domain-attach-policy.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
-import type { Receipt } from '../ports/provider.port.js';
 
 const connectionRepo = new ConnectionRepository();
-
-/** Hosting adapters that can attach a custom domain to a deployed service (e.g. Railway). */
-type DomainCapableAdapter = {
-  attachCustomDomain?: (params: { projectId?: string; serviceId: string; environmentId: string; domain: string }) => Promise<Receipt>;
-};
 
 type HostingBindings = {
   projectId?: string;
@@ -108,12 +109,20 @@ export async function setupCustomDomain(params: {
   result.service = serviceName;
 
   let providerDnsRecords: Array<Record<string, unknown>> = [];
-  if (serviceName && binding?.serviceId && bindings.environmentId) {
-    const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
-    const adapter = adapterResult.adapter as DomainCapableAdapter | undefined;
-    if (adapterResult.success && adapter && typeof adapter.attachCustomDomain === 'function') {
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
+  const adapter = adapterResult.adapter as DomainAttachCapableAdapter | undefined;
+  const requiresProviderAttach = providerRequiresCustomDomainAttach(provider);
+
+  if (!adapterResult.success && requiresProviderAttach) {
+    result.customDomainAttached = false;
+    result.customDomainError = adapterResult.error || customDomainAttachUnsupportedMessage(provider, domain);
+  } else if (serviceName && binding?.serviceId && bindings.environmentId) {
+    const attachCustomDomain = supportsCustomDomainAttach(adapter)
+      ? adapter.attachCustomDomain
+      : undefined;
+    if (attachCustomDomain) {
       try {
-        const receipt = await adapter.attachCustomDomain({
+        const receipt = await attachCustomDomain({
           projectId: bindings.projectId,
           serviceId: binding.serviceId,
           environmentId: bindings.environmentId,
@@ -132,7 +141,13 @@ export async function setupCustomDomain(params: {
         result.customDomainAttached = false;
         result.customDomainError = error instanceof Error ? error.message : String(error);
       }
+    } else if (requiresProviderAttach) {
+      result.customDomainAttached = false;
+      result.customDomainError = customDomainAttachUnsupportedMessage(provider, domain);
     }
+  } else if (requiresProviderAttach) {
+    result.customDomainAttached = false;
+    result.customDomainError = customDomainAttachBindingMissingMessage(provider, domain);
   }
 
   // Step 3: DNS records — provider-required records when the attach returned

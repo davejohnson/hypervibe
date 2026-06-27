@@ -22,6 +22,13 @@ import { normalizeGitRemoteForBuild } from '../../lib/git-remote.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
 import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from './railway-help.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
+import {
+  customDomainAttachBindingMissingMessage,
+  customDomainAttachUnsupportedMessage,
+  providerRequiresCustomDomainAttach,
+  supportsCustomDomainAttach,
+  type DomainAttachCapableAdapter,
+} from './domain-attach-policy.js';
 import type { Component } from '../entities/component.entity.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
@@ -43,10 +50,6 @@ const connectionRepo = new ConnectionRepository();
 type SourceConfigurableHostingAdapter = {
   connectServiceToRepo?: (params: { serviceId: string; repo: string; branch: string }) => Promise<Receipt>;
   isGitHubRepoAccessible?: (fullRepoName: string) => Promise<boolean | null>;
-};
-
-type DomainConfigurableHostingAdapter = {
-  attachCustomDomain?: (params: { projectId?: string; serviceId: string; environmentId: string; domain: string }) => Promise<Receipt>;
 };
 
 type DatabaseEnsuringAdapter = {
@@ -796,12 +799,17 @@ export async function executeBootstrap(params: {
       const boundProjectId = typeof latestBindings.projectId === 'string' ? latestBindings.projectId : undefined;
       const boundEnvironmentId =
         typeof latestBindings.environmentId === 'string' ? latestBindings.environmentId : null;
-      const domainAdapter = hostingAdapter as IHostingAdapter & DomainConfigurableHostingAdapter;
+      const domainAdapter = hostingAdapter as IHostingAdapter & DomainAttachCapableAdapter;
       const targetService = serviceWorkloads[0];
       const targetServiceId = targetService ? boundServices[targetService.name]?.serviceId : undefined;
+      const domainProvider = hostingAdapter.name || targetPlatform;
+      const requiresProviderAttach = providerRequiresCustomDomainAttach(domainProvider);
+      const attachCustomDomain = supportsCustomDomainAttach(domainAdapter)
+        ? domainAdapter.attachCustomDomain
+        : undefined;
 
-      if (targetService && targetServiceId && boundEnvironmentId && typeof domainAdapter.attachCustomDomain === 'function') {
-        const receipt = await domainAdapter.attachCustomDomain({
+      if (targetService && targetServiceId && boundEnvironmentId && attachCustomDomain) {
+        const receipt = await attachCustomDomain({
           projectId: boundProjectId,
           serviceId: targetServiceId,
           environmentId: boundEnvironmentId,
@@ -863,6 +871,12 @@ export async function executeBootstrap(params: {
             }
           }
         }
+      } else if (requiresProviderAttach) {
+        providerDomainAttachFailed = true;
+        summary.customDomainAttached = false;
+        summary.customDomainError = targetService && targetServiceId && boundEnvironmentId
+          ? customDomainAttachUnsupportedMessage(domainProvider, params.domain)
+          : customDomainAttachBindingMissingMessage(domainProvider, params.domain);
       }
     } catch (error) {
       providerDomainAttachFailed = true;

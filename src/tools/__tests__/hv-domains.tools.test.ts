@@ -214,4 +214,87 @@ describe('hv_domain_setup', () => {
     expect(upsertDnsRecord).not.toHaveBeenCalled();
     await t.close();
   });
+
+  it('does not write fallback DNS for managed hosts without domain attach support', async () => {
+    seedCloudflareConnection({ apiToken: 'cf-token' }, 'app.example.com');
+    const project = new ProjectRepository().create({ name: 'domain-unsupported-host-app', defaultPlatform: 'vercel' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'vercel',
+        projectId: 'vercel-project-1',
+        environmentId: 'production',
+        services: {
+          web: {
+            serviceId: 'vercel-web',
+            url: 'https://web.vercel.app',
+          },
+        },
+      },
+    });
+
+    const fakeHostingAdapter = {
+      name: 'vercel',
+      capabilities: {
+        supportedBuilders: ['static'],
+        supportedComponents: [],
+        supportsAutoWiring: true,
+        supportsHealthChecks: false,
+        supportsCronSchedule: true,
+        supportsReleaseCommand: false,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsObserve: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return { success: true, message: 'ready' };
+      },
+      async ensureComponent() {
+        throw new Error('not used');
+      },
+      async deploy() {
+        throw new Error('not used');
+      },
+      async setEnvVars() {
+        return { success: true, message: 'vars synced' };
+      },
+    } satisfies IProviderAdapter;
+
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeHostingAdapter,
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'connect').mockImplementation(() => {});
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1',
+      name: 'example.com',
+      status: 'active',
+      paused: false,
+      type: 'full',
+      name_servers: [],
+    });
+    const upsertDnsRecord = vi.spyOn(CloudflareAdapter.prototype, 'upsertDnsRecord');
+
+    const t = await makeClient();
+    const result = await t.call('hv_domain_setup', {
+      project: 'domain-unsupported-host-app',
+      env: 'production',
+      domain: 'app.example.com',
+      service: 'web',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.customDomainAttached).toBe(false);
+    expect(result.data.dnsConfigured).toBe(false);
+    expect(result.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining('does not implement custom-domain attachment for vercel'),
+    ]));
+    expect(upsertDnsRecord).not.toHaveBeenCalled();
+    await t.close();
+  });
 });
