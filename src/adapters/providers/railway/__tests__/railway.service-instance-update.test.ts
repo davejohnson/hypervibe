@@ -145,12 +145,21 @@ describe('RailwayAdapter service instance updates', () => {
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
     const receipt = await adapter.attachCustomDomain({
+      projectId: 'rail-project-1',
       serviceId: 'svc-web',
       environmentId: 'env-prod',
       domain: 'usebillforge.com',
     });
 
     expect(receipt.success).toBe(true);
+    expect(request.mock.calls[1]?.[1]).toEqual({
+      input: {
+        projectId: 'rail-project-1',
+        serviceId: 'svc-web',
+        environmentId: 'env-prod',
+        domain: 'usebillforge.com',
+      },
+    });
     expect(receipt.data).toMatchObject({
       domain: 'usebillforge.com',
       customDomainId: 'cd_123',
@@ -168,6 +177,22 @@ describe('RailwayAdapter service instance updates', () => {
         },
       ],
     });
+  });
+
+  it('does not call Railway customDomainCreate without a projectId binding', async () => {
+    const request = vi.fn();
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.attachCustomDomain({
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+    });
+
+    expect(receipt.success).toBe(false);
+    expect(receipt.error).toContain('requires the Railway projectId');
+    expect(request).not.toHaveBeenCalled();
   });
 
   it('creates a Railway service domain for public services and returns the url', async () => {

@@ -1147,6 +1147,7 @@ describe('infra_apply multi-service convergence', () => {
 
     expect(payload.success).toBe(true);
     expect(attachCustomDomain).toHaveBeenCalledWith({
+      projectId: 'rail-project-1',
       serviceId: 'rail-web',
       environmentId: 'rail-env-1',
       domain: 'usebillforge.com',
@@ -1157,6 +1158,178 @@ describe('infra_apply multi-service convergence', () => {
     ]);
     expect(payload.customDomainAttached).toBe(true);
     expect(payload.domainDnsConfigured).toBe(true);
+  });
+
+  it('does not write fallback DNS when Railway custom-domain attach fails', async () => {
+    const projectRepo = new ProjectRepository();
+    const connectionRepo = new ConnectionRepository();
+    const secretStore = getSecretStore();
+    const project = projectRepo.create({ name: 'domain-attach-failed-project', defaultPlatform: 'railway' });
+
+    const cloudflareConnection = connectionRepo.create({
+      provider: 'cloudflare',
+      scope: 'usebillforge.com',
+      credentialsEncrypted: secretStore.encryptObject({ apiToken: 'cf-token' }),
+    });
+    connectionRepo.updateStatus(cloudflareConnection.id, 'verified');
+
+    const fakeDatabaseAdapter: IDatabaseAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedDatabases: ['postgres'],
+        supportedCaches: [],
+        supportsPooling: false,
+        supportsReadReplicas: false,
+        supportsPointInTimeRecovery: false,
+        serverlessOptimized: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async provision(_type, environment) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type: 'postgres',
+            bindings: {
+              provider: 'railway',
+              pluginName: 'postgres-db',
+              connectionString: 'postgres://shared-db',
+            },
+            externalId: 'rail-db-1',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: true,
+            message: 'db ready',
+            data: {
+              providerProjectId: 'rail-project-1',
+              ensureProjectCreated: false,
+            },
+          },
+          connectionUrl: 'postgres://shared-db',
+          envVars: {
+            DATABASE_URL: '${{postgres-db.DATABASE_URL}}',
+            DIRECT_URL: '${{postgres-db.DATABASE_PRIVATE_URL}}',
+          },
+        };
+      },
+      async getConnectionUrl() {
+        return 'postgres://shared-db';
+      },
+      async destroy() {
+        return { success: true, message: 'destroyed' };
+      },
+    };
+
+    const attachCustomDomain = vi.fn(async () => ({
+      success: false,
+      message: 'Failed to attach Railway custom domain',
+      error: 'Problem processing request',
+    }));
+
+    const fakeHostingAdapter: IHostingAdapter & {
+      attachCustomDomain: typeof attachCustomDomain;
+    } = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: false,
+        supportsReleaseCommand: true,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: false,
+        supportsObserve: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return {
+          success: true,
+          message: 'bound',
+          data: {
+            projectId: 'rail-project-1',
+            environmentId: 'rail-env-1',
+          },
+        };
+      },
+      async deploy(service) {
+        return {
+          serviceId: `deploy-${service.name}`,
+          externalId: `rail-${service.name}`,
+          url: 'https://web-production.up.railway.app',
+          status: 'deployed',
+          receipt: {
+            success: true,
+            message: 'deployed',
+            data: {
+              environmentId: 'rail-env-1',
+            },
+          },
+        };
+      },
+      async setEnvVars() {
+        return {
+          success: true,
+          message: 'vars synced',
+        };
+      },
+      async getDeployStatus() {
+        return {
+          status: 'deployed',
+          url: 'https://web-production.up.railway.app',
+        };
+      },
+      attachCustomDomain,
+    };
+
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeDatabaseAdapter,
+    });
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeHostingAdapter,
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'connect').mockImplementation(() => {});
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1',
+      name: 'usebillforge.com',
+      status: 'active',
+      paused: false,
+      type: 'full',
+      name_servers: [],
+    });
+    const upsertDnsRecord = vi.spyOn(CloudflareAdapter.prototype, 'upsertDnsRecord');
+
+    const payload = await applyInfra({
+      projectName: project.name,
+      environmentName: 'production',
+      services: ['web'],
+      databaseProvider: 'railway',
+      domain: 'usebillforge.com',
+      setupEmail: false,
+      confirm: true,
+    });
+
+    expect(payload.success).toBe(true);
+    expect(attachCustomDomain).toHaveBeenCalledWith({
+      projectId: 'rail-project-1',
+      serviceId: 'rail-web',
+      environmentId: 'rail-env-1',
+      domain: 'usebillforge.com',
+    });
+    expect(upsertDnsRecord).not.toHaveBeenCalled();
+    expect(payload.customDomainAttached).toBe(false);
+    expect(payload.customDomainError).toBe('Problem processing request');
+    expect(payload.domainDnsConfigured).toBeUndefined();
   });
 
   it('allows protected infra_apply with confirm=true', async () => {

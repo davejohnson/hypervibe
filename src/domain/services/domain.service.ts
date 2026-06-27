@@ -16,10 +16,11 @@ const connectionRepo = new ConnectionRepository();
 
 /** Hosting adapters that can attach a custom domain to a deployed service (e.g. Railway). */
 type DomainCapableAdapter = {
-  attachCustomDomain?: (params: { serviceId: string; environmentId: string; domain: string }) => Promise<Receipt>;
+  attachCustomDomain?: (params: { projectId?: string; serviceId: string; environmentId: string; domain: string }) => Promise<Receipt>;
 };
 
 type HostingBindings = {
+  projectId?: string;
   environmentId?: string;
   services?: Record<string, { serviceId?: string; url?: string }>;
 };
@@ -113,6 +114,7 @@ export async function setupCustomDomain(params: {
     if (adapterResult.success && adapter && typeof adapter.attachCustomDomain === 'function') {
       try {
         const receipt = await adapter.attachCustomDomain({
+          projectId: bindings.projectId,
           serviceId: binding.serviceId,
           environmentId: bindings.environmentId,
           domain,
@@ -154,6 +156,11 @@ export async function setupCustomDomain(params: {
       // Attached but the provider reported no records to create.
       result.dnsConfigured = false;
       result.dnsError = `${provider} did not return DNS records for ${domain}; check the provider dashboard for required records.`;
+    } else if (result.customDomainAttached === false) {
+      result.dnsConfigured = false;
+      result.dnsError = result.customDomainError
+        ? `Custom-domain attach failed on ${provider}: ${result.customDomainError}`
+        : `Custom-domain attach failed on ${provider}; DNS was not changed because the provider has not accepted ${domain}.`;
     } else if (binding?.url) {
       const targetHost = new URL(binding.url).hostname;
       const upsert = await cfAdapter.upsertDnsRecord(zone.id, domain, 'CNAME', targetHost, { proxied: true });

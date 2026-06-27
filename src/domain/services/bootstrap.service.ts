@@ -46,7 +46,7 @@ type SourceConfigurableHostingAdapter = {
 };
 
 type DomainConfigurableHostingAdapter = {
-  attachCustomDomain?: (params: { serviceId: string; environmentId: string; domain: string }) => Promise<Receipt>;
+  attachCustomDomain?: (params: { projectId?: string; serviceId: string; environmentId: string; domain: string }) => Promise<Receipt>;
 };
 
 type DatabaseEnsuringAdapter = {
@@ -787,11 +787,13 @@ export async function executeBootstrap(params: {
   }
 
   let providerDomainConfigured = false;
+  let providerDomainAttachFailed = false;
   if (params.domain) {
     try {
       const latestEnvironment = envRepo.findById(environment.id) ?? environment;
       const latestBindings = latestEnvironment.platformBindings as Record<string, unknown>;
       const boundServices = (latestBindings.services as Record<string, { serviceId: string; url?: string }> | undefined) ?? {};
+      const boundProjectId = typeof latestBindings.projectId === 'string' ? latestBindings.projectId : undefined;
       const boundEnvironmentId =
         typeof latestBindings.environmentId === 'string' ? latestBindings.environmentId : null;
       const domainAdapter = hostingAdapter as IHostingAdapter & DomainConfigurableHostingAdapter;
@@ -800,12 +802,14 @@ export async function executeBootstrap(params: {
 
       if (targetService && targetServiceId && boundEnvironmentId && typeof domainAdapter.attachCustomDomain === 'function') {
         const receipt = await domainAdapter.attachCustomDomain({
+          projectId: boundProjectId,
           serviceId: targetServiceId,
           environmentId: boundEnvironmentId,
           domain: params.domain,
         });
 
         if (!receipt.success) {
+          providerDomainAttachFailed = true;
           summary.customDomainAttached = false;
           summary.customDomainError = receipt.error || receipt.message;
         } else {
@@ -861,13 +865,14 @@ export async function executeBootstrap(params: {
         }
       }
     } catch (error) {
+      providerDomainAttachFailed = true;
       summary.customDomainAttached = false;
       summary.customDomainError = error instanceof Error ? error.message : String(error);
       summary.domainDnsConfigured = false;
     }
   }
 
-  if (!providerDomainConfigured && params.domain && deploy.urls[0]) {
+  if (!providerDomainConfigured && !providerDomainAttachFailed && params.domain && deploy.urls[0]) {
     try {
       const targetHost = new URL(deploy.urls[0]).hostname;
       const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [params.domain, ...scopeHints]);

@@ -12,6 +12,8 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
+import { adapterFactory } from '../../domain/services/adapter.factory.js';
+import type { IProviderAdapter } from '../../domain/ports/provider.port.js';
 import { createToolContext } from '../context.js';
 import { registerHvDomainsTools } from '../hv-domains.tools.js';
 
@@ -115,6 +117,101 @@ describe('hv_domain_setup', () => {
     const result = await t.call('hv_domain_setup', { project: 'domain-conn-app', env: 'staging', domain: 'app.example.com' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('MISSING_CONNECTION');
+    await t.close();
+  });
+
+  it('does not write fallback DNS when provider custom-domain attach fails', async () => {
+    seedCloudflareConnection({ apiToken: 'cf-token' }, 'app.example.com');
+    const project = new ProjectRepository().create({ name: 'domain-no-fallback-app', defaultPlatform: 'railway' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project-1',
+        environmentId: 'rail-env-1',
+        services: {
+          web: {
+            serviceId: 'rail-web',
+            url: 'https://web-production.up.railway.app',
+          },
+        },
+      },
+    });
+
+    const attachCustomDomain = vi.fn(async () => ({
+      success: false,
+      message: 'Failed to attach Railway custom domain',
+      error: 'Problem processing request',
+    }));
+    const fakeHostingAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportedComponents: [],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: false,
+        supportsReleaseCommand: true,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsObserve: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return { success: true, message: 'ready' };
+      },
+      async ensureComponent() {
+        throw new Error('not used');
+      },
+      async deploy() {
+        throw new Error('not used');
+      },
+      async setEnvVars() {
+        return { success: true, message: 'vars synced' };
+      },
+      attachCustomDomain,
+    } satisfies IProviderAdapter & { attachCustomDomain: typeof attachCustomDomain };
+
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeHostingAdapter,
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'connect').mockImplementation(() => {});
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1',
+      name: 'example.com',
+      status: 'active',
+      paused: false,
+      type: 'full',
+      name_servers: [],
+    });
+    const upsertDnsRecord = vi.spyOn(CloudflareAdapter.prototype, 'upsertDnsRecord');
+
+    const t = await makeClient();
+    const result = await t.call('hv_domain_setup', {
+      project: 'domain-no-fallback-app',
+      env: 'production',
+      domain: 'app.example.com',
+      service: 'web',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.customDomainAttached).toBe(false);
+    expect(result.data.dnsConfigured).toBe(false);
+    expect(result.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining('Problem processing request'),
+    ]));
+    expect(attachCustomDomain).toHaveBeenCalledWith({
+      projectId: 'rail-project-1',
+      serviceId: 'rail-web',
+      environmentId: 'rail-env-1',
+      domain: 'app.example.com',
+    });
+    expect(upsertDnsRecord).not.toHaveBeenCalled();
     await t.close();
   });
 });

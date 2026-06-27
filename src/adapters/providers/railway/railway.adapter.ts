@@ -396,15 +396,30 @@ export class RailwayAdapter implements IProviderAdapter {
     if (error instanceof Error) {
       const anyError = error as Error & {
         response?: {
-          errors?: Array<{ message?: string }>;
+          errors?: Array<{
+            message?: string;
+            path?: Array<string | number>;
+            extensions?: Record<string, unknown>;
+          }>;
           status?: number;
         };
       };
       const gqlErrors = anyError.response?.errors ?? [];
       if (gqlErrors.length > 0) {
         return gqlErrors
-          .map((entry) => entry.message ?? 'Unknown GraphQL error')
+          .map((entry) => {
+            const details = [
+              typeof entry.extensions?.code === 'string' ? `code: ${entry.extensions.code}` : undefined,
+              typeof entry.extensions?.statusCode === 'number' ? `status: ${entry.extensions.statusCode}` : undefined,
+              entry.path?.length ? `path: ${entry.path.join('.')}` : undefined,
+            ].filter(Boolean);
+            const suffix = details.length ? ` (${details.join(', ')})` : '';
+            return `${entry.message ?? 'Unknown GraphQL error'}${suffix}`;
+          })
           .join('; ');
+      }
+      if (anyError.response?.status) {
+        return `${error.message} (HTTP ${anyError.response.status})`;
       }
       return error.message;
     }
@@ -2176,12 +2191,20 @@ export class RailwayAdapter implements IProviderAdapter {
   }
 
   async attachCustomDomain(params: {
+    projectId?: string;
     serviceId: string;
     environmentId: string;
     domain: string;
   }): Promise<Receipt> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
+    }
+    if (!params.projectId) {
+      return {
+        success: false,
+        message: 'Failed to attach Railway custom domain',
+        error: 'Railway custom-domain creation requires the Railway projectId, but no project binding was available. Re-run hv_status or hv_plan to refresh repo bindings, then retry.',
+      };
     }
 
     const existing = await this.getCustomDomainStatus(params);
@@ -2215,6 +2238,7 @@ export class RailwayAdapter implements IProviderAdapter {
         };
       }>(mutation, {
         input: {
+          projectId: params.projectId,
           serviceId: params.serviceId,
           environmentId: params.environmentId,
           domain: params.domain,
