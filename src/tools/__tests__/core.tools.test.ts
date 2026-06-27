@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'crypto';
 import { parseToolEnvelope } from './tool-result.js';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -14,6 +15,7 @@ import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflar
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.port.js';
+import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../domain/services/github-ops.service.js';
 import { bootstrapActionResultFromSummary } from '../core.tools.js';
 
 let tempDir: string;
@@ -486,6 +488,10 @@ describe('hv_spec_set / hv_spec_get', () => {
 });
 
 describe('hv_plan / hv_status / hv_apply', () => {
+  function sha256(value: string) {
+    return createHash('sha256').update(value, 'utf8').digest('hex');
+  }
+
   function verifyConnection(provider: string, credentials: Record<string, unknown> = { apiToken: `${provider}-token` }) {
     const repo = new ConnectionRepository();
     const conn = repo.create({ provider, credentialsEncrypted: getSecretStore().encryptObject(credentials) });
@@ -954,6 +960,83 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(status.data.inSync).toBe(false);
     const drift = status.data.drift.find((a: { id: string }) => a.id === 'service:web');
     expect(drift.type).toBe('update');
+    await t.close();
+  });
+
+  it('reports push-to-deploy ready for synced GitHub Actions deploy workflows', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'ci-status-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/ci-status-app.git',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            envVars: {},
+            email: { enabled: false },
+            deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          },
+        },
+      },
+    });
+    verifyConnection('railway', { apiToken: 'railway-token' });
+    verifyConnection('github', { apiToken: 'gh-token', login: 'davejohnson', packageReadToken: 'gh-package-token' });
+    const { ProjectRepository } = await import('../../adapters/db/repositories/project.repository.js');
+    const project = new ProjectRepository().findByName('ci-status-app')!;
+    const envRepo = new EnvironmentRepository();
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-web' } },
+      },
+    });
+    const { targets, migration } = resolveBranchDeployTargets(project);
+    const target = targets.find((candidate) => candidate.environmentName === 'production')!;
+    const workflow = buildBranchDeployWorkflow('railway', target, migration);
+    const environment = envRepo.findByProjectAndName(project.id, 'production')!;
+    envRepo.updatePlatformBindings(environment.id, {
+      ...(environment.platformBindings as Record<string, unknown>),
+      ci: {
+        deployBranch: {
+          [workflow.path]: {
+            contentHash: sha256(workflow.content),
+            syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+            syncedSecretHashes: {
+              RAILWAY_API_TOKEN: sha256('railway-token'),
+              IMAGE_REGISTRY_USERNAME: sha256('davejohnson'),
+              IMAGE_REGISTRY_TOKEN: sha256('gh-package-token'),
+            },
+          },
+        },
+      },
+    });
+    mockObserved({
+      provider: 'railway', observedAt: new Date().toISOString(),
+      projectExists: true, projectId: 'rp-1', environmentId: 'rail-env-1',
+      services: [{
+        name: 'web', externalId: 'svc-web', workloadKind: 'web', customDomains: [],
+        config: { startCommand: 'npm start', public: false },
+        envVarKeys: [], envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [], partial: false, warnings: [],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+
+    const status = await t.call('hv_status', { project: 'ci-status-app', env: 'production' });
+
+    expect(status.ok).toBe(true);
+    expect(status.data.deploySource.pushToDeploy).toBe(true);
+    expect(status.data.deploySource.ci).toMatchObject({
+      provider: 'github-actions',
+      setup: 'in-sync',
+      workflow: { path: '.github/workflows/deploy-railway-production.yml', branch: 'main' },
+    });
     await t.close();
   });
 

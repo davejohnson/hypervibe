@@ -111,6 +111,7 @@ describe('RailwayAdapter observe', () => {
       config: {
         startCommand: 'npm run start:prod',
         healthCheckPath: '/healthz',
+        public: true,
       },
       status: 'running',
     });
@@ -135,8 +136,13 @@ describe('RailwayAdapter observe', () => {
   });
 
   it('marks workloadKind cron when the service instance has a cron schedule', async () => {
+    const privateCronProject = structuredClone(projectDetailsResponse);
+    privateCronProject.project.services.edges[0].node.serviceInstances.edges[0].node.domains = {
+      serviceDomains: [],
+      customDomains: [],
+    };
     const request = vi.fn()
-      .mockResolvedValueOnce(projectDetailsResponse)
+      .mockResolvedValueOnce(privateCronProject)
       .mockResolvedValueOnce({
         serviceInstance: {
           startCommand: 'npm run report',
@@ -155,6 +161,7 @@ describe('RailwayAdapter observe', () => {
 
     expect(result.services[0]?.workloadKind).toBe('cron');
     expect(result.services[0]?.config.cronSchedule).toBe('0 * * * *');
+    expect(result.services[0]?.config.public).toBe(false);
   });
 
   it('surfaces the linked repo and branch as the service source', async () => {

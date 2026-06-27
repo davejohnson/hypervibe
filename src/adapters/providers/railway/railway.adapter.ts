@@ -2636,6 +2636,7 @@ export class RailwayAdapter implements IProviderAdapter {
 
       const serviceDomain = instance?.domains?.serviceDomains?.[0]?.domain;
       const customDomains = (instance?.domains?.customDomains ?? []).map((d) => d.domain);
+      const isPublic = Boolean(serviceDomain || customDomains.length > 0);
 
       let startCommand = instance?.startCommand ?? undefined;
       let releaseCommand: string | undefined;
@@ -2698,6 +2699,7 @@ export class RailwayAdapter implements IProviderAdapter {
           releaseCommand,
           healthCheckPath,
           cronSchedule,
+          public: isPublic,
         },
         ...(sourceRepo
           ? { source: { repo: sourceRepo, ...(sourceBranch ? { branch: sourceBranch } : {}) } }

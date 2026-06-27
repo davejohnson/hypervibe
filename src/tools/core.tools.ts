@@ -22,6 +22,7 @@ import {
   applyGitHubActionsDeploy,
   environmentUsesGitHubActionsDeploy,
   isGitHubActionsDeployAction,
+  planGitHubActionsDeploy,
 } from '../domain/services/ci-deploy.service.js';
 import { setupCustomDomain } from '../domain/services/domain.service.js';
 import { StateManager } from '../agent/state.js';
@@ -111,6 +112,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function stringField(record: Record<string, unknown> | null, key: string): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function stringArrayField(record: Record<string, unknown> | null, key: string): string[] | undefined {
+  const value = record?.[key];
+  if (!Array.isArray(value)) return undefined;
+  const strings = value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+  return strings.length > 0 ? strings : undefined;
 }
 
 function gitRemoteUrlFromSpecInput(spec: Record<string, unknown>): string | undefined {
@@ -620,6 +628,48 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
       const deployStrategy = envSpec.deploy?.strategy ?? 'manual';
       const deployTrigger = deployStrategy === 'branch' ? envSpec.deploy?.trigger ?? 'ci' : undefined;
+      const ciDeploy = deployTrigger === 'ci'
+        ? await planGitHubActionsDeploy({
+          project: projectForStatus,
+          environmentName: envName,
+          environmentSpec: envSpec,
+          environment,
+        })
+        : { warnings: [] as string[] };
+      const ciAction = ciDeploy.action;
+      const ciMetadata = asRecord(ciAction?.metadata);
+      const ciWorkflow = asRecord(ciMetadata?.workflow);
+      const ciNeedsSync = Boolean(ciAction && ciAction.type !== 'noop');
+      const ciDeploySource = deployStrategy === 'branch' && deployTrigger === 'ci'
+        ? {
+          provider: 'github-actions',
+          setup: ciAction
+            ? (ciNeedsSync ? 'needs-sync' : 'in-sync')
+            : 'unavailable',
+          ...(ciWorkflow
+            ? {
+              workflow: {
+                path: stringField(ciWorkflow, 'path'),
+                branch: stringField(ciWorkflow, 'branch'),
+              },
+            }
+            : {}),
+          ...(stringArrayField(ciMetadata, 'missingProviderSecrets')
+            ? { missingProviderSecrets: stringArrayField(ciMetadata, 'missingProviderSecrets') }
+            : {}),
+          ...(stringArrayField(ciMetadata, 'staleProviderSecrets')
+            ? { staleProviderSecrets: stringArrayField(ciMetadata, 'staleProviderSecrets') }
+            : {}),
+        }
+        : undefined;
+      const ciPushToDeploy = Boolean(deployStrategy === 'branch' && deployTrigger === 'ci' && ciAction?.type === 'noop');
+      const nativePushToDeploy = Boolean(
+        deployStrategy === 'branch'
+        && deployTrigger === 'native'
+        && expectedSource
+        && allServicesLinkedToExpectedSource
+        && sourceWarnings.length === 0
+      );
 
       return toolSuccess(
         {
@@ -638,22 +688,16 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
             ...(expectedSource ? { expected: `${expectedSource.repo}@${expectedSource.branch}` } : {}),
             observed: observedSources,
             ...(deployStrategy === 'branch' && deployTrigger === 'ci'
-              ? { ci: { provider: 'github-actions', setup: 'managed-by-hv_plan-hv_apply' } }
+              ? { ci: ciDeploySource }
               : {}),
-            pushToDeploy: Boolean(
-              deployStrategy === 'branch'
-              && deployTrigger === 'native'
-              && expectedSource
-              && allServicesLinkedToExpectedSource
-              && sourceWarnings.length === 0
-            ),
+            pushToDeploy: ciPushToDeploy || nativePushToDeploy,
           },
         },
         {
-          warnings: [...warnings, ...diff.warnings, ...sourceWarnings],
+          warnings: [...warnings, ...diff.warnings, ...sourceWarnings, ...ciDeploy.warnings],
           hint: sourceWarnings.length > 0
             ? 'Fix Railway GitHub App repository access and project-member GitHub contributor access, then rerun hv_status or hv_plan.'
-            : deployStrategy === 'branch' && deployTrigger === 'ci'
+            : deployStrategy === 'branch' && deployTrigger === 'ci' && ciNeedsSync
               ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
               : drift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
         }
