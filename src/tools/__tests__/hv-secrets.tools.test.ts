@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseToolEnvelope } from './tool-result.js';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -8,6 +8,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { createToolContext } from '../context.js';
 import { registerHvSecretsTools } from '../hv-secrets.tools.js';
 
@@ -86,6 +89,43 @@ describe('hv_secrets_set target=mapping', () => {
       secretRef: 'not-a-ref',
     });
     expect(result.ok).toBe(false);
+    await t.close();
+  });
+});
+
+describe('hv_secrets_set target=github', () => {
+  it('sets a GitHub Actions secret from a dotenv secretRef without echoing the value', async () => {
+    new ProjectRepository().create({
+      name: 'github-secret-app',
+      gitRemoteUrl: 'https://github.com/davejohnson/github-secret-app',
+    });
+    const github = new ConnectionRepository().create({
+      provider: 'github',
+      scope: 'davejohnson/github-secret-app',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'gh-token' }),
+    });
+    new ConnectionRepository().updateStatus(github.id, 'verified');
+    const envPath = path.join(tempDir, '.env');
+    writeFileSync(envPath, 'GHCR_TOKEN=ghp_secret_value\n');
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    const t = await makeClient();
+
+    const result = await t.call('hv_secrets_set', {
+      project: 'github-secret-app',
+      target: 'github',
+      key: 'IMAGE_REGISTRY_TOKEN',
+      secretRef: `dotenv:${envPath}#GHCR_TOKEN`,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({
+      repository: 'davejohnson/github-secret-app',
+      secretName: 'IMAGE_REGISTRY_TOKEN',
+      action: 'set',
+      valueSource: 'dotenv',
+    });
+    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'github-secret-app', 'IMAGE_REGISTRY_TOKEN', 'ghp_secret_value');
+    expect(JSON.stringify(result)).not.toContain('ghp_secret_value');
     await t.close();
   });
 });

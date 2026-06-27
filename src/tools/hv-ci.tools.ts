@@ -156,6 +156,43 @@ function tailLogText(text: string, requestedLines: number) {
   };
 }
 
+function diagnoseWorkflowLog(text: string): Array<{
+  code: string;
+  severity: 'error' | 'warning';
+  summary: string;
+  evidence: string;
+  next: string[];
+}> {
+  const diagnostics: Array<{
+    code: string;
+    severity: 'error' | 'warning';
+    summary: string;
+    evidence: string;
+    next: string[];
+  }> = [];
+
+  if (
+    /docker buildx imagetools inspect/i.test(text)
+    && /ghcr\.io/i.test(text)
+    && /403 Forbidden/i.test(text)
+  ) {
+    diagnostics.push({
+      code: 'GHCR_IMAGE_PULL_FORBIDDEN',
+      severity: 'error',
+      summary: 'The workflow pushed the image, but IMAGE_REGISTRY_USERNAME/IMAGE_REGISTRY_TOKEN cannot read it back from GHCR. Railway is not called until this check passes, so Railway will show no new deploy attempt.',
+      evidence: 'docker buildx imagetools inspect returned 403 Forbidden for the GHCR image.',
+      next: [
+        'Confirm IMAGE_REGISTRY_USERNAME is the GitHub login that owns the package-read token.',
+        'Set IMAGE_REGISTRY_TOKEN from a classic GitHub PAT with read:packages, and repo when the repo/package is private.',
+        'Use hv_secrets_set target="github" key="IMAGE_REGISTRY_TOKEN" secretRef="dotenv:/absolute/path/.env#GHCR_TOKEN" to update the GitHub Actions secret without pasting the token into chat.',
+        'Re-run the workflow with hv_ci_trigger, then inspect logs with hv_ci_status include=["logs"].',
+      ],
+    });
+  }
+
+  return diagnostics;
+}
+
 const deployBranchConfigSchema = z.object({
   repo: z.string().optional(),
   provider: z.enum(['railway', 'vercel', 'render', 'digitalocean', 'cloudrun', 'apprunner', 'heroku']),
@@ -571,7 +608,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
                     ? [{ id: jobId, name: `job ${jobId}`, status: 'unknown', conclusion: null }]
                     : jobs.jobs.slice(0, 1));
               const resolvedLogLines = logLines ?? 120;
-              data.logs = await Promise.all(jobsForLogs.map(async (job) => {
+              const logEntries = await Promise.all(jobsForLogs.map(async (job) => {
                 try {
                   const text = await adapter.getWorkflowJobLogs(owner, repo, job.id);
                   const tail = tailLogText(text, resolvedLogLines);
@@ -592,6 +629,20 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
                   };
                 }
               }));
+              data.logs = logEntries;
+              const diagnostics = logEntries.flatMap((entry) => {
+                if (!('text' in entry) || typeof entry.text !== 'string') {
+                  return [];
+                }
+                return diagnoseWorkflowLog(entry.text).map((diagnostic) => ({
+                  ...diagnostic,
+                  jobId: entry.jobId,
+                  jobName: entry.name,
+                }));
+              });
+              if (diagnostics.length > 0) {
+                data.diagnostics = diagnostics;
+              }
               break;
             }
             case 'pages': {

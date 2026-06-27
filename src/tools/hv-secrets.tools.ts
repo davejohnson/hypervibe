@@ -1,4 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { readFileSync } from 'fs';
 import { z } from 'zod';
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { SecretResolver } from '../domain/services/secret.resolver.js';
@@ -9,6 +10,7 @@ import { parseSecretRef, type SecretManagerProvider } from '../domain/ports/secr
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
 import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { parseEnvFile } from '../utils/env-parser.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { projectField, envField } from './schemas.js';
@@ -46,10 +48,82 @@ function githubRepoForProject(project: Project, repoArg?: string): { owner: stri
   return { owner, repo };
 }
 
+function splitFragment(value: string): { target: string; fragment?: string } {
+  const hashIndex = value.lastIndexOf('#');
+  if (hashIndex === -1) {
+    return { target: value };
+  }
+  return {
+    target: value.slice(0, hashIndex),
+    fragment: value.slice(hashIndex + 1),
+  };
+}
+
+function secretRefKind(ref: string): string {
+  const trimmed = ref.trim();
+  if (trimmed.startsWith('env:')) return 'env';
+  if (trimmed.startsWith('dotenv:')) return 'dotenv';
+  if (trimmed.startsWith('file:')) return 'file';
+  if (parseSecretRef(trimmed)) return 'secret-manager';
+  return 'unknown';
+}
+
+async function resolveSecretValueRef(
+  ref: string,
+  context: { projectId?: string; environmentName?: string } = {}
+): Promise<string> {
+  const trimmed = ref.trim();
+  if (trimmed.startsWith('env:')) {
+    const name = trimmed.slice('env:'.length).trim();
+    if (!name) {
+      throw new HvError('VALIDATION', 'secretRef env: reference is missing the environment variable name.');
+    }
+    const value = process.env[name];
+    if (value === undefined) {
+      throw new HvError('VALIDATION', `Environment variable ${name} is not set.`);
+    }
+    return value;
+  }
+
+  if (trimmed.startsWith('dotenv:')) {
+    const raw = trimmed.slice('dotenv:'.length).trim();
+    const { target: filePath, fragment } = splitFragment(raw);
+    if (!filePath) {
+      throw new HvError('VALIDATION', 'secretRef dotenv: reference is missing the .env file path.');
+    }
+    if (!fragment) {
+      throw new HvError('VALIDATION', 'secretRef dotenv: references must include #ENV_VAR.');
+    }
+    const values = parseEnvFile(filePath);
+    if (!(fragment in values)) {
+      throw new HvError('VALIDATION', `.env variable "${fragment}" was not found.`);
+    }
+    return values[fragment];
+  }
+
+  if (trimmed.startsWith('file:')) {
+    const filePath = trimmed.slice('file:'.length).trim();
+    if (!filePath) {
+      throw new HvError('VALIDATION', 'secretRef file: reference is missing the file path.');
+    }
+    return readFileSync(filePath, 'utf8').trim();
+  }
+
+  const parsed = parseSecretRef(trimmed);
+  if (!parsed) {
+    throw new HvError('VALIDATION', 'Unsupported secretRef. Use env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like 1password://vault/item#field.');
+  }
+  const resolved = await new SecretResolver().resolveSecret(parsed.raw, context);
+  if ('error' in resolved) {
+    throw new HvError('PROVIDER_ERROR', `Failed to resolve secretRef: ${resolved.error}`);
+  }
+  return resolved.value;
+}
+
 export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_secrets_set',
-    'Set secrets and environment variables. target="hosting" (default) sets env vars on the deployed environment; "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time (e.g. "1password://<vault>/<item>#<field>", "bitwarden://<secret-name>"); "github" sets a GitHub Actions repo secret. remove=true deletes (mapping/github targets).',
+    'Set secrets and environment variables. target="hosting" (default) sets env vars on the deployed environment; "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time (e.g. "1password://<vault>/<item>#<field>", "bitwarden://<secret-name>"); "github" sets a GitHub Actions repo secret from raw value or secretRef without echoing the value. For target="github", secretRef supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref. remove=true deletes (mapping/github targets).',
     {
       project: projectField,
       env: envField,
@@ -60,7 +134,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       vars: z.record(z.string()).optional().describe('Multiple key-value pairs (alternative to key/value)'),
       provider: z.enum(SECRET_MANAGERS).optional().describe('target=manager: secret manager provider'),
       path: z.string().optional().describe('target=manager: secret path'),
-      secretRef: z.string().optional().describe('target=mapping: secret reference (e.g. "vault://app/prod#API_KEY")'),
+      secretRef: z.string().optional().describe('target=mapping: secret-manager reference to map; target=github: value source ref such as env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or 1password://vault/item#field.'),
       environments: z.array(z.string()).optional().describe('target=mapping: environments the mapping applies to'),
       repo: z.string().optional().describe('target=github: "owner/name" (defaults to project git remote)'),
       remove: z.boolean().optional().describe('Delete instead of set (mapping/github)'),
@@ -95,10 +169,18 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
           ctx.repos.audit.create({ action: 'github.secret_deleted', resourceType: 'github_secret', resourceId: `${owner}/${repoName}/${key}`, details: { secretName: key } });
           return toolSuccess({ repository: `${owner}/${repoName}`, secretName: key, action: 'deleted' });
         }
-        if (value === undefined) throw new HvError('VALIDATION', 'value is required to set a GitHub secret.');
-        await gh.adapter.setRepositorySecret(owner, repoName, key, value);
+        if (value !== undefined && secretRef) {
+          throw new HvError('VALIDATION', 'Pass either value or secretRef for target="github", not both.');
+        }
+        if (value === undefined && !secretRef) {
+          throw new HvError('VALIDATION', 'value or secretRef is required to set a GitHub secret.', {
+            hint: 'Use secretRef="env:NAME", secretRef="dotenv:/absolute/path/.env#KEY", secretRef="file:/absolute/path", or a secret-manager ref to avoid putting the secret value in chat.',
+          });
+        }
+        const secretValue = value ?? await resolveSecretValueRef(secretRef!, { projectId: project.id, ...(env ? { environmentName: env } : {}) });
+        await gh.adapter.setRepositorySecret(owner, repoName, key, secretValue);
         ctx.repos.audit.create({ action: 'github.secret_set', resourceType: 'github_secret', resourceId: `${owner}/${repoName}/${key}`, details: { secretName: key } });
-        return toolSuccess({ repository: `${owner}/${repoName}`, secretName: key, action: 'set' });
+        return toolSuccess({ repository: `${owner}/${repoName}`, secretName: key, action: 'set', valueSource: secretRef ? secretRefKind(secretRef) : 'raw' });
       }
 
       if (target === 'mapping') {

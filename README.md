@@ -299,6 +299,20 @@ For Railway and DigitalOcean GHCR deploys, the generated workflow grants `packag
 
 When Hypervibe syncs GitHub Actions secrets, it records only secret names plus local one-way value hashes. If the local provider token changes later, `hv_plan` will report the CI deploy action as needing an update and `hv_apply` will resync the GitHub secret value. Raw secret values are never written to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, or tool output.
 
+To repair a stale GitHub Actions secret without pasting the token into chat, point `hv_secrets_set` at the local source of truth:
+
+```text
+hv_secrets_set project="apreskeys.com" target="github" repo="davejohnson/apreskeys.com" key="IMAGE_REGISTRY_TOKEN" secretRef="dotenv:/Users/dave/projects/condoshare/.env#GHCR_TOKEN"
+```
+
+For GHCR failures, inspect the run through Hypervibe itself:
+
+```text
+hv_ci_status project="apreskeys.com" repo="davejohnson/apreskeys.com" include=["logs"] runId=28272281787
+```
+
+If the logs contain `docker buildx imagetools inspect ... ghcr.io ... 403 Forbidden`, the workflow has not reached Railway yet. Fix `IMAGE_REGISTRY_USERNAME` and `IMAGE_REGISTRY_TOKEN` first; Railway will not show a new deploy attempt until GHCR image verification can read the image.
+
 `deploy.trigger: "native"` opts into provider-native repo integrations instead. For Railway native push autodeploys, grant the [Railway GitHub App](https://github.com/apps/railway-app) access in GitHub:
 
 - Install/open the [Railway GitHub App](https://github.com/apps/railway-app/installations/new) and grant it access to the repo. If it is installed for "Only select repositories", add the target repo.

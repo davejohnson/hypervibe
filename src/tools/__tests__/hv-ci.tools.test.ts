@@ -493,6 +493,42 @@ describe('hv_ci_status', () => {
     }]);
     await t.close();
   });
+
+  it('diagnoses GHCR image pull permission failures from GitHub Actions logs', async () => {
+    seedProject();
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunJobs').mockResolvedValue({
+      total_count: 1,
+      jobs: [{
+        id: 99,
+        run_id: 123,
+        name: 'deploy',
+        status: 'completed',
+        conclusion: 'failure',
+        started_at: '2026-06-26T20:16:30Z',
+        completed_at: '2026-06-26T20:17:00Z',
+        html_url: 'https://github.com/davejohnson/billforge/actions/runs/123/job/99',
+        steps: [],
+      }],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getWorkflowJobLogs').mockResolvedValue([
+      'Run docker buildx imagetools inspect "ghcr.io/***/apreskeys.com:dde84d02" >/dev/null',
+      'ERROR: unexpected status from HEAD request to https://ghcr.io/v2/***/apreskeys.com/manifests/dde84d02: 403 Forbidden',
+      'Error: Process completed with exit code 1.',
+    ].join('\n'));
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', { project: 'billforge', include: ['logs'], runId: 123 });
+
+    expect(res.ok).toBe(true);
+    expect(res.data.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'GHCR_IMAGE_PULL_FORBIDDEN',
+      jobId: 99,
+      jobName: 'deploy',
+    }));
+    expect(res.data.diagnostics[0].summary).toContain('Railway will show no new deploy attempt');
+    expect(res.data.diagnostics[0].next).toContainEqual(expect.stringContaining('hv_secrets_set target="github"'));
+    await t.close();
+  });
 });
 
 describe('hv_ci_trigger', () => {
