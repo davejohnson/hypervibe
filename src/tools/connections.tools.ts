@@ -349,6 +349,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         tokenType?: string;
         requiredPermissions?: string[];
         credentialExample?: string;
+        notes?: string[];
       }>> = {};
       for (const p of providerRegistry.all()) {
         const category = p.metadata.category;
@@ -357,11 +358,12 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         availableProviders[category].push({
           name: p.metadata.name,
           displayName: p.metadata.displayName,
-          ...(p.metadata.setupHelpUrl ? { setupHelpUrl: p.metadata.setupHelpUrl } : {}),
+          ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
           ...(guidance ? {
             tokenType: guidance.tokenType,
             requiredPermissions: guidance.permissions,
             credentialExample: guidance.credentialExample,
+            ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
           } : {}),
         });
       }
@@ -371,11 +373,12 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         availableProviders['secrets'].push({
           name: p.metadata.name,
           displayName: p.metadata.displayName,
-          ...(p.metadata.setupHelpUrl ? { setupHelpUrl: p.metadata.setupHelpUrl } : {}),
+          ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
           ...(guidance ? {
             tokenType: guidance.tokenType,
             requiredPermissions: guidance.permissions,
             credentialExample: guidance.credentialExample,
+            ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
           } : {}),
         });
       }

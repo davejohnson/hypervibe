@@ -21,6 +21,29 @@ describe('connection guidance', () => {
     }
   });
 
+  it('keeps token guidance specific enough for agents to act on', () => {
+    const noSetupUrlExpected = new Set(['database', 'local', 'xcode']);
+    const providers = [...providerRegistry.names(), ...secretManagerRegistry.names()].sort();
+
+    for (const provider of providers) {
+      const guidance = getConnectionGuidance(provider)!;
+      expect(guidance.displayName.trim().length, provider).toBeGreaterThan(0);
+      expect(guidance.tokenType.trim().length, provider).toBeGreaterThan(0);
+      expect(guidance.permissions.length, provider).toBeGreaterThan(0);
+      expect(guidance.credentialExample, provider).toContain('hv_connect provider=');
+      expect(
+        guidance.credentialExample.includes('credentialsRef=')
+        || guidance.credentialExample.includes('credentials='),
+        provider
+      ).toBe(true);
+
+      if (!noSetupUrlExpected.has(provider)) {
+        expect(guidance.setupUrl, provider).toMatch(/^https?:\/\//);
+        expect(formatConnectionGuidance(provider), provider).toContain('Create or review it here:');
+      }
+    }
+  });
+
   it('tells users the Cloudflare token type, URL, permissions, and scoped connect command', () => {
     const guidance = formatConnectionGuidance('cloudflare', { scope: 'invoiceperfect.com' });
 

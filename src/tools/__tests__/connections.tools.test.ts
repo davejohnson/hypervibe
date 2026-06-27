@@ -350,6 +350,23 @@ describe('hv_connections_list', () => {
         ]),
       })
     );
+    expect(result.data.availableProviders.dns).toContainEqual(
+      expect.objectContaining({
+        name: 'cloudflare',
+        displayName: 'Cloudflare',
+        setupHelpUrl: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
+        tokenType: expect.stringContaining('Cloudflare Account API Token'),
+        requiredPermissions: expect.arrayContaining([
+          expect.stringContaining('Zone -> Zone -> Read'),
+          expect.stringContaining('Zone -> DNS -> Edit/Write'),
+        ]),
+        notes: expect.arrayContaining([
+          expect.stringContaining('Cloudflare Dashboard -> Manage Account -> Account API Tokens'),
+          expect.stringContaining('https://dash.cloudflare.com/profile/api-tokens'),
+          expect.stringContaining('cfut_'),
+        ]),
+      })
+    );
     await t.close();
   });
 });
