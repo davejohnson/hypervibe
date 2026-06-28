@@ -32,8 +32,8 @@ const EXPECTED_TOOLS = [
   'hv_db_query', 'hv_db_migrate', 'hv_db_url',
   // Secrets
   'hv_secrets_set', 'hv_secrets_get', 'hv_secrets_list', 'hv_secrets_sync',
-  // Domains + email
-  'hv_dns_record', 'hv_email_setup', 'hv_email_forwarding', 'hv_email_send',
+  // Email
+  'hv_email_setup', 'hv_email_forwarding', 'hv_email_send',
   // Payments
   'hv_payments_setup', 'hv_stripe_sync',
   // CI
@@ -55,12 +55,12 @@ async function makeClient() {
 }
 
 describe('server tool surface', () => {
-  it('registers exactly the 42 pinned hv_* tools', async () => {
+  it('registers exactly the 41 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
-    expect(names).toHaveLength(42);
+    expect(names).toHaveLength(41);
     await client.close();
     await server.close();
   });
@@ -74,7 +74,6 @@ describe('server tool surface', () => {
       { name: 'hv_deploy', args: { project: 'does-not-exist' } },
       { name: 'hv_db_url', args: { project: 'does-not-exist' } },
       { name: 'hv_secrets_sync', args: { project: 'does-not-exist' } },
-      { name: 'hv_dns_record', args: { action: 'zones' } },
       { name: 'hv_email_setup', args: { domain: 'example.com' } },
       { name: 'hv_runs', args: { project: 'does-not-exist' } },
     ];

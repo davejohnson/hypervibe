@@ -42,7 +42,6 @@ import { registerHvDeployTools } from './tools/hv-deploy.tools.js';
 import { registerHvObservabilityTools } from './tools/hv-observability.tools.js';
 import { registerHvDbTools } from './tools/hv-db.tools.js';
 import { registerHvSecretsTools } from './tools/hv-secrets.tools.js';
-import { registerHvDomainsTools } from './tools/hv-domains.tools.js';
 import { registerHvEmailTools } from './tools/hv-email.tools.js';
 import { registerHvPaymentsTools } from './tools/hv-payments.tools.js';
 import { registerHvCiTools } from './tools/hv-ci.tools.js';
@@ -60,6 +59,7 @@ export function createServer(): McpServer {
         'Hypervibe manages deployment infrastructure (hosting, databases, DNS, email, secrets, CI) through its hv_* tools.',
         'Always use hv_* tools for infrastructure operations. Do NOT shell out to provider CLIs (railway, gcloud, vercel, doppler, op, bws, gh, etc.) or call provider APIs directly: Hypervibe holds the verified credentials, records run/audit history, and keeps its local state in sync — a CLI bypasses all of that and causes state drift.',
         'Core workflow: hv_spec_set (desired state) → hv_plan (diff against live infrastructure, returns planId) → hv_apply planId=... → hv_status / hv_logs / hv_health to verify.',
+        'Custom domain and DNS changes must be modeled as desired infrastructure and reconciled through hv_plan/hv_apply. Do not bypass a blocked apply with one-off DNS/provider mutations.',
         'If a capability seems missing, check the other hv_* tools (most have action/target parameters) before reaching for anything outside Hypervibe.',
       ].join('\n'),
     }
@@ -67,7 +67,7 @@ export function createServer(): McpServer {
 
   const ctx = createToolContext();
 
-  // The consolidated intent-level tool surface (42 hv_* tools).
+  // The consolidated intent-level tool surface (41 hv_* tools).
   registerCoreTools(server, ctx);
   registerLifecycleTools(server, ctx);
   registerConnectionsTools(server, ctx);
@@ -75,7 +75,6 @@ export function createServer(): McpServer {
   registerHvObservabilityTools(server, ctx);
   registerHvDbTools(server, ctx);
   registerHvSecretsTools(server, ctx);
-  registerHvDomainsTools(server, ctx);
   registerHvEmailTools(server, ctx);
   registerHvPaymentsTools(server, ctx);
   registerHvCiTools(server, ctx);
