@@ -9,6 +9,7 @@ import { getProjectScopeHints } from './project-scope.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import {
+  callCustomDomainAttach,
   customDomainAttachBindingMissingMessage,
   customDomainAttachUnsupportedMessage,
   providerRequiresCustomDomainAttach,
@@ -117,12 +118,9 @@ export async function setupCustomDomain(params: {
     result.customDomainAttached = false;
     result.customDomainError = adapterResult.error || customDomainAttachUnsupportedMessage(provider, domain);
   } else if (serviceName && binding?.serviceId && bindings.environmentId) {
-    const attachCustomDomain = supportsCustomDomainAttach(adapter)
-      ? adapter.attachCustomDomain
-      : undefined;
-    if (attachCustomDomain) {
+    if (supportsCustomDomainAttach(adapter)) {
       try {
-        const receipt = await attachCustomDomain({
+        const receipt = await callCustomDomainAttach(adapter, {
           projectId: bindings.projectId,
           serviceId: binding.serviceId,
           environmentId: bindings.environmentId,

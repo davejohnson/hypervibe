@@ -23,6 +23,7 @@ import { hostingProviderForEnvironment } from './hosting-env.service.js';
 import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from './railway-help.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import {
+  callCustomDomainAttach,
   customDomainAttachBindingMissingMessage,
   customDomainAttachUnsupportedMessage,
   providerRequiresCustomDomainAttach,
@@ -804,12 +805,9 @@ export async function executeBootstrap(params: {
       const targetServiceId = targetService ? boundServices[targetService.name]?.serviceId : undefined;
       const domainProvider = hostingAdapter.name || targetPlatform;
       const requiresProviderAttach = providerRequiresCustomDomainAttach(domainProvider);
-      const attachCustomDomain = supportsCustomDomainAttach(domainAdapter)
-        ? domainAdapter.attachCustomDomain
-        : undefined;
 
-      if (targetService && targetServiceId && boundEnvironmentId && attachCustomDomain) {
-        const receipt = await attachCustomDomain({
+      if (targetService && targetServiceId && boundEnvironmentId && supportsCustomDomainAttach(domainAdapter)) {
+        const receipt = await callCustomDomainAttach(domainAdapter, {
           projectId: boundProjectId,
           serviceId: targetServiceId,
           environmentId: boundEnvironmentId,

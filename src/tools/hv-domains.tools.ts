@@ -1,11 +1,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { CloudflareAdapter, CloudflareDnsRecord } from '../adapters/providers/cloudflare/cloudflare.adapter.js';
-import { setupCustomDomain } from '../domain/services/domain.service.js';
 import { getAnyVerifiedCloudflareAdapter, getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.js';
 import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
-import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
 
 function summarizeRecord(record: CloudflareDnsRecord) {
@@ -28,65 +26,6 @@ async function resolveZoneId(adapter: CloudflareAdapter, zone: string): Promise<
 }
 
 export function registerHvDomainsTools(server: McpServer, ctx: ToolContext): void {
-  server.tool(
-    'hv_domain_setup',
-    'Attach a custom domain to a deployed service in one call: checks the Cloudflare zone, attaches the domain on the hosting provider (when supported), creates the required DNS records, and reports verification status.',
-    {
-      project: projectField,
-      env: envField,
-      domain: z.string().describe('Domain to attach (e.g. app.example.com or example.com)'),
-      service: z.string().optional().describe('Service to attach the domain to. Defaults to the first bound service in the environment.'),
-    },
-    wrapHandler(async ({ project: projectRef, env, domain, service }) => {
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const environment = ctx.resolveEnvironmentOrThrow(project, env);
-
-      const result = await setupCustomDomain({ project, environment, domain, serviceName: service });
-      if (result.error && !result.zone) {
-        return toolError(result.reason === 'no_connection' ? 'MISSING_CONNECTION' : 'NOT_FOUND', result.error, {
-          hint: result.reason === 'no_connection' ? formatConnectionGuidance('cloudflare', { scope: domain }) : undefined,
-          next: result.reason === 'no_zone' ? ['hv_dns_record'] : undefined,
-        });
-      }
-
-      ctx.repos.audit.create({
-        action: 'hv.domain_setup',
-        resourceType: 'domain',
-        resourceId: domain,
-        details: {
-          project: project.name,
-          environment: environment.name,
-          attached: result.customDomainAttached ?? false,
-          dnsConfigured: result.dnsConfigured ?? false,
-        },
-      });
-
-      const warnings = [
-        ...(result.customDomainError ? [`Custom-domain attach failed: ${result.customDomainError}`] : []),
-        ...(result.dnsError ? [`DNS: ${result.dnsError}`] : []),
-      ];
-      return toolSuccess(
-        {
-          domain: domain.trim().toLowerCase(),
-          environment: environment.name,
-          zone: result.zone,
-          hostingProvider: result.hostingProvider,
-          service: result.service,
-          customDomainAttached: result.customDomainAttached ?? false,
-          dnsConfigured: result.dnsConfigured ?? false,
-          dnsRecords: result.dnsRecords,
-          verification: result.verification,
-        },
-        {
-          warnings,
-          hint: result.success
-            ? 'DNS is configured. Certificates may take a few minutes to provision; re-check the verification status afterwards.'
-            : 'Domain setup is incomplete — see warnings for what to fix, then re-run hv_domain_setup.',
-        }
-      );
-    })
-  );
-
   server.tool(
     'hv_dns_record',
     'Manage Cloudflare DNS: list zones, list records, upsert (create-or-update) a record by name+type, or delete records by name.',

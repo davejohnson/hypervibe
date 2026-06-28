@@ -11,6 +11,10 @@ export type DomainAttachCapableAdapter = {
   attachCustomDomain?: (params: DomainAttachParams) => Promise<Receipt>;
 };
 
+export type DomainAttachAdapter = DomainAttachCapableAdapter & {
+  attachCustomDomain: (params: DomainAttachParams) => Promise<Receipt>;
+};
+
 const PROVIDERS_REQUIRING_PROVIDER_ATTACH = new Set([
   'apprunner',
   'cloudrun',
@@ -25,10 +29,25 @@ export function providerRequiresCustomDomainAttach(provider: string): boolean {
   return PROVIDERS_REQUIRING_PROVIDER_ATTACH.has(provider.toLowerCase());
 }
 
-export function supportsCustomDomainAttach(adapter: unknown): adapter is DomainAttachCapableAdapter {
+export function supportsCustomDomainAttach(adapter: unknown): adapter is DomainAttachAdapter {
   return Boolean(adapter)
     && typeof adapter === 'object'
     && typeof (adapter as DomainAttachCapableAdapter).attachCustomDomain === 'function';
+}
+
+export async function callCustomDomainAttach(
+  adapter: DomainAttachCapableAdapter,
+  params: DomainAttachParams
+): Promise<Receipt> {
+  if (!supportsCustomDomainAttach(adapter)) {
+    return {
+      success: false,
+      message: 'Custom-domain attachment is not supported',
+      error: customDomainAttachUnsupportedMessage('provider', params.domain),
+    };
+  }
+  const attachCustomDomain = adapter.attachCustomDomain;
+  return attachCustomDomain.call(adapter, params);
 }
 
 export function customDomainAttachUnsupportedMessage(provider: string, domain: string): string {
