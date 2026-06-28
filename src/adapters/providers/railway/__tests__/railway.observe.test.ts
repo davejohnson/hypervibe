@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { RailwayAdapter } from '../railway.adapter.js';
+import { RailwayAdapter, type RailwayCustomDomain } from '../railway.adapter.js';
 import { hashEnvValue } from '../../../../domain/ports/observe.port.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 
@@ -162,6 +162,51 @@ describe('RailwayAdapter observe', () => {
     expect(result.services[0]?.workloadKind).toBe('cron');
     expect(result.services[0]?.config.cronSchedule).toBe('0 * * * *');
     expect(result.services[0]?.config.public).toBe(false);
+  });
+
+  it('observes Railway custom-domain DNS verification state', async () => {
+    const pendingDomainProject = structuredClone(projectDetailsResponse);
+    pendingDomainProject.project.services.edges[0].node.serviceInstances.edges[0].node.domains.customDomains = [
+      {
+        id: 'cd_123',
+        domain: 'usebillforge.com',
+        status: {
+          dnsRecords: [
+            {
+              fqdn: 'usebillforge.com',
+              recordType: 'DNS_RECORD_TYPE_CNAME',
+              requiredValue: 'web-production.up.railway.app.',
+              status: 'DNS_RECORD_STATUS_PENDING',
+            },
+          ],
+          verificationDnsHost: '_railway.usebillforge.com',
+          verificationToken: 'verify-token',
+        },
+      },
+    ] as RailwayCustomDomain[];
+    const request = vi.fn()
+      .mockResolvedValueOnce(pendingDomainProject)
+      .mockResolvedValueOnce({
+        serviceInstance: {
+          latestDeployment: { status: 'SUCCESS' },
+        },
+      })
+      .mockResolvedValueOnce({ variables: {} });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
+    );
+
+    expect(result.services[0]?.customDomainStatus?.['usebillforge.com']).toMatchObject({
+      dnsConfigured: false,
+      dnsRecords: [
+        { name: 'usebillforge.com', type: 'CNAME', value: 'web-production.up.railway.app' },
+        { name: '_railway.usebillforge.com', type: 'TXT', value: 'verify-token' },
+      ],
+    });
   });
 
   it('surfaces the linked repo and branch as the service source', async () => {

@@ -30,6 +30,7 @@ import {
   supportsCustomDomainAttach,
   type DomainAttachCapableAdapter,
 } from './domain-attach-policy.js';
+import { normalizeProviderDnsRecord, type NormalizedDnsRecord } from './domain-dns-records.js';
 import type { Component } from '../entities/component.entity.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
@@ -847,24 +848,22 @@ export async function executeBootstrap(params: {
               summary.domainDnsConfigured = false;
               summary.domainDnsError = `Railway did not return required DNS records for ${params.domain}`;
             } else {
+              const normalizedRecords = dnsRecords
+                .map(normalizeProviderDnsRecord)
+                .filter((record): record is NormalizedDnsRecord => Boolean(record));
               const results: Array<{ name: string; type: string; target: string; action: string }> = [];
-              for (const record of dnsRecords) {
-                const name = typeof record.name === 'string' ? record.name : '';
-                const type = typeof record.type === 'string' ? record.type : '';
-                const value = typeof record.value === 'string' ? record.value : '';
-                if (!name || !type || !value) {
-                  continue;
-                }
-
+              for (const { name, type, value } of normalizedRecords) {
                 const upsert = await cfAdapter.upsertDnsRecord(zone.id, name, type, value, {
                   proxied: false,
                 });
                 results.push({ name, type, target: value, action: upsert.action });
               }
-              summary.domainDnsConfigured = results.length > 0;
+              summary.domainDnsConfigured = results.length > 0 && results.length === normalizedRecords.length;
               summary.domainDnsRecords = results;
-              if (results.length === 0) {
+              if (normalizedRecords.length === 0) {
                 summary.domainDnsError = `Railway returned no usable DNS records for ${params.domain}`;
+              } else if (results.length !== normalizedRecords.length) {
+                summary.domainDnsError = `Railway returned DNS records for ${params.domain}, but Hypervibe could not write all required records.`;
               }
             }
           }

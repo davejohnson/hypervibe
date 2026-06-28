@@ -349,6 +349,40 @@ describe('diffEnvironment — domain and workload', () => {
     expect(attached.actions.find((a) => a.id === 'domain:myapp.dev')!.type).toBe('noop');
   });
 
+  it('updates when the domain is attached but provider DNS is not configured', () => {
+    const withDomain = spec({ domain: 'myapp.dev' });
+    const result = diffEnvironment({
+      spec: withDomain,
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: {
+            'myapp.dev': {
+              dnsConfigured: false,
+              dnsRecords: [
+                {
+                  name: '_railway.myapp.dev',
+                  type: 'TXT',
+                  value: 'verify-token',
+                  status: 'DNS_RECORD_STATUS_PENDING',
+                },
+              ],
+            },
+          },
+        })],
+      }),
+      local: local(),
+    });
+
+    const domain = result.actions.find((a) => a.id === 'domain:myapp.dev')!;
+    expect(domain.type).toBe('update');
+    expect(domain.reason).toContain('required DNS records are not configured');
+    expect(domain.metadata?.dnsRecords).toEqual([
+      expect.objectContaining({ name: '_railway.myapp.dev', type: 'TXT' }),
+    ]);
+  });
+
   it('replaces a service whose workload kind changed', () => {
     const cronSpec = spec({ services: { web: { workloadKind: 'cron', cronSchedule: '0 3 * * *' } } });
     const result = diffEnvironment({ spec: cronSpec, envName: 'production', observed: observed(), local: local() });

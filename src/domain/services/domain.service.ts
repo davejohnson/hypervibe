@@ -16,6 +16,11 @@ import {
   supportsCustomDomainAttach,
   type DomainAttachCapableAdapter,
 } from './domain-attach-policy.js';
+import {
+  normalizeProviderDnsRecord,
+  type NormalizedDnsRecord,
+  type ProviderDnsRecord,
+} from './domain-dns-records.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 
@@ -109,7 +114,7 @@ export async function setupCustomDomain(params: {
   result.hostingProvider = provider;
   result.service = serviceName;
 
-  let providerDnsRecords: Array<Record<string, unknown>> = [];
+  let providerDnsRecords: ProviderDnsRecord[] = [];
   const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
   const adapter = adapterResult.adapter as DomainAttachCapableAdapter | undefined;
   const requiresProviderAttach = providerRequiresCustomDomainAttach(provider);
@@ -129,7 +134,7 @@ export async function setupCustomDomain(params: {
         if (receipt.success) {
           result.customDomainAttached = true;
           providerDnsRecords = Array.isArray(receipt.data?.dnsRecords)
-            ? (receipt.data.dnsRecords as Array<Record<string, unknown>>)
+            ? (receipt.data.dnsRecords as ProviderDnsRecord[])
             : [];
         } else {
           result.customDomainAttached = false;
@@ -153,17 +158,18 @@ export async function setupCustomDomain(params: {
   const dnsResults: DomainDnsRecordResult[] = [];
   try {
     if (providerDnsRecords.length > 0) {
-      for (const record of providerDnsRecords) {
-        const name = typeof record.name === 'string' ? record.name : '';
-        const type = typeof record.type === 'string' ? record.type : '';
-        const value = typeof record.value === 'string' ? record.value : '';
-        if (!name || !type || !value) continue;
+      const normalizedRecords = providerDnsRecords
+        .map(normalizeProviderDnsRecord)
+        .filter((record): record is NormalizedDnsRecord => Boolean(record));
+      for (const { name, type, value } of normalizedRecords) {
         const upsert = await cfAdapter.upsertDnsRecord(zone.id, name, type, value, { proxied: false });
         dnsResults.push({ name, type, target: value, action: upsert.action });
       }
-      result.dnsConfigured = dnsResults.length > 0;
-      if (dnsResults.length === 0) {
+      result.dnsConfigured = dnsResults.length > 0 && dnsResults.length === normalizedRecords.length;
+      if (normalizedRecords.length === 0) {
         result.dnsError = `${provider} returned no usable DNS records for ${domain}`;
+      } else if (dnsResults.length !== normalizedRecords.length) {
+        result.dnsError = `${provider} returned DNS records for ${domain}, but Hypervibe could not write all required records.`;
       }
     } else if (result.customDomainAttached) {
       // Attached but the provider reported no records to create.

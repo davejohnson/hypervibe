@@ -298,16 +298,27 @@ export function diffEnvironment(input: {
   // ---- domain ---------------------------------------------------------------
   if (spec.domain) {
     const id = `domain:${spec.domain}`;
+    const attachedService = observed
+      ? observed.services.find((s) => s.customDomains.includes(spec.domain!))
+      : undefined;
     const attached = observed
-      ? observed.services.some((s) => s.customDomains.includes(spec.domain!))
+      ? Boolean(attachedService)
       : Object.values(localServiceBindings).some((b) => b.customDomains?.includes(spec.domain!));
+    const domainStatus = attachedService?.customDomainStatus?.[spec.domain];
+    const dnsConfigured = domainStatus?.dnsConfigured;
+    const configured = attached && dnsConfigured !== false;
     actions.push({
       id,
-      type: attached ? 'noop' : 'update',
+      type: configured ? 'noop' : 'update',
       resource: { kind: 'domain', name: spec.domain, provider },
       verified,
-      reason: attached ? 'Domain attached' : `Domain ${spec.domain} is not attached to any service`,
-      dependsOn: attached ? undefined : projectDep,
+      reason: attached
+        ? dnsConfigured === false
+          ? `Domain ${spec.domain} is attached on ${provider}, but required DNS records are not configured`
+          : 'Domain attached'
+        : `Domain ${spec.domain} is not attached to any service`,
+      dependsOn: configured ? undefined : projectDep,
+      ...(domainStatus?.dnsRecords ? { metadata: { dnsRecords: domainStatus.dnsRecords } } : {}),
     });
   }
 

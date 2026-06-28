@@ -1035,8 +1035,8 @@ describe('infra_apply multi-service convergence', () => {
         customDomainId: 'cd_123',
         created: true,
         dnsRecords: [
-          { name: 'usebillforge.com', type: 'CNAME', value: 'web-production.up.railway.app' },
-          { name: '_railway.usebillforge.com', type: 'TXT', value: 'verify-token' },
+          { name: 'usebillforge.com', type: 'DNS_RECORD_TYPE_CNAME', value: 'web-production.up.railway.app.' },
+          { name: '_railway.usebillforge.com', type: 'DNS_RECORD_TYPE_TXT', value: 'verify-token' },
         ],
       },
     }));

@@ -16,6 +16,17 @@ export interface ObservedService {
   workloadKind: 'web' | 'worker' | 'cron' | 'job';
   url?: string;
   customDomains: string[];
+  customDomainStatus?: Record<string, {
+    dnsConfigured?: boolean;
+    dnsRecords?: Array<{
+      name: string;
+      type: string;
+      value: string;
+      currentValue?: string;
+      purpose?: string;
+      status?: string;
+    }>;
+  }>;
   config: {
     startCommand?: string;
     releaseCommand?: string;

@@ -8,6 +8,11 @@ import type { Component, ComponentType } from '../../../domain/entities/componen
 import { hashEnvValue } from '../../../domain/ports/observe.port.js';
 import type { ObservedDatabase, ObservedService, ObservedState } from '../../../domain/ports/observe.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  normalizeProviderDnsRecord,
+  providerDnsRecordsAreConfigured,
+  type NormalizedDnsRecord,
+} from '../../../domain/services/domain-dns-records.js';
 
 // Credentials schema for self-registration
 export const RailwayCredentialsSchema = z.object({
@@ -1863,7 +1868,22 @@ export class RailwayAdapter implements IProviderAdapter {
                             domain
                           }
                           customDomains {
+                            id
                             domain
+                            status {
+                              dnsRecords {
+                                currentValue
+                                fqdn
+                                hostlabel
+                                purpose
+                                recordType
+                                requiredValue
+                                status
+                                zone
+                              }
+                              verificationDnsHost
+                              verificationToken
+                            }
                           }
                         }
                         startCommand
@@ -2064,38 +2084,23 @@ export class RailwayAdapter implements IProviderAdapter {
     return `${hostlabel}.${zone}`;
   }
 
-  private extractCustomDomainDnsRecords(status?: RailwayCustomDomainStatus | null): Array<{
-    name: string;
-    type: string;
-    value: string;
-    currentValue?: string;
-    purpose?: string;
-    status?: string;
-  }> {
-    const records: Array<{
-      name: string;
-      type: string;
-      value: string;
-      currentValue?: string;
-      purpose?: string;
-      status?: string;
-    }> = [];
+  private extractCustomDomainDnsRecords(status?: RailwayCustomDomainStatus | null): NormalizedDnsRecord[] {
+    const records: NormalizedDnsRecord[] = [];
 
     for (const record of status?.dnsRecords ?? []) {
       const name = this.normalizeRailwayRecordName(record);
-      const type = typeof record.recordType === 'string' ? record.recordType.trim().toUpperCase() : '';
-      const value = typeof record.requiredValue === 'string' ? record.requiredValue.trim() : '';
-      if (!name || !type || !value) {
-        continue;
-      }
-      records.push({
+      const normalized = normalizeProviderDnsRecord({
         name,
-        type,
-        value,
+        type: record.recordType,
+        value: record.requiredValue,
         currentValue: record.currentValue,
         purpose: record.purpose,
         status: record.status,
       });
+      if (!normalized) {
+        continue;
+      }
+      records.push(normalized);
     }
 
     const verificationHost = status?.verificationDnsHost?.trim().replace(/\.$/, '');
@@ -2660,6 +2665,18 @@ export class RailwayAdapter implements IProviderAdapter {
 
       const serviceDomain = instance?.domains?.serviceDomains?.[0]?.domain;
       const customDomains = (instance?.domains?.customDomains ?? []).map((d) => d.domain);
+      const customDomainStatus = Object.fromEntries(
+        (instance?.domains?.customDomains ?? []).map((domain) => {
+          const dnsRecords = this.extractCustomDomainDnsRecords(domain.status);
+          const dnsConfigured = providerDnsRecordsAreConfigured(dnsRecords);
+          return [domain.domain, {
+            ...(dnsRecords.length > 0 ? { dnsRecords } : {}),
+            ...(dnsConfigured !== undefined
+              ? { dnsConfigured }
+              : {}),
+          }];
+        })
+      );
       const isPublic = Boolean(serviceDomain || customDomains.length > 0);
 
       let startCommand = instance?.startCommand ?? undefined;
@@ -2718,6 +2735,7 @@ export class RailwayAdapter implements IProviderAdapter {
         workloadKind: cronSchedule ? 'cron' : 'web',
         url: serviceDomain ? `https://${serviceDomain}` : undefined,
         customDomains,
+        ...(Object.keys(customDomainStatus).length > 0 ? { customDomainStatus } : {}),
         config: {
           startCommand,
           releaseCommand,
