@@ -157,6 +157,36 @@ describe('diffEnvironment — config drift', () => {
     expect(web.diff).toContainEqual({ field: 'env:DATABASE_SSL' });
   });
 
+  it('merges managed queue env vars into the desired env, with spec.envVars winning on conflict', () => {
+    const live = observedWeb({
+      envVarKeys: ['NODE_ENV', 'QUEUE_BACKEND', 'QUEUE_NAMES'],
+      envVarHashes: {
+        NODE_ENV: hashEnvValue('production'),
+        QUEUE_BACKEND: hashEnvValue('pubsub'),
+        // Live matches the spec override, not the managed queue value.
+        QUEUE_NAMES: hashEnvValue('spec-wins'),
+      },
+    });
+    const result = diffEnvironment({
+      spec: spec({ envVars: { NODE_ENV: 'production', QUEUE_NAMES: 'spec-wins' } }),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local(),
+      managedQueueEnvVars: {
+        QUEUE_BACKEND: 'pubsub',
+        QUEUE_NAMES: 'email-jobs',
+        QUEUE_TOPIC_EMAIL_JOBS: 'projects/gcp-project/topics/gcp-project-email-jobs',
+      },
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.type).toBe('update');
+    // Queue-only var missing live → drift.
+    expect(web.diff).toContainEqual({ field: 'env:QUEUE_TOPIC_EMAIL_JOBS' });
+    // spec.envVars wins over managedQueueEnvVars, so QUEUE_NAMES is in sync.
+    expect(web.diff).not.toContainEqual({ field: 'env:QUEUE_NAMES' });
+    expect(web.diff).not.toContainEqual({ field: 'env:QUEUE_BACKEND' });
+  });
+
   it('ignores config fields the spec does not manage', () => {
     const minimal = environmentSpecSchema.parse({
       hosting: { provider: 'railway' },

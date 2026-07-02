@@ -18,7 +18,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 ## Features
 
 **Infrastructure Providers**
-- **Railway** - Deploy apps, databases, cron jobs
+- **Railway** - Deploy apps, databases, cron jobs, queues
 - **Cloudflare** - DNS management, domain configuration
 - **Stripe** - Payment integration, webhooks, products
 - **SendGrid** - Email authentication, domain verification
@@ -28,6 +28,10 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 - **HashiCorp Vault** - KV secrets with versioning
 - **AWS Secrets Manager** - Native rotation support
 - **Doppler** - Simple config management
+
+**Workloads & Queues**
+- Services declare `workloadKind: web | worker | cron`. Workers are always-on background consumers (on Cloud Run: internal-only ingress, minimum one instance; they must still listen on `PORT`).
+- `queues` in the spec declares named message queues: Cloud Run environments get real Pub/Sub topics + subscriptions (apps receive `QUEUE_TOPIC_*` / `QUEUE_SUBSCRIPTION_*`); Railway environments are postgres-backed (pg-boss model — requires a declared database; apps consume via `DATABASE_URL`). Every queue environment gets `QUEUE_BACKEND` and `QUEUE_NAMES`.
 
 **Developer Experience**
 - **Natural language** - No YAML, no clicking through dashboards

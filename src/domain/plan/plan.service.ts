@@ -27,6 +27,8 @@ import {
   planGitHubActionsDeploy,
 } from '../services/ci-deploy.service.js';
 import { planIos } from '../services/appstore-plan.service.js';
+import { planQueues } from '../services/queue-plan.service.js';
+import { resolveQueueEnvVars } from '../services/queue-env.js';
 import { formatConnectionGuidance } from '../services/connection-guidance.js';
 
 export interface PlanOptions {
@@ -299,6 +301,7 @@ export class PlanService {
     const managedDatabaseEnvVars = environmentSpec.database && localDb && localDbProvider === environmentSpec.database.provider
       ? buildDatabaseEnvVarsFromComponent(localDb).envVars
       : undefined;
+    const managedQueueEnvVars = await resolveQueueEnvVars(projectForPlan, environmentSpec, environment);
 
     const diff = diffEnvironment({
       spec: specForDiff,
@@ -307,6 +310,7 @@ export class PlanService {
       local,
       expectedSource: this.expectedDeploySource(projectForPlan, environmentName, environmentSpec),
       managedDatabaseEnvVars,
+      managedQueueEnvVars,
     });
     const blocked = this.preflight(environmentSpec);
     const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
@@ -331,6 +335,16 @@ export class PlanService {
         ...(domainRegistration.action ? { dependsOn: [domainRegistration.action.id] } : {}),
       });
     }
+    const queues = await planQueues({ project: projectForPlan, environmentSpec, environment });
+    if (queues.actions.length > 0) {
+      const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
+      if (firstServiceIndex === -1) {
+        actions.push(...queues.actions);
+      } else {
+        actions.splice(firstServiceIndex, 0, ...queues.actions);
+      }
+    }
+
     const ciDependsOn = actions
       .filter((action) => action.type !== 'noop' && ['project', 'environment', 'service'].includes(action.resource.kind))
       .map((action) => action.id);
@@ -369,7 +383,7 @@ export class PlanService {
         return false;
       });
       filterWarnings.push(
-        `Partial plan (services: ${serviceFilter.join(', ')}): domain, CI, iOS, and destroy convergence was excluded; run hv_plan without services for full convergence.`
+        `Partial plan (services: ${serviceFilter.join(', ')}): domain, CI, iOS, queue, and destroy convergence was excluded; run hv_plan without services for full convergence.`
       );
     }
 
@@ -392,7 +406,7 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: diff.unmanaged,
-      warnings: [...specWarnings, ...observeWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...ios.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...observeWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...filterWarnings],
       ...(overrides ? { overrides } : {}),
     };
 

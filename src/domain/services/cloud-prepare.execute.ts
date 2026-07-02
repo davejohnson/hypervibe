@@ -5,8 +5,7 @@ import type { Project } from '../entities/project.entity.js';
 import { getProjectScopeHints } from './project-scope.js';
 import {
   getCloudPrepareProfile,
-  withCloudPreparationRecord,
-} from './cloud-prepare.js';
+  withCloudPreparationRecord, QUEUE_PREPARE_ADDON } from './cloud-prepare.js';
 
 const connectionRepo = new ConnectionRepository();
 const projectRepo = new ProjectRepository();
@@ -72,14 +71,18 @@ export async function runCloudPrepare(params: {
   }
 
   const member = `serviceAccount:${resolved.deployServiceAccountEmail}`;
+  // Prepare the union of the base profile and the queue addon so any new
+  // or re-run prepare also covers Pub/Sub queues.
+  const requiredApis = Array.from(new Set([...profile.requiredApis, ...QUEUE_PREPARE_ADDON.requiredApis]));
+  const requiredRoles = Array.from(new Set([...profile.requiredRoles, ...QUEUE_PREPARE_ADDON.requiredRoles]));
   const plan = {
     projectName: project.name,
     provider: profile.provider,
     version: profile.version,
     gcpProjectId: resolved.gcpProjectId,
     deployServiceAccountEmail: resolved.deployServiceAccountEmail,
-    enableApis: profile.requiredApis,
-    grantRoles: profile.requiredRoles,
+    enableApis: requiredApis,
+    grantRoles: requiredRoles,
     member,
   };
 
@@ -110,13 +113,13 @@ export async function runCloudPrepare(params: {
     const enabledApis = await enableRequiredApis({
       token,
       projectId: resolved.gcpProjectId,
-      services: profile.requiredApis,
+      services: requiredApis,
     });
     const iamResult = await ensureProjectIamRoles({
       token,
       projectId: resolved.gcpProjectId,
       member,
-      roles: profile.requiredRoles,
+      roles: requiredRoles,
     });
     const updatedProject = projectRepo.update(project.id, {
       policies: withCloudPreparationRecord(project.policies, profile.provider, {
@@ -125,8 +128,8 @@ export async function runCloudPrepare(params: {
         preparedAt: new Date().toISOString(),
         gcpProjectId: resolved.gcpProjectId,
         deployServiceAccountEmail: resolved.deployServiceAccountEmail,
-        requiredApis: profile.requiredApis,
-        requiredRoles: profile.requiredRoles,
+        requiredApis,
+        requiredRoles,
       }),
     });
 

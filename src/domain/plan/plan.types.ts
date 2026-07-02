@@ -3,7 +3,7 @@ import type { Component } from '../entities/component.entity.js';
 
 export type PlanActionType = 'create' | 'update' | 'replace' | 'destroy' | 'noop';
 
-export type PlanResourceKind = 'project' | 'environment' | 'service' | 'database' | 'domain' | 'ci' | 'ios';
+export type PlanResourceKind = 'project' | 'environment' | 'service' | 'database' | 'domain' | 'ci' | 'ios' | 'queue';
 
 export interface PlanFieldDiff {
   /** Field name; env vars appear as "env:KEY" with no values. */

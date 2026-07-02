@@ -30,8 +30,9 @@ export function diffEnvironment(input: {
   expectedSource?: { repo: string; branch: string };
   /** Managed database env vars derived from the currently desired database component. */
   managedDatabaseEnvVars?: Record<string, string>;
+  managedQueueEnvVars?: Record<string, string>;
 }): DiffResult {
-  const { spec, envName, observed, local, expectedSource, managedDatabaseEnvVars } = input;
+  const { spec, envName, observed, local, expectedSource, managedDatabaseEnvVars, managedQueueEnvVars } = input;
   const verified = observed !== null;
   const actions: PlanAction[] = [];
   const unmanaged: DiffResult['unmanaged'] = [];
@@ -39,6 +40,7 @@ export function diffEnvironment(input: {
   const provider = spec.hosting.provider;
   const desiredEnvVars = {
     ...(managedDatabaseEnvVars ?? {}),
+    ...(managedQueueEnvVars ?? {}),
     ...spec.envVars,
   };
 

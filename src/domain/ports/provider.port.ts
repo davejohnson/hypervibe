@@ -40,6 +40,9 @@ export interface ProviderCapabilities {
 
   /** Whether the adapter can read back live state via observe() */
   supportsObserve: boolean;
+
+  /** Queue backend this hosting provider implements, when it supports queues. */
+  queues?: { backend: 'pubsub' | 'postgres' };
 }
 
 export interface ComponentResult {

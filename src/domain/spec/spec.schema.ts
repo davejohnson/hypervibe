@@ -99,6 +99,17 @@ export const iosSpecSchema = z.object({
   }
 });
 
+/**
+ * A named message queue. Backend follows the hosting provider: Cloud Run
+ * environments get real Pub/Sub topics + subscriptions; Railway environments
+ * are postgres-backed (pg-boss model — queues ride the declared database,
+ * hypervibe wires env vars and apps own the tables).
+ */
+export const queueSpecSchema = z.object({
+  /** Subscriber ack deadline in seconds (Pub/Sub only; ignored on the postgres backend). */
+  ackDeadlineSeconds: z.number().int().min(10).max(600).optional(),
+}).strict();
+
 export const environmentSpecSchema = z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
@@ -114,6 +125,10 @@ export const environmentSpecSchema = z.object({
   deploy: deploySpecSchema.optional(),
   migrations: migrationsSpecSchema.optional(),
   ios: iosSpecSchema.optional(),
+  queues: z.record(
+    z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'queue names: lowercase alphanumeric and dashes, starting with a letter'),
+    queueSpecSchema
+  ).optional(),
   /** Autofix agent log watches, synced on hv_apply. */
   autofix: z.object({
     enabled: z.boolean(),
@@ -128,6 +143,14 @@ export const environmentSpecSchema = z.object({
       path: ['domainRegistration'],
     });
   }
+  if (environment.queues && Object.keys(environment.queues).length > 0
+    && environment.hosting.provider === 'railway' && !environment.database) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'railway queues are postgres-backed (pg-boss model): declare spec.database',
+      path: ['queues'],
+    });
+  }
 });
 
 export const projectSpecSchema = z.object({
@@ -140,6 +163,7 @@ export const projectSpecSchema = z.object({
 export type ServiceSpec = z.infer<typeof serviceSpecSchema>;
 export type DatabaseSpec = z.infer<typeof databaseSpecSchema>;
 export type IosSpec = z.infer<typeof iosSpecSchema>;
+export type QueueSpec = z.infer<typeof queueSpecSchema>;
 export type IosTestflightGroupSpec = z.infer<typeof iosTestflightGroupSpecSchema>;
 export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;

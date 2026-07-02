@@ -14,6 +14,8 @@ export interface BootstrapParams {
   deploy?: DesiredState['deploy'];
   /** Poll web services' healthCheckPath over HTTP after deploy (hv_deploy). */
   verifyHttpHealth?: boolean;
+  /** Managed queue env vars resolved by the caller (see queue-env.ts). */
+  queueEnvVars?: Record<string, string>;
 }
 
 function classifyEnvName(name: string): 'staging' | 'production' | null {

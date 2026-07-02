@@ -94,6 +94,7 @@ export async function executeBootstrap(params: {
   envVars?: DesiredState['envVars'];
   deploy?: DesiredState['deploy'];
   verifyHttpHealth?: boolean;
+  queueEnvVars?: Record<string, string>;
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
   const tx = new InfraTransaction();
   let project = resolveProject({ projectName: params.projectName });
@@ -327,6 +328,7 @@ export async function executeBootstrap(params: {
   const deployEnvVars = {
     ...sourceEnvVars,
     ...(dbProvision?.envVars ?? {}),
+    ...(params.queueEnvVars ?? {}),
     ...(params.envVars ?? {}),
   };
   const deploy = await orchestrator.execute({

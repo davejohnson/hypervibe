@@ -64,6 +64,7 @@ export class RailwayAdapter implements IProviderAdapter {
     supportsMultiEnvironment: true,
     managedTls: true,
     supportsObserve: true,
+    queues: { backend: 'postgres' },
   };
 
   private client: GraphQLClient | null = null;

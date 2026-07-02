@@ -12,6 +12,7 @@ import {
   removeServiceFromDesiredState,
 } from '../domain/services/spec.service.js';
 import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { parseQueueBindings } from '../domain/services/queue-plan.service.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler } from './respond.js';
@@ -174,6 +175,10 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
           });
         }
 
+        const queueBindings = Object.entries(parseQueueBindings(environment))
+          .filter(([, binding]) => binding.backend === 'pubsub')
+          .map(([queueName]) => queueName);
+
         ctx.repos.environments.delete(environment.id);
         ctx.repos.audit.create({
           action: 'environment.deleted',
@@ -184,7 +189,12 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
 
         return toolSuccess(
           { deleted: { scope: 'environment', project: project.name, environment: environment.name } },
-          { hint: providerNote }
+          {
+            hint: providerNote,
+            ...(queueBindings.length > 0
+              ? { warnings: [`Pub/Sub topics for queue(s) ${queueBindings.join(', ')} were not deleted; remove queues from the spec and apply first if you want them gone.`] }
+              : {}),
+          }
         );
       }
 

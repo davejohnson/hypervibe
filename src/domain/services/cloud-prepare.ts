@@ -98,6 +98,32 @@ export function isCloudPrepared(
   );
 }
 
+/**
+ * Extra APIs/roles queues need on GCP. Kept out of the base profile so
+ * existing prepared projects are not forced to re-run prepare: deploys
+ * keep working; only queue actions require the addon (with a clear
+ * re-run-prepare hint). runCloudPrepare enables the union going forward.
+ */
+export const QUEUE_PREPARE_ADDON = {
+  requiredApis: ['pubsub.googleapis.com'],
+  requiredRoles: ['roles/pubsub.editor'],
+} as const;
+
+export function isCloudPreparedForQueues(
+  project: Pick<Project, 'policies'> | null | undefined,
+  provider: string
+): boolean {
+  if (!isCloudPrepared(project, provider)) return false;
+  const profile = getCloudPrepareProfile(provider);
+  if (!profile || !project) return true;
+  const record = getCloudPreparation(project, profile.provider);
+  if (!record) return false;
+  return (
+    QUEUE_PREPARE_ADDON.requiredApis.every((api) => record.requiredApis.includes(api))
+    && QUEUE_PREPARE_ADDON.requiredRoles.every((role) => record.requiredRoles.includes(role))
+  );
+}
+
 export function withCloudPreparationRecord(
   policies: Record<string, unknown>,
   provider: CloudPrepareProvider,

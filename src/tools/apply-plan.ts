@@ -15,6 +15,8 @@ import {
   isCloudflareDomainRegistrationAction,
 } from '../domain/services/domain-registration.service.js';
 import { applyIosAction, isIosAction } from '../domain/services/appstore-plan.service.js';
+import { applyQueueAction, isQueueAction } from '../domain/services/queue-plan.service.js';
+import { resolveQueueEnvVars } from '../domain/services/queue-env.js';
 import {
   applyGitHubActionsDeploy,
   isGitHubActionsDeployAction,
@@ -299,6 +301,11 @@ export async function executePlanApply(ctx: ToolContext, params: {
       if (params.verifyHttpHealth) {
         bootstrapParams = { ...bootstrapParams, verifyHttpHealth: true };
       }
+      const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      const queueEnvVars = await resolveQueueEnvVars(applyProject, envSpec, latestEnvironment);
+      if (queueEnvVars) {
+        bootstrapParams = { ...bootstrapParams, queueEnvVars };
+      }
       bootstrap = await executeBootstrap(bootstrapParams);
     }
     return bootstrap;
@@ -313,6 +320,9 @@ export async function executePlanApply(ctx: ToolContext, params: {
     }
     if (isIosAction(action)) {
       return applyIosAction({ project: applyProject, envName, environmentSpec: envSpec, action });
+    }
+    if (isQueueAction(action)) {
+      return applyQueueAction({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
     if (action.resource.kind === 'database' && action.type === 'create') {
       return createDatabase(ctx, applyProject, envName, action);

@@ -12,6 +12,8 @@ import { serviceWorkloadKind, type Service } from '../../../domain/entities/serv
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { parseHostingBindings, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
+import * as pubsub from './pubsub.api.js';
+import { pubsubQueueResourceIds } from '../../../domain/services/queue-env.js';
 import { hashEnvValue, type ObservedService, type ObservedState } from '../../../domain/ports/observe.port.js';
 
 // Credentials schema for self-registration
@@ -261,6 +263,7 @@ export class CloudRunAdapter implements IProviderAdapter {
     supportsMultiEnvironment: false, // Separate services per env
     managedTls: true,
     supportsObserve: true,
+    queues: { backend: 'pubsub' },
   };
 
   private credentials: CloudRunCredentials | null = null;
@@ -1107,6 +1110,77 @@ export class CloudRunAdapter implements IProviderAdapter {
         },
       };
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Queues (Pub/Sub) — the hosting provider owns its queue backend.
+  // ---------------------------------------------------------------------------
+
+  /** Deterministic Pub/Sub resource ids for a spec queue name (shared with queue-env). */
+  queueResourceNames(environment: Environment, queueName: string): { topicId: string; subscriptionId: string } {
+    return pubsubQueueResourceIds(environment, queueName);
+  }
+
+  /** Hypervibe-owned topics for this environment (label-filtered). */
+  async listQueueTopics(environment: Environment): Promise<pubsub.PubSubTopic[]> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const token = await this.getAccessToken();
+    const topics = await pubsub.listTopics(token, this.credentials.projectId);
+    const environmentLabel = this.labelValue(environment.name);
+    return topics.filter((topic) => topic.labels?.['infraprint-environment'] === environmentLabel);
+  }
+
+  async getQueueSubscription(environment: Environment, queueName: string): Promise<pubsub.PubSubSubscription | null> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const token = await this.getAccessToken();
+    const { subscriptionId } = this.queueResourceNames(environment, queueName);
+    return pubsub.getSubscription(token, this.credentials.projectId, subscriptionId);
+  }
+
+  async ensureQueue(
+    environment: Environment,
+    queueName: string,
+    options: { ackDeadlineSeconds?: number } = {}
+  ): Promise<{ topicName: string; subscriptionName: string; createdTopic: boolean; createdSubscription: boolean }> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const token = await this.getAccessToken();
+    const gcpProjectId = this.credentials.projectId;
+    const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
+    const labels = {
+      'infraprint-environment': this.labelValue(environment.name),
+      'infraprint-queue': this.labelValue(queueName),
+    };
+
+    const topic = await pubsub.ensureTopic(token, gcpProjectId, topicId, labels);
+    const existing = await pubsub.getSubscription(token, gcpProjectId, subscriptionId);
+    let createdSubscription = false;
+    if (!existing) {
+      const result = await pubsub.ensureSubscription(token, gcpProjectId, subscriptionId, topicId, {
+        ackDeadlineSeconds: options.ackDeadlineSeconds,
+        labels,
+      });
+      createdSubscription = result.created;
+    } else if (
+      options.ackDeadlineSeconds !== undefined
+      && existing.ackDeadlineSeconds !== options.ackDeadlineSeconds
+    ) {
+      await pubsub.patchSubscriptionAckDeadline(token, gcpProjectId, subscriptionId, options.ackDeadlineSeconds);
+    }
+
+    return {
+      topicName: `projects/${gcpProjectId}/topics/${topicId}`,
+      subscriptionName: `projects/${gcpProjectId}/subscriptions/${subscriptionId}`,
+      createdTopic: topic.created,
+      createdSubscription,
+    };
+  }
+
+  async destroyQueue(environment: Environment, queueName: string): Promise<void> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const token = await this.getAccessToken();
+    const { topicId, subscriptionId } = this.queueResourceNames(environment, queueName);
+    await pubsub.deleteSubscription(token, this.credentials.projectId, subscriptionId);
+    await pubsub.deleteTopic(token, this.credentials.projectId, topicId);
   }
 
   async getLogs(
