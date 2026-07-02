@@ -18,6 +18,7 @@ import {
   applyCloudflareDomainRegistration,
   isCloudflareDomainRegistrationAction,
 } from '../domain/services/domain-registration.service.js';
+import { applyIosAction, isIosAction, planIos } from '../domain/services/appstore-plan.service.js';
 import {
   applyGitHubActionsDeploy,
   environmentUsesGitHubActionsDeploy,
@@ -209,6 +210,7 @@ function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
     }
     if (envSpec.email.enabled) add('sendgrid', envName, 'transactional email');
     if (environmentUsesGitHubActionsDeploy(envSpec)) add('github', envName, 'GitHub Actions deploy workflow');
+    if (envSpec.ios) add('appstoreconnect', envName, 'iOS bundle ID / TestFlight', [envSpec.ios.bundleId]);
   }
 
   const items = Array.from(required.values())
@@ -389,7 +391,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
     'Create or update the desired-state spec for a project (the single source of truth that hv_plan diffs against live infrastructure). When run inside a git worktree, Hypervibe writes .hypervibe/spec.json so teams share the same infrastructure intent. Merges by default; pass replace=true to overwrite. In a merge, set a key to null to delete it (e.g. remove a service).',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|rds|cloudsql|railway }, domain?, domainRegistration?: { provider: cloudflare, register?: boolean, years?, autoRenew?, privacyMode? }, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations? } } }. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows. trigger "native" is provider-specific, requires confirmNativeDeploy=true when newly introduced, and must not be used merely to avoid CI/package credentials. "manual" provisions infrastructure only.'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|cloudsql|railway }, domain?, domainRegistration?: { provider: cloudflare, register?: boolean, years?, autoRenew?, privacyMode? }, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations?, ios?: { bundleId, appName?, platform?: IOS|MAC_OS, capabilities?: [PUSH_NOTIFICATIONS|...], testflight?: { groups: { <name>: { internal?, publicLinkEnabled?, publicLinkLimit?, feedbackEnabled?, hasAccessToAllBuilds?, testers?: [emails] } } } } } } }. ios declares the iOS identity + TestFlight fingerprint: hv_plan observes App Store Connect and converges bundle ID, capabilities (additive), beta groups, and tester membership; builds/submission stay in hv_testflight_*/hv_appstore_*. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows. trigger "native" is provider-specific, requires confirmNativeDeploy=true when newly introduced, and must not be used merely to avoid CI/package credentials. "manual" provisions infrastructure only.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external app access such as the Railway GitHub App.'),
     },
@@ -666,6 +668,27 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         }
         : undefined;
       const ciPushToDeploy = Boolean(deployStrategy === 'branch' && deployTrigger === 'ci' && ciAction?.type === 'noop');
+
+      // iOS drift (identity + TestFlight) when the environment declares it.
+      const ios = envSpec.ios
+        ? await planIos({ project: projectForStatus, environmentSpec: envSpec, environment })
+        : { actions: [] as PlanAction[], warnings: [] as string[] };
+      const iosDrift = ios.actions.filter((action) => action.type !== 'noop');
+      const iosGroupActions = ios.actions.filter((action) => action.id.startsWith('ios:group:'));
+      const iosStatus = envSpec.ios
+        ? {
+          bundleId: envSpec.ios.bundleId,
+          bundleIdRegistered: ios.actions.some((action) => action.id.startsWith('ios:bundle-id:') && action.type === 'noop'),
+          capabilitiesMissing: (ios.actions.find((action) => action.id.startsWith('ios:capabilities:'))?.metadata?.missingCapabilities as string[] | undefined) ?? [],
+          appRecord: ios.actions.some((action) => action.id.startsWith('ios:app:'))
+            ? (ios.actions.find((action) => action.id.startsWith('ios:app:'))!.type === 'noop' ? 'found' : 'missing')
+            : 'unknown',
+          groups: {
+            inSync: iosGroupActions.filter((action) => action.type === 'noop').map((action) => action.resource.name),
+            pending: iosGroupActions.filter((action) => action.type !== 'noop').map((action) => action.resource.name),
+          },
+        }
+        : undefined;
       const nativePushToDeploy = Boolean(
         deployStrategy === 'branch'
         && deployTrigger === 'native'
@@ -680,11 +703,12 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           specRevision: specResult.revision,
           specSource: specResult.source ?? { kind: 'local' },
           verified: observed !== null,
-          inSync: drift.length === 0,
-          summary: summarizeActions(diff.actions),
-          drift,
+          inSync: drift.length === 0 && iosDrift.length === 0,
+          summary: summarizeActions([...diff.actions, ...ios.actions]),
+          drift: [...drift, ...iosDrift],
           unmanaged: diff.unmanaged,
           blocked: planService.preflight(envSpec),
+          ...(iosStatus ? { ios: iosStatus } : {}),
           deploySource: {
             strategy: deployStrategy,
             ...(deployTrigger ? { trigger: deployTrigger } : {}),
@@ -697,12 +721,12 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           },
         },
         {
-          warnings: [...warnings, ...diff.warnings, ...sourceWarnings, ...ciDeploy.warnings],
+          warnings: [...warnings, ...diff.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings],
           hint: sourceWarnings.length > 0
             ? 'Fix Railway GitHub App repository access and project-member GitHub contributor access, then rerun hv_status or hv_plan.'
             : deployStrategy === 'branch' && deployTrigger === 'ci' && ciNeedsSync
               ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
-              : drift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
+              : drift.length > 0 || iosDrift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
         }
       );
     })
@@ -780,6 +804,9 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         }
         if (isGitHubActionsDeployAction(action)) {
           return applyGitHubActionsDeploy({ project: applyProject, environmentName: envName, environmentSpec: envSpec });
+        }
+        if (isIosAction(action)) {
+          return applyIosAction({ project: applyProject, envName, environmentSpec: envSpec, action });
         }
         if (action.resource.kind === 'database' && action.type === 'create') {
           return createDatabase(ctx, applyProject, envName, action);

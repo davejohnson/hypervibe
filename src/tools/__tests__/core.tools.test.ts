@@ -13,6 +13,7 @@ import { ProjectRepository } from '../../adapters/db/repositories/project.reposi
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
+import { AppStoreConnectAdapter } from '../../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.port.js';
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../domain/services/github-ops.service.js';
@@ -674,6 +675,132 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(environment.platformBindings.domainRegistrations).toMatchObject({
       'apreskeys.com': { provider: 'cloudflare', accountId: 'acct-1', state: 'succeeded', completed: true },
     });
+    await t.close();
+  });
+
+  it('plans and applies iOS bundle ID, capabilities, and TestFlight actions end to end', async () => {
+    const BUNDLE = 'com.example.app';
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'ios-e2e-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            ios: {
+              bundleId: BUNDLE,
+              capabilities: ['PUSH_NOTIFICATIONS'],
+              testflight: { groups: { Beta: { testers: ['a@example.com'] } } },
+            },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('appstoreconnect', { keyId: 'K1', issuerId: 'I1', privateKey: 'pk' });
+    const project = new ProjectRepository().findByName('ios-e2e-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-1' } },
+      },
+    });
+    // Hosting is already converged so the only executable actions are ios:*.
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [], envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    // ASC reads: bundle ID missing, app record exists, no groups/testers yet.
+    const findBundleId = vi.spyOn(AppStoreConnectAdapter.prototype, 'findBundleIdByIdentifier').mockResolvedValue(null);
+    const capabilities = vi.spyOn(AppStoreConnectAdapter.prototype, 'getBundleIdCapabilities').mockResolvedValue([]);
+    const findApp = vi.spyOn(AppStoreConnectAdapter.prototype, 'findAppByBundleId')
+      .mockResolvedValue({ id: 'app-1', bundleId: BUNDLE, name: 'Example' });
+    const listGroups = vi.spyOn(AppStoreConnectAdapter.prototype, 'listBetaGroups').mockResolvedValue([]);
+    const listTesters = vi.spyOn(AppStoreConnectAdapter.prototype, 'listBetaTesters').mockResolvedValue([]);
+    // ASC writes used at apply time.
+    const registerBundleId = vi.spyOn(AppStoreConnectAdapter.prototype, 'registerBundleId')
+      .mockResolvedValue({ id: 'bid-1', identifier: BUNDLE, name: 'ios-e2e-app', platform: 'IOS' });
+    const enableCapabilities = vi.spyOn(AppStoreConnectAdapter.prototype, 'enableCapabilities')
+      .mockResolvedValue({ enabled: ['PUSH_NOTIFICATIONS'], alreadyEnabled: [], errors: [] });
+    const getOrCreateGroup = vi.spyOn(AppStoreConnectAdapter.prototype, 'getOrCreateBetaGroup')
+      .mockResolvedValue({ group: { id: 'grp-1', name: 'Beta', isInternal: false }, created: true });
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'findBetaGroupByName')
+      .mockResolvedValue({ id: 'grp-1', name: 'Beta', isInternal: false });
+    const getOrCreateTester = vi.spyOn(AppStoreConnectAdapter.prototype, 'getOrCreateBetaTester')
+      .mockResolvedValue({ tester: { id: 'tester-1', email: 'a@example.com' }, created: true });
+
+    const plan = await t.call('hv_plan', { project: 'ios-e2e-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    const ids = plan.data.actions.map((action: { id: string }) => action.id);
+    expect(ids).toEqual(expect.arrayContaining([
+      `ios:bundle-id:${BUNDLE}`,
+      `ios:capabilities:${BUNDLE}`,
+      `ios:app:${BUNDLE}`,
+      'ios:group:Beta',
+      'ios:testers:Beta',
+    ]));
+    expect(plan.data.actions.find((action: { id: string }) => action.id === `ios:bundle-id:${BUNDLE}`)).toMatchObject({
+      type: 'create',
+      resource: { kind: 'ios', name: BUNDLE, provider: 'appstoreconnect' },
+    });
+    // The app record already exists, so its action is a noop.
+    expect(plan.data.actions.find((action: { id: string }) => action.id === `ios:app:${BUNDLE}`)).toMatchObject({ type: 'noop' });
+
+    const apply = await t.call('hv_apply', { project: 'ios-e2e-app', planId: plan.data.planId });
+    expect(apply.ok).toBe(true);
+    expect(apply.data.applied).toBe(true);
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({ actionId: `ios:bundle-id:${BUNDLE}`, status: 'succeeded' }));
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({ actionId: `ios:capabilities:${BUNDLE}`, status: 'succeeded' }));
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({ actionId: `ios:app:${BUNDLE}`, status: 'skipped_noop' }));
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({ actionId: 'ios:group:Beta', status: 'succeeded' }));
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({ actionId: 'ios:testers:Beta', status: 'succeeded' }));
+    expect(registerBundleId).toHaveBeenCalledWith(BUNDLE, 'ios-e2e-app', 'IOS');
+    expect(enableCapabilities).toHaveBeenCalledWith('bid-1', ['PUSH_NOTIFICATIONS']);
+    expect(getOrCreateGroup).toHaveBeenCalledWith(expect.objectContaining({ appId: 'app-1', name: 'Beta' }));
+    expect(getOrCreateTester).toHaveBeenCalledWith(expect.objectContaining({ email: 'a@example.com', groupIds: ['grp-1'] }));
+
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    expect(environment.platformBindings.ios).toMatchObject({
+      bundleIdResourceId: 'bid-1',
+      appId: 'app-1',
+      testflight: { groups: { Beta: { groupId: 'grp-1' } } },
+    });
+
+    // Re-point the reads at the converged Apple-side state for hv_status.
+    findBundleId.mockResolvedValue({ id: 'bid-1', identifier: BUNDLE, name: 'ios-e2e-app', platform: 'IOS' });
+    capabilities.mockResolvedValue([{ id: 'cap-1', type: 'PUSH_NOTIFICATIONS' }]);
+    findApp.mockResolvedValue({ id: 'app-1', bundleId: BUNDLE, name: 'Example' });
+    listGroups.mockResolvedValue([{ id: 'grp-1', name: 'Beta', isInternal: false }]);
+    listTesters.mockResolvedValue([{ id: 'tester-1', email: 'a@example.com' }]);
+
+    const status = await t.call('hv_status', { project: 'ios-e2e-app', env: 'production' });
+    expect(status.ok).toBe(true);
+    expect(status.data.ios).toMatchObject({
+      bundleId: BUNDLE,
+      bundleIdRegistered: true,
+      capabilitiesMissing: [],
+      appRecord: 'found',
+    });
+    expect(status.data.ios.groups.inSync).toContain('Beta');
+    expect(status.data.inSync).toBe(true);
     await t.close();
   });
 

@@ -25,6 +25,7 @@ import {
   environmentUsesGitHubActionsDeploy,
   planGitHubActionsDeploy,
 } from '../services/ci-deploy.service.js';
+import { planIos } from '../services/appstore-plan.service.js';
 import { formatConnectionGuidance } from '../services/connection-guidance.js';
 
 export interface EnvironmentPlan {
@@ -319,6 +320,11 @@ export class PlanService {
       }
     }
 
+    // iOS actions go last: the executor aborts remaining actions after a
+    // failure, and an Apple-side failure must never block hosting convergence.
+    const ios = await planIos({ project: projectForPlan, environmentSpec, environment });
+    actions.push(...ios.actions);
+
     const document: PlanRunDocument = {
       kind: 'hv_plan',
       environmentName,
@@ -326,7 +332,7 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: diff.unmanaged,
-      warnings: [...specWarnings, ...observeWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings],
+      warnings: [...specWarnings, ...observeWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...ios.warnings],
     };
 
     // Plans for untracked environments can't reference an environment row;

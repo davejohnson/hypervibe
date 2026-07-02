@@ -14,6 +14,8 @@ import { adapterFactory } from '../../services/adapter.factory.js';
 import { PlanService } from '../plan.service.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
+import { AppStoreConnectAdapter } from '../../../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
+import { isIosAction } from '../../services/appstore-plan.service.js';
 import { hashEnvValue, type ObservedState } from '../../ports/observe.port.js';
 import type { Project } from '../../entities/project.entity.js';
 import { buildBranchDeployWorkflow } from '../../services/github-ops.service.js';
@@ -748,6 +750,118 @@ describe('PlanService.plan', () => {
     expect(ci.type).toBe('noop');
     expect(ci.metadata?.missingProviderSecrets).toBeUndefined();
     expect(ci.metadata?.staleProviderSecrets).toBeUndefined();
+  });
+
+  describe('iOS planning', () => {
+    const BUNDLE = 'com.example.app';
+
+    function replaceSpecWithIos() {
+      new SpecStore().replace(project, {
+        version: 1,
+        project: project.name,
+        environments: {
+          staging: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            envVars: { NODE_ENV: 'staging' },
+            ios: {
+              bundleId: BUNDLE,
+              capabilities: ['PUSH_NOTIFICATIONS'],
+              testflight: { groups: { Beta: { testers: ['a@example.com'] } } },
+            },
+          },
+        },
+      });
+    }
+
+    function seedAppStoreConnectConnection() {
+      const repo = new ConnectionRepository();
+      const connection = repo.create({
+        provider: 'appstoreconnect',
+        credentialsEncrypted: getSecretStore().encryptObject({ keyId: 'K1', issuerId: 'I1', privateKey: 'pk' }),
+      });
+      repo.updateStatus(connection.id, 'verified');
+    }
+
+    it('appends iOS actions after all non-iOS actions when the spec declares ios', async () => {
+      replaceSpecWithIos();
+      seedAppStoreConnectConnection();
+      new EnvironmentRepository().create({
+        projectId: project.id,
+        name: 'staging',
+        platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 're-1', services: { web: { serviceId: 's-1' } } },
+      });
+      new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+      mockObservingAdapter({
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: true,
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: [{
+          name: 'web',
+          externalId: 's-1',
+          workloadKind: 'web',
+          customDomains: [],
+          config: { startCommand: 'node old.js' },
+          envVarKeys: ['NODE_ENV'],
+          envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+          status: 'running',
+        }],
+        databases: [],
+        partial: false,
+        warnings: [],
+      });
+      vi.spyOn(AppStoreConnectAdapter.prototype, 'findBundleIdByIdentifier').mockResolvedValue(null);
+      vi.spyOn(AppStoreConnectAdapter.prototype, 'findAppByBundleId').mockResolvedValue(null);
+      vi.spyOn(AppStoreConnectAdapter.prototype, 'listBetaGroups').mockResolvedValue([]);
+      vi.spyOn(AppStoreConnectAdapter.prototype, 'listBetaTesters').mockResolvedValue([]);
+
+      const result = await new PlanService().plan(project, 'staging');
+      expect(result).not.toHaveProperty('error');
+      const plan = result as Exclude<typeof result, { error: string }>;
+
+      const ids = plan.actions.map((action) => action.id);
+      expect(ids).toEqual(expect.arrayContaining([
+        `ios:bundle-id:${BUNDLE}`,
+        `ios:capabilities:${BUNDLE}`,
+        `ios:app:${BUNDLE}`,
+        'ios:group:Beta',
+        'ios:testers:Beta',
+      ]));
+
+      // iOS actions are appended last, after every non-iOS action.
+      const iosIndexes = plan.actions.flatMap((action, index) => (isIosAction(action) ? [index] : []));
+      const nonIosIndexes = plan.actions.flatMap((action, index) => (isIosAction(action) ? [] : [index]));
+      expect(iosIndexes.length).toBeGreaterThan(0);
+      expect(nonIosIndexes.length).toBeGreaterThan(0);
+      expect(Math.min(...iosIndexes)).toBeGreaterThan(Math.max(...nonIosIndexes));
+
+      // Nothing exists Apple-side, so the chain is verified creates/updates.
+      expect(plan.actions.find((action) => action.id === `ios:bundle-id:${BUNDLE}`)).toMatchObject({ type: 'create', verified: true });
+      expect(plan.warnings.some((warning) => warning.includes('iOS'))).toBe(false);
+    });
+
+    it('plans no iOS actions when the spec has no ios section', async () => {
+      vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'no connection' });
+      const observe = vi.spyOn(AppStoreConnectAdapter.prototype, 'findBundleIdByIdentifier');
+
+      const result = await new PlanService().plan(project, 'staging');
+      const plan = result as Exclude<typeof result, { error: string }>;
+      expect(plan.actions.some(isIosAction)).toBe(false);
+      expect(plan.actions.some((action) => action.id.startsWith('ios:'))).toBe(false);
+      expect(observe).not.toHaveBeenCalled();
+    });
+
+    it('merges a Cannot-plan-iOS warning and plans zero iOS actions without an appstoreconnect connection', async () => {
+      replaceSpecWithIos();
+      vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'no connection' });
+
+      const result = await new PlanService().plan(project, 'staging');
+      const plan = result as Exclude<typeof result, { error: string }>;
+      expect(plan.actions.some(isIosAction)).toBe(false);
+      expect(plan.warnings.some((warning) => warning.includes('Cannot plan iOS') && warning.includes(BUNDLE))).toBe(true);
+    });
   });
 
   it('clears blocked when a verified connection exists', async () => {
