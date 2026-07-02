@@ -11,6 +11,7 @@ import { ProjectRepository } from '../../adapters/db/repositories/project.reposi
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
+import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import type { IHostingAdapter } from '../../domain/ports/hosting.port.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
@@ -301,6 +302,91 @@ describe('hv_deploy database env injection', () => {
 });
 
 describe('hv_rollback', () => {
+  it('records the rollback as a plan/apply run pair with per-service receipts', async () => {
+    const project = new ProjectRepository().create({ name: 'rollback-pair-app', defaultPlatform: 'railway' });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+
+    // A prior successful deploy run with a deploy_web receipt is the target.
+    const runRepo = new RunRepository();
+    const priorRun = runRepo.create({
+      projectId: project.id,
+      environmentId: environment.id,
+      type: 'deploy',
+      plan: { steps: [] },
+    });
+    runRepo.addReceipt(priorRun.id, { step: 'deploy_web', status: 'success', timestamp: new Date().toISOString() });
+    runRepo.updateStatus(priorRun.id, 'succeeded');
+
+    const fakeAdapter: IHostingAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['dockerfile'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: true,
+        supportsReleaseCommand: true,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: true,
+        supportsObserve: true,
+      },
+      async connect() {},
+      async verify() { return { success: true }; },
+      async ensureProject() { return { success: true, message: 'ok', data: { projectId: 'rp', environmentId: 're' } }; },
+      async deploy(service) {
+        return {
+          serviceId: service.id,
+          externalId: 'rail-web',
+          url: 'https://web.up.railway.app',
+          status: 'deployed',
+          receipt: { success: true, message: 'deployed' },
+        };
+      },
+      async setEnvVars() { return { success: true, message: 'ok' }; },
+      async getDeployStatus() { return { status: 'deployed', url: 'https://web.up.railway.app' }; },
+    };
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeAdapter });
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', { project: 'rollback-pair-app', env: 'staging' });
+    expect(result.ok).toBe(true);
+    expect(result.data.rollbackFromRunId).toBe(priorRun.id);
+    expect(typeof result.data.planId).toBe('string');
+    expect(typeof result.data.applyRunId).toBe('string');
+    expect(result.data.services).toEqual(['web']);
+
+    // The synthetic plan run carries the rollback action with fromRunId.
+    const planRun = runRepo.findById(result.data.planId)!;
+    expect(planRun.type).toBe('plan');
+    const doc = planRun.plan as Record<string, any>;
+    expect(doc.actions).toHaveLength(1);
+    expect(doc.actions[0].id).toBe('service:web:rollback');
+    expect(doc.actions[0].metadata).toMatchObject({ operation: 'rollbackRedeploy', fromRunId: priorRun.id });
+
+    // The apply run has a per-service receipt.
+    const applyRun = runRepo.findById(result.data.applyRunId)!;
+    expect(applyRun.type).toBe('apply');
+    expect(applyRun.receipts.some((receipt) => receipt.step === 'service:web:rollback' && receipt.status === 'success')).toBe(true);
+    await t.close();
+  });
+
+  it('still validates toRunId against successful deploy runs', async () => {
+    const project = new ProjectRepository().create({ name: 'rollback-invalid-app', defaultPlatform: 'railway' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: 'rollback-invalid-app',
+      env: 'staging',
+      toRunId: '00000000-0000-4000-8000-000000000000',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('not a successful deploy run');
+    await t.close();
+  });
+
   it('confirm-gates protected environments', async () => {
     const project = new ProjectRepository().create({
       name: 'rollback-gate-app',

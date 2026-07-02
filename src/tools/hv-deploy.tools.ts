@@ -165,7 +165,7 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
 
   server.tool(
     'hv_rollback',
-    'Rollback by redeploying services from the most recent successful deploy run (or a specific run via toRunId). Protected environments require confirm=true.',
+    'Rollback by redeploying services from the most recent successful deploy run (or a specific run via toRunId). Recorded as a plan/apply run pair (planId + applyRunId returned) with per-service receipts; redeploys current code, not a pinned image. Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,

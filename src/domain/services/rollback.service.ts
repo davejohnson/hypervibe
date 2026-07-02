@@ -6,6 +6,9 @@ import { DeployOrchestrator } from './deploy.orchestrator.js';
 import { buildDeploySourceEnvVars } from './deploy-source.js';
 import { buildDatabaseEnvVarsFromComponent } from './database-env.js';
 import { syncProjectIntent } from './intent.service.js';
+import { SpecStore } from '../spec/spec.store.js';
+import { ConvergeExecutor, type ActionResult, type PlanRunDocument } from '../plan/converge.executor.js';
+import type { PlanAction } from '../plan/plan.types.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { DeployResult } from './deploy.orchestrator.js';
@@ -28,6 +31,9 @@ export type RollbackSuccess = {
   success: boolean;
   rollbackFromRunId: string;
   rollbackRunId: string;
+  /** The synthetic rollback plan run (audit pair with applyRunId). */
+  planId: string;
+  applyRunId?: string;
   status: string;
   services: string[];
   urls: DeployResult['urls'];
@@ -37,19 +43,25 @@ export type RollbackSuccess = {
   intent: ReturnType<typeof syncProjectIntent>;
 };
 
+export const ROLLBACK_OPERATION = 'rollbackRedeploy';
+
 /**
- * Shared rollback flow used by both the legacy `deploy_rollback` tool and the
- * new `hv_rollback` tool: find the last known-good deploy run (or a specific
- * one), resolve the services it deployed, and redeploy them.
- *
- * Confirm gating for protected environments is the caller's responsibility.
+ * Resolve the rollback target and persist it as a synthetic plan run: one
+ * service:<name>:rollback action per service from the target run's receipts.
+ * Rollback stays available for spec-less projects (revision 0 sentinel).
  */
-export async function executeRollback(params: {
+export function planRollback(params: {
   project: Project;
   environment: Environment;
   toRunId?: string;
   services?: string[];
-}): Promise<RollbackFailure | RollbackSuccess> {
+}): RollbackFailure | {
+  ok: true;
+  planRunId: string;
+  fromRunId: string;
+  specRevision: number;
+  serviceNames: string[];
+} {
   const { project, environment, toRunId, services } = params;
 
   let targetRun = toRunId ? runRepo.findById(toRunId) : null;
@@ -85,6 +97,61 @@ export async function executeRollback(params: {
     };
   }
 
+  const specRevision = new SpecStore().get(project)?.revision ?? 0;
+  const provider = project.defaultPlatform ?? 'unknown';
+  const actions: PlanAction[] = servicesToDeploy.map((service) => ({
+    id: `service:${service.name}:rollback`,
+    type: 'update',
+    resource: { kind: 'service', name: service.name, provider },
+    verified: false,
+    reason: `Redeploy from run ${targetRun.id}`,
+    metadata: { operation: ROLLBACK_OPERATION, fromRunId: targetRun.id },
+  }));
+  const document: PlanRunDocument = {
+    kind: 'hv_plan',
+    environmentName: environment.name,
+    specRevision,
+    observedFingerprint: null,
+    actions,
+    warnings: [ROLLBACK_NOTE],
+  };
+  const planRun = runRepo.create({
+    projectId: project.id,
+    environmentId: environment.id,
+    type: 'plan',
+    plan: document as unknown as Record<string, unknown>,
+  });
+  runRepo.updateStatus(planRun.id, 'succeeded');
+
+  return {
+    ok: true,
+    planRunId: planRun.id,
+    fromRunId: targetRun.id,
+    specRevision,
+    serviceNames: servicesToDeploy.map((s) => s.name),
+  };
+}
+
+/**
+ * Shared rollback flow used by both the legacy `deploy_rollback` tool and the
+ * new `hv_rollback` tool: find the last known-good deploy run (or a specific
+ * one), resolve the services it deployed, and redeploy them.
+ *
+ * Confirm gating for protected environments is the caller's responsibility.
+ */
+export async function executeRollback(params: {
+  project: Project;
+  environment: Environment;
+  toRunId?: string;
+  services?: string[];
+}): Promise<RollbackFailure | RollbackSuccess> {
+  const { project, environment } = params;
+
+  const planned = planRollback(params);
+  if (!planned.ok) {
+    return planned;
+  }
+
   const adapterResult = await adapterFactory.getHostingAdapter(project);
   if (!adapterResult.success || !adapterResult.adapter) {
     return {
@@ -93,34 +160,74 @@ export async function executeRollback(params: {
       error: adapterResult.error || 'No hosting adapter available for rollback',
     };
   }
+  const adapter = adapterResult.adapter;
 
-  const orchestrator = new DeployOrchestrator();
-  // Include managed database env vars (e.g. DATABASE_URL): Cloud Run scopes
-  // env to the revision, so a rollback deploy must carry them too.
-  const dbComponent = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
-  const deployEnvVars = {
-    ...buildDeploySourceEnvVars(project, adapterResult.adapter.name),
-    ...(dbComponent ? buildDatabaseEnvVarsFromComponent(dbComponent).envVars : {}),
+  const servicesToDeploy = serviceRepo
+    .findByProjectId(project.id)
+    .filter((s) => planned.serviceNames.includes(s.name));
+
+  // One provider deploy shared across the per-service rollback actions:
+  // the executor gets per-service receipts, the provider gets one run.
+  let deployResult: DeployResult | null = null;
+  const ensureDeploy = async (): Promise<DeployResult> => {
+    if (!deployResult) {
+      const orchestrator = new DeployOrchestrator();
+      // Include managed database env vars (e.g. DATABASE_URL): Cloud Run scopes
+      // env to the revision, so a rollback deploy must carry them too.
+      const dbComponent = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
+      const deployEnvVars = {
+        ...buildDeploySourceEnvVars(project, adapter.name),
+        ...(dbComponent ? buildDatabaseEnvVarsFromComponent(dbComponent).envVars : {}),
+      };
+      deployResult = await orchestrator.execute({
+        project,
+        environment,
+        services: servicesToDeploy,
+        envVars: Object.keys(deployEnvVars).length > 0 ? deployEnvVars : undefined,
+        adapter,
+      });
+    }
+    return deployResult;
   };
-  const rollback = await orchestrator.execute({
-    project,
-    environment,
-    services: servicesToDeploy,
-    envVars: Object.keys(deployEnvVars).length > 0 ? deployEnvVars : undefined,
-    adapter: adapterResult.adapter,
+
+  const handler = async (action: PlanAction): Promise<ActionResult> => {
+    const deployed = await ensureDeploy();
+    const serviceName = action.resource.name;
+    if (deployed.success) {
+      return {
+        success: true,
+        message: `Redeployed ${serviceName} from run ${planned.fromRunId}`,
+        data: { ...(deployed.serviceUrls[serviceName] ? { url: deployed.serviceUrls[serviceName] } : {}) },
+      };
+    }
+    return {
+      success: false,
+      message: `Rollback redeploy failed for ${serviceName}`,
+      error: deployed.errors.join('; ') || 'Rollback deploy failed',
+    };
+  };
+
+  const converge = await new ConvergeExecutor().execute({
+    planRunId: planned.planRunId,
+    currentSpecRevision: planned.specRevision,
+    freshObservedFingerprint: null,
+    handler,
   });
+  const deployed = deployResult as DeployResult | null;
 
   return {
     ok: true,
-    success: rollback.success,
-    rollbackFromRunId: targetRun.id,
-    rollbackRunId: rollback.run.id,
-    status: rollback.run.status,
-    services: servicesToDeploy.map((s) => s.name),
-    urls: rollback.urls,
-    errors: rollback.errors.length ? rollback.errors : undefined,
-    createdResources: rollback.createdResources,
-    rollback: rollback.rollback,
+    success: converge.success && (deployed?.success ?? false),
+    rollbackFromRunId: planned.fromRunId,
+    rollbackRunId: deployed?.run.id ?? '',
+    planId: planned.planRunId,
+    ...(converge.applyRunId ? { applyRunId: converge.applyRunId } : {}),
+    status: deployed?.run.status ?? 'failed',
+    services: planned.serviceNames,
+    urls: deployed?.urls ?? [],
+    errors: deployed && deployed.errors.length ? deployed.errors : (converge.error ? [converge.error] : undefined),
+    createdResources: deployed?.createdResources ?? [],
+    rollback: deployed?.rollback,
     intent: syncProjectIntent(project.id),
   };
 }
