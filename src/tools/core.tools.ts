@@ -332,11 +332,19 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_plan',
-    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply.',
-    { project: projectField, env: envField },
-    wrapHandler(async ({ project: projectRef, env }) => {
+    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply. Optional services=[...] produces a partial deploy plan restricted to those spec services (domain/CI/iOS/destroy actions are excluded); optional envVars={...} freezes one-off env var overrides into the plan (values encrypted at rest, merged over spec envVars at apply).',
+    {
+      project: projectField,
+      env: envField,
+      services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
+      envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over spec envVars at apply. Durable values belong in the spec.'),
+    },
+    wrapHandler(async ({ project: projectRef, env, services, envVars }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const result = await planService.plan(project, env?.trim() || 'staging');
+      const result = await planService.plan(project, env?.trim() || 'staging', {
+        ...(services?.length ? { serviceFilter: services } : {}),
+        ...(envVars && Object.keys(envVars).length > 0 ? { envVarOverrides: envVars } : {}),
+      });
       if ('error' in result) {
         return toolError('VALIDATION', result.error, { next: ['hv_spec_set'] });
       }

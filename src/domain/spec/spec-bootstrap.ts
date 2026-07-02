@@ -81,3 +81,32 @@ export function specToBootstrapParams(
     ...(deploy ? { deploy } : {}),
   };
 }
+
+/**
+ * Apply plan-frozen deploy overrides (hv_plan services=/envVars=) to
+ * bootstrap params: restrict services/crons to the subset and merge one-off
+ * env vars last so they win over spec and database-derived vars, matching
+ * hv_deploy's historical behavior.
+ */
+export function applyOverridesToBootstrapParams(
+  params: BootstrapParams,
+  overrides: { services?: string[]; envVars?: Record<string, string> }
+): BootstrapParams {
+  const next: BootstrapParams = { ...params };
+  if (overrides.services?.length) {
+    const keep = new Set(overrides.services);
+    next.services = params.services.filter((name) => keep.has(name));
+    if (params.crons) {
+      const crons = Object.fromEntries(Object.entries(params.crons).filter(([name]) => keep.has(name)));
+      if (Object.keys(crons).length > 0) {
+        next.crons = crons;
+      } else {
+        delete next.crons;
+      }
+    }
+  }
+  if (overrides.envVars && Object.keys(overrides.envVars).length > 0) {
+    next.envVars = { ...(params.envVars ?? {}), ...overrides.envVars };
+  }
+  return next;
+}

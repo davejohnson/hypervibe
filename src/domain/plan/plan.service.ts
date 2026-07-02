@@ -12,6 +12,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { classifyDeployEnvironment, resolveGitDeploySource } from '../services/deploy-source.js';
 import { diffEnvironment } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
@@ -27,6 +28,13 @@ import {
 } from '../services/ci-deploy.service.js';
 import { planIos } from '../services/appstore-plan.service.js';
 import { formatConnectionGuidance } from '../services/connection-guidance.js';
+
+export interface PlanOptions {
+  /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
+  serviceFilter?: string[];
+  /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
+  envVarOverrides?: Record<string, string>;
+}
 
 export interface EnvironmentPlan {
   planRunId: string;
@@ -241,7 +249,11 @@ export class PlanService {
     return [];
   }
 
-  async plan(project: Project, environmentName: string): Promise<EnvironmentPlan | { error: string }> {
+  async plan(
+    project: Project,
+    environmentName: string,
+    options?: PlanOptions
+  ): Promise<EnvironmentPlan | { error: string }> {
     const specResult = this.specStore.get(project);
     if (!specResult) {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec_set.` };
@@ -254,6 +266,24 @@ export class PlanService {
         error: `Spec has no environment "${environmentName}". Available: ${available.join(', ') || '(none)'}.`,
       };
     }
+
+    const serviceFilter = options?.serviceFilter?.length ? options.serviceFilter : undefined;
+    if (serviceFilter) {
+      const unknown = serviceFilter.filter((name) => !environmentSpec.services[name]);
+      if (unknown.length > 0) {
+        return {
+          error: `services filter names not in the spec: ${unknown.join(', ')}. Available: ${Object.keys(environmentSpec.services).join(', ') || '(none)'}.`,
+        };
+      }
+    }
+    const envVarOverrides = options?.envVarOverrides && Object.keys(options.envVarOverrides).length > 0
+      ? options.envVarOverrides
+      : undefined;
+    // Overrides feed the diff so env drift reflects them; the base spec is
+    // untouched (preflight, CI, and domain planning see the declared state).
+    const specForDiff = envVarOverrides
+      ? { ...environmentSpec, envVars: { ...environmentSpec.envVars, ...envVarOverrides } }
+      : environmentSpec;
 
     const specWarnings = specResult.adopted && specResult.source?.kind === 'repo'
       ? [`${specResult.source.path} changed outside hypervibe; recorded as revision ${specResult.revision}.`]
@@ -271,7 +301,7 @@ export class PlanService {
       : undefined;
 
     const diff = diffEnvironment({
-      spec: environmentSpec,
+      spec: specForDiff,
       envName: environmentName,
       observed,
       local,
@@ -325,6 +355,36 @@ export class PlanService {
     const ios = await planIos({ project: projectForPlan, environmentSpec, environment });
     actions.push(...ios.actions);
 
+    const filterWarnings: string[] = [];
+    if (serviceFilter) {
+      // A filtered plan is an honest "deploy these services" plan: keep the
+      // scaffolding (project/environment) and database creates the deploy
+      // depends on, keep the selected services, and never destroy anything.
+      const keep = new Set(serviceFilter);
+      actions = actions.filter((action) => {
+        if (action.type === 'destroy') return false;
+        if (action.resource.kind === 'project' || action.resource.kind === 'environment') return true;
+        if (action.resource.kind === 'database') return action.type === 'create' || action.type === 'noop';
+        if (action.resource.kind === 'service') return keep.has(action.resource.name);
+        return false;
+      });
+      filterWarnings.push(
+        `Partial plan (services: ${serviceFilter.join(', ')}): domain, CI, iOS, and destroy convergence was excluded; run hv_plan without services for full convergence.`
+      );
+    }
+
+    const overrides = serviceFilter || envVarOverrides
+      ? {
+        ...(serviceFilter ? { services: serviceFilter } : {}),
+        ...(envVarOverrides
+          ? {
+            envVarKeys: Object.keys(envVarOverrides).sort(),
+            envVarsEncrypted: getSecretStore().encryptObject(envVarOverrides),
+          }
+          : {}),
+      }
+      : undefined;
+
     const document: PlanRunDocument = {
       kind: 'hv_plan',
       environmentName,
@@ -332,7 +392,8 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: diff.unmanaged,
-      warnings: [...specWarnings, ...observeWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...ios.warnings],
+      warnings: [...specWarnings, ...observeWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...ios.warnings, ...filterWarnings],
+      ...(overrides ? { overrides } : {}),
     };
 
     // Plans for untracked environments can't reference an environment row;

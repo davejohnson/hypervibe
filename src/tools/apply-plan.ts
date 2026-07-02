@@ -7,7 +7,7 @@ import {
 } from '../domain/plan/converge.executor.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
-import { specToBootstrapParams } from '../domain/spec/spec-bootstrap.js';
+import { applyOverridesToBootstrapParams, specToBootstrapParams } from '../domain/spec/spec-bootstrap.js';
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import {
@@ -23,6 +23,7 @@ import { setupCustomDomain } from '../domain/services/domain.service.js';
 import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
 import { StateManager } from '../agent/state.js';
+import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
@@ -274,10 +275,21 @@ export async function executePlanApply(ctx: ToolContext, params: {
 
   // Converge: bootstrap handles create/update/replace as one idempotent
   // pass; confirm-gated database destroys run individually afterward.
+  const overrides = loaded.document.overrides;
+  const overrideEnvVars = overrides?.envVarsEncrypted
+    ? getSecretStore().decryptObject<Record<string, string>>(overrides.envVarsEncrypted)
+    : undefined;
   let bootstrap: { success: boolean; summary: Record<string, unknown> } | null = null;
   const ensureBootstrap = async () => {
     if (!bootstrap) {
-      bootstrap = await executeBootstrap(specToBootstrapParams(applyProject.name, envName, envSpec));
+      let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec);
+      if (overrides) {
+        bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
+          services: overrides.services,
+          envVars: overrideEnvVars,
+        });
+      }
+      bootstrap = await executeBootstrap(bootstrapParams);
     }
     return bootstrap;
   };

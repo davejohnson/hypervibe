@@ -752,6 +752,97 @@ describe('PlanService.plan', () => {
     expect(ci.metadata?.staleProviderSecrets).toBeUndefined();
   });
 
+  describe('plan options (serviceFilter / envVarOverrides)', () => {
+    function seedTwoServiceSpec() {
+      new SpecStore().replace(project, {
+        version: 1,
+        project: project.name,
+        environments: {
+          staging: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' }, worker: { workloadKind: 'worker' } },
+            domain: 'example.com',
+            envVars: { NODE_ENV: 'staging' },
+          },
+        },
+      });
+    }
+
+    it('rejects a filter naming services not in the spec', async () => {
+      seedTwoServiceSpec();
+      const result = await new PlanService().plan(project, 'staging', { serviceFilter: ['web', 'ghost'] });
+      expect(result).toHaveProperty('error');
+      expect((result as { error: string }).error).toContain('ghost');
+    });
+
+    it('filters to the subset, drops domain actions, never destroys, and records overrides', async () => {
+      seedTwoServiceSpec();
+      vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'no connection' });
+
+      const result = await new PlanService().plan(project, 'staging', {
+        serviceFilter: ['web'],
+        envVarOverrides: { DEBUG: '1' },
+      });
+      expect(result).not.toHaveProperty('error');
+      const plan = result as Exclude<typeof result, { error: string }>;
+
+      const kinds = plan.actions.map((action) => `${action.resource.kind}:${action.resource.name}`);
+      expect(kinds).toContain('service:web');
+      expect(kinds).not.toContain('service:worker');
+      expect(plan.actions.some((action) => action.resource.kind === 'domain')).toBe(false);
+      expect(plan.actions.some((action) => action.type === 'destroy')).toBe(false);
+      expect(plan.warnings.some((warning) => warning.includes('Partial plan'))).toBe(true);
+
+      const doc = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+      const overrides = doc.overrides as Record<string, unknown>;
+      expect(overrides.services).toEqual(['web']);
+      expect(overrides.envVarKeys).toEqual(['DEBUG']);
+      // Values are encrypted, never plaintext in the stored plan document.
+      expect(typeof overrides.envVarsEncrypted).toBe('string');
+      expect(JSON.stringify(doc)).not.toContain('"DEBUG":"1"');
+      expect(getSecretStore().decryptObject(overrides.envVarsEncrypted as string)).toEqual({ DEBUG: '1' });
+    });
+
+    it('reflects envVar overrides in the diff without touching the spec', async () => {
+      new EnvironmentRepository().create({
+        projectId: project.id,
+        name: 'staging',
+        platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 're-1', services: { web: { serviceId: 's-1' } } },
+      });
+      new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+      mockObservingAdapter({
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: true,
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: [{
+          name: 'web',
+          externalId: 's-1',
+          workloadKind: 'web',
+          customDomains: [],
+          config: { startCommand: 'npm start' },
+          envVarKeys: ['NODE_ENV'],
+          envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+          status: 'running',
+        }],
+        databases: [],
+        partial: false,
+        warnings: [],
+      });
+
+      const result = await new PlanService().plan(project, 'staging', { envVarOverrides: { DEBUG: '1' } });
+      const plan = result as Exclude<typeof result, { error: string }>;
+      const web = plan.actions.find((action) => action.id === 'service:web')!;
+      expect(web.type).toBe('update');
+      expect(web.diff?.some((entry) => entry.field === 'env:DEBUG')).toBe(true);
+
+      // Spec on disk is untouched by the override.
+      const spec = new SpecStore().get(project)!.spec;
+      expect(spec.environments.staging.envVars).toEqual({ NODE_ENV: 'staging' });
+    });
+  });
+
   describe('iOS planning', () => {
     const BUNDLE = 'com.example.app';
 

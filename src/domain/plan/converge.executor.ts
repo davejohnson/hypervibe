@@ -21,6 +21,16 @@ export interface PlanRunDocument {
   actions: PlanAction[];
   unmanaged?: Array<{ kind: string; name: string; detail?: string }>;
   warnings?: string[];
+  /**
+   * One-off deploy overrides frozen into the plan (hv_plan services=/envVars=,
+   * used by hv_deploy). envVar values are SecretStore-encrypted because
+   * hv_runs returns this document verbatim; only the keys are readable.
+   */
+  overrides?: {
+    services?: string[];
+    envVarKeys?: string[];
+    envVarsEncrypted?: string;
+  };
 }
 
 export interface ActionResult {
