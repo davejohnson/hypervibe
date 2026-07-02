@@ -101,7 +101,6 @@ describe('infra_apply multi-service convergence', () => {
       name: 'railway',
       capabilities: {
         supportedDatabases: ['postgres'],
-        supportedCaches: [],
         supportsPooling: false,
         supportsReadReplicas: false,
         supportsPointInTimeRecovery: false,
@@ -319,7 +318,6 @@ describe('infra_apply multi-service convergence', () => {
         name: 'railway',
         capabilities: {
           supportedDatabases: ['postgres'],
-          supportedCaches: [],
           supportsPooling: false,
           supportsReadReplicas: false,
           supportsPointInTimeRecovery: false,
@@ -388,7 +386,6 @@ describe('infra_apply multi-service convergence', () => {
       name: 'railway',
       capabilities: {
         supportedDatabases: ['postgres'],
-        supportedCaches: [],
         supportsPooling: false,
         supportsReadReplicas: false,
         supportsPointInTimeRecovery: false,
@@ -549,7 +546,6 @@ describe('infra_apply multi-service convergence', () => {
       name: 'railway',
       capabilities: {
         supportedDatabases: ['postgres'],
-        supportedCaches: [],
         supportsPooling: false,
         supportsReadReplicas: false,
         supportsPointInTimeRecovery: false,
@@ -809,7 +805,6 @@ describe('infra_apply multi-service convergence', () => {
       name: 'railway',
       capabilities: {
         supportedDatabases: ['postgres'],
-        supportedCaches: [],
         supportsPooling: false,
         supportsReadReplicas: false,
         supportsPointInTimeRecovery: false,
@@ -979,7 +974,6 @@ describe('infra_apply multi-service convergence', () => {
       name: 'railway',
       capabilities: {
         supportedDatabases: ['postgres'],
-        supportedCaches: [],
         supportsPooling: false,
         supportsReadReplicas: false,
         supportsPointInTimeRecovery: false,
@@ -1177,7 +1171,6 @@ describe('infra_apply multi-service convergence', () => {
       name: 'railway',
       capabilities: {
         supportedDatabases: ['postgres'],
-        supportedCaches: [],
         supportsPooling: false,
         supportsReadReplicas: false,
         supportsPointInTimeRecovery: false,
@@ -1351,7 +1344,6 @@ describe('infra_apply multi-service convergence', () => {
       name: 'railway',
       capabilities: {
         supportedDatabases: ['postgres'],
-        supportedCaches: [],
         supportsPooling: false,
         supportsReadReplicas: false,
         supportsPointInTimeRecovery: false,
@@ -1484,7 +1476,6 @@ describe('infra_apply multi-service convergence', () => {
       name: 'cloudsql',
       capabilities: {
         supportedDatabases: ['postgres'],
-        supportedCaches: [],
         supportsPooling: false,
         supportsReadReplicas: false,
         supportsPointInTimeRecovery: true,

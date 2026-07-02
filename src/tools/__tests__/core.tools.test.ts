@@ -1406,7 +1406,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       adapter: {
         name: 'supabase',
         capabilities: {
-          supportedDatabases: ['postgres'], supportedCaches: [],
+          supportedDatabases: ['postgres'],
           supportsPooling: true, supportsReadReplicas: false,
           supportsPointInTimeRecovery: false, serverlessOptimized: true,
         },

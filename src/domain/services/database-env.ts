@@ -11,7 +11,6 @@ function portBinding(bindings: Record<string, unknown>, fallback: number): strin
 }
 
 function socketDatabaseUrl(params: {
-  component: Component;
   username?: string;
   password?: string;
   database?: string;
@@ -21,8 +20,7 @@ function socketDatabaseUrl(params: {
     return undefined;
   }
 
-  const scheme = params.component.type === 'mysql' ? 'mysql' : 'postgresql';
-  return `${scheme}://${encodeURIComponent(params.username)}:${encodeURIComponent(params.password)}@/${encodeURIComponent(params.database)}?host=${encodeURIComponent(params.socketHost)}`;
+  return `postgresql://${encodeURIComponent(params.username)}:${encodeURIComponent(params.password)}@/${encodeURIComponent(params.database)}?host=${encodeURIComponent(params.socketHost)}`;
 }
 
 export function buildDatabaseEnvVarsFromComponent(component: Component): { envVars: Record<string, string>; connectionUrl?: string } {
@@ -43,13 +41,13 @@ export function buildDatabaseEnvVarsFromComponent(component: Component): { envVa
   const username = stringBinding(bindings, 'username');
   const password = stringBinding(bindings, 'password');
   const database = stringBinding(bindings, 'database');
-  const port = portBinding(bindings, component.type === 'mysql' ? 3306 : 5432);
+  const port = portBinding(bindings, 5432);
 
   if (provider === 'cloudsql') {
     const connectionName = stringBinding(bindings, 'connectionName');
     const socketHost = connectionName ? `/cloudsql/${connectionName}` : stringBinding(bindings, 'host');
     const socketUrl = socketHost
-      ? socketDatabaseUrl({ component, username, password, database, socketHost })
+      ? socketDatabaseUrl({ username, password, database, socketHost })
       : undefined;
     const url = socketUrl ?? connectionUrl;
 

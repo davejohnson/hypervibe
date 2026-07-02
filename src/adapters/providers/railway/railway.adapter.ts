@@ -56,7 +56,7 @@ export class RailwayAdapter implements IProviderAdapter {
 
   readonly capabilities: ProviderCapabilities = {
     supportedBuilders: ['nixpacks', 'dockerfile'],
-    supportedComponents: ['postgres', 'redis', 'mysql', 'mongodb'],
+    supportedComponents: ['postgres'],
     supportsAutoWiring: true,
     supportsHealthChecks: true,
     supportsCronSchedule: true,
@@ -481,9 +481,6 @@ export class RailwayAdapter implements IProviderAdapter {
 
     const imageMap: Partial<Record<ComponentType, string>> = {
       postgres: 'postgres:16',
-      redis: 'redis:7',
-      mysql: 'mysql:8',
-      mongodb: 'mongo:7',
     };
     const image = imageMap[type];
     if (!image) return null;
@@ -731,60 +728,17 @@ export class RailwayAdapter implements IProviderAdapter {
       };
     }
 
-    if (type === 'mysql') {
-      const rootPassword = randomBytes(18).toString('base64url');
-      const userPassword = randomBytes(18).toString('base64url');
-      const databaseName = 'app';
-      const username = 'app';
-      const connectionUrl = `mysql://${username}:${userPassword}@${serviceHost}:3306/${databaseName}`;
-      return {
-        MYSQL_ROOT_PASSWORD: rootPassword,
-        MYSQL_DATABASE: databaseName,
-        MYSQL_USER: username,
-        MYSQL_PASSWORD: userPassword,
-        DATABASE_URL: connectionUrl,
-        MYSQL_URL: connectionUrl,
-        MYSQLHOST: serviceHost,
-        MYSQLPORT: '3306',
-        MYSQLUSER: username,
-        MYSQLPASSWORD: userPassword,
-        MYSQLDATABASE: databaseName,
-      };
-    }
-
-    if (type === 'mongodb') {
-      const username = 'admin';
-      const password = randomBytes(18).toString('base64url');
-      const authDb = 'admin';
-      const connectionUrl = `mongodb://${username}:${password}@${serviceHost}:27017/?authSource=${authDb}`;
-      return {
-        MONGO_INITDB_ROOT_USERNAME: username,
-        MONGO_INITDB_ROOT_PASSWORD: password,
-        DATABASE_URL: connectionUrl,
-        MONGO_URL: connectionUrl,
-        MONGOHOST: serviceHost,
-        MONGOPORT: '27017',
-        MONGOUSER: username,
-        MONGOPASSWORD: password,
-      };
-    }
-
     return null;
   }
 
   /** Env var that must exist for the datastore image to initialize; null = boots without vars. */
   private datastoreRequiredVar(type: ComponentType): string | null {
     if (type === 'postgres') return 'POSTGRES_PASSWORD';
-    if (type === 'mysql') return 'MYSQL_ROOT_PASSWORD';
-    if (type === 'mongodb') return 'MONGO_INITDB_ROOT_PASSWORD';
     return null;
   }
 
   private datastoreVolumeMountPath(type: ComponentType): string | null {
     if (type === 'postgres') return '/var/lib/postgresql/data';
-    if (type === 'mysql') return '/var/lib/mysql';
-    if (type === 'mongodb') return '/data/db';
-    if (type === 'redis') return '/data';
     return null;
   }
 
@@ -2374,8 +2328,8 @@ export class RailwayAdapter implements IProviderAdapter {
   }
 
   /**
-   * Detect Railway plugins (Postgres, Redis, etc.) and return variable references
-   * that can be used to auto-wire services to databases/caches
+   * Detect Railway Postgres plugins and return variable references
+   * that can be used to auto-wire services to databases
    */
   async getPluginVariableReferences(projectId: string): Promise<Record<string, string>> {
     if (!this.client) {
@@ -2420,26 +2374,6 @@ export class RailwayAdapter implements IProviderAdapter {
           vars['PGUSER'] = ref(name, 'PGUSER');
           vars['PGPASSWORD'] = ref(name, 'PGPASSWORD');
           vars['PGDATABASE'] = ref(name, 'PGDATABASE');
-        } else if (pluginName.includes('redis')) {
-          vars['REDIS_URL'] = ref(name, 'REDIS_URL');
-          vars['REDIS_HOST'] = ref(name, 'REDISHOST');
-          vars['REDIS_PORT'] = ref(name, 'REDISPORT');
-          vars['REDIS_PASSWORD'] = ref(name, 'REDISPASSWORD');
-        } else if (pluginName.includes('mysql')) {
-          vars['DATABASE_URL'] = ref(name, 'DATABASE_URL');
-          vars['MYSQL_URL'] = ref(name, 'MYSQL_URL');
-          vars['MYSQLHOST'] = ref(name, 'MYSQLHOST');
-          vars['MYSQLPORT'] = ref(name, 'MYSQLPORT');
-          vars['MYSQLUSER'] = ref(name, 'MYSQLUSER');
-          vars['MYSQLPASSWORD'] = ref(name, 'MYSQLPASSWORD');
-          vars['MYSQLDATABASE'] = ref(name, 'MYSQLDATABASE');
-        } else if (pluginName.includes('mongo')) {
-          vars['DATABASE_URL'] = ref(name, 'DATABASE_URL');
-          vars['MONGO_URL'] = ref(name, 'MONGO_URL');
-          vars['MONGOHOST'] = ref(name, 'MONGOHOST');
-          vars['MONGOPORT'] = ref(name, 'MONGOPORT');
-          vars['MONGOUSER'] = ref(name, 'MONGOUSER');
-          vars['MONGOPASSWORD'] = ref(name, 'MONGOPASSWORD');
         }
       }
 
@@ -2480,9 +2414,6 @@ export class RailwayAdapter implements IProviderAdapter {
       const name = e.node.name.toLowerCase();
       let type = 'unknown';
       if (name.includes('postgres') || name === 'postgresql') type = 'postgres';
-      else if (name.includes('redis')) type = 'redis';
-      else if (name.includes('mysql')) type = 'mysql';
-      else if (name.includes('mongo')) type = 'mongodb';
 
       return { id: e.node.id, name: e.node.name, type };
     });
@@ -2843,9 +2774,6 @@ export class RailwayAdapter implements IProviderAdapter {
   private classifyDatastoreEngine(name: string): string | null {
     const normalized = name.toLowerCase();
     if (normalized.includes('postgres')) return 'postgres';
-    if (normalized.includes('redis')) return 'redis';
-    if (normalized.includes('mysql')) return 'mysql';
-    if (normalized.includes('mongo')) return 'mongodb';
     return null;
   }
 

@@ -15,7 +15,7 @@ import { generateVisualizationHtml } from './visualize.template.js';
 import { findRepoRoot, readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
 import { readRepoBindingsFile } from '../domain/spec/repo-bindings-file.js';
 
-const componentTypeField = z.enum(['postgres', 'redis', 'mysql', 'mongodb']);
+const componentTypeField = z.enum(['postgres']);
 
 function readPackageVersion(): string {
   try {
@@ -199,7 +199,7 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_local_bootstrap',
-    'Local development setup. Default action="bootstrap" generates compose.yaml and .env.local for the project (registering the requested components — postgres, redis, mysql, mongodb — on the local environment). action="components" lists registered components per environment without writing files.',
+    'Local development setup. Default action="bootstrap" generates compose.yaml and .env.local for the project (registering the requested components — postgres — on the local environment). action="components" lists registered components per environment without writing files.',
     {
       action: z.enum(['bootstrap', 'components']).optional().describe('Operation (default: bootstrap)'),
       project: projectField,

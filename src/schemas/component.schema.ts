@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const componentTypeSchema = z.enum(['postgres', 'redis', 'mysql', 'mongodb']).or(z.string().min(1));
+export const componentTypeSchema = z.enum(['postgres']).or(z.string().min(1));
 
 export const componentBindingsSchema = z.object({
   connectionString: z.string().optional(),

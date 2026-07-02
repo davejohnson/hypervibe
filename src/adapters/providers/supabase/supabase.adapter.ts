@@ -43,7 +43,6 @@ export class SupabaseAdapter implements IDatabaseAdapter {
 
   readonly capabilities: DatabaseCapabilities = {
     supportedDatabases: ['postgres'],
-    supportedCaches: [],
     supportsPooling: true,
     supportsReadReplicas: false,
     supportsPointInTimeRecovery: true,

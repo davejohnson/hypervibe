@@ -1,4 +1,4 @@
-export type ComponentType = 'postgres' | 'redis' | 'mysql' | 'mongodb' | string;
+export type ComponentType = 'postgres' | string;
 
 export interface ComponentBindings {
   connectionString?: string;

@@ -18,7 +18,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 ## Features
 
 **Infrastructure Providers**
-- **Railway** - Deploy apps, databases, Redis, cron jobs
+- **Railway** - Deploy apps, databases, cron jobs
 - **Cloudflare** - DNS management, domain configuration
 - **Stripe** - Payment integration, webhooks, products
 - **SendGrid** - Email authentication, domain verification
@@ -31,7 +31,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 
 **Developer Experience**
 - **Natural language** - No YAML, no clicking through dashboards
-- **Auto-wiring** - DATABASE_URL, REDIS_URL connected automatically
+- **Auto-wiring** - DATABASE_URL connected automatically
 - **Environment management** - Staging, production, PR previews
 - **Migration support** - Run Prisma, Drizzle, TypeORM migrations
 - **Local development** - Generate Docker Compose for local parity
@@ -357,6 +357,8 @@ Provider credentials remain local and encrypted. Teammates may still need to run
 `workloadKind: "job"` was removed from the service spec — it never had run-to-completion deploy semantics. Specs using it fail validation; choose `worker` (always-on, internal-only on Cloud Run with a minimum of one instance — note Cloud Run workers must still listen on `PORT`) or `cron` (scheduled). Railway's observe cannot distinguish `web` from `worker`, so kind drift is not detected there.
 
 Hosting support for Vercel, Render, Heroku, DigitalOcean, and AWS App Runner (plus AWS RDS databases) was removed. Specs that reference those providers no longer validate; move the environment to `railway` or `cloudrun` (databases: `supabase`, `cloudsql`, or `railway`) and re-run `hv_plan`. Stored connections for removed providers can still be deleted with `hv_connect action="remove"`.
+
+The `redis`, `mysql`, and `mongodb` component types were removed — `postgres` is the only provisionable datastore. Existing live Redis/MySQL/MongoDB instances are no longer managed and observe as `unknown` engines.
 
 ## Adding New Providers
 

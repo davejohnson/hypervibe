@@ -49,7 +49,7 @@ const migrations: Migration[] = [
         UNIQUE(project_id, name)
       );
 
-      -- Components table (postgres, redis, etc.)
+      -- Components table (postgres, etc.)
       CREATE TABLE IF NOT EXISTS components (
         id TEXT PRIMARY KEY,
         environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,

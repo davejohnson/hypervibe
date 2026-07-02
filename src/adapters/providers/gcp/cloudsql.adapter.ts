@@ -55,8 +55,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
   readonly name = 'cloudsql';
 
   readonly capabilities: DatabaseCapabilities = {
-    supportedDatabases: ['postgres', 'mysql'],
-    supportedCaches: [],
+    supportedDatabases: ['postgres'],
     supportsPooling: false, // Cloud SQL Auth Proxy recommended
     supportsReadReplicas: true,
     supportsPointInTimeRecovery: true,
@@ -114,7 +113,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
       throw new Error('Not connected. Call connect() first.');
     }
 
-    if (type !== 'postgres' && type !== 'mysql') {
+    if (type !== 'postgres') {
       const emptyComponent: Component = {
         id: '',
         environmentId: environment.id,
@@ -128,7 +127,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
         component: emptyComponent,
         receipt: {
           success: false,
-          message: `Cloud SQL supports postgres and mysql. Requested type: ${type}`,
+          message: `Cloud SQL supports postgres. Requested type: ${type}`,
         },
       };
     }
@@ -144,11 +143,10 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
       // Map type to Cloud SQL database version
       const versionMap: Record<string, string> = {
         postgres: 'POSTGRES_15',
-        mysql: 'MYSQL_8_0',
       };
 
       const databaseVersion = versionMap[type];
-      const defaultPort = type === 'postgres' ? 5432 : 3306;
+      const defaultPort = 5432;
 
       // Create Cloud SQL instance
       const response = await fetch(
@@ -198,16 +196,14 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
       // Get the instance details (may not have IP yet)
       // For now, construct connection string with placeholder
       const host = `${instanceName}.${region}.${projectId}`;
-      const rootUser = type === 'postgres' ? 'postgres' : 'root';
+      const rootUser = 'postgres';
       await this.ensureDatabaseByName({
         token,
         instanceName,
         databaseName: dbName,
       });
 
-      const connectionUrl = type === 'postgres'
-        ? `postgresql://${encodeURIComponent(rootUser)}:${encodeURIComponent(rootPassword)}@${host}:${defaultPort}/${encodeURIComponent(dbName)}`
-        : `mysql://${encodeURIComponent(rootUser)}:${encodeURIComponent(rootPassword)}@${host}:${defaultPort}/${encodeURIComponent(dbName)}`;
+      const connectionUrl = `postgresql://${encodeURIComponent(rootUser)}:${encodeURIComponent(rootPassword)}@${host}:${defaultPort}/${encodeURIComponent(dbName)}`;
 
       // Cloud SQL connection name format for Cloud SQL Auth Proxy
       const connectionName = `${projectId}:${region}:${instanceName}`;
@@ -434,7 +430,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
     }
 
     // provision() names instances `${environment.name}-${type}`.
-    for (const type of ['postgres', 'mysql'] as const) {
+    for (const type of ['postgres'] as const) {
       const instanceName = this.sanitizeName(`${environment.name}-${type}`);
       const instance = await this.getInstance(instanceName);
       if (!instance) {

@@ -56,50 +56,6 @@ const COMPONENT_CONFIGS: Record<
       retries: 5,
     },
   },
-  redis: {
-    image: 'redis:7-alpine',
-    port: 6379,
-    envPrefix: 'REDIS',
-    defaultEnv: {},
-    healthcheck: {
-      test: ['CMD', 'redis-cli', 'ping'],
-      interval: '5s',
-      timeout: '5s',
-      retries: 5,
-    },
-  },
-  mysql: {
-    image: 'mysql:8',
-    port: 3306,
-    envPrefix: 'MYSQL',
-    defaultEnv: {
-      MYSQL_ROOT_PASSWORD: 'root',
-      MYSQL_DATABASE: 'app',
-      MYSQL_USER: 'app',
-      MYSQL_PASSWORD: 'app',
-    },
-    healthcheck: {
-      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost'],
-      interval: '5s',
-      timeout: '5s',
-      retries: 5,
-    },
-  },
-  mongodb: {
-    image: 'mongo:7',
-    port: 27017,
-    envPrefix: 'MONGO',
-    defaultEnv: {
-      MONGO_INITDB_ROOT_USERNAME: 'mongo',
-      MONGO_INITDB_ROOT_PASSWORD: 'mongo',
-    },
-    healthcheck: {
-      test: ['CMD', 'mongosh', '--eval', "db.adminCommand('ping')"],
-      interval: '5s',
-      timeout: '5s',
-      retries: 5,
-    },
-  },
 };
 
 export class ComposeGenerator {
@@ -154,26 +110,6 @@ export class ComposeGenerator {
           lines.push(`POSTGRES_PASSWORD=postgres`);
           lines.push(`POSTGRES_DB=app`);
           break;
-        case 'redis':
-          lines.push(`REDIS_URL=redis://localhost:6379`);
-          lines.push(`REDIS_HOST=localhost`);
-          lines.push(`REDIS_PORT=6379`);
-          break;
-        case 'mysql':
-          lines.push(`MYSQL_URL=mysql://app:app@localhost:3306/app`);
-          lines.push(`MYSQL_HOST=localhost`);
-          lines.push(`MYSQL_PORT=3306`);
-          lines.push(`MYSQL_USER=app`);
-          lines.push(`MYSQL_PASSWORD=app`);
-          lines.push(`MYSQL_DATABASE=app`);
-          break;
-        case 'mongodb':
-          lines.push(`MONGODB_URL=mongodb://mongo:mongo@localhost:27017`);
-          lines.push(`MONGO_HOST=localhost`);
-          lines.push(`MONGO_PORT=27017`);
-          lines.push(`MONGO_USER=mongo`);
-          lines.push(`MONGO_PASSWORD=mongo`);
-          break;
       }
 
       lines.push('');
@@ -195,29 +131,6 @@ export class ComposeGenerator {
           username: 'postgres',
           password: 'postgres',
           database: 'app',
-        };
-      case 'redis':
-        return {
-          connectionString: 'redis://localhost:6379',
-          host: 'localhost',
-          port: 6379,
-        };
-      case 'mysql':
-        return {
-          connectionString: 'mysql://app:app@localhost:3306/app',
-          host: 'localhost',
-          port: 3306,
-          username: 'app',
-          password: 'app',
-          database: 'app',
-        };
-      case 'mongodb':
-        return {
-          connectionString: 'mongodb://mongo:mongo@localhost:27017',
-          host: 'localhost',
-          port: 27017,
-          username: 'mongo',
-          password: 'mongo',
         };
       default:
         return {};

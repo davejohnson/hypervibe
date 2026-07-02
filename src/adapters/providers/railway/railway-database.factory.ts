@@ -43,12 +43,7 @@ export function createRailwayDatabaseAdapter(params: {
         DIRECT_URL: ref('DATABASE_PRIVATE_URL'),
       };
     }
-    if (type === 'redis') {
-      return {
-        REDIS_URL: ref('REDIS_URL'),
-      };
-    }
-    // Railway plugin provisioning currently supports postgres/redis in DB flows.
+    // Railway plugin provisioning currently supports postgres in DB flows.
     return {};
   };
 
@@ -59,7 +54,6 @@ export function createRailwayDatabaseAdapter(params: {
     name: 'railway',
     capabilities: {
       supportedDatabases: ['postgres'],
-      supportedCaches: ['redis'],
       supportsPooling: false,
       supportsReadReplicas: false,
       supportsPointInTimeRecovery: false,
@@ -75,7 +69,7 @@ export function createRailwayDatabaseAdapter(params: {
       return { success: true };
     },
     async provision(type, environment, _options): Promise<ProvisionResult> {
-      if (type !== 'postgres' && type !== 'redis') {
+      if (type !== 'postgres') {
         return {
           component: {
             id: '',
@@ -88,7 +82,7 @@ export function createRailwayDatabaseAdapter(params: {
           },
           receipt: {
             success: false,
-            message: `Railway database adapter supports only postgres/redis (requested: ${type})`,
+            message: `Railway database adapter supports only postgres (requested: ${type})`,
           },
         };
       }
@@ -208,7 +202,7 @@ export function createRailwayDatabaseAdapter(params: {
       }
 
       const envVars = makePluginVarRefs(pluginName, type);
-      const connectionUrl = envVars.DATABASE_URL ?? envVars.REDIS_URL;
+      const connectionUrl = envVars.DATABASE_URL;
 
       return {
         component: {

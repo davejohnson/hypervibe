@@ -7,7 +7,7 @@ const { Client } = pg;
 // Credentials schema for database connections
 export const DatabaseCredentialsSchema = z.object({
   connectionUrl: z.string().min(1, 'Connection URL is required'),
-  type: z.enum(['postgres', 'mysql']).optional().describe('Database type (auto-detected from URL if not specified)'),
+  type: z.enum(['postgres']).optional().describe('Database type (auto-detected from URL if not specified)'),
 });
 
 export type DatabaseCredentials = z.infer<typeof DatabaseCredentialsSchema>;
@@ -108,7 +108,7 @@ export class DatabaseAdapter {
   /**
    * Detect database type from connection URL
    */
-  getDbType(): 'postgres' | 'mysql' | 'unknown' {
+  getDbType(): 'postgres' | 'unknown' {
     if (!this.credentials) return 'unknown';
 
     if (this.credentials.type) {
@@ -118,9 +118,6 @@ export class DatabaseAdapter {
     const url = this.credentials.connectionUrl.toLowerCase();
     if (url.startsWith('postgres://') || url.startsWith('postgresql://')) {
       return 'postgres';
-    }
-    if (url.startsWith('mysql://')) {
-      return 'mysql';
     }
     return 'unknown';
   }
@@ -224,10 +221,8 @@ export class DatabaseAdapter {
     switch (dbType) {
       case 'postgres':
         return this.queryPostgres(sql, params);
-      case 'mysql':
-        return { success: false, error: 'MySQL support coming soon. Use postgres:// connections for now.' };
       default:
-        return { success: false, error: `Unknown database type. URL should start with postgres:// or mysql://` };
+        return { success: false, error: `Unknown database type. URL should start with postgres://` };
     }
   }
 

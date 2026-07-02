@@ -218,9 +218,6 @@ DATA.environments.forEach((env, i) => {
     let geo;
     switch (comp.type) {
       case 'postgres': geo = new THREE.CylinderGeometry(0.5, 0.5, 1, 16); break;
-      case 'redis': geo = new THREE.OctahedronGeometry(0.6); break;
-      case 'mysql': geo = new THREE.CylinderGeometry(0.4, 0.6, 1, 8); break;
-      case 'mongodb': geo = new THREE.DodecahedronGeometry(0.5); break;
       default: geo = new THREE.SphereGeometry(0.5, 16, 16);
     }
     const mat = new THREE.MeshPhongMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 0.5, transparent: true, opacity: 0.7 });

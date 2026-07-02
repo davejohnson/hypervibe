@@ -215,16 +215,16 @@ describe('hv_local_bootstrap', () => {
     const boot = await t.call('hv_local_bootstrap', {
       project: 'devx-local-app',
       outputDir: tempDir,
-      components: ['postgres', 'redis'],
+      components: ['postgres'],
     });
     expect(boot.ok).toBe(true);
-    expect(boot.data.components).toEqual(['postgres', 'redis']);
+    expect(boot.data.components).toEqual(['postgres']);
     expect(boot.data.files.compose).toBe(path.join(tempDir, 'compose.yaml'));
 
     const list = await t.call('hv_local_bootstrap', { action: 'components', project: 'devx-local-app', env: 'local' });
     expect(list.ok).toBe(true);
     expect(list.data.environments).toHaveLength(1);
-    expect(list.data.environments[0].components.map((c: { type: string }) => c.type).sort()).toEqual(['postgres', 'redis']);
+    expect(list.data.environments[0].components.map((c: { type: string }) => c.type).sort()).toEqual(['postgres']);
     await t.close();
   });
 });

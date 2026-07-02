@@ -127,7 +127,7 @@ describe('RailwayAdapter observe', () => {
       },
       {
         provider: 'railway',
-        engine: 'redis',
+        engine: 'unknown',
         externalId: 'plugin-redis',
         name: 'Redis',
         status: 'unknown',

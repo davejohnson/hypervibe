@@ -5,17 +5,12 @@ import type { Receipt, VerifyResult } from './provider.port.js';
 /**
  * Supported database types that can be provisioned
  */
-export type DatabaseType = 'postgres' | 'mysql' | 'mongodb';
-
-/**
- * Supported cache types that can be provisioned
- */
-export type CacheType = 'redis';
+export type DatabaseType = 'postgres';
 
 /**
  * All provisionable component types
  */
-export type ProvisionableType = DatabaseType | CacheType;
+export type ProvisionableType = DatabaseType;
 
 /**
  * Capabilities that a database provider supports.
@@ -23,9 +18,6 @@ export type ProvisionableType = DatabaseType | CacheType;
 export interface DatabaseCapabilities {
   /** Database types the provider supports */
   supportedDatabases: DatabaseType[];
-
-  /** Cache types the provider supports */
-  supportedCaches: CacheType[];
 
   /** Whether the provider supports connection pooling (important for serverless) */
   supportsPooling: boolean;

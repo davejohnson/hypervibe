@@ -194,7 +194,7 @@ describe('CloudSqlAdapter', () => {
       const url = String(input);
       const method = init?.method ?? 'GET';
 
-      if ((url.endsWith('/instances/production-postgres') || url.endsWith('/instances/production-mysql')) && method === 'GET') {
+      if (url.endsWith('/instances/production-postgres') && method === 'GET') {
         return new Response('not found', { status: 404 });
       }
 

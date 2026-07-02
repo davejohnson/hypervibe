@@ -109,7 +109,6 @@ describe('infra_apply local rollback coverage', () => {
       name: 'railway',
       capabilities: {
         supportedDatabases: ['postgres'],
-        supportedCaches: [],
         supportsPooling: false,
         supportsReadReplicas: false,
         supportsPointInTimeRecovery: false,

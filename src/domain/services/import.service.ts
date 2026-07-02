@@ -71,9 +71,6 @@ export type ImportResult =
 export function mapPluginToComponentType(pluginName: string): ComponentType {
   const normalized = pluginName.toLowerCase();
   if (normalized.includes('postgres')) return 'postgres';
-  if (normalized.includes('redis')) return 'redis';
-  if (normalized.includes('mysql')) return 'mysql';
-  if (normalized.includes('mongo')) return 'mongodb';
   return pluginName;
 }
 
