@@ -7,6 +7,8 @@
  * humans so the MCP transcript is readable.
  */
 
+import { NotSupportedError } from '../domain/errors/not-supported.error.js';
+
 export type ErrorCode =
   | 'NOT_FOUND'
   | 'AMBIGUOUS_PROJECT'
@@ -521,6 +523,9 @@ export function wrapHandler<Args>(
     } catch (error) {
       if (error instanceof HvError) {
         return toolError(error.code, error.message, error.extras);
+      }
+      if (error instanceof NotSupportedError) {
+        return toolError('UNSUPPORTED', error.message, error.hint ? { hint: error.hint } : undefined);
       }
       return toolError('INTERNAL', describeError(error));
     }

@@ -1,74 +1,44 @@
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
-import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { adapterFactory } from './adapter.factory.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { DeployOrchestrator } from './deploy.orchestrator.js';
 import { CloudflareAdapter, type CloudflareCredentials } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
-import { SendGridAdapter, assessSendGridScopes, type SendGridCredentials } from '../../adapters/providers/sendgrid/sendgrid.adapter.js';
 import type { GitHubCredentials } from '../../adapters/providers/github/github.adapter.js';
 import { syncProjectIntent } from './intent.service.js';
 import { InfraTransaction } from './infra.transaction.js';
 import { getCloudPrepareProfile, isCloudPrepared } from './cloud-prepare.js';
-import {
-  snapshotComponentRecord,
-  snapshotEnvironmentBindings,
-} from './local-state.transaction.js';
+import { snapshotEnvironmentBindings } from './local-state.transaction.js';
 import { resolveProject } from './resolve-project.js';
 import { normalizeGitRemoteForBuild } from '../../lib/git-remote.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
 import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from './railway-help.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
-import {
-  callCustomDomainAttach,
-  customDomainAttachBindingMissingMessage,
-  customDomainAttachUnsupportedMessage,
-  providerRequiresCustomDomainAttach,
-  supportsCustomDomainAttach,
-  type DomainAttachCapableAdapter,
-} from './domain-attach-policy.js';
-import { normalizeProviderDnsRecord, type NormalizedDnsRecord } from './domain-dns-records.js';
-import type { Component } from '../entities/component.entity.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
-import type { HostingBindings, IHostingAdapter } from '../ports/hosting.port.js';
+import { parseHostingBindings, type IHostingAdapter } from '../ports/hosting.port.js';
 import {
   DB_PROVIDERS,
   type DesiredState,
-  resolveExistingDatabaseState,
   workloadKindForServiceName,
 } from './spec.service.js';
 import { resolveGitDeploySource } from './deploy-source.js';
+import { provisionBootstrapDatabase, type DbProvision } from './bootstrap-database.js';
+import { setupBootstrapEmail } from './bootstrap-email.js';
+import { attachBootstrapDomain } from './bootstrap-domain.js';
 
 const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
-const componentRepo = new ComponentRepository();
 const connectionRepo = new ConnectionRepository();
 
 type SourceConfigurableHostingAdapter = {
   connectServiceToRepo?: (params: { serviceId: string; repo: string; branch: string }) => Promise<Receipt>;
   isGitHubRepoAccessible?: (fullRepoName: string) => Promise<boolean | null>;
 };
-
-type DatabaseEnsuringAdapter = {
-  ensureDatabase?: (component: Component, databaseName?: string) => Promise<Receipt>;
-};
-
-async function ensureDatabaseIfSupported(
-  adapter: unknown,
-  component: Component,
-  databaseName?: string
-): Promise<Receipt | undefined> {
-  const databaseAdapter = adapter as DatabaseEnsuringAdapter;
-  if (typeof databaseAdapter.ensureDatabase !== 'function') {
-    return undefined;
-  }
-  return databaseAdapter.ensureDatabase(component, databaseName);
-}
 
 function defaultPublicForWorkload(workloadKind: WorkloadKind): boolean {
   return workloadKind === 'web';
@@ -88,7 +58,7 @@ function recordConnectedDeploySource(params: {
     return;
   }
 
-  const bindings = latestEnvironment.platformBindings as Partial<HostingBindings>;
+  const bindings = parseHostingBindings(latestEnvironment);
   const services = { ...(bindings.services ?? {}) };
   services[params.serviceName] = {
     ...(services[params.serviceName] ?? {}),
@@ -274,188 +244,22 @@ export async function executeBootstrap(params: {
   }
 
   let dbEnsureReceipt: Receipt | undefined;
-  let dbProvision: {
-    component: Component;
-    receipt: { success: boolean; message: string; error?: string; data?: Record<string, unknown> };
-    connectionUrl?: string;
-    envVars?: Record<string, string>;
-  } | undefined;
+  let dbProvision: DbProvision | undefined;
 
   if (params.databaseProvider) {
-  const databaseProvider = params.databaseProvider;
-  const existingDatabase = resolveExistingDatabaseState(environment.id, databaseProvider);
-
-  if (existingDatabase.status === 'match' && existingDatabase.component) {
-    if (params.databaseProvider === 'cloudsql') {
-      const dbAdapterResult = await adapterFactory.getDatabaseAdapter(params.databaseProvider, project);
-      if (!dbAdapterResult.success || !dbAdapterResult.adapter) {
-        const cleanup = await tx.rollback();
-        return {
-          success: false,
-          summary: {
-            error: dbAdapterResult.error || 'Database adapter unavailable',
-            rollback: cleanup,
-            transaction: { created: tx.listResources() },
-          },
-        };
-      }
-      dbEnsureReceipt = await ensureDatabaseIfSupported(dbAdapterResult.adapter, existingDatabase.component);
-      if (dbEnsureReceipt && !dbEnsureReceipt.success) {
-        const cleanup = await tx.rollback();
-        return {
-          success: false,
-          summary: {
-            error: dbEnsureReceipt.error || dbEnsureReceipt.message,
-            rollback: cleanup,
-            transaction: { created: tx.listResources() },
-            debug: {
-              phase: 'db_ensure',
-              provider: params.databaseProvider,
-              receiptData: dbEnsureReceipt.data ?? null,
-            },
-          },
-        };
-      }
-    }
-    dbProvision = {
-      component: existingDatabase.component,
-      receipt: {
-        success: true,
-        message: `Reusing existing postgres on ${params.databaseProvider}`,
-        data: {
-          phase: 'reuseExisting',
-          provider: params.databaseProvider,
-          componentId: existingDatabase.component.externalId ?? existingDatabase.component.id,
-        },
-      },
-      connectionUrl: existingDatabase.connectionUrl,
-      envVars: existingDatabase.envVars,
-    };
-  } else {
-    const dbAdapterResult = await adapterFactory.getDatabaseAdapter(params.databaseProvider, project);
-    if (!dbAdapterResult.success || !dbAdapterResult.adapter) {
-      const cleanup = await tx.rollback();
-      return {
-        success: false,
-        summary: {
-          error: dbAdapterResult.error || 'Database adapter unavailable',
-          rollback: cleanup,
-          transaction: { created: tx.listResources() },
-        },
-      };
-    };
-
-    snapshotEnvironmentBindings({
+    const dbResult = await provisionBootstrapDatabase({
+      projectName: params.projectName,
+      databaseProvider: params.databaseProvider,
+      project,
+      environment,
       tx,
-      envRepo,
-      environmentId: environment.id,
-      label: 'environment_bindings_db_provision',
     });
-    dbProvision = await dbAdapterResult.adapter.provision('postgres', environment, {
-      databaseName: 'app',
-    });
-    if (!dbProvision.receipt.success) {
-      const cleanup = await tx.rollback();
-      return {
-        success: false,
-        summary: {
-          error: dbProvision.receipt.error || dbProvision.receipt.message,
-          rollback: cleanup,
-          transaction: { created: tx.listResources() },
-          debug: {
-            phase: 'db_provision',
-            provider: params.databaseProvider,
-            receiptData: dbProvision.receipt.data ?? null,
-          },
-        },
-      };
+    if (!dbResult.ok) {
+      return dbResult.failure;
     }
-    const dbReceiptData = (dbProvision.receipt.data ?? {}) as Record<string, unknown>;
-    const provisionProjectId =
-      (typeof dbReceiptData.projectId === 'string' ? dbReceiptData.projectId : null) ??
-      (typeof dbReceiptData.providerProjectId === 'string' ? dbReceiptData.providerProjectId : null);
-    const provisionCreatedProject = dbReceiptData.ensureProjectCreated === true;
-    if (params.databaseProvider === 'railway' && provisionCreatedProject && provisionProjectId) {
-      tx.addStep({
-        id: `provider-project:${provisionProjectId}`,
-        label: 'db_provision_ensure_project',
-        resource: {
-          provider: 'railway',
-          type: 'project',
-          id: provisionProjectId,
-          name: params.projectName,
-        },
-        compensate: async () => {
-          const hosting = await adapterFactory.getHostingAdapter(project!);
-          if (!hosting.success || !hosting.adapter || typeof hosting.adapter.deleteProject !== 'function') {
-            return {
-              success: false,
-              error: `Manual cleanup required: railway project ${provisionProjectId}`,
-            };
-          }
-          const deleted = await hosting.adapter.deleteProject(provisionProjectId);
-          return {
-            success: deleted.success,
-            error: deleted.error,
-            message: deleted.success ? `Deleted provider project ${provisionProjectId}` : undefined,
-          };
-        },
-      });
-    }
-    // DB provisioning may update provider bindings; refresh the environment object before deploy planning.
-    environment = envRepo.findById(environment.id) ?? environment;
-    tx.addStep({
-      id: `database:${dbProvision.component.externalId ?? dbProvision.component.id}`,
-      label: 'db_provision',
-      resource: {
-        provider: params.databaseProvider,
-        type: dbProvision.component.type,
-        id: dbProvision.component.externalId ?? dbProvision.component.id,
-        metadata: { environmentId: environment.id },
-      },
-      compensate: async () => dbAdapterResult.adapter!.destroy(dbProvision!.component),
-    });
-
-    const existingComponent = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
-    if (existingComponent) {
-      snapshotComponentRecord({
-        tx,
-        componentRepo,
-        component: existingComponent,
-        label: 'component_record_update',
-      });
-      const existingBindings = existingComponent.bindings as Record<string, unknown>;
-      const existingProvider = typeof existingBindings.provider === 'string' ? existingBindings.provider : undefined;
-      const nextBindings = existingProvider && existingProvider !== params.databaseProvider
-        ? {
-            ...(dbProvision.component.bindings as Record<string, unknown>),
-            previousProvider: existingProvider,
-            previousExternalId: existingComponent.externalId ?? undefined,
-            previousBindings: existingComponent.bindings,
-          }
-        : dbProvision.component.bindings;
-      componentRepo.update(existingComponent.id, {
-        bindings: nextBindings,
-        externalId: dbProvision.component.externalId ?? undefined,
-      });
-    } else {
-      const createdComponent = componentRepo.create({
-        environmentId: environment.id,
-        type: 'postgres',
-        bindings: dbProvision.component.bindings,
-        externalId: dbProvision.component.externalId ?? undefined,
-      });
-      tx.addStep({
-        id: `component:${createdComponent.id}`,
-        label: 'component_record_create',
-        resource: { provider: 'hypervibe', type: 'component', id: createdComponent.id, name: 'postgres' },
-        compensate: async () => ({
-          success: componentRepo.delete(createdComponent.id),
-          message: `Deleted local component ${createdComponent.id}`,
-        }),
-      });
-    }
-  }
+    environment = dbResult.environment;
+    dbProvision = dbResult.dbProvision;
+    dbEnsureReceipt = dbResult.dbEnsureReceipt;
   }
 
   const hostingProject = project.defaultPlatform?.toLowerCase() === targetPlatform
@@ -591,8 +395,7 @@ export async function executeBootstrap(params: {
     }
 
     const latestEnvironment = envRepo.findById(environment.id) ?? environment;
-    const latestBindings = latestEnvironment.platformBindings as Record<string, unknown>;
-    const boundServices = (latestBindings.services as Record<string, { serviceId: string; url?: string }> | undefined) ?? {};
+    const boundServices = parseHostingBindings(latestEnvironment).services ?? {};
     const sourceAdapter = hostingAdapter as IHostingAdapter & SourceConfigurableHostingAdapter;
 
     if (typeof sourceAdapter.connectServiceToRepo !== 'function') {
@@ -706,207 +509,30 @@ export async function executeBootstrap(params: {
   }
 
   if (params.setupEmail) {
-    const sgConnection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
-    if (sgConnection) {
-      const sgCreds = secretStore.decryptObject<SendGridCredentials>(sgConnection.credentialsEncrypted);
-      const sgAdapter = new SendGridAdapter();
-      sgAdapter.connect(sgCreds);
-      const sendgridPermissions = assessSendGridScopes(await sgAdapter.getScopes());
-      const missingSendgridScopes: Record<string, string[]> = {};
-      if (!sendgridPermissions.hasMailSend) {
-        missingSendgridScopes.mailSend = sendgridPermissions.missingScopes.mailSend;
-      }
-      if (params.domain) {
-        if (!sendgridPermissions.canManageDomainAuthentication) {
-          missingSendgridScopes.domainAuthentication = sendgridPermissions.missingScopes.domainAuthentication;
-        }
-      } else if (!sendgridPermissions.canManageDomainAuthentication && !sendgridPermissions.canManageSenderVerification) {
-        missingSendgridScopes.domainAuthentication = sendgridPermissions.missingScopes.domainAuthentication;
-        missingSendgridScopes.senderVerification = sendgridPermissions.missingScopes.senderVerification;
-      }
-
-      if (Object.keys(missingSendgridScopes).length > 0) {
-        return {
-          success: false,
-          summary: {
-            ...summary,
-            sendgridApiKeySynced: false,
-            sendgridApiKeySyncError: `SendGrid API key is valid but cannot complete setupEmail. ${sendgridPermissions.recommendation} ${formatConnectionGuidance('sendgrid', { intro: 'Confirm the SendGrid API key type and permissions.' })}`,
-            sendgridMissingScopes: missingSendgridScopes,
-          },
-        };
-      }
-
-      const latestEnvironment = envRepo.findById(environment.id) ?? environment;
-      const sendgridFailures: string[] = [];
-      for (const service of workloads) {
-        const receipt = await hostingAdapter.setEnvVars(latestEnvironment, service, {
-          SENDGRID_API_KEY: sgCreds.apiKey,
-        });
-        if (!receipt.success) {
-          sendgridFailures.push(`${service.name}: ${receipt.error || receipt.message}`);
-        }
-      }
-      summary.sendgridApiKeySynced = sendgridFailures.length === 0;
-      if (sendgridFailures.length > 0) {
-        summary.sendgridApiKeySyncError = sendgridFailures.join('; ');
-      }
-
-      if (params.domain) {
-        const existingDomains = await sgAdapter.listDomainAuthentications();
-        const existingAuth = existingDomains.find((d) => d.domain.toLowerCase() === params.domain!.toLowerCase());
-        const auth = existingAuth ?? await sgAdapter.createDomainAuthentication(params.domain, { default: false });
-        const records = [auth.dns.dkim1, auth.dns.dkim2, auth.dns.mail_cname].filter(
-          (r): r is NonNullable<typeof r> => Boolean(r)
-        );
-
-        const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [params.domain, ...scopeHints]);
-        if (cfConnection) {
-          const cfCreds = secretStore.decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted);
-          const cfAdapter = new CloudflareAdapter();
-          cfAdapter.connect(cfCreds);
-          const zone = await cfAdapter.findZoneByName(params.domain);
-          if (zone) {
-            const dnsResults: Array<{ name: string; type: string; action: string }> = [];
-            for (const record of records) {
-              const upsert = await cfAdapter.upsertDnsRecord(zone.id, record.host, record.type, record.data, {
-                proxied: false,
-              });
-              dnsResults.push({ name: record.host, type: record.type, action: upsert.action });
-            }
-            summary.sendgridDnsSynced = true;
-            summary.sendgridDnsRecords = dnsResults;
-          } else {
-            summary.sendgridDnsSynced = false;
-            summary.sendgridDnsError = `Cloudflare zone not found for ${params.domain}`;
-          }
-        } else {
-          summary.sendgridDnsSynced = false;
-          summary.sendgridDnsError = `No Cloudflare connection available for domain DNS setup. ${formatConnectionGuidance('cloudflare', { scope: params.domain })}`;
-        }
-      }
-    } else {
-      summary.sendgridApiKeySynced = false;
-      summary.sendgridApiKeySyncError = `No SendGrid connection found. ${formatConnectionGuidance('sendgrid')}`;
+    const emailResult = await setupBootstrapEmail({
+      domain: params.domain,
+      workloads,
+      environment,
+      hostingAdapter,
+      scopeHints,
+      summary,
+    });
+    if (emailResult.failure) {
+      return emailResult.failure;
     }
   }
 
-  let providerDomainConfigured = false;
-  let providerDomainAttachFailed = false;
   if (params.domain) {
-    try {
-      const latestEnvironment = envRepo.findById(environment.id) ?? environment;
-      const latestBindings = latestEnvironment.platformBindings as Record<string, unknown>;
-      const boundServices = (latestBindings.services as Record<string, { serviceId: string; url?: string }> | undefined) ?? {};
-      const boundProjectId = typeof latestBindings.projectId === 'string' ? latestBindings.projectId : undefined;
-      const boundEnvironmentId =
-        typeof latestBindings.environmentId === 'string' ? latestBindings.environmentId : null;
-      const domainAdapter = hostingAdapter as IHostingAdapter & DomainAttachCapableAdapter;
-      const targetService = serviceWorkloads[0];
-      const targetServiceId = targetService ? boundServices[targetService.name]?.serviceId : undefined;
-      const domainProvider = hostingAdapter.name || targetPlatform;
-      const requiresProviderAttach = providerRequiresCustomDomainAttach(domainProvider);
-
-      if (targetService && targetServiceId && boundEnvironmentId && supportsCustomDomainAttach(domainAdapter)) {
-        const receipt = await callCustomDomainAttach(domainAdapter, {
-          projectId: boundProjectId,
-          serviceId: targetServiceId,
-          environmentId: boundEnvironmentId,
-          domain: params.domain,
-        });
-
-        if (!receipt.success) {
-          providerDomainAttachFailed = true;
-          summary.customDomainAttached = false;
-          summary.customDomainError = receipt.error || receipt.message;
-        } else {
-          providerDomainConfigured = true;
-          summary.customDomainAttached = true;
-          summary.customDomain = {
-            domain: params.domain,
-            service: targetService.name,
-            created: receipt.data?.created === true,
-          };
-
-          const dnsRecords = Array.isArray(receipt.data?.dnsRecords)
-            ? receipt.data.dnsRecords as Array<Record<string, unknown>>
-            : [];
-          const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [params.domain, ...scopeHints]);
-
-          if (!cfConnection) {
-            summary.domainDnsConfigured = false;
-            summary.domainDnsError = `No Cloudflare connection available for ${params.domain}. ${formatConnectionGuidance('cloudflare', { scope: params.domain })}`;
-          } else {
-            const cfCreds = secretStore.decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted);
-            const cfAdapter = new CloudflareAdapter();
-            cfAdapter.connect(cfCreds);
-            const zone = await cfAdapter.findZoneByName(params.domain);
-            if (!zone) {
-              summary.domainDnsConfigured = false;
-              summary.domainDnsError = `Cloudflare zone not found for ${params.domain}`;
-            } else if (dnsRecords.length === 0) {
-              summary.domainDnsConfigured = false;
-              summary.domainDnsError = `Railway did not return required DNS records for ${params.domain}`;
-            } else {
-              const normalizedRecords = dnsRecords
-                .map(normalizeProviderDnsRecord)
-                .filter((record): record is NormalizedDnsRecord => Boolean(record));
-              const results: Array<{ name: string; type: string; target: string; action: string }> = [];
-              for (const { name, type, value } of normalizedRecords) {
-                const upsert = await cfAdapter.upsertDnsRecord(zone.id, name, type, value, {
-                  proxied: false,
-                });
-                results.push({ name, type, target: value, action: upsert.action });
-              }
-              summary.domainDnsConfigured = results.length > 0 && results.length === normalizedRecords.length;
-              summary.domainDnsRecords = results;
-              if (normalizedRecords.length === 0) {
-                summary.domainDnsError = `Railway returned no usable DNS records for ${params.domain}`;
-              } else if (results.length !== normalizedRecords.length) {
-                summary.domainDnsError = `Railway returned DNS records for ${params.domain}, but Hypervibe could not write all required records.`;
-              }
-            }
-          }
-        }
-      } else if (requiresProviderAttach) {
-        providerDomainAttachFailed = true;
-        summary.customDomainAttached = false;
-        summary.customDomainError = targetService && targetServiceId && boundEnvironmentId
-          ? customDomainAttachUnsupportedMessage(domainProvider, params.domain)
-          : customDomainAttachBindingMissingMessage(domainProvider, params.domain);
-      }
-    } catch (error) {
-      providerDomainAttachFailed = true;
-      summary.customDomainAttached = false;
-      summary.customDomainError = error instanceof Error ? error.message : String(error);
-      summary.domainDnsConfigured = false;
-    }
-  }
-
-  if (!providerDomainConfigured && !providerDomainAttachFailed && params.domain && deploy.urls[0]) {
-    try {
-      const targetHost = new URL(deploy.urls[0]).hostname;
-      const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [params.domain, ...scopeHints]);
-      if (cfConnection) {
-        const cfCreds = secretStore.decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted);
-        const cfAdapter = new CloudflareAdapter();
-        cfAdapter.connect(cfCreds);
-        const zone = await cfAdapter.findZoneByName(params.domain);
-        if (zone) {
-          const result = await cfAdapter.upsertDnsRecord(zone.id, params.domain, 'CNAME', targetHost, { proxied: true });
-          summary.domainDnsConfigured = true;
-          summary.domainDns = { name: params.domain, type: 'CNAME', target: targetHost, action: result.action };
-        } else {
-          summary.domainDnsConfigured = false;
-          summary.domainDnsError = `Cloudflare zone not found for ${params.domain}`;
-        }
-      } else {
-        summary.domainDnsConfigured = false;
-        summary.domainDnsError = `No Cloudflare connection available for ${params.domain}. ${formatConnectionGuidance('cloudflare', { scope: params.domain })}`;
-      }
-    } catch {
-      summary.domainDnsConfigured = false;
-    }
+    await attachBootstrapDomain({
+      domain: params.domain,
+      environment,
+      hostingAdapter,
+      serviceWorkloads,
+      scopeHints,
+      targetPlatform,
+      deployUrls: deploy.urls,
+      summary,
+    });
   }
 
   summary.intent = syncProjectIntent(project.id);

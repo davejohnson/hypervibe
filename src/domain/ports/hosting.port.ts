@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type { Receipt, DeployResult, VerifyResult, JobResult } from './provider.port.js';
@@ -59,12 +60,52 @@ export interface HostingBindings {
     resourceType?: string;
     jobName?: string;
     schedulerJobName?: string;
-    serviceArn?: string;
     source?: {
       repo?: string;
       branch?: string;
     };
   }>;
+}
+
+/**
+ * Tolerant runtime schema for platformBindings blobs. Passthrough at every
+ * level so provider-specific extras (ci sync metadata, Railway rebind data,
+ * scheduler bindings) survive a parse round-trip; every field optional so
+ * legacy rows never throw. Use parseHostingBindings for reads.
+ */
+export const hostingBindingsSchema = z.object({
+  provider: z.string().optional(),
+  projectId: z.string().optional(),
+  environmentId: z.string().optional(),
+  services: z.record(
+    z.object({
+      serviceId: z.string().optional(),
+      url: z.string().optional(),
+      customDomains: z.array(z.string()).optional(),
+      imageUri: z.string().optional(),
+      workloadKind: z.string().optional(),
+      resourceType: z.string().optional(),
+      jobName: z.string().optional(),
+      schedulerJobName: z.string().optional(),
+      source: z.object({
+        repo: z.string().optional(),
+        branch: z.string().optional(),
+      }).passthrough().optional(),
+    }).passthrough()
+  ).optional(),
+}).passthrough();
+
+export type ParsedHostingBindings = z.infer<typeof hostingBindingsSchema>;
+
+/**
+ * Read an environment's platformBindings as HostingBindings-shaped data.
+ * Never throws: malformed blobs (legacy rows, hand-edited files) return {}.
+ */
+export function parseHostingBindings(
+  environment: Pick<Environment, 'platformBindings'> | null | undefined
+): ParsedHostingBindings {
+  const parsed = hostingBindingsSchema.safeParse(environment?.platformBindings ?? {});
+  return parsed.success ? parsed.data : {};
 }
 
 /**

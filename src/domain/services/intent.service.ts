@@ -333,12 +333,14 @@ function buildIntent(project: Project): ProjectIntentSchema {
 
   const providersToCheck = [
     'railway',
+    'cloudrun',
     'cloudflare',
     'sendgrid',
     'supabase',
     'cloudsql',
     'stripe',
     'recaptcha',
+    'appstoreconnect',
   ];
 
   const connectionSummaries: Array<{ provider: string; status: string; scope: string | null }> = [];

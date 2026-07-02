@@ -41,6 +41,14 @@ interface HttpHealthResult {
   error?: string;
 }
 
+/**
+ * Imperative deploy engine. This is the escape hatch OUTSIDE the
+ * spec -> plan -> apply loop: hv_deploy and hv_rollback drive it directly,
+ * and executeBootstrap (the hv_apply converge pass) delegates the actual
+ * service deploys to it. It builds its own RunPlan and does not consult
+ * spec revisions — model durable infrastructure changes in the spec and
+ * reconcile via hv_plan/hv_apply instead of adding steps here.
+ */
 export class DeployOrchestrator {
   private runRepo = new RunRepository();
   private envRepo = new EnvironmentRepository();
@@ -421,7 +429,7 @@ export class DeployOrchestrator {
             if (typeof deployData.imageUri === 'string') {
               services[service.name].imageUri = deployData.imageUri;
             }
-            for (const key of ['resourceType', 'jobName', 'schedulerJobName', 'serviceArn'] as const) {
+            for (const key of ['resourceType', 'jobName', 'schedulerJobName'] as const) {
               if (typeof deployData[key] === 'string') {
                 services[service.name][key] = deployData[key];
               }

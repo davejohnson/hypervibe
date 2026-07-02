@@ -141,6 +141,12 @@ export interface SpecResult {
   spec: ProjectSpec;
   revision: number;
   source?: { kind: 'repo'; path: string } | { kind: 'local' };
+  /**
+   * True when `.hypervibe/spec.json` changed outside hypervibe (or was seen
+   * for the first time) and was just recorded as a new revision. Callers
+   * should surface this so out-of-band edits are visible, not silent.
+   */
+  adopted?: boolean;
 }
 
 function sameSpec(a: unknown, b: unknown): boolean {
@@ -155,6 +161,15 @@ function repoSpecMatchesProject(spec: ProjectSpec, project: Project): boolean {
  * Revisioned storage for project specs. Every write creates a new revision —
  * hv_plan records the revision it planned against, and hv_apply rejects
  * plans whose revision has been superseded.
+ *
+ * Source-of-truth contract: the repo file `.hypervibe/spec.json` is the
+ * desired state when it exists and names this project; the `project_specs`
+ * table is the revision journal behind it (stale-plan rejection, history).
+ * When the repo file diverges from the latest revision, the repo file wins
+ * and is recorded as a new revision with `adopted: true` on the result.
+ * Bindings are the inverse: `environments.platform_bindings` (DB) is
+ * authoritative and `.hypervibe/bindings.json` is a sanitized export — see
+ * repo-bindings-file.ts.
  */
 export class SpecStore {
   private repo = new ProjectSpecRepository();
@@ -175,7 +190,7 @@ export class SpecStore {
       }
 
       const row = this.repo.insert(project.id, (latest?.revision ?? 0) + 1, repoSpec.spec);
-      return { spec: repoSpec.spec, revision: row.revision, source: { kind: 'repo', path: repoSpec.path } };
+      return { spec: repoSpec.spec, revision: row.revision, source: { kind: 'repo', path: repoSpec.path }, adopted: true };
     }
 
     const latest = this.repo.findLatest(project.id);

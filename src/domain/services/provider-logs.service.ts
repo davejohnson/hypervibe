@@ -7,6 +7,7 @@ import type { StripeCredentials, StripeMode } from '../../adapters/providers/str
 import { adapterFactory } from './adapter.factory.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import type { Project } from '../entities/project.entity.js';
+import { NotSupportedError } from '../errors/not-supported.error.js';
 
 const connectionRepo = new ConnectionRepository();
 
@@ -126,7 +127,7 @@ export async function fetchProviderLogs(
       ) => Promise<{ status: string; url?: string }>;
     };
     if (typeof adapter.getLogs !== 'function') {
-      throw new Error('Cloud Run logs are not supported by this adapter version');
+      throw new NotSupportedError('cloudrun', 'log reads', 'Update Hypervibe so the Cloud Run adapter includes getLogs.');
     }
     const deploymentId = bindings.services?.[serviceName]?.serviceId;
     const logs = await adapter.getLogs(environment, serviceName, { limit: lines, errorsOnly: options.errorsOnly });
@@ -144,7 +145,7 @@ export async function fetchProviderLogs(
     };
   }
 
-  throw new Error(`Logs are not yet supported for provider: ${provider}`);
+  throw new NotSupportedError(provider, 'log reads');
 }
 
 export type ProviderDeployment = {
@@ -222,13 +223,13 @@ export async function fetchProviderDeployments(
       ) => Promise<ProviderDeployment[]>;
     };
     if (typeof adapter.listDeployments !== 'function') {
-      throw new Error('Cloud Run deployments are not supported by this adapter version');
+      throw new NotSupportedError('cloudrun', 'deployment listing', 'Update Hypervibe so the Cloud Run adapter includes listDeployments.');
     }
 
     return adapter.listDeployments(environment, serviceName, limit);
   }
 
-  throw new Error(logsDeploymentsUnsupportedMessage(provider));
+  throw new NotSupportedError(provider, 'deployment listing', logsDeploymentsUnsupportedMessage(provider));
 }
 
 /**
@@ -280,7 +281,7 @@ export async function fetchProviderBuildLogs(
     return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
   }
 
-  throw new Error(logsBuildUnsupportedMessage(provider));
+  throw new NotSupportedError(provider, 'build log reads', logsBuildUnsupportedMessage(provider));
 }
 
 /**

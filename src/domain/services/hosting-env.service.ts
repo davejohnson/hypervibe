@@ -1,19 +1,9 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Service } from '../entities/service.entity.js';
-import type { IHostingAdapter } from '../ports/hosting.port.js';
+import { parseHostingBindings, type IHostingAdapter } from '../ports/hosting.port.js';
 import type { Receipt } from '../ports/provider.port.js';
 import { adapterFactory } from './adapter.factory.js';
-
-type PlatformBindings = {
-  provider?: string;
-  projectId?: string;
-  environmentId?: string;
-  services?: Record<string, {
-    serviceId?: string;
-    jobName?: string;
-  }>;
-};
 
 type EnvReadableHostingAdapter = IHostingAdapter & {
   getServiceVariables?: (
@@ -24,7 +14,7 @@ type EnvReadableHostingAdapter = IHostingAdapter & {
 };
 
 export function hostingProviderForEnvironment(project: Project, environment: Environment): string {
-  const bindings = environment.platformBindings as PlatformBindings;
+  const bindings = parseHostingBindings(environment);
   if (bindings.provider) return bindings.provider.toLowerCase();
   return project.defaultPlatform?.toLowerCase() || 'cloudrun';
 }
@@ -41,7 +31,7 @@ export function providerDisplayName(provider: string): string {
 }
 
 export function serviceHasHostingBinding(environment: Environment, serviceName: string): boolean {
-  const bindings = environment.platformBindings as PlatformBindings;
+  const bindings = parseHostingBindings(environment);
   const serviceBinding = bindings.services?.[serviceName];
   return Boolean(serviceBinding?.serviceId || serviceBinding?.jobName);
 }
@@ -104,7 +94,7 @@ export async function readHostingEnvVars(params: {
 }): Promise<{ success: true; provider: string; variables: Record<string, string> } | { success: false; provider: string; error: string }> {
   const provider = hostingProviderForEnvironment(params.project, params.environment);
   const displayName = providerDisplayName(provider);
-  const bindings = params.environment.platformBindings as PlatformBindings;
+  const bindings = parseHostingBindings(params.environment);
 
   if (!serviceHasHostingBinding(params.environment, params.service.name)) {
     return {

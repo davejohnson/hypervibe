@@ -480,6 +480,9 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       }
       const gitRemoteUrl = project.gitRemoteUrl ?? result.spec.gitRemoteUrl ?? null;
       const connections = requiredConnectionChecklist(ctx, result.spec);
+      const extras = result.adopted && result.source?.kind === 'repo'
+        ? { warnings: [`${result.source.path} changed outside hypervibe; recorded as revision ${result.revision}.`] }
+        : undefined;
       return toolSuccess({
         project: { id: project.id, name: project.name, gitRemoteUrl },
         projectMeta: { gitRemoteUrl },
@@ -495,7 +498,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
             domain: env.domain ?? null,
           }])
         ),
-      });
+      }, extras);
     })
   );
 

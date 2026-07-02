@@ -64,8 +64,21 @@ export function readRepoSpecFile(startDir = process.cwd()): RepoSpecFile | null 
   }
 
   const raw = readFileSync(specPath, 'utf8');
-  const parsed = projectSpecSchema.parse(JSON.parse(raw));
-  return { root, path: specPath, spec: parsed };
+  let document: unknown;
+  try {
+    document = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`${specPath} is not valid JSON: ${error instanceof Error ? error.message : String(error)}. Fix the file (or delete it to fall back to the local spec) and retry.`);
+  }
+  const parsed = projectSpecSchema.safeParse(document);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .slice(0, 5)
+      .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+      .join('; ');
+    throw new Error(`${specPath} does not match the project spec schema: ${issues}. Fix the file (or delete it to fall back to the local spec) and retry.`);
+  }
+  return { root, path: specPath, spec: parsed.data };
 }
 
 export function writeRepoSpecFile(spec: ProjectSpec, startDir = process.cwd()): RepoSpecWrite | null {

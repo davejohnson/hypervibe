@@ -254,6 +254,10 @@ export class PlanService {
       };
     }
 
+    const specWarnings = specResult.adopted && specResult.source?.kind === 'repo'
+      ? [`${specResult.source.path} changed outside hypervibe; recorded as revision ${specResult.revision}.`]
+      : [];
+
     const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
     const { observed, warnings: observeWarnings } = await this.observeEnvironment(projectForPlan, environment, environmentSpec);
     const local = this.buildLocalSnapshot(projectForPlan, environment);
@@ -322,7 +326,7 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: diff.unmanaged,
-      warnings: [...observeWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings],
+      warnings: [...specWarnings, ...observeWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings],
     };
 
     // Plans for untracked environments can't reference an environment row;

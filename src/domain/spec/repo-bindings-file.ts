@@ -4,6 +4,11 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import { findRepoRoot, repoSpecEnabled } from './repo-spec-file.js';
 
+// Bindings are the inverse of the spec's source-of-truth contract: the DB
+// column `environments.platform_bindings` is authoritative (it holds data the
+// sanitizer strips), and `.hypervibe/bindings.json` is a sanitized export so
+// teammates can converge the same provider resources.
+
 export interface RepoBindingsEnvironment {
   platformBindings: Record<string, unknown>;
 }

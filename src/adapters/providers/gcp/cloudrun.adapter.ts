@@ -11,7 +11,7 @@ import type { Environment } from '../../../domain/entities/environment.entity.js
 import { serviceWorkloadKind, type Service } from '../../../domain/entities/service.entity.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
-import type { GetLogsOptions, LogEntry } from '../../../domain/ports/hosting.port.js';
+import { parseHostingBindings, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
 import { hashEnvValue, type ObservedService, type ObservedState } from '../../../domain/ports/observe.port.js';
 
 // Credentials schema for self-registration
@@ -1112,9 +1112,7 @@ export class CloudRunAdapter implements IProviderAdapter {
     }
 
     const token = await this.getAccessToken();
-    const bindings = environment.platformBindings as {
-      services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
-    };
+    const bindings = parseHostingBindings(environment);
     const serviceBinding = bindings.services?.[serviceName];
     const targetName = serviceBinding?.jobName ?? serviceBinding?.serviceId ?? serviceName;
     const isJob = serviceBinding?.resourceType === 'scheduledJob' || Boolean(serviceBinding?.jobName);
@@ -1138,10 +1136,7 @@ export class CloudRunAdapter implements IProviderAdapter {
     }
 
     const token = await this.getAccessToken();
-    const bindings = environment.platformBindings as {
-      projectId?: string;
-      services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
-    };
+    const bindings = parseHostingBindings(environment);
     const serviceBinding = bindings.services?.[serviceName];
     const targetName = serviceBinding?.jobName ?? serviceBinding?.serviceId;
     if (!targetName) {

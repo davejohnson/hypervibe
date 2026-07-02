@@ -165,10 +165,25 @@ describe('SpecStore', () => {
       const v2 = store.get(project)!;
       expect(v2.revision).toBe(2);
       expect(v2.source).toEqual({ kind: 'repo', path: specPath });
+      expect(v2.adopted).toBe(true);
       expect(v2.spec.environments.staging.services.daily).toMatchObject({
         workloadKind: 'cron',
         cronSchedule: '0 8 * * *',
       });
+
+      // Re-reading the unchanged file is not another adoption.
+      const v2Again = store.get(project)!;
+      expect(v2Again.revision).toBe(2);
+      expect(v2Again.adopted).toBeUndefined();
+
+      // A repo file that fails schema validation surfaces a clear error
+      // instead of silently falling back to the local revision.
+      writeFileSync(specPath, JSON.stringify({ version: 1, project: project.name }), 'utf8');
+      expect(() => store.get(project)).toThrow(/does not match the project spec schema/);
+
+      // Invalid JSON gets its own clear error.
+      writeFileSync(specPath, '{not json', 'utf8');
+      expect(() => store.get(project)).toThrow(/is not valid JSON/);
     } finally {
       process.chdir(oldCwd);
       if (oldDisable === undefined) {

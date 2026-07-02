@@ -4,6 +4,7 @@ import { RailwayAdapter, type RailwayCredentials, type RailwayLogEntry } from '.
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { parseHostingBindings } from '../../domain/ports/hosting.port.js';
 
 /**
  * Log watcher for Railway deployments.
@@ -58,7 +59,7 @@ export class RailwayLogWatcher extends LogWatcher {
     // Check if any environment in this project has Railway bindings
     const envs = this.envRepo.findByProjectId(projectId);
     return envs.some((env) => {
-      const bindings = env.platformBindings as { provider?: string; projectId?: string };
+      const bindings = parseHostingBindings(env);
       return bindings.provider === 'railway' && !!bindings.projectId;
     });
   }
@@ -75,12 +76,7 @@ export class RailwayLogWatcher extends LogWatcher {
       return [];
     }
 
-    const bindings = env.platformBindings as {
-      provider?: string;
-      projectId?: string;
-      environmentId?: string;
-      services?: Record<string, { serviceId: string }>;
-    };
+    const bindings = parseHostingBindings(env);
 
     if (bindings.provider !== 'railway' || !bindings.projectId || !bindings.environmentId) {
       console.warn('Environment not bound to Railway');
