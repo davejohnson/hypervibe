@@ -233,6 +233,13 @@ export async function executePlanApply(ctx: ToolContext, params: {
   specRevision: number;
   planId: string;
   confirmActions: string[];
+  /** Poll web services' healthCheckPath over HTTP during the bootstrap pass (hv_deploy). */
+  verifyHttpHealth?: boolean;
+  /**
+   * Run the bootstrap converge pass even when every action is a noop —
+   * hv_deploy's contract is "deploy current code now", not "converge drift".
+   */
+  alwaysRunBootstrap?: boolean;
 }): Promise<PlanApplyOutcome> {
   const { project, spec, planId } = params;
   const planService = new PlanService();
@@ -289,6 +296,9 @@ export async function executePlanApply(ctx: ToolContext, params: {
           envVars: overrideEnvVars,
         });
       }
+      if (params.verifyHttpHealth) {
+        bootstrapParams = { ...bootstrapParams, verifyHttpHealth: true };
+      }
       bootstrap = await executeBootstrap(bootstrapParams);
     }
     return bootstrap;
@@ -320,13 +330,26 @@ export async function executePlanApply(ctx: ToolContext, params: {
     return bootstrapActionResultFromSummary(action, result);
   };
 
-  const result = await executor.execute({
+  let result = await executor.execute({
     planRunId: planId,
     confirmActions: params.confirmActions,
     currentSpecRevision: params.specRevision,
     freshObservedFingerprint: freshFingerprint,
     handler,
   });
+
+  // An all-noop plan never reaches the bootstrap fallback; hv_deploy still
+  // means "deploy current code now", so force the pass when asked.
+  if (params.alwaysRunBootstrap && !bootstrap && result.success && result.applyRunId) {
+    const forced = await ensureBootstrap();
+    if (!forced.success) {
+      result = {
+        ...result,
+        success: false,
+        error: String(forced.summary.error ?? 'Deploy failed'),
+      };
+    }
+  }
 
   if (result.success) {
     syncAutofixWatches(ctx, applyProject, envName, envSpec);

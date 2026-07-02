@@ -12,6 +12,8 @@ export interface BootstrapParams {
   serviceConfig?: DesiredState['serviceConfig'];
   envVars?: DesiredState['envVars'];
   deploy?: DesiredState['deploy'];
+  /** Poll web services' healthCheckPath over HTTP after deploy (hv_deploy). */
+  verifyHttpHealth?: boolean;
 }
 
 function classifyEnvName(name: string): 'staging' | 'production' | null {

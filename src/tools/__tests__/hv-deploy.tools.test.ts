@@ -14,6 +14,9 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import type { IHostingAdapter } from '../../domain/ports/hosting.port.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
+import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { CLOUD_PREPARE_PROFILES } from '../../domain/services/cloud-prepare.js';
 import { createToolContext } from '../context.js';
 import { registerHvDeployTools } from '../hv-deploy.tools.js';
 
@@ -30,6 +33,15 @@ afterEach(() => {
   SqliteAdapter.resetInstance();
   rmSync(tempDir, { recursive: true, force: true });
 });
+
+function seedVerifiedConnection(provider: string): void {
+  const repo = new ConnectionRepository();
+  const connection = repo.create({
+    provider,
+    credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'test-token' }),
+  });
+  repo.updateStatus(connection.id, 'verified');
+}
 
 async function makeClient() {
   const server = new McpServer({ name: 'hv-deploy-test', version: '1.0.0' });
@@ -64,11 +76,30 @@ describe('hv_deploy', () => {
       policies: { protectedEnvironments: ['production'] },
     });
     new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: { hosting: { provider: 'railway' }, services: { web: {} } },
+      },
+    });
 
     const t = await makeClient();
     const result = await t.call('hv_deploy', { project: 'gate-app', env: 'production' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('CONFIRM_REQUIRED');
+    await t.close();
+  });
+
+  it('requires a spec: deploys are plan-gated', async () => {
+    const project = new ProjectRepository().create({ name: 'specless-app' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+
+    const t = await makeClient();
+    const result = await t.call('hv_deploy', { project: 'specless-app', env: 'staging' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('NOT_FOUND');
+    expect(result.hint).toContain('hv_spec_set');
     await t.close();
   });
 
@@ -115,6 +146,17 @@ describe('hv_deploy', () => {
       buildConfig: { workloadKind: 'web', healthCheckPath: '/health' },
       envVarSpec: {},
     });
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { workloadKind: 'web', healthCheckPath: '/health' } },
+        },
+      },
+    });
+    seedVerifiedConnection('railway');
 
     const fakeAdapter: IHostingAdapter = {
       name: 'railway',
@@ -167,7 +209,18 @@ describe('hv_deploy', () => {
 
 describe('hv_deploy database env injection', () => {
   it('injects the managed database env vars into every deploy', async () => {
-    const project = new ProjectRepository().create({ name: 'dbenv-app', defaultPlatform: 'cloudrun' });
+    const cloudrunPrepared = {
+      cloudPreparation: {
+        cloudrun: {
+          provider: 'cloudrun',
+          version: CLOUD_PREPARE_PROFILES.cloudrun.version,
+          preparedAt: new Date().toISOString(),
+          requiredApis: CLOUD_PREPARE_PROFILES.cloudrun.requiredApis,
+          requiredRoles: CLOUD_PREPARE_PROFILES.cloudrun.requiredRoles,
+        },
+      },
+    };
+    const project = new ProjectRepository().create({ name: 'dbenv-app', defaultPlatform: 'cloudrun', policies: cloudrunPrepared });
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
@@ -213,7 +266,24 @@ describe('hv_deploy database env injection', () => {
       async setEnvVars() { return { success: true, message: 'ok' }; },
       async getDeployStatus() { return { status: 'deployed' }; },
     };
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'cloudrun' },
+          services: { web: {} },
+          database: { provider: 'cloudsql' },
+        },
+      },
+    });
+    seedVerifiedConnection('cloudrun');
+    seedVerifiedConnection('cloudsql');
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeAdapter });
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: { name: 'cloudsql' } as never,
+    });
 
     const t = await makeClient();
     const result = await t.call('hv_deploy', { project: 'dbenv-app', env: 'production' });
@@ -222,6 +292,10 @@ describe('hv_deploy database env injection', () => {
     expect(deployCalls).toHaveLength(1);
     // The managed database URL is injected even though the caller passed no envVars.
     expect(deployCalls[0].DATABASE_URL).toBe('postgresql://app:pw@34.44.202.227:5432/app');
+
+    // Sugar path: the deploy is recorded as a plan + apply run pair.
+    expect(typeof result.data.planId).toBe('string');
+    expect(typeof result.data.applyRunId).toBe('string');
     await t.close();
   });
 });
