@@ -18,17 +18,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     credentialExample: 'hv_connect provider="1password" credentialsRef="env:OP_SERVICE_ACCOUNT_TOKEN"',
     notes: ['The token usually starts with ops_.'],
   },
-  apprunner: {
-    provider: 'apprunner',
-    displayName: 'AWS App Runner',
-    tokenType: 'AWS IAM access key for an IAM user or role',
-    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
-    permissions: [
-      'App Runner service management permissions for the target account/region, such as apprunner:ListServices, apprunner:DescribeService, apprunner:CreateService, apprunner:UpdateService, and apprunner:DeleteService.',
-      'iam:PassRole if App Runner service roles are used.',
-    ],
-    credentialExample: 'hv_connect provider="apprunner" credentialsRef="file:/absolute/path/aws-apprunner.json"',
-  },
   appstoreconnect: {
     provider: 'appstoreconnect',
     displayName: 'App Store Connect',
@@ -108,14 +97,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     permissions: ['Use a database user with the least privileges required for the intended hv_db query or migration operation.'],
     credentialExample: 'hv_connect provider="database" credentialsRef="dotenv:/absolute/path/.env#DATABASE_URL"',
   },
-  digitalocean: {
-    provider: 'digitalocean',
-    displayName: 'DigitalOcean',
-    tokenType: 'DigitalOcean personal access token',
-    setupUrl: 'https://cloud.digitalocean.com/account/api/tokens',
-    permissions: ['Write scope is required for App Platform and database create/update/delete operations; read-only tokens are not enough.'],
-    credentialExample: 'hv_connect provider="digitalocean" credentialsRef="env:DIGITALOCEAN_ACCESS_TOKEN"',
-  },
   doppler: {
     provider: 'doppler',
     displayName: 'Doppler',
@@ -131,7 +112,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     setupUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
     permissions: [
       'For CI deploy management, apiToken must have repo and workflow so Hypervibe can create/update .github/workflows files, read Actions runs/jobs/logs, trigger workflows, and manage repository secrets for private repos.',
-      'For Railway/DigitalOcean GHCR image pulls, packageReadToken must have read:packages. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.',
+      'For Railway GHCR image pulls, packageReadToken must have read:packages. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.',
       'If using a fine-grained PAT for apiToken, grant Contents read/write, Workflows write, Actions write, and Secrets write on the target repo; GHCR package access still requires a classic PAT because fine-grained PATs do not support Packages.',
     ],
     credentialExample: 'hv_connect provider="github" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}',
@@ -140,14 +121,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'For the simplest setup, create one classic PAT with repo, workflow, and read:packages, then map both apiToken and packageReadToken to the same .env variable.',
       'For least privilege, use two classic PATs: HYPERVIBE_GITHUB_TOKEN with repo + workflow, and HYPERVIBE_GITHUB_PACKAGES_TOKEN with read:packages.',
     ],
-  },
-  heroku: {
-    provider: 'heroku',
-    displayName: 'Heroku',
-    tokenType: 'Heroku API key',
-    setupUrl: 'https://dashboard.heroku.com/account/applications',
-    permissions: ['Use an API key for a Heroku user/team member allowed to create and manage the target apps, add-ons, config vars, builds, and domains.'],
-    credentialExample: 'hv_connect provider="heroku" credentialsRef="env:HEROKU_API_KEY"',
   },
   local: {
     provider: 'local',
@@ -171,25 +144,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     setupUrl: 'https://www.google.com/recaptcha/admin',
     permissions: ['Create a key for the correct reCAPTCHA version and allow the target domains.'],
     credentialExample: 'hv_connect provider="recaptcha" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"siteKey":"RECAPTCHA_SITE_KEY","secretKey":"RECAPTCHA_SECRET_KEY"}',
-  },
-  rds: {
-    provider: 'rds',
-    displayName: 'AWS RDS',
-    tokenType: 'AWS IAM access key for an IAM user or role',
-    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
-    permissions: [
-      'rds:DescribeDBInstances for verification/read.',
-      'Add rds:CreateDBInstance, rds:ModifyDBInstance, rds:DeleteDBInstance, rds:AddTagsToResource, and rds:ListTagsForResource if Hypervibe should manage databases.',
-    ],
-    credentialExample: 'hv_connect provider="rds" credentialsRef="file:/absolute/path/aws-rds.json"',
-  },
-  render: {
-    provider: 'render',
-    displayName: 'Render',
-    tokenType: 'Render API key',
-    setupUrl: 'https://dashboard.render.com/u/settings#api-keys',
-    permissions: ['Use an API key for a Render owner/member allowed to create and manage services, env vars, deploys, databases, and domains.'],
-    credentialExample: 'hv_connect provider="render" credentialsRef="env:RENDER_API_KEY"',
   },
   sendgrid: {
     provider: 'sendgrid',
@@ -241,14 +195,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     setupUrl: 'https://developer.hashicorp.com/vault/docs',
     permissions: ['Token/AppRole policy must allow auth/token/lookup-self plus read/list on the KV paths Hypervibe should resolve. Add create/update/delete only if Hypervibe should manage secrets.'],
     credentialExample: 'hv_connect provider="vault" credentialsRef="file:/absolute/path/vault.json"',
-  },
-  vercel: {
-    provider: 'vercel',
-    displayName: 'Vercel',
-    tokenType: 'Vercel access token',
-    setupUrl: 'https://vercel.com/account/tokens',
-    permissions: ['Token must have access to the target personal account or team. Include teamId when deploying to a team. It must be able to create/update projects, env vars, deployments, domains, and cron configuration.'],
-    credentialExample: 'hv_connect provider="vercel" credentialsRef="env:VERCEL_TOKEN"',
   },
   xcode: {
     provider: 'xcode',

@@ -191,7 +191,7 @@ function diagnoseWorkflowLog(text: string): Array<{
 
 const deployBranchConfigSchema = z.object({
   repo: z.string().optional(),
-  provider: z.enum(['railway', 'vercel', 'render', 'digitalocean', 'cloudrun', 'apprunner', 'heroku']),
+  provider: z.enum(['railway', 'cloudrun']),
   protectBranches: z.boolean().optional(),
   statusChecks: statusChecksField,
   requiredReviewers: z.number().optional(),
@@ -228,7 +228,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_ci_setup',
     'Set up explicit CI/CD tasks on GitHub for a project. For desired-state push deploys, prefer hv_spec_set deploy.strategy="branch" trigger="ci", then hv_plan/hv_apply; that manages the deploy workflow and provider API secrets as infrastructure. Dispatches on kind; config holds the kind-specific fields (config.repo="owner/repo" overrides the project gitRemoteUrl for every kind). ' +
-      'kind="deploy-branch": explicit/backfill branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs). Requires a GitHub apiToken that can write workflow files and repo secrets (classic PAT scopes repo + workflow for private repos); Railway/DigitalOcean image deploys also require packageReadToken with read:packages for GHCR pull credentials. config { provider (railway|vercel|render|digitalocean|cloudrun|apprunner|heroku, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
+      'kind="deploy-branch": explicit/backfill branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs). Requires a GitHub apiToken that can write workflow files and repo secrets (classic PAT scopes repo + workflow for private repos); Railway image deploys also require packageReadToken with read:packages for GHCR pull credentials. config { provider (railway|cloudrun, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
       'kind="ai-review": Claude PR review workflow; config { apiKey (required), model? }. ' +
       'kind="branch-protection": protection rules; config { branch (required), requireReviews?, requiredReviewers?, dismissStaleReviews?, requireCodeOwnerReviews?, requireStatusChecks?, statusChecks?, strictStatusChecks?, enforceAdmins?, requireLinearHistory?, allowForcePushes?, allowDeletions? }. ' +
       'kind="workflow": a workflow from a template; config { template (required, e.g. node-test, lint, deploy-railway) }.',

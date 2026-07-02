@@ -25,7 +25,7 @@ describe('spec.service desired state resolution', () => {
         services: ['api', 'worker'],
         serviceName: 'api',
         domain: 'example.com',
-        databaseProvider: 'rds',
+        databaseProvider: 'supabase',
         setupEmail: false,
         serviceConfig: {
           api: {

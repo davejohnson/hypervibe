@@ -87,7 +87,6 @@ describe('github tools', () => {
         providerProjectId: undefined,
         providerEnvironmentId: undefined,
         providerServiceIds: [],
-        providerServiceArns: [],
       },
     ]);
     expect(migration.includeStep).toBe(true);
@@ -177,18 +176,7 @@ describe('github tools', () => {
       providerProjectId: undefined,
       providerEnvironmentId: undefined,
       providerServiceIds: [],
-      providerServiceArns: [],
     };
-
-    const renderWorkflow = buildBranchDeployWorkflow('render', {
-      ...baseTarget,
-      providerServiceIds: ['srv-render'],
-    }, { includeStep: false });
-    expect(renderWorkflow.requiredSecrets).toEqual(['RENDER_API_KEY']);
-    expect(renderWorkflow.requiredVariables).toEqual([]);
-    expect(renderWorkflow.content).toContain("RENDER_SERVICE_IDS: 'srv-render'");
-    expect(renderWorkflow.content).toContain('https://api.render.com/v1/services/');
-    expect(renderWorkflow.content).not.toContain('RENDER_DEPLOY_HOOK_URL');
 
     const cloudRunWorkflow = buildBranchDeployWorkflow('cloudrun', {
       ...baseTarget,
@@ -200,48 +188,17 @@ describe('github tools', () => {
     expect(cloudRunWorkflow.content).toContain('https://run.googleapis.com/v2/projects/');
     expect(cloudRunWorkflow.content).toContain('docker/build-push-action@v6');
 
-    const appRunnerWorkflow = buildBranchDeployWorkflow('apprunner', {
+    const railwayWorkflow = buildBranchDeployWorkflow('railway', {
       ...baseTarget,
-      providerServiceArns: ['arn:aws:apprunner:us-east-1:123456789012:service/app/abc'],
+      providerServiceIds: ['srv-railway'],
+      providerEnvironmentId: 'env-railway',
     }, { includeStep: false });
-    expect(appRunnerWorkflow.requiredSecrets).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION']);
-    expect(appRunnerWorkflow.requiredVariables).toEqual([]);
-    expect(appRunnerWorkflow.content).toContain("APPRUNNER_SERVICE_ARNS: 'arn:aws:apprunner:us-east-1:123456789012:service/app/abc'");
-    expect(appRunnerWorkflow.content).toContain("appRunnerRequest('UpdateService'");
-
-    const digitalOceanWorkflow = buildBranchDeployWorkflow('digitalocean', {
-      ...baseTarget,
-      providerProjectId: 'do-app-id',
-    }, { includeStep: false });
-    expect(digitalOceanWorkflow.requiredSecrets).toEqual(['DIGITALOCEAN_ACCESS_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
-    expect(digitalOceanWorkflow.requiredVariables).toEqual([]);
-    expect(digitalOceanWorkflow.content).toContain("DO_APP_ID: 'do-app-id'");
-    expect(digitalOceanWorkflow.content).toContain("registry_type: 'GHCR'");
-    expect(digitalOceanWorkflow.content).toContain('docker/build-push-action@v6');
-    expect(digitalOceanWorkflow.content).toContain('packages: write');
-    expect(digitalOceanWorkflow.content).toContain('username: ${{ github.actor }}');
-    expect(digitalOceanWorkflow.content).toContain('password: ${{ secrets.GITHUB_TOKEN }}');
-    expect(digitalOceanWorkflow.content).toContain('IMAGE_REGISTRY_USERNAME: ${{ secrets.IMAGE_REGISTRY_USERNAME }}');
-    expect(digitalOceanWorkflow.content).toContain('IMAGE_REGISTRY_TOKEN: ${{ secrets.IMAGE_REGISTRY_TOKEN }}');
-    expect(digitalOceanWorkflow.content).toContain("registry_credentials: process.env.IMAGE_REGISTRY_USERNAME + ':' + process.env.IMAGE_REGISTRY_TOKEN");
-    expect(digitalOceanWorkflow.content).not.toContain('secrets.GHCR_USERNAME');
-    expect(digitalOceanWorkflow.content).not.toContain('secrets.GHCR_TOKEN');
-
-    const herokuWorkflow = buildBranchDeployWorkflow('heroku', {
-      ...baseTarget,
-      providerProjectId: 'heroku-app-id',
-    }, { includeStep: false });
-    expect(herokuWorkflow.requiredSecrets).toEqual(['HEROKU_API_KEY']);
-    expect(herokuWorkflow.requiredVariables).toEqual([]);
-    expect(herokuWorkflow.content).toContain("HEROKU_APP: 'heroku-app-id'");
-    expect(herokuWorkflow.content).toContain('registry.heroku.com');
+    expect(railwayWorkflow.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
+    expect(railwayWorkflow.content).toContain('packages: write');
 
     const combinedContent = [
-      renderWorkflow.content,
       cloudRunWorkflow.content,
-      appRunnerWorkflow.content,
-      digitalOceanWorkflow.content,
-      herokuWorkflow.content,
+      railwayWorkflow.content,
     ].join('\n');
     expect(combinedContent).not.toMatch(/railway-github-action|vercel deploy|doctl apps|gcloud |heroku container|heroku git/);
   });

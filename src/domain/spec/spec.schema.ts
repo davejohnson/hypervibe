@@ -28,7 +28,7 @@ export const serviceSpecSchema = z.object({
 });
 
 export const databaseSpecSchema = z.object({
-  provider: z.enum(['supabase', 'rds', 'cloudsql', 'railway']),
+  provider: z.enum(['supabase', 'cloudsql', 'railway']),
   engine: z.literal('postgres').default('postgres'),
 });
 

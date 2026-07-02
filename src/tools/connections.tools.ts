@@ -12,6 +12,7 @@ import { formatConnectionGuidance, getConnectionGuidance } from '../domain/servi
 import type { ToolContext } from './context.js';
 import { projectField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler } from './respond.js';
+import { splitFragment } from '../utils/split-fragment.js';
 
 function resolveLocalSecretRef(ref: string): string {
   const trimmed = ref.trim();
@@ -36,32 +37,16 @@ function resolveLocalSecretRef(ref: string): string {
   throw new Error('Unsupported credentialsRef. Use env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like 1password://vault/item#field.');
 }
 
-function splitFragment(value: string): { target: string; fragment?: string } {
-  const hashIndex = value.lastIndexOf('#');
-  if (hashIndex === -1) {
-    return { target: value };
-  }
-  return {
-    target: value.slice(0, hashIndex),
-    fragment: value.slice(hashIndex + 1),
-  };
-}
-
 function defaultScalarCredentialKey(provider: string): string | undefined {
   switch (provider) {
     case 'cloudflare':
-    case 'digitalocean':
     case 'github':
     case 'railway':
       return 'apiToken';
     case 'database':
       return 'connectionUrl';
     case 'doppler':
-    case 'vercel':
       return 'token';
-    case 'heroku':
-    case 'render':
-      return 'apiKey';
     case '1password':
       return 'serviceAccountToken';
     case 'sendgrid':
@@ -181,7 +166,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
     'hv_connect',
     'Manage provider connections. action="add" (default) stores credentials and immediately verifies them; action="verify" re-verifies an existing connection; action="remove" deletes one; action="prepare" runs one-time cloud account preparation (Cloud Run: enables required GCP APIs and grants deploy IAM roles using one-time admin credentials that are never stored — preview first, then pass confirm=true). Credentials are encrypted at rest and never returned. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if the user intentionally wants to enter credentials in chat.',
     {
-      provider: z.enum(providerNames as [string, ...string[]]).describe('Provider name (see hv_connections_list for what is available)'),
+      provider: z.string().describe(`Provider name (available: ${providerNames.join(', ')}). action="remove" also accepts providers that are no longer registered so stale connections can be deleted.`),
       action: z.enum(['add', 'verify', 'remove', 'prepare']).optional().describe('What to do (default: "add")'),
       credentials: z.record(z.unknown()).optional().describe('action="add": provider-specific credentials object. credentialsRef is recommended, but raw credentials are accepted when the user intentionally wants to enter them in chat.'),
       credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, or secret-manager refs like 1password://vault/item#field. The resolved value may be a JSON credentials object or a scalar.'),
@@ -214,6 +199,13 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
       adminAccessTokenRef,
       confirm,
     }) => {
+      // Stale connections for unregistered providers must stay removable.
+      if (action !== 'remove' && !providerNames.includes(provider)) {
+        return toolError('VALIDATION', `Unknown provider: ${provider}.`, {
+          hint: `Available providers: ${providerNames.join(', ')}`,
+        });
+      }
+
       if (action === 'prepare') {
         const project = ctx.resolveProjectOrThrow({ project: projectRef });
         const resolvedAdminCredentialsJson = adminCredentialsJsonRef

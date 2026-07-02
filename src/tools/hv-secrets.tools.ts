@@ -15,6 +15,7 @@ import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { splitFragment } from '../utils/split-fragment.js';
 
 const SECRET_MANAGERS = ['vault', 'aws-secrets', 'doppler', '1password', 'bitwarden'] as const;
 const accessLogRepo = new SecretAccessLogRepository();
@@ -46,17 +47,6 @@ function githubRepoForProject(project: Project, repoArg?: string): { owner: stri
   }
   const [owner, repo] = full.split('/');
   return { owner, repo };
-}
-
-function splitFragment(value: string): { target: string; fragment?: string } {
-  const hashIndex = value.lastIndexOf('#');
-  if (hashIndex === -1) {
-    return { target: value };
-  }
-  return {
-    target: value.slice(0, hashIndex),
-    fragment: value.slice(hashIndex + 1),
-  };
 }
 
 function secretRefKind(ref: string): string {

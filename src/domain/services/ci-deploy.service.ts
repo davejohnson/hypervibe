@@ -18,8 +18,8 @@ import {
 import { formatConnectionGuidance } from './connection-guidance.js';
 
 const OPERATION = 'githubActionsDeployBranch';
-const SUPPORTED_PROVIDERS = new Set(['railway', 'vercel', 'render', 'digitalocean', 'cloudrun', 'apprunner', 'heroku']);
-const PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL = new Set(['railway', 'digitalocean']);
+const SUPPORTED_PROVIDERS = new Set(['railway', 'cloudrun']);
+const PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL = new Set(['railway']);
 const GITHUB_CI_REQUIRED_CLASSIC_SCOPES = ['repo', 'workflow'];
 
 export function requiredProviderSecretNamesForGitHubActions(provider: string): string[] {
@@ -28,20 +28,8 @@ export function requiredProviderSecretNamesForGitHubActions(provider: string): s
     case 'railway':
       names.push('RAILWAY_API_TOKEN');
       break;
-    case 'digitalocean':
-      names.push('DIGITALOCEAN_ACCESS_TOKEN');
-      break;
-    case 'render':
-      names.push('RENDER_API_KEY');
-      break;
     case 'cloudrun':
       names.push('GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION');
-      break;
-    case 'apprunner':
-      names.push('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION');
-      break;
-    case 'heroku':
-      names.push('HEROKU_API_KEY');
       break;
     default:
       break;
@@ -60,7 +48,7 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
     parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions. ${formatConnectionGuidance(provider)}`);
   }
   if (missingImageRegistrySecrets) {
-    parts.push(`For Railway/DigitalOcean GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials. The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable GHCR image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
+    parts.push(`For Railway GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials. The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable GHCR image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
   }
   return parts.join(' ');
 }
@@ -133,16 +121,6 @@ export function providerSecretsForGitHubActions(
           secrets.push({ name: 'RAILWAY_API_TOKEN', value: credentials.apiToken });
         }
         break;
-      case 'digitalocean':
-        if (typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0) {
-          secrets.push({ name: 'DIGITALOCEAN_ACCESS_TOKEN', value: credentials.apiToken });
-        }
-        break;
-      case 'render':
-        if (typeof credentials.apiKey === 'string' && credentials.apiKey.length > 0) {
-          secrets.push({ name: 'RENDER_API_KEY', value: credentials.apiKey });
-        }
-        break;
       case 'cloudrun':
         if (typeof credentials.credentials === 'string' && credentials.credentials.length > 0) {
           secrets.push({ name: 'GCP_SERVICE_ACCOUNT_JSON', value: credentials.credentials });
@@ -152,22 +130,6 @@ export function providerSecretsForGitHubActions(
         }
         if (typeof credentials.region === 'string' && credentials.region.length > 0) {
           secrets.push({ name: 'GCP_REGION', value: credentials.region });
-        }
-        break;
-      case 'apprunner':
-        if (typeof credentials.accessKeyId === 'string' && credentials.accessKeyId.length > 0) {
-          secrets.push({ name: 'AWS_ACCESS_KEY_ID', value: credentials.accessKeyId });
-        }
-        if (typeof credentials.secretAccessKey === 'string' && credentials.secretAccessKey.length > 0) {
-          secrets.push({ name: 'AWS_SECRET_ACCESS_KEY', value: credentials.secretAccessKey });
-        }
-        if (typeof credentials.region === 'string' && credentials.region.length > 0) {
-          secrets.push({ name: 'AWS_REGION', value: credentials.region });
-        }
-        break;
-      case 'heroku':
-        if (typeof credentials.apiKey === 'string' && credentials.apiKey.length > 0) {
-          secrets.push({ name: 'HEROKU_API_KEY', value: credentials.apiKey });
         }
         break;
       default:

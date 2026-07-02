@@ -35,12 +35,6 @@ export function providerDisplayName(provider: string): string {
       return 'Cloud Run';
     case 'railway':
       return 'Railway';
-    case 'vercel':
-      return 'Vercel';
-    case 'render':
-      return 'Render';
-    case 'digitalocean':
-      return 'DigitalOcean';
     default:
       return provider;
   }

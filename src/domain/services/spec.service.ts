@@ -7,7 +7,7 @@ import type { BuildConfig, WorkloadKind } from '../entities/service.entity.js';
 const envRepo = new EnvironmentRepository();
 const componentRepo = new ComponentRepository();
 
-export const DB_PROVIDERS = ['supabase', 'rds', 'cloudsql', 'railway'] as const;
+export const DB_PROVIDERS = ['supabase', 'cloudsql', 'railway'] as const;
 
 export interface DesiredState {
   environmentName: string;

@@ -66,7 +66,6 @@ jobs:
       branch: 'main',
       serviceNames: [],
       providerServiceIds: [],
-      providerServiceArns: [],
     }, { includeStep: false }).content,
     requiredSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
     requiredVariables: ['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS'],
@@ -80,7 +79,6 @@ jobs:
       branch: 'staging',
       serviceNames: [],
       providerServiceIds: [],
-      providerServiceArns: [],
     }, { includeStep: false }).content,
     requiredSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
     requiredVariables: ['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS'],
@@ -94,92 +92,9 @@ jobs:
       branch: 'main',
       serviceNames: [],
       providerServiceIds: [],
-      providerServiceArns: [],
     }, { includeStep: false }).content,
     requiredSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
     requiredVariables: ['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS'],
-  },
-  'deploy-vercel-staging': {
-    name: 'Deploy Vercel (staging)',
-    filename: 'deploy-vercel-staging.yml',
-    content: buildBranchDeployWorkflow('vercel', {
-      environmentName: 'staging',
-      kind: 'staging',
-      branch: 'staging',
-      serviceNames: [],
-      providerServiceIds: [],
-      providerServiceArns: [],
-    }, { includeStep: false }).content,
-    requiredSecrets: ['VERCEL_DEPLOY_HOOK_URL'],
-  },
-  'deploy-vercel-production': {
-    name: 'Deploy Vercel (production)',
-    filename: 'deploy-vercel-production.yml',
-    content: buildBranchDeployWorkflow('vercel', {
-      environmentName: 'production',
-      kind: 'production',
-      branch: 'main',
-      serviceNames: [],
-      providerServiceIds: [],
-      providerServiceArns: [],
-    }, { includeStep: false }).content,
-    requiredSecrets: ['VERCEL_DEPLOY_HOOK_URL'],
-  },
-  'deploy-render-staging': {
-    name: 'Deploy Render (staging)',
-    filename: 'deploy-render-staging.yml',
-    content: buildBranchDeployWorkflow('render', {
-      environmentName: 'staging',
-      kind: 'staging',
-      branch: 'staging',
-      serviceNames: [],
-      providerServiceIds: [],
-      providerServiceArns: [],
-    }, { includeStep: false }).content,
-    requiredSecrets: ['RENDER_API_KEY'],
-    requiredVariables: ['RENDER_SERVICE_IDS'],
-  },
-  'deploy-render-production': {
-    name: 'Deploy Render (production)',
-    filename: 'deploy-render-production.yml',
-    content: buildBranchDeployWorkflow('render', {
-      environmentName: 'production',
-      kind: 'production',
-      branch: 'main',
-      serviceNames: [],
-      providerServiceIds: [],
-      providerServiceArns: [],
-    }, { includeStep: false }).content,
-    requiredSecrets: ['RENDER_API_KEY'],
-    requiredVariables: ['RENDER_SERVICE_IDS'],
-  },
-  'deploy-digitalocean-staging': {
-    name: 'Deploy DigitalOcean App Platform (staging)',
-    filename: 'deploy-digitalocean-staging.yml',
-    content: buildBranchDeployWorkflow('digitalocean', {
-      environmentName: 'staging',
-      kind: 'staging',
-      branch: 'staging',
-      serviceNames: [],
-      providerServiceIds: [],
-      providerServiceArns: [],
-    }, { includeStep: false }).content,
-    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
-    requiredVariables: ['DO_APP_ID', 'DO_SERVICE_NAMES'],
-  },
-  'deploy-digitalocean-production': {
-    name: 'Deploy DigitalOcean App Platform (production)',
-    filename: 'deploy-digitalocean-production.yml',
-    content: buildBranchDeployWorkflow('digitalocean', {
-      environmentName: 'production',
-      kind: 'production',
-      branch: 'main',
-      serviceNames: [],
-      providerServiceIds: [],
-      providerServiceArns: [],
-    }, { includeStep: false }).content,
-    requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
-    requiredVariables: ['DO_APP_ID', 'DO_SERVICE_NAMES'],
   },
   'lint': {
     name: 'Lint',
@@ -251,12 +166,7 @@ export function getApexDomain(domain: string): string {
 
 export type BranchDeployProvider =
   | 'railway'
-  | 'vercel'
-  | 'render'
-  | 'digitalocean'
-  | 'cloudrun'
-  | 'apprunner'
-  | 'heroku';
+  | 'cloudrun';
 export type BranchDeployEnvironmentKind = 'staging' | 'production';
 
 export interface BranchDeployTarget {
@@ -267,7 +177,6 @@ export interface BranchDeployTarget {
   providerProjectId?: string;
   providerEnvironmentId?: string;
   providerServiceIds: string[];
-  providerServiceArns: string[];
 }
 
 export interface BranchDeployWorkflow {
@@ -297,7 +206,6 @@ function environmentBindings(projectId: string, environmentName: string): {
   providerProjectId?: string;
   providerEnvironmentId?: string;
   providerServiceIds: string[];
-  providerServiceArns: string[];
   boundServiceNames: string[];
 } {
   const environment = envRepo.findByProjectAndName(projectId, environmentName);
@@ -307,15 +215,10 @@ function environmentBindings(projectId: string, environmentName: string): {
   const providerServiceIds = Object.values(services ?? {})
     .map((service) => asRecord(service)?.serviceId)
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-  const providerServiceArns = Object.values(services ?? {})
-    .map((service) => asRecord(service)?.serviceArn)
-    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-
   return {
     providerProjectId: typeof bindings?.projectId === 'string' ? bindings.projectId : undefined,
     providerEnvironmentId: typeof bindings?.environmentId === 'string' ? bindings.environmentId : undefined,
     providerServiceIds,
-    providerServiceArns,
     boundServiceNames,
   };
 }
@@ -385,7 +288,6 @@ export function resolveBranchDeployTargets(project: Project): {
         providerProjectId: bindings.providerProjectId,
         providerEnvironmentId: bindings.providerEnvironmentId,
         providerServiceIds: bindings.providerServiceIds,
-        providerServiceArns: bindings.providerServiceArns,
       });
 
       if (!migration.includeStep && envSpec.migrations?.mode === 'tool' && envSpec.migrations.runInDeploy !== false && envSpec.migrations.command) {
@@ -469,7 +371,6 @@ export function resolveBranchDeployTargets(project: Project): {
       providerProjectId: bindings.providerProjectId,
       providerEnvironmentId: bindings.providerEnvironmentId,
       providerServiceIds: bindings.providerServiceIds,
-      providerServiceArns: bindings.providerServiceArns,
     });
   }
 
@@ -698,157 +599,6 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
         requiredVariables,
       };
     }
-    case 'vercel':
-      return {
-        steps: `      - name: Trigger Vercel deploy hook
-        uses: actions/github-script@v7
-        env:
-          VERCEL_DEPLOY_HOOK_URL: \${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
-        with:
-          script: |
-            if (!process.env.VERCEL_DEPLOY_HOOK_URL) throw new Error('VERCEL_DEPLOY_HOOK_URL is required');
-            const response = await fetch(process.env.VERCEL_DEPLOY_HOOK_URL, { method: 'POST' });
-            if (!response.ok) throw new Error('Vercel deploy hook failed: ' + response.status + ' ' + await response.text());
-`,
-        requiredSecrets: ['VERCEL_DEPLOY_HOOK_URL'],
-        requiredVariables: [],
-      };
-    case 'render':
-      {
-        const renderServiceIds = providerListValueOrVariable(target.providerServiceIds, 'RENDER_SERVICE_IDS');
-        const requiredVariables = target.providerServiceIds.length === 0 ? ['RENDER_SERVICE_IDS'] : [];
-        return {
-          steps: `      - name: Trigger Render deployment
-        uses: actions/github-script@v7
-        env:
-          RENDER_API_KEY: \${{ secrets.RENDER_API_KEY }}
-          RENDER_SERVICE_IDS: ${renderServiceIds}
-        with:
-          script: |
-            if (!process.env.RENDER_API_KEY) throw new Error('RENDER_API_KEY is required');
-            const serviceIds = process.env.RENDER_SERVICE_IDS.split(',').map((value) => value.trim()).filter(Boolean);
-            if (serviceIds.length === 0) throw new Error('RENDER_SERVICE_IDS is empty');
-            for (const serviceId of serviceIds) {
-              const response = await fetch('https://api.render.com/v1/services/' + encodeURIComponent(serviceId) + '/deploys', {
-                method: 'POST',
-                headers: {
-                  Authorization: 'Bearer ' + process.env.RENDER_API_KEY,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({}),
-              });
-              if (!response.ok) throw new Error('Render deployment failed for ' + serviceId + ': ' + response.status + ' ' + await response.text());
-            }
-`,
-          requiredSecrets: ['RENDER_API_KEY'],
-          requiredVariables,
-        };
-      }
-    case 'digitalocean': {
-      const doAppId = providerValueOrVariable(target.providerProjectId, 'DO_APP_ID');
-      const doServiceNames = providerListValueOrVariable(
-        target.serviceNames.length > 0 ? target.serviceNames : target.providerServiceIds,
-        'DO_SERVICE_NAMES'
-      );
-      const requiredVariables = [
-        ...(target.providerProjectId ? [] : ['DO_APP_ID']),
-        ...(target.serviceNames.length > 0 || target.providerServiceIds.length > 0 ? [] : ['DO_SERVICE_NAMES']),
-      ];
-      return {
-        steps: `      - name: Resolve DigitalOcean image URI
-        id: image
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const repo = process.env.GITHUB_REPOSITORY.toLowerCase();
-            const [owner, name] = repo.split('/');
-            core.setOutput('registry', 'ghcr.io');
-            core.setOutput('registry_owner', owner);
-            core.setOutput('repository', name);
-            core.setOutput('tag', process.env.GITHUB_SHA);
-            core.setOutput('uri', 'ghcr.io/' + repo + ':' + process.env.GITHUB_SHA);
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: \${{ github.actor }}
-          password: \${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: \${{ steps.image.outputs.uri }}
-      - name: Deploy image to DigitalOcean App Platform
-        uses: actions/github-script@v7
-        env:
-          DIGITALOCEAN_ACCESS_TOKEN: \${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-          DO_APP_ID: ${doAppId}
-          DO_SERVICE_NAMES: ${doServiceNames}
-          IMAGE_REGISTRY_USERNAME: \${{ secrets.IMAGE_REGISTRY_USERNAME }}
-          IMAGE_REGISTRY_TOKEN: \${{ secrets.IMAGE_REGISTRY_TOKEN }}
-          IMAGE_REGISTRY_OWNER: \${{ steps.image.outputs.registry_owner }}
-          IMAGE_REPOSITORY: \${{ steps.image.outputs.repository }}
-          IMAGE_TAG: \${{ steps.image.outputs.tag }}
-        with:
-          script: |
-            if (!process.env.DIGITALOCEAN_ACCESS_TOKEN) throw new Error('DIGITALOCEAN_ACCESS_TOKEN is required');
-            if (!process.env.DO_APP_ID) throw new Error('DO_APP_ID is required');
-            const required = ['DO_SERVICE_NAMES', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN', 'IMAGE_REGISTRY_OWNER', 'IMAGE_REPOSITORY', 'IMAGE_TAG'];
-            for (const key of required) {
-              if (!process.env[key]) throw new Error(key + ' is required');
-            }
-            const serviceNames = process.env.DO_SERVICE_NAMES.split(',').map((value) => value.trim()).filter(Boolean);
-            if (serviceNames.length === 0) throw new Error('DO_SERVICE_NAMES is empty');
-            async function digitalOcean(method, path, body) {
-              const response = await fetch('https://api.digitalocean.com/v2' + path, {
-                method,
-                headers: {
-                  Authorization: 'Bearer ' + process.env.DIGITALOCEAN_ACCESS_TOKEN,
-                  'Content-Type': 'application/json',
-                },
-                body: body ? JSON.stringify(body) : undefined,
-              });
-              const text = await response.text();
-              if (!response.ok) throw new Error('DigitalOcean API ' + method + ' ' + path + ' failed: ' + response.status + ' ' + text);
-              return text ? JSON.parse(text) : {};
-            }
-            const payload = await digitalOcean('GET', '/apps/' + process.env.DO_APP_ID);
-            const spec = payload.app.spec;
-            const services = spec.services || [];
-            for (const serviceName of serviceNames) {
-              const service = services.find((candidate) => candidate.name === serviceName);
-              if (!service) throw new Error('DigitalOcean service not found in app spec: ' + serviceName);
-              delete service.bitbucket;
-              delete service.git;
-              delete service.github;
-              delete service.gitlab;
-              delete service.build_command;
-              delete service.dockerfile_path;
-              delete service.environment_slug;
-              delete service.source_dir;
-              service.image = {
-                registry_type: 'GHCR',
-                registry: process.env.IMAGE_REGISTRY_OWNER,
-                repository: process.env.IMAGE_REPOSITORY,
-                tag: process.env.IMAGE_TAG,
-                registry_credentials: process.env.IMAGE_REGISTRY_USERNAME + ':' + process.env.IMAGE_REGISTRY_TOKEN,
-              };
-            }
-            await digitalOcean('PUT', '/apps/' + process.env.DO_APP_ID, { spec });
-            const deployment = await fetch('https://api.digitalocean.com/v2/apps/' + process.env.DO_APP_ID + '/deployments', {
-              method: 'POST',
-              headers: {
-                Authorization: 'Bearer ' + process.env.DIGITALOCEAN_ACCESS_TOKEN,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({ force_build: true }),
-            });
-            if (!deployment.ok) throw new Error('DigitalOcean deployment failed: ' + deployment.status + ' ' + await deployment.text());
-`,
-        requiredSecrets: ['DIGITALOCEAN_ACCESS_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
-        requiredVariables,
-      };
-    }
     case 'cloudrun': {
       const cloudRunServiceNames = providerListValueOrVariable(target.providerServiceIds, 'CLOUDRUN_SERVICE_NAMES');
       const requiredVariables = target.providerServiceIds.length === 0 ? ['CLOUDRUN_SERVICE_NAMES'] : [];
@@ -1013,260 +763,6 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
         requiredVariables,
       };
     }
-    case 'apprunner': {
-      const appRunnerServiceArns = providerListValueOrVariable(target.providerServiceArns, 'APPRUNNER_SERVICE_ARNS');
-      const requiredVariables = target.providerServiceArns.length === 0 ? ['APPRUNNER_SERVICE_ARNS'] : [];
-      return {
-        steps: `      - name: Prepare ECR image
-        id: ecr
-        uses: actions/github-script@v7
-        env:
-          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: \${{ secrets.AWS_REGION }}
-          AWS_ECR_REPOSITORY: \${{ vars.AWS_ECR_REPOSITORY }}
-        with:
-          script: |
-            const crypto = require('crypto');
-
-            function sha256(data) {
-              return crypto.createHash('sha256').update(data).digest('hex');
-            }
-
-            function hmac(key, data, encoding) {
-              return crypto.createHmac('sha256', key).update(data).digest(encoding);
-            }
-
-            function signRequest({ method, host, path, service, region, accessKeyId, secretAccessKey, headers, body }) {
-              const now = new Date();
-              const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, '');
-              const dateStamp = amzDate.slice(0, 8);
-              const signedHeadersObject = { ...headers, Host: host, 'X-Amz-Date': amzDate };
-              const signedHeaders = Object.keys(signedHeadersObject).map((key) => key.toLowerCase()).sort().join(';');
-              const canonicalHeaders = Object.entries(signedHeadersObject).map(([key, value]) => key.toLowerCase() + ':' + String(value).trim()).sort().join('\\n');
-              const canonicalRequest = [method, path, '', canonicalHeaders + '\\n', signedHeaders, sha256(body)].join('\\n');
-              const algorithm = 'AWS4-HMAC-SHA256';
-              const credentialScope = dateStamp + '/' + region + '/' + service + '/aws4_request';
-              const stringToSign = [algorithm, amzDate, credentialScope, sha256(canonicalRequest)].join('\\n');
-              const kDate = hmac('AWS4' + secretAccessKey, dateStamp);
-              const kRegion = hmac(kDate, region);
-              const kService = hmac(kRegion, service);
-              const kSigning = hmac(kService, 'aws4_request');
-              const signature = hmac(kSigning, stringToSign, 'hex');
-              return {
-                ...signedHeadersObject,
-                Authorization: algorithm + ' Credential=' + accessKeyId + '/' + credentialScope + ', SignedHeaders=' + signedHeaders + ', Signature=' + signature,
-              };
-            }
-
-            async function awsJsonRequest(service, target, bodyObject) {
-              const region = process.env.AWS_REGION;
-              const host = service === 'ecr' ? 'api.ecr.' + region + '.amazonaws.com' : service + '.' + region + '.amazonaws.com';
-              const body = JSON.stringify(bodyObject);
-              const headers = signRequest({
-                method: 'POST',
-                host,
-                path: '/',
-                service,
-                region,
-                accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-                headers: {
-                  'Content-Type': service === 'ecr' ? 'application/x-amz-json-1.1' : 'application/x-amz-json-1.0',
-                  'X-Amz-Target': target,
-                },
-                body,
-              });
-              const response = await fetch('https://' + host + '/', { method: 'POST', headers, body });
-              const text = await response.text();
-              if (!response.ok) throw new Error(service + ' API ' + target + ' failed: ' + response.status + ' ' + text);
-              return text ? JSON.parse(text) : {};
-            }
-
-            for (const key of ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION']) {
-              if (!process.env[key]) throw new Error(key + ' is required');
-            }
-            const repositoryName = process.env.AWS_ECR_REPOSITORY || process.env.GITHUB_REPOSITORY.toLowerCase().replace(/[^a-z0-9._/-]/g, '-');
-            try {
-              await awsJsonRequest('ecr', 'AmazonEC2ContainerRegistry_V20150921.DescribeRepositories', { repositoryNames: [repositoryName] });
-            } catch (error) {
-              await awsJsonRequest('ecr', 'AmazonEC2ContainerRegistry_V20150921.CreateRepository', { repositoryName });
-            }
-            const auth = await awsJsonRequest('ecr', 'AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken', {});
-            const authData = auth.authorizationData[0];
-            const decoded = Buffer.from(authData.authorizationToken, 'base64').toString('utf8');
-            const separator = decoded.indexOf(':');
-            const username = decoded.slice(0, separator);
-            const password = decoded.slice(separator + 1);
-            const registry = authData.proxyEndpoint.replace(/^https?:\\/\\//, '');
-            core.setOutput('registry', registry);
-            core.setOutput('username', username);
-            core.setOutput('password', password);
-            core.setOutput('uri', registry + '/' + repositoryName + ':' + process.env.GITHUB_SHA);
-      - uses: docker/login-action@v3
-        with:
-          registry: \${{ steps.ecr.outputs.registry }}
-          username: \${{ steps.ecr.outputs.username }}
-          password: \${{ steps.ecr.outputs.password }}
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: \${{ steps.ecr.outputs.uri }}
-      - name: Deploy image to AWS App Runner
-        uses: actions/github-script@v7
-        env:
-          AWS_ACCESS_KEY_ID: \${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: \${{ secrets.AWS_REGION }}
-          APPRUNNER_SERVICE_ARNS: ${appRunnerServiceArns}
-          IMAGE_URI: \${{ steps.ecr.outputs.uri }}
-        with:
-          script: |
-            const crypto = require('crypto');
-
-            function sha256(data) {
-              return crypto.createHash('sha256').update(data).digest('hex');
-            }
-
-            function hmac(key, data, encoding) {
-              return crypto.createHmac('sha256', key).update(data).digest(encoding);
-            }
-
-            function signRequest({ method, host, path, service, region, accessKeyId, secretAccessKey, headers, body }) {
-              const now = new Date();
-              const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, '');
-              const dateStamp = amzDate.slice(0, 8);
-              const signedHeadersObject = { ...headers, Host: host, 'X-Amz-Date': amzDate };
-              const signedHeaders = Object.keys(signedHeadersObject).map((key) => key.toLowerCase()).sort().join(';');
-              const canonicalHeaders = Object.entries(signedHeadersObject).map(([key, value]) => key.toLowerCase() + ':' + String(value).trim()).sort().join('\\n');
-              const canonicalRequest = [method, path, '', canonicalHeaders + '\\n', signedHeaders, sha256(body)].join('\\n');
-              const algorithm = 'AWS4-HMAC-SHA256';
-              const credentialScope = dateStamp + '/' + region + '/' + service + '/aws4_request';
-              const stringToSign = [algorithm, amzDate, credentialScope, sha256(canonicalRequest)].join('\\n');
-              const kDate = hmac('AWS4' + secretAccessKey, dateStamp);
-              const kRegion = hmac(kDate, region);
-              const kService = hmac(kRegion, service);
-              const kSigning = hmac(kService, 'aws4_request');
-              const signature = hmac(kSigning, stringToSign, 'hex');
-              return {
-                ...signedHeadersObject,
-                Authorization: algorithm + ' Credential=' + accessKeyId + '/' + credentialScope + ', SignedHeaders=' + signedHeaders + ', Signature=' + signature,
-              };
-            }
-
-            async function appRunnerRequest(action, bodyObject) {
-              const region = process.env.AWS_REGION;
-              const host = 'apprunner.' + region + '.amazonaws.com';
-              const body = JSON.stringify(bodyObject);
-              const headers = signRequest({
-                method: 'POST',
-                host,
-                path: '/',
-                service: 'apprunner',
-                region,
-                accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-                headers: {
-                  'Content-Type': 'application/x-amz-json-1.0',
-                  'X-Amz-Target': 'AppRunner.' + action,
-                },
-                body,
-              });
-              const response = await fetch('https://' + host + '/', { method: 'POST', headers, body });
-              const text = await response.text();
-              if (!response.ok) throw new Error('App Runner ' + action + ' failed: ' + response.status + ' ' + text);
-              return text ? JSON.parse(text) : {};
-            }
-
-            const required = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'APPRUNNER_SERVICE_ARNS', 'IMAGE_URI'];
-            for (const key of required) {
-              if (!process.env[key]) throw new Error(key + ' is required');
-            }
-            const serviceArns = process.env.APPRUNNER_SERVICE_ARNS.split(',').map((value) => value.trim()).filter(Boolean);
-            if (serviceArns.length === 0) throw new Error('APPRUNNER_SERVICE_ARNS is empty');
-            for (const serviceArn of serviceArns) {
-              await appRunnerRequest('UpdateService', {
-                ServiceArn: serviceArn,
-                SourceConfiguration: {
-                  ImageRepository: {
-                    ImageIdentifier: process.env.IMAGE_URI,
-                    ImageRepositoryType: 'ECR',
-                  },
-                },
-              });
-            }
-`,
-        requiredSecrets: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION'],
-        requiredVariables,
-      };
-    }
-    case 'heroku': {
-      const herokuApp = providerValueOrVariable(target.providerProjectId, 'HEROKU_APP');
-      const requiredVariables = target.providerProjectId ? [] : ['HEROKU_APP'];
-      return {
-        steps: `      - name: Resolve Heroku app
-        id: heroku
-        uses: actions/github-script@v7
-        env:
-          HEROKU_API_KEY: \${{ secrets.HEROKU_API_KEY }}
-          HEROKU_APP: ${herokuApp}
-        with:
-          script: |
-            if (!process.env.HEROKU_API_KEY) throw new Error('HEROKU_API_KEY is required');
-            if (!process.env.HEROKU_APP) throw new Error('HEROKU_APP is required');
-            const response = await fetch('https://api.heroku.com/apps/' + encodeURIComponent(process.env.HEROKU_APP), {
-              method: 'GET',
-              headers: {
-                Authorization: 'Bearer ' + process.env.HEROKU_API_KEY,
-                Accept: 'application/vnd.heroku+json; version=3',
-              },
-            });
-            const body = await response.text();
-            if (!response.ok) throw new Error('Heroku app lookup failed: ' + response.status + ' ' + body);
-            const app = JSON.parse(body);
-            core.setOutput('app_name', app.name);
-      - uses: docker/login-action@v3
-        with:
-          registry: registry.heroku.com
-          username: _
-          password: \${{ secrets.HEROKU_API_KEY }}
-      - uses: docker/setup-buildx-action@v3
-      - name: Build and push Heroku image
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: registry.heroku.com/\${{ steps.heroku.outputs.app_name }}/web
-      - name: Release Heroku image
-        uses: actions/github-script@v7
-        env:
-          HEROKU_API_KEY: \${{ secrets.HEROKU_API_KEY }}
-          HEROKU_APP_NAME: \${{ steps.heroku.outputs.app_name }}
-          IMAGE_DIGEST: \${{ steps.build.outputs.digest }}
-        with:
-          script: |
-            const required = ['HEROKU_API_KEY', 'HEROKU_APP_NAME', 'IMAGE_DIGEST'];
-            for (const key of required) {
-              if (!process.env[key]) throw new Error(key + ' is required');
-            }
-            const response = await fetch('https://api.heroku.com/apps/' + encodeURIComponent(process.env.HEROKU_APP_NAME) + '/formation', {
-              method: 'PATCH',
-              headers: {
-                Authorization: 'Bearer ' + process.env.HEROKU_API_KEY,
-                Accept: 'application/vnd.heroku+json; version=3.docker-releases',
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({ updates: [{ type: 'web', docker_image: process.env.IMAGE_DIGEST }] }),
-            });
-            if (!response.ok) throw new Error('Heroku release failed: ' + response.status + ' ' + await response.text());
-`,
-        requiredSecrets: ['HEROKU_API_KEY'],
-        requiredVariables,
-      };
-    }
   }
 }
 
@@ -1276,13 +772,9 @@ export function buildBranchDeployWorkflow(
   migration: { includeStep: boolean; command?: string }
 ): BranchDeployWorkflow {
   const providerName =
-    provider === 'digitalocean'
-      ? 'DigitalOcean'
-      : provider === 'cloudrun'
-        ? 'Cloud Run'
-        : provider === 'apprunner'
-          ? 'AWS App Runner'
-          : provider.charAt(0).toUpperCase() + provider.slice(1);
+    provider === 'cloudrun'
+      ? 'Cloud Run'
+      : provider.charAt(0).toUpperCase() + provider.slice(1);
   const template = `deploy-${provider}-${target.kind}`;
   const filename = `${template}.yml`;
   const migrationStep = migration.includeStep && migration.command ? buildMigrationStep(migration.command) : '';
@@ -1291,7 +783,7 @@ export function buildBranchDeployWorkflow(
     ? [...deployBlock.requiredSecrets, 'DATABASE_URL']
     : [...deployBlock.requiredSecrets];
   const requiredVariables = [...deployBlock.requiredVariables];
-  const permissionsBlock = provider === 'railway' || provider === 'digitalocean'
+  const permissionsBlock = provider === 'railway'
     ? `    permissions:
       contents: read
       packages: write

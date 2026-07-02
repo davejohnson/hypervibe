@@ -16,13 +16,8 @@ export type DomainAttachAdapter = DomainAttachCapableAdapter & {
 };
 
 const PROVIDERS_REQUIRING_PROVIDER_ATTACH = new Set([
-  'apprunner',
   'cloudrun',
-  'digitalocean',
-  'heroku',
   'railway',
-  'render',
-  'vercel',
 ]);
 
 export function providerRequiresCustomDomainAttach(provider: string): boolean {

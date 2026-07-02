@@ -395,7 +395,6 @@ describe('PlanService.plan', () => {
       providerProjectId: 'rp-1',
       providerEnvironmentId: 'rail-env-1',
       providerServiceIds: ['svc-1'],
-      providerServiceArns: [],
     }, { includeStep: false });
     new EnvironmentRepository().create({
       projectId: project.id,
@@ -491,7 +490,6 @@ describe('PlanService.plan', () => {
       providerProjectId: 'rp-1',
       providerEnvironmentId: 'rail-env-1',
       providerServiceIds: ['svc-1'],
-      providerServiceArns: [],
     }, { includeStep: false });
     new EnvironmentRepository().create({
       projectId: ciProject.id,
@@ -592,7 +590,6 @@ describe('PlanService.plan', () => {
       providerProjectId: 'rp-1',
       providerEnvironmentId: 'rail-env-1',
       providerServiceIds: ['svc-1'],
-      providerServiceArns: [],
     }, { includeStep: false });
     new EnvironmentRepository().create({
       projectId: ciProject.id,
@@ -699,7 +696,6 @@ describe('PlanService.plan', () => {
       providerProjectId: 'rp-1',
       providerEnvironmentId: 'rail-env-1',
       providerServiceIds: ['svc-1'],
-      providerServiceArns: [],
     }, { includeStep: false });
     new EnvironmentRepository().create({
       projectId: ciProject.id,

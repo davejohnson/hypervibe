@@ -8,7 +8,7 @@ import {
 
 describe('domain attach policy', () => {
   it('requires provider-side domain attachment for managed hosting providers', () => {
-    for (const provider of ['apprunner', 'cloudrun', 'digitalocean', 'heroku', 'railway', 'render', 'vercel']) {
+    for (const provider of ['cloudrun', 'railway']) {
       expect(providerRequiresCustomDomainAttach(provider), provider).toBe(true);
     }
   });

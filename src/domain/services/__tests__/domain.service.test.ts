@@ -233,18 +233,18 @@ describe('setupCustomDomain', () => {
 
   it('does not write fallback DNS for managed hosts without domain attach support', async () => {
     seedCloudflareConnection({ apiToken: 'cf-token' }, 'app.example.com');
-    const project = new ProjectRepository().create({ name: 'domain-unsupported-host-app', defaultPlatform: 'vercel' });
+    const project = new ProjectRepository().create({ name: 'domain-unsupported-host-app', defaultPlatform: 'cloudrun' });
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
       platformBindings: {
-        provider: 'vercel',
-        projectId: 'vercel-project-1',
+        provider: 'cloudrun',
+        projectId: 'gcp-project-1',
         environmentId: 'production',
         services: {
           web: {
-            serviceId: 'vercel-web',
-            url: 'https://web.vercel.app',
+            serviceId: 'cloudrun-web',
+            url: 'https://web-abc123-uc.a.run.app',
           },
         },
       },
@@ -252,7 +252,7 @@ describe('setupCustomDomain', () => {
 
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
-      adapter: createBaseAdapter('vercel'),
+      adapter: createBaseAdapter('cloudrun'),
     });
     vi.spyOn(CloudflareAdapter.prototype, 'connect').mockImplementation(() => {});
     vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
@@ -273,7 +273,7 @@ describe('setupCustomDomain', () => {
     });
 
     expect(result.customDomainAttached).toBe(false);
-    expect(result.customDomainError).toContain('does not implement custom-domain attachment for vercel');
+    expect(result.customDomainError).toContain('does not implement custom-domain attachment for cloudrun');
     expect(result.dnsConfigured).toBe(false);
     expect(upsertDnsRecord).not.toHaveBeenCalled();
   });

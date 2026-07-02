@@ -336,7 +336,6 @@ function buildIntent(project: Project): ProjectIntentSchema {
     'cloudflare',
     'sendgrid',
     'supabase',
-    'rds',
     'cloudsql',
     'stripe',
     'recaptcha',

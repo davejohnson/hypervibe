@@ -21,7 +21,7 @@ async function applyInfra(args: {
   crons?: Record<string, { schedule: string; command?: string; timeZone?: string }>;
   serviceName?: string;
   domain?: string;
-  databaseProvider?: 'supabase' | 'rds' | 'cloudsql' | 'railway';
+  databaseProvider?: 'supabase' | 'cloudsql' | 'railway';
   setupEmail?: boolean;
   serviceConfig?: Record<string, Record<string, unknown>>;
   envVars?: Record<string, string>;

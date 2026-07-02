@@ -37,19 +37,14 @@ describe('provider-logs.service helpers', () => {
   describe('provider support matrix', () => {
     it('matches deployments provider support contract', () => {
       expect(supportsLogsDeploymentsProvider('railway')).toBe(true);
-      expect(supportsLogsDeploymentsProvider('vercel')).toBe(true);
-      expect(supportsLogsDeploymentsProvider('render')).toBe(true);
-      expect(supportsLogsDeploymentsProvider('digitalocean')).toBe(true);
       expect(supportsLogsDeploymentsProvider('cloudrun')).toBe(true);
-      expect(supportsLogsDeploymentsProvider('heroku')).toBe(false);
+      expect(supportsLogsDeploymentsProvider('vercel')).toBe(false);
     });
 
     it('matches build provider support contract', () => {
       expect(supportsLogsBuildProvider('railway')).toBe(true);
-      expect(supportsLogsBuildProvider('vercel')).toBe(true);
-      expect(supportsLogsBuildProvider('render')).toBe(true);
-      expect(supportsLogsBuildProvider('digitalocean')).toBe(true);
-      expect(supportsLogsBuildProvider('aws')).toBe(false);
+      expect(supportsLogsBuildProvider('cloudrun')).toBe(false);
+      expect(supportsLogsBuildProvider('vercel')).toBe(false);
     });
   });
 });

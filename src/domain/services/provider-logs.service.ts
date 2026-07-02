@@ -39,8 +39,8 @@ export function isErrorLike(log: UnifiedLog): boolean {
   );
 }
 
-const LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS = ['railway', 'vercel', 'render', 'digitalocean', 'cloudrun'] as const;
-const LOGS_BUILD_SUPPORTED_PROVIDERS = ['railway', 'vercel', 'render', 'digitalocean'] as const;
+const LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS = ['railway', 'cloudrun'] as const;
+const LOGS_BUILD_SUPPORTED_PROVIDERS = ['railway'] as const;
 
 export function supportsLogsDeploymentsProvider(provider: string): boolean {
   return (LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS as readonly string[]).includes(provider.toLowerCase());
@@ -109,26 +109,6 @@ export async function fetchProviderLogs(
     };
   }
 
-  if (provider === 'render') {
-    const serviceId = bindings.services?.[serviceName]?.serviceId;
-    if (!serviceId) {
-      throw new Error(`Service ${serviceName} is not bound to Render`);
-    }
-
-    const result = await adapterFactory.getProviderAdapter('render');
-    if (!result.success || !result.adapter) {
-      throw new Error(result.error || 'Failed to create Render adapter');
-    }
-    const adapter = result.adapter as unknown as {
-      getServiceLogs: (serviceId: string, limit?: number) => Promise<UnifiedLog[]>;
-    };
-    if (typeof adapter.getServiceLogs !== 'function') {
-      throw new Error('Render logs are not supported by this adapter version');
-    }
-    const logs = await adapter.getServiceLogs(serviceId, lines);
-    return { deploymentStatus: 'unknown', logs };
-  }
-
   if (provider === 'cloudrun') {
     const result = await adapterFactory.getProviderAdapter('cloudrun', project);
     if (!result.success || !result.adapter) {
@@ -161,36 +141,6 @@ export async function fetchProviderLogs(
         severity: log.severity || 'info',
         message: log.message,
       })),
-    };
-  }
-
-  if (provider === 'vercel') {
-    const projectId = bindings.projectId;
-    if (!projectId) {
-      throw new Error('Environment is not bound to Vercel projectId');
-    }
-
-    const result = await adapterFactory.getProviderAdapter('vercel');
-    if (!result.success || !result.adapter) {
-      throw new Error(result.error || 'Failed to create Vercel adapter');
-    }
-    const adapter = result.adapter as unknown as {
-      listDeployments: (projectId: string, limit?: number) => Promise<Array<{ id: string; readyState?: string }>>;
-      getDeploymentEvents: (deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
-    };
-    if (typeof adapter.listDeployments !== 'function' || typeof adapter.getDeploymentEvents !== 'function') {
-      throw new Error('Vercel logs are not supported by this adapter version');
-    }
-    const deployments = await adapter.listDeployments(projectId, 1);
-    if (deployments.length === 0) {
-      return { logs: [] };
-    }
-    const latestDeployment = deployments[0];
-    const logs = await adapter.getDeploymentEvents(latestDeployment.id, lines);
-    return {
-      deploymentStatus: latestDeployment.readyState ?? 'unknown',
-      deploymentId: latestDeployment.id,
-      logs,
     };
   }
 
@@ -256,104 +206,6 @@ export async function fetchProviderDeployments(
       status: d.status,
       createdAt: d.createdAt,
       url: d.staticUrl,
-    }));
-  }
-
-  if (provider === 'vercel') {
-    if (!bindings.projectId) {
-      throw new Error('Environment is not bound to Vercel projectId');
-    }
-    const result = await adapterFactory.getProviderAdapter('vercel', project);
-    if (!result.success || !result.adapter) {
-      throw new Error(result.error || 'Failed to create Vercel adapter');
-    }
-    const adapter = result.adapter as unknown as {
-      listDeployments: (projectId: string, limit?: number) => Promise<Array<{
-        id: string;
-        readyState?: string;
-        createdAt?: number;
-        url?: string;
-        name?: string;
-      }>>;
-    };
-    const deployments = await adapter.listDeployments(bindings.projectId, limit);
-    return deployments.map((d) => ({
-      id: d.id,
-      status: d.readyState ?? 'unknown',
-      createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : undefined,
-      url: d.url ? `https://${d.url}` : undefined,
-      service: d.name,
-    }));
-  }
-
-  if (provider === 'render') {
-    const result = await adapterFactory.getProviderAdapter('render', project);
-    if (!result.success || !result.adapter) {
-      throw new Error(result.error || 'Failed to create Render adapter');
-    }
-    const adapter = result.adapter as unknown as {
-      listServiceDeployments: (serviceId: string, limit?: number) => Promise<Array<{
-        id: string;
-        status: string;
-        createdAt: string;
-      }>>;
-    };
-    if (typeof adapter.listServiceDeployments !== 'function') {
-      throw new Error('Render deployments are not supported by this adapter version');
-    }
-
-    const targetServices = serviceName
-      ? [{ name: serviceName, serviceId: bindings.services?.[serviceName]?.serviceId }]
-      : Object.entries(bindings.services ?? {}).map(([name, svc]) => ({ name, serviceId: svc.serviceId }));
-
-    const deployments: ProviderDeployment[] = [];
-    for (const svc of targetServices) {
-      if (!svc.serviceId) continue;
-      const items = await adapter.listServiceDeployments(svc.serviceId, limit);
-      for (const d of items) {
-        deployments.push({
-          id: d.id,
-          status: d.status,
-          createdAt: d.createdAt,
-          service: svc.name,
-        });
-      }
-    }
-
-    deployments.sort((a, b) => {
-      const at = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const bt = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      return bt - at;
-    });
-    return deployments.slice(0, limit);
-  }
-
-  if (provider === 'digitalocean') {
-    if (!bindings.projectId) {
-      throw new Error('Environment is not bound to DigitalOcean projectId');
-    }
-    const result = await adapterFactory.getProviderAdapter('digitalocean', project);
-    if (!result.success || !result.adapter) {
-      throw new Error(result.error || 'Failed to create DigitalOcean adapter');
-    }
-    const adapter = result.adapter as unknown as {
-      listDeployments: (appId: string, limit?: number) => Promise<Array<{
-        id: string;
-        status: string;
-        createdAt?: string;
-        updatedAt?: string;
-      }>>;
-    };
-    if (typeof adapter.listDeployments !== 'function') {
-      throw new Error('DigitalOcean deployments are not supported by this adapter version');
-    }
-
-    const deployments = await adapter.listDeployments(bindings.projectId, limit);
-    return deployments.map((d) => ({
-      id: d.id,
-      status: d.status,
-      createdAt: d.createdAt,
-      updatedAt: d.updatedAt,
     }));
   }
 
@@ -425,100 +277,6 @@ export async function fetchProviderBuildLogs(
     }
 
     const buildLogs = await adapter.getBuildLogs(targetDeploymentId);
-    return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
-  }
-
-  if (provider === 'vercel') {
-    if (!bindings.projectId) {
-      throw new Error('Environment is not bound to Vercel projectId');
-    }
-    const result = await adapterFactory.getProviderAdapter('vercel', project);
-    if (!result.success || !result.adapter) {
-      throw new Error(result.error || 'Failed to create Vercel adapter');
-    }
-    const adapter = result.adapter as unknown as {
-      listDeployments: (projectId: string, limit?: number) => Promise<Array<{ id: string }>>;
-      getDeploymentEvents: (deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
-    };
-
-    let targetDeploymentId = deploymentId;
-    if (!targetDeploymentId) {
-      const deployments = await adapter.listDeployments(bindings.projectId, 1);
-      if (deployments.length === 0) {
-        throw new Error('No deployments found for service');
-      }
-      targetDeploymentId = deployments[0].id;
-    }
-
-    const events = await adapter.getDeploymentEvents(targetDeploymentId, 200);
-    const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
-    return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
-  }
-
-  if (provider === 'render') {
-    const serviceId = bindings.services?.[serviceName]?.serviceId;
-    if (!serviceId) {
-      throw new Error(`Service ${serviceName} not bound to Render`);
-    }
-    const result = await adapterFactory.getProviderAdapter('render', project);
-    if (!result.success || !result.adapter) {
-      throw new Error(result.error || 'Failed to create Render adapter');
-    }
-    const adapter = result.adapter as unknown as {
-      listServiceDeployments: (serviceId: string, limit?: number) => Promise<Array<{ id: string }>>;
-      getDeploymentLogs: (serviceId: string, deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
-    };
-    if (
-      typeof adapter.listServiceDeployments !== 'function' ||
-      typeof adapter.getDeploymentLogs !== 'function'
-    ) {
-      throw new Error('Render build logs are not supported by this adapter version');
-    }
-
-    let targetDeploymentId = deploymentId;
-    if (!targetDeploymentId) {
-      const deployments = await adapter.listServiceDeployments(serviceId, 1);
-      if (deployments.length === 0) {
-        throw new Error('No deployments found for service');
-      }
-      targetDeploymentId = deployments[0].id;
-    }
-
-    const events = await adapter.getDeploymentLogs(serviceId, targetDeploymentId, 200);
-    const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
-    return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
-  }
-
-  if (provider === 'digitalocean') {
-    if (!bindings.projectId) {
-      throw new Error('Environment is not bound to DigitalOcean projectId');
-    }
-    const result = await adapterFactory.getProviderAdapter('digitalocean', project);
-    if (!result.success || !result.adapter) {
-      throw new Error(result.error || 'Failed to create DigitalOcean adapter');
-    }
-    const adapter = result.adapter as unknown as {
-      listDeployments: (appId: string, limit?: number) => Promise<Array<{ id: string }>>;
-      getDeploymentLogs: (appId: string, deploymentId: string, limit?: number) => Promise<UnifiedLog[]>;
-    };
-    if (
-      typeof adapter.listDeployments !== 'function' ||
-      typeof adapter.getDeploymentLogs !== 'function'
-    ) {
-      throw new Error('DigitalOcean build logs are not supported by this adapter version');
-    }
-
-    let targetDeploymentId = deploymentId;
-    if (!targetDeploymentId) {
-      const deployments = await adapter.listDeployments(bindings.projectId, 1);
-      if (deployments.length === 0) {
-        throw new Error('No deployments found for service');
-      }
-      targetDeploymentId = deployments[0].id;
-    }
-
-    const events = await adapter.getDeploymentLogs(bindings.projectId, targetDeploymentId, 200);
-    const buildLogs = events.map((e) => `[${e.timestamp}] ${e.severity || 'info'} ${e.message}`).join('\n');
     return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
   }
 

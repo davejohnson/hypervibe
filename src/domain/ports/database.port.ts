@@ -61,7 +61,7 @@ export interface ProvisionResult {
  * Standard binding keys used for database components
  */
 export interface DatabaseBindings {
-  /** Provider name (e.g., 'supabase', 'rds', 'cloudsql', 'railway') */
+  /** Provider name (e.g., 'supabase', 'cloudsql', 'railway') */
   provider: string;
 
   /** External database/instance ID */

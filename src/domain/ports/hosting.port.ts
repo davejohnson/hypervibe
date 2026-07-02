@@ -40,7 +40,7 @@ export interface HostingCapabilities {
  * Each hosting adapter uses these keys to store its identifiers.
  */
 export interface HostingBindings {
-  /** Provider name (e.g., 'railway', 'digitalocean', 'heroku') */
+  /** Provider name (e.g., 'railway', 'cloudrun') */
   provider: string;
 
   /** External project/app ID on the hosting platform */

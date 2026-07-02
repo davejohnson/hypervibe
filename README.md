@@ -233,7 +233,7 @@ https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&descri
 That one token can be used for both:
 
 - `apiToken`: GitHub API work such as writing `.github/workflows/*`, reading Actions runs/jobs/logs, triggering workflows, and creating repository secrets.
-- `packageReadToken`: durable GHCR image-pull credentials for providers like Railway and DigitalOcean.
+- `packageReadToken`: durable GHCR image-pull credentials for Railway image deploys.
 
 For an existing `.env` file with one token:
 
@@ -274,7 +274,7 @@ What hypervibe uses the GitHub token for, and the permission each operation need
 | Manage the Railway GitHub App's repository access for `deploy.trigger: "native"` selected-repos installs | `repo` + repo admin — **classic PAT only**; GitHub's app-installation APIs do not accept fine-grained PATs | not supported |
 | Private repo source fetch for Cloud Run builds | `repo` | Contents: read |
 
-Fine-grained PATs can work for some GitHub API operations when granted the permissions in the table, but GitHub Packages/GHCR package authentication still requires a classic PAT. If you use a fine-grained PAT as `apiToken`, still provide a classic PAT with `read:packages` as `packageReadToken` for Railway/DigitalOcean GHCR deploys.
+Fine-grained PATs can work for some GitHub API operations when granted the permissions in the table, but GitHub Packages/GHCR package authentication still requires a classic PAT. If you use a fine-grained PAT as `apiToken`, still provide a classic PAT with `read:packages` as `packageReadToken` for Railway GHCR deploys.
 
 ### Push deploys
 
@@ -283,7 +283,7 @@ Fine-grained PATs can work for some GitHub API operations when granted the permi
 Typical setup:
 
 - Define the environment with `deploy: { strategy: "branch", branch: "main" }` or an explicit `trigger: "ci"`.
-- Run `hv_apply` first so Hypervibe records provider project, environment, service ID, and service ARN bindings.
+- Run `hv_apply` first so Hypervibe records provider project, environment, and service ID bindings.
 - Run `hv_ci_setup kind="deploy-branch" config={"provider":"<provider>"}`.
 - Check the returned `requiredSecrets`, `syncedSecrets`, `manualSecrets`, and `requiredVariables`. Hypervibe syncs provider API credentials to GitHub Actions secrets when the provider connection is verified and the GitHub token can write repo secrets.
 
@@ -293,13 +293,8 @@ Provider workflow behavior:
 |---|---|---|---|
 | `railway` | Build/push OCI image to GHCR with GitHub's built-in workflow token, update `ServiceInstance.source.image` via Railway GraphQL, then trigger deploy via Railway GraphQL | `RAILWAY_API_TOKEN`; `IMAGE_REGISTRY_USERNAME`/`IMAGE_REGISTRY_TOKEN` from the verified GitHub connection | Variables: `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_SERVICE_IDS` |
 | `cloudrun` | Build/push OCI image to Google Artifact Registry, patch Cloud Run services through Google APIs | `GCP_SERVICE_ACCOUNT_JSON`, `GCP_PROJECT_ID`, `GCP_REGION` | Variable: `CLOUDRUN_SERVICE_NAMES`; optional variable: `GCP_ARTIFACT_REPOSITORY` |
-| `apprunner` | Build/push OCI image to ECR, update App Runner services through AWS signed API requests | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | Variable: `APPRUNNER_SERVICE_ARNS`; optional variable: `AWS_ECR_REPOSITORY` |
-| `render` | Trigger Render service deploys through the Render API | `RENDER_API_KEY` | Variable: `RENDER_SERVICE_IDS` |
-| `digitalocean` | Build/push OCI image to GHCR with GitHub's built-in workflow token, update App Platform services to use that image through the DigitalOcean API, then trigger deployment | `DIGITALOCEAN_ACCESS_TOKEN`; `IMAGE_REGISTRY_USERNAME`/`IMAGE_REGISTRY_TOKEN` from the verified GitHub connection | Variables: `DO_APP_ID`, `DO_SERVICE_NAMES` |
-| `heroku` | Build/push OCI image to Heroku Container Registry and release the `web` process through the Heroku API | `HEROKU_API_KEY` | Variable: `HEROKU_APP` |
-| `vercel` | Trigger a Vercel deploy hook from GitHub Actions | none | Secret: `VERCEL_DEPLOY_HOOK_URL` |
 
-For Railway and DigitalOcean GHCR deploys, the generated workflow grants `packages: write` and uses `${{ github.actor }}` plus `${{ secrets.GITHUB_TOKEN }}` only for the workflow-time image push. The hosting provider also needs durable image-pull credentials because GitHub's workflow token is short-lived and only exists inside the Actions job. Hypervibe syncs those pull credentials into `IMAGE_REGISTRY_USERNAME` and `IMAGE_REGISTRY_TOKEN` from the verified GitHub connection when it has a login and a package-read-capable `packageReadToken`. Do not use `${{ secrets.GITHUB_TOKEN }}` for `IMAGE_REGISTRY_TOKEN`, and do not use a `read:packages`-only token as the GitHub `apiToken`.
+For Railway GHCR deploys, the generated workflow grants `packages: write` and uses `${{ github.actor }}` plus `${{ secrets.GITHUB_TOKEN }}` only for the workflow-time image push. The hosting provider also needs durable image-pull credentials because GitHub's workflow token is short-lived and only exists inside the Actions job. Hypervibe syncs those pull credentials into `IMAGE_REGISTRY_USERNAME` and `IMAGE_REGISTRY_TOKEN` from the verified GitHub connection when it has a login and a package-read-capable `packageReadToken`. Do not use `${{ secrets.GITHUB_TOKEN }}` for `IMAGE_REGISTRY_TOKEN`, and do not use a `read:packages`-only token as the GitHub `apiToken`.
 
 When Hypervibe syncs GitHub Actions secrets, it records only secret names plus local one-way value hashes. If the local provider token changes later, `hv_plan` will report the CI deploy action as needing an update and `hv_apply` will resync the GitHub secret value. Raw secret values are never written to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, or tool output.
 
@@ -358,6 +353,8 @@ Normal update flow:
 `hv_upgrade` is a diagnostic/repair tool, not a required user ritual. Use it when something looks stale or after changing the MCP install command; it reports the running package version, local SQLite schema version, pending migrations, repo spec/bindings status, and connection counts. If it reports pending SQLite migrations, run `hv_upgrade action="migrate"` and restart the MCP server once more.
 
 Provider credentials remain local and encrypted. Teammates may still need to run `hv_connect` for their own Railway, GitHub, Cloudflare, SendGrid, AWS, or GCP access after installing Hypervibe, but ordinary Hypervibe package and SQLite schema upgrades should happen on restart.
+
+Hosting support for Vercel, Render, Heroku, DigitalOcean, and AWS App Runner (plus AWS RDS databases) was removed. Specs that reference those providers no longer validate; move the environment to `railway` or `cloudrun` (databases: `supabase`, `cloudsql`, or `railway`) and re-run `hv_plan`. Stored connections for removed providers can still be deleted with `hv_connect action="remove"`.
 
 ## Adding New Providers
 

@@ -3,16 +3,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 // Import adapters for auto-registration (must be before registerConnectionTools)
 // Hosting platforms
 import './adapters/providers/railway/railway.adapter.js';
-import './adapters/providers/digitalocean/digitalocean.adapter.js';
-import './adapters/providers/render/render.adapter.js';
-import './adapters/providers/vercel/vercel.adapter.js';
-import './adapters/providers/heroku/heroku.adapter.js';
-import './adapters/providers/aws/apprunner.adapter.js';
 import './adapters/providers/gcp/cloudrun.adapter.js';
 
 // Database providers (Railway Postgres is handled via the Railway adapter shim in adapterFactory)
 import './adapters/providers/supabase/supabase.adapter.js';
-import './adapters/providers/aws/rds.adapter.js';
 import './adapters/providers/gcp/cloudsql.adapter.js';
 
 // Other providers
