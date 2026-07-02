@@ -18,6 +18,8 @@ Desired infrastructure state is repo-backed when Hypervibe runs inside a git wor
 
 When adding capabilities that create, mutate, purchase, migrate, or destroy infrastructure, default to modeling them in the spec and plan/apply flow. Use separate imperative tools only for read-only inspection, explicit operational actions, or narrow escape hatches; they should not become the primary path for lifecycle-managed infrastructure.
 
+Domain, DNS, registrar, hosting, database, and deploy-source changes are lifecycle infrastructure. Do not hide those mutations inside CI, diagnostics, or helper tools; add them to desired state, compute them in `hv_plan`, and converge them in `hv_apply`.
+
 Provider credentials and required external connections should be discovered as early as possible from the spec and reported before apply. Prefer `credentialsRef` with exported environment variables or local JSON files; raw credentials in chat are still accepted when the user intentionally chooses that path.
 
 Connection guidance is part of the product contract, not incidental copy. Every provider or secret-manager connection should have a `ConnectionGuidance` entry in `src/domain/services/connection-guidance.ts`, and token/permission errors should route through `formatConnectionGuidance(...)` whenever possible.

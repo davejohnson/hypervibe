@@ -266,11 +266,10 @@ What hypervibe uses the GitHub token for, and the permission each operation need
 
 | Operation | Classic PAT scope | Fine-grained permission |
 |---|---|---|
-| Commit CI/config files (`hv_ci_setup`: workflows, AI review, Pages CNAME, SEO files) | `repo` (+ `workflow` for files under `.github/workflows/`) | Contents: read/write |
+| Commit CI/config files (`hv_ci_setup`: workflows, AI review, SEO files) | `repo` (+ `workflow` for files under `.github/workflows/`) | Contents: read/write |
 | List/trigger Actions workflows, read runs/jobs/logs (`hv_ci_status`, `hv_ci_trigger`) | `repo` | Actions: read/write |
 | Set/delete Actions repo secrets (`hv_secrets_set target="github"`) | `repo` | Secrets: read/write |
 | Branch protection (`hv_ci_setup kind="branch-protection"`) | `repo` + repo admin | Administration: read/write |
-| GitHub Pages (`hv_ci_setup kind="pages"`) | `repo` | Pages: read/write |
 | Generated push deploys (`hv_ci_setup kind="deploy-branch"`) | `repo` + `workflow`; add Secrets read/write if Hypervibe should sync provider API tokens | Contents: read/write, Actions: read/write, Secrets: read/write |
 | Manage the Railway GitHub App's repository access for `deploy.trigger: "native"` selected-repos installs | `repo` + repo admin — **classic PAT only**; GitHub's app-installation APIs do not accept fine-grained PATs | not supported |
 | Private repo source fetch for Cloud Run builds | `repo` | Contents: read |

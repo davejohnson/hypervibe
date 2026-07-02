@@ -1871,6 +1871,7 @@ export class RailwayAdapter implements IProviderAdapter {
                             id
                             domain
                             status {
+                              verified
                               dnsRecords {
                                 currentValue
                                 fqdn
@@ -2139,6 +2140,7 @@ export class RailwayAdapter implements IProviderAdapter {
                     id
                     domain
                     status {
+                      verified
                       dnsRecords {
                         currentValue
                         fqdn
@@ -2668,7 +2670,9 @@ export class RailwayAdapter implements IProviderAdapter {
       const customDomainStatus = Object.fromEntries(
         (instance?.domains?.customDomains ?? []).map((domain) => {
           const dnsRecords = this.extractCustomDomainDnsRecords(domain.status);
-          const dnsConfigured = providerDnsRecordsAreConfigured(dnsRecords);
+          const dnsConfigured = typeof domain.status?.verified === 'boolean'
+            ? domain.status.verified
+            : providerDnsRecordsAreConfigured(dnsRecords);
           return [domain.domain, {
             ...(dnsRecords.length > 0 ? { dnsRecords } : {}),
             ...(dnsConfigured !== undefined
@@ -2893,6 +2897,7 @@ export interface RailwayCustomDomainDnsRecord {
 }
 
 export interface RailwayCustomDomainStatus {
+  verified?: boolean;
   dnsRecords?: RailwayCustomDomainDnsRecord[];
   verificationDnsHost?: string;
   verificationToken?: string;

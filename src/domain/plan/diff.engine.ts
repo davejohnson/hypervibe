@@ -2,6 +2,7 @@ import type { EnvironmentSpec, ServiceSpec } from '../spec/spec.schema.js';
 import type { ObservedState, ObservedService } from '../ports/observe.port.js';
 import { hashEnvValue } from '../ports/observe.port.js';
 import type { PlanAction, PlanFieldDiff, DiffResult, LocalSnapshot } from './plan.types.js';
+import { providerRequiresCustomDomainAttach } from '../services/domain-attach-policy.js';
 
 /**
  * Pure diff: desired spec vs observed live state (or local state when the
@@ -306,7 +307,9 @@ export function diffEnvironment(input: {
       : Object.values(localServiceBindings).some((b) => b.customDomains?.includes(spec.domain!));
     const domainStatus = attachedService?.customDomainStatus?.[spec.domain];
     const dnsConfigured = domainStatus?.dnsConfigured;
-    const configured = attached && dnsConfigured !== false;
+    const requiresProviderVerification = providerRequiresCustomDomainAttach(provider);
+    const configured = attached
+      && (dnsConfigured === true || (!requiresProviderVerification && dnsConfigured !== false));
     actions.push({
       id,
       type: configured ? 'noop' : 'update',
@@ -315,7 +318,9 @@ export function diffEnvironment(input: {
       reason: attached
         ? dnsConfigured === false
           ? `Domain ${spec.domain} is attached on ${provider}, but required DNS records are not configured`
-          : 'Domain attached'
+          : dnsConfigured === undefined && requiresProviderVerification
+            ? `Domain ${spec.domain} is attached on ${provider}, but provider verification status was not observed`
+            : 'Domain attached'
         : `Domain ${spec.domain} is not attached to any service`,
       dependsOn: configured ? undefined : projectDep,
       ...(domainStatus?.dnsRecords ? { metadata: { dnsRecords: domainStatus.dnsRecords } } : {}),

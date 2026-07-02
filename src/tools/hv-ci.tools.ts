@@ -7,9 +7,6 @@ import {
   resolveBranchDeployTargets,
   buildBranchDeployWorkflow,
   WORKFLOW_TEMPLATES,
-  GITHUB_PAGES_IPS,
-  isApexDomain,
-  getApexDomain,
   AI_REVIEW_WORKFLOW_PATH,
   AI_REVIEW_DEFAULT_MODEL,
   buildAiReviewWorkflowContent,
@@ -20,7 +17,6 @@ import {
   providerSecretsForGitHubActions,
   requiredProviderSecretNamesForGitHubActions,
 } from '../domain/services/ci-deploy.service.js';
-import { getCloudflareAdapter } from '../domain/services/cloudflare-ops.service.js';
 import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
 import { projectField } from './schemas.js';
@@ -207,11 +203,6 @@ const aiReviewConfigSchema = z.object({
   model: z.string().optional(),
 });
 
-const pagesConfigSchema = z.object({
-  repo: z.string().optional(),
-  domain: z.string(),
-});
-
 const branchProtectionConfigSchema = z.object({
   repo: z.string().optional(),
   branch: z.string(),
@@ -239,12 +230,11 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
     'Set up explicit CI/CD tasks on GitHub for a project. For desired-state push deploys, prefer hv_spec_set deploy.strategy="branch" trigger="ci", then hv_plan/hv_apply; that manages the deploy workflow and provider API secrets as infrastructure. Dispatches on kind; config holds the kind-specific fields (config.repo="owner/repo" overrides the project gitRemoteUrl for every kind). ' +
       'kind="deploy-branch": explicit/backfill branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs). Requires a GitHub apiToken that can write workflow files and repo secrets (classic PAT scopes repo + workflow for private repos); Railway/DigitalOcean image deploys also require packageReadToken with read:packages for GHCR pull credentials. config { provider (railway|vercel|render|digitalocean|cloudrun|apprunner|heroku, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
       'kind="ai-review": Claude PR review workflow; config { apiKey (required), model? }. ' +
-      'kind="pages": GitHub Pages with a custom domain via Cloudflare DNS; config { domain (required) }. ' +
       'kind="branch-protection": protection rules; config { branch (required), requireReviews?, requiredReviewers?, dismissStaleReviews?, requireCodeOwnerReviews?, requireStatusChecks?, statusChecks?, strictStatusChecks?, enforceAdmins?, requireLinearHistory?, allowForcePushes?, allowDeletions? }. ' +
       'kind="workflow": a workflow from a template; config { template (required, e.g. node-test, lint, deploy-railway) }.',
     {
       project: projectField,
-      kind: z.enum(['deploy-branch', 'ai-review', 'pages', 'branch-protection', 'workflow']).describe('What to set up'),
+      kind: z.enum(['deploy-branch', 'ai-review', 'branch-protection', 'workflow']).describe('What to set up'),
       config: z.record(z.unknown()).optional().describe('Kind-specific configuration (see tool description)'),
     },
     wrapHandler(async ({ project: projectRef, kind, config }) => {
@@ -414,77 +404,6 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
             {
               warnings: secretError ? [`Failed to set ANTHROPIC_API_KEY secret: ${secretError}. Set it manually in repo Settings > Secrets.`] : undefined,
               hint: `PRs will be reviewed by Claude (${model}).`,
-            }
-          );
-        }
-        case 'pages': {
-          const cfg = parseKindConfig(pagesConfigSchema, config, kind);
-          const { owner, repo } = resolveRepoOrThrow(ctx, projectRef, cfg.repo);
-          const adapter = githubAdapterOrThrow({ owner, repo });
-          const domain = cfg.domain.trim().toLowerCase();
-          const apex = getApexDomain(domain);
-
-          const cfResult = getCloudflareAdapter(apex);
-          if ('error' in cfResult) {
-            return toolError('MISSING_CONNECTION', cfResult.error, {
-              hint: formatConnectionGuidance('cloudflare', { scope: apex }),
-            });
-          }
-
-          let pages = await adapter.getPagesConfig(owner, repo);
-          let pagesWasEnabled = false;
-          if (!pages) {
-            pages = await adapter.enablePages(owner, repo, { branch: 'main', path: '/docs' });
-            pagesWasEnabled = true;
-          }
-
-          const zone = await cfResult.adapter.findZoneByName(apex);
-          if (!zone) {
-            return toolError('NOT_FOUND', `Cloudflare zone "${apex}" not found.`, {
-              hint: `Add the domain to Cloudflare or create a scoped connection for it. ${formatConnectionGuidance('cloudflare', { scope: apex })}`,
-            });
-          }
-
-          const dnsRecords: Array<Record<string, unknown>> = [];
-          if (isApexDomain(domain)) {
-            const ensured = await cfResult.adapter.ensureRecords(zone.id, domain, 'A', GITHUB_PAGES_IPS, { proxied: false });
-            dnsRecords.push({ name: domain, type: 'A', created: ensured.created, unchanged: ensured.unchanged });
-            const www = await cfResult.adapter.upsertDnsRecord(zone.id, `www.${domain}`, 'CNAME', `${owner}.github.io`, { proxied: false });
-            dnsRecords.push({ name: `www.${domain}`, type: 'CNAME', action: www.action });
-          } else {
-            const record = await cfResult.adapter.upsertDnsRecord(zone.id, domain, 'CNAME', `${owner}.github.io`, { proxied: false });
-            dnsRecords.push({ name: domain, type: 'CNAME', action: record.action });
-          }
-
-          const warnings: string[] = [];
-          try {
-            await adapter.setCustomDomain(owner, repo, domain);
-          } catch (error) {
-            warnings.push(`Failed to set custom domain on GitHub: ${error instanceof Error ? error.message : String(error)}`);
-          }
-          try {
-            await adapter.ensureCnameFile(owner, repo, domain, pages.source?.path || '/docs');
-          } catch (error) {
-            warnings.push(`Failed to ensure CNAME file: ${error instanceof Error ? error.message : String(error)}`);
-          }
-          try {
-            await adapter.requestPagesBuild(owner, repo);
-          } catch {
-            // Build request is best-effort.
-          }
-
-          ctx.repos.audit.create({
-            action: 'hv.ci_setup',
-            resourceType: 'github_pages',
-            resourceId: `${owner}/${repo}`,
-            details: { kind, domain, pagesWasEnabled, dnsRecords, warnings },
-          });
-
-          return toolSuccess(
-            { repository: `${owner}/${repo}`, domain, pagesWasEnabled, zone: { id: zone.id, name: zone.name }, dnsRecords },
-            {
-              warnings,
-              hint: 'DNS is configured. GitHub provisions the HTTPS certificate asynchronously (can take a while) — check progress with hv_ci_status include=["pages"], then enforce HTTPS once issued.',
             }
           );
         }

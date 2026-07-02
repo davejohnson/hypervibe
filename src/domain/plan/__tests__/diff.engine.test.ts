@@ -343,10 +343,29 @@ describe('diffEnvironment — domain and workload', () => {
     const attached = diffEnvironment({
       spec: withDomain,
       envName: 'production',
-      observed: observed({ services: [observedWeb({ customDomains: ['myapp.dev'] })] }),
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: { 'myapp.dev': { dnsConfigured: true } },
+        })],
+      }),
       local: local(),
     });
     expect(attached.actions.find((a) => a.id === 'domain:myapp.dev')!.type).toBe('noop');
+  });
+
+  it('updates when a provider-attached domain has no observed verification status', () => {
+    const withDomain = spec({ domain: 'myapp.dev' });
+    const result = diffEnvironment({
+      spec: withDomain,
+      envName: 'production',
+      observed: observed({ services: [observedWeb({ customDomains: ['myapp.dev'] })] }),
+      local: local(),
+    });
+
+    const domain = result.actions.find((a) => a.id === 'domain:myapp.dev')!;
+    expect(domain.type).toBe('update');
+    expect(domain.reason).toContain('provider verification status was not observed');
   });
 
   it('updates when the domain is attached but provider DNS is not configured', () => {
