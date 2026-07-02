@@ -130,7 +130,7 @@ export async function executeBootstrap(params: {
   const serviceWorkloads = params.services.map((serviceName, index) => {
     let service = serviceRepo.findByProjectAndName(project.id, serviceName);
     const runtimeConfig = params.serviceConfig?.[serviceName];
-    const workloadKind = service?.buildConfig.workloadKind ?? workloadKindForServiceName(serviceName, index);
+    const workloadKind = runtimeConfig?.workloadKind ?? service?.buildConfig.workloadKind ?? workloadKindForServiceName(serviceName, index);
     const publicAccess = typeof runtimeConfig?.public === 'boolean'
       ? runtimeConfig.public
       : defaultPublicForWorkload(workloadKind);

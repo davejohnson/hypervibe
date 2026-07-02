@@ -17,7 +17,7 @@ export const platformBindingsColumnSchema = z.record(z.unknown()).default({});
 /** services.build_config */
 export const buildConfigColumnSchema = z
   .object({
-    workloadKind: z.enum(['web', 'worker', 'cron', 'job']).optional(),
+    workloadKind: z.enum(['web', 'worker', 'cron']).optional(),
     builder: z.enum(['nixpacks', 'dockerfile', 'buildpack']).optional(),
     dockerfilePath: z.string().optional(),
     buildCommand: z.string().optional(),

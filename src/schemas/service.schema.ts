@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const buildConfigSchema = z.object({
-  workloadKind: z.enum(['web', 'worker', 'cron', 'job']).optional(),
+  workloadKind: z.enum(['web', 'worker', 'cron']).optional(),
   builder: z.enum(['nixpacks', 'dockerfile', 'buildpack']).optional(),
   dockerfilePath: z.string().optional(),
   buildCommand: z.string().optional(),

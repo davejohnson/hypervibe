@@ -10,7 +10,9 @@ import { z } from 'zod';
  */
 
 export const serviceSpecSchema = z.object({
-  workloadKind: z.enum(['web', 'worker', 'cron', 'job']).default('web'),
+  workloadKind: z.enum(['web', 'worker', 'cron'], {
+    errorMap: () => ({ message: "workloadKind 'job' was removed; use 'worker' (always-on) or 'cron' (scheduled, requires cronSchedule). See README migration notes." }),
+  }).default('web'),
   startCommand: z.string().min(1).optional(),
   releaseCommand: z.string().min(1).optional(),
   healthCheckPath: z.string().min(1).optional(),

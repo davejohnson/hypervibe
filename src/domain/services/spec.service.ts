@@ -22,6 +22,7 @@ export interface DesiredState {
   databaseProvider: (typeof DB_PROVIDERS)[number];
   setupEmail: boolean;
   serviceConfig?: Record<string, {
+    workloadKind?: WorkloadKind;
     startCommand?: string;
     releaseCommand?: string;
     healthCheckPath?: string;
@@ -94,6 +95,9 @@ export function normalizeServiceConfig(
     const configRecord = rawConfig as Record<string, unknown>;
     const nextConfig: NonNullable<DesiredState['serviceConfig']>[string] = {};
 
+    if (configRecord.workloadKind === 'web' || configRecord.workloadKind === 'worker' || configRecord.workloadKind === 'cron') {
+      nextConfig.workloadKind = configRecord.workloadKind;
+    }
     if (typeof configRecord.startCommand === 'string' && configRecord.startCommand.trim().length > 0) {
       nextConfig.startCommand = configRecord.startCommand.trim();
     }
@@ -189,7 +193,6 @@ export function splitDesiredWorkloads(params: {
 export function workloadKindForServiceName(serviceName: string, index: number): WorkloadKind {
   const normalized = serviceName.toLowerCase();
   if (/worker|queue|consumer|processor/.test(normalized)) return 'worker';
-  if (/job|task|migrate/.test(normalized)) return 'job';
   return index === 0 ? 'web' : 'worker';
 }
 

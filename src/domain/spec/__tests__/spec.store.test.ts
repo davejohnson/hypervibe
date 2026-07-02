@@ -5,6 +5,7 @@ import path from 'path';
 import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { SpecStore, desiredStateToSpec, deepMergeSpec } from '../spec.store.js';
+import { projectSpecSchema } from '../spec.schema.js';
 import type { Project } from '../../entities/project.entity.js';
 
 function freshDb() {
@@ -78,6 +79,23 @@ describe('deepMergeSpec', () => {
       { services: { worker: null } }
     ) as { services: Record<string, unknown> };
     expect(Object.keys(merged.services)).toEqual(['api']);
+  });
+});
+
+describe('serviceSpecSchema workloadKind', () => {
+  it("rejects the removed 'job' kind with a migration message", () => {
+    const result = projectSpecSchema.safeParse({
+      version: 1,
+      project: 'app',
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { migrate: { workloadKind: 'job' } },
+        },
+      },
+    });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.success ? '' : result.error.issues)).toContain("workloadKind 'job' was removed");
   });
 });
 

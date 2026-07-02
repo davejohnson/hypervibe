@@ -57,6 +57,22 @@ const webService = {
   },
 };
 
+const workerService = {
+  name: 'projects/gcp-project/locations/us-central1/services/gcp-project-consumer',
+  uid: 'uid-worker',
+  generation: '1',
+  observedGeneration: '1',
+  reconciling: false,
+  ingress: 'INGRESS_TRAFFIC_INTERNAL_ONLY',
+  labels: { 'infraprint-environment': 'production', 'infraprint-service': 'consumer' },
+  terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
+  template: {
+    containers: [{
+      image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-consumer:main',
+    }],
+  },
+};
+
 const strayService = {
   name: 'projects/gcp-project/locations/us-central1/services/other-web',
   uid: 'uid-2',
@@ -129,13 +145,16 @@ describe('CloudRunAdapter.observe', () => {
       const method = init?.method ?? 'GET';
 
       if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/services?') && method === 'GET') {
-        return Response.json({ services: [webService, strayService] });
+        return Response.json({ services: [webService, workerService, strayService] });
       }
       if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/jobs?') && method === 'GET') {
         return Response.json({ jobs: [cronJob, batchJob] });
       }
       if (url.endsWith('/services/gcp-project-web:getIamPolicy') && method === 'GET') {
         return Response.json({ bindings: [{ role: 'roles/run.invoker', members: ['allUsers'] }] });
+      }
+      if (url.endsWith('/services/gcp-project-consumer:getIamPolicy') && method === 'GET') {
+        return Response.json({ bindings: [] });
       }
       if (url.includes('cloudscheduler.googleapis.com') && url.endsWith('/jobs/gcp-project-cron-schedule') && method === 'GET') {
         return Response.json({
@@ -174,7 +193,7 @@ describe('CloudRunAdapter.observe', () => {
     expect(observed.databases).toEqual([]);
     expect(observed.partial).toBe(false);
     expect(observed.warnings).toEqual([]);
-    expect(observed.services.map((service) => service.name).sort()).toEqual(['batch', 'cron', 'web']);
+    expect(observed.services.map((service) => service.name).sort()).toEqual(['batch', 'consumer', 'cron', 'web']);
 
     const web = observed.services.find((service) => service.name === 'web');
     expect(web).toMatchObject({
@@ -209,10 +228,15 @@ describe('CloudRunAdapter.observe', () => {
     const batch = observed.services.find((service) => service.name === 'batch');
     expect(batch).toMatchObject({
       externalId: 'gcp-project-batch',
-      workloadKind: 'job',
+      // A Job without a Cloud Scheduler trigger is a broken cron.
+      workloadKind: 'cron',
       config: { startCommand: 'npm run batch' },
       status: 'failed',
     });
+
+    // Internal-only ingress classifies live services as workers.
+    const consumer = observed.services.find((svc) => svc.name === 'consumer');
+    expect(consumer).toMatchObject({ workloadKind: 'worker' });
 
     // Raw env var values must never appear in the observed state.
     expect(JSON.stringify(observed)).not.toContain('postgres://super-secret');

@@ -13,7 +13,7 @@ import type { Environment } from '../entities/environment.entity.js';
 export interface ObservedService {
   name: string;
   externalId: string;
-  workloadKind: 'web' | 'worker' | 'cron' | 'job';
+  workloadKind: 'web' | 'worker' | 'cron';
   url?: string;
   customDomains: string[];
   customDomainStatus?: Record<string, {

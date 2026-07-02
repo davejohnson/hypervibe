@@ -1,4 +1,4 @@
-export type WorkloadKind = 'web' | 'worker' | 'cron' | 'job';
+export type WorkloadKind = 'web' | 'worker' | 'cron';
 
 export interface BuildConfig {
   workloadKind?: WorkloadKind;
@@ -51,9 +51,6 @@ export function serviceWorkloadKind(service: Pick<Service, 'name' | 'buildConfig
   }
   if (/worker|queue|consumer|processor/.test(name)) {
     return 'worker';
-  }
-  if (/job|task|migrate/.test(name)) {
-    return 'job';
   }
 
   return 'web';

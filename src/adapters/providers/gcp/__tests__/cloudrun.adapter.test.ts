@@ -618,6 +618,14 @@ describe('CloudRunAdapter', () => {
     expect(result.receipt.data?.public).toBe(false);
     expect(result.receipt.data?.publicAccessConfigured).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes(':setIamPolicy'))).toBe(false);
+
+    // Workers must not scale to zero and must not receive external traffic.
+    const deployCall = fetchMock.mock.calls.find(([url, init]) =>
+      String(url).includes('run.googleapis.com') && init?.method === 'POST'
+    );
+    const deployBody = JSON.parse(String(deployCall?.[1]?.body));
+    expect(deployBody.ingress).toBe('INGRESS_TRAFFIC_INTERNAL_ONLY');
+    expect(deployBody.template.scaling).toEqual({ minInstanceCount: 1 });
   });
 
   it('updates existing service env vars with the Cloud Run v2 service shape', async () => {

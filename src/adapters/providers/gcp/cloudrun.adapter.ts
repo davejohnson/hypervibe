@@ -66,6 +66,7 @@ interface CloudRunService {
   reconciling?: boolean;
   labels?: Record<string, string>;
   uri?: string;
+  ingress?: string;
   template?: {
     containers?: CloudRunContainer[];
     volumes?: Array<Record<string, unknown>>;
@@ -442,12 +443,13 @@ export class CloudRunAdapter implements IProviderAdapter {
     };
 
     const prefix = bindings.projectId || 'hypervibe';
-    const isCron = serviceWorkloadKind(service) === 'cron';
+    const workloadKind = serviceWorkloadKind(service);
+    const isCron = workloadKind === 'cron';
     const serviceName = isCron
       ? bindings.services?.[service.name]?.jobName ?? this.sanitizeName(`${prefix}-${service.name}`)
       : bindings.services?.[service.name]?.serviceId ?? this.sanitizeName(`${prefix}-${service.name}`);
 
-    if (serviceWorkloadKind(service) === 'cron') {
+    if (isCron) {
       return this.deployScheduledJob({
         service,
         environment,
@@ -516,12 +518,16 @@ export class CloudRunAdapter implements IProviderAdapter {
         'infraprint-service': this.labelValue(service.name),
       };
 
-      // Cloud Run Admin API v2 Service shape.
+      // Cloud Run Admin API v2 Service shape. Workers get internal-only
+      // ingress and min one instance: with no inbound traffic they would
+      // otherwise scale to zero and never process work.
+      const isWorker = workloadKind === 'worker';
       const serviceSpec = {
         labels,
-        ingress: 'INGRESS_TRAFFIC_ALL',
+        ingress: isWorker ? 'INGRESS_TRAFFIC_INTERNAL_ONLY' : 'INGRESS_TRAFFIC_ALL',
         template: {
           labels,
+          ...(isWorker ? { scaling: { minInstanceCount: 1 } } : {}),
           containers: [containerSpec],
           ...(templateVolumes && (templateVolumes.length > 0 || replaceManagedDatabaseVars)
             ? { volumes: templateVolumes }
@@ -801,7 +807,8 @@ export class CloudRunAdapter implements IProviderAdapter {
     };
 
     const prefix = bindings.projectId || 'hypervibe';
-    const isCron = serviceWorkloadKind(service) === 'cron';
+    const workloadKind = serviceWorkloadKind(service);
+    const isCron = workloadKind === 'cron';
     const serviceName = isCron
       ? bindings.services?.[service.name]?.jobName ?? this.sanitizeName(`${prefix}-${service.name}`)
       : bindings.services?.[service.name]?.serviceId ?? this.sanitizeName(`${prefix}-${service.name}`);
@@ -1312,7 +1319,9 @@ export class CloudRunAdapter implements IProviderAdapter {
       services.push({
         name: this.observedServiceName(externalId, liveService.labels, bindingKey, prefix),
         externalId,
-        workloadKind: 'web',
+        // Workers deploy with internal-only ingress; classify by it so the
+        // diff can converge a manually flipped ingress back to the spec.
+        workloadKind: liveService.ingress === 'INGRESS_TRAFFIC_INTERNAL_ONLY' ? 'worker' : 'web',
         ...(liveService.uri ? { url: liveService.uri } : {}),
         customDomains: [],
         config: {
@@ -1355,7 +1364,9 @@ export class CloudRunAdapter implements IProviderAdapter {
       services.push({
         name: this.observedServiceName(externalId, liveJob.labels, bindingKey, prefix),
         externalId: schedulerJob ? schedulerJobName : externalId,
-        workloadKind: schedulerJob ? 'cron' : 'job',
+        // A Job without a Cloud Scheduler trigger is a broken cron: the
+        // missing cronSchedule surfaces as config drift in the diff.
+        workloadKind: 'cron',
         customDomains: [],
         config: {
           ...(startCommand ? { startCommand } : {}),

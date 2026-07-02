@@ -402,12 +402,43 @@ describe('diffEnvironment — domain and workload', () => {
     ]);
   });
 
-  it('replaces a service whose workload kind changed', () => {
+  it('replaces a service whose cron-ness changed', () => {
     const cronSpec = spec({ services: { web: { workloadKind: 'cron', cronSchedule: '0 3 * * *' } } });
     const result = diffEnvironment({ spec: cronSpec, envName: 'production', observed: observed(), local: local() });
     const web = result.actions.find((a) => a.id === 'service:web')!;
     expect(web.type).toBe('replace');
     expect(web.diff).toContainEqual({ field: 'workloadKind', from: 'web', to: 'cron' });
+  });
+
+  it('treats web<->worker as an update on providers that observe the kind', () => {
+    const workerSpec = spec({
+      hosting: { provider: 'cloudrun' },
+      services: { web: { workloadKind: 'worker', startCommand: 'npm start', healthCheckPath: '/health', public: true } },
+    });
+    const result = diffEnvironment({
+      spec: workerSpec,
+      envName: 'production',
+      observed: observed({ provider: 'cloudrun' }),
+      local: local({
+        bindings: {
+          provider: 'cloudrun',
+          projectId: 'gcp-proj-1',
+          services: { web: { serviceId: 'svc-1' } },
+        },
+      }),
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.type).toBe('update');
+    expect(web.diff).toContainEqual({ field: 'workloadKind', from: 'web', to: 'worker' });
+  });
+
+  it('skips the web<->worker field diff on railway, whose observe cannot distinguish them', () => {
+    const workerSpec = spec({
+      services: { web: { workloadKind: 'worker', startCommand: 'npm start', healthCheckPath: '/health', public: true } },
+    });
+    const result = diffEnvironment({ spec: workerSpec, envName: 'production', observed: observed(), local: local() });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.type).toBe('noop');
   });
 });
 

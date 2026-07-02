@@ -354,6 +354,8 @@ Normal update flow:
 
 Provider credentials remain local and encrypted. Teammates may still need to run `hv_connect` for their own Railway, GitHub, Cloudflare, SendGrid, AWS, or GCP access after installing Hypervibe, but ordinary Hypervibe package and SQLite schema upgrades should happen on restart.
 
+`workloadKind: "job"` was removed from the service spec — it never had run-to-completion deploy semantics. Specs using it fail validation; choose `worker` (always-on, internal-only on Cloud Run with a minimum of one instance — note Cloud Run workers must still listen on `PORT`) or `cron` (scheduled). Railway's observe cannot distinguish `web` from `worker`, so kind drift is not detected there.
+
 Hosting support for Vercel, Render, Heroku, DigitalOcean, and AWS App Runner (plus AWS RDS databases) was removed. Specs that reference those providers no longer validate; move the environment to `railway` or `cloudrun` (databases: `supabase`, `cloudsql`, or `railway`) and re-run `hv_plan`. Stored connections for removed providers can still be deleted with `hv_connect action="remove"`.
 
 ## Adding New Providers

@@ -112,7 +112,9 @@ export function diffEnvironment(input: {
         continue;
       }
 
-      if (live.workloadKind !== serviceSpec.workloadKind) {
+      // Only cron-ness is structural (Cloud Run Job vs Service are different
+      // resources); web<->worker converges via redeploy (ingress/scaling).
+      if ((live.workloadKind === 'cron') !== (serviceSpec.workloadKind === 'cron')) {
         actions.push({
           id,
           type: 'replace',
@@ -126,6 +128,11 @@ export function diffEnvironment(input: {
       }
 
       const diff = diffServiceConfig(serviceSpec, live, desiredEnvVars);
+      // Railway observe cannot distinguish web from worker, so a kind field
+      // diff there would never converge; skip it (documented observe gap).
+      if (live.workloadKind !== serviceSpec.workloadKind && provider !== 'railway') {
+        diff.push({ field: 'workloadKind', from: live.workloadKind, to: serviceSpec.workloadKind });
+      }
       const noCode = live.status === 'empty';
       const sourceIssue = spec.deploy?.strategy === 'branch' && expectedSource
         ? diffDeploySource(expectedSource, live)

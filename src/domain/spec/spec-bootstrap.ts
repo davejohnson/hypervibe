@@ -48,6 +48,7 @@ export function specToBootstrapParams(
     }
 
     const config: Record<string, unknown> = {};
+    config.workloadKind = service.workloadKind;
     if (service.startCommand !== undefined) config.startCommand = service.startCommand;
     if (service.releaseCommand !== undefined) config.releaseCommand = service.releaseCommand;
     if (service.healthCheckPath !== undefined) config.healthCheckPath = service.healthCheckPath;
