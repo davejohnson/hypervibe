@@ -53,6 +53,50 @@ export const domainRegistrationSpecSchema = z.object({
   privacyMode: z.enum(['redaction', 'off']).optional(),
 });
 
+export const iosTestflightGroupSpecSchema = z.object({
+  internal: z.boolean().default(false),
+  publicLinkEnabled: z.boolean().optional(),
+  publicLinkLimit: z.number().int().min(1).max(10000).optional(),
+  feedbackEnabled: z.boolean().optional(),
+  hasAccessToAllBuilds: z.boolean().optional(),
+  testers: z.array(z.string().email()).default([]),
+});
+
+/**
+ * iOS identity + TestFlight desired state. Capabilities and tester
+ * membership converge additively (never disabled/removed); extras on the
+ * live side are reported as unmanaged. Build upload, review submission,
+ * and App Store metadata stay imperative (hv_testflight_*, hv_appstore_*).
+ */
+export const iosSpecSchema = z.object({
+  bundleId: z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9.-]*$/, 'bundleId must be a reverse-DNS identifier'),
+  /** Name used when registering the bundle ID; defaults to the project name at plan time. */
+  appName: z.string().min(1).optional(),
+  platform: z.enum(['IOS', 'MAC_OS']).default('IOS'),
+  /** ASC capability types, e.g. PUSH_NOTIFICATIONS, ICLOUD, SIGN_IN_WITH_APPLE. */
+  capabilities: z.array(z.string().min(1)).default([]),
+  testflight: z.object({
+    groups: z.record(z.string().min(1), iosTestflightGroupSpecSchema).default({}),
+  }).optional(),
+}).superRefine((ios, ctx) => {
+  for (const [name, group] of Object.entries(ios.testflight?.groups ?? {})) {
+    if (group.publicLinkLimit !== undefined && !group.publicLinkEnabled) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'publicLinkLimit requires publicLinkEnabled',
+        path: ['testflight', 'groups', name, 'publicLinkLimit'],
+      });
+    }
+    if (group.internal && group.publicLinkEnabled) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'internal groups cannot have a public link',
+        path: ['testflight', 'groups', name, 'publicLinkEnabled'],
+      });
+    }
+  }
+});
+
 export const environmentSpecSchema = z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
@@ -67,6 +111,7 @@ export const environmentSpecSchema = z.object({
   envVars: z.record(z.string()).default({}),
   deploy: deploySpecSchema.optional(),
   migrations: migrationsSpecSchema.optional(),
+  ios: iosSpecSchema.optional(),
   /** Autofix agent log watches, synced on hv_apply. */
   autofix: z.object({
     enabled: z.boolean(),
@@ -92,6 +137,8 @@ export const projectSpecSchema = z.object({
 
 export type ServiceSpec = z.infer<typeof serviceSpecSchema>;
 export type DatabaseSpec = z.infer<typeof databaseSpecSchema>;
+export type IosSpec = z.infer<typeof iosSpecSchema>;
+export type IosTestflightGroupSpec = z.infer<typeof iosTestflightGroupSpecSchema>;
 export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;

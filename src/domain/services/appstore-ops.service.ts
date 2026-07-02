@@ -132,6 +132,42 @@ export async function resolveBetaGroup(
   });
 }
 
+/**
+ * Create-or-find testers and ensure they are in the given beta group.
+ * Shared by hv_testflight_distribute and the iOS spec converge path.
+ */
+export async function addTestersToGroup(
+  adapter: AppStoreConnectAdapter,
+  appId: string,
+  group: AppStoreBetaGroup,
+  testers: BetaTesterInput[],
+): Promise<Array<Record<string, unknown>>> {
+  if (testers.length === 0) return [];
+  const existing = await adapter.listBetaTesters({ groupId: group.id, limit: 200 });
+  const existingEmails = new Set(existing.map((t) => t.email?.toLowerCase()).filter(Boolean));
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const input of testers) {
+    const resolution = await adapter.getOrCreateBetaTester({
+      email: input.email,
+      firstName: input.firstName,
+      lastName: input.lastName,
+      appIds: [appId],
+      groupIds: [group.id],
+    });
+    const alreadyInGroup = existingEmails.has(input.email.toLowerCase());
+    if (!resolution.created && !alreadyInGroup) {
+      await adapter.addBetaTesterToBetaGroups(resolution.tester.id, [group.id]);
+    }
+    results.push({
+      ...resolution.tester,
+      created: resolution.created,
+      addedToGroup: resolution.created || !alreadyInGroup,
+    });
+  }
+  return results;
+}
+
 export function summarizeBuild(build: AppStoreConnectBuild): Record<string, unknown> {
   return {
     id: build.id,

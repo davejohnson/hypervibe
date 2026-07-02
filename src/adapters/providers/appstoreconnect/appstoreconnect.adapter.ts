@@ -399,6 +399,54 @@ export class AppStoreConnectAdapter {
     };
   }
 
+  async updateBetaGroup(groupId: string, attrs: {
+    hasAccessToAllBuilds?: boolean;
+    feedbackEnabled?: boolean;
+    publicLinkEnabled?: boolean;
+    publicLinkLimit?: number;
+  }): Promise<AppStoreBetaGroup> {
+    const attributes: Record<string, unknown> = {};
+    if (attrs.hasAccessToAllBuilds !== undefined) attributes.hasAccessToAllBuilds = attrs.hasAccessToAllBuilds;
+    if (attrs.feedbackEnabled !== undefined) attributes.feedbackEnabled = attrs.feedbackEnabled;
+    if (attrs.publicLinkEnabled !== undefined) attributes.publicLinkEnabled = attrs.publicLinkEnabled;
+    if (attrs.publicLinkLimit !== undefined) {
+      attributes.publicLinkLimitEnabled = true;
+      attributes.publicLinkLimit = attrs.publicLinkLimit;
+    }
+
+    const response = await this.apiRequest<{
+      data: {
+        id: string;
+        attributes: {
+          name: string;
+          isInternalGroup: boolean;
+          hasAccessToAllBuilds?: boolean;
+          publicLinkEnabled?: boolean;
+          publicLink?: string;
+          publicLinkLimit?: number;
+          feedbackEnabled?: boolean;
+        };
+      };
+    }>('PATCH', `/betaGroups/${groupId}`, {
+      data: {
+        type: 'betaGroups',
+        id: groupId,
+        attributes,
+      },
+    });
+
+    return {
+      id: response.data.id,
+      name: response.data.attributes.name,
+      isInternal: response.data.attributes.isInternalGroup,
+      hasAccessToAllBuilds: response.data.attributes.hasAccessToAllBuilds,
+      publicLinkEnabled: response.data.attributes.publicLinkEnabled,
+      publicLink: response.data.attributes.publicLink,
+      publicLinkLimit: response.data.attributes.publicLinkLimit,
+      feedbackEnabled: response.data.attributes.feedbackEnabled,
+    };
+  }
+
   async getOrCreateBetaGroup(input: {
     appId: string;
     name: string;

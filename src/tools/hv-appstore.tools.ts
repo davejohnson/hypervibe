@@ -5,6 +5,7 @@ import path from 'path';
 import type { ToolContext } from './context.js';
 import { toolSuccess, toolError, wrapHandler, HvError, describeError } from './respond.js';
 import {
+  addTestersToGroup,
   getAppStoreConnectAdapter,
   resolveAppId,
   resolveBuild,
@@ -41,42 +42,6 @@ function adapterOrThrow(scopeHint?: string): AppStoreConnectAdapter {
 function unwrap<T extends object>(result: T | { error: string }): T {
   if ('error' in result) throw new HvError('PROVIDER_ERROR', result.error);
   return result;
-}
-
-/**
- * Create-or-find testers and ensure they are in the given beta group.
- * Shared by hv_testflight_distribute's tester handling.
- */
-async function addTestersToGroup(
-  adapter: AppStoreConnectAdapter,
-  appId: string,
-  group: AppStoreBetaGroup,
-  testers: BetaTesterInput[],
-): Promise<Array<Record<string, unknown>>> {
-  if (testers.length === 0) return [];
-  const existing = await adapter.listBetaTesters({ groupId: group.id, limit: 200 });
-  const existingEmails = new Set(existing.map((t) => t.email?.toLowerCase()).filter(Boolean));
-  const results: Array<Record<string, unknown>> = [];
-
-  for (const input of testers) {
-    const resolution = await adapter.getOrCreateBetaTester({
-      email: input.email,
-      firstName: input.firstName,
-      lastName: input.lastName,
-      appIds: [appId],
-      groupIds: [group.id],
-    });
-    const alreadyInGroup = existingEmails.has(input.email.toLowerCase());
-    if (!resolution.created && !alreadyInGroup) {
-      await adapter.addBetaTesterToBetaGroups(resolution.tester.id, [group.id]);
-    }
-    results.push({
-      ...resolution.tester,
-      created: resolution.created,
-      addedToGroup: resolution.created || !alreadyInGroup,
-    });
-  }
-  return results;
 }
 
 /**
