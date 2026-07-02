@@ -11,6 +11,7 @@
  * Required environment variables:
  *   - ANTHROPIC_API_KEY: Claude API key for error analysis
  *   - RAILWAY_API_TOKEN: Railway API token (if watching Railway services)
+ *   - GCP_SERVICE_ACCOUNT_JSON: GCP service account JSON (if watching Cloud Run services)
  *   - GITHUB_TOKEN: GitHub token for PR creation (auto-provided in Actions)
  *
  * Optional environment variables:

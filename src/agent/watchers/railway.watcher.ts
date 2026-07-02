@@ -1,5 +1,5 @@
 import { LogWatcher, type NormalizedError, type FetchErrorsOptions } from './log-watcher.js';
-import { groupConsecutiveErrors, isErrorLog } from './types.js';
+import { groupConsecutiveErrors, isErrorLog, normalizeErrorGroups } from './types.js';
 import { RailwayAdapter, type RailwayCredentials, type RailwayLogEntry } from '../../adapters/providers/railway/railway.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
@@ -121,20 +121,10 @@ export class RailwayLogWatcher extends LogWatcher {
       );
 
       // Convert to normalized errors
-      const errors: NormalizedError[] = errorGroups.map((group) => {
-        const firstLine = group.lines[0];
-        const stackLines = group.lines.slice(1).filter((l) => /^\s+at\s/.test(l));
-
-        return {
-          timestamp: new Date(group.timestamp),
-          message: firstLine,
-          stackTrace: stackLines.length > 0 ? stackLines.join('\n') : undefined,
-          serviceName,
-          environmentName: env.name,
-          projectId: env.projectId,
-          rawLines: group.lines,
-          errorType: this.extractErrorType(firstLine),
-        };
+      const errors: NormalizedError[] = normalizeErrorGroups(errorGroups, {
+        serviceName,
+        environmentName: env.name,
+        projectId: env.projectId,
       });
 
       // Limit results
@@ -145,28 +135,5 @@ export class RailwayLogWatcher extends LogWatcher {
       console.error('Failed to fetch Railway logs:', error);
       return [];
     }
-  }
-
-  /**
-   * Extract error type from a log message.
-   */
-  private extractErrorType(message: string): string | undefined {
-    // Common patterns
-    const patterns = [
-      /^(\w+Error):/,           // TypeError:, ReferenceError:, etc.
-      /^(\w+Exception):/,       // NullPointerException:, etc.
-      /^Error: (\w+):/,         // Error: ENOENT:, etc.
-      /^Uncaught (\w+Error)/,   // Uncaught TypeError
-      /^\[(\w+Error)\]/,        // [DatabaseError]
-    ];
-
-    for (const pattern of patterns) {
-      const match = message.match(pattern);
-      if (match) {
-        return match[1];
-      }
-    }
-
-    return undefined;
   }
 }

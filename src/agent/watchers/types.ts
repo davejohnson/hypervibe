@@ -52,10 +52,10 @@ export function createFingerprint(error: NormalizedError): string {
 }
 
 /**
- * Extract error type from message.
- * e.g., "TypeError: Cannot read property..." -> "TypeError"
+ * Detect the error type from a log message, or undefined when no known
+ * pattern matches. e.g., "TypeError: Cannot read property..." -> "TypeError"
  */
-function extractErrorType(message: string): string {
+export function detectErrorType(message: string): string | undefined {
   // Common patterns
   const patterns = [
     /^(\w+Error):/,           // TypeError:, ReferenceError:, etc.
@@ -72,7 +72,11 @@ function extractErrorType(message: string): string {
     }
   }
 
-  return 'UnknownError';
+  return undefined;
+}
+
+function extractErrorType(message: string): string {
+  return detectErrorType(message) ?? 'UnknownError';
 }
 
 /**
@@ -123,6 +127,31 @@ export function isErrorLog(message: string, severity?: string): boolean {
 
   const lower = message.toLowerCase();
   return ERROR_KEYWORDS.some((keyword) => lower.includes(keyword));
+}
+
+/**
+ * Convert grouped error log lines into NormalizedError records.
+ * Shared by every provider watcher so error shape stays uniform.
+ */
+export function normalizeErrorGroups(
+  errorGroups: Array<{ timestamp: string; lines: string[] }>,
+  context: { serviceName: string; environmentName: string; projectId: string }
+): NormalizedError[] {
+  return errorGroups.map((group) => {
+    const firstLine = group.lines[0];
+    const stackLines = group.lines.slice(1).filter((l) => /^\s+at\s/.test(l));
+
+    return {
+      timestamp: new Date(group.timestamp),
+      message: firstLine,
+      stackTrace: stackLines.length > 0 ? stackLines.join('\n') : undefined,
+      serviceName: context.serviceName,
+      environmentName: context.environmentName,
+      projectId: context.projectId,
+      rawLines: group.lines,
+      errorType: detectErrorType(firstLine),
+    };
+  });
 }
 
 /**

@@ -2,6 +2,7 @@ import type { AutoFixConfig } from './config.js';
 import { StateManager, type TrackedError } from './state.js';
 import { LogWatcher, type NormalizedError } from './watchers/log-watcher.js';
 import { RailwayLogWatcher } from './watchers/railway.watcher.js';
+import { CloudRunLogWatcher } from './watchers/cloudrun.watcher.js';
 import { ErrorAnalyzer, type AnalysisResult } from './analyzer/error-analyzer.js';
 import { CodeFixer, type FixResult } from './fixer/code-fixer.js';
 import { PRCreator, type PRResult } from './github/pr-creator.js';
@@ -15,6 +16,7 @@ export class AutoFixAgent {
   private readonly config: AutoFixConfig;
   private readonly state: StateManager;
   private readonly watchers: Map<string, LogWatcher>;
+  private readonly providerWatchers: Map<string, LogWatcher | null>;
   private readonly analyzer: ErrorAnalyzer;
   private readonly fixer: CodeFixer;
   private readonly prCreator: PRCreator;
@@ -23,6 +25,7 @@ export class AutoFixAgent {
     this.config = config;
     this.state = new StateManager(config.workingDirectory);
     this.watchers = new Map();
+    this.providerWatchers = new Map();
     this.analyzer = new ErrorAnalyzer(config);
     this.fixer = new CodeFixer(config);
     this.prCreator = new PRCreator(config);
@@ -185,18 +188,32 @@ export class AutoFixAgent {
   }
 
   /**
-   * Get or create a log watcher for a project.
+   * Get or create a log watcher for a project, picking the first provider
+   * whose bindings match (canHandle). Watcher instances are shared across
+   * projects; the per-project choice is cached.
    */
   private async getWatcher(projectId: string): Promise<LogWatcher | null> {
-    // For now, only Railway is supported
-    // In the future, detect provider from project bindings
-    if (!this.watchers.has(projectId)) {
-      const watcher = await RailwayLogWatcher.create();
-      if (watcher) {
+    const cached = this.watchers.get(projectId);
+    if (cached) {
+      return cached;
+    }
+
+    const factories: Array<[string, () => Promise<LogWatcher | null>]> = [
+      ['railway', RailwayLogWatcher.create],
+      ['cloudrun', CloudRunLogWatcher.create],
+    ];
+    for (const [provider, create] of factories) {
+      let watcher = this.providerWatchers.get(provider) ?? null;
+      if (watcher === null && !this.providerWatchers.has(provider)) {
+        watcher = await create();
+        this.providerWatchers.set(provider, watcher);
+      }
+      if (watcher && await watcher.canHandle(projectId)) {
         this.watchers.set(projectId, watcher);
+        return watcher;
       }
     }
-    return this.watchers.get(projectId) ?? null;
+    return null;
   }
 
   /**
