@@ -5,7 +5,10 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { resolveProject } from './resolve-project.js';
 import { adapterFactory } from './adapter.factory.js';
 import { captureEnvironmentSnapshot, restoreEnvironmentSnapshot } from './local-state.transaction.js';
-import { getTableEstimates, quoteIdentifier } from './database-ops.service.js';
+import { getTableEstimates, quoteIdentifier, resolveEnvironmentDatabaseUrl } from './database-ops.service.js';
+import type { Component } from '../entities/component.entity.js';
+import type { Environment } from '../entities/environment.entity.js';
+import type { Project } from '../entities/project.entity.js';
 
 const envRepo = new EnvironmentRepository();
 const componentRepo = new ComponentRepository();
@@ -255,5 +258,160 @@ export function compareTableEstimates(
     missingTables,
     mismatchedTables,
     ok: missingTables.length === 0 && mismatchedTables.length === 0,
+  };
+}
+
+function connectionUrlFromBindings(bindings: Record<string, unknown> | null | undefined): string | undefined {
+  if (!bindings) return undefined;
+  if (typeof bindings.connectionUrl === 'string' && bindings.connectionUrl.length > 0) return bindings.connectionUrl;
+  if (typeof bindings.connectionString === 'string' && bindings.connectionString.length > 0) return bindings.connectionString;
+  return undefined;
+}
+
+export type ManagedMoveFailure = {
+  ok: false;
+  code: 'no_component' | 'no_source' | 'no_target' | 'same_database' | 'tooling' | 'copy_failed';
+  error: string;
+  hint?: string;
+};
+
+export type ManagedMoveSuccess = {
+  ok: true;
+  sourceProvider?: string;
+  targetProvider?: string;
+  verification: Awaited<ReturnType<typeof getExactCountVerification>>;
+};
+
+export interface ManagedMovePreview {
+  sourceProvider?: string;
+  targetProvider?: string;
+  sourceResolved: boolean;
+  targetResolved: boolean;
+  strategy: Record<string, unknown>;
+}
+
+/**
+ * Resolve the source (previous provider) and target (current provider)
+ * connection URLs for a staged database provider migration. The apply flow
+ * records the old database under previousProvider/previousBindings on the
+ * postgres component when the new one is created.
+ */
+export async function resolveManagedMoveTargets(params: {
+  project: Project;
+  environment: Environment;
+  sourceConnectionUrl?: string;
+  targetConnectionUrl?: string;
+}): Promise<
+  | { ok: true; sourceUrl: string; targetUrl: string; sourceProvider?: string; targetProvider?: string }
+  | ManagedMoveFailure
+> {
+  const component = componentRepo.findByEnvironmentAndType(params.environment.id, 'postgres');
+  const bindings = component?.bindings as Record<string, unknown> | undefined;
+  const targetProvider = typeof bindings?.provider === 'string' ? bindings.provider : undefined;
+  const previousProvider = typeof bindings?.previousProvider === 'string' ? bindings.previousProvider : undefined;
+  const previousBindings = bindings?.previousBindings && typeof bindings.previousBindings === 'object'
+    ? bindings.previousBindings as Record<string, unknown>
+    : undefined;
+
+  // Target: the CURRENT database (where data lands).
+  let targetUrl = params.targetConnectionUrl;
+  if (!targetUrl && component) {
+    targetUrl = await resolveEnvironmentDatabaseUrl(params.project, params.environment) ?? undefined;
+  }
+  if (!targetUrl) {
+    return {
+      ok: false,
+      code: component ? 'no_target' : 'no_component',
+      error: component
+        ? 'Could not resolve the target (current) database connection URL from the component bindings.'
+        : `No postgres component is tracked for ${params.environment.name}. Run hv_plan/hv_apply to create the new database first.`,
+      hint: 'The move copies INTO the environment\'s current database. Apply the plan that creates the new database, then re-run the move.',
+    };
+  }
+
+  // Source: the PREVIOUS provider's database (where data comes from).
+  let sourceUrl = params.sourceConnectionUrl;
+  if (!sourceUrl && previousBindings) {
+    sourceUrl = connectionUrlFromBindings(previousBindings);
+    if (!sourceUrl && previousProvider) {
+      const adapterResult = await adapterFactory.getDatabaseAdapter(previousProvider, params.project);
+      if (adapterResult.success && adapterResult.adapter) {
+        const syntheticComponent = {
+          ...(component as Component),
+          bindings: previousBindings,
+          externalId: typeof bindings?.previousExternalId === 'string' ? bindings.previousExternalId : null,
+        };
+        sourceUrl = await adapterResult.adapter.getConnectionUrl(syntheticComponent) ?? undefined;
+      }
+    }
+  }
+  if (!sourceUrl) {
+    return {
+      ok: false,
+      code: 'no_source',
+      error: previousProvider
+        ? `Could not resolve the previous ${previousProvider} database connection URL from the recorded bindings.`
+        : 'No previous database is recorded for this environment (the component has no previousProvider bindings).',
+      hint: 'The source is recorded automatically when hv_apply creates the replacement database during a provider change. Pass sourceConnectionUrl explicitly if the old database is not tracked.',
+    };
+  }
+
+  if (sourceUrl === targetUrl) {
+    return {
+      ok: false,
+      code: 'same_database',
+      error: 'Source and target resolve to the same database; nothing to move.',
+    };
+  }
+
+  return { ok: true, sourceUrl, targetUrl, sourceProvider: previousProvider, targetProvider };
+}
+
+/**
+ * Managed snapshot copy for a staged database provider migration:
+ * pg_dump | pg_restore from the previous provider's database into the
+ * current one, then exact-count verification on the largest tables.
+ * Writes made to the source after the dump starts are NOT copied —
+ * freeze writes or re-run the move before cutover.
+ */
+export async function executeManagedDatabaseMove(params: {
+  project: Project;
+  environment: Environment;
+  sourceConnectionUrl?: string;
+  targetConnectionUrl?: string;
+  criticalTables?: string[];
+}): Promise<ManagedMoveSuccess | ManagedMoveFailure> {
+  for (const command of ['pg_dump', 'pg_restore'] as const) {
+    if (!hasCommand(command)) {
+      return {
+        ok: false,
+        code: 'tooling',
+        error: `${command} is not available on this machine.`,
+        hint: 'Install the PostgreSQL client tools (macOS: brew install libpq && brew link --force libpq) and retry.',
+      };
+    }
+  }
+
+  const resolved = await resolveManagedMoveTargets(params);
+  if (!resolved.ok) {
+    return resolved;
+  }
+
+  const copy = await copyPostgresDatabase(resolved.sourceUrl, resolved.targetUrl);
+  if (!copy.success) {
+    return {
+      ok: false,
+      code: 'copy_failed',
+      error: copy.error ?? 'pg_dump/pg_restore failed',
+      hint: 'Check network access to both databases from this machine. Supabase requires the direct (non-pooler) connection string for pg_dump.',
+    };
+  }
+
+  const verification = await getExactCountVerification(resolved.sourceUrl, resolved.targetUrl, params.criticalTables);
+  return {
+    ok: true,
+    sourceProvider: resolved.sourceProvider,
+    targetProvider: resolved.targetProvider,
+    verification,
   };
 }

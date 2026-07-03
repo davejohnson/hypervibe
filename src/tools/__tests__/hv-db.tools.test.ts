@@ -130,3 +130,56 @@ describe('hv_db_url', () => {
     await t.close();
   });
 });
+
+describe('hv_db_migrate mode="move"', () => {
+  const SOURCE_URL = 'postgresql://postgres:oldpass@db.supabase.co:5432/postgres';
+  const TARGET_URL = 'postgresql://app:newpass@railway.internal:5432/app';
+
+  function seedStagedMigration() {
+    const project = new ProjectRepository().create({ name: 'move-app', defaultPlatform: 'railway' });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      bindings: {
+        provider: 'railway',
+        connectionUrl: TARGET_URL,
+        previousProvider: 'supabase',
+        previousBindings: { provider: 'supabase', connectionString: SOURCE_URL },
+      },
+    });
+  }
+
+  it('confirm-gates the move with masked source and target', async () => {
+    seedStagedMigration();
+
+    const t = await makeClient();
+    const result = await t.call('hv_db_migrate', { project: 'move-app', env: 'production', mode: 'move' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('CONFIRM_REQUIRED');
+    expect(result.error.details.source.provider).toBe('supabase');
+    expect(result.error.details.target.provider).toBe('railway');
+    // URLs are masked — passwords never reach chat.
+    expect(JSON.stringify(result)).not.toContain('oldpass');
+    expect(JSON.stringify(result)).not.toContain('newpass');
+    expect(result.error.details.strategy.writeFreezeRequired).toBe(true);
+    await t.close();
+  });
+
+  it('returns NOT_FOUND with guidance when no previous database is recorded', async () => {
+    const project = new ProjectRepository().create({ name: 'nosrc-app', defaultPlatform: 'railway' });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      bindings: { provider: 'railway', connectionUrl: TARGET_URL },
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_db_migrate', { project: 'nosrc-app', env: 'production', mode: 'move' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('NOT_FOUND');
+    expect(result.error.message).toContain('previous database');
+    await t.close();
+  });
+});

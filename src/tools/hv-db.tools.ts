@@ -7,6 +7,11 @@ import {
   resolveEnvironmentDatabaseUrl,
   maskDatabaseUrl,
 } from '../domain/services/database-ops.service.js';
+import {
+  databaseMigrationStrategyStatus,
+  executeManagedDatabaseMove,
+  resolveManagedMoveTargets,
+} from '../domain/services/database-move.service.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
@@ -97,21 +102,65 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_db_migrate',
-    'Run database migrations on a deployed environment (mode "up", default), or reset the database by dropping all tables (mode "reset", confirm-gated).',
+    'Run database migrations on a deployed environment (mode "up", default); reset the database by dropping all tables (mode "reset", confirm-gated); or copy data from the previous provider\'s database into the current one during a staged provider migration (mode "move", confirm-gated: pg_dump | pg_restore snapshot plus row-count verification — writes made to the source after the dump starts are not copied).',
     {
       project: projectField,
       env: envField,
-      mode: z.enum(['up', 'reset']).optional().describe('Default "up"'),
+      mode: z.enum(['up', 'reset', 'move']).optional().describe('Default "up"'),
       command: z.string().optional().describe('mode=up: migration command (default: prisma preset)'),
       preset: z.enum(['prisma', 'prisma-push', 'drizzle', 'typeorm', 'knex', 'sequelize', 'django', 'rails', 'laravel']).optional()
         .describe('mode=up: use a preset migration command'),
       service: z.string().optional().describe('Service to run the migration on (default: first service)'),
       dryRun: z.boolean().optional().describe('mode=up: show what would run without executing'),
+      sourceConnectionUrl: z.string().optional().describe('mode=move: override the source database URL (default: the previous provider recorded during hv_apply)'),
+      targetConnectionUrl: z.string().optional().describe('mode=move: override the target database URL (default: the environment\'s current database)'),
+      criticalTables: z.array(z.string()).optional().describe('mode=move: tables to verify with exact row counts (default: the 8 largest)'),
       confirm: confirmField,
     },
-    wrapHandler(async ({ project: projectRef, env, mode = 'up', command, preset, service, dryRun, confirm }) => {
+    wrapHandler(async ({ project: projectRef, env, mode = 'up', command, preset, service, dryRun, sourceConnectionUrl, targetConnectionUrl, criticalTables, confirm }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
+
+      if (mode === 'move') {
+        const resolved = await resolveManagedMoveTargets({ project, environment, sourceConnectionUrl, targetConnectionUrl });
+        if (!resolved.ok) {
+          const code = resolved.code === 'tooling' ? 'UNSUPPORTED' : 'NOT_FOUND';
+          return toolError(code, resolved.error, { hint: resolved.hint });
+        }
+        if (!confirm) {
+          return toolError('CONFIRM_REQUIRED', 'Managed database move copies data with pg_dump | pg_restore (pg_restore --clean replaces existing objects in the target).', {
+            details: {
+              source: { provider: resolved.sourceProvider ?? 'unknown', url: maskDatabaseUrl(resolved.sourceUrl) },
+              target: { provider: resolved.targetProvider ?? 'unknown', url: maskDatabaseUrl(resolved.targetUrl) },
+              strategy: databaseMigrationStrategyStatus('snapshot'),
+            },
+            hint: 'Freeze writes to the source (or plan a final re-run) and re-run with confirm=true. After the move, re-run hv_plan to repoint services, verify the app, then confirm the old database destroy.',
+          });
+        }
+
+        const result = await executeManagedDatabaseMove({ project, environment, sourceConnectionUrl, targetConnectionUrl, criticalTables });
+        if (!result.ok) {
+          const code = result.code === 'tooling' ? 'UNSUPPORTED' : 'PROVIDER_ERROR';
+          return toolError(code, result.error, { hint: result.hint });
+        }
+        return toolSuccess(
+          {
+            moved: true,
+            source: { provider: result.sourceProvider ?? 'unknown' },
+            target: { provider: result.targetProvider ?? 'unknown' },
+            verification: result.verification,
+          },
+          {
+            warnings: result.verification.ok
+              ? undefined
+              : [`Row counts differ on ${result.verification.mismatches.length} table(s) — writes may have continued on the source. Freeze writes and re-run the move, or verify manually.`],
+            hint: result.verification.ok
+              ? 'Copy verified. Next: hv_plan then hv_apply to repoint services at the new database, verify app health, then re-run hv_plan and confirm the old database destroy action.'
+              : 'Resolve the row-count mismatches before cutting over.',
+            next: ['hv_plan', 'hv_apply'],
+          }
+        );
+      }
 
       if (mode === 'reset') {
         const target = await resolveTarget(ctx, { project: projectRef, env, service });
