@@ -204,6 +204,8 @@ export const AwsSecretsCredentialsSchema = z.object({
   region: z.string().default('us-east-1'),
   accessKeyId: z.string().optional(),
   secretAccessKey: z.string().optional(),
+  /** Required for temporary STS credentials (adds X-Amz-Security-Token). */
+  sessionToken: z.string().optional(),
   // If not provided, uses default credential chain
 });
 

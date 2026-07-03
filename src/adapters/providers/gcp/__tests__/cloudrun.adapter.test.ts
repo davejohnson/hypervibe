@@ -182,6 +182,9 @@ describe('CloudRunAdapter', () => {
 
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/services?') && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ services: [] });
+      }
       if (url === 'https://logging.googleapis.com/v2/entries:list' && init?.method === 'POST') {
         return Response.json({
           error: {
@@ -201,6 +204,80 @@ describe('CloudRunAdapter', () => {
     expect(result.warning).toContain('roles/logging.viewer');
     expect(result.warning).toContain('roles/logging.viewAccessor');
     expect(result.warning).toContain('serviceAccount:deploy@gcp-project.iam.gserviceaccount.com');
+  });
+
+  it('fails verification when the Cloud Run Admin API probe is denied', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key_id: 'key-id',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+        client_id: 'client-id',
+        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+        token_uri: 'https://oauth2.googleapis.com/token',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/services?') && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({
+          error: {
+            code: 403,
+            message: "Permission 'run.services.list' denied on resource",
+            status: 'PERMISSION_DENIED',
+          },
+        }, { status: 403 });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.verify();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('roles/run.admin');
+    expect(result.error).toContain('serviceAccount:deploy@gcp-project.iam.gserviceaccount.com');
+  });
+
+  it('fails verification with status and body on non-403 Cloud Run Admin API errors', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key_id: 'key-id',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+        client_id: 'client-id',
+        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+        token_uri: 'https://oauth2.googleapis.com/token',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/services?') && (init?.method ?? 'GET') === 'GET') {
+        return new Response('backend unavailable', { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.verify();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('503');
+    expect(result.error).toContain('backend unavailable');
   });
 
   it('enables Cloud Resource Manager before repairing logging IAM when the API is disabled', async () => {

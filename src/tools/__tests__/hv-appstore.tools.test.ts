@@ -138,6 +138,110 @@ describe('hv_testflight_distribute', () => {
   });
 });
 
+const VERSION = { id: 'ver-1', versionString: '1.2.0', appStoreState: 'PREPARE_FOR_SUBMISSION', platform: 'IOS' };
+
+describe('hv_appstore_submit', () => {
+  function stubSubmittableVersion() {
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'findAppByBundleId').mockResolvedValue(APP);
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'getEditableAppStoreVersion').mockResolvedValue(VERSION);
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'getAppStoreVersionBuild').mockResolvedValue({ id: 'build-1', version: '42' });
+  }
+
+  it('creates a review submission, adds the version as an item, and submits it', async () => {
+    seedConnection();
+    stubSubmittableVersion();
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'listReviewSubmissions').mockResolvedValue([]);
+    const create = vi.spyOn(AppStoreConnectAdapter.prototype, 'createReviewSubmission')
+      .mockResolvedValue({ id: 'rs-1', state: 'READY_FOR_REVIEW', platform: 'IOS' });
+    const addItem = vi.spyOn(AppStoreConnectAdapter.prototype, 'addReviewSubmissionItem').mockResolvedValue(undefined);
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitReviewSubmission')
+      .mockResolvedValue({ id: 'rs-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' });
+    const t = await makeClient();
+
+    const res = await t.call('hv_appstore_submit', { appIdentifier: 'com.example.app' });
+    expect(res.ok).toBe(true);
+    expect(create).toHaveBeenCalledWith('app-1', 'IOS');
+    expect(addItem).toHaveBeenCalledWith('rs-1', 'ver-1');
+    expect(submit).toHaveBeenCalledWith('rs-1');
+    expect(res.data.version).toMatchObject({ id: 'ver-1', versionString: '1.2.0' });
+    expect(res.data.reviewSubmission).toEqual({ id: 'rs-1', state: 'WAITING_FOR_REVIEW', reusedExistingSubmission: false });
+
+    const audit = new AuditRepository().findByAction('appstore.submit');
+    expect(audit).toHaveLength(1);
+    expect(audit[0].details).toMatchObject({ reviewSubmissionId: 'rs-1' });
+    await t.close();
+  });
+
+  it('reuses an existing READY_FOR_REVIEW submission instead of creating one', async () => {
+    seedConnection();
+    stubSubmittableVersion();
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'listReviewSubmissions')
+      .mockResolvedValue([{ id: 'rs-9', state: 'READY_FOR_REVIEW', platform: 'IOS' }]);
+    const create = vi.spyOn(AppStoreConnectAdapter.prototype, 'createReviewSubmission');
+    const addItem = vi.spyOn(AppStoreConnectAdapter.prototype, 'addReviewSubmissionItem').mockResolvedValue(undefined);
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'submitReviewSubmission')
+      .mockResolvedValue({ id: 'rs-9', state: 'WAITING_FOR_REVIEW', platform: 'IOS' });
+    const t = await makeClient();
+
+    const res = await t.call('hv_appstore_submit', { appIdentifier: 'com.example.app' });
+    expect(res.ok).toBe(true);
+    expect(create).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith('rs-9', 'ver-1');
+    expect(res.data.reviewSubmission).toEqual({ id: 'rs-9', state: 'WAITING_FOR_REVIEW', reusedExistingSubmission: true });
+    await t.close();
+  });
+
+  it('fails clearly when a review submission is already in flight', async () => {
+    seedConnection();
+    stubSubmittableVersion();
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'listReviewSubmissions')
+      .mockResolvedValue([{ id: 'rs-9', state: 'WAITING_FOR_REVIEW', platform: 'IOS' }]);
+    const addItem = vi.spyOn(AppStoreConnectAdapter.prototype, 'addReviewSubmissionItem');
+    const t = await makeClient();
+
+    const res = await t.call('hv_appstore_submit', { appIdentifier: 'com.example.app' });
+    expect(res.ok).toBe(false);
+    expect(res.error.message).toContain('already WAITING_FOR_REVIEW');
+    expect(res.error.message).toContain('rs-9');
+    expect(addItem).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('surfaces the provider error detail when adding the version item fails', async () => {
+    seedConnection();
+    stubSubmittableVersion();
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'listReviewSubmissions')
+      .mockResolvedValue([{ id: 'rs-9', state: 'READY_FOR_REVIEW', platform: 'IOS' }]);
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'addReviewSubmissionItem')
+      .mockRejectedValue(new Error('App Store Connect API: This version is already added to another submission.'));
+    const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitReviewSubmission');
+    const t = await makeClient();
+
+    const res = await t.call('hv_appstore_submit', { appIdentifier: 'com.example.app' });
+    expect(res.ok).toBe(false);
+    expect(res.error.message).toContain('Could not add version ver-1 to review submission rs-9');
+    expect(res.error.message).toContain('already added to another submission');
+    expect(submit).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('returns VALIDATION when no version is ready for submission', async () => {
+    seedConnection();
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'findAppByBundleId').mockResolvedValue(APP);
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'getEditableAppStoreVersion').mockResolvedValue(null);
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'listAppStoreVersions')
+      .mockResolvedValue([{ id: 'ver-0', versionString: '1.1.0', appStoreState: 'READY_FOR_SALE', platform: 'IOS' }]);
+    const t = await makeClient();
+
+    const res = await t.call('hv_appstore_submit', { appIdentifier: 'com.example.app' });
+    expect(res.ok).toBe(false);
+    expect(res.error.code).toBe('VALIDATION');
+    expect(res.error.message).toContain('No version ready for submission');
+    expect(res.error.details.currentVersions).toEqual([{ version: '1.1.0', state: 'READY_FOR_SALE', platform: 'IOS' }]);
+    await t.close();
+  });
+});
+
 describe('hv_xcode_deploy', () => {
   it('dispatches action="devices" to the Xcode adapter', async () => {
     vi.spyOn(XcodeAdapter.prototype, 'listDevices').mockResolvedValue([

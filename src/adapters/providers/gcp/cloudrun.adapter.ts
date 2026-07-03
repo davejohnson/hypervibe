@@ -287,6 +287,32 @@ export class CloudRunAdapter implements IProviderAdapter {
 
     try {
       const token = await this.getAccessToken();
+
+      // A token exchange succeeds even for a service account with zero roles;
+      // probe the Cloud Run Admin API since deploys are impossible without it.
+      const { projectId, region } = this.credentials;
+      const runResponse = await fetch(
+        `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services?pageSize=1`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!runResponse.ok) {
+        const text = await runResponse.text();
+        if (runResponse.status === 403) {
+          return {
+            success: false,
+            error: [
+              'Cloud Run Admin API probe failed with 403.',
+              `Grant roles/run.admin to serviceAccount:${this.serviceAccountCreds.client_email} on project ${projectId} — deploys are impossible without it.`,
+              `Original error: ${text}`,
+            ].join(' '),
+          };
+        }
+        return {
+          success: false,
+          error: `Cloud Run Admin API probe failed: ${runResponse.status} ${text}`,
+        };
+      }
+
       const loggingAccess = await this.verifyCloudLoggingAccess(token);
       if (!loggingAccess.success) {
         return {

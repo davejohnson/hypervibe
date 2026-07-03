@@ -52,6 +52,12 @@ export interface AppStoreVersion {
   platform: string;
 }
 
+export interface ReviewSubmission {
+  id: string;
+  state: string;
+  platform: string;
+}
+
 export interface AppStoreVersionLocalization {
   id: string;
   locale: string;
@@ -904,23 +910,139 @@ export class AppStoreConnectAdapter {
   }
 
   /**
-   * Submit an App Store version for review.
-   * The version must be in PREPARE_FOR_SUBMISSION state with a valid build attached.
+   * List review submissions for an app, optionally filtered by platform and state.
    */
-  async submitForReview(appStoreVersionId: string): Promise<void> {
-    await this.apiRequest('POST', '/appStoreVersionSubmissions', {
+  async listReviewSubmissions(
+    appId: string,
+    options?: { platform?: string; states?: string[] }
+  ): Promise<ReviewSubmission[]> {
+    const params = new URLSearchParams();
+    params.set('filter[app]', appId);
+    params.set('fields[reviewSubmissions]', 'state,platform');
+    if (options?.platform) {
+      params.set('filter[platform]', options.platform);
+    }
+    if (options?.states?.length) {
+      params.set('filter[state]', options.states.join(','));
+    }
+
+    const result = await this.apiRequest<{
+      data: Array<{ id: string; attributes: { state: string; platform: string } }>;
+    }>('GET', `/reviewSubmissions?${params.toString()}`);
+
+    return result.data.map(s => ({
+      id: s.id,
+      state: s.attributes.state,
+      platform: s.attributes.platform,
+    }));
+  }
+
+  /**
+   * Create a review submission for an app on a platform.
+   */
+  async createReviewSubmission(appId: string, platform: string): Promise<ReviewSubmission> {
+    const result = await this.apiRequest<{
+      data: { id: string; attributes: { state: string; platform: string } };
+    }>('POST', '/reviewSubmissions', {
       data: {
-        type: 'appStoreVersionSubmissions',
+        type: 'reviewSubmissions',
+        attributes: { platform },
         relationships: {
-          appStoreVersion: {
-            data: {
-              type: 'appStoreVersions',
-              id: appStoreVersionId,
-            },
+          app: {
+            data: { type: 'apps', id: appId },
           },
         },
       },
     });
+
+    return {
+      id: result.data.id,
+      state: result.data.attributes.state,
+      platform: result.data.attributes.platform,
+    };
+  }
+
+  /**
+   * Add an App Store version as an item on a review submission.
+   */
+  async addReviewSubmissionItem(reviewSubmissionId: string, appStoreVersionId: string): Promise<void> {
+    await this.apiRequest('POST', '/reviewSubmissionItems', {
+      data: {
+        type: 'reviewSubmissionItems',
+        relationships: {
+          reviewSubmission: {
+            data: { type: 'reviewSubmissions', id: reviewSubmissionId },
+          },
+          appStoreVersion: {
+            data: { type: 'appStoreVersions', id: appStoreVersionId },
+          },
+        },
+      },
+    });
+  }
+
+  /**
+   * Submit a review submission to App Review.
+   */
+  async submitReviewSubmission(reviewSubmissionId: string): Promise<ReviewSubmission> {
+    const result = await this.apiRequest<{
+      data: { id: string; attributes: { state: string; platform: string } };
+    }>('PATCH', `/reviewSubmissions/${reviewSubmissionId}`, {
+      data: {
+        type: 'reviewSubmissions',
+        id: reviewSubmissionId,
+        attributes: { submitted: true },
+      },
+    });
+
+    return {
+      id: result.data.id,
+      state: result.data.attributes.state,
+      platform: result.data.attributes.platform,
+    };
+  }
+
+  /**
+   * Submit an App Store version for review via the reviewSubmissions flow
+   * (the appStoreVersionSubmissions create endpoint was removed in ASC API 4.0):
+   * reuse or create an open review submission, add the version as an item,
+   * then submit. The version must be in PREPARE_FOR_SUBMISSION state with a
+   * valid build attached.
+   */
+  async submitForReview(input: {
+    appId: string;
+    appStoreVersionId: string;
+    platform: string;
+  }): Promise<{ reviewSubmission: ReviewSubmission; reusedExistingSubmission: boolean }> {
+    const open = await this.listReviewSubmissions(input.appId, {
+      platform: input.platform,
+      states: ['READY_FOR_REVIEW', 'WAITING_FOR_REVIEW', 'IN_REVIEW', 'UNRESOLVED_ISSUES'],
+    });
+
+    const inFlight = open.find(s => s.state !== 'READY_FOR_REVIEW');
+    if (inFlight) {
+      throw new Error(
+        `A review submission for this app is already ${inFlight.state} (id ${inFlight.id}). Wait for it to finish or cancel it in App Store Connect before submitting again.`
+      );
+    }
+
+    let submission = open.find(s => s.state === 'READY_FOR_REVIEW') ?? null;
+    const reusedExistingSubmission = submission !== null;
+    if (!submission) {
+      submission = await this.createReviewSubmission(input.appId, input.platform);
+    }
+
+    try {
+      await this.addReviewSubmissionItem(submission.id, input.appStoreVersionId);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Could not add version ${input.appStoreVersionId} to review submission ${submission.id} (state ${submission.state}): ${detail}`
+      );
+    }
+
+    const reviewSubmission = await this.submitReviewSubmission(submission.id);
+    return { reviewSubmission, reusedExistingSubmission };
   }
 
   /**

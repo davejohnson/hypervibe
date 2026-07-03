@@ -8,6 +8,83 @@ describe('CloudSqlAdapter', () => {
     vi.restoreAllMocks();
   });
 
+  async function connectedAdapter(): Promise<CloudSqlAdapter> {
+    const adapter = new CloudSqlAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    return adapter;
+  }
+
+  it('verifies successfully when the SQL Admin API probe succeeds', async () => {
+    const adapter = await connectedAdapter();
+
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://sqladmin.googleapis.com/v1/projects/gcp-project/instances?maxResults=1' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ items: [] });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.verify();
+
+    expect(result.success).toBe(true);
+    expect(result.email).toBe('deploy@gcp-project.iam.gserviceaccount.com');
+  });
+
+  it('fails verification with an actionable error when the SQL Admin API probe is denied', async () => {
+    const adapter = await connectedAdapter();
+
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://sqladmin.googleapis.com/v1/projects/gcp-project/instances?maxResults=1' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({
+          error: {
+            code: 403,
+            message: 'The caller does not have permission',
+            status: 'PERMISSION_DENIED',
+          },
+        }, { status: 403 });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.verify();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('roles/cloudsql.admin');
+    expect(result.error).toContain('sqladmin.googleapis.com');
+    expect(result.error).toContain('serviceAccount:deploy@gcp-project.iam.gserviceaccount.com');
+  });
+
+  it('fails verification with status and body on non-403 SQL Admin API errors', async () => {
+    const adapter = await connectedAdapter();
+
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://sqladmin.googleapis.com/v1/projects/gcp-project/instances?maxResults=1' && (init?.method ?? 'GET') === 'GET') {
+        return new Response('backend unavailable', { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.verify();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('503');
+    expect(result.error).toContain('backend unavailable');
+  });
+
   it('creates a missing logical database on an existing Cloud SQL instance', async () => {
     const adapter = new CloudSqlAdapter();
     await adapter.connect({

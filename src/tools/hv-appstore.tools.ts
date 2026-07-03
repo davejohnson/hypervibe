@@ -376,12 +376,16 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         });
       }
 
-      await adapter.submitForReview(version.id);
+      const { reviewSubmission, reusedExistingSubmission } = await adapter.submitForReview({
+        appId: app.id,
+        appStoreVersionId: version.id,
+        platform: version.platform,
+      });
       ctx.repos.audit.create({
         action: 'appstore.submit',
         resourceType: 'appstore',
         resourceId: app.id,
-        details: { appIdentifier, version: version.versionString, buildNumber: build.version },
+        details: { appIdentifier, version: version.versionString, buildNumber: build.version, reviewSubmissionId: reviewSubmission.id },
       });
 
       return toolSuccess({
@@ -389,6 +393,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         app,
         version: { id: version.id, versionString: version.versionString, previousState: version.appStoreState },
         build: { id: build.id, buildNumber: build.version },
+        reviewSubmission: { id: reviewSubmission.id, state: reviewSubmission.state, reusedExistingSubmission },
       });
     })
   );

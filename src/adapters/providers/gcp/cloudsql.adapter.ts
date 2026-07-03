@@ -82,7 +82,35 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
     }
 
     try {
-      await this.getAccessToken();
+      const token = await this.getAccessToken();
+      const { projectId } = this.credentials;
+
+      // A token exchange succeeds even for a service account with zero roles;
+      // probe the SQL Admin API so verification proves real access.
+      const response = await fetch(
+        `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances?maxResults=1`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (!response.ok) {
+        const text = await response.text();
+        if (response.status === 403) {
+          return {
+            success: false,
+            error: [
+              'Cloud SQL Admin API probe failed with 403.',
+              `Grant roles/cloudsql.admin to serviceAccount:${this.serviceAccountCreds.client_email} on project ${projectId},`,
+              'and make sure the sqladmin.googleapis.com API is enabled (hv_connect provider="cloudrun" action="prepare" enables it).',
+              `Original error: ${text}`,
+            ].join(' '),
+          };
+        }
+        return {
+          success: false,
+          error: `Cloud SQL Admin API probe failed: ${response.status} ${text}`,
+        };
+      }
+
       return {
         success: true,
         email: this.serviceAccountCreds.client_email,

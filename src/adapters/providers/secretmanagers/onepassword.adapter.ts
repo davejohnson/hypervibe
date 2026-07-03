@@ -22,6 +22,12 @@ interface OpClient {
       >;
     }>;
   };
+  vaults: {
+    list(): Promise<Array<{ id: string; title: string }>>;
+  };
+  items: {
+    list(vaultId: string): Promise<Array<{ id: string; title: string }>>;
+  };
 }
 
 /**
@@ -74,7 +80,14 @@ export class OnePasswordAdapter implements ISecretManagerAdapter {
 
   async verify(): Promise<SecretManagerVerifyResult> {
     try {
-      await this.getClient();
+      const client = await this.getClient();
+      const vaults = await client.vaults.list();
+      if (vaults.length === 0) {
+        return {
+          success: false,
+          error: 'The 1Password service account token is valid but has access to no vaults. Grant the service account access to the vault(s) Hypervibe should read.',
+        };
+      }
       return {
         success: true,
         identity: '1Password service account',
@@ -141,10 +154,21 @@ export class OnePasswordAdapter implements ISecretManagerAdapter {
     };
   }
 
-  async listSecrets(_pathPrefix?: string): Promise<SecretListItem[]> {
-    throw new Error(
-      'Listing is not supported for 1Password. Reference items directly with 1password://<vault>/<item>#<field>.'
-    );
+  async listSecrets(pathPrefix?: string): Promise<SecretListItem[]> {
+    const client = await this.getClient();
+    const vaults = await client.vaults.list();
+    const results: SecretListItem[] = [];
+
+    for (const vault of vaults) {
+      const items = await client.items.list(vault.id);
+      for (const item of items) {
+        const path = `${vault.title}/${item.title}`;
+        if (pathPrefix && !path.startsWith(pathPrefix)) continue;
+        results.push({ path });
+      }
+    }
+
+    return results;
   }
 }
 

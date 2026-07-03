@@ -35,9 +35,13 @@ async function signRequest(
     `content-type:application/x-amz-json-1.1`,
     `host:${host}`,
     `x-amz-date:${amzDate}`,
+    // Canonical headers must stay sorted; x-amz-security-token sorts after x-amz-date.
+    ...(credentials.sessionToken ? [`x-amz-security-token:${credentials.sessionToken}`] : []),
   ].join('\n') + '\n';
 
-  const signedHeaders = 'content-type;host;x-amz-date';
+  const signedHeaders = credentials.sessionToken
+    ? 'content-type;host;x-amz-date;x-amz-security-token'
+    : 'content-type;host;x-amz-date';
 
   const canonicalRequest = [
     method,
@@ -70,6 +74,7 @@ async function signRequest(
   return {
     'Content-Type': 'application/x-amz-json-1.1',
     'X-Amz-Date': amzDate,
+    ...(credentials.sessionToken ? { 'X-Amz-Security-Token': credentials.sessionToken } : {}),
     'Authorization': authorizationHeader,
   };
 }
@@ -157,6 +162,7 @@ export class AwsSecretsAdapter implements ISecretManagerAdapter {
     if (!this.credentials.accessKeyId) {
       this.credentials.accessKeyId = process.env.AWS_ACCESS_KEY_ID;
       this.credentials.secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+      this.credentials.sessionToken = process.env.AWS_SESSION_TOKEN;
     }
 
     if (!this.credentials.accessKeyId || !this.credentials.secretAccessKey) {

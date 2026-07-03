@@ -70,6 +70,71 @@ describe('OnePasswordAdapter', () => {
     expect(result.error).toContain('invalid service account token');
   });
 
+  it('verify succeeds when the service account can see at least one vault', async () => {
+    createClient.mockResolvedValue({
+      secrets: { resolve: vi.fn(), resolveAll: vi.fn() },
+      vaults: { list: vi.fn().mockResolvedValue([{ id: 'v1', title: 'Production' }]) },
+      items: { list: vi.fn() },
+    });
+
+    const adapter = new OnePasswordAdapter();
+    await adapter.connect({ serviceAccountToken: 'ops_token' });
+    const result = await adapter.verify();
+
+    expect(result.success).toBe(true);
+    expect(result.identity).toBe('1Password service account');
+  });
+
+  it('verify fails with a clear message when the token has no vault access', async () => {
+    createClient.mockResolvedValue({
+      secrets: { resolve: vi.fn(), resolveAll: vi.fn() },
+      vaults: { list: vi.fn().mockResolvedValue([]) },
+      items: { list: vi.fn() },
+    });
+
+    const adapter = new OnePasswordAdapter();
+    await adapter.connect({ serviceAccountToken: 'ops_token' });
+    const result = await adapter.verify();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('no vaults');
+  });
+
+  it('lists secrets as vault/item paths, filtered by prefix', async () => {
+    const itemsList = vi.fn(async (vaultId: string) => {
+      if (vaultId === 'v1') {
+        return [{ id: 'i1', title: 'stripe' }, { id: 'i2', title: 'db' }];
+      }
+      return [{ id: 'i3', title: 'stripe' }];
+    });
+    createClient.mockResolvedValue({
+      secrets: { resolve: vi.fn(), resolveAll: vi.fn() },
+      vaults: {
+        list: vi.fn().mockResolvedValue([
+          { id: 'v1', title: 'Production' },
+          { id: 'v2', title: 'Staging' },
+        ]),
+      },
+      items: { list: itemsList },
+    });
+
+    const adapter = new OnePasswordAdapter();
+    await adapter.connect({ serviceAccountToken: 'ops_token' });
+
+    const all = await adapter.listSecrets();
+    expect(all.map((item) => item.path).sort()).toEqual([
+      'Production/db',
+      'Production/stripe',
+      'Staging/stripe',
+    ]);
+
+    const filtered = await adapter.listSecrets('Production/');
+    expect(filtered.map((item) => item.path).sort()).toEqual([
+      'Production/db',
+      'Production/stripe',
+    ]);
+  });
+
   it('rejects writes with a resolve-only explanation', async () => {
     const adapter = new OnePasswordAdapter();
     await adapter.connect({ serviceAccountToken: 'ops_token' });

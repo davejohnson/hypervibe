@@ -37,14 +37,14 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   'aws-secrets': {
     provider: 'aws-secrets',
     displayName: 'AWS Secrets Manager',
-    tokenType: 'AWS IAM access key (long-lived accessKeyId/secretAccessKey; temporary STS session credentials are not supported)',
+    tokenType: 'AWS IAM access key (accessKeyId/secretAccessKey, plus sessionToken for temporary STS session credentials)',
     setupUrl: 'https://docs.aws.amazon.com/secretsmanager/',
     permissions: [
       'secretsmanager:GetSecretValue and secretsmanager:ListSecrets for read-only resolution (ListSecrets is required for connection verification and hv_secrets_list).',
       'Add secretsmanager:CreateSecret, secretsmanager:PutSecretValue, secretsmanager:DescribeSecret, and secretsmanager:DeleteSecret if Hypervibe should manage secrets, and secretsmanager:RotateSecret for hv_secrets_sync rotation.',
     ],
     credentialExample: 'hv_connect provider="aws-secrets" credentialsRef="file:/absolute/path/aws-secrets.json"',
-    notes: ['Credentials come from the connection or the AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY environment variables; profiles, SSO, and instance roles are not read.'],
+    notes: ['Credentials come from the connection or the AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN environment variables; profiles, SSO, and instance roles are not read.'],
   },
   bitwarden: {
     provider: 'bitwarden',
