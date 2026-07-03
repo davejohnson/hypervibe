@@ -1499,4 +1499,196 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
     await t.close();
   });
+
+  it('tears down abandoned-provider services only when confirmed and prunes the previousHosting stash', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'previous-teardown-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    const project = new ProjectRepository().findByName('previous-teardown-app')!;
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-1' } },
+        previousHosting: {
+          provider: 'cloudrun',
+          projectId: 'gcp-project',
+          services: { web: { serviceId: 'gcp-project-web' } },
+        },
+      },
+    });
+    // Railway side is fully in sync, so the only pending action is the
+    // confirm-gated teardown of the abandoned Cloud Run service.
+    const observedState: ObservedState = {
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [], envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    };
+    const railwayAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'], supportedComponents: ['postgres'],
+        supportsAutoWiring: true, supportsHealthChecks: true, supportsCronSchedule: true,
+        supportsReleaseCommand: false, supportsMultiEnvironment: true, managedTls: true,
+        supportsObserve: true,
+      },
+      connect: async () => {}, verify: async () => ({ success: true }),
+      ensureProject: async () => ({ success: true, message: 'ok' }),
+      ensureComponent: async () => { throw new Error('unused'); },
+      deploy: async () => { throw new Error('hosting deploy should not run for previous-provider teardown'); },
+      setEnvVars: async () => ({ success: true, message: 'ok' }),
+      observe: async () => observedState,
+    };
+    const deleteService = vi.fn(async () => ({ success: true }));
+    const cloudrunAdapter = {
+      name: 'cloudrun',
+      capabilities: {
+        supportedBuilders: ['dockerfile'], supportedComponents: [],
+        supportsAutoWiring: true, supportsHealthChecks: true, supportsCronSchedule: true,
+        supportsReleaseCommand: false, supportsMultiEnvironment: false, managedTls: true,
+        supportsObserve: true,
+      },
+      deleteService,
+    };
+    // The teardown must resolve the PREVIOUS provider's adapter, so dispatch
+    // on the provider name instead of returning a single adapter.
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (provider: string) => (
+      provider === 'cloudrun'
+        ? { success: true, adapter: cloudrunAdapter }
+        : { success: true, adapter: railwayAdapter }
+    ) as any);
+
+    const plan = await t.call('hv_plan', { project: 'previous-teardown-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    expect(plan.data.actions).toContainEqual(expect.objectContaining({
+      id: 'service:web:previous-destroy',
+      type: 'destroy',
+      requiresConfirm: true,
+      resource: { kind: 'service', name: 'web', provider: 'cloudrun' },
+    }));
+
+    const unconfirmed = await t.call('hv_apply', { project: 'previous-teardown-app', planId: plan.data.planId });
+    expect(unconfirmed.ok).toBe(true);
+    expect(unconfirmed.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'service:web:previous-destroy',
+      status: 'skipped_requires_confirm',
+    }));
+    expect(deleteService).not.toHaveBeenCalled();
+
+    // Plans are single-use: re-plan before the confirmed apply.
+    const plan2 = await t.call('hv_plan', { project: 'previous-teardown-app', env: 'production' });
+    expect(plan2.ok).toBe(true);
+    const confirmed = await t.call('hv_apply', {
+      project: 'previous-teardown-app',
+      planId: plan2.data.planId,
+      confirmActions: ['service:web:previous-destroy'],
+    });
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'service:web:previous-destroy',
+      status: 'succeeded',
+    }));
+    expect(deleteService).toHaveBeenCalledWith('gcp-project-web');
+
+    const updated = new EnvironmentRepository().findById(environment.id)!;
+    expect((updated.platformBindings as Record<string, unknown>).previousHosting ?? null).toBeNull();
+    await t.close();
+  });
+
+  it('stashes the abandoned provider bindings as previousHosting when the hosting provider switches', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'provider-switch-stash-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    const project = new ProjectRepository().findByName('provider-switch-stash-app')!;
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        services: { web: { serviceId: 'gcp-project-web' } },
+      },
+    });
+    // No observation: the plan falls back to local state and emits the
+    // provider-switch replace actions unverified.
+    mockObserved(null);
+    const fakeRailway = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportsAutoWiring: true, supportsHealthChecks: true, supportsCronSchedule: true,
+        supportsReleaseCommand: false, supportsMultiEnvironment: true, managedTls: true,
+        supportsObserve: true,
+      },
+      connect: async () => {},
+      verify: async () => ({ success: true }),
+      ensureProject: async () => ({ success: true, message: 'ok', data: { projectId: 'rail-project', environmentId: 'rail-env' } }),
+      deploy: async () => ({
+        serviceId: 'web',
+        externalId: 'rail-web',
+        url: 'https://web-production.up.railway.app',
+        status: 'deployed',
+        receipt: { success: true, message: 'deployed' },
+      }),
+      setEnvVars: async () => ({ success: true, message: 'ok' }),
+      getDeployStatus: async () => ({ status: 'deployed', url: 'https://web-production.up.railway.app' }),
+    };
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeRailway } as any);
+
+    const plan = await t.call('hv_plan', { project: 'provider-switch-stash-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    expect(plan.data.actions).toContainEqual(expect.objectContaining({
+      id: 'service:web',
+      type: 'replace',
+    }));
+
+    const apply = await t.call('hv_apply', { project: 'provider-switch-stash-app', planId: plan.data.planId });
+    expect(apply.ok).toBe(true);
+
+    // The stash is written before the converge pass, so it must hold
+    // regardless of how the bootstrap converge itself turned out (here the
+    // bootstrap pass fails on the Cloud Run prepare gate, which is fine —
+    // the contract under test is the pre-converge stash, not the converge).
+    const updated = new EnvironmentRepository().findById(environment.id)!;
+    expect((updated.platformBindings as Record<string, unknown>).previousHosting).toMatchObject({
+      provider: 'cloudrun',
+      projectId: 'gcp-project',
+      services: { web: { serviceId: 'gcp-project-web' } },
+    });
+    await t.close();
+  });
 });

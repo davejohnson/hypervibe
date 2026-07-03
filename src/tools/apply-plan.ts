@@ -29,6 +29,7 @@ import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
+import { parseHostingBindings } from '../domain/ports/hosting.port.js';
 import type { ToolContext } from './context.js';
 
 /**
@@ -291,6 +292,36 @@ export async function executePlanApply(ctx: ToolContext, params: {
   let bootstrap: { success: boolean; summary: Record<string, unknown> } | null = null;
   const ensureBootstrap = async () => {
     if (!bootstrap) {
+      // Provider switch: stash the abandoned provider's bindings for later
+      // confirm-gated teardown (mirrors the database previousProvider
+      // pattern), then reset the active bindings to the new provider —
+      // executeBootstrap derives its target from bindings.provider, so
+      // leaving the old provider there would deploy to the wrong host.
+      // Runs here (not pre-converge) so stale plans never mutate bindings.
+      const bootstrapEnv = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      if (bootstrapEnv) {
+        const currentBindings = parseHostingBindings(bootstrapEnv);
+        const hasPreviousHosting = Boolean((bootstrapEnv.platformBindings as Record<string, unknown>).previousHosting);
+        if (currentBindings.provider && currentBindings.provider !== envSpec.hosting.provider) {
+          ctx.repos.environments.updatePlatformBindings(bootstrapEnv.id, {
+            ...(!hasPreviousHosting && Object.keys(currentBindings.services ?? {}).length > 0
+              ? {
+                previousHosting: {
+                  provider: currentBindings.provider,
+                  ...(currentBindings.projectId ? { projectId: currentBindings.projectId } : {}),
+                  ...(currentBindings.environmentId ? { environmentId: currentBindings.environmentId } : {}),
+                  services: currentBindings.services ?? {},
+                },
+              }
+              : {}),
+            provider: envSpec.hosting.provider,
+            projectId: undefined,
+            environmentId: undefined,
+            services: {},
+          });
+        }
+      }
+
       let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec);
       if (overrides) {
         bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
@@ -331,6 +362,9 @@ export async function executePlanApply(ctx: ToolContext, params: {
       return destroyDatabase(ctx, applyProject, envName, action);
     }
     if (action.resource.kind === 'service' && action.type === 'destroy') {
+      if (action.metadata?.operation === 'previousHostingDestroy') {
+        return destroyPreviousHostingService(ctx, applyProject, envName, action);
+      }
       return destroyService(ctx, applyProject, spec, envName, action);
     }
     if (action.resource.kind === 'domain') {
@@ -442,6 +476,69 @@ async function applyDomain(
     message: `Domain setup failed for ${action.resource.name}`,
     error: result.error ?? result.dnsError ?? result.customDomainError ?? 'Domain setup failed',
     data: result as unknown as Record<string, unknown>,
+  };
+}
+
+/**
+ * Delete a service left running on the hosting provider abandoned by a
+ * provider switch. Resolves the OLD provider's adapter (not the current
+ * hosting adapter) and prunes the previousHosting stash as services go.
+ */
+async function destroyPreviousHostingService(
+  ctx: ToolContext,
+  project: Project,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return { success: false, message: 'Environment not found locally', error: `No local environment "${envName}"` };
+  }
+  const previousHosting = asRecord((environment.platformBindings as Record<string, unknown>).previousHosting);
+  const services = asRecord(previousHosting?.services) ?? {};
+  const binding = asRecord(services[action.resource.name]);
+  const serviceId = stringField(binding, 'serviceId') ?? stringField(binding, 'jobName');
+  if (!previousHosting || !serviceId) {
+    return {
+      success: false,
+      message: 'Previous-provider service binding not found',
+      error: `No ${action.resource.provider} binding recorded for "${action.resource.name}"; it may already be cleaned up. Re-run hv_plan.`,
+    };
+  }
+
+  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project);
+  if (!adapterResult.success || !adapterResult.adapter) {
+    return { success: false, message: `${action.resource.provider} adapter unavailable`, error: adapterResult.error };
+  }
+  const adapter = adapterResult.adapter as { name: string; deleteService?: (serviceId: string) => Promise<{ success: boolean; error?: string; message?: string }> };
+  if (typeof adapter.deleteService !== 'function') {
+    return {
+      success: false,
+      message: `${action.resource.provider} does not support service deletion via Hypervibe`,
+      error: `Manual cleanup required: ${action.resource.provider} service ${serviceId}`,
+    };
+  }
+
+  const deleted = await adapter.deleteService(serviceId);
+  if (!deleted.success) {
+    return {
+      success: false,
+      message: `Failed to delete ${action.resource.provider} service ${action.resource.name}`,
+      error: deleted.error,
+    };
+  }
+
+  // Prune the stash; drop it entirely when the last service is gone.
+  const remaining = Object.fromEntries(Object.entries(services).filter(([name]) => name !== action.resource.name));
+  ctx.repos.environments.updatePlatformBindings(environment.id, {
+    previousHosting: Object.keys(remaining).length > 0
+      ? { ...previousHosting, services: remaining }
+      : null,
+  });
+
+  return {
+    success: true,
+    message: `Deleted ${action.resource.provider} service ${action.resource.name}${deleted.message ? ` (${deleted.message})` : ''}`,
   };
 }
 

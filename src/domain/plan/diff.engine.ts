@@ -227,6 +227,35 @@ export function diffEnvironment(input: {
     }
   }
 
+  // ---- abandoned hosting provider teardown ----------------------------------
+  // A provider switch stashes the old provider's bindings as previousHosting;
+  // offer confirm-gated deletion of each service still running there.
+  const previousHosting = local.bindings?.previousHosting;
+  if (previousHosting?.provider && previousHosting.provider !== provider) {
+    const previousServices = Object.entries(previousHosting.services ?? {});
+    if (previousServices.length > 0) {
+      warnings.push(
+        `${previousServices.length} service(s) are still running on ${previousHosting.provider} from before the switch to ${provider} — they keep billing until destroyed. Confirm the previous-provider destroy actions when the ${provider} deployment is verified.`
+      );
+      for (const [name, binding] of previousServices) {
+        const serviceId = binding?.serviceId ?? binding?.jobName;
+        actions.push({
+          id: `service:${name}:previous-destroy`,
+          type: 'destroy',
+          resource: { kind: 'service', name, provider: previousHosting.provider },
+          verified: false,
+          reason: `Service "${name}" is still running on ${previousHosting.provider} (abandoned by the switch to ${provider}). Confirm to delete it there.`,
+          requiresConfirm: true,
+          metadata: {
+            operation: 'previousHostingDestroy',
+            previousProvider: previousHosting.provider,
+            ...(serviceId ? { serviceId } : {}),
+          },
+        });
+      }
+    }
+  }
+
   // ---- database -------------------------------------------------------------
   const localDb = local.components.find((c) => c.type === 'postgres');
   const localDbProvider = localDb

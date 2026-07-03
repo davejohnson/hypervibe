@@ -600,3 +600,47 @@ describe('diffEnvironment — partial observation', () => {
     expect(result.warnings.some((w) => w.includes('partial'))).toBe(true);
   });
 });
+
+describe('diffEnvironment — abandoned provider teardown', () => {
+  it('emits confirm-gated destroys for services stashed in previousHosting', () => {
+    const result = diffEnvironment({
+      spec: spec({ hosting: { provider: 'railway' } }),
+      envName: 'production',
+      observed: observed(),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'svc-1' } },
+          previousHosting: {
+            provider: 'cloudrun',
+            projectId: 'gcp-project',
+            services: {
+              web: { serviceId: 'gcp-project-web' },
+              nightly: { serviceId: 'gcp-project-nightly-schedule', jobName: 'gcp-project-nightly', resourceType: 'scheduledJob' },
+            },
+          },
+        },
+      }),
+    });
+
+    const destroys = result.actions.filter((a) => a.metadata?.operation === 'previousHostingDestroy');
+    expect(destroys).toHaveLength(2);
+    for (const action of destroys) {
+      expect(action.type).toBe('destroy');
+      expect(action.requiresConfirm).toBe(true);
+      expect(action.resource.provider).toBe('cloudrun');
+    }
+    expect(destroys.map((a) => a.id).sort()).toEqual([
+      'service:nightly:previous-destroy',
+      'service:web:previous-destroy',
+    ]);
+    expect(result.warnings.some((w) => w.includes('still running on cloudrun'))).toBe(true);
+  });
+
+  it('emits nothing without a previousHosting stash', () => {
+    const result = diffEnvironment({ spec: spec(), envName: 'production', observed: observed(), local: local() });
+    expect(result.actions.some((a) => a.metadata?.operation === 'previousHostingDestroy')).toBe(false);
+  });
+});
