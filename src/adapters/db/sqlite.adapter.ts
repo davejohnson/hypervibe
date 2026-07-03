@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { getSecretStore } from '../secrets/secret-store.js';
 import path from 'path';
 import fs from 'fs';
 import { getDataDir } from '../storage/paths.js';
@@ -9,6 +10,8 @@ export interface Migration {
   version: number;
   name: string;
   up: string;
+  /** Optional JS data migration, run in the same transaction after `up`. */
+  run?: (db: Database.Database) => void;
 }
 
 const migrations: Migration[] = [
@@ -298,6 +301,25 @@ const migrations: Migration[] = [
       DROP TABLE IF EXISTS approvals;
     `,
   },
+  {
+    version: 10,
+    name: 'encrypt_component_bindings',
+    up: '-- Component bindings carry database credentials; encrypt existing plaintext rows (JS hook).',
+    run: (db) => {
+      const rows = db.prepare('SELECT id, bindings FROM components').all() as Array<{ id: string; bindings: string }>;
+      for (const row of rows) {
+        let parsed: Record<string, unknown> | null = null;
+        try {
+          parsed = JSON.parse(row.bindings) as Record<string, unknown>;
+        } catch {
+          continue; // Unreadable legacy row; leave untouched.
+        }
+        if (parsed && typeof parsed.__encrypted === 'string') continue; // Already encrypted.
+        const encrypted = JSON.stringify({ __encrypted: getSecretStore().encryptObject(parsed ?? {}) });
+        db.prepare('UPDATE components SET bindings = ? WHERE id = ?').run(encrypted, row.id);
+      }
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION = migrations[migrations.length - 1]?.version ?? 0;
@@ -397,6 +419,7 @@ export class SqliteAdapter {
       if (!appliedVersions.has(migration.version)) {
         this.db.transaction(() => {
           this.db.exec(migration.up);
+          migration.run?.(this.db);
           this.db
             .prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)')
             .run(migration.version, migration.name);

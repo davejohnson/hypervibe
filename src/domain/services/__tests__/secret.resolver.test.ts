@@ -248,7 +248,7 @@ describe('SecretResolver.resolveForEnvironment', () => {
     expect(createAdapter).not.toHaveBeenCalled();
   });
 
-  it('caches the connected adapter per provider across resolutions', async () => {
+  it('batches same-manager secrets within a resolution but drops decrypted credentials afterwards', async () => {
     const project = new ProjectRepository().create({ name: 'resolver-cache-app', defaultPlatform: 'railway' });
     seedDopplerConnection();
     const mappingRepo = new SecretMappingRepository();
@@ -284,10 +284,12 @@ describe('SecretResolver.resolveForEnvironment', () => {
 
     expect(first.vars).toEqual({ API_KEY: 'value-one', OTHER_KEY: 'value-two' });
     expect(second.vars).toEqual(first.vars);
-    // Two secrets from the same manager are batched, and the second
-    // resolution reuses the cached connected adapter.
-    expect(createAdapter).toHaveBeenCalledTimes(1);
-    expect(connect).toHaveBeenCalledTimes(1);
+    // Two secrets from the same manager are batched into one getSecrets
+    // call per resolution, but the adapter cache (holding decrypted
+    // credentials) is cleared after each resolveForEnvironment — the second
+    // call reconnects rather than retaining credentials in memory.
+    expect(createAdapter).toHaveBeenCalledTimes(2);
+    expect(connect).toHaveBeenCalledTimes(2);
     expect(fakeAdapter.getSecretsCalls).toHaveLength(2);
     expect(fakeAdapter.getSecretsCalls[0]).toHaveLength(2);
   });

@@ -22,9 +22,39 @@ export class SecretStore {
   }
 
   private loadOrCreateKey(): Buffer {
+    // Externally injected key wins (CI, containers, key managers). Must be
+    // the hex encoding of exactly crypto_secretbox_KEYBYTES bytes.
+    const envKey = process.env.HYPERVIBE_SECRET_KEY?.trim();
+    if (envKey) {
+      const key = Buffer.from(envKey, 'hex');
+      if (key.length !== sodium.crypto_secretbox_KEYBYTES) {
+        throw new Error(
+          `HYPERVIBE_SECRET_KEY must be ${sodium.crypto_secretbox_KEYBYTES * 2} hex characters (${sodium.crypto_secretbox_KEYBYTES} bytes); got ${envKey.length} characters.`
+        );
+      }
+      return key;
+    }
+
     if (fs.existsSync(KEY_FILE)) {
       const keyHex = fs.readFileSync(KEY_FILE, 'utf-8').trim();
-      return Buffer.from(keyHex, 'hex');
+      const key = Buffer.from(keyHex, 'hex');
+      if (key.length !== sodium.crypto_secretbox_KEYBYTES) {
+        throw new Error(
+          `${KEY_FILE} is corrupt (expected ${sodium.crypto_secretbox_KEYBYTES * 2} hex characters). Restore it from backup or set HYPERVIBE_SECRET_KEY; generating a new key would make existing encrypted data unrecoverable.`
+        );
+      }
+      return key;
+    }
+
+    // A fresh key alongside an existing database means previously encrypted
+    // data (connections, component bindings) can never be decrypted again.
+    // Generate anyway (the server must start) but say so loudly.
+    if (fs.existsSync(path.join(DATA_DIR, 'hypervibe.db'))) {
+      console.error(
+        `[hypervibe] WARNING: ${KEY_FILE} is missing but ${DATA_DIR}/hypervibe.db exists. `
+        + 'A new encryption key is being generated: previously encrypted connections and bindings are unrecoverable. '
+        + 'Restore .secret-key from backup (or set HYPERVIBE_SECRET_KEY) and restart, or reconnect providers with hv_connect.'
+      );
     }
 
     // Generate new key
@@ -65,7 +95,11 @@ export class SecretStore {
     const success = sodium.crypto_secretbox_open_easy(decrypted, ciphertext, nonce, this.key);
 
     if (!success) {
-      throw new Error('Failed to decrypt: authentication failed');
+      throw new Error(
+        'Failed to decrypt: authentication failed. The encryption key has likely changed '
+        + '(.secret-key was regenerated or HYPERVIBE_SECRET_KEY differs from the key that encrypted this data). '
+        + 'Restore the original key, or reconnect the affected providers with hv_connect.'
+      );
     }
 
     return decrypted.toString('utf-8');

@@ -2,7 +2,36 @@ import { randomUUID } from 'crypto';
 import { getDb } from '../sqlite.adapter.js';
 import { parseJsonColumn } from '../json.codec.js';
 import { componentBindingsColumnSchema } from '../column.schemas.js';
+import { getSecretStore } from '../../secrets/secret-store.js';
 import type { Component, CreateComponentInput } from '../../../domain/entities/component.entity.js';
+
+/**
+ * Component bindings carry live database credentials (connection URLs,
+ * passwords), so they are encrypted at rest with the SecretStore. The
+ * column holds {"__encrypted": "<secretbox>"} for new rows; plaintext
+ * rows written before migration 10 are still readable.
+ */
+export function serializeComponentBindings(bindings: Record<string, unknown>): string {
+  return JSON.stringify({ __encrypted: getSecretStore().encryptObject(bindings) });
+}
+
+export function deserializeComponentBindings(raw: unknown, context: string): Record<string, unknown> {
+  if (typeof raw === 'string') {
+    try {
+      const outer = JSON.parse(raw) as Record<string, unknown>;
+      if (outer && typeof outer.__encrypted === 'string') {
+        const decrypted = getSecretStore().decryptObject<Record<string, unknown>>(outer.__encrypted);
+        return parseJsonColumn(componentBindingsColumnSchema, JSON.stringify(decrypted), context);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Failed to decrypt')) {
+        throw new Error(`Cannot read ${context}: ${error.message}`);
+      }
+      // Fall through: not JSON or not the encrypted wrapper — legacy parse below.
+    }
+  }
+  return parseJsonColumn(componentBindingsColumnSchema, raw, context);
+}
 
 export class ComponentRepository {
   create(input: CreateComponentInput): Component {
@@ -17,7 +46,7 @@ export class ComponentRepository {
       id,
       input.environmentId,
       input.type,
-      JSON.stringify(input.bindings ?? {}),
+      serializeComponentBindings(input.bindings ?? {}),
       input.externalId ?? null,
       now,
       now
@@ -56,7 +85,7 @@ export class ComponentRepository {
       WHERE id = ?
     `).run(
       updates.type ?? existing.type,
-      JSON.stringify(updates.bindings ?? existing.bindings),
+      serializeComponentBindings(updates.bindings ?? existing.bindings),
       updates.externalId ?? existing.externalId,
       now,
       id
@@ -77,7 +106,7 @@ export class ComponentRepository {
       UPDATE components
       SET bindings = ?, updated_at = ?
       WHERE id = ?
-    `).run(JSON.stringify(merged), now, id);
+    `).run(serializeComponentBindings(merged), now, id);
 
     return this.findById(id);
   }
@@ -93,7 +122,7 @@ export class ComponentRepository {
       id: row.id as string,
       environmentId: row.environment_id as string,
       type: row.type as string,
-      bindings: parseJsonColumn(componentBindingsColumnSchema, row.bindings, `components.bindings (${row.id})`),
+      bindings: deserializeComponentBindings(row.bindings, `components.bindings (${row.id})`),
       externalId: row.external_id as string | null,
       createdAt: new Date(row.created_at as string),
       updatedAt: new Date(row.updated_at as string),

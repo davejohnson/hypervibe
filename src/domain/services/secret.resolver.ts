@@ -41,6 +41,16 @@ export class SecretResolver {
    * Resolve all secret mappings for an environment into actual values.
    */
   async resolveForEnvironment(options: ResolveOptions): Promise<ResolvedEnvVars> {
+    try {
+      return await this.resolveForEnvironmentInner(options);
+    } finally {
+      // Decrypted manager credentials must not outlive the resolution:
+      // the cache batches adapter reuse within one resolve, not across calls.
+      this.clearCache();
+    }
+  }
+
+  private async resolveForEnvironmentInner(options: ResolveOptions): Promise<ResolvedEnvVars> {
     const mappings = this.mappingRepo.findByProjectEnvironmentAndService(
       options.projectId,
       options.environmentName,
