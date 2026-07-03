@@ -134,6 +134,35 @@ describe('hv_runs', () => {
     await t.close();
   });
 
+  it('redacts secret-bearing run plan fields', async () => {
+    const project = new ProjectRepository().create({ name: 'redacted-runs-app' });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    const run = new RunRepository().create({
+      projectId: project.id,
+      environmentId: environment.id,
+      type: 'plan',
+      plan: {
+        kind: 'hv_plan',
+        overrides: {
+          envVarKeys: ['DEBUG'],
+          envVarsEncrypted: 'encrypted-debug-value',
+        },
+        steps: [
+          { id: 'legacy', params: { vars: { SECRET_TOKEN: 'plaintext' }, keep: true } },
+        ],
+      },
+    });
+    const t = await makeClient();
+
+    const get = await t.call('hv_runs', { action: 'get', runId: run.id });
+    expect(get.ok).toBe(true);
+    expect(get.data.run.plan.overrides).toEqual({ envVarKeys: ['DEBUG'] });
+    expect(get.data.run.plan.steps[0].params.vars).toEqual({ SECRET_TOKEN: '***' });
+    expect(JSON.stringify(get.data.run.plan)).not.toContain('encrypted-debug-value');
+    expect(JSON.stringify(get.data.run.plan)).not.toContain('plaintext');
+    await t.close();
+  });
+
   it('lists audit events via action="audit"', async () => {
     new AuditRepository().create({
       action: 'deploy.started',

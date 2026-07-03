@@ -88,6 +88,43 @@ function queueAction(params: {
   };
 }
 
+function unconvergeableQueueActions(params: {
+  declared: Record<string, QueueSpec>;
+  bindings: Record<string, QueueBinding>;
+  provider: string;
+  reason: string;
+}): PlanAction[] {
+  const actions: PlanAction[] = [];
+  for (const name of Object.keys(params.declared)) {
+    actions.push(queueAction({
+      id: `queue:${name}`,
+      type: 'create',
+      name,
+      provider: params.provider,
+      operation: QUEUE_OPERATIONS.ensure,
+      reason: `${params.reason}; queue "${name}" cannot be converged`,
+      verified: false,
+      metadata: { queueName: name, unsupported: true },
+    }));
+  }
+  for (const [name, binding] of Object.entries(params.bindings)) {
+    if (params.declared[name]) continue;
+    actions.push(queueAction({
+      id: `queue:${name}:destroy`,
+      type: 'destroy',
+      name,
+      provider: params.provider,
+      operation: QUEUE_OPERATIONS.destroy,
+      reason: `${params.reason}; queue binding "${name}" cannot be reconciled`,
+      verified: false,
+      dataBearing: binding.backend === 'pubsub',
+      requiresConfirm: binding.backend === 'pubsub',
+      metadata: { queueName: name, unsupported: true },
+    }));
+  }
+  return actions;
+}
+
 export async function planQueues(params: {
   project: Project;
   environmentSpec: EnvironmentSpec;
@@ -104,17 +141,19 @@ export async function planQueues(params: {
   const provider = params.environmentSpec.hosting.provider;
   const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
   if (!adapterResult.success || !adapterResult.adapter) {
+    const reason = `Cannot plan queues: ${adapterResult.error ?? `no ${provider} adapter`}`;
     return {
-      actions: [],
-      warnings: [`Cannot plan queues: ${adapterResult.error ?? `no ${provider} adapter`}`],
+      actions: unconvergeableQueueActions({ declared, bindings, provider, reason }),
+      warnings: [reason],
     };
   }
   const adapter = adapterResult.adapter as IProviderAdapter;
   const backend = queueBackend(adapter);
   if (!backend) {
+    const reason = `Hosting provider ${provider} does not support queues`;
     return {
-      actions: [],
-      warnings: [`Hosting provider ${provider} does not support queues.`],
+      actions: unconvergeableQueueActions({ declared, bindings, provider, reason }),
+      warnings: [`${reason}.`],
     };
   }
 

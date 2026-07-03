@@ -1094,6 +1094,62 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('reports declared queues as drift when the provider cannot converge them', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'queue-status-app',
+        environments: {
+          staging: {
+            hosting: { provider: 'railway' },
+            database: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' }, jobs: { workloadKind: 'worker' } },
+            queues: { 'email-jobs': {} },
+            envVars: { NODE_ENV: 'staging' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    const project = new ProjectRepository().findByName('queue-status-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { provider: 'railway', projectId: 'rp-1', services: { web: { serviceId: 's-1' } } },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      services: [{
+        name: 'web',
+        externalId: 's-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: ['NODE_ENV'],
+        envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const status = await t.call('hv_status', { project: 'queue-status-app', env: 'staging' });
+    expect(status.ok).toBe(true);
+    expect(status.data.inSync).toBe(false);
+    expect(status.data.drift).toContainEqual(expect.objectContaining({
+      id: 'queue:email-jobs',
+      type: 'create',
+      verified: false,
+      metadata: expect.objectContaining({ unsupported: true }),
+    }));
+    expect(status.warnings).toContainEqual(expect.stringContaining('does not support queues'));
+    await t.close();
+  });
+
   it('reports push-to-deploy ready for synced GitHub Actions deploy workflows', async () => {
     const t = await makeClient();
     await t.call('hv_spec_set', {

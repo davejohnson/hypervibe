@@ -377,13 +377,35 @@ describe('queue-plan.service', () => {
       expect(withWorker.warnings.some((warning) => warning.includes('worker'))).toBe(false);
     });
 
-    it('returns a warning and zero actions when the provider has no queue backend', async () => {
+    it('returns unverified queue actions when the provider has no queue backend', async () => {
       const { project, environment } = seedProject();
       stubAdapter({});
 
       const { actions, warnings } = await planQueues({ project, environmentSpec: pubsubSpec(), environment });
-      expect(actions).toEqual([]);
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toMatchObject({
+        id: 'queue:email-jobs',
+        type: 'create',
+        verified: false,
+        metadata: { operation: QUEUE_OPERATIONS.ensure, queueName: 'email-jobs', unsupported: true },
+      });
+      expect(actions[0].reason).toContain('cannot be converged');
       expect(warnings.some((warning) => warning.includes('does not support queues'))).toBe(true);
+    });
+
+    it('returns unverified queue actions when the provider adapter is unavailable', async () => {
+      const { project, environment } = seedProject();
+      vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'missing cloudrun connection' });
+
+      const { actions, warnings } = await planQueues({ project, environmentSpec: pubsubSpec(), environment });
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toMatchObject({
+        id: 'queue:email-jobs',
+        type: 'create',
+        verified: false,
+        metadata: { operation: QUEUE_OPERATIONS.ensure, queueName: 'email-jobs', unsupported: true },
+      });
+      expect(warnings).toEqual(['Cannot plan queues: missing cloudrun connection']);
     });
   });
 });

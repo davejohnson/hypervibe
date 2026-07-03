@@ -83,10 +83,15 @@ function repoUpgradeState(): Record<string, unknown> {
 function redactRunPlan(plan: unknown): unknown {
   if (!plan || typeof plan !== 'object') return plan;
   const record = plan as Record<string, unknown>;
-  if (!Array.isArray(record.steps)) return plan;
-  return {
-    ...record,
-    steps: record.steps.map((step) => {
+  const redacted: Record<string, unknown> = { ...record };
+  const overrides = record.overrides as Record<string, unknown> | undefined;
+  if (overrides && typeof overrides === 'object' && !Array.isArray(overrides)) {
+    const redactedOverrides = { ...overrides };
+    delete redactedOverrides.envVarsEncrypted;
+    redacted.overrides = redactedOverrides;
+  }
+  if (Array.isArray(record.steps)) {
+    redacted.steps = record.steps.map((step) => {
       if (!step || typeof step !== 'object') return step;
       const stepRecord = step as Record<string, unknown>;
       const params = stepRecord.params as Record<string, unknown> | undefined;
@@ -98,8 +103,9 @@ function redactRunPlan(plan: unknown): unknown {
           vars: Object.fromEntries(Object.keys(params.vars as Record<string, unknown>).map((key) => [key, '***'])),
         },
       };
-    }),
-  };
+    });
+  }
+  return redacted;
 }
 
 export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
