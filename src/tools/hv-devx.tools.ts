@@ -75,6 +75,33 @@ function repoUpgradeState(): Record<string, unknown> {
   return state;
 }
 
+/**
+ * Redact secret-bearing fields when returning stored run plans to chat.
+ * Current plans store env var key names only, but runs persisted before
+ * that change carry plaintext values in steps[].params.vars — mask them.
+ */
+function redactRunPlan(plan: unknown): unknown {
+  if (!plan || typeof plan !== 'object') return plan;
+  const record = plan as Record<string, unknown>;
+  if (!Array.isArray(record.steps)) return plan;
+  return {
+    ...record,
+    steps: record.steps.map((step) => {
+      if (!step || typeof step !== 'object') return step;
+      const stepRecord = step as Record<string, unknown>;
+      const params = stepRecord.params as Record<string, unknown> | undefined;
+      if (!params || typeof params.vars !== 'object' || params.vars === null) return step;
+      return {
+        ...stepRecord,
+        params: {
+          ...params,
+          vars: Object.fromEntries(Object.keys(params.vars as Record<string, unknown>).map((key) => [key, '***'])),
+        },
+      };
+    }),
+  };
+}
+
 export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_upgrade',
@@ -364,7 +391,7 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
           return toolError('NOT_FOUND', `Run not found: ${runId}`, { hint: 'List runs with hv_runs action="list".' });
         }
         return toolSuccess({
-          run: { ...describeRun(run), plan: run.plan, receipts: run.receipts, createdAt: run.createdAt },
+          run: { ...describeRun(run), plan: redactRunPlan(run.plan), receipts: run.receipts, createdAt: run.createdAt },
         });
       }
 

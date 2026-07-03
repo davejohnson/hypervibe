@@ -86,12 +86,15 @@ export class DeployOrchestrator {
       });
     }
 
-    // Step 3: Set environment variables if provided
+    // Step 3: Set environment variables if provided. Only key NAMES go into
+    // the persisted plan — runs.plan is returned verbatim by hv_runs, so
+    // values (which include DATABASE_URL and resolved secrets) must never
+    // be stored. The step reads the live options.envVars at execution time.
     if (options.envVars && Object.keys(options.envVars).length > 0) {
       steps.push({
         name: 'set_env_vars',
         action: 'setEnvVars',
-        params: { vars: options.envVars },
+        params: { envVarKeys: Object.keys(options.envVars).sort() },
       });
     }
 
@@ -350,7 +353,7 @@ export class DeployOrchestrator {
         }
 
         case 'setEnvVars': {
-          const vars = (step.params?.vars as Record<string, string> | undefined) ?? {};
+          const vars = options.envVars ?? {};
           if (Object.keys(vars).length === 0) {
             return {
               step: step.name,

@@ -220,3 +220,47 @@ describe('DeployOrchestrator local rollback', () => {
     });
   });
 });
+
+describe('DeployOrchestrator run plan secrecy', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-deploy-plan-'));
+    SqliteAdapter.resetInstance();
+    initializeDatabase(path.join(tempDir, 'hypervibe.db'));
+  });
+
+  afterEach(() => {
+    SqliteAdapter.resetInstance();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('never persists env var values in the run plan — key names only', () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const serviceRepo = new ServiceRepository();
+
+    const project = projectRepo.create({ name: 'plan-secrecy-project', defaultPlatform: 'railway' });
+    const environment = envRepo.create({ projectId: project.id, name: 'staging' });
+    const service = serviceRepo.create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+
+    const orchestrator = new DeployOrchestrator();
+    const plan = orchestrator.buildPlan({
+      project,
+      environment,
+      services: [service],
+      envVars: {
+        DATABASE_URL: 'postgres://user:sup3rsecret@host:5432/app',
+        SENDGRID_API_KEY: 'SG.very-secret-value',
+      },
+      adapter: { name: 'railway' } as unknown as IHostingAdapter,
+    });
+
+    const serialized = JSON.stringify(plan);
+    expect(serialized).not.toContain('sup3rsecret');
+    expect(serialized).not.toContain('SG.very-secret-value');
+
+    const setEnvStep = plan.steps.find((step) => step.action === 'setEnvVars')!;
+    expect(setEnvStep.params).toEqual({ envVarKeys: ['DATABASE_URL', 'SENDGRID_API_KEY'] });
+  });
+});
