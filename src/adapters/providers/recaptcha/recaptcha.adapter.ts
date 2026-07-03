@@ -131,7 +131,7 @@ providerRegistry.register({
     displayName: 'Google reCAPTCHA',
     category: 'security',
     credentialsSchema: RecaptchaCredentialsSchema,
-    setupHelpUrl: 'https://www.google.com/recaptcha/admin',
+    setupHelpUrl: 'https://console.cloud.google.com/security/recaptcha',
   },
   factory: (credentials) => {
     const adapter = new RecaptchaAdapter();

@@ -53,13 +53,15 @@ describe('connection guidance', () => {
     expect(guidance).toContain('Registrar/domain purchase');
     expect(guidance).toContain('Cloudflare Dashboard -> Manage Account -> Account API Tokens');
     expect(guidance).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
-    expect(guidance).toContain('Cloudflare Dashboard -> My Profile -> API Tokens');
+    expect(guidance).toContain('My Profile -> API Tokens');
     expect(guidance).toContain('https://dash.cloudflare.com/profile/api-tokens');
     expect(guidance).toContain('cfat_');
     expect(guidance).toContain('cfut_');
     expect(guidance).toContain('Zone -> Zone -> Read');
     expect(guidance).toContain('Zone -> Zone Settings -> Read or Edit');
-    expect(guidance).toContain('Zone -> DNS -> Edit/Write');
+    expect(guidance).toContain('Zone -> DNS -> Edit.');
+    expect(guidance).toContain('Email Routing Rules');
+    expect(guidance).toContain('Email Routing Addresses');
     expect(guidance).toContain('scope="invoiceperfect.com"');
     expect(guidance).toContain('accountId');
     expect(guidance).toContain('Do not use the legacy Global API Key');

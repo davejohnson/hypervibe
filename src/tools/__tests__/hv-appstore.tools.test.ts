@@ -97,7 +97,7 @@ describe('hv_appstore_status', () => {
     const status = await t.call('hv_appstore_status', { appIdentifier: 'com.example.app' });
     expect(status.ok).toBe(false);
     expect(status.error.code).toBe('MISSING_CONNECTION');
-    expect(status.hint).toContain('appstoreconnect.apple.com/access/api');
+    expect(status.hint).toContain('appstoreconnect.apple.com/access/integrations/api');
     await t.close();
   });
 });

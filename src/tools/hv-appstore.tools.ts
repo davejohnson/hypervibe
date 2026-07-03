@@ -115,7 +115,7 @@ type StatusSection = (typeof STATUS_SECTIONS)[number];
 export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_appstore_status',
-    'Read-only App Store Connect overview for an app: TestFlight builds, beta groups, testers, App Store submission readiness, and App ID capabilities. Use include to limit scope. Requires an appstoreconnect connection (API key from https://appstoreconnect.apple.com/access/api).',
+    'Read-only App Store Connect overview for an app: TestFlight builds, beta groups, testers, App Store submission readiness, and App ID capabilities. Use include to limit scope. Requires an appstoreconnect connection (API key from https://appstoreconnect.apple.com/access/integrations/api).',
     {
       appIdentifier: z.string().describe('App bundle identifier (e.g. com.example.myapp)'),
       include: z.array(z.enum(STATUS_SECTIONS)).optional().describe('Sections to include (default: all of builds, groups, testers, readiness, capabilities)'),

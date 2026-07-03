@@ -82,7 +82,7 @@ export function buildRailwaySetupHelpInstructions(repo?: string): string {
 
 ## Railway API Token
 
-1. Go to https://railway.app/account/tokens
+1. Go to https://railway.com/account/tokens
 2. Create an Account token or a Workspace token with write access to the target workspace/project
 3. Recommended: export it or reference the existing \`.env\` file directly, then save and verify it in Hypervibe. If the user intentionally wants to enter the token in chat, raw credentials are still accepted.
 

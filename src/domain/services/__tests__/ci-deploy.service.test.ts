@@ -142,7 +142,7 @@ describe('ci-deploy.service', () => {
       const message = missingProviderSecretsMessage('railway', ['RAILWAY_API_TOKEN']);
       expect(message).toContain('Missing provider secrets: RAILWAY_API_TOKEN.');
       expect(message).toContain('Connect and verify railway');
-      expect(message).toContain('Railway Account token or Workspace token');
+      expect(message).toContain('Railway Account API token');
       expect(message).not.toContain('GHCR');
     });
 

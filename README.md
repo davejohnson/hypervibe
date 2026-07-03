@@ -189,7 +189,10 @@ Set these permissions and resources:
 Permissions:
 - Zone -> Zone -> Read
 - Zone -> Zone Settings -> Read or Edit
-- Zone -> DNS -> Edit/Write
+- Zone -> DNS -> Edit
+- Zone -> Email Routing Rules -> Edit (for hv_email_setup/hv_email_forwarding)
+- Account -> Email Routing Addresses -> Edit (to create/verify forwarding destinations)
+- Account -> Account Settings -> Read (lets Hypervibe auto-resolve accountId)
 
 Zone Resources:
 - Include -> Specific zone -> example.com

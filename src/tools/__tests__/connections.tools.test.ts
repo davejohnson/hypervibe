@@ -264,8 +264,8 @@ describe('hv_connect', () => {
     expect(result.error.code).toBe('PROVIDER_ERROR');
     expect(result.error.message).toContain('invalid token');
     expect(result.hint).toContain('saved');
-    expect(result.hint).toContain('Railway Account token or Workspace token');
-    expect(result.hint).toContain('https://railway.app/account/tokens');
+    expect(result.hint).toContain('Railway Account API token');
+    expect(result.hint).toContain('https://railway.com/account/tokens');
 
     const connection = new ConnectionRepository().findByProvider('railway');
     expect(connection).not.toBeNull();
@@ -279,13 +279,13 @@ describe('hv_connect', () => {
     const missing = await t.call('hv_connect', { provider: 'railway' });
     expect(missing.ok).toBe(false);
     expect(missing.error.code).toBe('VALIDATION');
-    expect(missing.hint).toContain('Railway Account token or Workspace token');
-    expect(missing.hint).toContain('https://railway.app/account/tokens');
+    expect(missing.hint).toContain('Railway Account API token');
+    expect(missing.hint).toContain('https://railway.com/account/tokens');
 
     const invalid = await t.call('hv_connect', { provider: 'railway', credentials: { nope: true } });
     expect(invalid.ok).toBe(false);
     expect(invalid.error.code).toBe('VALIDATION');
-    expect(invalid.hint).toContain('Railway Account token or Workspace token');
+    expect(invalid.hint).toContain('Railway Account API token');
     await t.close();
   });
 
@@ -294,8 +294,8 @@ describe('hv_connect', () => {
     const result = await t.call('hv_connect', { provider: 'railway', action: 'verify' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('NOT_FOUND');
-    expect(result.hint).toContain('Railway Account token or Workspace token');
-    expect(result.hint).toContain('https://railway.app/account/tokens');
+    expect(result.hint).toContain('Railway Account API token');
+    expect(result.hint).toContain('https://railway.com/account/tokens');
     await t.close();
   });
 
@@ -343,10 +343,10 @@ describe('hv_connections_list', () => {
       expect.objectContaining({
         name: 'railway',
         displayName: 'Railway',
-        tokenType: 'Railway Account token or Workspace token',
-        setupHelpUrl: 'https://railway.app/account/tokens',
+        tokenType: expect.stringContaining('Railway Account API token'),
+        setupHelpUrl: 'https://railway.com/account/tokens',
         requiredPermissions: expect.arrayContaining([
-          expect.stringContaining('write access to the target workspace/project'),
+          expect.stringContaining('create projects, services, environments, variables, databases, domains, and deployments'),
         ]),
       })
     );
@@ -358,7 +358,7 @@ describe('hv_connections_list', () => {
         tokenType: expect.stringContaining('Cloudflare Account API Token'),
         requiredPermissions: expect.arrayContaining([
           expect.stringContaining('Zone -> Zone -> Read'),
-          expect.stringContaining('Zone -> DNS -> Edit/Write'),
+          expect.stringContaining('Zone -> DNS -> Edit.'),
         ]),
         notes: expect.arrayContaining([
           expect.stringContaining('Cloudflare Dashboard -> Manage Account -> Account API Tokens'),

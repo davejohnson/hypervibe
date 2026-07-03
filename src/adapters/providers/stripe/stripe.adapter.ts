@@ -117,7 +117,7 @@ export class StripeAdapter {
 
     const key = mode === 'sandbox' ? this.credentials.sandboxSecretKey : this.credentials.liveSecretKey;
     if (!key) {
-      throw new Error(`No ${mode} API key configured`);
+      throw new Error(`No ${mode} Stripe secret key configured. Connect with sandboxSecretKey (sk_test_...) and/or liveSecretKey (sk_live_...).`);
     }
     return key;
   }
@@ -182,9 +182,14 @@ export class StripeAdapter {
     return pairs.filter(Boolean).join('&');
   }
 
-  async verify(mode: StripeMode): Promise<{ success: boolean; error?: string; accountId?: string }> {
+  async verify(mode?: StripeMode): Promise<{ success: boolean; error?: string; accountId?: string }> {
+    // The generic connection-verify path passes no mode; default to whichever
+    // key is configured (live wins when both are) instead of failing a
+    // sandbox-only connection by always reaching for the live key.
+    const resolvedMode: StripeMode = mode
+      ?? (this.credentials?.liveSecretKey ? 'live' : 'sandbox');
     try {
-      const result = await this.request<{ id: string }>(mode, 'GET', '/account');
+      const result = await this.request<{ id: string }>(resolvedMode, 'GET', '/account');
       return { success: true, accountId: result.id };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };

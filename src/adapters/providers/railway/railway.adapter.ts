@@ -2895,7 +2895,7 @@ providerRegistry.register({
     displayName: 'Railway',
     category: 'deployment',
     credentialsSchema: RailwayCredentialsSchema,
-    setupHelpUrl: 'https://railway.app/account/tokens',
+    setupHelpUrl: 'https://railway.com/account/tokens',
   },
   factory: (credentials) => {
     const adapter = new RailwayAdapter();
