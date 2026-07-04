@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync } from 'fs';
+import { randomBytes } from 'crypto';
 import { z } from 'zod';
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { SecretResolver } from '../domain/services/secret.resolver.js';
@@ -58,6 +59,17 @@ function secretRefKind(ref: string): string {
   return 'unknown';
 }
 
+/** Server-side random secret (base64url alphabet) that never enters chat. */
+function generateSecretValue(length: number): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const bytes = randomBytes(length);
+  let output = '';
+  for (let i = 0; i < length; i++) {
+    output += alphabet[bytes[i] % alphabet.length];
+  }
+  return output;
+}
+
 async function resolveSecretValueRef(
   ref: string,
   context: { projectId?: string; environmentName?: string } = {}
@@ -113,34 +125,64 @@ async function resolveSecretValueRef(
 export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_secrets_set',
-    'Set secrets and environment variables. target="hosting" (default) sets env vars on the deployed environment; "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time (e.g. "1password://<vault>/<item>#<field>", "bitwarden://<secret-name>"); "github" sets a GitHub Actions repo secret from raw value or secretRef without echoing the value. For target="github", secretRef supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref. remove=true deletes (mapping/github targets).',
+    'Set secrets and environment variables. NEVER pass sensitive values via value/vars — they appear in the chat transcript; use secretRef (env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref — read locally, never enters chat) or generate=true for a new server-side random secret. target="hosting" (default) sets env vars on the deployed environment; "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time; "github" sets a GitHub Actions repo secret. remove=true deletes (mapping/github targets).',
     {
       project: projectField,
       env: envField,
       service: z.string().optional().describe('Service to scope hosting env vars to (default: first service)'),
       target: z.enum(['hosting', 'manager', 'mapping', 'github']).optional().describe('Default "hosting"'),
       key: z.string().optional().describe('Variable/secret name'),
-      value: z.string().optional().describe('Value for key'),
-      vars: z.record(z.string()).optional().describe('Multiple key-value pairs (alternative to key/value)'),
+      value: z.string().optional().describe('Value for key. WARNING: values passed here appear in the chat transcript — prefer secretRef (reads the value locally) or generate=true (server-side random). Only use value when the secret is already exposed or not sensitive.'),
+      generate: z.boolean().optional().describe('Generate a cryptographically random value server-side for key (targets hosting/manager/github). The value is never shown in chat.'),
+      generateLength: z.number().int().min(16).max(128).optional().describe('Length of the generated value (default 48 characters, base64url alphabet)'),
+      vars: z.record(z.string()).optional().describe('Multiple key-value pairs (alternative to key/value). Same chat-transcript warning as value.'),
       provider: z.enum(SECRET_MANAGERS).optional().describe('target=manager: secret manager provider'),
       path: z.string().optional().describe('target=manager: secret path'),
-      secretRef: z.string().optional().describe('target=mapping: secret-manager reference to map; target=github: value source ref such as env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or 1password://vault/item#field.'),
+      secretRef: z.string().optional().describe('Chat-safe value source for targets hosting/manager/github: env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like 1password://vault/item#field — the value is read locally and never enters chat. For target=mapping: the secret-manager reference to map.'),
       environments: z.array(z.string()).optional().describe('target=mapping: environments the mapping applies to'),
       repo: z.string().optional().describe('target=github: "owner/name" (defaults to project git remote)'),
       remove: z.boolean().optional().describe('Delete instead of set (mapping/github)'),
     },
-    wrapHandler(async ({ project: projectRef, env, service, target = 'hosting', key, value, vars, provider, path, secretRef, environments, repo, remove }) => {
+    wrapHandler(async ({ project: projectRef, env, service, target = 'hosting', key, value, generate, generateLength, vars, provider, path, secretRef, environments, repo, remove }) => {
+      // One chat-safe value pipeline for hosting/manager/github: an explicit
+      // value (already in the transcript — warn), a secretRef (read locally),
+      // or generate (server-side random, never shown).
+      const rawValueUsed = value !== undefined || (vars !== undefined && Object.keys(vars).length > 0);
+      const exposureWarning = rawValueUsed && target !== 'mapping'
+        ? 'The secret value was passed through chat and is now in the conversation transcript. If it is sensitive, rotate it (generate=true replaces it with a server-side random value that never appears in chat) or use secretRef next time.'
+        : undefined;
+      if (generate) {
+        if (!key) throw new HvError('VALIDATION', 'key is required with generate=true.');
+        if (value !== undefined || secretRef) {
+          throw new HvError('VALIDATION', 'Pass generate=true alone — not with value or secretRef.');
+        }
+        value = generateSecretValue(generateLength ?? 48);
+      } else if (secretRef && (target === 'hosting' || target === 'manager') && key !== undefined && value === undefined) {
+        // hosting/manager: resolve the ref locally so the value never enters chat.
+        const projectForRef = ctx.resolveProject({ project: projectRef });
+        value = await resolveSecretValueRef(secretRef, {
+          ...(projectForRef ? { projectId: projectForRef.id } : {}),
+          ...(env ? { environmentName: env } : {}),
+        });
+      }
       const kv = vars ?? (key !== undefined && value !== undefined ? { [key]: value } : undefined);
 
       if (target === 'manager') {
         if (!provider || !path) throw new HvError('VALIDATION', 'provider and path are required for target="manager".');
-        if (!kv) throw new HvError('VALIDATION', 'Provide key+value or vars.');
+        if (!kv) {
+          throw new HvError('VALIDATION', 'Provide key with secretRef/generate=true, or key+value / vars.', {
+            hint: 'Prefer key + secretRef or key + generate=true so the value never enters chat.',
+          });
+        }
         const adapter = await managerAdapter(ctx, provider);
         const receipt = await adapter.setSecret(path, kv);
         accessLogRepo.create({ action: 'write', provider: provider as SecretManagerProvider, secretPath: path, success: true });
         return toolSuccess(
-          { provider, path: receipt.path, keysStored: Object.keys(kv) },
-          { hint: `Map to env vars with hv_secrets_set target="mapping" secretRef="${provider}://${path}#<KEY>".` }
+          { provider, path: receipt.path, keysStored: Object.keys(kv), valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw' },
+          {
+            hint: `Map to env vars with hv_secrets_set target="mapping" secretRef="${provider}://${path}#<KEY>".`,
+            ...(exposureWarning ? { warnings: [exposureWarning] } : {}),
+          }
         );
       }
 
@@ -170,7 +212,10 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const secretValue = value ?? await resolveSecretValueRef(secretRef!, { projectId: project.id, ...(env ? { environmentName: env } : {}) });
         await gh.adapter.setRepositorySecret(owner, repoName, key, secretValue);
         ctx.repos.audit.create({ action: 'github.secret_set', resourceType: 'github_secret', resourceId: `${owner}/${repoName}/${key}`, details: { secretName: key } });
-        return toolSuccess({ repository: `${owner}/${repoName}`, secretName: key, action: 'set', valueSource: secretRef ? secretRefKind(secretRef) : 'raw' });
+        return toolSuccess(
+          { repository: `${owner}/${repoName}`, secretName: key, action: 'set', valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw' },
+          exposureWarning ? { warnings: [exposureWarning] } : undefined
+        );
       }
 
       if (target === 'mapping') {
@@ -203,7 +248,11 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       // target === 'hosting'
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
-      if (!kv) throw new HvError('VALIDATION', 'Provide key+value or vars.');
+      if (!kv) {
+        throw new HvError('VALIDATION', 'Provide key with secretRef/generate=true, or key+value / vars.', {
+          hint: 'Prefer key + secretRef="dotenv:/absolute/path/.env#KEY" (value read locally) or key + generate=true (server-side random) so the value never enters chat.',
+        });
+      }
       const services = ctx.repos.services.findByProjectId(project.id);
       const targetService = service ? services.find((s) => s.name === service) : services[0];
       if (!targetService) {
@@ -213,11 +262,15 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       if (!result.success) {
         return toolError('PROVIDER_ERROR', result.error || result.message, {});
       }
-      return toolSuccess({
-        environment: environment.name,
-        service: targetService.name,
-        variables: Object.keys(kv),
-      });
+      return toolSuccess(
+        {
+          environment: environment.name,
+          service: targetService.name,
+          variables: Object.keys(kv),
+          valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw',
+        },
+        exposureWarning ? { warnings: [exposureWarning] } : undefined
+      );
     })
   );
 

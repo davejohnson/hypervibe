@@ -8,6 +8,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
+import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
+import * as hostingEnv from '../../domain/services/hosting-env.service.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
@@ -174,6 +177,96 @@ describe('hv_secrets_sync', () => {
     const result = await t.call('hv_secrets_sync', { project: 'empty-sync-app', dryRun: true });
     expect(result.ok).toBe(true);
     expect(result.data.environments).toEqual([]);
+    await t.close();
+  });
+});
+
+describe('hv_secrets_set target=hosting value sources', () => {
+  function seedHostingProject() {
+    const project = new ProjectRepository().create({ name: 'hosting-secrets-app', defaultPlatform: 'railway' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+    return project;
+  }
+
+  it('warns loudly when a raw value is passed through chat', async () => {
+    seedHostingProject();
+    const sync = vi.spyOn(hostingEnv, 'syncHostingEnvVars').mockResolvedValue({ success: true, message: 'ok' });
+
+    const t = await makeClient();
+    const result = await t.call('hv_secrets_set', {
+      project: 'hosting-secrets-app',
+      env: 'production',
+      key: 'SESSION_SECRET',
+      value: 'raw-secret-passed-in-chat',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.valueSource).toBe('raw');
+    expect(result.warnings.join(' ')).toContain('passed through chat');
+    expect(sync).toHaveBeenCalledWith(expect.objectContaining({ vars: { SESSION_SECRET: 'raw-secret-passed-in-chat' } }));
+    await t.close();
+  });
+
+  it('resolves secretRef locally so the value never enters chat', async () => {
+    seedHostingProject();
+    const sync = vi.spyOn(hostingEnv, 'syncHostingEnvVars').mockResolvedValue({ success: true, message: 'ok' });
+    const envFile = path.join(tempDir, '.env');
+    writeFileSync(envFile, 'SESSION_SECRET=from-dotenv-file\n');
+
+    const t = await makeClient();
+    const result = await t.call('hv_secrets_set', {
+      project: 'hosting-secrets-app',
+      env: 'production',
+      key: 'SESSION_SECRET',
+      secretRef: `dotenv:${envFile}#SESSION_SECRET`,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.valueSource).toBe('dotenv');
+    expect(result.warnings).toBeUndefined();
+    expect(sync).toHaveBeenCalledWith(expect.objectContaining({ vars: { SESSION_SECRET: 'from-dotenv-file' } }));
+    // The resolved value never appears in the tool response.
+    expect(JSON.stringify(result)).not.toContain('from-dotenv-file');
+    await t.close();
+  });
+
+  it('generate=true sets a server-side random value that never appears in output', async () => {
+    seedHostingProject();
+    let capturedValue = '';
+    vi.spyOn(hostingEnv, 'syncHostingEnvVars').mockImplementation(async (params) => {
+      capturedValue = (params.vars as Record<string, string>).SESSION_SECRET;
+      return { success: true, message: 'ok' };
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_secrets_set', {
+      project: 'hosting-secrets-app',
+      env: 'production',
+      key: 'SESSION_SECRET',
+      generate: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.valueSource).toBe('generated');
+    expect(result.warnings).toBeUndefined();
+    expect(capturedValue).toHaveLength(48);
+    expect(JSON.stringify(result)).not.toContain(capturedValue);
+    await t.close();
+  });
+
+  it('rejects generate combined with value or secretRef', async () => {
+    seedHostingProject();
+    const t = await makeClient();
+    const result = await t.call('hv_secrets_set', {
+      project: 'hosting-secrets-app',
+      env: 'production',
+      key: 'X',
+      value: 'y',
+      generate: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
     await t.close();
   });
 });
