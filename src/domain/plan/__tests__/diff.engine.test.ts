@@ -645,3 +645,57 @@ describe('diffEnvironment — abandoned provider teardown', () => {
     expect(result.actions.some((a) => a.metadata?.operation === 'previousHostingDestroy')).toBe(false);
   });
 });
+
+describe('diffEnvironment — release-command migrations', () => {
+  it('carries migrations.mode=releaseCommand as web releaseCommand drift', () => {
+    const result = diffEnvironment({
+      spec: spec({ migrations: { mode: 'releaseCommand', command: 'npm run db:setup' } }),
+      envName: 'production',
+      observed: observed(),
+      local: local(),
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.type).toBe('update');
+    expect(web.diff).toContainEqual({ field: 'releaseCommand', from: undefined, to: 'npm run db:setup' });
+  });
+
+  it('is a noop when the live service already runs the release command', () => {
+    const live = observedWeb({
+      config: { startCommand: 'npm start', healthCheckPath: '/health', public: true, releaseCommand: 'npm run db:setup' },
+    });
+    const result = diffEnvironment({
+      spec: spec({ migrations: { mode: 'releaseCommand', command: 'npm run db:setup' } }),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local(),
+    });
+    expect(result.actions.find((a) => a.id === 'service:web')!.type).toBe('noop');
+  });
+
+  it('an explicit service releaseCommand wins over migrations.command', () => {
+    const result = diffEnvironment({
+      spec: spec({
+        services: { web: { startCommand: 'npm start', healthCheckPath: '/health', public: true, releaseCommand: 'npm run migrate' } },
+        migrations: { mode: 'releaseCommand', command: 'npm run db:setup' },
+      }),
+      envName: 'production',
+      observed: observed(),
+      local: local(),
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.diff).toContainEqual({ field: 'releaseCommand', from: undefined, to: 'npm run migrate' });
+  });
+
+  it('warns when no web service can carry the release command', () => {
+    const result = diffEnvironment({
+      spec: spec({
+        services: { nightly: { workloadKind: 'cron', cronSchedule: '0 8 * * *', startCommand: 'npm run cron' } },
+        migrations: { mode: 'releaseCommand', command: 'npm run db:setup' },
+      }),
+      envName: 'production',
+      observed: observed({ services: [] }),
+      local: local({ services: [localService('nightly')], bindings: { provider: 'railway', projectId: 'rail-proj-1', environmentId: 'rail-env-1', services: {} } }),
+    });
+    expect(result.warnings).toContainEqual(expect.stringContaining('will never run'));
+  });
+});

@@ -26,14 +26,39 @@ function classifyEnvName(name: string): 'staging' | 'production' | null {
 }
 
 /**
+ * Env-level migrations.mode="releaseCommand" is carried by a web service:
+ * derive its releaseCommand so both diff and bootstrap converge the
+ * provider's pre-deploy hook. An explicit releaseCommand on any web service
+ * means the user manages it themselves — derive nothing. With several web
+ * services, only the first (alphabetical) carries it: migrations run once.
+ */
+export function withMigrationReleaseCommand(env: EnvironmentSpec): EnvironmentSpec {
+  const command = env.migrations?.mode === 'releaseCommand' ? env.migrations.command : undefined;
+  if (!command) return env;
+  const webNames = Object.keys(env.services)
+    .filter((name) => env.services[name].workloadKind === 'web')
+    .sort();
+  const carrier = webNames[0];
+  if (!carrier || webNames.some((name) => env.services[name].releaseCommand !== undefined)) return env;
+  return {
+    ...env,
+    services: {
+      ...env.services,
+      [carrier]: { ...env.services[carrier], releaseCommand: command },
+    },
+  };
+}
+
+/**
  * Convert one environment section of a ProjectSpec into the parameter shape
  * executeBootstrap expects (the legacy DesiredState layout).
  */
 export function specToBootstrapParams(
   projectName: string,
   environmentName: string,
-  env: EnvironmentSpec
+  envInput: EnvironmentSpec
 ): BootstrapParams {
+  const env = withMigrationReleaseCommand(envInput);
   const services: string[] = [];
   const crons: NonNullable<DesiredState['crons']> = {};
   const serviceConfig: NonNullable<DesiredState['serviceConfig']> = {};
