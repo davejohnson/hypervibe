@@ -87,6 +87,9 @@ describe('github tools', () => {
         providerProjectId: undefined,
         providerEnvironmentId: undefined,
         providerServiceIds: [],
+        providerJobNames: [],
+        needsServiceNames: true,
+        needsJobNames: false,
       },
     ]);
     expect(migration.includeStep).toBe(true);
@@ -119,7 +122,11 @@ describe('github tools', () => {
     expect(workflow.content).toContain('IMAGE_REGISTRY_TOKEN: ${{ secrets.IMAGE_REGISTRY_TOKEN }}');
     expect(workflow.content).toContain('username: process.env.IMAGE_REGISTRY_USERNAME');
     expect(workflow.content).toContain('password: process.env.IMAGE_REGISTRY_TOKEN');
-    expect(workflow.content).toContain('const deploymentId = await railway(deployMutation');
+    expect(workflow.content).toContain('uses: actions/github-script@v8');
+    expect(workflow.content).toContain('Railway API \' + response.status + \' during \' + operation');
+    expect(workflow.content).toContain('traceId=');
+    expect(workflow.content).toContain('const deploymentData = await railway(deployMutation');
+    expect(workflow.content).toContain('const deploymentId = requireString(deploymentData.serviceInstanceDeployV2');
     expect(workflow.content).toContain('query DeploymentStatus');
     expect(workflow.content).toContain('await waitForDeployment(deploymentId, serviceId)');
     expect(workflow.content).toContain('Recent Railway logs');
@@ -190,8 +197,11 @@ describe('github tools', () => {
     expect(cloudRunWorkflow.requiredSecrets).toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION']);
     expect(cloudRunWorkflow.requiredVariables).toEqual([]);
     expect(cloudRunWorkflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'cloudrun-web'");
+    expect(cloudRunWorkflow.content).toContain("CLOUDRUN_JOB_NAMES: ''");
     expect(cloudRunWorkflow.content).toContain('https://run.googleapis.com/v2/projects/');
     expect(cloudRunWorkflow.content).toContain('docker/build-push-action@v6');
+    expect(cloudRunWorkflow.content).toContain('await waitOperation(operation, \'service \' + serviceName + \' deployment\')');
+    expect(cloudRunWorkflow.content).toContain('await waitReady(url, serviceName, \'service\')');
 
     const railwayWorkflow = buildBranchDeployWorkflow('railway', {
       ...baseTarget,
@@ -206,6 +216,59 @@ describe('github tools', () => {
       railwayWorkflow.content,
     ].join('\n');
     expect(combinedContent).not.toMatch(/railway-github-action|vercel deploy|doctl apps|gcloud |heroku container|heroku git/);
+  });
+
+  it('separates Cloud Run service and scheduled job deploy targets', () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const project = projectRepo.create({
+      name: 'cloudapp',
+      defaultPlatform: 'cloudrun',
+      gitRemoteUrl: 'https://github.com/davejohnson/cloudapp',
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        services: {
+          web: { serviceId: 'gcp-project-web' },
+          daily: { serviceId: 'gcp-project-daily-schedule', jobName: 'gcp-project-daily', resourceType: 'scheduledJob' },
+        },
+      },
+    });
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'cloudrun' },
+          services: {
+            web: { workloadKind: 'web' },
+            daily: { workloadKind: 'cron', cronSchedule: '0 8 * * *' },
+          },
+          deploy: { strategy: 'branch', branch: 'main' },
+        },
+      },
+    });
+
+    const { targets } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
+    expect(targets[0]).toMatchObject({
+      providerServiceIds: ['gcp-project-web'],
+      providerJobNames: ['gcp-project-daily'],
+      needsServiceNames: true,
+      needsJobNames: true,
+    });
+
+    const workflow = buildBranchDeployWorkflow('cloudrun', targets[0], { includeStep: false });
+    expect(workflow.requiredVariables).toEqual([]);
+    expect(workflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'gcp-project-web'");
+    expect(workflow.content).toContain("CLOUDRUN_JOB_NAMES: 'gcp-project-daily'");
+    expect(workflow.content).toContain('/jobs/\' + encodeURIComponent(jobName)');
+    expect(workflow.content).toContain('await waitOperation(operation, \'job \' + jobName + \' deployment\')');
+    expect(workflow.content).toContain('await waitReady(url, jobName, \'job\')');
+    expect(workflow.content).not.toContain("CLOUDRUN_SERVICE_NAMES: 'gcp-project-web,gcp-project-daily-schedule'");
   });
 
   it('never requires a repo Dockerfile: both providers generate one for Node apps', () => {

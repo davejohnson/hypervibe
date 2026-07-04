@@ -684,6 +684,26 @@ describe('diffEnvironment — release-command migrations', () => {
     });
     const web = result.actions.find((a) => a.id === 'service:web')!;
     expect(web.diff).toContainEqual({ field: 'releaseCommand', from: undefined, to: 'npm run migrate' });
+    expect(result.warnings).toContainEqual(expect.stringContaining('already set on web'));
+    expect(result.warnings).toContainEqual(expect.stringContaining('npm run db:setup'));
+  });
+
+  it('does not warn when an explicit service releaseCommand already matches migrations.command', () => {
+    const live = observedWeb({
+      config: { startCommand: 'npm start', healthCheckPath: '/health', public: true, releaseCommand: 'npm run db:setup' },
+    });
+    const result = diffEnvironment({
+      spec: spec({
+        services: { web: { startCommand: 'npm start', healthCheckPath: '/health', public: true, releaseCommand: 'npm run db:setup' } },
+        migrations: { mode: 'releaseCommand', command: 'npm run db:setup' },
+      }),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local(),
+    });
+    expect(result.actions.find((a) => a.id === 'service:web')!.type).toBe('noop');
+    expect(result.warnings).not.toContainEqual(expect.stringContaining('already set on web'));
+    expect(result.warnings).not.toContainEqual(expect.stringContaining('will never run'));
   });
 
   it('warns when no web service can carry the release command', () => {

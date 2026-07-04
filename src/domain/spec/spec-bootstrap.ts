@@ -49,6 +49,23 @@ export function withMigrationReleaseCommand(env: EnvironmentSpec): EnvironmentSp
   };
 }
 
+export function migrationReleaseCommandWarning(env: EnvironmentSpec): string | undefined {
+  const command = env.migrations?.mode === 'releaseCommand' ? env.migrations.command : undefined;
+  if (!command) return undefined;
+  const webServices = Object.entries(env.services)
+    .filter(([, service]) => service.workloadKind === 'web')
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (webServices.length === 0) {
+    return `migrations.mode="releaseCommand" is set but no web service exists to carry the release command, so "${command}" will never run. Add a web service or set releaseCommand on a service explicitly.`;
+  }
+  const explicit = webServices.filter(([, service]) => service.releaseCommand !== undefined);
+  if (explicit.length === 0 || explicit.some(([, service]) => service.releaseCommand === command)) {
+    return undefined;
+  }
+  const serviceNames = explicit.map(([name]) => name).join(', ');
+  return `migrations.mode="releaseCommand" is set to "${command}", but web service releaseCommand is already set on ${serviceNames}. Hypervibe will not overwrite explicit service releaseCommand values, so the migration command will not run unless one of those commands includes it.`;
+}
+
 /**
  * Convert one environment section of a ProjectSpec into the parameter shape
  * executeBootstrap expects (the legacy DesiredState layout).

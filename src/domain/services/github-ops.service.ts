@@ -177,6 +177,12 @@ export interface BranchDeployTarget {
   providerProjectId?: string;
   providerEnvironmentId?: string;
   providerServiceIds: string[];
+  /** Cloud Run job names for cron workloads; Railway cron uses providerServiceIds. */
+  providerJobNames?: string[];
+  /** Whether an unbound Cloud Run workflow should require CLOUDRUN_SERVICE_NAMES. */
+  needsServiceNames?: boolean;
+  /** Whether an unbound Cloud Run workflow should require CLOUDRUN_JOB_NAMES. */
+  needsJobNames?: boolean;
   /** CMD for the generated fallback Dockerfile (repos without one). */
   webStartCommand?: string;
 }
@@ -208,19 +214,36 @@ function environmentBindings(projectId: string, environmentName: string): {
   providerProjectId?: string;
   providerEnvironmentId?: string;
   providerServiceIds: string[];
+  providerJobNames: string[];
   boundServiceNames: string[];
 } {
   const environment = envRepo.findByProjectAndName(projectId, environmentName);
   const bindings = asRecord(environment?.platformBindings);
   const services = asRecord(bindings?.services);
   const boundServiceNames = Object.keys(services ?? {});
-  const providerServiceIds = Object.values(services ?? {})
-    .map((service) => asRecord(service)?.serviceId)
-    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  const providerServiceIds: string[] = [];
+  const providerJobNames: string[] = [];
+  for (const service of Object.values(services ?? {})) {
+    const record = asRecord(service);
+    const serviceId = typeof record?.serviceId === 'string' && record.serviceId.trim().length > 0
+      ? record.serviceId.trim()
+      : undefined;
+    const jobName = typeof record?.jobName === 'string' && record.jobName.trim().length > 0
+      ? record.jobName.trim()
+      : undefined;
+    const isScheduledJob = record?.resourceType === 'scheduledJob' || Boolean(jobName);
+    if (isScheduledJob) {
+      const target = jobName ?? serviceId;
+      if (target) providerJobNames.push(target);
+    } else if (serviceId) {
+      providerServiceIds.push(serviceId);
+    }
+  }
   return {
     providerProjectId: typeof bindings?.projectId === 'string' ? bindings.projectId : undefined,
     providerEnvironmentId: typeof bindings?.environmentId === 'string' ? bindings.environmentId : undefined,
     providerServiceIds,
+    providerJobNames,
     boundServiceNames,
   };
 }
@@ -282,6 +305,12 @@ export function resolveBranchDeployTargets(project: Project): {
       desiredBranches[kind] = branch;
       const bindings = environmentBindings(project.id, environmentName);
       const serviceNames = Object.keys(envSpec.services);
+      const runtimeServiceNames = Object.entries(envSpec.services)
+        .filter(([, service]) => service.workloadKind !== 'cron')
+        .map(([name]) => name);
+      const jobServiceNames = Object.entries(envSpec.services)
+        .filter(([, service]) => service.workloadKind === 'cron')
+        .map(([name]) => name);
       const webService = Object.values(envSpec.services).find((service) => service.workloadKind === 'web');
       targetsByKind.set(kind, {
         environmentName,
@@ -291,6 +320,9 @@ export function resolveBranchDeployTargets(project: Project): {
         providerProjectId: bindings.providerProjectId,
         providerEnvironmentId: bindings.providerEnvironmentId,
         providerServiceIds: bindings.providerServiceIds,
+        providerJobNames: bindings.providerJobNames,
+        needsServiceNames: runtimeServiceNames.length > 0 || (serviceNames.length === 0 && bindings.providerServiceIds.length > 0),
+        needsJobNames: jobServiceNames.length > 0 || (serviceNames.length === 0 && bindings.providerJobNames.length > 0),
         webStartCommand: webService?.startCommand,
       });
 
@@ -375,6 +407,9 @@ export function resolveBranchDeployTargets(project: Project): {
       providerProjectId: bindings.providerProjectId,
       providerEnvironmentId: bindings.providerEnvironmentId,
       providerServiceIds: bindings.providerServiceIds,
+      providerJobNames: bindings.providerJobNames,
+      needsServiceNames: true,
+      needsJobNames: bindings.providerJobNames.length > 0,
     });
   }
 
@@ -489,7 +524,7 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
       return {
         steps: `      - name: Resolve image URI
         id: image
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const repo = process.env.GITHUB_REPOSITORY.toLowerCase();
@@ -515,7 +550,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
       - name: Verify Railway can read image
         run: docker buildx imagetools inspect "\${{ steps.image.outputs.uri }}" >/dev/null
       - name: Deploy image to Railway
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           RAILWAY_API_TOKEN: \${{ secrets.RAILWAY_API_TOKEN }}
           RAILWAY_ENVIRONMENT_ID: ${railwayEnvironmentId}
@@ -533,7 +568,31 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
             const serviceIds = process.env.RAILWAY_SERVICE_IDS.split(',').map((value) => value.trim()).filter(Boolean);
             if (serviceIds.length === 0) throw new Error('RAILWAY_SERVICE_IDS is empty');
 
+            function operationName(query) {
+              return (query.match(/\\b(?:query|mutation)\\s+(\\w+)/) || [])[1] || 'RailwayGraphQL';
+            }
+
+            function redact(value) {
+              if (Array.isArray(value)) return value.map(redact);
+              if (!value || typeof value !== 'object') return value;
+              return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+                key,
+                /token|password|secret|credential/i.test(key) ? '***' : redact(entry),
+              ]));
+            }
+
+            function errorDetails(payload, body) {
+              const errors = Array.isArray(payload?.errors) ? payload.errors : [];
+              const messages = errors.map((error) => error.message).filter(Boolean);
+              const traceIds = errors.map((error) => error.traceId).filter(Boolean);
+              return [
+                messages.length ? messages.join('; ') : body,
+                traceIds.length ? 'traceId=' + traceIds.join(',') : '',
+              ].filter(Boolean).join(' ');
+            }
+
             async function railway(query, variables) {
+              const operation = operationName(query);
               const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
@@ -543,18 +602,41 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
                 body: JSON.stringify({ query, variables }),
               });
               const body = await response.text();
-              if (!response.ok) throw new Error('Railway API ' + response.status + ': ' + body);
-              const payload = JSON.parse(body);
+              let payload;
+              try {
+                payload = JSON.parse(body);
+              } catch {
+                payload = null;
+              }
+              if (!response.ok) {
+                throw new Error(
+                  'Railway API ' + response.status + ' during ' + operation
+                  + ' variables=' + JSON.stringify(redact(variables))
+                  + ': ' + errorDetails(payload, body)
+                );
+              }
+              if (!payload) throw new Error('Railway API returned non-JSON during ' + operation + ': ' + body);
               if (payload.errors && payload.errors.length > 0) {
-                throw new Error(payload.errors.map((error) => error.message).join('; '));
+                throw new Error(
+                  'Railway GraphQL error during ' + operation
+                  + ' variables=' + JSON.stringify(redact(variables))
+                  + ': ' + errorDetails(payload, body)
+                );
               }
               return payload.data;
+            }
+
+            function requireString(value, name) {
+              if (typeof value !== 'string' || value.trim().length === 0) {
+                throw new Error(name + ' must be a non-empty string, got: ' + JSON.stringify(redact(value)));
+              }
+              return value;
             }
 
             const updateMutation = 'mutation UpdateServiceImage($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }';
             const deployMutation = 'mutation DeployServiceImage($serviceId: String!, $environmentId: String!, $commitSha: String) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId, commitSha: $commitSha) }';
             const deploymentQuery = 'query DeploymentStatus($id: String!) { deployment(id: $id) { id status url staticUrl diagnosis meta } }';
-            const buildLogsQuery = 'query BuildLogs($deploymentId: String!, $limit: Int) { buildLogs(deploymentId: $deploymentId, limit: $limit) { timestamp severity message } }';
+            const buildLogsQuery = 'query BuildLogs($deploymentId: String!) { buildLogs(deploymentId: $deploymentId) { timestamp severity message } }';
             const deploymentLogsQuery = 'query DeploymentLogs($deploymentId: String!, $limit: Int) { deploymentLogs(deploymentId: $deploymentId, limit: $limit) { timestamp severity message } }';
             const successStatuses = new Set(['SUCCESS']);
             const failedStatuses = new Set(['CRASHED', 'FAILED', 'REMOVED', 'SKIPPED']);
@@ -589,14 +671,15 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
             async function logsFor(deploymentId) {
               const sections = [];
               for (const entry of [
-                ['build logs', buildLogsQuery, 'buildLogs'],
-                ['deployment logs', deploymentLogsQuery, 'deploymentLogs'],
+                ['build logs', buildLogsQuery, 'buildLogs', { deploymentId }],
+                ['deployment logs', deploymentLogsQuery, 'deploymentLogs', { deploymentId, limit: 100 }],
               ]) {
                 try {
-                  const data = await railway(entry[1], { deploymentId, limit: 100 });
+                  const data = await railway(entry[1], entry[3]);
                   const lines = formatLogs(data[entry[2]]);
                   if (lines) sections.push(entry[0] + ':\\n' + lines);
                 } catch (error) {
+                  sections.push(entry[0] + ' unavailable: ' + error.message);
                   core.warning('Could not read Railway ' + entry[0] + ' for ' + deploymentId + ': ' + error.message);
                 }
               }
@@ -607,6 +690,9 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
               for (let attempt = 0; attempt < 90; attempt++) {
                 const data = await railway(deploymentQuery, { id: deploymentId });
                 const deployment = data.deployment;
+                if (!deployment) {
+                  throw new Error('Railway deployment query returned no deployment for id ' + deploymentId + ': ' + shortJson(data));
+                }
                 const status = deployment.status;
                 core.info('Railway deployment ' + deploymentId + ' for service ' + serviceId + ' status: ' + status);
                 if (successStatuses.has(status)) return deployment;
@@ -637,11 +723,12 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
                   },
                 },
               });
-              const deploymentId = await railway(deployMutation, {
+              const deploymentData = await railway(deployMutation, {
                 serviceId,
                 environmentId: process.env.RAILWAY_ENVIRONMENT_ID,
                 commitSha: process.env.GITHUB_SHA,
               });
+              const deploymentId = requireString(deploymentData.serviceInstanceDeployV2, 'serviceInstanceDeployV2 deployment id');
               await waitForDeployment(deploymentId, serviceId);
             }
 `,
@@ -650,12 +737,27 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
       };
     }
     case 'cloudrun': {
-      const cloudRunServiceNames = providerListValueOrVariable(target.providerServiceIds, 'CLOUDRUN_SERVICE_NAMES');
-      const requiredVariables = target.providerServiceIds.length === 0 ? ['CLOUDRUN_SERVICE_NAMES'] : [];
+      const jobNames = target.providerJobNames ?? [];
+      const needsServiceNames = target.needsServiceNames ?? true;
+      const needsJobNames = target.needsJobNames ?? false;
+      const cloudRunServiceNames = target.providerServiceIds.length > 0
+        ? yamlSingleQuoted(target.providerServiceIds.join(','))
+        : needsServiceNames
+          ? variableExpression('CLOUDRUN_SERVICE_NAMES')
+          : "''";
+      const cloudRunJobNames = jobNames.length > 0
+        ? yamlSingleQuoted(jobNames.join(','))
+        : needsJobNames
+          ? variableExpression('CLOUDRUN_JOB_NAMES')
+          : "''";
+      const requiredVariables = [
+        ...(target.providerServiceIds.length === 0 && needsServiceNames ? ['CLOUDRUN_SERVICE_NAMES'] : []),
+        ...(jobNames.length === 0 && needsJobNames ? ['CLOUDRUN_JOB_NAMES'] : []),
+      ];
       return {
         steps: `      - name: Resolve Cloud Run image URI
         id: image
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
           GCP_REGION: \${{ secrets.GCP_REGION }}
@@ -673,7 +775,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
             core.setOutput('uri', registry + '/' + process.env.GCP_PROJECT_ID + '/' + repository + '/' + imageName + ':' + process.env.GITHUB_SHA);
       - name: Prepare GCP Artifact Registry
         id: gcp
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           GCP_SERVICE_ACCOUNT_JSON: \${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
@@ -746,12 +848,13 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           push: true
           tags: \${{ steps.image.outputs.uri }}
       - name: Deploy image to Cloud Run
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           GCP_SERVICE_ACCOUNT_JSON: \${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
           GCP_REGION: \${{ secrets.GCP_REGION }}
           CLOUDRUN_SERVICE_NAMES: ${cloudRunServiceNames}
+          CLOUDRUN_JOB_NAMES: ${cloudRunJobNames}
           IMAGE_URI: \${{ steps.image.outputs.uri }}
         with:
           script: |
@@ -782,32 +885,156 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
               return JSON.parse(body).access_token;
             }
 
-            const required = ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION', 'CLOUDRUN_SERVICE_NAMES', 'IMAGE_URI'];
+            const required = ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION', 'IMAGE_URI'];
             for (const key of required) {
               if (!process.env[key]) throw new Error(key + ' is required');
             }
             const token = await getAccessToken();
-            const serviceNames = process.env.CLOUDRUN_SERVICE_NAMES.split(',').map((value) => value.trim()).filter(Boolean);
-            if (serviceNames.length === 0) throw new Error('CLOUDRUN_SERVICE_NAMES is empty');
+            const headers = {
+              Authorization: 'Bearer ' + token,
+              'Content-Type': 'application/json',
+            };
+            const serviceNames = (process.env.CLOUDRUN_SERVICE_NAMES || '').split(',').map((value) => value.trim()).filter(Boolean);
+            const jobNames = (process.env.CLOUDRUN_JOB_NAMES || '').split(',').map((value) => value.trim()).filter(Boolean);
+            if (serviceNames.length === 0 && jobNames.length === 0) {
+              throw new Error('CLOUDRUN_SERVICE_NAMES and CLOUDRUN_JOB_NAMES are both empty');
+            }
+
+            async function googleJson(url, options, description) {
+              const response = await fetch(url, options);
+              const body = await response.text();
+              let payload;
+              try {
+                payload = body ? JSON.parse(body) : {};
+              } catch {
+                payload = null;
+              }
+              if (!response.ok) {
+                throw new Error(description + ' failed: ' + response.status + ' ' + body);
+              }
+              if (!payload) {
+                throw new Error(description + ' returned non-JSON: ' + body);
+              }
+              return payload;
+            }
+
+            function shortJson(value) {
+              if (value === null || value === undefined) return '';
+              if (typeof value === 'string') return value;
+              try {
+                return JSON.stringify(value);
+              } catch {
+                return String(value);
+              }
+            }
+
+            function conditionSummary(resource) {
+              const condition = resource?.terminalCondition || (resource?.conditions || []).find((entry) => entry.type === 'Ready');
+              if (!condition) return '';
+              return [
+                condition.type,
+                condition.state || condition.status,
+                condition.reason,
+                condition.message,
+              ].filter(Boolean).join(' ');
+            }
+
+            function readiness(resource, kind) {
+              if (!resource) return { ready: false };
+              const condition = resource.terminalCondition || (resource.conditions || []).find((entry) => entry.type === 'Ready');
+              const state = condition?.state || condition?.status;
+              const succeeded = state === 'CONDITION_SUCCEEDED' || state === 'True';
+              const failed = state === 'CONDITION_FAILED' || state === 'False';
+              const generationsMatch = !resource.generation || !resource.observedGeneration || String(resource.generation) === String(resource.observedGeneration);
+              if (succeeded && generationsMatch && resource.reconciling !== true) return { ready: true };
+              if (failed && resource.reconciling !== true) {
+                const reason = condition?.reason ? condition.reason + ': ' : '';
+                return { ready: false, error: reason + (condition?.message || 'Ready condition failed') };
+              }
+              if (kind === 'service' && !condition && resource.uri) return { ready: true };
+              return { ready: false };
+            }
+
+            async function waitOperation(operation, description) {
+              if (!operation?.name || !operation.name.includes('/operations/')) return operation;
+              let current = operation;
+              for (let attempt = 0; attempt < 120; attempt++) {
+                if (current.done) {
+                  if (current.error) {
+                    throw new Error(
+                      'Cloud Run ' + description + ' operation failed: '
+                      + (current.error.status || current.error.code || 'unknown')
+                      + ' ' + (current.error.message || '')
+                    );
+                  }
+                  return current;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+                current = await googleJson(
+                  'https://run.googleapis.com/v2/' + current.name,
+                  { headers: { Authorization: 'Bearer ' + token } },
+                  'Cloud Run ' + description + ' operation status check'
+                );
+              }
+              throw new Error('Cloud Run ' + description + ' operation did not finish before timeout');
+            }
+
+            async function waitReady(url, name, kind) {
+              let last;
+              for (let attempt = 0; attempt < 120; attempt++) {
+                last = await googleJson(url, { headers: { Authorization: 'Bearer ' + token } }, 'Cloud Run ' + kind + ' readiness lookup for ' + name);
+                const state = readiness(last, kind);
+                const summary = conditionSummary(last);
+                core.info('Cloud Run ' + kind + ' ' + name + ' readiness: ' + (state.ready ? 'ready' : last.reconciling ? 'reconciling' : 'pending') + (summary ? ' - ' + summary : ''));
+                if (state.ready) return last;
+                if (state.error) throw new Error('Cloud Run ' + kind + ' ' + name + ' is not ready: ' + state.error);
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+              }
+              throw new Error('Cloud Run ' + kind + ' ' + name + ' was not ready before timeout. Last state: ' + shortJson(last));
+            }
+
+            function primaryServiceContainer(service) {
+              return service?.template?.containers?.[0] || service?.spec?.template?.spec?.containers?.[0] || {};
+            }
+
+            function primaryJobContainer(job) {
+              return job?.template?.template?.containers?.[0] || {};
+            }
+
+            function withImage(containers, image) {
+              const next = Array.isArray(containers) && containers.length > 0 ? [...containers] : [{}];
+              next[0] = { ...next[0], image };
+              return next;
+            }
+
             for (const serviceName of serviceNames) {
               const url = 'https://run.googleapis.com/v2/projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/services/' + encodeURIComponent(serviceName);
-              const currentResponse = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
-              const currentBody = await currentResponse.text();
-              if (!currentResponse.ok) throw new Error('Cloud Run service lookup failed for ' + serviceName + ': ' + currentResponse.status + ' ' + currentBody);
-              const current = JSON.parse(currentBody);
+              const current = await googleJson(url, { headers: { Authorization: 'Bearer ' + token } }, 'Cloud Run service lookup for ' + serviceName);
               const template = current.template || {};
-              const containers = Array.isArray(template.containers) && template.containers.length > 0 ? template.containers : [{}];
-              containers[0] = { ...containers[0], image: process.env.IMAGE_URI };
-              template.containers = containers;
-              const patchResponse = await fetch(url + '?updateMask=template.containers', {
+              template.containers = withImage(template.containers || [primaryServiceContainer(current)], process.env.IMAGE_URI);
+              const operation = await googleJson(url + '?updateMask=template.containers', {
                 method: 'PATCH',
-                headers: {
-                  Authorization: 'Bearer ' + token,
-                  'Content-Type': 'application/json',
-                },
+                headers,
                 body: JSON.stringify({ template }),
-              });
-              if (!patchResponse.ok) throw new Error('Cloud Run deployment failed for ' + serviceName + ': ' + patchResponse.status + ' ' + await patchResponse.text());
+              }, 'Cloud Run service deployment for ' + serviceName);
+              await waitOperation(operation, 'service ' + serviceName + ' deployment');
+              await waitReady(url, serviceName, 'service');
+            }
+
+            for (const jobName of jobNames) {
+              const url = 'https://run.googleapis.com/v2/projects/' + process.env.GCP_PROJECT_ID + '/locations/' + process.env.GCP_REGION + '/jobs/' + encodeURIComponent(jobName);
+              const current = await googleJson(url, { headers: { Authorization: 'Bearer ' + token } }, 'Cloud Run job lookup for ' + jobName);
+              const template = current.template || {};
+              const taskTemplate = template.template || {};
+              taskTemplate.containers = withImage(taskTemplate.containers || [primaryJobContainer(current)], process.env.IMAGE_URI);
+              template.template = taskTemplate;
+              const operation = await googleJson(url, {
+                method: 'PATCH',
+                headers,
+                body: JSON.stringify({ template }),
+              }, 'Cloud Run job deployment for ' + jobName);
+              await waitOperation(operation, 'job ' + jobName + ' deployment');
+              await waitReady(url, jobName, 'job');
             }
 `,
         requiredSecrets: ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION'],
@@ -893,7 +1120,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v8
         env:
           ANTHROPIC_API_KEY: \${{ secrets.ANTHROPIC_API_KEY }}
         with:

@@ -1,5 +1,5 @@
 import type { EnvironmentSpec, ServiceSpec } from '../spec/spec.schema.js';
-import { withMigrationReleaseCommand } from '../spec/spec-bootstrap.js';
+import { migrationReleaseCommandWarning, withMigrationReleaseCommand } from '../spec/spec-bootstrap.js';
 import type { ObservedState, ObservedService } from '../ports/observe.port.js';
 import { hashEnvValue } from '../ports/observe.port.js';
 import type { PlanAction, PlanFieldDiff, DiffResult, LocalSnapshot } from './plan.types.js';
@@ -39,15 +39,9 @@ export function diffEnvironment(input: {
   const actions: PlanAction[] = [];
   const unmanaged: DiffResult['unmanaged'] = [];
   const warnings: string[] = [...(observed?.warnings ?? [])];
-  if (
-    input.spec.migrations?.mode === 'releaseCommand'
-    && input.spec.migrations.command
-    && spec === input.spec
-    && !Object.values(input.spec.services).some((service) => service.releaseCommand !== undefined)
-  ) {
-    warnings.push(
-      `migrations.mode="releaseCommand" is set but no web service exists to carry the release command, so "${input.spec.migrations.command}" will never run. Add a web service or set releaseCommand on a service explicitly.`
-    );
+  const migrationWarning = migrationReleaseCommandWarning(input.spec);
+  if (migrationWarning) {
+    warnings.push(migrationWarning);
   }
   const provider = spec.hosting.provider;
   const desiredEnvVars = {

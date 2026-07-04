@@ -215,6 +215,37 @@ function diagnoseWorkflowLog(text: string): Array<{
     });
   }
 
+  if (/Node 20 is being deprecated/i.test(text) && /actions\/github-script@v7/i.test(text)) {
+    diagnostics.push({
+      code: 'GITHUB_SCRIPT_NODE20_DEPRECATED',
+      severity: 'warning',
+      summary: 'This deploy workflow still uses actions/github-script@v7, which runs on the deprecated Node 20 action runtime. Current Hypervibe workflows use actions/github-script@v8.',
+      evidence: 'GitHub Actions reported Node 20 deprecation for actions/github-script@v7.',
+      next: [
+        'Re-sync the deploy workflow with hv_plan + hv_apply, or hv_ci_setup kind="deploy-branch", so the workflow uses actions/github-script@v8.',
+        'Re-run the workflow with hv_ci_trigger afterwards.',
+      ],
+    });
+  }
+
+  if (
+    /Railway API 400/i.test(text)
+    && /Problem processing request/i.test(text)
+    && /waitForDeployment/i.test(text)
+  ) {
+    diagnostics.push({
+      code: 'RAILWAY_DEPLOY_POLLING_GRAPHQL_400',
+      severity: 'error',
+      summary: 'The workflow reached Railway deploy polling, then Railway returned a generic GraphQL 400. Older Hypervibe workflows passed the whole deploy mutation response as deploymentId instead of serviceInstanceDeployV2, which produces exactly this opaque Railway error.',
+      evidence: 'Railway API 400 "Problem processing request" occurred inside waitForDeployment.',
+      next: [
+        'Re-sync the deploy workflow with hv_plan + hv_apply, or hv_ci_setup kind="deploy-branch", so it extracts serviceInstanceDeployV2 before polling.',
+        'Re-run the workflow with hv_ci_trigger.',
+        'If it still fails after re-sync, inspect hv_ci_status include=["logs"]; newer workflows include the Railway GraphQL operation, redacted variables, and traceId.',
+      ],
+    });
+  }
+
   return diagnostics;
 }
 

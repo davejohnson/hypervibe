@@ -529,6 +529,49 @@ describe('hv_ci_status', () => {
     expect(res.data.diagnostics[0].next).toContainEqual(expect.stringContaining('hv_secrets_set target="github"'));
     await t.close();
   });
+
+  it('diagnoses old Railway deploy workflow GraphQL polling failures', async () => {
+    seedProject();
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunJobs').mockResolvedValue({
+      total_count: 1,
+      jobs: [{
+        id: 99,
+        run_id: 123,
+        name: 'deploy',
+        status: 'completed',
+        conclusion: 'failure',
+        started_at: '2026-07-04T18:16:30Z',
+        completed_at: '2026-07-04T18:17:00Z',
+        html_url: 'https://github.com/davejohnson/billforge/actions/runs/123/job/99',
+        steps: [],
+      }],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getWorkflowJobLogs').mockResolvedValue([
+      'Node 20 is being deprecated. This workflow is running with Node 24 by default.',
+      'Run actions/github-script@v7',
+      'Error: Railway API 400: {"errors":[{"message":"Problem processing request","traceId":"7784396596033792361"}]}',
+      'at async waitForDeployment (eval at callAsyncFunction, <anonymous>:83:18)',
+    ].join('\n'));
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', { project: 'billforge', include: ['logs'], runId: 123 });
+
+    expect(res.ok).toBe(true);
+    expect(res.data.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'GITHUB_SCRIPT_NODE20_DEPRECATED',
+      jobId: 99,
+      jobName: 'deploy',
+    }));
+    expect(res.data.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'RAILWAY_DEPLOY_POLLING_GRAPHQL_400',
+      jobId: 99,
+      jobName: 'deploy',
+    }));
+    const railwayDiagnostic = res.data.diagnostics.find((entry: { code: string }) => entry.code === 'RAILWAY_DEPLOY_POLLING_GRAPHQL_400');
+    expect(railwayDiagnostic.summary).toContain('serviceInstanceDeployV2');
+    expect(railwayDiagnostic.next).toContainEqual(expect.stringContaining('hv_plan + hv_apply'));
+    await t.close();
+  });
 });
 
 describe('hv_ci_trigger', () => {
