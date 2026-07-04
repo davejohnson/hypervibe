@@ -239,7 +239,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     displayName: 'Tunnel',
     tokenType: 'optional ngrok auth token or local cloudflared setup',
     setupUrl: 'https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/',
-    permissions: ['cloudflared quick tunnels need no API token; ngrok requires an auth token for authenticated tunnels.'],
+    permissions: ['cloudflared quick tunnels need no API token; ngrok requires an auth token for authenticated tunnels (create: https://dashboard.ngrok.com/get-started/your-authtoken).'],
     credentialExample: 'hv_connect provider="tunnel" credentialsRef="file:/absolute/path/tunnel.json"',
   },
   vault: {
