@@ -89,6 +89,50 @@ describe('resolveManagedMoveTargets', () => {
     expect(result).toMatchObject({ ok: false, code: 'same_database' });
   });
 
+  it('classifies an internal-only Railway target with no TCP proxy as target_unreachable', async () => {
+    const railwayEnv = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { provider: 'railway', projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
+    });
+    new ComponentRepository().create({
+      environmentId: railwayEnv.id,
+      type: 'postgres',
+      externalId: 'rail-svc-db-1',
+      bindings: {
+        provider: 'railway',
+        projectId: 'rail-proj-1',
+        connectionUrl: 'postgresql://postgres:pw@postgres-db.railway.internal:5432/postgres',
+        previousProvider: 'supabase',
+        previousBindings: { provider: 'supabase', connectionString: SOURCE_URL },
+      },
+    });
+
+    const result = await resolveManagedMoveTargets({ project, environment: railwayEnv });
+    expect(result).toMatchObject({ ok: false, code: 'target_unreachable' });
+    if (!result.ok) {
+      expect(result.hint).toContain('TCP proxy');
+    }
+  });
+
+  it('keeps no_target when the Railway bindings are too incomplete to create a proxy', async () => {
+    // No environmentId in the environment bindings -> a proxy could not be
+    // created at execute time, so this stays a plain no_target failure.
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      externalId: 'rail-svc-db-1',
+      bindings: {
+        provider: 'railway',
+        projectId: 'rail-proj-1',
+        connectionUrl: 'postgresql://postgres:pw@postgres-db.railway.internal:5432/postgres',
+      },
+    });
+
+    const result = await resolveManagedMoveTargets({ project, environment });
+    expect(result).toMatchObject({ ok: false, code: 'no_target' });
+  });
+
   it('honors explicit URL overrides', async () => {
     const result = await resolveManagedMoveTargets({
       project,

@@ -266,10 +266,30 @@ function isExternallyUsableDatabaseUrl(url: string | null | undefined): url is s
 }
 
 /**
+ * Build a postgres URL that goes through a Railway TCP proxy, using the
+ * datastore service's own variables for credentials. Returns null when the
+ * variables are missing the required credentials.
+ */
+export function buildRailwayProxyDatabaseUrl(
+  vars: Record<string, string>,
+  proxy: { domain: string; proxyPort: number }
+): string | null {
+  const user = vars.PGUSER;
+  const password = vars.POSTGRES_PASSWORD;
+  if (!user || !password) {
+    return null;
+  }
+  const database = vars.PGDATABASE || vars.POSTGRES_DB || 'railway';
+  return `postgresql://${user}:${encodeURIComponent(password)}@${proxy.domain}:${proxy.proxyPort}/${database}`;
+}
+
+/**
  * Resolve a database URL reachable from outside the hosting network.
  * Railway components store a `${{plugin.DATABASE_URL}}` template (only
  * meaningful inside Railway), so fetch the datastore service's real
- * variables and prefer DATABASE_PUBLIC_URL (TCP proxy).
+ * variables and prefer DATABASE_PUBLIC_URL (TCP proxy), falling back to a
+ * read-only lookup of an existing TCP proxy on the datastore service.
+ * Runs during hv_plan, so it must NEVER create a proxy.
  */
 export async function resolveExternalDatabaseUrl(
   project: Project,
@@ -298,6 +318,7 @@ export async function resolveExternalDatabaseUrl(
   const adapter = adapterResult.success
     ? adapterResult.adapter as unknown as {
       getServiceVariables?: (projectId: string, serviceId: string, environmentId: string) => Promise<Record<string, string>>;
+      getTcpProxy?: (environmentId: string, serviceId: string, applicationPort: number) => Promise<{ domain: string; proxyPort: number } | null>;
     }
     : null;
   if (!adapter || typeof adapter.getServiceVariables !== 'function') {
@@ -307,6 +328,15 @@ export async function resolveExternalDatabaseUrl(
     const vars = await adapter.getServiceVariables(railwayProjectId, datastoreServiceId, railwayEnvironmentId);
     if (isExternallyUsableDatabaseUrl(vars.DATABASE_PUBLIC_URL)) return vars.DATABASE_PUBLIC_URL;
     if (isExternallyUsableDatabaseUrl(vars.DATABASE_URL)) return vars.DATABASE_URL;
+
+    // No externally usable URL variable — check for an existing TCP proxy
+    // (read-only: this runs during hv_plan and must not create one).
+    if (typeof adapter.getTcpProxy === 'function') {
+      const proxy = await adapter.getTcpProxy(railwayEnvironmentId, datastoreServiceId, 5432);
+      if (proxy) {
+        return buildRailwayProxyDatabaseUrl(vars, proxy);
+      }
+    }
     return null;
   } catch {
     return null;

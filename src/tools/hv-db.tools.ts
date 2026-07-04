@@ -135,11 +135,26 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
           resolveUrlOverride(targetConnectionUrl),
         ]);
         const resolved = await resolveManagedMoveTargets({ project, environment, sourceConnectionUrl: sourceOverride, targetConnectionUrl: targetOverride });
-        if (!resolved.ok) {
+        // target_unreachable is previewable: the confirm-gated execute path
+        // creates a public TCP proxy so the target becomes reachable.
+        if (!resolved.ok && resolved.code !== 'target_unreachable') {
           const code = resolved.code === 'tooling' ? 'UNSUPPORTED' : 'NOT_FOUND';
           return toolError(code, resolved.error, { hint: resolved.hint });
         }
         if (!confirm) {
+          if (!resolved.ok) {
+            return toolError('CONFIRM_REQUIRED', 'Managed database move copies data with pg_dump | pg_restore (pg_restore --clean replaces existing objects in the target). The target Railway database is internal-only: confirming will also create a public TCP proxy for it.', {
+              details: {
+                target: {
+                  provider: 'railway',
+                  reachable: false,
+                  note: 'A public TCP proxy will be created for the database so pg_dump/pg_restore can reach it.',
+                },
+                strategy: databaseMigrationStrategyStatus('snapshot'),
+              },
+              hint: 'Freeze writes to the source (or plan a final re-run) and re-run with confirm=true. After the move, re-run hv_plan to repoint services, verify the app, then confirm the old database destroy.',
+            });
+          }
           return toolError('CONFIRM_REQUIRED', 'Managed database move copies data with pg_dump | pg_restore (pg_restore --clean replaces existing objects in the target).', {
             details: {
               source: { provider: resolved.sourceProvider ?? 'unknown', url: maskDatabaseUrl(resolved.sourceUrl) },
@@ -160,6 +175,9 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
             moved: true,
             source: { provider: result.sourceProvider ?? 'unknown' },
             target: { provider: result.targetProvider ?? 'unknown' },
+            ...(result.tcpProxyCreated !== undefined
+              ? { tcpProxyCreated: result.tcpProxyCreated, proxyDomain: result.proxyDomain }
+              : {}),
             verification: result.verification,
           },
           {

@@ -294,6 +294,16 @@ export async function planGitHubActionsDeploy(params: {
       availableSecrets.push(databaseUrlSecret);
     }
   }
+  if (
+    workflow.requiredSecrets.includes('DATABASE_URL')
+    && !availableSecrets.some((secret) => secret.name === 'DATABASE_URL')
+    && environmentSpec.hosting.provider === 'railway'
+    && environmentSpec.database
+  ) {
+    warnings.push(
+      'Tool-mode migrations run in GitHub Actions, but the Railway database has no externally reachable URL (no public TCP proxy), so DATABASE_URL cannot be synced and the migration step will fail. Recommended: migrations.mode="releaseCommand" with the command as the web service releaseCommand — Railway then runs migrations inside its network before each deploy. Alternatively a public TCP proxy makes DATABASE_URL syncable (hv_db_migrate mode="move" creates one).'
+    );
+  }
   const availableSecretNames = availableSecrets.map((secret) => secret.name);
   const availableSecretHashes = secretHashes(availableSecrets);
   const missingProviderSecrets = requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name));

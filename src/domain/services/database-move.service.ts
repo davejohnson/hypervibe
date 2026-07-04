@@ -5,7 +5,7 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { resolveProject } from './resolve-project.js';
 import { adapterFactory } from './adapter.factory.js';
 import { captureEnvironmentSnapshot, restoreEnvironmentSnapshot } from './local-state.transaction.js';
-import { getTableEstimates, quoteIdentifier, resolveExternalDatabaseUrl } from './database-ops.service.js';
+import { buildRailwayProxyDatabaseUrl, getTableEstimates, quoteIdentifier, resolveExternalDatabaseUrl } from './database-ops.service.js';
 import type { Component } from '../entities/component.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
@@ -261,6 +261,26 @@ export function compareTableEstimates(
   };
 }
 
+/**
+ * The Railway identifiers needed to create (or look up) a TCP proxy for the
+ * environment's postgres datastore service. Null when the component is not a
+ * Railway service-backed datastore or the bindings are incomplete.
+ */
+function railwayProxyProvisionIds(
+  component: Component | null | undefined,
+  environment: Environment
+): { railwayProjectId: string; serviceId: string; railwayEnvironmentId: string } | null {
+  const bindings = component?.bindings as Record<string, unknown> | undefined;
+  if (!component || bindings?.provider !== 'railway') return null;
+  const railwayProjectId = typeof bindings.projectId === 'string' ? bindings.projectId : undefined;
+  const serviceId = component.externalId
+    ?? (typeof bindings.serviceId === 'string' ? bindings.serviceId : undefined);
+  const envBindings = environment.platformBindings as { environmentId?: string };
+  const railwayEnvironmentId = typeof envBindings?.environmentId === 'string' ? envBindings.environmentId : undefined;
+  if (!railwayProjectId || !serviceId || !railwayEnvironmentId) return null;
+  return { railwayProjectId, serviceId, railwayEnvironmentId };
+}
+
 function connectionUrlFromBindings(bindings: Record<string, unknown> | null | undefined): string | undefined {
   if (!bindings) return undefined;
   if (typeof bindings.connectionUrl === 'string' && bindings.connectionUrl.length > 0) return bindings.connectionUrl;
@@ -270,7 +290,7 @@ function connectionUrlFromBindings(bindings: Record<string, unknown> | null | un
 
 export type ManagedMoveFailure = {
   ok: false;
-  code: 'no_component' | 'no_source' | 'no_target' | 'same_database' | 'tooling' | 'copy_failed';
+  code: 'no_component' | 'no_source' | 'no_target' | 'target_unreachable' | 'same_database' | 'tooling' | 'copy_failed';
   error: string;
   hint?: string;
 };
@@ -279,6 +299,8 @@ export type ManagedMoveSuccess = {
   ok: true;
   sourceProvider?: string;
   targetProvider?: string;
+  tcpProxyCreated?: boolean;
+  proxyDomain?: string;
   verification: Awaited<ReturnType<typeof getExactCountVerification>>;
 };
 
@@ -321,6 +343,18 @@ export async function resolveManagedMoveTargets(params: {
     targetUrl = await resolveExternalDatabaseUrl(params.project, params.environment) ?? undefined;
   }
   if (!targetUrl) {
+    // Railway datastore with only internal/template URLs and no TCP proxy
+    // (resolveExternalDatabaseUrl already checked for one, read-only):
+    // reachable once a proxy is created, which the confirm-gated execute
+    // path does.
+    if (railwayProxyProvisionIds(component, params.environment)) {
+      return {
+        ok: false,
+        code: 'target_unreachable',
+        error: 'The target Railway database is only reachable on Railway\'s private network — no externally usable URL or public TCP proxy exists.',
+        hint: 'Confirming the move will create a public TCP proxy for the database so pg_dump/pg_restore can reach it.',
+      };
+    }
     return {
       ok: false,
       code: component ? 'no_target' : 'no_component',
@@ -394,7 +428,18 @@ export async function executeManagedDatabaseMove(params: {
     }
   }
 
-  const resolved = await resolveManagedMoveTargets(params);
+  let resolved = await resolveManagedMoveTargets(params);
+  let proxyInfo: { tcpProxyCreated: boolean; proxyDomain: string } | undefined;
+  if (!resolved.ok && resolved.code === 'target_unreachable') {
+    // The move is confirm-gated at the tool layer, so creating the proxy at
+    // execute time is acceptable.
+    const provisioned = await provisionRailwayTargetProxyUrl(params.project, params.environment);
+    if (!provisioned.ok) {
+      return provisioned;
+    }
+    proxyInfo = { tcpProxyCreated: provisioned.created, proxyDomain: provisioned.domain };
+    resolved = await resolveManagedMoveTargets({ ...params, targetConnectionUrl: provisioned.url });
+  }
   if (!resolved.ok) {
     return resolved;
   }
@@ -414,6 +459,62 @@ export async function executeManagedDatabaseMove(params: {
     ok: true,
     sourceProvider: resolved.sourceProvider,
     targetProvider: resolved.targetProvider,
+    ...(proxyInfo ?? {}),
     verification,
   };
+}
+
+/**
+ * Create (or reuse) a public TCP proxy on the environment's Railway postgres
+ * datastore and build an externally reachable connection URL from the
+ * datastore's own variables. Only called from the confirm-gated execute path.
+ */
+async function provisionRailwayTargetProxyUrl(
+  project: Project,
+  environment: Environment
+): Promise<{ ok: true; url: string; domain: string; created: boolean } | ManagedMoveFailure> {
+  const component = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
+  const ids = railwayProxyProvisionIds(component, environment);
+  if (!ids) {
+    return {
+      ok: false,
+      code: 'target_unreachable',
+      error: 'The target Railway database is missing the bindings (projectId/serviceId/environmentId) needed to create a TCP proxy.',
+    };
+  }
+
+  const adapterResult = await adapterFactory.getProviderAdapter('railway', project);
+  const adapter = adapterResult.success
+    ? adapterResult.adapter as unknown as {
+      ensureTcpProxy?: (environmentId: string, serviceId: string, applicationPort: number) => Promise<{ domain: string; proxyPort: number; created: boolean }>;
+      getServiceVariables?: (projectId: string, serviceId: string, environmentId: string) => Promise<Record<string, string>>;
+    }
+    : null;
+  if (!adapter || typeof adapter.ensureTcpProxy !== 'function' || typeof adapter.getServiceVariables !== 'function') {
+    return {
+      ok: false,
+      code: 'target_unreachable',
+      error: adapterResult.error ?? 'No Railway adapter available to create the TCP proxy.',
+    };
+  }
+
+  try {
+    const proxy = await adapter.ensureTcpProxy(ids.railwayEnvironmentId, ids.serviceId, 5432);
+    const vars = await adapter.getServiceVariables(ids.railwayProjectId, ids.serviceId, ids.railwayEnvironmentId);
+    const url = buildRailwayProxyDatabaseUrl(vars, proxy);
+    if (!url) {
+      return {
+        ok: false,
+        code: 'target_unreachable',
+        error: 'Created a Railway TCP proxy but the datastore variables are missing PGUSER/POSTGRES_PASSWORD, so no connection URL could be built.',
+      };
+    }
+    return { ok: true, url, domain: proxy.domain, created: proxy.created };
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'target_unreachable',
+      error: `Failed to create a Railway TCP proxy for the target database: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }

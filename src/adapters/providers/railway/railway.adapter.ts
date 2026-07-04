@@ -1910,6 +1910,86 @@ export class RailwayAdapter implements IProviderAdapter {
     return result.variables ?? {};
   }
 
+  /**
+   * Read-only lookup of a public TCP proxy for a service port. Used by
+   * plan-time resolution, which must never mutate live infrastructure.
+   */
+  async getTcpProxy(
+    environmentId: string,
+    serviceId: string,
+    applicationPort: number
+  ): Promise<RailwayTcpProxy | null> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const query = gql`
+      query TcpProxies($environmentId: String!, $serviceId: String!) {
+        tcpProxies(environmentId: $environmentId, serviceId: $serviceId) {
+          id
+          domain
+          proxyPort
+          applicationPort
+        }
+      }
+    `;
+
+    try {
+      const result = await this.client.request<{ tcpProxies?: RailwayTcpProxy[] }>(query, {
+        environmentId,
+        serviceId,
+      });
+      return (result.tcpProxies ?? []).find((proxy) => proxy.applicationPort === applicationPort) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Ensure a public TCP proxy exists for a service port (e.g. postgres 5432)
+   * so externally-run tools (pg_dump/pg_restore, CI) can reach an otherwise
+   * internal-only datastore. Reuses an existing proxy for the same
+   * application port when one is present.
+   */
+  async ensureTcpProxy(
+    environmentId: string,
+    serviceId: string,
+    applicationPort: number
+  ): Promise<{ domain: string; proxyPort: number; created: boolean }> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const existing = await this.getTcpProxy(environmentId, serviceId, applicationPort);
+    if (existing) {
+      return { domain: existing.domain, proxyPort: existing.proxyPort, created: false };
+    }
+
+    const mutation = gql`
+      mutation TcpProxyCreate($input: TCPProxyCreateInput!) {
+        tcpProxyCreate(input: $input) {
+          id
+          domain
+          proxyPort
+          applicationPort
+        }
+      }
+    `;
+
+    try {
+      const result = await this.client.request<{ tcpProxyCreate?: RailwayTcpProxy }>(mutation, {
+        input: { environmentId, serviceId, applicationPort },
+      });
+      const created = result.tcpProxyCreate;
+      if (!created?.domain || typeof created.proxyPort !== 'number') {
+        throw new Error('Railway returned an empty tcpProxyCreate payload');
+      }
+      return { domain: created.domain, proxyPort: created.proxyPort, created: true };
+    } catch (error) {
+      throw new Error(this.describeError(error));
+    }
+  }
+
   async updateServiceInstanceConfig(params: {
     serviceId: string;
     environmentId: string;
@@ -2805,6 +2885,13 @@ export interface RailwayServiceInstance {
   healthcheckPath?: string;
   numReplicas?: number;
   sleepApplication?: boolean;
+}
+
+export interface RailwayTcpProxy {
+  id: string;
+  domain: string;
+  proxyPort: number;
+  applicationPort: number;
 }
 
 export interface RailwayDeployment {

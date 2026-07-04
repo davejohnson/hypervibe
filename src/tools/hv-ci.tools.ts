@@ -187,6 +187,20 @@ function diagnoseWorkflowLog(text: string): Array<{
     });
   }
 
+  if (/ECONNREFUSED (127\.0\.0\.1|::1):5432/.test(text) && /db:setup|migrat|sequelize|prisma|knex/i.test(text)) {
+    diagnostics.push({
+      code: 'MIGRATION_DATABASE_URL_EMPTY',
+      severity: 'error',
+      summary: 'The migration step connected to localhost:5432 — DATABASE_URL is empty or unset in the workflow, so the database client fell back to local defaults.',
+      evidence: 'ECONNREFUSED 127.0.0.1:5432 during the migration step.',
+      next: [
+        'On Railway, prefer migrations.mode="releaseCommand" with the command as the web service releaseCommand: migrations then run inside Railway with the internal DATABASE_URL and no public exposure. Update the spec, then hv_plan and hv_apply.',
+        'If migrations must run in GitHub Actions, the database needs an externally reachable URL: once a public TCP proxy exists (hv_db_migrate mode="move" creates one), re-run hv_plan and hv_apply to sync DATABASE_URL into the repository secrets.',
+        'Re-run the workflow with hv_ci_trigger afterwards.',
+      ],
+    });
+  }
+
   return diagnostics;
 }
 
