@@ -17,7 +17,7 @@ import {
   providerSecretsForGitHubActions,
   requiredProviderSecretNamesForGitHubActions,
 } from '../domain/services/ci-deploy.service.js';
-import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
 import { projectField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
@@ -179,7 +179,7 @@ function diagnoseWorkflowLog(text: string): Array<{
       evidence: 'docker buildx imagetools inspect returned 403 Forbidden for the GHCR image.',
       next: [
         'Confirm IMAGE_REGISTRY_USERNAME is the GitHub login that owns the package-read token.',
-        'Set IMAGE_REGISTRY_TOKEN from a classic GitHub PAT with read:packages, and repo when the repo/package is private.',
+        `Set IMAGE_REGISTRY_TOKEN from a classic GitHub PAT with read:packages (create: ${GITHUB_TOKEN_URLS.packageRead}), and repo when the repo/package is private.`,
         'Use hv_secrets_set target="github" key="IMAGE_REGISTRY_TOKEN" secretRef="dotenv:/absolute/path/.env#GHCR_TOKEN" to update the GitHub Actions secret without pasting the token into chat.',
         'Re-run the workflow with hv_ci_trigger, then inspect logs with hv_ci_status include=["logs"].',
       ],

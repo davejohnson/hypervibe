@@ -1561,7 +1561,7 @@ providerRegistry.register({
     displayName: 'App Store Connect',
     category: 'appstore',
     credentialsSchema: AppStoreConnectCredentialsSchema,
-    setupHelpUrl: 'https://developer.apple.com/documentation/appstoreconnectapi',
+    setupHelpUrl: 'https://appstoreconnect.apple.com/access/integrations/api',
   },
   factory: (credentials) => {
     const adapter = new AppStoreConnectAdapter();

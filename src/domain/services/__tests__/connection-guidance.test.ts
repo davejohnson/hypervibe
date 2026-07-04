@@ -78,6 +78,9 @@ describe('connection guidance', () => {
     expect(guidance).toContain('workflow');
     expect(guidance).toContain('read:packages');
     expect(guidance).toContain('read:packages-only token is not enough');
+    // Every token role carries its own pre-filled creation URL.
+    expect(guidance).toContain('https://github.com/settings/tokens/new?scopes=repo,workflow&description=Hypervibe%20GitHub%20API');
+    expect(guidance).toContain('https://github.com/settings/tokens/new?scopes=read:packages&description=Hypervibe%20GHCR%20pull');
     expect(guidance).toContain('apiToken');
     expect(guidance).toContain('packageReadToken');
     expect(guidance).toContain('fine-grained PAT');

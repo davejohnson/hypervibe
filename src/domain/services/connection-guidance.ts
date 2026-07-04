@@ -1,3 +1,13 @@
+/** Pre-filled GitHub classic PAT creation URLs, one per token role. */
+export const GITHUB_TOKEN_URLS = {
+  /** apiToken: workflow/secrets management. */
+  api: 'https://github.com/settings/tokens/new?scopes=repo,workflow&description=Hypervibe%20GitHub%20API',
+  /** packageReadToken: durable GHCR image pulls. */
+  packageRead: 'https://github.com/settings/tokens/new?scopes=read:packages&description=Hypervibe%20GHCR%20pull',
+  /** Single-token setup covering both roles. */
+  combined: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
+} as const;
+
 export interface ConnectionGuidance {
   provider: string;
   displayName: string;
@@ -136,15 +146,15 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     tokenType: 'classic personal access token for Hypervibe GitHub API operations; optional second classic PAT for GHCR package reads',
     setupUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
     permissions: [
-      'For CI deploy management, apiToken must have repo and workflow so Hypervibe can create/update .github/workflows files, read Actions runs/jobs/logs, trigger workflows, and manage repository secrets for private repos.',
-      'For Railway GHCR image pulls, packageReadToken must have read:packages. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.',
+      `For CI deploy management, apiToken must have repo and workflow so Hypervibe can create/update .github/workflows files, read Actions runs/jobs/logs, trigger workflows, and manage repository secrets for private repos. Create it here: ${GITHUB_TOKEN_URLS.api}`,
+      `For Railway GHCR image pulls, packageReadToken must have read:packages — create it here: ${GITHUB_TOKEN_URLS.packageRead}. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.`,
       'If using a fine-grained PAT for apiToken, grant Contents read/write, Workflows write, Actions write, and Secrets write on the target repo; add Pages write for GitHub Pages custom domains and Administration write for branch protection. GHCR package access still requires a classic PAT (GitHub: "GitHub Packages only supports authentication using a personal access token (classic)"). Hypervibe cannot pre-check fine-grained permissions (no scopes header), so missing permissions surface at apply time.',
     ],
     credentialExample: 'hv_connect provider="github" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}',
     notes: [
       'A read:packages-only token is not enough for CI deploy setup because it cannot write workflows or repository secrets.',
-      'For the simplest setup, create one classic PAT with repo, workflow, and read:packages, then map both apiToken and packageReadToken to the same .env variable.',
-      'For least privilege, use two classic PATs: HYPERVIBE_GITHUB_TOKEN with repo + workflow, and HYPERVIBE_GITHUB_PACKAGES_TOKEN with read:packages.',
+      `For the simplest setup, create one classic PAT with repo, workflow, and read:packages (${GITHUB_TOKEN_URLS.combined}), then map both apiToken and packageReadToken to the same .env variable.`,
+      `For least privilege, use two classic PATs: HYPERVIBE_GITHUB_TOKEN with repo + workflow (${GITHUB_TOKEN_URLS.api}), and HYPERVIBE_GITHUB_PACKAGES_TOKEN with read:packages (${GITHUB_TOKEN_URLS.packageRead}).`,
     ],
   },
   local: {

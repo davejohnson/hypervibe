@@ -15,7 +15,7 @@ import {
   type BranchDeployProvider,
   type BranchDeployWorkflow,
 } from './github-ops.service.js';
-import { formatConnectionGuidance } from './connection-guidance.js';
+import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
 
 const OPERATION = 'githubActionsDeployBranch';
 const SUPPORTED_PROVIDERS = new Set(['railway', 'cloudrun']);
@@ -48,7 +48,7 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
     parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions. ${formatConnectionGuidance(provider)}`);
   }
   if (missingImageRegistrySecrets) {
-    parts.push(`For Railway GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials. The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable GHCR image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
+    parts.push(`For Railway GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials (create the read:packages PAT here: ${GITHUB_TOKEN_URLS.packageRead}). The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable GHCR image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
   }
   return parts.join(' ');
 }
