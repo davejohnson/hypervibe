@@ -12,6 +12,7 @@ import {
   buildAiReviewWorkflowContent,
 } from '../domain/services/github-ops.service.js';
 import {
+  databaseUrlSecretForGitHubActions,
   githubCiDeployPermissionProblem,
   missingProviderSecretsMessage,
   providerSecretsForGitHubActions,
@@ -285,10 +286,25 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
             .filter((name) => requiredSecrets.includes(name));
           const syncedSecrets: string[] = [];
           const secretSyncErrors: Array<{ name: string; error: string }> = [];
-          for (const secret of providerSecretsForGitHubActions(cfg.provider, {
+          const secretsToSync = providerSecretsForGitHubActions(cfg.provider, {
             githubLogin: verification.login,
             githubRepo: `${owner}/${repo}`,
-          })) {
+          });
+          // DATABASE_URL is per-environment but stored as one repo secret:
+          // sync it only when every deploy target resolves to the same URL.
+          if (requiredSecrets.includes('DATABASE_URL')) {
+            const urls = new Set<string>();
+            for (const target of targets) {
+              const secret = await databaseUrlSecretForGitHubActions(project, target.environmentName);
+              if (secret) urls.add(secret.value);
+            }
+            if (urls.size === 1) {
+              secretsToSync.push({ name: 'DATABASE_URL', value: Array.from(urls)[0] });
+            } else if (urls.size > 1) {
+              secretSyncErrors.push({ name: 'DATABASE_URL', error: 'Deploy targets resolve to different database URLs; set the repository secret manually per environment.' });
+            }
+          }
+          for (const secret of secretsToSync) {
             if (!requiredSecrets.includes(secret.name)) {
               continue;
             }

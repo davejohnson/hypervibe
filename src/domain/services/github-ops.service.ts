@@ -395,7 +395,16 @@ export function resolveBranchDeployTargets(project: Project): {
 }
 
 function buildMigrationStep(command: string): string {
-  return `      - name: Run migrations
+  // Migrations run app tooling (prisma, node scripts), so the runner needs
+  // dependencies installed — the deploy steps that follow build a container
+  // image and never run npm ci on the runner themselves.
+  return `      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies for migrations
+        run: npm ci
+      - name: Run migrations
         run: ${command}
         env:
           DATABASE_URL: \${{ secrets.DATABASE_URL }}

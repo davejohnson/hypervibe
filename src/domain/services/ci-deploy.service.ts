@@ -16,6 +16,7 @@ import {
   type BranchDeployWorkflow,
 } from './github-ops.service.js';
 import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
+import { resolveExternalDatabaseUrl } from './database-ops.service.js';
 
 const OPERATION = 'githubActionsDeployBranch';
 const SUPPORTED_PROVIDERS = new Set(['railway', 'cloudrun']);
@@ -170,6 +171,21 @@ export function providerSecretsForGitHubActions(
   return secrets;
 }
 
+/**
+ * The managed database's externally reachable URL as a GitHub Actions
+ * secret, when the environment has one — lets the generated migration
+ * step run without a manually configured DATABASE_URL.
+ */
+export async function databaseUrlSecretForGitHubActions(
+  project: Project,
+  environmentName: string
+): Promise<ProviderSecret | null> {
+  const environment = new EnvironmentRepository().findByProjectAndName(project.id, environmentName);
+  if (!environment) return null;
+  const url = await resolveExternalDatabaseUrl(project, environment);
+  return url ? { name: 'DATABASE_URL', value: url } : null;
+}
+
 function githubConnectionRank(scope: string | null, repo?: string): number | null {
   if (!repo) {
     return scope === null ? 0 : 1;
@@ -272,6 +288,12 @@ export async function planGitHubActionsDeploy(params: {
     .filter((name) => workflow.requiredSecrets.includes(name));
   const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider, { githubRepo: repo })
     .filter((secret) => workflow.requiredSecrets.includes(secret.name));
+  if (workflow.requiredSecrets.includes('DATABASE_URL') && !availableSecrets.some((secret) => secret.name === 'DATABASE_URL')) {
+    const databaseUrlSecret = await databaseUrlSecretForGitHubActions(project, environmentName);
+    if (databaseUrlSecret) {
+      availableSecrets.push(databaseUrlSecret);
+    }
+  }
   const availableSecretNames = availableSecrets.map((secret) => secret.name);
   const availableSecretHashes = secretHashes(availableSecrets);
   const missingProviderSecrets = requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name));
@@ -406,6 +428,12 @@ export async function applyGitHubActionsDeploy(params: {
     .filter((name) => workflow.requiredSecrets.includes(name));
   const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider, { githubRepo: repo })
     .filter((secret) => workflow.requiredSecrets.includes(secret.name));
+  if (workflow.requiredSecrets.includes('DATABASE_URL') && !availableSecrets.some((secret) => secret.name === 'DATABASE_URL')) {
+    const databaseUrlSecret = await databaseUrlSecretForGitHubActions(project, environmentName);
+    if (databaseUrlSecret) {
+      availableSecrets.push(databaseUrlSecret);
+    }
+  }
   const availableSecretNames = availableSecrets.map((secret) => secret.name);
   const missingProviderSecrets = requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name));
 

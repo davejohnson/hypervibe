@@ -5,7 +5,7 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { resolveProject } from './resolve-project.js';
 import { adapterFactory } from './adapter.factory.js';
 import { captureEnvironmentSnapshot, restoreEnvironmentSnapshot } from './local-state.transaction.js';
-import { getTableEstimates, quoteIdentifier, resolveEnvironmentDatabaseUrl } from './database-ops.service.js';
+import { getTableEstimates, quoteIdentifier, resolveExternalDatabaseUrl } from './database-ops.service.js';
 import type { Component } from '../entities/component.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
@@ -313,10 +313,12 @@ export async function resolveManagedMoveTargets(params: {
     ? bindings.previousBindings as Record<string, unknown>
     : undefined;
 
-  // Target: the CURRENT database (where data lands).
+  // Target: the CURRENT database (where data lands). Must be reachable from
+  // this machine — Railway components store internal template refs, so
+  // resolve the external (TCP proxy) URL.
   let targetUrl = params.targetConnectionUrl;
   if (!targetUrl && component) {
-    targetUrl = await resolveEnvironmentDatabaseUrl(params.project, params.environment) ?? undefined;
+    targetUrl = await resolveExternalDatabaseUrl(params.project, params.environment) ?? undefined;
   }
   if (!targetUrl) {
     return {
@@ -352,7 +354,7 @@ export async function resolveManagedMoveTargets(params: {
       error: previousProvider
         ? `Could not resolve the previous ${previousProvider} database connection URL from the recorded bindings.`
         : 'No previous database is recorded for this environment (the component has no previousProvider bindings).',
-      hint: 'The source is recorded automatically when hv_apply creates the replacement database during a provider change. Pass sourceConnectionUrl explicitly if the old database is not tracked.',
+      hint: 'The source is recorded automatically when hv_apply creates the replacement database during a provider change. Pass sourceConnectionUrl explicitly if the old database is not tracked — chat-safe refs are supported: sourceConnectionUrl=\"dotenv:/absolute/path/.env#OLD_DATABASE_URL\".',
     };
   }
 

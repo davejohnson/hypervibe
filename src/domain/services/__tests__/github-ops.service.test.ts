@@ -102,6 +102,11 @@ describe('github tools', () => {
     expect(workflow.content).toContain('workflow_dispatch:');
     expect(workflow.content).toContain('environment: production');
     expect(workflow.content).toContain('run: npm run migrate');
+    // Migrations need dependencies installed on the runner; the deploy steps
+    // build a container image and never run npm ci themselves.
+    expect(workflow.content.indexOf('npm ci')).toBeGreaterThan(-1);
+    expect(workflow.content.indexOf('npm ci')).toBeLessThan(workflow.content.indexOf('run: npm run migrate'));
+    expect(workflow.content).toContain('actions/setup-node@v4');
     expect(workflow.content).toContain('docker/build-push-action@v6');
     expect(workflow.content).toContain('packages: write');
     expect(workflow.content).toContain('username: ${{ github.actor }}');

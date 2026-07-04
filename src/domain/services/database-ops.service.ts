@@ -260,6 +260,59 @@ export async function runDatabaseMigration(params: {
   }
 }
 
+/** A URL usable from OUTSIDE the hosting provider's network (CI runners, local pg_dump). */
+function isExternallyUsableDatabaseUrl(url: string | null | undefined): url is string {
+  return Boolean(url && !url.includes('${{') && !url.includes('.railway.internal'));
+}
+
+/**
+ * Resolve a database URL reachable from outside the hosting network.
+ * Railway components store a `${{plugin.DATABASE_URL}}` template (only
+ * meaningful inside Railway), so fetch the datastore service's real
+ * variables and prefer DATABASE_PUBLIC_URL (TCP proxy).
+ */
+export async function resolveExternalDatabaseUrl(
+  project: Project,
+  env: { id: string; name: string; platformBindings: Record<string, unknown> }
+): Promise<string | null> {
+  const direct = await resolveEnvironmentDatabaseUrl(project, env);
+  if (isExternallyUsableDatabaseUrl(direct)) {
+    return direct;
+  }
+
+  const component = componentRepo.findByEnvironmentAndType(env.id, 'postgres');
+  const componentBindings = component?.bindings as Record<string, unknown> | undefined;
+  if (!component || componentBindings?.provider !== 'railway') {
+    return null;
+  }
+  const railwayProjectId = typeof componentBindings.projectId === 'string' ? componentBindings.projectId : undefined;
+  const datastoreServiceId = component.externalId
+    ?? (typeof componentBindings.serviceId === 'string' ? componentBindings.serviceId : undefined);
+  const envBindings = env.platformBindings as { environmentId?: string };
+  const railwayEnvironmentId = typeof envBindings?.environmentId === 'string' ? envBindings.environmentId : undefined;
+  if (!railwayProjectId || !datastoreServiceId || !railwayEnvironmentId) {
+    return null;
+  }
+
+  const adapterResult = await adapterFactory.getProviderAdapter('railway', project);
+  const adapter = adapterResult.success
+    ? adapterResult.adapter as unknown as {
+      getServiceVariables?: (projectId: string, serviceId: string, environmentId: string) => Promise<Record<string, string>>;
+    }
+    : null;
+  if (!adapter || typeof adapter.getServiceVariables !== 'function') {
+    return null;
+  }
+  try {
+    const vars = await adapter.getServiceVariables(railwayProjectId, datastoreServiceId, railwayEnvironmentId);
+    if (isExternallyUsableDatabaseUrl(vars.DATABASE_PUBLIC_URL)) return vars.DATABASE_PUBLIC_URL;
+    if (isExternallyUsableDatabaseUrl(vars.DATABASE_URL)) return vars.DATABASE_URL;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function resolveEnvironmentDatabaseUrl(
   project: Project,
   env: { id: string; name: string; platformBindings: Record<string, unknown> },

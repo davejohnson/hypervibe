@@ -12,6 +12,7 @@ import {
   executeManagedDatabaseMove,
   resolveManagedMoveTargets,
 } from '../domain/services/database-move.service.js';
+import { resolveSecretValueRef } from '../domain/services/secret-value-ref.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
@@ -112,8 +113,8 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
         .describe('mode=up: use a preset migration command'),
       service: z.string().optional().describe('Service to run the migration on (default: first service)'),
       dryRun: z.boolean().optional().describe('mode=up: show what would run without executing'),
-      sourceConnectionUrl: z.string().optional().describe('mode=move: override the source database URL (default: the previous provider recorded during hv_apply)'),
-      targetConnectionUrl: z.string().optional().describe('mode=move: override the target database URL (default: the environment\'s current database)'),
+      sourceConnectionUrl: z.string().optional().describe('mode=move: override the source database URL. Accepts chat-safe refs — env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path — so the URL/password never enters chat. (Default: the previous provider recorded during hv_apply.)'),
+      targetConnectionUrl: z.string().optional().describe('mode=move: override the target database URL; same chat-safe refs supported. (Default: the environment\'s current database.)'),
       criticalTables: z.array(z.string()).optional().describe('mode=move: tables to verify with exact row counts (default: the 8 largest)'),
       confirm: confirmField,
     },
@@ -122,7 +123,18 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
 
       if (mode === 'move') {
-        const resolved = await resolveManagedMoveTargets({ project, environment, sourceConnectionUrl, targetConnectionUrl });
+        const resolveUrlOverride = async (input?: string): Promise<string | undefined> => {
+          if (!input) return undefined;
+          if (/^(env|dotenv|file):/.test(input.trim())) {
+            return resolveSecretValueRef(input, { projectId: project.id, environmentName: environment.name });
+          }
+          return input;
+        };
+        const [sourceOverride, targetOverride] = await Promise.all([
+          resolveUrlOverride(sourceConnectionUrl),
+          resolveUrlOverride(targetConnectionUrl),
+        ]);
+        const resolved = await resolveManagedMoveTargets({ project, environment, sourceConnectionUrl: sourceOverride, targetConnectionUrl: targetOverride });
         if (!resolved.ok) {
           const code = resolved.code === 'tooling' ? 'UNSUPPORTED' : 'NOT_FOUND';
           return toolError(code, resolved.error, { hint: resolved.hint });
@@ -138,7 +150,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
           });
         }
 
-        const result = await executeManagedDatabaseMove({ project, environment, sourceConnectionUrl, targetConnectionUrl, criticalTables });
+        const result = await executeManagedDatabaseMove({ project, environment, sourceConnectionUrl: sourceOverride, targetConnectionUrl: targetOverride, criticalTables });
         if (!result.ok) {
           const code = result.code === 'tooling' ? 'UNSUPPORTED' : 'PROVIDER_ERROR';
           return toolError(code, result.error, { hint: result.hint });
