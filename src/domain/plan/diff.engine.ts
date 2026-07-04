@@ -142,7 +142,9 @@ export function diffEnvironment(input: {
       if (noCode || sourceIssue || diff.length > 0) {
         const reasons: string[] = [];
         if (noCode) {
-          reasons.push(`Service "${name}" exists on ${provider} but has no code deployed (no source connected)`);
+          reasons.push(spec.deploy?.strategy === 'branch'
+            ? `Service "${name}" has no image deployed yet — expected until the first CI deploy succeeds (push to the deploy branch or hv_ci_trigger)`
+            : `Service "${name}" exists on ${provider} but has no code deployed (no source connected)`);
         }
         if (sourceIssue) {
           reasons.push(sourceIssue);

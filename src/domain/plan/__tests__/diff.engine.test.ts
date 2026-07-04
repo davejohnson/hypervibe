@@ -504,7 +504,8 @@ describe('diffEnvironment — deploy source', () => {
     });
     const web = result.actions.find((a) => a.id === 'service:web')!;
     expect(web.type).toBe('update');
-    expect(web.reason).toContain('no code deployed');
+    expect(web.reason).toContain('no image deployed yet');
+    expect(web.reason).toContain('first CI deploy');
   });
 
   it('flags a missing deploy source as drift when strategy is branch', () => {

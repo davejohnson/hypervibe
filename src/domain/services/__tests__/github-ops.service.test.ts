@@ -208,6 +208,33 @@ describe('github tools', () => {
     expect(combinedContent).not.toMatch(/railway-github-action|vercel deploy|doctl apps|gcloud |heroku container|heroku git/);
   });
 
+  it('never requires a repo Dockerfile: both providers generate one for Node apps', () => {
+    const baseTarget = {
+      environmentName: 'production',
+      kind: 'production' as const,
+      branch: 'main',
+      serviceNames: ['web'],
+      providerProjectId: undefined,
+      providerEnvironmentId: 'env-1',
+      providerServiceIds: ['srv-1'],
+      webStartCommand: 'npm run serve',
+    };
+    for (const provider of ['railway', 'cloudrun'] as const) {
+      const workflow = buildBranchDeployWorkflow(provider, baseTarget, { includeStep: false });
+      expect(workflow.content).toContain('name: Resolve Dockerfile');
+      expect(workflow.content).toContain('file: ${{ steps.dockerfile.outputs.path }}');
+      // Repo Dockerfile wins; otherwise a minimal Node image is generated
+      // with the web service start command as CMD.
+      expect(workflow.content).toContain('if [ -f Dockerfile ]; then');
+      expect(workflow.content).toContain('FROM node:20-slim');
+      expect(workflow.content).toContain('CMD ["sh", "-lc", "npm run serve"]');
+      // The generated Dockerfile step precedes the image build.
+      expect(workflow.content.indexOf('Resolve Dockerfile')).toBeLessThan(workflow.content.indexOf('docker/build-push-action@v6'));
+    }
+    const defaulted = buildBranchDeployWorkflow('railway', { ...baseTarget, webStartCommand: undefined }, { includeStep: false });
+    expect(defaulted.content).toContain('CMD ["sh", "-lc", "npm start"]');
+  });
+
   it('hv_ci_setup deploy-branch fails fast when the GitHub connection is invalid', async () => {
     const projectRepo = new ProjectRepository();
     const envRepo = new EnvironmentRepository();

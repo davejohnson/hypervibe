@@ -345,8 +345,11 @@ export class PlanService {
       }
     }
 
+    // Destroys (including confirm-gated previous-provider cleanup) are never
+    // prerequisites for CI setup — an unconfirmed destroy must not block the
+    // workflow sync.
     const ciDependsOn = actions
-      .filter((action) => action.type !== 'noop' && ['project', 'environment', 'service'].includes(action.resource.kind))
+      .filter((action) => action.type !== 'noop' && action.type !== 'destroy' && ['project', 'environment', 'service'].includes(action.resource.kind))
       .map((action) => action.id);
     const ciDeploy = await planGitHubActionsDeploy({
       project: projectForPlan,

@@ -177,6 +177,8 @@ export interface BranchDeployTarget {
   providerProjectId?: string;
   providerEnvironmentId?: string;
   providerServiceIds: string[];
+  /** CMD for the generated fallback Dockerfile (repos without one). */
+  webStartCommand?: string;
 }
 
 export interface BranchDeployWorkflow {
@@ -280,6 +282,7 @@ export function resolveBranchDeployTargets(project: Project): {
       desiredBranches[kind] = branch;
       const bindings = environmentBindings(project.id, environmentName);
       const serviceNames = Object.keys(envSpec.services);
+      const webService = Object.values(envSpec.services).find((service) => service.workloadKind === 'web');
       targetsByKind.set(kind, {
         environmentName,
         kind,
@@ -288,6 +291,7 @@ export function resolveBranchDeployTargets(project: Project): {
         providerProjectId: bindings.providerProjectId,
         providerEnvironmentId: bindings.providerEnvironmentId,
         providerServiceIds: bindings.providerServiceIds,
+        webStartCommand: webService?.startCommand,
       });
 
       if (!migration.includeStep && envSpec.migrations?.mode === 'tool' && envSpec.migrations.runInDeploy !== false && envSpec.migrations.command) {
@@ -415,6 +419,42 @@ function yamlSingleQuoted(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function shellSingleQuoted(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * A repo Dockerfile is never required: Node apps get the same minimal image
+ * the Cloud Build path generates (cloudrun.adapter cloudBuildScript), built
+ * on the runner when no Dockerfile exists.
+ */
+function buildDockerfileStep(target: BranchDeployTarget): string {
+  const startCommand = target.webStartCommand?.trim() || 'npm start';
+  const cmdLine = `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`;
+  return `      - name: Resolve Dockerfile
+        id: dockerfile
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "path=Dockerfile" >> "$GITHUB_OUTPUT"
+          elif [ -f package.json ]; then
+            printf '%s\\n' \\
+              'FROM node:20-slim' \\
+              'WORKDIR /app' \\
+              'COPY package*.json ./' \\
+              'RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi' \\
+              'COPY . .' \\
+              'ENV PORT=8080' \\
+              'EXPOSE 8080' \\
+              ${shellSingleQuoted(cmdLine)} \\
+              > Dockerfile.hypervibe
+            echo "path=Dockerfile.hypervibe" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Dockerfile or package.json found. Node apps build automatically; anything else needs a Dockerfile in the repo." >&2
+            exit 1
+          fi
+`;
+}
+
 function variableExpression(name: string): string {
   return `\${{ vars.${name} }}`;
 }
@@ -459,10 +499,11 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
           registry: ghcr.io
           username: \${{ github.actor }}
           password: \${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: \${{ steps.dockerfile.outputs.path }}
           push: true
           tags: \${{ steps.image.outputs.uri }}
       - name: Verify Railway image pull credentials
@@ -697,10 +738,11 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, kind: BranchDe
           registry: \${{ steps.image.outputs.registry }}
           username: oauth2accesstoken
           password: \${{ steps.gcp.outputs.access_token }}
-      - uses: docker/setup-buildx-action@v3
+${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: \${{ steps.dockerfile.outputs.path }}
           push: true
           tags: \${{ steps.image.outputs.uri }}
       - name: Deploy image to Cloud Run

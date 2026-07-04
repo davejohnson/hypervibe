@@ -448,6 +448,83 @@ describe('PlanService.plan', () => {
     expect(plan.warnings).toContainEqual(expect.stringContaining('packageReadToken needs read:packages'));
   });
 
+  it('never blocks the CI workflow sync on confirm-gated previous-provider destroys', async () => {
+    project = new ProjectRepository().update(project.id, { gitRemoteUrl: 'git@github.com:dave/apreskeys.com.git' })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          email: { enabled: false },
+          envVars: {},
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+    const connRepo = new ConnectionRepository();
+    const github = connRepo.create({
+      provider: 'github',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'gh-token', login: 'dave' }),
+    });
+    connRepo.updateStatus(github.id, 'verified');
+    const railway = connRepo.create({
+      provider: 'railway',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
+    });
+    connRepo.updateStatus(railway.id, 'verified');
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-1' } },
+        previousHosting: {
+          provider: 'cloudrun',
+          projectId: 'gcp-1',
+          services: { web: { serviceId: 'cr-web' }, cron: { serviceId: 'cr-cron' } },
+        },
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web',
+        externalId: 'svc-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+
+    const result = await new PlanService().plan(project, 'production');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const destroyIds = plan.actions
+      .filter((action) => action.metadata?.operation === 'previousHostingDestroy')
+      .map((action) => action.id);
+    expect(destroyIds.sort()).toEqual(['service:cron:previous-destroy', 'service:web:previous-destroy']);
+    const ci = plan.actions.find((action) => action.id === 'ci:github-actions:production:deploy-branch')!;
+    expect(ci.type).not.toBe('noop');
+    for (const id of destroyIds) {
+      expect(ci.dependsOn ?? []).not.toContain(id);
+    }
+  });
+
   it('replans CI deploys when a previously synced GitHub Actions secret value is stale', async () => {
     const ciProject = new ProjectRepository().create({
       name: 'ci-stale-secret-app',

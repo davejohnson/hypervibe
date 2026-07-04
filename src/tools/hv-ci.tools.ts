@@ -187,6 +187,20 @@ function diagnoseWorkflowLog(text: string): Array<{
     });
   }
 
+  if (/failed to read dockerfile|dockerfile.*no such file or directory/i.test(text)) {
+    diagnostics.push({
+      code: 'DOCKERFILE_MISSING',
+      severity: 'error',
+      summary: 'The Docker build step found no Dockerfile in the repository. Current Hypervibe workflows generate one automatically for Node apps (package.json), so this workflow predates that support.',
+      evidence: 'failed to read dockerfile during the image build step.',
+      next: [
+        'Re-sync the deploy workflow so it picks up the auto-Dockerfile step: hv_ci_setup kind="deploy-branch", or hv_plan + hv_apply.',
+        'A Dockerfile in the repo is only needed for non-Node apps (no package.json); if present it always takes precedence over the generated one.',
+        'Re-run the workflow with hv_ci_trigger afterwards.',
+      ],
+    });
+  }
+
   if (/ECONNREFUSED (127\.0\.0\.1|::1):5432/.test(text) && /db:setup|migrat|sequelize|prisma|knex/i.test(text)) {
     diagnostics.push({
       code: 'MIGRATION_DATABASE_URL_EMPTY',
@@ -398,6 +412,11 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
               ? [missingProviderSecretsMessage(cfg.provider, missingProviderSecrets)]
               : []),
           ];
+          if (created.some((entry) => entry.created || entry.updated)) {
+            warnings.push(
+              `Workflow file(s) were committed directly to the GitHub repository (${created.map((entry) => entry.path).join(', ')}); any local checkout is now behind — run git pull before editing workflows locally.`
+            );
+          }
           return toolSuccess(data, {
             warnings: warnings.length > 0 ? warnings : undefined,
             hint: `Set the manual secrets (${data.manualSecrets.join(', ') || 'none'})${data.requiredVariables.length > 0 ? ` and variables (${data.requiredVariables.join(', ')})` : ''} in the GitHub repository, then pushes to the mapped branches will deploy.`,

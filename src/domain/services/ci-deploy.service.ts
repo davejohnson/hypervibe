@@ -486,7 +486,10 @@ export async function applyGitHubActionsDeploy(params: {
   }
   return {
     success: true,
-    message: `Synced GitHub Actions deploy workflow ${workflow.path}`,
+    message: `Synced GitHub Actions deploy workflow ${workflow.path}`
+      + (fileResult.created || fileResult.updated
+        ? ' (committed directly to the GitHub repository — local checkouts need git pull)'
+        : ''),
     data: { workflow: workflow.path, file: fileResult, syncedSecrets: syncedSecretNames },
   };
 }
