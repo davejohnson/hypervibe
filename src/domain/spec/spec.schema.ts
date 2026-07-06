@@ -32,6 +32,13 @@ export const serviceSpecSchema = z.object({
 export const databaseSpecSchema = z.object({
   provider: z.enum(['supabase', 'cloudsql', 'railway']),
   engine: z.literal('postgres').default('postgres'),
+  /**
+   * Optional one-shot bootstrap/seed command. hv_plan emits a visible database
+   * seed action. hv_apply runs it inside the deployed service environment and
+   * records the successful command hash in the database component bindings so
+   * it does not run again unless changed.
+   */
+  seedCommand: z.string().min(1).optional(),
 });
 
 export const deploySpecSchema = z.object({
@@ -39,6 +46,20 @@ export const deploySpecSchema = z.object({
   trigger: z.enum(['ci', 'native']).optional(),
   branch: z.string().min(1).optional(),
 });
+
+export const envFileSpecSchema = z.object({
+  /**
+   * runtime: include high-confidence app runtime keys from .env (default).
+   * all: include every non-provider key from .env.
+   * explicit: include only keys listed in include.
+   * off: never load .env for deploy planning/apply.
+   */
+  mode: z.enum(['runtime', 'all', 'explicit', 'off']).default('runtime'),
+  /** Exact .env keys to include in addition to the mode's defaults. */
+  include: z.array(z.string().min(1)).default([]),
+  /** Exact .env keys to omit even if the mode or include list would select them. */
+  exclude: z.array(z.string().min(1)).default([]),
+}).default({});
 
 export const migrationsSpecSchema = z.object({
   mode: z.enum(['none', 'releaseCommand', 'tool']),
@@ -122,6 +143,7 @@ export const environmentSpecSchema = z.object({
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: z.object({ enabled: z.boolean() }).default({ enabled: false }),
   envVars: z.record(z.string()).default({}),
+  envFile: envFileSpecSchema.optional(),
   deploy: deploySpecSchema.optional(),
   migrations: migrationsSpecSchema.optional(),
   ios: iosSpecSchema.optional(),
@@ -166,5 +188,6 @@ export type IosSpec = z.infer<typeof iosSpecSchema>;
 export type QueueSpec = z.infer<typeof queueSpecSchema>;
 export type IosTestflightGroupSpec = z.infer<typeof iosTestflightGroupSpecSchema>;
 export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema>;
+export type EnvFileSpec = z.infer<typeof envFileSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;

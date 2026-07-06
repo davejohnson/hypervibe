@@ -47,15 +47,17 @@ function railwayCiDeployGuidance(project: Project, envName: string): { branch: s
 export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_deploy',
-    'Deploy services to an environment (staging, production, etc.). Plan-gated: builds a plan from the spec (optionally restricted to services=[...] with one-off envVars={...} overrides) and applies it immediately; the planId and applyRunId are returned for the audit trail. Requires a spec (hv_spec_set). Protected environments require confirm=true.',
+    'Deploy services to an environment (staging, production, etc.). Plan-gated: builds a plan from the spec and applies it immediately; the planId and applyRunId are returned for the audit trail. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. Use spec envFile.mode/include/exclude to control selection, envFile for a different local env file, or includeEnvFile=false to skip it. Requires a spec (hv_spec_set). Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
       services: z.array(z.string()).optional().describe('Specific services to deploy (default: all)'),
-      envVars: z.record(z.string()).optional().describe('Additional environment variables'),
+      envVars: z.record(z.string()).optional().describe('Additional one-off environment variables; values are encrypted in the stored plan and win over .env and spec envVars.'),
+      envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env> then repo .env when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
+      includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
       confirm: confirmField,
     },
-    wrapHandler(async ({ project: projectRef, env, services, envVars, confirm }) => {
+    wrapHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, confirm }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
 
       // Deploys are plan-gated: the spec is the source of truth for what runs.
@@ -102,6 +104,8 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
       const planned = await planService.plan(project, envName, {
         ...(services?.length ? { serviceFilter: services } : {}),
         ...(envVars && Object.keys(envVars).length > 0 ? { envVarOverrides: envVars } : {}),
+        ...(envFile ? { envFile } : {}),
+        ...(includeEnvFile !== undefined ? { includeEnvFile } : {}),
       });
       if ('error' in planned) {
         return toolError('VALIDATION', planned.error, { next: ['hv_spec_set'] });

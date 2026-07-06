@@ -7,7 +7,11 @@ import {
 } from '../domain/plan/converge.executor.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
-import { applyOverridesToBootstrapParams, specToBootstrapParams } from '../domain/spec/spec-bootstrap.js';
+import {
+  applyEnvFileVarsToBootstrapParams,
+  applyOverridesToBootstrapParams,
+  specToBootstrapParams,
+} from '../domain/spec/spec-bootstrap.js';
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import {
@@ -30,6 +34,7 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
+import { runEnvironmentTask } from '../domain/services/environment-task.service.js';
 import type { ToolContext } from './context.js';
 
 /**
@@ -286,6 +291,9 @@ export async function executePlanApply(ctx: ToolContext, params: {
   // Converge: bootstrap handles create/update/replace as one idempotent
   // pass; confirm-gated database destroys run individually afterward.
   const overrides = loaded.document.overrides;
+  const envFileEnvVars = overrides?.envFileVarsEncrypted
+    ? getSecretStore().decryptObject<Record<string, string>>(overrides.envFileVarsEncrypted)
+    : undefined;
   const overrideEnvVars = overrides?.envVarsEncrypted
     ? getSecretStore().decryptObject<Record<string, string>>(overrides.envVarsEncrypted)
     : undefined;
@@ -323,6 +331,7 @@ export async function executePlanApply(ctx: ToolContext, params: {
       }
 
       let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec);
+      bootstrapParams = applyEnvFileVarsToBootstrapParams(bootstrapParams, envFileEnvVars);
       if (overrides) {
         bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
           services: overrides.services,
@@ -357,6 +366,9 @@ export async function executePlanApply(ctx: ToolContext, params: {
     }
     if (action.resource.kind === 'database' && action.type === 'create') {
       return createDatabase(ctx, applyProject, envName, action);
+    }
+    if (action.resource.kind === 'database' && action.metadata?.operation === 'databaseSeed') {
+      return applyDatabaseSeed(ctx, applyProject, envName, action);
     }
     if (action.resource.kind === 'database' && action.type === 'destroy') {
       return destroyDatabase(ctx, applyProject, envName, action);
@@ -736,6 +748,72 @@ async function createDatabase(
       componentId: provisioned.component.externalId ?? provisioned.component.id,
       previousProvider: existingProvider && existingProvider !== action.resource.provider ? existingProvider : undefined,
       receiptData: provisioned.receipt.data,
+    },
+  };
+}
+
+export async function applyDatabaseSeed(
+  ctx: ToolContext,
+  project: Project,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return { success: false, message: 'Environment not found locally', error: `No local environment "${envName}"` };
+  }
+  const command = stringField(asRecord(action.metadata), 'command');
+  const commandHash = stringField(asRecord(action.metadata), 'commandHash');
+  if (!command || !commandHash) {
+    return {
+      success: false,
+      message: 'Database seed action is missing command metadata',
+      error: 'Re-run hv_plan so the seed action includes command and commandHash.',
+    };
+  }
+
+  const component = ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres');
+  if (!component) {
+    return {
+      success: false,
+      message: 'Database component not found',
+      error: `No postgres component is recorded for ${project.name}/${envName}. Re-run hv_plan/hv_apply to create the database first.`,
+    };
+  }
+
+  const result = await runEnvironmentTask({
+    project,
+    environment,
+    command,
+    purpose: 'database seed command',
+  });
+  if (result.success === false) {
+    return {
+      success: false,
+      message: 'Database seed command failed',
+      error: result.error,
+      data: result as unknown as Record<string, unknown>,
+    };
+  }
+
+  const seededAt = new Date().toISOString();
+  ctx.repos.components.updateBindings(component.id, {
+    seed: {
+      commandHash,
+      seededAt,
+      source: 'hv_apply',
+    },
+  });
+
+  return {
+    success: true,
+    message: `Database seed command completed for ${project.name}/${envName}`,
+    data: {
+      ...result,
+      seed: {
+        commandHash,
+        seededAt,
+      },
     },
   };
 }

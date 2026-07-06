@@ -10,6 +10,7 @@ import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
@@ -18,6 +19,8 @@ import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.port.js';
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../domain/services/github-ops.service.js';
 import { bootstrapActionResultFromSummary } from '../core.tools.js';
+import { applyDatabaseSeed } from '../apply-plan.js';
+import { createToolContext } from '../context.js';
 
 let tempDir: string;
 
@@ -1497,6 +1500,138 @@ describe('hv_plan / hv_status / hv_apply', () => {
       provider: 'cloudsql',
       connectionUrl: 'postgres://old-cloudsql',
     });
+    await t.close();
+  });
+
+  it('runs a declarative database seedCommand once through hv_apply and records completion', async () => {
+    const t = await makeClient();
+    const command = 'true';
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'seed-apply-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            database: { provider: 'railway', seedCommand: command },
+            envVars: { NODE_ENV: 'production' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+
+    const { ComponentRepository } = await import('../../adapters/db/repositories/component.repository.js');
+    const project = new ProjectRepository().findByName('seed-apply-app')!;
+    const service = new ServiceRepository().create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { workloadKind: 'web' },
+      envVarSpec: {},
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { web: { serviceId: 's-1' } },
+      },
+    });
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      externalId: 'db-1',
+      bindings: {
+        provider: 'railway',
+        serviceId: 'db-1',
+        connectionString: 'postgres://seed:secret@db.example.com/app',
+      },
+    });
+    const observedState: ObservedState = {
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 're-1',
+      services: [{
+        name: 'web',
+        externalId: 's-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: ['NODE_ENV'],
+        envVarHashes: { NODE_ENV: hashEnvValue('production') },
+        status: 'running',
+      }],
+      databases: [{ provider: 'railway', engine: 'postgres', externalId: 'db-1', status: 'running' }],
+      partial: false,
+      warnings: [],
+    };
+    mockObserved(observedState);
+
+    const plan = await t.call('hv_plan', { project: 'seed-apply-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    expect(plan.data.actions).toContainEqual(expect.objectContaining({
+      id: 'database:railway:seed',
+      type: 'update',
+    }));
+
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'railway',
+        capabilities: {
+          supportedBuilders: ['nixpacks'], supportedComponents: ['postgres'],
+          supportsAutoWiring: true, supportsHealthChecks: true, supportsCronSchedule: true,
+          supportsReleaseCommand: false, supportsMultiEnvironment: true, managedTls: true,
+          supportsObserve: true,
+        },
+        connect: async () => {}, verify: async () => ({ success: true }),
+        runJob: async (_environment: unknown, taskService: { name: string }, taskCommand: string) => ({
+          jobId: 'job-1',
+          status: 'completed',
+          output: 'seeded',
+          receipt: {
+            success: true,
+            message: 'seed completed',
+            data: { service: taskService.name, command: taskCommand },
+          },
+        }),
+      },
+    } as any);
+    const seedResult = await applyDatabaseSeed(createToolContext(), project, 'production', {
+      id: 'database:railway:seed',
+      type: 'update',
+      resource: { kind: 'database', name: 'seed', provider: 'railway' },
+      verified: true,
+      reason: 'test',
+      metadata: {
+        operation: 'databaseSeed',
+        command,
+        commandHash: sha256(command),
+      },
+    });
+    expect(seedResult.success).toBe(true);
+    expect(seedResult.data).toMatchObject({
+      service: service.name,
+      status: 'completed',
+    });
+
+    const component = new ComponentRepository().findByEnvironmentAndType(environment.id, 'postgres')!;
+    const seedRecord = component.bindings.seed as Record<string, unknown>;
+    expect(seedRecord).toMatchObject({
+      commandHash: sha256(command),
+      source: 'hv_apply',
+    });
+    expect(seedRecord.seededAt).toEqual(expect.any(String));
+
+    const nextPlan = await t.call('hv_plan', { project: 'seed-apply-app', env: 'production' });
+    expect(nextPlan.data.actions).toContainEqual(expect.objectContaining({
+      id: 'database:railway:seed',
+      type: 'noop',
+    }));
     await t.close();
   });
 

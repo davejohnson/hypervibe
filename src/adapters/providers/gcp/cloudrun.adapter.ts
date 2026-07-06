@@ -1058,8 +1058,8 @@ export class CloudRunAdapter implements IProviderAdapter {
         status: 'failed',
         receipt: {
           success: false,
-          message: `Cloud Run migration job requires an image for service ${service.name}`,
-          error: 'Deploy the service first so Infraprint can build and record its Cloud Run image before running db_migrate.',
+          message: `Cloud Run environment task requires an image for service ${service.name}`,
+          error: 'Deploy the service first so Hypervibe can build and record its Cloud Run image before running one-off environment tasks.',
           data: {
             provider: this.name,
             missing: ['services.' + service.name + '.imageUri'],
@@ -1096,7 +1096,7 @@ export class CloudRunAdapter implements IProviderAdapter {
         token,
         jobName,
         jobSpec,
-        description: 'migration job',
+        description: 'environment task',
       });
 
       const runResponse = await fetch(`${jobsBaseUrl}/${jobName}:run`, {
@@ -1111,15 +1111,39 @@ export class CloudRunAdapter implements IProviderAdapter {
       }
 
       const operation = await runResponse.json() as { name?: string };
+      const execution = await this.waitForCloudRunJobExecution(jobName, token);
+      const status = execution ? this.executionStatus(execution) : 'failed';
+      const jobId = execution?.name ?? operation.name ?? jobName;
+      if (status !== 'completed') {
+        return {
+          jobId,
+          status: 'failed',
+          receipt: {
+            success: false,
+            message: `Cloud Run environment task failed for ${service.name}`,
+            error: execution
+              ? `Cloud Run execution ${this.lastPathSegment(execution.name) ?? jobId} ended with status ${status}`
+              : `Cloud Run execution for ${jobName} did not finish before timeout`,
+            data: {
+              jobName,
+              operationName: operation.name,
+              executionName: execution?.name,
+              serviceName,
+              imageUri,
+            },
+          },
+        };
+      }
       return {
-        jobId: operation.name ?? jobName,
-        status: 'running',
+        jobId,
+        status: 'completed',
         receipt: {
           success: true,
-          message: `Started Cloud Run migration job ${jobName}`,
+          message: `Completed Cloud Run environment task ${jobName}`,
           data: {
             jobName,
             operationName: operation.name,
+            executionName: execution?.name,
             serviceName,
             imageUri,
           },
@@ -1131,7 +1155,7 @@ export class CloudRunAdapter implements IProviderAdapter {
         status: 'failed',
         receipt: {
           success: false,
-          message: `Cloud Run migration job failed for ${service.name}`,
+          message: `Cloud Run environment task failed for ${service.name}`,
           error: this.formatError(error),
         },
       };
@@ -1764,6 +1788,8 @@ export class CloudRunAdapter implements IProviderAdapter {
   private executionStatus(execution: CloudRunExecution): string {
     const completion = execution.completionStatus?.toLowerCase();
     if (completion) {
+      if (completion.includes('succeed')) return 'completed';
+      if (completion.includes('fail') || completion.includes('cancel') || completion.includes('timeout')) return 'failed';
       return completion;
     }
     const readiness = this.cloudRunJobReadiness({
@@ -1777,6 +1803,27 @@ export class CloudRunAdapter implements IProviderAdapter {
     if (readiness.ready) return 'completed';
     if (readiness.error) return 'failed';
     return 'running';
+  }
+
+  private async waitForCloudRunJobExecution(
+    jobName: string,
+    token: string,
+    timeoutMs = 10 * 60 * 1000
+  ): Promise<CloudRunExecution | null> {
+    const deadline = Date.now() + timeoutMs;
+    let latest: CloudRunExecution | null = null;
+    while (Date.now() < deadline) {
+      const executions = await this.listCloudRunJobExecutions(jobName, token, 5);
+      latest = executions[0] ?? latest;
+      if (latest) {
+        const status = this.executionStatus(latest);
+        if (status === 'completed' || status === 'failed') {
+          return latest;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    return latest;
   }
 
   private lastPathSegment(value?: string): string | undefined {

@@ -13,6 +13,7 @@ import {
   maskDatabaseUrl,
   resolveEnvironmentDatabaseUrl,
   runDatabaseMigration,
+  runDatabaseSeed,
 } from '../database-ops.service.js';
 
 describe('database-ops.service', () => {
@@ -138,5 +139,27 @@ describe('database-ops.service', () => {
       .toBe('postgres://***:***@db.example.com:5432/app');
     expect(maskDatabaseUrl('postgres://user@db.example.com:5432/app'))
       .toBe('postgres://***@db.example.com:5432/app');
+  });
+
+  it('runs seed commands locally with DATABASE_URL and masks command output', async () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const project = projectRepo.create({ name: 'seed-project', defaultPlatform: 'railway' });
+    const environment = envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway' },
+    });
+
+    const payload = await runDatabaseSeed({
+      project,
+      env: environment,
+      command: 'node -e "console.log(process.env.DATABASE_URL)"',
+      targetConnectionUrl: 'postgres://user:secretpw@db.example.com:5432/app',
+    });
+
+    expect(payload.success).toBe(true);
+    expect(String(payload.stdout)).toContain('postgres://***:***@db.example.com:5432/app');
+    expect(JSON.stringify(payload)).not.toContain('secretpw');
   });
 });

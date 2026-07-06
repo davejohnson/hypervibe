@@ -1036,7 +1036,7 @@ describe('CloudRunAdapter', () => {
 
     expect(result.status).toBe('failed');
     expect(result.receipt.success).toBe(false);
-    expect(result.receipt.message).toBe('Cloud Run migration job requires an image for service web');
+    expect(result.receipt.message).toBe('Cloud Run environment task requires an image for service web');
     expect(result.receipt.error).toContain('Deploy the service first');
   });
 
@@ -1074,6 +1074,14 @@ describe('CloudRunAdapter', () => {
               resources: { limits: { cpu: '1', memory: '512Mi' } },
             }],
           },
+        });
+      }
+      if (url.includes('/jobs/gcp-project-web-migration/executions') && method === 'GET') {
+        return Response.json({
+          executions: [{
+            name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-web-migration/executions/execution-1',
+            completionStatus: 'EXECUTION_SUCCEEDED',
+          }],
         });
       }
       if (url.includes('/jobs/gcp-project-web-migration:run') && method === 'POST') {
@@ -1135,7 +1143,7 @@ describe('CloudRunAdapter', () => {
 
     const result = await adapter.runJob(environment, service, 'npm run db:setup');
 
-    expect(result.status).toBe('running');
+    expect(result.status).toBe('completed');
     expect(result.receipt.success).toBe(true);
 
     const patchCall = fetchMock.mock.calls.find(([url, init]) =>
@@ -1636,7 +1644,7 @@ describe('CloudRunAdapter', () => {
     expect(deployments).toEqual([
       {
         id: 'gcp-project-cron-abc',
-        status: 'execution_succeeded',
+        status: 'completed',
         createdAt: '2026-06-03T18:05:00Z',
         updatedAt: '2026-06-03T18:05:10Z',
         service: 'cron',

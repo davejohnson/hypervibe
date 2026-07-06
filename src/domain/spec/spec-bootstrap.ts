@@ -157,3 +157,19 @@ export function applyOverridesToBootstrapParams(
   }
   return next;
 }
+
+export function applyEnvFileVarsToBootstrapParams(
+  params: BootstrapParams,
+  envFileVars: Record<string, string> | undefined
+): BootstrapParams {
+  if (!envFileVars || Object.keys(envFileVars).length === 0) {
+    return params;
+  }
+  return {
+    ...params,
+    envVars: {
+      ...envFileVars,
+      ...(params.envVars ?? {}),
+    },
+  };
+}

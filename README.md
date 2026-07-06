@@ -162,6 +162,53 @@ Hypervibe also maintains non-secret provider identity bindings in:
 
 This file lets teammates observe and converge the same provider resources instead of planning duplicate projects/services. It is for non-secret IDs such as provider project IDs, environment IDs, service IDs, custom domain bindings, and CI workflow sync metadata. Credentials, tokens, passwords, database URLs, and secret values stay out of the repo and remain local/provider-side.
 
+### Deploy env from `.env`
+
+When `.env.<environment>` or repo `.env` exists, `hv_plan` considers it as a local deploy input. Environment-specific files such as `.env.production` and `.env.staging` win over `.env`. Hypervibe does **not** blindly publish every key. The default policy is `envFile.mode: "runtime"`: Hypervibe syncs high-confidence app runtime keys such as `SENDGRID_API_KEY`, `SESSION_SECRET`, `*_URL`, `*_TOKEN`, `*_SECRET`, `APP_*`, `VITE_*`, and similar names; it skips provider/control-plane credentials such as `RAILWAY_API_TOKEN`, `GITHUB_TOKEN`, and `CLOUDFLARE_API_TOKEN`; it skips local-looking runtime values such as `localhost`, `127.0.0.1`, `0.0.0.0`, `host.docker.internal`, `.local`, and `.internal`; and it reports ignored key names in the plan.
+
+Tune this per environment in `.hypervibe/spec.json`:
+
+```json
+{
+  "envFile": {
+    "mode": "explicit",
+    "include": ["SENDGRID_API_KEY", "CUSTOM_WORKER_FLAG"],
+    "exclude": ["LOCAL_DEBUG_FLAG"]
+  }
+}
+```
+
+Modes are `runtime` (default), `all`, `explicit`, and `off`. Values loaded from the env file are encrypted into the plan and never printed. The plan warning names the env file path and selected keys so the agent can show the user exactly what source is being applied. Generated infrastructure values such as `DATABASE_URL` still win over stale local `.env` values.
+
+### Database data operations
+
+Do not temporarily change a service `releaseCommand` just to seed or import production data. Release commands are desired deploy configuration for repeatable schema work, such as `migrations: { "mode": "releaseCommand", "command": "npm run db:migrate" }`.
+
+For fresh environments, declare seed/bootstrap data on the database. This is provider-neutral desired state; it works through the normal plan/apply flow for any supported hosting/database target:
+
+```json
+{
+  "database": {
+    "provider": "supabase",
+    "engine": "postgres",
+    "seedCommand": "npm run db:seed"
+  }
+}
+```
+
+`hv_plan` emits a visible one-shot database seed action. `hv_apply` runs it after the database exists as a one-off command inside the deployed service environment, then records the command hash plus `seededAt` on the database component. The command does not run again unless the command changes.
+
+Use `hv_db_migrate` for operational data work:
+
+- `mode: "move"` copies data from the previous provider database into the current database during a staged migration, using `pg_dump | pg_restore` plus row-count verification. This is the path for moves like Cloud SQL -> Railway Postgres. If the target Railway database is private-only, the confirmed move creates or reuses a Railway TCP proxy so the local PostgreSQL tools can reach it.
+- `mode: "seed"` explicitly re-runs a seed/bootstrap command against the target database without changing service config. This is for repair/re-seed operations, not the normal fresh-environment path. Hypervibe sets `DATABASE_URL` and `DIRECT_URL` for that command, masks the URL in output, and confirm-gates the operation.
+
+Example:
+
+```text
+hv_db_migrate project="my-app" env="production" mode="seed" command="npm run db:seed"
+```
+
 Typical team flow:
 
 1. One person changes infrastructure through Hypervibe, such as adding a cron service.

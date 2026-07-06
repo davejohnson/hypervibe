@@ -115,6 +115,11 @@ export interface IProviderAdapter {
     deploymentId: string
   ): Promise<{ status: string; url?: string }>;
 
+  /**
+   * Run a one-off command in a deployed service environment. Implementations
+   * must wait for terminal completion and return status="completed" only
+   * after a zero/successful exit.
+   */
   runJob?(
     environment: Environment,
     service: Service,

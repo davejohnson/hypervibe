@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { DatabaseAdapter, type DatabaseCredentials } from '../adapters/providers/database/database.adapter.js';
 import {
   runDatabaseMigration,
+  runDatabaseSeed,
   executeDatabaseReset,
   resolveEnvironmentDatabaseUrl,
   maskDatabaseUrl,
@@ -103,18 +104,18 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_db_migrate',
-    'Run database migrations on a deployed environment (mode "up", default); reset the database by dropping all tables (mode "reset", confirm-gated); or copy data from the previous provider\'s database into the current one during a staged provider migration (mode "move", confirm-gated: pg_dump | pg_restore snapshot plus row-count verification — writes made to the source after the dump starts are not copied).',
+    'Database operations for a deployed environment. mode="up" runs schema migrations; mode="seed" explicitly re-runs a one-off seed/bootstrap command against the target database without changing releaseCommand (fresh-environment seed/bootstrap data should be declared as database.seedCommand and applied through hv_plan/hv_apply); mode="reset" drops all tables; mode="move" copies data from the previous provider into the current database during staged provider migration (pg_dump | pg_restore snapshot plus row-count verification). Mutating modes are confirm-gated.',
     {
       project: projectField,
       env: envField,
-      mode: z.enum(['up', 'reset', 'move']).optional().describe('Default "up"'),
-      command: z.string().optional().describe('mode=up: migration command (default: prisma preset)'),
+      mode: z.enum(['up', 'reset', 'move', 'seed']).optional().describe('Default "up"'),
+      command: z.string().optional().describe('mode=up: migration command (default: prisma preset); mode=seed: required explicit re-run/repair seed command. For fresh environments prefer database.seedCommand in the spec.'),
       preset: z.enum(['prisma', 'prisma-push', 'drizzle', 'typeorm', 'knex', 'sequelize', 'django', 'rails', 'laravel']).optional()
         .describe('mode=up: use a preset migration command'),
       service: z.string().optional().describe('Service to run the migration on (default: first service)'),
-      dryRun: z.boolean().optional().describe('mode=up: show what would run without executing'),
+      dryRun: z.boolean().optional().describe('mode=up or mode=seed: show what would run without executing'),
       sourceConnectionUrl: z.string().optional().describe('mode=move: override the source database URL. Accepts chat-safe refs — env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path — so the URL/password never enters chat. (Default: the previous provider recorded during hv_apply.)'),
-      targetConnectionUrl: z.string().optional().describe('mode=move: override the target database URL; same chat-safe refs supported. (Default: the environment\'s current database.)'),
+      targetConnectionUrl: z.string().optional().describe('mode=move or mode=seed: override the target database URL; same chat-safe refs supported. (Default: the environment\'s current database, creating a Railway TCP proxy only from a confirmed mutating operation when required.)'),
       criticalTables: z.array(z.string()).optional().describe('mode=move: tables to verify with exact row counts (default: the 8 largest)'),
       confirm: confirmField,
     },
@@ -190,6 +191,51 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
             next: ['hv_plan', 'hv_apply'],
           }
         );
+      }
+
+      if (mode === 'seed') {
+        const resolvedTargetRaw = targetConnectionUrl && /^(env|dotenv|file):/.test(targetConnectionUrl.trim())
+          ? await resolveSecretValueRef(targetConnectionUrl, { projectId: project.id, environmentName: environment.name })
+          : targetConnectionUrl;
+        const resolvedTarget = resolvedTargetRaw?.trim();
+        if (!command?.trim()) {
+          return toolError('VALIDATION', 'mode="seed" requires command, for example command="npm run db:seed".', {
+            hint: 'Seed data is a one-off database operation; do not set a temporary releaseCommand for it.',
+          });
+        }
+        const preview = await runDatabaseSeed({
+          project,
+          env: environment,
+          command,
+          targetConnectionUrl: resolvedTarget,
+          dryRun: true,
+        });
+        if (dryRun) {
+          return toolSuccess(preview);
+        }
+        if (!confirm) {
+          return toolError('CONFIRM_REQUIRED', 'Seed commands mutate the target database and must be confirmed.', {
+            details: preview,
+            hint: 'Review the target and command, then re-run with confirm=true. This does not change service releaseCommand.',
+          });
+        }
+        const result = await runDatabaseSeed({
+          project,
+          env: environment,
+          command,
+          targetConnectionUrl: resolvedTarget,
+        });
+        if (result.success === false) {
+          return toolError('PROVIDER_ERROR', String(result.error ?? 'Seed command failed'), {
+            details: result,
+            hint: typeof result.hint === 'string'
+              ? result.hint
+              : 'Check the command output. The command runs locally with DATABASE_URL and DIRECT_URL pointed at the target database.',
+          });
+        }
+        return toolSuccess(result, {
+          hint: 'Seed complete. Run hv_db_query or app-level health checks to verify the seeded data.',
+        });
       }
 
       if (mode === 'reset') {

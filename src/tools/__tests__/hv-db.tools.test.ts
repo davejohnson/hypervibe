@@ -99,6 +99,50 @@ describe('hv_db_migrate', () => {
     expect(details).toContain('***');
     await t.close();
   });
+
+  it('requires a command for seed mode', async () => {
+    seedDbProject();
+    const t = await makeClient();
+    const result = await t.call('hv_db_migrate', { project: 'db-app', env: 'staging', mode: 'seed' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.hint).toContain('releaseCommand');
+    await t.close();
+  });
+
+  it('confirm-gates seed mode and masks database URLs', async () => {
+    seedDbProject();
+    const t = await makeClient();
+    const result = await t.call('hv_db_migrate', {
+      project: 'db-app',
+      env: 'staging',
+      mode: 'seed',
+      command: 'npm run db:seed',
+      targetConnectionUrl: 'postgres://user:secretpw@db.example.com:5432/app',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('CONFIRM_REQUIRED');
+    expect(JSON.stringify(result)).not.toContain('secretpw');
+    expect(JSON.stringify(result)).toContain('postgres://***:***@db.example.com:5432/app');
+    await t.close();
+  });
+
+  it('runs seed mode without leaking database URLs printed by the command', async () => {
+    seedDbProject();
+    const t = await makeClient();
+    const result = await t.call('hv_db_migrate', {
+      project: 'db-app',
+      env: 'staging',
+      mode: 'seed',
+      command: 'node -e "console.log(process.env.DATABASE_URL)"',
+      targetConnectionUrl: 'postgres://user:secretpw@db.example.com:5432/app',
+      confirm: true,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.data.stdout).toContain('postgres://***:***@db.example.com:5432/app');
+    expect(JSON.stringify(result)).not.toContain('secretpw');
+    await t.close();
+  });
 });
 
 describe('hv_db_url', () => {

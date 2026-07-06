@@ -1688,7 +1688,7 @@ export class RailwayAdapter implements IProviderAdapter {
       if (errorMsg.includes('Cannot query field') || errorMsg.includes('Unknown field')) {
         return {
           success: false,
-          error: `Railway's API does not support one-off command execution for this account. Configure the command as the service's releaseCommand (pre-deploy) in the spec instead: hv_spec_set serviceConfig releaseCommand="${command}".`,
+          error: 'Railway did not accept one-off command execution for this account.',
         };
       }
 

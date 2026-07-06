@@ -1,4 +1,5 @@
 import type { EnvironmentSpec, ServiceSpec } from '../spec/spec.schema.js';
+import { createHash } from 'crypto';
 import { migrationReleaseCommandWarning, withMigrationReleaseCommand } from '../spec/spec-bootstrap.js';
 import type { ObservedState, ObservedService } from '../ports/observe.port.js';
 import { hashEnvValue } from '../ports/observe.port.js';
@@ -266,19 +267,22 @@ export function diffEnvironment(input: {
 
   // ---- database -------------------------------------------------------------
   const localDb = local.components.find((c) => c.type === 'postgres');
+  const localDbBindings = localDb?.bindings as Record<string, unknown> | undefined;
   const localDbProvider = localDb
-    ? String((localDb.bindings as Record<string, unknown>)?.provider ?? '') || undefined
+    ? String(localDbBindings?.provider ?? '') || undefined
     : undefined;
   const previousDbProvider = localDb
-    ? String((localDb.bindings as Record<string, unknown>)?.previousProvider ?? '') || undefined
+    ? String(localDbBindings?.previousProvider ?? '') || undefined
     : undefined;
   const observedDb = observed?.databases.find((d) => d.engine === 'postgres');
   const currentDbProvider = observedDb?.provider ?? localDbProvider;
   const dbVerified = observed ? Boolean(observedDb) || !localDb : false;
+  let activeDatabaseActionId: string | undefined;
 
   if (spec.database) {
     const wanted = spec.database.provider;
     const createId = `database:${wanted}`;
+    activeDatabaseActionId = createId;
     if (!currentDbProvider) {
       actions.push({
         id: createId,
@@ -322,6 +326,37 @@ export function diffEnvironment(input: {
           requiresConfirm: true,
         });
       }
+    }
+
+    if (spec.database.seedCommand) {
+      const commandHash = seedCommandHash(spec.database.seedCommand);
+      const seedRecord = localDbBindings?.seed && typeof localDbBindings.seed === 'object' && !Array.isArray(localDbBindings.seed)
+        ? localDbBindings.seed as Record<string, unknown>
+        : {};
+      const seeded = currentDbProvider === wanted
+        && seedRecord.commandHash === commandHash
+        && typeof seedRecord.seededAt === 'string';
+      const serviceDeps = actions
+        .filter((action) => action.resource.kind === 'service' && !action.id.includes(':destroy'))
+        .map((action) => action.id);
+      actions.push({
+        id: `database:${wanted}:seed`,
+        type: seeded ? 'noop' : 'update',
+        resource: { kind: 'database', name: 'seed', provider: wanted },
+        verified: dbVerified,
+        reason: seeded
+          ? 'Database seed command has already completed for this database'
+          : currentDbProvider && currentDbProvider !== wanted
+            ? `Seed command will run after the new ${wanted} database is created`
+            : 'Database seed command has not completed for this database',
+        dependsOn: [createId, ...serviceDeps],
+        metadata: {
+          operation: 'databaseSeed',
+          command: spec.database.seedCommand,
+          commandHash,
+          mode: 'once',
+        },
+      });
     }
   } else if (localDb && currentDbProvider) {
     // Spec no longer declares a database but we manage one: confirm-gated destroy.
@@ -374,6 +409,10 @@ export function diffEnvironment(input: {
   }
 
   return { actions, unmanaged, warnings };
+}
+
+function seedCommandHash(command: string): string {
+  return createHash('sha256').update(command.trim(), 'utf8').digest('hex');
 }
 
 /** Strip URL prefixes/.git and lowercase so "owner/repo" forms compare equal. */

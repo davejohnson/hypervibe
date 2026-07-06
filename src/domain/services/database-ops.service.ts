@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { spawn } from 'child_process';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
@@ -31,6 +32,29 @@ const MIGRATION_PRESETS: Record<string, string> = {
   rails: 'rails db:migrate',
   laravel: 'php artisan migrate --force',
 };
+
+type ExternalDatabaseUrlResult =
+  | { ok: true; url: string; source: 'direct' | 'existing_proxy' | 'created_proxy'; proxyDomain?: string; tcpProxyCreated?: boolean }
+  | { ok: false; code: 'no_database' | 'no_external_url' | 'provider_error'; error: string; hint?: string; canCreateTcpProxy?: boolean };
+
+function railwayProxyProvisionIds(
+  env: { id: string; platformBindings: Record<string, unknown> }
+): { railwayProjectId: string; serviceId: string; railwayEnvironmentId: string } | null {
+  const component = componentRepo.findByEnvironmentAndType(env.id, 'postgres');
+  const bindings = component?.bindings as Record<string, unknown> | undefined;
+  if (!component || bindings?.provider !== 'railway') return null;
+  const railwayProjectId = typeof bindings.projectId === 'string' ? bindings.projectId : undefined;
+  const serviceId = component.externalId
+    ?? (typeof bindings.serviceId === 'string' ? bindings.serviceId : undefined);
+  const envBindings = env.platformBindings as { environmentId?: string };
+  const railwayEnvironmentId = typeof envBindings?.environmentId === 'string' ? envBindings.environmentId : undefined;
+  if (!railwayProjectId || !serviceId || !railwayEnvironmentId) return null;
+  return { railwayProjectId, serviceId, railwayEnvironmentId };
+}
+
+export function canCreateRailwayDatabaseTcpProxy(env: { id: string; platformBindings: Record<string, unknown> }): boolean {
+  return Boolean(railwayProxyProvisionIds(env));
+}
 
 /**
  * Drop and recreate a postgres database (DROP DATABASE with schema-cascade
@@ -249,7 +273,7 @@ export async function runDatabaseMigration(params: {
         project: project.name,
         environment: env.name,
         command: migrationCommand,
-        hint: 'If direct execution is not available, you can run migrations locally using: railway link && railway run ' + migrationCommand,
+        hint: 'Railway did not accept direct one-off command execution. For recurring schema migrations, set migrations.mode="releaseCommand" in the spec and run hv_plan/hv_apply. For one-time seed/bootstrap data, use hv_db_migrate mode="seed" command="..." so Hypervibe runs the command against the database without changing releaseCommand.',
       };
     }
   } catch (error) {
@@ -280,7 +304,71 @@ export function buildRailwayProxyDatabaseUrl(
     return null;
   }
   const database = vars.PGDATABASE || vars.POSTGRES_DB || 'railway';
-  return `postgresql://${user}:${encodeURIComponent(password)}@${proxy.domain}:${proxy.proxyPort}/${database}`;
+  const domain = proxy.domain.replace(/\.+$/, '');
+  return `postgresql://${user}:${encodeURIComponent(password)}@${domain}:${proxy.proxyPort}/${database}`;
+}
+
+/**
+ * Full database env for a one-off local command against `targetUrl`.
+ *
+ * The command runs app code that typically calls dotenv.config(), which
+ * fills in any env var that is NOT already set — so a repo .env with
+ * DATABASE_HOST=127.0.0.1 would silently redirect the connection away from
+ * the target. Every host/port/credential/socket variable is therefore set
+ * explicitly (derived from the URL, or empty string to block dotenv) so the
+ * child sees one consistent database no matter which variable it reads.
+ */
+export function buildOneOffDatabaseCommandEnv(targetUrl: string): Record<string, string> {
+  const env: Record<string, string> = {
+    DATABASE_URL: targetUrl,
+    DIRECT_URL: targetUrl,
+  };
+  let url: URL | null = null;
+  try {
+    url = new URL(targetUrl);
+  } catch {
+    url = null;
+  }
+  if (url) {
+    const host = url.hostname.replace(/\.+$/, '');
+    const port = url.port || '5432';
+    const database = url.pathname.replace(/^\//, '');
+    const user = decodeURIComponent(url.username);
+    const password = decodeURIComponent(url.password);
+    env.DATABASE_HOST = host;
+    env.PGHOST = host;
+    env.DATABASE_PORT = port;
+    env.PGPORT = port;
+    if (user) {
+      env.DATABASE_USER = user;
+      env.PGUSER = user;
+    }
+    if (password) {
+      env.DATABASE_PASSWORD = password;
+      env.PGPASSWORD = password;
+    }
+    if (database) {
+      env.DATABASE_NAME = database;
+      env.PGDATABASE = database;
+    }
+    const sslMode = url.searchParams.get('sslmode');
+    env.DATABASE_SSL = sslMode && sslMode !== 'disable' ? 'true' : '';
+  }
+  // Socket/instance overrides have no equivalent for an external URL: set
+  // them to empty (present, so dotenv cannot refill them from .env).
+  for (const key of [
+    'DATABASE_SOCKET_PATH',
+    'CLOUD_SQL_SOCKET_PATH',
+    'INSTANCE_UNIX_SOCKET',
+    'CLOUD_SQL_CONNECTION_NAME',
+    'CLOUDSQL_CONNECTION_NAME',
+    'CLOUD_SQL_INSTANCE_CONNECTION_NAME',
+    'INSTANCE_CONNECTION_NAME',
+    'GCP_CLOUDSQL_CONNECTION_NAME',
+  ]) {
+    env[key] = '';
+  }
+  return env;
 }
 
 /**
@@ -341,6 +429,194 @@ export async function resolveExternalDatabaseUrl(
   } catch {
     return null;
   }
+}
+
+export async function ensureExternalDatabaseUrl(
+  project: Project,
+  env: { id: string; name: string; platformBindings: Record<string, unknown> }
+): Promise<ExternalDatabaseUrlResult> {
+  const existing = await resolveExternalDatabaseUrl(project, env);
+  if (existing) {
+    return { ok: true, url: existing, source: 'direct', tcpProxyCreated: false };
+  }
+
+  const ids = railwayProxyProvisionIds(env);
+  if (!ids) {
+    const component = componentRepo.findByEnvironmentAndType(env.id, 'postgres');
+    return {
+      ok: false,
+      code: component ? 'no_external_url' : 'no_database',
+      error: component
+        ? 'No externally reachable database URL is available for this environment.'
+        : `No postgres component is tracked for ${env.name}.`,
+      hint: component
+        ? 'For Railway databases, Hypervibe can create a public TCP proxy when the component has Railway project/service/environment bindings.'
+        : 'Apply a spec with a database first, or pass targetConnectionUrl with a chat-safe ref.',
+    };
+  }
+
+  const adapterResult = await adapterFactory.getProviderAdapter('railway', project);
+  const adapter = adapterResult.success
+    ? adapterResult.adapter as unknown as {
+      ensureTcpProxy?: (environmentId: string, serviceId: string, applicationPort: number) => Promise<{ domain: string; proxyPort: number; created: boolean }>;
+      getServiceVariables?: (projectId: string, serviceId: string, environmentId: string) => Promise<Record<string, string>>;
+    }
+    : null;
+  if (!adapter || typeof adapter.ensureTcpProxy !== 'function' || typeof adapter.getServiceVariables !== 'function') {
+    return {
+      ok: false,
+      code: 'provider_error',
+      error: adapterResult.error ?? 'No Railway adapter is available to create or inspect a database TCP proxy.',
+    };
+  }
+
+  try {
+    const proxy = await adapter.ensureTcpProxy(ids.railwayEnvironmentId, ids.serviceId, 5432);
+    const vars = await adapter.getServiceVariables(ids.railwayProjectId, ids.serviceId, ids.railwayEnvironmentId);
+    const url = buildRailwayProxyDatabaseUrl(vars, proxy);
+    if (!url) {
+      return {
+        ok: false,
+        code: 'provider_error',
+        error: 'Railway TCP proxy is available, but datastore variables are missing PGUSER/POSTGRES_PASSWORD so Hypervibe cannot build a connection URL.',
+      };
+    }
+    return {
+      ok: true,
+      url,
+      source: proxy.created ? 'created_proxy' : 'existing_proxy',
+      proxyDomain: proxy.domain,
+      tcpProxyCreated: proxy.created,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'provider_error',
+      error: `Failed to create or inspect the Railway database TCP proxy: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+function redactDatabaseText(value: string, databaseUrl: string): string {
+  return value
+    .replaceAll(databaseUrl, maskDatabaseUrl(databaseUrl))
+    .replace(/postgres(?:ql)?:\/\/[^\s'"`]+/g, (match) => maskDatabaseUrl(match));
+}
+
+export async function runDatabaseSeed(params: {
+  project: Project;
+  env: Environment;
+  command: string;
+  targetConnectionUrl?: string;
+  dryRun?: boolean;
+}): Promise<Record<string, unknown>> {
+  const command = params.command.trim();
+  if (!command) {
+    return { success: false, error: 'Seed command is required.' };
+  }
+
+  if (params.dryRun) {
+    const previewUrl = params.targetConnectionUrl
+      ?? await resolveExternalDatabaseUrl(params.project, params.env);
+    return {
+      success: true,
+      dryRun: true,
+      project: params.project.name,
+      environment: params.env.name,
+      command,
+      target: previewUrl
+        ? {
+          reachable: true,
+          databaseUrl: maskDatabaseUrl(previewUrl),
+          source: params.targetConnectionUrl ? 'override' : 'observed',
+        }
+        : {
+          reachable: false,
+          canCreateTcpProxy: canCreateRailwayDatabaseTcpProxy(params.env),
+          note: canCreateRailwayDatabaseTcpProxy(params.env)
+            ? 'A confirmed run will create or reuse a Railway TCP proxy so the seed command can reach the database.'
+            : 'No externally reachable database URL is available.',
+        },
+    };
+  }
+
+  const target = params.targetConnectionUrl
+    ? { ok: true as const, url: params.targetConnectionUrl, source: 'direct' as const, tcpProxyCreated: false }
+    : await ensureExternalDatabaseUrl(params.project, params.env);
+  if (!target.ok) {
+    return {
+      success: false,
+      error: target.error,
+      code: target.code,
+      hint: target.hint,
+      canCreateTcpProxy: target.canCreateTcpProxy,
+    };
+  }
+
+  const startedAt = Date.now();
+  const result = await new Promise<{ exitCode: number; stdout: string; stderr: string; error?: string }>((resolve) => {
+    const child = spawn(command, {
+      shell: true,
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        ...buildOneOffDatabaseCommandEnv(target.url),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (error) => {
+      resolve({ exitCode: 1, stdout, stderr, error: error.message });
+    });
+    child.on('close', (code) => {
+      resolve({ exitCode: code ?? 1, stdout, stderr });
+    });
+  });
+
+  const durationMs = Date.now() - startedAt;
+  const success = result.exitCode === 0 && !result.error;
+  auditRepo.create({
+    action: success ? 'db_seed.succeeded' : 'db_seed.failed',
+    resourceType: 'database',
+    resourceId: `${params.project.name}/${params.env.name}`,
+    details: {
+      command,
+      exitCode: result.exitCode,
+      durationMs,
+      target: {
+        databaseUrl: maskDatabaseUrl(target.url),
+        source: target.source,
+        tcpProxyCreated: target.tcpProxyCreated,
+        proxyDomain: target.proxyDomain,
+      },
+    },
+  });
+
+  return {
+    success,
+    message: success ? 'Seed command completed' : 'Seed command failed',
+    project: params.project.name,
+    environment: params.env.name,
+    command,
+    exitCode: result.exitCode,
+    durationMs,
+    target: {
+      databaseUrl: maskDatabaseUrl(target.url),
+      source: target.source,
+      tcpProxyCreated: target.tcpProxyCreated,
+      proxyDomain: target.proxyDomain,
+    },
+    stdout: redactDatabaseText(result.stdout, target.url).slice(-4000),
+    stderr: redactDatabaseText(result.stderr, target.url).slice(-4000),
+    ...(result.error ? { error: result.error } : {}),
+  };
 }
 
 export async function resolveEnvironmentDatabaseUrl(

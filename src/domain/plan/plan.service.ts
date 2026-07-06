@@ -30,12 +30,17 @@ import { planIos } from '../services/appstore-plan.service.js';
 import { planQueues } from '../services/queue-plan.service.js';
 import { resolveQueueEnvVars } from '../services/queue-env.js';
 import { formatConnectionGuidance } from '../services/connection-guidance.js';
+import { loadDeployEnvFile } from '../services/deploy-env-file.js';
 
 export interface PlanOptions {
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
   envVarOverrides?: Record<string, string>;
+  /** Local env file to treat as deploy input. Defaults to .env.<env> then repo .env when present. */
+  envFile?: string;
+  /** Set false to skip loading the local deploy env file. */
+  includeEnvFile?: boolean;
 }
 
 export interface EnvironmentPlan {
@@ -281,11 +286,22 @@ export class PlanService {
     const envVarOverrides = options?.envVarOverrides && Object.keys(options.envVarOverrides).length > 0
       ? options.envVarOverrides
       : undefined;
-    // Overrides feed the diff so env drift reflects them; the base spec is
-    // untouched (preflight, CI, and domain planning see the declared state).
-    const specForDiff = envVarOverrides
-      ? { ...environmentSpec, envVars: { ...environmentSpec.envVars, ...envVarOverrides } }
-      : environmentSpec;
+    let envFile: ReturnType<typeof loadDeployEnvFile> = null;
+    try {
+      const envFilePolicy = environmentSpec.envFile;
+      envFile = loadDeployEnvFile({
+        envFile: options?.envFile,
+        includeEnvFile: options?.includeEnvFile === false ? false : envFilePolicy?.mode !== 'off',
+        mode: envFilePolicy?.mode,
+        includeKeys: envFilePolicy?.include,
+        excludeKeys: envFilePolicy?.exclude,
+        envName: environmentName,
+      });
+    } catch (error) {
+      return {
+        error: `Failed to load deploy env file: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
 
     const specWarnings = specResult.adopted && specResult.source?.kind === 'repo'
       ? [`${specResult.source.path} changed outside hypervibe; recorded as revision ${specResult.revision}.`]
@@ -302,6 +318,27 @@ export class PlanService {
       ? buildDatabaseEnvVarsFromComponent(localDb).envVars
       : undefined;
     const managedQueueEnvVars = await resolveQueueEnvVars(projectForPlan, environmentSpec, environment);
+    const managedEnvKeys = new Set([
+      ...Object.keys(managedDatabaseEnvVars ?? {}),
+      ...Object.keys(managedQueueEnvVars ?? {}),
+    ]);
+    const envFileVars = envFile && Object.keys(envFile.vars).length > 0
+      ? Object.fromEntries(Object.entries(envFile.vars).filter(([key]) => !managedEnvKeys.has(key)))
+      : undefined;
+    // Env sources feed the diff so env drift reflects what apply will sync;
+    // the base spec is untouched (preflight, CI, and domain planning see the
+    // declared state). Precedence at apply is: .env < generated infra vars
+    // < spec envVars < explicit envVars overrides.
+    const specForDiff = envFileVars || envVarOverrides
+      ? {
+        ...environmentSpec,
+        envVars: {
+          ...(envFileVars ?? {}),
+          ...environmentSpec.envVars,
+          ...(envVarOverrides ?? {}),
+        },
+      }
+      : environmentSpec;
 
     const diff = diffEnvironment({
       spec: specForDiff,
@@ -390,9 +427,42 @@ export class PlanService {
       );
     }
 
-    const overrides = serviceFilter || envVarOverrides
+    const envFileWarnings: string[] = [];
+    if (envFile) {
+      const loadedKeys = Object.keys(envFileVars ?? {}).sort();
+      const shadowedByManaged = Object.keys(envFile.vars)
+        .filter((key) => managedEnvKeys.has(key))
+        .sort();
+      if (loadedKeys.length > 0) {
+        envFileWarnings.push(`Loaded ${loadedKeys.length} deploy env var(s) from ${envFile.path}.`);
+      }
+      if (envFile.ignoredKeys.length > 0) {
+        envFileWarnings.push(`Ignored ${envFile.ignoredKeys.length} .env key(s) that do not match envFile policy: ${envFile.ignoredKeys.join(', ')}.`);
+      }
+      if (envFile.excludedKeys.length > 0) {
+        envFileWarnings.push(`Excluded ${envFile.excludedKeys.length} .env key(s) by envFile.exclude: ${envFile.excludedKeys.join(', ')}.`);
+      }
+      if (envFile.localValueKeys.length > 0) {
+        envFileWarnings.push(`Skipped ${envFile.localValueKeys.length} .env key(s) with local-only values in runtime mode: ${envFile.localValueKeys.join(', ')}.`);
+      }
+      if (shadowedByManaged.length > 0) {
+        envFileWarnings.push(`Ignored ${shadowedByManaged.length} .env key(s) because Hypervibe manages them from infrastructure: ${shadowedByManaged.join(', ')}.`);
+      }
+      if (envFile.skippedKeys.length > 0) {
+        envFileWarnings.push(`Skipped ${envFile.skippedKeys.length} provider-only .env key(s): ${envFile.skippedKeys.join(', ')}.`);
+      }
+    }
+
+    const overrides = serviceFilter || envVarOverrides || (envFileVars && Object.keys(envFileVars).length > 0)
       ? {
         ...(serviceFilter ? { services: serviceFilter } : {}),
+        ...(envFileVars && Object.keys(envFileVars).length > 0
+          ? {
+            envFilePath: envFile?.path,
+            envFileKeys: Object.keys(envFileVars).sort(),
+            envFileVarsEncrypted: getSecretStore().encryptObject(envFileVars),
+          }
+          : {}),
         ...(envVarOverrides
           ? {
             envVarKeys: Object.keys(envVarOverrides).sort(),
@@ -409,7 +479,7 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: diff.unmanaged,
-      warnings: [...specWarnings, ...observeWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...filterWarnings],
       ...(overrides ? { overrides } : {}),
     };
 

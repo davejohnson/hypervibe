@@ -28,6 +28,9 @@ export interface PlanRunDocument {
    */
   overrides?: {
     services?: string[];
+    envFilePath?: string;
+    envFileKeys?: string[];
+    envFileVarsEncrypted?: string;
     envVarKeys?: string[];
     envVarsEncrypted?: string;
   };

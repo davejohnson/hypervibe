@@ -9,7 +9,7 @@ import { ComponentRepository } from '../../../adapters/db/repositories/component
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../../../adapters/providers/railway/railway.adapter.js';
-import { buildRailwayProxyDatabaseUrl, resolveExternalDatabaseUrl } from '../database-ops.service.js';
+import { buildOneOffDatabaseCommandEnv, buildRailwayProxyDatabaseUrl, resolveExternalDatabaseUrl } from '../database-ops.service.js';
 import type { Project } from '../../entities/project.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
 
@@ -120,5 +120,48 @@ describe('buildRailwayProxyDatabaseUrl', () => {
   it('returns null when credentials are missing', () => {
     expect(buildRailwayProxyDatabaseUrl({ POSTGRES_PASSWORD: 'x' }, proxy)).toBeNull();
     expect(buildRailwayProxyDatabaseUrl({ PGUSER: 'u' }, proxy)).toBeNull();
+  });
+
+  it('trims trailing dots from the proxy domain', () => {
+    expect(buildRailwayProxyDatabaseUrl({ PGUSER: 'u', POSTGRES_PASSWORD: 'x' }, { domain: 'db.proxy.rlwy.net.', proxyPort: 33333 }))
+      .toBe('postgresql://u:x@db.proxy.rlwy.net:33333/railway');
+  });
+});
+
+describe('buildOneOffDatabaseCommandEnv', () => {
+  it('pins the full database env family to the target URL', () => {
+    const env = buildOneOffDatabaseCommandEnv('postgresql://user:p%40ss@db.proxy.rlwy.net:52877/appdb');
+    expect(env.DATABASE_URL).toBe('postgresql://user:p%40ss@db.proxy.rlwy.net:52877/appdb');
+    expect(env.DIRECT_URL).toBe(env.DATABASE_URL);
+    expect(env.DATABASE_HOST).toBe('db.proxy.rlwy.net');
+    expect(env.PGHOST).toBe('db.proxy.rlwy.net');
+    expect(env.DATABASE_PORT).toBe('52877');
+    expect(env.PGPORT).toBe('52877');
+    expect(env.PGUSER).toBe('user');
+    expect(env.PGPASSWORD).toBe('p@ss');
+    expect(env.PGDATABASE).toBe('appdb');
+    expect(env.DATABASE_SSL).toBe('');
+  });
+
+  it('sets socket/instance override vars to empty so child dotenv cannot refill them', () => {
+    const env = buildOneOffDatabaseCommandEnv('postgresql://u:p@host:5432/db');
+    for (const key of [
+      'DATABASE_SOCKET_PATH',
+      'CLOUD_SQL_SOCKET_PATH',
+      'INSTANCE_UNIX_SOCKET',
+      'CLOUD_SQL_CONNECTION_NAME',
+      'CLOUDSQL_CONNECTION_NAME',
+      'CLOUD_SQL_INSTANCE_CONNECTION_NAME',
+      'INSTANCE_CONNECTION_NAME',
+      'GCP_CLOUDSQL_CONNECTION_NAME',
+    ]) {
+      expect(env[key]).toBe('');
+    }
+  });
+
+  it('derives DATABASE_SSL from the URL sslmode and defaults the port', () => {
+    const ssl = buildOneOffDatabaseCommandEnv('postgresql://u:p@db.supabase.co/postgres?sslmode=require');
+    expect(ssl.DATABASE_SSL).toBe('true');
+    expect(ssl.PGPORT).toBe('5432');
   });
 });

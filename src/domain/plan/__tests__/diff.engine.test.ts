@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'crypto';
 import { diffEnvironment, confirmGatedActionIds } from '../diff.engine.js';
 import { hashEnvValue, type ObservedState, type ObservedService } from '../../ports/observe.port.js';
 import { environmentSpecSchema, type EnvironmentSpec } from '../../spec/spec.schema.js';
 import type { LocalSnapshot } from '../plan.types.js';
 import type { Service } from '../../entities/service.entity.js';
+import type { Component } from '../../entities/component.entity.js';
 
 function spec(overrides: Record<string, unknown> = {}): EnvironmentSpec {
   return environmentSpecSchema.parse({
@@ -55,6 +57,22 @@ function localService(name: string): Service {
     createdAt: new Date(),
     updatedAt: new Date(),
   };
+}
+
+function localComponent(bindings: Record<string, unknown> = {}): Component {
+  return {
+    id: 'local-postgres',
+    environmentId: 'env-1',
+    type: 'postgres',
+    bindings,
+    externalId: 'db-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 function local(overrides: Partial<LocalSnapshot> = {}): LocalSnapshot {
@@ -717,5 +735,65 @@ describe('diffEnvironment — release-command migrations', () => {
       local: local({ services: [localService('nightly')], bindings: { provider: 'railway', projectId: 'rail-proj-1', environmentId: 'rail-env-1', services: {} } }),
     });
     expect(result.warnings).toContainEqual(expect.stringContaining('will never run'));
+  });
+});
+
+describe('diffEnvironment — database seed command', () => {
+  it('plans a one-shot database seed action when seedCommand has not completed', () => {
+    const result = diffEnvironment({
+      spec: spec({ database: { provider: 'railway', seedCommand: 'npm run db:seed' } }),
+      envName: 'production',
+      observed: observed(),
+      local: local({ components: [localComponent({ provider: 'railway' })] }),
+    });
+
+    const seed = result.actions.find((a) => a.id === 'database:railway:seed')!;
+    expect(seed).toMatchObject({
+      type: 'update',
+      resource: { kind: 'database', name: 'seed', provider: 'railway' },
+      metadata: {
+        operation: 'databaseSeed',
+        command: 'npm run db:seed',
+        commandHash: sha256('npm run db:seed'),
+        mode: 'once',
+      },
+    });
+    expect(seed.requiresConfirm).toBeUndefined();
+    expect(seed.dependsOn).toEqual(expect.arrayContaining(['database:railway', 'service:web']));
+  });
+
+  it('noops the seed action after the command hash is recorded on the database component', () => {
+    const command = 'npm run db:seed';
+    const result = diffEnvironment({
+      spec: spec({ database: { provider: 'railway', seedCommand: command } }),
+      envName: 'production',
+      observed: observed(),
+      local: local({
+        components: [localComponent({
+          provider: 'railway',
+          seed: { commandHash: sha256(command), seededAt: '2026-07-05T12:00:00.000Z' },
+        })],
+      }),
+    });
+
+    const seed = result.actions.find((a) => a.id === 'database:railway:seed')!;
+    expect(seed.type).toBe('noop');
+    expect(seed.reason).toContain('already completed');
+  });
+
+  it('replans seeding when the desired command changes', () => {
+    const result = diffEnvironment({
+      spec: spec({ database: { provider: 'railway', seedCommand: 'npm run db:seed:v2' } }),
+      envName: 'production',
+      observed: observed(),
+      local: local({
+        components: [localComponent({
+          provider: 'railway',
+          seed: { commandHash: sha256('npm run db:seed'), seededAt: '2026-07-05T12:00:00.000Z' },
+        })],
+      }),
+    });
+
+    expect(result.actions.find((a) => a.id === 'database:railway:seed')?.type).toBe('update');
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
@@ -9,6 +9,7 @@ import { EnvironmentRepository } from '../../../adapters/db/repositories/environ
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
+import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
 import { SpecStore } from '../../spec/spec.store.js';
 import { adapterFactory } from '../../services/adapter.factory.js';
 import { PlanService } from '../plan.service.js';
@@ -917,6 +918,206 @@ describe('PlanService.plan', () => {
       // Spec on disk is untouched by the override.
       const spec = new SpecStore().get(project)!.spec;
       expect(spec.environments.staging.envVars).toEqual({ NODE_ENV: 'staging' });
+    });
+
+    it('loads app runtime vars from a deploy env file without storing plaintext or provider tokens', async () => {
+      const envFile = path.join(mkdtempSync(path.join(tmpdir(), 'hypervibe-env-file-')), '.env');
+      writeFileSync(envFile, [
+        'SENDGRID_API_KEY=SG.local-secret',
+        'NODE_ENV=from-dotenv',
+        'WEBHOOK_URL=http://localhost:4040/hook',
+        'LOCAL_DEBUG_FLAG=true',
+        'RAILWAY_API_TOKEN=railway-provider-token',
+        'NPM_TOKEN=npm-provider-token',
+        '',
+      ].join('\n'));
+      new EnvironmentRepository().create({
+        projectId: project.id,
+        name: 'staging',
+        platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 're-1', services: { web: { serviceId: 's-1' } } },
+      });
+      new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+      mockObservingAdapter({
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: true,
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: [{
+          name: 'web',
+          externalId: 's-1',
+          workloadKind: 'web',
+          customDomains: [],
+          config: { startCommand: 'npm start' },
+          envVarKeys: ['NODE_ENV'],
+          envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+          status: 'running',
+        }],
+        databases: [],
+        partial: false,
+        warnings: [],
+      });
+
+      const result = await new PlanService().plan(project, 'staging', { envFile });
+      const plan = result as Exclude<typeof result, { error: string }>;
+      const web = plan.actions.find((action) => action.id === 'service:web')!;
+
+      expect(web.type).toBe('update');
+      expect(web.diff?.some((entry) => entry.field === 'env:SENDGRID_API_KEY')).toBe(true);
+      expect(web.diff?.some((entry) => entry.field === 'env:RAILWAY_API_TOKEN')).toBe(false);
+      expect(web.diff?.some((entry) => entry.field === 'env:NPM_TOKEN')).toBe(false);
+      expect(web.diff?.some((entry) => entry.field === 'env:NODE_ENV')).toBe(false);
+      expect(web.diff?.some((entry) => entry.field === 'env:LOCAL_DEBUG_FLAG')).toBe(false);
+      expect(web.diff?.some((entry) => entry.field === 'env:WEBHOOK_URL')).toBe(false);
+      expect(plan.warnings).toContainEqual(expect.stringContaining(`Loaded 1 deploy env var(s) from ${envFile}`));
+      expect(plan.warnings).toContainEqual(expect.stringContaining('Ignored 2 .env key(s) that do not match envFile policy: LOCAL_DEBUG_FLAG, NODE_ENV'));
+      expect(plan.warnings).toContainEqual(expect.stringContaining('Skipped 1 .env key(s) with local-only values in runtime mode: WEBHOOK_URL'));
+      expect(plan.warnings).toContainEqual(expect.stringContaining('Skipped 2 provider-only .env key(s): NPM_TOKEN, RAILWAY_API_TOKEN'));
+
+      const doc = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+      const overrides = doc.overrides as Record<string, unknown>;
+      expect(overrides.envFilePath).toBe(envFile);
+      expect(overrides.envFileKeys).toEqual(['SENDGRID_API_KEY']);
+      expect(JSON.stringify(doc)).not.toContain('SG.local-secret');
+      expect(JSON.stringify(doc)).not.toContain('railway-provider-token');
+      expect(JSON.stringify(doc)).not.toContain('npm-provider-token');
+      expect(JSON.stringify(doc)).not.toContain('localhost:4040');
+      expect(getSecretStore().decryptObject(overrides.envFileVarsEncrypted as string)).toEqual({
+        SENDGRID_API_KEY: 'SG.local-secret',
+      });
+    });
+
+    it('uses spec envFile policy to include custom runtime keys and exclude unwanted keys', async () => {
+      const envFile = path.join(mkdtempSync(path.join(tmpdir(), 'hypervibe-env-policy-')), '.env');
+      writeFileSync(envFile, [
+        'CUSTOM_WORKER_FLAG=true',
+        'LOCAL_DEBUG_FLAG=true',
+        'SESSION_SECRET=session-runtime',
+        '',
+      ].join('\n'));
+      new SpecStore().replace(project, {
+        version: 1,
+        project: project.name,
+        environments: {
+          staging: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            envVars: { NODE_ENV: 'staging' },
+            envFile: {
+              mode: 'explicit',
+              include: ['CUSTOM_WORKER_FLAG', 'SESSION_SECRET'],
+              exclude: ['SESSION_SECRET'],
+            },
+          },
+        },
+      });
+      new EnvironmentRepository().create({
+        projectId: project.id,
+        name: 'staging',
+        platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 're-1', services: { web: { serviceId: 's-1' } } },
+      });
+      new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+      mockObservingAdapter({
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: true,
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: [{
+          name: 'web',
+          externalId: 's-1',
+          workloadKind: 'web',
+          customDomains: [],
+          config: { startCommand: 'npm start' },
+          envVarKeys: ['NODE_ENV'],
+          envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+          status: 'running',
+        }],
+        databases: [],
+        partial: false,
+        warnings: [],
+      });
+
+      const result = await new PlanService().plan(project, 'staging', { envFile });
+      const plan = result as Exclude<typeof result, { error: string }>;
+      const web = plan.actions.find((action) => action.id === 'service:web')!;
+
+      expect(web.diff?.some((entry) => entry.field === 'env:CUSTOM_WORKER_FLAG')).toBe(true);
+      expect(web.diff?.some((entry) => entry.field === 'env:SESSION_SECRET')).toBe(false);
+      expect(web.diff?.some((entry) => entry.field === 'env:LOCAL_DEBUG_FLAG')).toBe(false);
+      expect(plan.warnings).toContainEqual(expect.stringContaining('Excluded 1 .env key(s) by envFile.exclude: SESSION_SECRET'));
+      expect(plan.warnings).toContainEqual(expect.stringContaining('Ignored 1 .env key(s) that do not match envFile policy: LOCAL_DEBUG_FLAG'));
+      const doc = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+      const overrides = doc.overrides as Record<string, unknown>;
+      expect(overrides.envFileKeys).toEqual(['CUSTOM_WORKER_FLAG']);
+      expect(getSecretStore().decryptObject(overrides.envFileVarsEncrypted as string)).toEqual({
+        CUSTOM_WORKER_FLAG: 'true',
+      });
+    });
+
+    it('does not let deploy env files override managed database env vars', async () => {
+      const envFile = path.join(mkdtempSync(path.join(tmpdir(), 'hypervibe-env-db-')), '.env');
+      writeFileSync(envFile, [
+        'DATABASE_URL=postgres://local-dev-db',
+        'SENDGRID_API_KEY=SG.local-secret',
+        '',
+      ].join('\n'));
+      new SpecStore().replace(project, {
+        version: 1,
+        project: project.name,
+        environments: {
+          staging: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            database: { provider: 'railway', engine: 'postgres' },
+            envVars: { NODE_ENV: 'staging' },
+          },
+        },
+      });
+      const environment = new EnvironmentRepository().create({
+        projectId: project.id,
+        name: 'staging',
+        platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 're-1', services: { web: { serviceId: 's-1' } } },
+      });
+      new ComponentRepository().create({
+        environmentId: environment.id,
+        type: 'postgres',
+        bindings: { provider: 'railway', connectionString: 'postgres://managed-db' },
+      });
+      new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+      mockObservingAdapter({
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: true,
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: [{
+          name: 'web',
+          externalId: 's-1',
+          workloadKind: 'web',
+          customDomains: [],
+          config: { startCommand: 'npm start' },
+          envVarKeys: ['NODE_ENV'],
+          envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+          status: 'running',
+        }],
+        databases: [],
+        partial: false,
+        warnings: [],
+      });
+
+      const result = await new PlanService().plan(project, 'staging', { envFile });
+      const plan = result as Exclude<typeof result, { error: string }>;
+      const web = plan.actions.find((action) => action.id === 'service:web')!;
+
+      expect(web.diff?.some((entry) => entry.field === 'env:DATABASE_URL')).toBe(true);
+      expect(plan.warnings).toContainEqual(expect.stringContaining('Ignored 1 .env key(s) because Hypervibe manages them from infrastructure: DATABASE_URL'));
+      const doc = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+      const overrides = doc.overrides as Record<string, unknown>;
+      expect(overrides.envFileKeys).toEqual(['SENDGRID_API_KEY']);
+      expect(getSecretStore().decryptObject(overrides.envFileVarsEncrypted as string)).toEqual({
+        SENDGRID_API_KEY: 'SG.local-secret',
+      });
     });
   });
 

@@ -22,6 +22,10 @@ Domain, DNS, registrar, hosting, database, and deploy-source changes are lifecyc
 
 Provider credentials and required external connections should be discovered as early as possible from the spec and reported before apply. Prefer `credentialsRef` with exported environment variables or local JSON files; raw credentials in chat are still accepted when the user intentionally chooses that path.
 
+Local `.env` files are deploy input candidates, not a raw publish list. Prefer `.env.<environment>` over `.env` when present. Keep env-file handling policy-driven through the environment spec (`envFile.mode`, `include`, `exclude`): default to high-confidence runtime keys, skip provider/control-plane credentials and local-looking values (`localhost`, `127.0.0.1`, `0.0.0.0`, `host.docker.internal`, `.local`, `.internal`), warn with key names for ignored/excluded/skipped keys, surface the env file path in plan previews, and never let stale local values override Hypervibe-managed infrastructure env vars such as database or queue URLs.
+
+Do not use temporary release-command changes to run one-off data operations. Release commands are durable deploy-time schema configuration. Provider-to-provider data moves belong in `hv_db_migrate mode="move"`. Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`, which plans a visible one-shot seed action, runs it through the provider-neutral environment task runner during `hv_apply`, and records completion on the database component only after terminal success; `hv_db_migrate mode="seed"` is only for explicit re-runs or repair operations and must be confirm-gated, masked, and audited.
+
 Connection guidance is part of the product contract, not incidental copy. Every provider or secret-manager connection should have a `ConnectionGuidance` entry in `src/domain/services/connection-guidance.ts`, and token/permission errors should route through `formatConnectionGuidance(...)` whenever possible.
 
 When adding or changing token guidance, include all of these details:
