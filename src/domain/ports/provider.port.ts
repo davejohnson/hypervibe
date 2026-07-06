@@ -43,6 +43,9 @@ export interface ProviderCapabilities {
 
   /** Queue backend this hosting provider implements, when it supports queues. */
   queues?: { backend: 'pubsub' | 'postgres' };
+
+  /** Whether one-off in-environment tasks (runJob) are supported. */
+  supportsOneOffTasks?: boolean;
 }
 
 export interface ComponentResult {
@@ -60,8 +63,15 @@ export interface DeployResult {
 
 export interface JobResult {
   jobId: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'timeout';
+  /** Log tail from the task container. */
   output?: string;
+  /** Railway: parsed from the exit sentinel; Cloud Run: not reported. */
+  exitCode?: number;
+  durationMs?: number;
+  runner?: 'cloudrun-job' | 'railway-temp-service';
+  /** Set when the temp task service could not be deleted (manual cleanup). */
+  cleanupWarning?: string;
   receipt: Receipt;
 }
 

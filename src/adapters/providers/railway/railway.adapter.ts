@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { IProviderAdapter, Receipt, ComponentResult, DeployResult, JobResult, ProviderCapabilities } from '../../../domain/ports/provider.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
+import { githubPackagePullCredentials } from '../github/package-pull.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { hashEnvValue } from '../../../domain/ports/observe.port.js';
 import type { ObservedDatabase, ObservedService, ObservedState } from '../../../domain/ports/observe.port.js';
@@ -65,6 +66,7 @@ export class RailwayAdapter implements IProviderAdapter {
     managedTls: true,
     supportsObserve: true,
     queues: { backend: 'postgres' },
+    supportsOneOffTasks: true,
   };
 
   private client: GraphQLClient | null = null;
@@ -1628,75 +1630,284 @@ export class RailwayAdapter implements IProviderAdapter {
   async runJob(
     environment: Environment,
     service: Service,
-    command: string
+    command: string,
+    options?: { timeoutMs?: number; pollIntervalMs?: number }
   ): Promise<JobResult> {
-    // Railway doesn't have a direct job API - you'd typically use a cron service
-    // This is a placeholder for future implementation
-    return {
-      jobId: '',
-      status: 'failed',
-      receipt: {
-        success: false,
-        message: 'Job execution not yet implemented for Railway',
-      },
-    };
-  }
-
-  /**
-   * Execute a one-off command on a service (for migrations, etc.)
-   * Uses Railway's execution API to run commands in ephemeral containers
-   */
-  async executeCommand(
-    projectId: string,
-    environmentId: string,
-    serviceId: string,
-    command: string
-  ): Promise<{ success: boolean; output?: string; error?: string }> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
     }
+    const client = this.client;
+    const startedAt = Date.now();
+    const fail = (message: string, error?: string, data?: Record<string, unknown>): JobResult => ({
+      jobId: '',
+      status: 'failed',
+      runner: 'railway-temp-service',
+      durationMs: Date.now() - startedAt,
+      receipt: {
+        success: false,
+        message,
+        ...(error ? { error } : {}),
+        ...(data ? { data } : {}),
+      },
+    });
 
+    const bindings = environment.platformBindings as {
+      projectId?: string;
+      environmentId?: string;
+      services?: Record<string, { serviceId?: string }>;
+    };
+    const projectId = bindings.projectId;
+    const environmentId = bindings.environmentId;
+    const sourceServiceId = bindings.services?.[service.name]?.serviceId;
+    if (!projectId || !environmentId || !sourceServiceId) {
+      return fail(
+        `Railway environment task requires bindings for service ${service.name}`,
+        'Missing Railway project/environment/service bindings. Apply service convergence first.'
+      );
+    }
+
+    // Tasks run the deployed image so they execute the same code and deps.
+    let image: string | undefined;
     try {
-      // Railway uses ephemeral containers for one-off commands
-      // This creates a temporary instance that runs the command and exits
-      const mutation = gql`
-        mutation ExecuteCommand($input: ServiceInstanceExecuteCommandInput!) {
-          serviceInstanceExecuteCommand(input: $input)
-        }
-      `;
+      const result = await client.request<{ serviceInstance?: { source?: { image?: string | null } | null } }>(
+        gql`
+          query TaskSourceInstance($serviceId: String!, $environmentId: String!) {
+            serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
+              source {
+                image
+              }
+            }
+          }
+        `,
+        { serviceId: sourceServiceId, environmentId }
+      );
+      image = result.serviceInstance?.source?.image ?? undefined;
+    } catch (error) {
+      return fail(
+        `Could not read the deployed image for ${service.name}`,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+    if (!image) {
+      return fail(
+        `Railway environment task requires a deployed image for service ${service.name}`,
+        'The service has no image source yet. Deploy it first (push to the deploy branch or hv_ci_trigger), then re-run the task.',
+        { pendingDeploy: true }
+      );
+    }
 
-      const result = await this.client.request<{ serviceInstanceExecuteCommand: string }>(
-        mutation,
+    let variables: Record<string, string>;
+    try {
+      const vars = await this.getServiceVariables(projectId, sourceServiceId, environmentId);
+      // RAILWAY_* are provider-injected for the SOURCE service; the temp
+      // service gets its own set from Railway.
+      variables = Object.fromEntries(Object.entries(vars).filter(([key]) => !key.startsWith('RAILWAY_')));
+    } catch (error) {
+      return fail(
+        `Could not read env vars for ${service.name}`,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+
+    const taskName = `hv-task-${Date.now()}`;
+    let taskServiceId: string;
+    try {
+      const created = await client.request<{ serviceCreate: { id: string } }>(
+        gql`
+          mutation CreateTaskService($input: ServiceCreateInput!) {
+            serviceCreate(input: $input) {
+              id
+              name
+            }
+          }
+        `,
         {
           input: {
             projectId,
             environmentId,
-            serviceId,
-            command,
+            name: taskName,
+            ...(Object.keys(variables).length > 0 ? { variables } : {}),
+          },
+        }
+      );
+      taskServiceId = created.serviceCreate.id;
+    } catch (error) {
+      return fail(
+        'Could not create the temporary Railway task service',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+
+    const runTask = async (): Promise<JobResult> => {
+      const pull = image.startsWith('ghcr.io/') ? githubPackagePullCredentials() : null;
+      // The sentinel is the exit-code source of truth: Railway deployment
+      // statuses have no run-to-completion value for a NEVER-restart service.
+      const inner = `${command}; hv_exit=$?; echo "__HYPERVIBE_TASK_EXIT:$hv_exit__"; exit $hv_exit`;
+      const startCommand = `/bin/sh -c '${inner.replace(/'/g, `'\\''`)}'`;
+      await client.request(
+        gql`
+          mutation ConfigureTaskService(
+            $serviceId: String!
+            $environmentId: String!
+            $input: ServiceInstanceUpdateInput!
+          ) {
+            serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
+          }
+        `,
+        {
+          serviceId: taskServiceId,
+          environmentId,
+          input: {
+            source: { image },
+            ...(pull ? { registryCredentials: { username: pull.username, password: pull.token } } : {}),
+            startCommand,
+            restartPolicyType: 'NEVER',
+            restartPolicyMaxRetries: 0,
           },
         }
       );
 
-      return {
-        success: true,
-        output: result.serviceInstanceExecuteCommand,
-      };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-
-      // If the execute API isn't available, provide alternative instructions
-      if (errorMsg.includes('Cannot query field') || errorMsg.includes('Unknown field')) {
-        return {
-          success: false,
-          error: 'Railway did not accept one-off command execution for this account.',
-        };
+      const deployResult = await client.request<{ serviceInstanceDeployV2?: string }>(
+        gql`
+          mutation DeployTaskService($serviceId: String!, $environmentId: String!) {
+            serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
+          }
+        `,
+        { serviceId: taskServiceId, environmentId }
+      );
+      const deploymentId = deployResult.serviceInstanceDeployV2;
+      if (!deploymentId) {
+        return fail('Railway did not return a deployment id for the task service');
       }
 
+      const timeoutMs = options?.timeoutMs ?? 15 * 60 * 1000;
+      const pollIntervalMs = options?.pollIntervalMs ?? 3000;
+      const sentinel = /__HYPERVIBE_TASK_EXIT:(\d+)__/;
+      const deadline = Date.now() + timeoutMs;
+      let exitCode: number | undefined;
+      let deployStatus = 'UNKNOWN';
+      let logs: RailwayLogEntry[] = [];
+      for (;;) {
+        try {
+          const statusResult = await client.request<{ deployment?: { status?: string } }>(
+            gql`
+              query TaskDeploymentStatus($id: String!) {
+                deployment(id: $id) {
+                  status
+                }
+              }
+            `,
+            { id: deploymentId }
+          );
+          deployStatus = statusResult.deployment?.status ?? deployStatus;
+        } catch {
+          // Keep the last known status; transient API errors must not kill the poll.
+        }
+        try {
+          logs = await this.getDeploymentLogs(deploymentId, 500);
+        } catch {
+          // Logs are unavailable while the image is still building.
+        }
+        const match = logs.map((entry) => entry.message).join('\n').match(sentinel);
+        if (match) {
+          exitCode = Number(match[1]);
+          break;
+        }
+        if (deployStatus === 'CRASHED' || deployStatus === 'FAILED') {
+          break;
+        }
+        if (Date.now() >= deadline) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+
+      const durationMs = Date.now() - startedAt;
+      const output = logs
+        .slice(-100)
+        .map((entry) => entry.message)
+        .filter((message) => !sentinel.test(message))
+        .join('\n')
+        .slice(-4000);
+      const data = { taskService: taskName, taskServiceId, deploymentId, image, deployStatus };
+      if (exitCode === 0) {
+        return {
+          jobId: deploymentId,
+          status: 'completed',
+          exitCode,
+          durationMs,
+          output,
+          runner: 'railway-temp-service',
+          receipt: { success: true, message: `Completed Railway environment task for ${service.name}`, data },
+        };
+      }
+      if (exitCode !== undefined) {
+        return {
+          jobId: deploymentId,
+          status: 'failed',
+          exitCode,
+          durationMs,
+          output,
+          runner: 'railway-temp-service',
+          receipt: {
+            success: false,
+            message: `Railway environment task exited with code ${exitCode}`,
+            error: `Command exited with code ${exitCode}. Check the task output.`,
+            data,
+          },
+        };
+      }
+      if (deployStatus === 'CRASHED' || deployStatus === 'FAILED') {
+        return {
+          jobId: deploymentId,
+          status: 'failed',
+          durationMs,
+          output,
+          runner: 'railway-temp-service',
+          receipt: {
+            success: false,
+            message: `Railway environment task deployment ended as ${deployStatus} before the command reported an exit code`,
+            error: 'The task container failed to start (image pull or boot failure). Check the task output and registry credentials.',
+            data,
+          },
+        };
+      }
       return {
-        success: false,
-        error: errorMsg,
+        jobId: deploymentId,
+        status: 'timeout',
+        durationMs,
+        output,
+        runner: 'railway-temp-service',
+        receipt: {
+          success: false,
+          message: `Railway environment task did not finish within ${Math.round(timeoutMs / 60000)} minute(s)`,
+          error: 'No exit sentinel appeared in the task logs before the timeout.',
+          data,
+        },
       };
+    };
+
+    let outcome: JobResult;
+    try {
+      outcome = await runTask();
+    } catch (error) {
+      outcome = fail(
+        `Railway environment task failed for ${service.name}`,
+        error instanceof Error ? error.message : String(error)
+      );
     }
+
+    let cleanupWarning: string | undefined;
+    try {
+      const deleted = await this.deleteService(taskServiceId);
+      if (!deleted.success) {
+        cleanupWarning = `Temporary task service ${taskName} (${taskServiceId}) could not be deleted: ${deleted.error ?? 'unknown error'}. Delete it in Railway to avoid billing.`;
+      }
+    } catch (error) {
+      cleanupWarning = `Temporary task service ${taskName} (${taskServiceId}) could not be deleted: ${error instanceof Error ? error.message : String(error)}. Delete it in Railway to avoid billing.`;
+    }
+
+    return { ...outcome, ...(cleanupWarning ? { cleanupWarning } : {}) };
   }
 
   /**

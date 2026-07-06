@@ -264,6 +264,7 @@ export class CloudRunAdapter implements IProviderAdapter {
     managedTls: true,
     supportsObserve: true,
     queues: { backend: 'pubsub' },
+    supportsOneOffTasks: true,
   };
 
   private credentials: CloudRunCredentials | null = null;
@@ -1040,6 +1041,7 @@ export class CloudRunAdapter implements IProviderAdapter {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
+    const startedAt = Date.now();
 
     const bindings = environment.platformBindings as {
       projectId?: string;
@@ -1063,6 +1065,7 @@ export class CloudRunAdapter implements IProviderAdapter {
           data: {
             provider: this.name,
             missing: ['services.' + service.name + '.imageUri'],
+            pendingDeploy: true,
           },
         },
       };
@@ -1117,7 +1120,9 @@ export class CloudRunAdapter implements IProviderAdapter {
       if (status !== 'completed') {
         return {
           jobId,
-          status: 'failed',
+          status: execution ? 'failed' : 'timeout',
+          runner: 'cloudrun-job',
+          durationMs: Date.now() - startedAt,
           receipt: {
             success: false,
             message: `Cloud Run environment task failed for ${service.name}`,
@@ -1137,6 +1142,8 @@ export class CloudRunAdapter implements IProviderAdapter {
       return {
         jobId,
         status: 'completed',
+        runner: 'cloudrun-job',
+        durationMs: Date.now() - startedAt,
         receipt: {
           success: true,
           message: `Completed Cloud Run environment task ${jobName}`,
@@ -1153,6 +1160,8 @@ export class CloudRunAdapter implements IProviderAdapter {
       return {
         jobId: '',
         status: 'failed',
+        runner: 'cloudrun-job',
+        durationMs: Date.now() - startedAt,
         receipt: {
           success: false,
           message: `Cloud Run environment task failed for ${service.name}`,

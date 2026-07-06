@@ -788,6 +788,20 @@ export async function applyDatabaseSeed(
     purpose: 'database seed command',
   });
   if (result.success === false) {
+    const receiptData = asRecord(asRecord(result.receipt)?.data);
+    if (receiptData?.pendingDeploy) {
+      // Fresh environment: the database exists but CI has not deployed an
+      // image yet. Not stamping seededAt keeps the seed action in the next
+      // plan, so it runs once a deploy exists.
+      return {
+        success: true,
+        message: `Database seed is pending the first deploy for ${project.name}/${envName}`,
+        data: {
+          pendingDeploy: true,
+          hint: 'Deploy first (push to the deploy branch or hv_ci_trigger), then re-run hv_plan/hv_apply — the seed action stays planned until it completes. hv_db_migrate mode="seed" also works once deployed.',
+        },
+      };
+    }
     return {
       success: false,
       message: 'Database seed command failed',

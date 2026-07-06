@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { githubPackagePullCredentials } from '../../adapters/providers/github/package-pull.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
@@ -139,32 +140,12 @@ export function providerSecretsForGitHubActions(
   }
 
   if (PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL.has(provider)) {
-    const githubConnections = connectionRepo.findAllByProvider('github')
-      .filter((connection) => connection.status === 'verified')
-      .flatMap((connection) => {
-        const rank = githubConnectionRank(connection.scope, options.githubRepo);
-        return rank === null ? [] : [{ connection, rank }];
-      })
-      .sort((a, b) => a.rank - b.rank);
-
-    for (const { connection: githubConnection } of githubConnections) {
-      const credentials = secretStore.decryptObject<Record<string, unknown>>(githubConnection.credentialsEncrypted);
-      const username =
-        options.githubLogin
-        ?? (typeof credentials.login === 'string' ? credentials.login : undefined)
-        ?? (typeof credentials.username === 'string' ? credentials.username : undefined);
-      const token =
-        typeof credentials.packageReadToken === 'string' && credentials.packageReadToken.length > 0
-          ? credentials.packageReadToken
-          : undefined;
-
-      if (username && token) {
-        secrets.push(
-          { name: 'IMAGE_REGISTRY_USERNAME', value: username },
-          { name: 'IMAGE_REGISTRY_TOKEN', value: token }
-        );
-        break;
-      }
+    const pull = githubPackagePullCredentials({ githubRepo: options.githubRepo, githubLogin: options.githubLogin });
+    if (pull) {
+      secrets.push(
+        { name: 'IMAGE_REGISTRY_USERNAME', value: pull.username },
+        { name: 'IMAGE_REGISTRY_TOKEN', value: pull.token }
+      );
     }
   }
 
@@ -184,22 +165,6 @@ export async function databaseUrlSecretForGitHubActions(
   if (!environment) return null;
   const url = await resolveExternalDatabaseUrl(project, environment);
   return url ? { name: 'DATABASE_URL', value: url } : null;
-}
-
-function githubConnectionRank(scope: string | null, repo?: string): number | null {
-  if (!repo) {
-    return scope === null ? 0 : 1;
-  }
-  if (scope === repo) {
-    return 0;
-  }
-  if (scope?.endsWith('/*') && repo.startsWith(scope.slice(0, -1))) {
-    return 1;
-  }
-  if (scope === null) {
-    return 2;
-  }
-  return null;
 }
 
 function ciBindings(environment: Environment | null): Record<string, WorkflowCiBinding> {

@@ -104,7 +104,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_db_migrate',
-    'Database operations for a deployed environment. mode="up" runs schema migrations; mode="seed" explicitly re-runs a one-off seed/bootstrap command against the target database without changing releaseCommand (fresh-environment seed/bootstrap data should be declared as database.seedCommand and applied through hv_plan/hv_apply); mode="reset" drops all tables; mode="move" copies data from the previous provider into the current database during staged provider migration (pg_dump | pg_restore snapshot plus row-count verification). Mutating modes are confirm-gated.',
+    'Database operations for a deployed environment. mode="up" runs schema migrations; mode="seed" explicitly re-runs a one-off seed/bootstrap command (fresh-environment seed/bootstrap data should be declared as database.seedCommand and applied through hv_plan/hv_apply); mode="reset" drops all tables; mode="move" copies data from the previous provider into the current database during staged provider migration (pg_dump | pg_restore snapshot plus row-count verification). up/seed default to runIn="environment": the command runs INSIDE the hosting environment (Cloud Run job / temporary Railway service) using the deployed image and its env vars — no database exposure, no local .env. runIn="local" spawns the command locally against an externally reachable database URL instead. Mutating modes are confirm-gated.',
     {
       project: projectField,
       env: envField,
@@ -113,13 +113,14 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
       preset: z.enum(['prisma', 'prisma-push', 'drizzle', 'typeorm', 'knex', 'sequelize', 'django', 'rails', 'laravel']).optional()
         .describe('mode=up: use a preset migration command'),
       service: z.string().optional().describe('Service to run the migration on (default: first service)'),
+      runIn: z.enum(['environment', 'local']).optional().describe('mode=up/seed: "environment" (default when supported) runs inside the hosting environment with the deployed image + env vars; "local" spawns locally against an externally reachable database URL.'),
       dryRun: z.boolean().optional().describe('mode=up or mode=seed: show what would run without executing'),
       sourceConnectionUrl: z.string().optional().describe('mode=move: override the source database URL. Accepts chat-safe refs — env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path — so the URL/password never enters chat. (Default: the previous provider recorded during hv_apply.)'),
       targetConnectionUrl: z.string().optional().describe('mode=move or mode=seed: override the target database URL; same chat-safe refs supported. (Default: the environment\'s current database, creating a Railway TCP proxy only from a confirmed mutating operation when required.)'),
       criticalTables: z.array(z.string()).optional().describe('mode=move: tables to verify with exact row counts (default: the 8 largest)'),
       confirm: confirmField,
     },
-    wrapHandler(async ({ project: projectRef, env, mode = 'up', command, preset, service, dryRun, sourceConnectionUrl, targetConnectionUrl, criticalTables, confirm }) => {
+    wrapHandler(async ({ project: projectRef, env, mode = 'up', command, preset, service, runIn, dryRun, sourceConnectionUrl, targetConnectionUrl, criticalTables, confirm }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
 
@@ -208,6 +209,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
           env: environment,
           command,
           targetConnectionUrl: resolvedTarget,
+          runIn,
           dryRun: true,
         });
         if (dryRun) {
@@ -224,13 +226,16 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
           env: environment,
           command,
           targetConnectionUrl: resolvedTarget,
+          runIn,
         });
         if (result.success === false) {
           return toolError('PROVIDER_ERROR', String(result.error ?? 'Seed command failed'), {
             details: result,
             hint: typeof result.hint === 'string'
               ? result.hint
-              : 'Check the command output. The command runs locally with DATABASE_URL and DIRECT_URL pointed at the target database.',
+              : result.runner === 'environment'
+                ? 'Check the task output. The command ran inside the hosting environment with the deployed image and env vars.'
+                : 'Check the command output. The command runs locally with DATABASE_URL and DIRECT_URL pinned to the target database.',
           });
         }
         return toolSuccess(result, {
@@ -256,6 +261,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
         command,
         preset,
         serviceName: service,
+        runIn,
         dryRun,
       });
       if (payload.success === false) {

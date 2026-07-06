@@ -21,6 +21,10 @@ export type EnvironmentTaskResult =
     jobId: string;
     status: 'completed';
     output?: string;
+    exitCode?: number;
+    durationMs?: number;
+    runner?: string;
+    cleanupWarning?: string;
     receipt: Record<string, unknown>;
   }
   | {
@@ -31,6 +35,10 @@ export type EnvironmentTaskResult =
     error: string;
     status?: string;
     output?: string;
+    exitCode?: number;
+    durationMs?: number;
+    runner?: string;
+    cleanupWarning?: string;
     receipt?: Record<string, unknown>;
   };
 
@@ -110,7 +118,13 @@ export async function runEnvironmentTask(params: {
 
   const job = await adapter.runJob(params.environment, service, command);
   const receipt = job.receipt as unknown as Record<string, unknown>;
-  if (!job.receipt.success || job.status === 'failed') {
+  const diagnostics = {
+    ...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),
+    ...(job.durationMs !== undefined ? { durationMs: job.durationMs } : {}),
+    ...(job.runner ? { runner: job.runner } : {}),
+    ...(job.cleanupWarning ? { cleanupWarning: job.cleanupWarning } : {}),
+  };
+  if (!job.receipt.success || job.status === 'failed' || job.status === 'timeout') {
     return {
       success: false,
       provider,
@@ -118,6 +132,7 @@ export async function runEnvironmentTask(params: {
       command,
       status: job.status,
       output: job.output,
+      ...diagnostics,
       receipt,
       error: job.receipt.error || job.receipt.message || `${params.purpose ?? 'Environment task'} failed.`,
     };
@@ -131,6 +146,7 @@ export async function runEnvironmentTask(params: {
       command,
       status: job.status,
       output: job.output,
+      ...diagnostics,
       receipt,
       error: `${displayName} started the ${params.purpose ?? 'environment task'} but did not report successful completion. Refusing to mark it complete.`,
     };
@@ -144,6 +160,7 @@ export async function runEnvironmentTask(params: {
     jobId: job.jobId,
     status: 'completed',
     output: job.output,
+    ...diagnostics,
     receipt,
   };
 }

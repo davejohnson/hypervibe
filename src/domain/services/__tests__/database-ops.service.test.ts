@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -11,10 +11,12 @@ import { ConnectionRepository } from '../../../adapters/db/repositories/connecti
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import {
   maskDatabaseUrl,
+  resolveDatabaseTaskRunner,
   resolveEnvironmentDatabaseUrl,
   runDatabaseMigration,
   runDatabaseSeed,
 } from '../database-ops.service.js';
+import { adapterFactory } from '../adapter.factory.js';
 
 describe('database-ops.service', () => {
   let tempDir: string;
@@ -161,5 +163,104 @@ describe('database-ops.service', () => {
     expect(payload.success).toBe(true);
     expect(String(payload.stdout)).toContain('postgres://***:***@db.example.com:5432/app');
     expect(JSON.stringify(payload)).not.toContain('secretpw');
+  });
+});
+
+describe('resolveDatabaseTaskRunner', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-task-runner-'));
+    SqliteAdapter.resetInstance();
+    initializeDatabase(path.join(tempDir, 'hypervibe.db'));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    SqliteAdapter.resetInstance();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function seed(bindings: Record<string, unknown>) {
+    const project = new ProjectRepository().create({ name: 'runner-app', defaultPlatform: 'railway' });
+    const env = new EnvironmentRepository().create({ projectId: project.id, name: 'production', platformBindings: bindings });
+    return { project, env };
+  }
+
+  it('prefers the environment runner when the adapter supports runJob and a service is bound', async () => {
+    const { project, env } = seed({ provider: 'railway', services: { web: { serviceId: 'svc-1' } } });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: { runJob: async () => ({}) } as never,
+    });
+
+    expect(await resolveDatabaseTaskRunner(project, env)).toEqual({ runner: 'environment' });
+  });
+
+  it('falls back to local with a reason when the adapter has no runJob', async () => {
+    const { project, env } = seed({ provider: 'railway', services: { web: { serviceId: 'svc-1' } } });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter: {} as never });
+
+    const result = await resolveDatabaseTaskRunner(project, env);
+    expect(result.runner).toBe('local');
+    expect(result.reason).toContain('does not support in-environment');
+  });
+
+  it('falls back to local when no service is deployed yet', async () => {
+    const { project, env } = seed({ provider: 'railway', services: {} });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: { runJob: async () => ({}) } as never,
+    });
+
+    const result = await resolveDatabaseTaskRunner(project, env);
+    expect(result.runner).toBe('local');
+    expect(result.reason).toContain('Deploy first');
+  });
+
+  it('rejects explicit runIn=environment when only local would work', async () => {
+    const { project, env } = seed({ provider: 'railway', services: {} });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: { runJob: async () => ({}) } as never,
+    });
+
+    const result = await runDatabaseSeed({
+      project,
+      env,
+      command: 'npm run db:seed',
+      runIn: 'environment',
+    });
+    expect(result.success).toBe(false);
+    expect(String(result.hint)).toContain('runIn="local"');
+  });
+
+  it('seed dry run reports the environment runner without touching database URLs', async () => {
+    const { project, env } = seed({ provider: 'railway', services: { web: { serviceId: 'svc-1' } } });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: { runJob: async () => ({}) } as never,
+    });
+
+    const preview = await runDatabaseSeed({ project, env, command: 'npm run db:seed', dryRun: true });
+    expect(preview).toMatchObject({ success: true, dryRun: true, runner: 'environment' });
+    expect(preview.target).toBeUndefined();
+  });
+
+  it('an explicit target URL forces the local runner', async () => {
+    const { project, env } = seed({ provider: 'railway', services: { web: { serviceId: 'svc-1' } } });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: { runJob: async () => ({}) } as never,
+    });
+
+    const preview = await runDatabaseSeed({
+      project,
+      env,
+      command: 'npm run db:seed',
+      targetConnectionUrl: 'postgresql://u:p@db.example.com:5432/app',
+      dryRun: true,
+    });
+    expect(preview).toMatchObject({ success: true, runner: 'local' });
   });
 });

@@ -12,7 +12,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import { adapterFactory } from './adapter.factory.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
-import { formatConnectionGuidance } from './connection-guidance.js';
+import { runEnvironmentTask } from './environment-task.service.js';
 
 const serviceRepo = new ServiceRepository();
 const componentRepo = new ComponentRepository();
@@ -138,6 +138,36 @@ export async function executeDatabaseReset(
  * Run a database migration on a deployed environment. Returns a plain payload
  * (no MCP envelope) so both db_migrate and hv_db_migrate can use it.
  */
+/**
+ * Where a one-off database command (migration/seed) runs. "environment" =
+ * inside the hosting environment via the provider's one-off task runner
+ * (deployed image + provider env vars); "local" = spawned on this machine
+ * against an externally reachable database URL.
+ */
+export async function resolveDatabaseTaskRunner(
+  project: Project,
+  env: Environment
+): Promise<{ runner: 'environment' | 'local'; reason?: string }> {
+  const provider = hostingProviderForEnvironment(project, env);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
+  const adapter = adapterResult.success ? adapterResult.adapter : null;
+  if (!adapter || typeof adapter.runJob !== 'function') {
+    return {
+      runner: 'local',
+      reason: `${provider} does not support in-environment one-off tasks; the command runs locally against an externally reachable database URL.`,
+    };
+  }
+  const bindings = env.platformBindings as { services?: Record<string, { serviceId?: string }> };
+  const hasBoundService = Object.values(bindings.services ?? {}).some((binding) => Boolean(binding?.serviceId));
+  if (!hasBoundService) {
+    return {
+      runner: 'local',
+      reason: 'No service is deployed in this environment yet, so the command runs locally. Deploy first to run tasks inside the environment.',
+    };
+  }
+  return { runner: 'environment' };
+}
+
 export async function runDatabaseMigration(params: {
   project: Project;
   env: Environment;
@@ -145,6 +175,7 @@ export async function runDatabaseMigration(params: {
   preset?: keyof typeof MIGRATION_PRESETS;
   serviceName?: string;
   dryRun?: boolean;
+  runIn?: 'environment' | 'local';
 }): Promise<Record<string, unknown>> {
   const { project, env, command, preset, serviceName, dryRun } = params;
 
@@ -188,6 +219,16 @@ export async function runDatabaseMigration(params: {
     migrationCommand = MIGRATION_PRESETS.prisma;
   }
 
+  const resolution = await resolveDatabaseTaskRunner(project, env);
+  const runner = params.runIn ?? resolution.runner;
+  if (params.runIn === 'environment' && resolution.runner === 'local') {
+    return {
+      success: false,
+      error: resolution.reason ?? 'In-environment tasks are not available for this environment.',
+      hint: 'Deploy the service first, or re-run with runIn="local".',
+    };
+  }
+
   // Dry run - just show what would happen
   if (dryRun) {
     return {
@@ -199,89 +240,52 @@ export async function runDatabaseMigration(params: {
       provider: hostingProvider,
       service: targetService.name,
       command: migrationCommand,
+      runner,
+      ...(runner === 'local' && resolution.reason ? { runnerReason: resolution.reason } : {}),
     };
   }
 
-  if (hostingProvider !== 'railway') {
-    const adapterResult = await adapterFactory.getProviderAdapter(hostingProvider, project);
-    if (!adapterResult.success || !adapterResult.adapter) {
-      return { success: false, error: adapterResult.error || `No ${hostingProvider} adapter available` };
-    }
-
-    if (typeof adapterResult.adapter.runJob !== 'function') {
-      return {
-        success: false,
-        error: `Provider ${hostingProvider} does not support one-off migration jobs`,
-      };
-    }
-
-    const job = await adapterResult.adapter.runJob(env, targetService, migrationCommand);
-    const success = job.receipt.success && job.status !== 'failed';
+  if (runner === 'local') {
+    const local = await runLocalDatabaseCommand({
+      project,
+      env,
+      command: migrationCommand,
+      auditAction: 'db_migrate',
+    });
     return {
-      success,
-      message: success ? 'Migration job started' : 'Migration job failed',
-      project: project.name,
-      environment: env.name,
+      ...local,
       provider: hostingProvider,
       service: targetService.name,
-      command: migrationCommand,
-      jobId: job.jobId,
-      status: job.status,
-      output: job.output,
-      error: success ? undefined : (job.receipt.error || job.receipt.message),
-      receipt: job.receipt,
+      runner: 'local',
+      ...(resolution.reason && !params.runIn ? { runnerReason: resolution.reason } : {}),
     };
   }
 
-  if (!bindings.projectId || !bindings.environmentId) {
-    return { success: false, error: 'Environment is marked as Railway but is missing Railway project/environment bindings' };
+  const adapterResult = await adapterFactory.getProviderAdapter(hostingProvider, project);
+  if (!adapterResult.success || !adapterResult.adapter || typeof adapterResult.adapter.runJob !== 'function') {
+    return { success: false, error: adapterResult.error || `No ${hostingProvider} adapter available` };
   }
 
-  // Get Railway connection
-  const connection = connectionRepo.findBestMatchFromHints('railway', getProjectScopeHints(project));
-  if (!connection) {
-    return { success: false, error: `No Railway connection found. ${formatConnectionGuidance('railway')}` };
-  }
-
-  const secretStore = getSecretStore();
-  const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-  const adapter = new RailwayAdapter();
-  await adapter.connect(credentials);
-
-  try {
-    const result = await adapter.executeCommand(
-      bindings.projectId,
-      bindings.environmentId,
-      serviceBinding.serviceId,
-      migrationCommand
-    );
-
-    if (result.success) {
-      return {
-        success: true,
-        message: 'Migration completed',
-        project: project.name,
-        environment: env.name,
-        service: targetService.name,
-        command: migrationCommand,
-        output: result.output,
-      };
-    } else {
-      return {
-        success: false,
-        error: result.error,
-        project: project.name,
-        environment: env.name,
-        command: migrationCommand,
-        hint: 'Railway did not accept direct one-off command execution. For recurring schema migrations, set migrations.mode="releaseCommand" in the spec and run hv_plan/hv_apply. For one-time seed/bootstrap data, use hv_db_migrate mode="seed" command="..." so Hypervibe runs the command against the database without changing releaseCommand.',
-      };
-    }
-  } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
+  const job = await adapterResult.adapter.runJob(env, targetService, migrationCommand);
+  const success = job.receipt.success && job.status === 'completed';
+  return {
+    success,
+    message: success ? 'Migration completed' : 'Migration job failed',
+    project: project.name,
+    environment: env.name,
+    provider: hostingProvider,
+    service: targetService.name,
+    command: migrationCommand,
+    runner: 'environment',
+    jobId: job.jobId,
+    status: job.status,
+    output: job.output,
+    ...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),
+    ...(job.durationMs !== undefined ? { durationMs: job.durationMs } : {}),
+    ...(job.cleanupWarning ? { cleanupWarning: job.cleanupWarning } : {}),
+    error: success ? undefined : (job.receipt.error || job.receipt.message),
+    receipt: job.receipt,
+  };
 }
 
 /** A URL usable from OUTSIDE the hosting provider's network (CI runners, local pg_dump). */
@@ -509,13 +513,37 @@ export async function runDatabaseSeed(params: {
   command: string;
   targetConnectionUrl?: string;
   dryRun?: boolean;
+  runIn?: 'environment' | 'local';
 }): Promise<Record<string, unknown>> {
   const command = params.command.trim();
   if (!command) {
     return { success: false, error: 'Seed command is required.' };
   }
 
+  // An explicit target URL is inherently a local run: the environment runner
+  // always uses the environment's own database wiring.
+  const resolution = await resolveDatabaseTaskRunner(params.project, params.env);
+  const runner = params.runIn ?? (params.targetConnectionUrl ? 'local' : resolution.runner);
+  if (params.runIn === 'environment' && resolution.runner === 'local') {
+    return {
+      success: false,
+      error: resolution.reason ?? 'In-environment tasks are not available for this environment.',
+      hint: 'Deploy the service first, or re-run with runIn="local".',
+    };
+  }
+
   if (params.dryRun) {
+    if (runner === 'environment') {
+      return {
+        success: true,
+        dryRun: true,
+        project: params.project.name,
+        environment: params.env.name,
+        command,
+        runner: 'environment',
+        note: 'Runs inside the hosting environment using the deployed service image and its env vars — no database exposure, no local .env involved.',
+      };
+    }
     const previewUrl = params.targetConnectionUrl
       ?? await resolveExternalDatabaseUrl(params.project, params.env);
     return {
@@ -524,6 +552,8 @@ export async function runDatabaseSeed(params: {
       project: params.project.name,
       environment: params.env.name,
       command,
+      runner: 'local',
+      ...(resolution.reason && !params.runIn && !params.targetConnectionUrl ? { runnerReason: resolution.reason } : {}),
       target: previewUrl
         ? {
           reachable: true,
@@ -540,6 +570,80 @@ export async function runDatabaseSeed(params: {
     };
   }
 
+  if (runner === 'environment') {
+    const task = await runEnvironmentTask({
+      project: params.project,
+      environment: params.env,
+      command,
+      purpose: 'seed command',
+    });
+    auditRepo.create({
+      action: task.success ? 'db_seed.succeeded' : 'db_seed.failed',
+      resourceType: 'database',
+      resourceId: `${params.project.name}/${params.env.name}`,
+      details: {
+        command,
+        runner: 'environment',
+        status: task.status,
+        ...(task.exitCode !== undefined ? { exitCode: task.exitCode } : {}),
+        ...(task.durationMs !== undefined ? { durationMs: task.durationMs } : {}),
+      },
+    });
+    if (!task.success) {
+      return {
+        success: false,
+        message: 'Seed command failed',
+        project: params.project.name,
+        environment: params.env.name,
+        command,
+        runner: 'environment',
+        error: task.error,
+        ...(task.status ? { status: task.status } : {}),
+        ...(task.output !== undefined ? { output: task.output } : {}),
+        ...(task.exitCode !== undefined ? { exitCode: task.exitCode } : {}),
+        ...(task.cleanupWarning ? { cleanupWarning: task.cleanupWarning } : {}),
+      };
+    }
+    return {
+      success: true,
+      message: 'Seed command completed',
+      project: params.project.name,
+      environment: params.env.name,
+      command,
+      runner: 'environment',
+      provider: task.provider,
+      service: task.service,
+      jobId: task.jobId,
+      ...(task.exitCode !== undefined ? { exitCode: task.exitCode } : {}),
+      ...(task.durationMs !== undefined ? { durationMs: task.durationMs } : {}),
+      ...(task.output !== undefined ? { output: task.output } : {}),
+      ...(task.cleanupWarning ? { cleanupWarning: task.cleanupWarning } : {}),
+    };
+  }
+
+  const local = await runLocalDatabaseCommand({
+    project: params.project,
+    env: params.env,
+    command,
+    targetConnectionUrl: params.targetConnectionUrl,
+    auditAction: 'db_seed',
+  });
+  return {
+    ...local,
+    runner: 'local',
+    ...(resolution.reason && !params.runIn && !params.targetConnectionUrl ? { runnerReason: resolution.reason } : {}),
+  };
+}
+
+/** Spawn a one-off DB command locally with the env pinned to the target URL. */
+async function runLocalDatabaseCommand(params: {
+  project: Project;
+  env: Environment;
+  command: string;
+  targetConnectionUrl?: string;
+  auditAction: 'db_seed' | 'db_migrate';
+}): Promise<Record<string, unknown>> {
+  const command = params.command;
   const target = params.targetConnectionUrl
     ? { ok: true as const, url: params.targetConnectionUrl, source: 'direct' as const, tcpProxyCreated: false }
     : await ensureExternalDatabaseUrl(params.project, params.env);
@@ -583,11 +687,12 @@ export async function runDatabaseSeed(params: {
   const durationMs = Date.now() - startedAt;
   const success = result.exitCode === 0 && !result.error;
   auditRepo.create({
-    action: success ? 'db_seed.succeeded' : 'db_seed.failed',
+    action: success ? `${params.auditAction}.succeeded` : `${params.auditAction}.failed`,
     resourceType: 'database',
     resourceId: `${params.project.name}/${params.env.name}`,
     details: {
       command,
+      runner: 'local',
       exitCode: result.exitCode,
       durationMs,
       target: {
@@ -601,7 +706,7 @@ export async function runDatabaseSeed(params: {
 
   return {
     success,
-    message: success ? 'Seed command completed' : 'Seed command failed',
+    message: success ? 'Command completed' : 'Command failed',
     project: params.project.name,
     environment: params.env.name,
     command,

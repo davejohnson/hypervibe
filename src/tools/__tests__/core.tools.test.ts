@@ -1635,6 +1635,66 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('leaves the seedCommand pending (not failed) when no image is deployed yet', async () => {
+    const { ComponentRepository } = await import('../../adapters/db/repositories/component.repository.js');
+    const command = 'npm run db:seed';
+    const project = new ProjectRepository().create({ name: 'seed-pending-app', defaultPlatform: 'railway' });
+    new ServiceRepository().create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { workloadKind: 'web' },
+      envVarSpec: {},
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { web: { serviceId: 's-1' } },
+      },
+    });
+    const component = new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      externalId: 'db-1',
+      bindings: { provider: 'railway' },
+    });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        runJob: async () => ({
+          jobId: '',
+          status: 'failed',
+          runner: 'railway-temp-service',
+          receipt: {
+            success: false,
+            message: 'Railway environment task requires a deployed image for service web',
+            error: 'The service has no image source yet.',
+            data: { pendingDeploy: true },
+          },
+        }),
+      },
+    } as any);
+
+    const result = await applyDatabaseSeed(createToolContext(), project, 'production', {
+      id: 'database:railway:seed',
+      type: 'update',
+      resource: { kind: 'database', name: 'seed', provider: 'railway' },
+      verified: true,
+      reason: 'test',
+      metadata: { operation: 'databaseSeed', command, commandHash: sha256(command) },
+    });
+
+    // The apply is not failed and seededAt is NOT stamped: the seed action
+    // stays in the next plan until a deploy exists and it actually runs.
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({ pendingDeploy: true });
+    const after = new ComponentRepository().findById(component.id)!;
+    expect(after.bindings.seed).toBeUndefined();
+  });
+
   it('tears down abandoned-provider services only when confirmed and prunes the previousHosting stash', async () => {
     const t = await makeClient();
     await t.call('hv_spec_set', {
