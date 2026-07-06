@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
@@ -985,6 +985,59 @@ describe('PlanService.plan', () => {
       expect(getSecretStore().decryptObject(overrides.envFileVarsEncrypted as string)).toEqual({
         SENDGRID_API_KEY: 'SG.local-secret',
       });
+    });
+
+    it('warns when the environment-specific env file is missing and base .env is used', async () => {
+      const oldCwd = process.cwd();
+      const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-env-fallback-plan-'));
+      mkdirSync(path.join(root, '.git'));
+      mkdirSync(path.join(root, 'app'));
+      const realRoot = realpathSync(root);
+      const baseEnvFile = path.join(realRoot, '.env');
+      const stagingEnvFile = path.join(realRoot, '.env.staging');
+      writeFileSync(baseEnvFile, 'SENDGRID_API_KEY=SG.base\n');
+      new EnvironmentRepository().create({
+        projectId: project.id,
+        name: 'staging',
+        platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 're-1', services: { web: { serviceId: 's-1' } } },
+      });
+      new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+      mockObservingAdapter({
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: true,
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: [{
+          name: 'web',
+          externalId: 's-1',
+          workloadKind: 'web',
+          customDomains: [],
+          config: { startCommand: 'npm start' },
+          envVarKeys: ['NODE_ENV'],
+          envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+          status: 'running',
+        }],
+        databases: [],
+        partial: false,
+        warnings: [],
+      });
+
+      try {
+        process.chdir(path.join(root, 'app'));
+        const result = await new PlanService().plan(project, 'staging');
+        const plan = result as Exclude<typeof result, { error: string }>;
+
+        expect(plan.warnings).toContainEqual(expect.stringContaining(`No environment-specific deploy env file found at ${stagingEnvFile}`));
+        expect(plan.warnings).toContainEqual(expect.stringContaining(`using base ${baseEnvFile}`));
+        expect(plan.warnings).toContainEqual(expect.stringContaining('copying selected runtime keys into the plan'));
+        const doc = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+        const overrides = doc.overrides as Record<string, unknown>;
+        expect(overrides.envFilePath).toBe(baseEnvFile);
+        expect(overrides.envFileKeys).toEqual(['SENDGRID_API_KEY']);
+      } finally {
+        process.chdir(oldCwd);
+      }
     });
 
     it('uses spec envFile policy to include custom runtime keys and exclude unwanted keys', async () => {

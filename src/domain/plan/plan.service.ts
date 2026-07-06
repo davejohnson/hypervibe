@@ -433,6 +433,9 @@ export class PlanService {
       const shadowedByManaged = Object.keys(envFile.vars)
         .filter((key) => managedEnvKeys.has(key))
         .sort();
+      if (envFile.usedBaseEnvFallback && envFile.missingEnvSpecificPath) {
+        envFileWarnings.push(`No environment-specific deploy env file found at ${envFile.missingEnvSpecificPath}; using base ${envFile.path} for environment "${environmentName}" and copying selected runtime keys into the plan. Create ${envFile.missingEnvSpecificPath} or adjust envFile.mode/include/exclude if these values should differ.`);
+      }
       if (loadedKeys.length > 0) {
         envFileWarnings.push(`Loaded ${loadedKeys.length} deploy env var(s) from ${envFile.path}.`);
       }

@@ -65,6 +65,29 @@ describe('deploy-env-file', () => {
     expect(defaultDeployEnvFilePath(path.join(root, 'app'), 'bad/env')).toBe(basePath);
   });
 
+  it('reports when an environment-specific env file is missing and base .env is used', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-fallback-'));
+    mkdirSync(path.join(root, '.git'));
+    mkdirSync(path.join(root, 'app'));
+    const basePath = path.join(root, '.env');
+    const stagingPath = path.join(root, '.env.staging');
+    writeFileSync(basePath, 'SENDGRID_API_KEY=SG.base\n');
+
+    expect(defaultDeployEnvFilePath(path.join(root, 'app'), 'staging')).toBe(basePath);
+    expect(loadDeployEnvFile({ startDir: path.join(root, 'app'), envName: 'staging' })).toEqual({
+      path: basePath,
+      missingEnvSpecificPath: stagingPath,
+      usedBaseEnvFallback: true,
+      vars: {
+        SENDGRID_API_KEY: 'SG.base',
+      },
+      ignoredKeys: [],
+      skippedKeys: [],
+      excludedKeys: [],
+      localValueKeys: [],
+    });
+  });
+
   it('recognizes common local-only values', () => {
     expect(valueLooksLocal('redis://localhost:6379')).toBe(true);
     expect(valueLooksLocal('https://api.service.internal/hook')).toBe(true);

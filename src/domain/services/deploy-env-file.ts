@@ -5,6 +5,8 @@ import { findRepoRoot } from '../spec/repo-spec-file.js';
 
 export interface DeployEnvFileResult {
   path: string;
+  missingEnvSpecificPath?: string;
+  usedBaseEnvFallback?: boolean;
   vars: Record<string, string>;
   skippedKeys: string[];
   ignoredKeys: string[];
@@ -176,14 +178,32 @@ export function valueLooksLocal(value: string): boolean {
 }
 
 export function defaultDeployEnvFilePath(startDir = process.cwd(), envName?: string): string | null {
+  return resolveDefaultDeployEnvFile(startDir, envName).path;
+}
+
+function resolveDefaultDeployEnvFile(startDir = process.cwd(), envName?: string): {
+  path: string | null;
+  missingEnvSpecificPath?: string;
+  usedBaseEnvFallback?: boolean;
+} {
   const root = findRepoRoot(startDir);
-  if (!root) return null;
+  if (!root) return { path: null };
   const suffix = envFileSuffix(envName);
-  const candidates = [
-    ...(suffix ? [path.join(root, `.env.${suffix}`)] : []),
-    path.join(root, '.env'),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+  const basePath = path.join(root, '.env');
+  const envSpecificPath = suffix ? path.join(root, `.env.${suffix}`) : null;
+  if (envSpecificPath && existsSync(envSpecificPath)) {
+    return { path: envSpecificPath };
+  }
+  if (existsSync(basePath)) {
+    return {
+      path: basePath,
+      ...(envSpecificPath ? { missingEnvSpecificPath: envSpecificPath, usedBaseEnvFallback: true } : {}),
+    };
+  }
+  return {
+    path: null,
+    ...(envSpecificPath ? { missingEnvSpecificPath: envSpecificPath } : {}),
+  };
 }
 
 export function loadDeployEnvFile(options: {
@@ -197,9 +217,10 @@ export function loadDeployEnvFile(options: {
 } = {}): DeployEnvFileResult | null {
   const mode = options.mode ?? 'runtime';
   if (options.includeEnvFile === false || mode === 'off') return null;
-  const filePath = options.envFile
-    ? path.resolve(options.startDir ?? process.cwd(), options.envFile)
-    : defaultDeployEnvFilePath(options.startDir, options.envName);
+  const resolvedDefault = options.envFile
+    ? { path: path.resolve(options.startDir ?? process.cwd(), options.envFile) }
+    : resolveDefaultDeployEnvFile(options.startDir, options.envName);
+  const filePath = resolvedDefault.path;
   if (!filePath) return null;
 
   const parsed = parseEnvFile(filePath);
@@ -235,6 +256,8 @@ export function loadDeployEnvFile(options: {
 
   return {
     path: filePath,
+    ...(resolvedDefault.missingEnvSpecificPath ? { missingEnvSpecificPath: resolvedDefault.missingEnvSpecificPath } : {}),
+    ...(resolvedDefault.usedBaseEnvFallback ? { usedBaseEnvFallback: true } : {}),
     vars,
     skippedKeys: skippedKeys.sort(),
     ignoredKeys: ignoredKeys.sort(),
