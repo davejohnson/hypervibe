@@ -57,6 +57,7 @@ export type ConnectionBlock = {
   provider: string;
   reason?: string;
   scope?: string;
+  policy?: 'hard' | 'action-scoped-if-independent-actions';
 };
 
 function uniqueConnectionBlocks(blocks: ConnectionBlock[]): ConnectionBlock[] {
@@ -160,7 +161,7 @@ export function splitActionScopedConnectionBlocks(
     && !isCloudflareDomainRegistrationAction(action)
   );
   const actionScopedBlocked = blocked.filter((entry) =>
-    entry.provider === 'cloudflare' && hasIndependentPendingAction
+    entry.policy === 'action-scoped-if-independent-actions' && hasIndependentPendingAction
   );
   const actionScopedProviders = new Set(actionScopedBlocked.map((entry) => entry.provider));
   const ciCredentialBlocks = actions.flatMap((action) => {
@@ -187,13 +188,13 @@ export function splitActionScopedConnectionBlocks(
 export function actionScopedBlocksRequiringConnectBeforeApply(
   actionScopedBlocked: ConnectionBlock[]
 ): ConnectionBlock[] {
-  return actionScopedBlocked.filter((entry) => entry.provider !== 'cloudflare');
+  return actionScopedBlocked.filter((entry) => entry.policy !== 'action-scoped-if-independent-actions');
 }
 
 export function actionScopedBlocksAllowedDuringApply(
   actionScopedBlocked: ConnectionBlock[]
 ): ConnectionBlock[] {
-  return actionScopedBlocked.filter((entry) => entry.provider === 'cloudflare');
+  return actionScopedBlocked.filter((entry) => entry.policy === 'action-scoped-if-independent-actions');
 }
 
 export function bootstrapActionResultFromSummary(

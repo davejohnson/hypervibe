@@ -985,7 +985,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('applies independent CI deploy setup before failing a missing Cloudflare domain action', async () => {
+  it('blocks apply before independent actions when a full plan is missing Cloudflare for domain convergence', async () => {
     const t = await makeClient();
     await t.call('hv_spec_set', {
       spec: {
@@ -1044,24 +1044,18 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
     const plan = await t.call('hv_plan', { project: 'ci-domain-soft-block-app', env: 'production' });
     expect(plan.ok).toBe(true);
-    expect(plan.data.blocked).toEqual([]);
-    expect(plan.data.actionScopedBlocked).toContainEqual(expect.objectContaining({ provider: 'cloudflare' }));
-    expect(plan.next).toContain('hv_apply');
+    expect(plan.data.blocked).toContainEqual(expect.objectContaining({ provider: 'cloudflare' }));
+    expect(plan.data.actionScopedBlocked).toBeUndefined();
+    expect(plan.next).toEqual(['hv_connect', 'hv_plan']);
+    expect(plan.hint).toContain('Do not run hv_apply until these connections verify');
 
     const apply = await t.call('hv_apply', { project: 'ci-domain-soft-block-app', planId: plan.data.planId });
-    expect(apply.ok).toBe(true);
-    expect(apply.data.applied).toBe(false);
-    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'ci:github-actions:production:deploy-branch',
-      status: 'succeeded',
-    }));
-    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'domain:apreskeys.com',
-      status: 'failed',
-      error: expect.stringContaining('No Cloudflare connection available for apreskeys.com'),
-    }));
-    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-domain-soft-block-app', 'RAILWAY_API_TOKEN', 'railway-token');
-    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-domain-soft-block-app', 'IMAGE_REGISTRY_TOKEN', 'gh-package-token');
+    expect(apply.ok).toBe(false);
+    expect(apply.error.code).toBe('MISSING_CONNECTION');
+    expect(apply.error.details).toContainEqual(expect.objectContaining({ provider: 'cloudflare' }));
+    expect(apply.hint).toContain('Cloudflare Account API Token');
+    expect(apply.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
+    expect(setSecret).not.toHaveBeenCalled();
     await t.close();
   });
 

@@ -372,7 +372,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       let next: string[] | undefined;
 
       if (hardBlocked.length > 0) {
-        hint = connectionRecoveryHint(hardBlocked, { after: 'Then re-run hv_plan and hv_apply.' });
+        hint = connectionRecoveryHint(hardBlocked, { after: 'Do not run hv_apply until these connections verify; then re-run hv_plan and hv_apply.' });
       } else if (connectBeforeApply.length > 0) {
         hint = connectionRecoveryHint(connectBeforeApply, {
           includePackageRead: true,
@@ -388,7 +388,9 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         hint = `Apply with hv_apply planId="${result.planRunId}"${confirmIds.length ? ` and confirmActions=${JSON.stringify(confirmIds)} for confirm-gated billable or destructive actions` : ''}.`;
       }
 
-      if (hardBlocked.length === 0 && pending.length > 0) {
+      if (hardBlocked.length > 0) {
+        next = ['hv_connect', 'hv_plan'];
+      } else if (pending.length > 0) {
         next = connectBeforeApply.length > 0
           ? ['hv_connect', 'hv_plan']
           : softActionScopedBlocked.length > 0
