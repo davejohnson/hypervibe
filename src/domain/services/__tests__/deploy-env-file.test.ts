@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { defaultDeployEnvFilePath, loadDeployEnvFile, valueLooksLocal } from '../deploy-env-file.js';
@@ -65,7 +65,7 @@ describe('deploy-env-file', () => {
     expect(defaultDeployEnvFilePath(path.join(root, 'app'), 'bad/env')).toBe(basePath);
   });
 
-  it('reports when an environment-specific env file is missing and base .env is used', () => {
+  it('creates an environment-specific env file from base .env when it is missing', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-fallback-'));
     mkdirSync(path.join(root, '.git'));
     mkdirSync(path.join(root, 'app'));
@@ -75,9 +75,10 @@ describe('deploy-env-file', () => {
 
     expect(defaultDeployEnvFilePath(path.join(root, 'app'), 'staging')).toBe(basePath);
     expect(loadDeployEnvFile({ startDir: path.join(root, 'app'), envName: 'staging' })).toEqual({
-      path: basePath,
-      missingEnvSpecificPath: stagingPath,
-      usedBaseEnvFallback: true,
+      path: stagingPath,
+      baseEnvPath: basePath,
+      createdEnvSpecificPath: stagingPath,
+      syncedFromBaseKeys: ['SENDGRID_API_KEY'],
       vars: {
         SENDGRID_API_KEY: 'SG.base',
       },
@@ -86,6 +87,45 @@ describe('deploy-env-file', () => {
       excludedKeys: [],
       localValueKeys: [],
     });
+    expect(existsSync(stagingPath)).toBe(true);
+    expect(readFileSync(stagingPath, 'utf-8')).toBe('SENDGRID_API_KEY=SG.base\n');
+  });
+
+  it('copies newly added base .env keys into an existing environment-specific file', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-sync-'));
+    mkdirSync(path.join(root, '.git'));
+    mkdirSync(path.join(root, 'app'));
+    const basePath = path.join(root, '.env');
+    const stagingPath = path.join(root, '.env.staging');
+    writeFileSync(basePath, [
+      'SENDGRID_API_KEY=SG.base',
+      'SESSION_SECRET=session-base',
+      'STRIPE_SECRET_KEY=stripe-base',
+      '',
+    ].join('\n'));
+    writeFileSync(stagingPath, [
+      'SENDGRID_API_KEY=SG.staging',
+      'SESSION_SECRET=session-base',
+      '',
+    ].join('\n'));
+
+    expect(loadDeployEnvFile({ startDir: path.join(root, 'app'), envName: 'staging' })).toEqual({
+      path: stagingPath,
+      baseEnvPath: basePath,
+      syncedFromBaseKeys: ['STRIPE_SECRET_KEY'],
+      divergentFromBaseKeys: ['SENDGRID_API_KEY'],
+      vars: {
+        SENDGRID_API_KEY: 'SG.staging',
+        SESSION_SECRET: 'session-base',
+        STRIPE_SECRET_KEY: 'stripe-base',
+      },
+      ignoredKeys: [],
+      skippedKeys: [],
+      excludedKeys: [],
+      localValueKeys: [],
+    });
+    expect(readFileSync(stagingPath, 'utf-8')).toContain('STRIPE_SECRET_KEY=stripe-base');
+    expect(readFileSync(stagingPath, 'utf-8')).toContain('Copied from .env by Hypervibe');
   });
 
   it('recognizes common local-only values', () => {

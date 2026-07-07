@@ -6,6 +6,7 @@ const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4';
 const CLOUDFLARE_USER_TOKEN_URL = 'https://dash.cloudflare.com/profile/api-tokens';
 const CLOUDFLARE_ACCOUNT_TOKEN_URL = 'https://dash.cloudflare.com/?to=/:account/api-tokens';
 const CLOUDFLARE_DNS_PERMISSIONS = 'Zone > Zone > Read, Zone > Zone Settings > Read or Edit, and Zone > DNS > Edit/Write';
+const CLOUDFLARE_REGISTRAR_PERMISSIONS = 'Registrar write permissions on the target account';
 
 export interface CloudflareZone {
   id: string;
@@ -187,6 +188,8 @@ interface CloudflareResponse<T> {
 export const CloudflareCredentialsSchema = z.object({
   apiToken: z.string().min(1, 'API token is required'),
   accountId: z.string().min(1).optional(),
+  registrarApiToken: z.string().min(1).optional(),
+  apiTokenKind: z.enum(['user', 'account', 'unknown']).optional(),
 });
 
 export type CloudflareCredentials = z.infer<typeof CloudflareCredentialsSchema>;
@@ -226,23 +229,66 @@ function tokenSetupHelp(kind: 'user' | 'account' | 'unknown', domain?: string): 
   }
   return [
     `Cloudflare rejected this API token${scope}.`,
-    `For DNS/custom-domain/email automation, create an Account API Token under Manage Account > Account API Tokens: ${CLOUDFLARE_ACCOUNT_TOKEN_URL}`,
+    `For the simplest DNS/custom-domain/email automation setup, create a User API Token under My Profile > API Tokens: ${CLOUDFLARE_USER_TOKEN_URL}`,
     `Grant ${CLOUDFLARE_DNS_PERMISSIONS} for the target zone.`,
-    'Account API Tokens usually start with cfat_ and require accountId in the Hypervibe credentials.',
-    `If Hypervibe needs Cloudflare Registrar/domain purchase, use a User API Token at My Profile > API Tokens instead: ${CLOUDFLARE_USER_TOKEN_URL}`,
-    'User API Tokens usually start with cfut_. Do not use the legacy Global API Key.',
+    `For durable account-owned automation that should not be tied to a user, create an Account API Token under Manage Account > Account API Tokens: ${CLOUDFLARE_ACCOUNT_TOKEN_URL} and pass accountId.`,
+    'User API Tokens usually start with cfut_; Account API Tokens usually start with cfat_.',
+    'Cloudflare Registrar/domain purchase requires a User API Token; Account API Tokens are not supported for Registrar.',
+    'Do not use the legacy Global API Key.',
   ].join(' ');
 }
 
-function tokenKind(token: string): 'user' | 'account' | 'unknown' {
+export function cloudflareTokenKind(token: string): 'user' | 'account' | 'unknown' {
   const normalized = normalizeApiToken(token);
   if (normalized.startsWith('cfut_')) return 'user';
   if (normalized.startsWith('cfat_')) return 'account';
   return 'unknown';
 }
 
+function registrarTokenSetupHelp(domain?: string): string {
+  const scope = domain ? ` for ${domain}` : '';
+  return [
+    `Cloudflare Registrar/domain purchase${scope} requires a Cloudflare User API Token, not an Account API Token.`,
+    `Create the User API Token at My Profile > API Tokens: ${CLOUDFLARE_USER_TOKEN_URL}`,
+    `Grant ${CLOUDFLARE_REGISTRAR_PERMISSIONS}.`,
+    'For a single-token setup, store that User API Token as apiToken/CLOUDFLARE_API_TOKEN; it can handle DNS and Registrar when it has both permission sets.',
+    'For a durable account-token setup, keep the Account API Token as apiToken/CLOUDFLARE_API_TOKEN and store the User API Token as registrarApiToken/CLOUDFLARE_REGISTRAR_API_TOKEN.',
+    'New user tokens usually start with cfut_; new account tokens usually start with cfat_.',
+  ].join(' ');
+}
+
 function combineWarnings(...warnings: Array<string | undefined>): string | undefined {
   return warnings.filter(Boolean).join(' ');
+}
+
+function normalizeDnsName(value: string): string {
+  return value.trim().toLowerCase().replace(/\.+$/g, '');
+}
+
+function canonicalDnsName(value: string, zoneName?: string): string {
+  const normalized = normalizeDnsName(value);
+  const zone = zoneName ? normalizeDnsName(zoneName) : '';
+  if (!zone || normalized === zone) return normalized;
+  if (normalized === '@') return zone;
+  return normalized.endsWith(`.${zone}`) ? normalized : `${normalized}.${zone}`;
+}
+
+function normalizeDnsContent(type: string, value: string): string {
+  const normalizedType = type.trim().toUpperCase();
+  const trimmed = value.trim();
+  if (normalizedType === 'CNAME') {
+    return trimmed
+      .replace(/^https?:\/\//i, '')
+      .replace(/\/.*$/g, '')
+      .replace(/\.+$/g, '')
+      .toLowerCase();
+  }
+  return trimmed;
+}
+
+function isDuplicateDnsRecordError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /already exists|identical record/i.test(message);
 }
 
 export class CloudflareAdapter implements IDnsProvider {
@@ -256,14 +302,15 @@ export class CloudflareAdapter implements IDnsProvider {
   private async request<T>(
     method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
     endpoint: string,
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    token?: string
   ): Promise<CloudflareResponse<T>> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
 
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${normalizeApiToken(this.credentials.apiToken)}`,
+      Authorization: `Bearer ${normalizeApiToken(token ?? this.credentials.apiToken)}`,
       'Content-Type': 'application/json',
     };
 
@@ -287,11 +334,30 @@ export class CloudflareAdapter implements IDnsProvider {
     return data;
   }
 
+  private registrarToken(domain?: string): string {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const explicit = this.credentials.registrarApiToken?.trim();
+    const fallback = this.credentials.apiToken;
+    const token = explicit || fallback;
+    const kind = explicit ? cloudflareTokenKind(token) : (this.credentials.apiTokenKind ?? cloudflareTokenKind(token));
+    if (kind === 'account') {
+      const credentialName = explicit ? 'registrarApiToken' : 'apiToken';
+      throw new Error(`${registrarTokenSetupHelp(domain)} The configured ${credentialName} is an Account API Token, which Cloudflare does not support for Registrar.`);
+    }
+    return token;
+  }
+
+  private async verifyUserToken(token: string): Promise<void> {
+    await this.request<{ id: string }>('GET', '/user/tokens/verify', undefined, token);
+  }
+
   private async verifyToken(domain?: string): Promise<{ success: true; kind: 'user' | 'account' | 'unknown'; warning?: string } | { success: false; error: string }> {
     if (!this.credentials) {
       return { success: false, error: 'Not connected. Call connect() first.' };
     }
-    const kind = tokenKind(this.credentials.apiToken);
+    const kind = cloudflareTokenKind(this.credentials.apiToken);
 
     if (kind === 'account') {
       const accountId = this.credentials.accountId?.trim();
@@ -306,7 +372,9 @@ export class CloudflareAdapter implements IDnsProvider {
         return {
           success: true,
           kind,
-          warning: 'Cloudflare Account API Token verified. DNS automation can use account tokens, but Cloudflare Registrar domain registration is not supported by Account API Tokens; use a User API Token if Hypervibe needs to buy domains.',
+          warning: this.credentials.registrarApiToken
+            ? 'Cloudflare Account API Token verified for DNS/custom-domain/email automation.'
+            : 'Cloudflare Account API Token verified for DNS/custom-domain/email automation. Cloudflare Registrar domain registration is not supported by Account API Tokens; add registrarApiToken/CLOUDFLARE_REGISTRAR_API_TOKEN if Hypervibe needs to buy domains.',
         };
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
@@ -315,7 +383,7 @@ export class CloudflareAdapter implements IDnsProvider {
     }
 
     try {
-      await this.request<{ id: string }>('GET', '/user/tokens/verify');
+      await this.verifyUserToken(this.credentials.apiToken);
       return { success: true, kind };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -325,7 +393,9 @@ export class CloudflareAdapter implements IDnsProvider {
           return {
             success: true,
             kind: 'account',
-            warning: 'Cloudflare Account API Token verified. DNS automation can use account tokens, but Cloudflare Registrar domain registration is not supported by Account API Tokens; use a User API Token if Hypervibe needs to buy domains.',
+            warning: this.credentials.registrarApiToken
+              ? 'Cloudflare Account API Token verified for DNS/custom-domain/email automation.'
+              : 'Cloudflare Account API Token verified for DNS/custom-domain/email automation. Cloudflare Registrar domain registration is not supported by Account API Tokens; add registrarApiToken/CLOUDFLARE_REGISTRAR_API_TOKEN if Hypervibe needs to buy domains.',
           };
         } catch {
           // Keep the user-token verification error below; it is usually clearer.
@@ -342,17 +412,42 @@ export class CloudflareAdapter implements IDnsProvider {
     }
   }
 
-  async verify(domain?: string): Promise<{ success: boolean; error?: string; zones?: string[]; warning?: string }> {
+  private async verifyRegistrarToken(domain?: string): Promise<string | undefined> {
+    if (!this.credentials?.registrarApiToken) return undefined;
+    const token = this.credentials.registrarApiToken;
+    const kind = cloudflareTokenKind(token);
+    if (kind === 'account') {
+      return `${registrarTokenSetupHelp(domain)} The configured registrarApiToken is an Account API Token.`;
+    }
+    try {
+      await this.verifyUserToken(token);
+      return undefined;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return `${registrarTokenSetupHelp(domain)} Cloudflare response: ${msg}`;
+    }
+  }
+
+  async verify(domain?: string): Promise<{ success: boolean; error?: string; zones?: string[]; warning?: string; tokenKind?: 'user' | 'account' | 'unknown' }> {
     const verified = await this.verifyToken(domain);
     if (!verified.success) {
       return verified;
+    }
+    const registrarError = await this.verifyRegistrarToken(domain);
+    if (registrarError) {
+      return { success: false, error: registrarError };
     }
 
     if (domain) {
       try {
         const zone = await this.findZoneByName(domain);
         if (zone) {
-          return { success: true, zones: [zone.name], ...(verified.warning ? { warning: verified.warning } : {}) };
+          return {
+            success: true,
+            zones: [zone.name],
+            tokenKind: verified.kind,
+            ...(verified.warning ? { warning: verified.warning } : {}),
+          };
         }
 
         const zones = await this.listZones();
@@ -360,6 +455,7 @@ export class CloudflareAdapter implements IDnsProvider {
         return {
           success: true,
           zones: zoneNames,
+          tokenKind: verified.kind,
           warning: combineWarnings(
             verified.warning,
             `Token is valid, but Hypervibe could not find a Cloudflare zone for "${domain}". If the zone already exists, make sure the token includes ${CLOUDFLARE_DNS_PERMISSIONS} for that zone. If Hypervibe will register the domain first, this is expected until Cloudflare creates the zone.`
@@ -369,6 +465,7 @@ export class CloudflareAdapter implements IDnsProvider {
         const msg = error instanceof Error ? error.message : String(error);
         return {
           success: true,
+          tokenKind: verified.kind,
           warning: combineWarnings(
             verified.warning,
             `Token is valid, but Hypervibe could not confirm Cloudflare zone access for "${domain}" (${msg}). DNS automation needs zone visibility or an existing zone-scoped token with DNS permissions; domain registration may still be possible with account/registrar permissions.`
@@ -377,7 +474,7 @@ export class CloudflareAdapter implements IDnsProvider {
       }
     }
 
-    return { success: true, ...(verified.warning ? { warning: verified.warning } : {}) };
+    return { success: true, tokenKind: verified.kind, ...(verified.warning ? { warning: verified.warning } : {}) };
   }
 
   async listZones(): Promise<CloudflareZone[]> {
@@ -458,16 +555,20 @@ export class CloudflareAdapter implements IDnsProvider {
 
     const response = await this.request<{ domains: RegistrarDomainCandidate[] }>(
       'GET',
-      `/accounts/${params.accountId}/registrar/domain-search?${search.toString()}`
+      `/accounts/${params.accountId}/registrar/domain-search?${search.toString()}`,
+      undefined,
+      this.registrarToken(params.query)
     );
     return response.result.domains;
   }
 
   async checkRegistrarDomains(accountId: string, domains: string[]): Promise<RegistrarDomainCandidate[]> {
+    const registrarToken = this.registrarToken(domains[0]);
     const response = await this.request<{ domains: RegistrarDomainCandidate[] }>(
       'POST',
       `/accounts/${accountId}/registrar/domain-check`,
-      { domains }
+      { domains },
+      registrarToken
     );
     return response.result.domains;
   }
@@ -495,7 +596,8 @@ export class CloudflareAdapter implements IDnsProvider {
     const response = await this.request<RegistrarWorkflowStatus>(
       'POST',
       `/accounts/${accountId}/registrar/registrations`,
-      body
+      body,
+      this.registrarToken(input.domainName)
     );
     return response.result;
   }
@@ -503,7 +605,9 @@ export class CloudflareAdapter implements IDnsProvider {
   async getRegistrarRegistrationStatus(accountId: string, domainName: string): Promise<RegistrarWorkflowStatus> {
     const response = await this.request<RegistrarWorkflowStatus>(
       'GET',
-      `/accounts/${accountId}/registrar/registrations/${encodeURIComponent(domainName)}/registration-status`
+      `/accounts/${accountId}/registrar/registrations/${encodeURIComponent(domainName)}/registration-status`,
+      undefined,
+      this.registrarToken(domainName)
     );
     return response.result;
   }
@@ -715,6 +819,51 @@ export class CloudflareAdapter implements IDnsProvider {
     return response.result;
   }
 
+  private dnsRecordMatchesName(record: CloudflareDnsRecord, desiredName: string): boolean {
+    return canonicalDnsName(record.name, record.zone_name) === canonicalDnsName(desiredName, record.zone_name);
+  }
+
+  private dnsRecordNeedsUpdate(
+    record: CloudflareDnsRecord,
+    type: string,
+    content: string,
+    options?: { ttl?: number; proxied?: boolean; priority?: number }
+  ): boolean {
+    if (normalizeDnsContent(type, record.content) !== normalizeDnsContent(type, content)) {
+      return true;
+    }
+    if (options?.ttl !== undefined && record.ttl !== options.ttl) {
+      return true;
+    }
+    if (options?.proxied !== undefined && record.proxied !== options.proxied) {
+      return true;
+    }
+    if (options?.priority !== undefined && record.priority !== options.priority) {
+      return true;
+    }
+    return false;
+  }
+
+  private async finishDnsRecordUpsert(
+    zoneId: string,
+    existing: CloudflareDnsRecord,
+    type: string,
+    content: string,
+    options?: { ttl?: number; proxied?: boolean; priority?: number }
+  ): Promise<{ record: CloudflareDnsRecord; action: 'updated' }> {
+    if (!this.dnsRecordNeedsUpdate(existing, type, content, options)) {
+      return { record: existing, action: 'updated' };
+    }
+
+    const updated = await this.updateDnsRecord(zoneId, existing.id, {
+      content,
+      ttl: options?.ttl,
+      proxied: options?.proxied,
+      priority: options?.priority,
+    });
+    return { record: updated, action: 'updated' };
+  }
+
   async upsertDnsRecord(
     zoneId: string,
     name: string,
@@ -724,17 +873,13 @@ export class CloudflareAdapter implements IDnsProvider {
   ): Promise<{ record: CloudflareDnsRecord; action: 'created' | 'updated' }> {
     // Find existing record by name and type
     const records = await this.listDnsRecords(zoneId, type);
-    const existing = records.find((r) => r.name === name || r.name === `${name}.${r.zone_name}`);
+    const existing = records.find((record) => this.dnsRecordMatchesName(record, name));
 
     if (existing) {
-      const updated = await this.updateDnsRecord(zoneId, existing.id, {
-        content,
-        ttl: options?.ttl,
-        proxied: options?.proxied,
-        priority: options?.priority,
-      });
-      return { record: updated, action: 'updated' };
-    } else {
+      return this.finishDnsRecordUpsert(zoneId, existing, type, content, options);
+    }
+
+    try {
       const created = await this.createDnsRecord(zoneId, {
         type,
         name,
@@ -744,6 +889,17 @@ export class CloudflareAdapter implements IDnsProvider {
         priority: options?.priority,
       });
       return { record: created, action: 'created' };
+    } catch (error) {
+      if (!isDuplicateDnsRecordError(error)) {
+        throw error;
+      }
+
+      const refreshed = await this.listDnsRecords(zoneId, type);
+      const recovered = refreshed.find((record) => this.dnsRecordMatchesName(record, name));
+      if (!recovered) {
+        throw error;
+      }
+      return this.finishDnsRecordUpsert(zoneId, recovered, type, content, options);
     }
   }
 
@@ -883,7 +1039,10 @@ providerRegistry.register({
     displayName: 'Cloudflare',
     category: 'dns',
     credentialsSchema: CloudflareCredentialsSchema,
-    setupHelpUrl: CLOUDFLARE_ACCOUNT_TOKEN_URL,
+    setupHelpUrl: CLOUDFLARE_USER_TOKEN_URL,
+    credentials: {
+      defaultScalarKey: 'apiToken',
+    },
   },
   factory: (credentials) => {
     const adapter = new CloudflareAdapter();
