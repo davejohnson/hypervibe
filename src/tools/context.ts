@@ -199,7 +199,7 @@ export function createToolContext(): ToolContext {
       const all = repos.projects.findAll();
       if (all.length === 0) {
         throw new HvError('NOT_FOUND', 'No projects found.', {
-          hint: 'Create one with hv_spec_set, or import existing infrastructure with hv_import.',
+          hint: 'Create one with hv_spec_set, or inspect existing provider infrastructure with hv_inspect and adopt it with hv_import.',
         });
       }
       throw new HvError('AMBIGUOUS_PROJECT', 'Could not resolve a project from this directory.', {

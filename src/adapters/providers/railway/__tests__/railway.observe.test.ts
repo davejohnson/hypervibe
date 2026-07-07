@@ -3,11 +3,11 @@ import { RailwayAdapter, type RailwayCustomDomain } from '../railway.adapter.js'
 import { hashEnvValue } from '../../../../domain/ports/observe.port.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 
-function makeEnvironment(platformBindings: Record<string, unknown>): Environment {
+function makeEnvironment(platformBindings: Record<string, unknown>, name = 'production'): Environment {
   return {
     id: 'env-local',
     projectId: 'proj-local',
-    name: 'production',
+    name,
     platformBindings,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -53,7 +53,19 @@ const projectDetailsResponse = {
             id: 'svc-pg',
             name: 'postgres-db',
             repoTriggers: { edges: [] },
-            serviceInstances: { edges: [] },
+            serviceInstances: {
+              edges: [
+                {
+                  node: {
+                    environmentId: 'env-prod',
+                    domains: {
+                      serviceDomains: [],
+                      customDomains: [],
+                    },
+                  },
+                },
+              ],
+            },
           },
         },
       ],
@@ -402,6 +414,92 @@ describe('RailwayAdapter observe', () => {
     expect(result.projectExists).toBe(false);
     expect(result.projectId).toBe('rail-project-gone');
     expect(result.services).toEqual([]);
+  });
+
+  it('does not observe production services when the target Railway environment is missing', async () => {
+    const request = vi.fn().mockResolvedValueOnce(projectDetailsResponse);
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-deleted' }, 'preview')
+    );
+
+    expect(result.projectExists).toBe(true);
+    expect(result.environmentId).toBeUndefined();
+    expect(result.services).toEqual([]);
+    expect(result.databases).toEqual([]);
+    expect(result.warnings).toContain('Could not resolve Railway environment for "preview"');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores services that do not have an instance in the requested environment', async () => {
+    const stagingProject = structuredClone(projectDetailsResponse);
+    const request = vi.fn().mockResolvedValueOnce(stagingProject);
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-staging' })
+    );
+
+    expect(result.projectExists).toBe(true);
+    expect(result.environmentId).toBe('env-staging');
+    expect(result.services).toEqual([]);
+    expect(result.databases.find((db) => db.engine === 'postgres')).toBeUndefined();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps Hypervibe-created environment-suffixed Railway service names back to desired names', async () => {
+    const stagingProject = structuredClone(projectDetailsResponse);
+    stagingProject.project.services.edges.push({
+      node: {
+        id: 'svc-web-staging',
+        name: 'web-staging',
+        repoTriggers: { edges: [] },
+        serviceInstances: {
+          edges: [
+            {
+              node: {
+                environmentId: 'env-staging',
+                domains: {
+                  serviceDomains: [{ domain: 'web-staging.up.railway.app' }],
+                  customDomains: [],
+                },
+                startCommand: 'npm start',
+                healthcheckPath: '/api/health',
+              },
+            },
+          ],
+        },
+      },
+    });
+    const request = vi.fn()
+      .mockResolvedValueOnce(stagingProject)
+      .mockResolvedValueOnce({
+        serviceInstance: {
+          startCommand: 'npm start',
+          healthcheckPath: '/api/health',
+          latestDeployment: { status: 'SUCCESS' },
+        },
+      })
+      .mockResolvedValueOnce({ variables: {} });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-staging' }, 'staging')
+    );
+
+    expect(result.services).toHaveLength(1);
+    expect(result.services[0]).toMatchObject({
+      name: 'web',
+      externalId: 'svc-web-staging',
+      url: 'https://web-staging.up.railway.app',
+    });
   });
 
   it('sets partial true with warnings when a sub-query fails', async () => {

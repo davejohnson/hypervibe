@@ -32,7 +32,7 @@ const { tools } = await client.listTools();
 tools.sort((a, b) => a.name.localeCompare(b.name));
 
 const groups = new Map([
-  ['Core (spec → plan → apply)', /^hv_(spec_|plan$|apply$|status$|import$|destroy$)/],
+  ['Core (spec → plan → apply)', /^hv_(spec_|plan$|apply$|status$|inspect$|import$|destroy$)/],
   ['Connections', /^hv_connect/],
   ['Deploy & observability', /^hv_(deploy|rollback|logs|errors|health)$/],
   ['Database', /^hv_db_/],

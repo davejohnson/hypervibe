@@ -126,7 +126,7 @@ describe('hv_destroy', () => {
   });
 });
 
-describe('hv_import', () => {
+describe('hv_inspect / hv_import', () => {
   const details: RailwayProjectDetails = {
     id: 'rp-1',
     name: 'demo-app',
@@ -170,24 +170,35 @@ describe('hv_import', () => {
     vi.spyOn(RailwayAdapter.prototype, 'listProjects').mockResolvedValue([{ id: 'rp-1', name: 'demo-app' }]);
     vi.spyOn(RailwayAdapter.prototype, 'getProjectDetails').mockResolvedValue(details);
     vi.spyOn(RailwayAdapter.prototype, 'findProjectByName').mockResolvedValue({ id: 'rp-1', name: 'demo-app' });
+    vi.spyOn(RailwayAdapter.prototype, 'findProjectsByName').mockResolvedValue([{ id: 'rp-1', name: 'demo-app' }]);
     vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue({ DATABASE_URL: 'postgres://x' });
   }
 
-  it('returns MISSING_CONNECTION when no Railway connection exists', async () => {
+  it('hv_inspect returns MISSING_CONNECTION when no Railway connection exists', async () => {
     const t = await makeClient();
-    const result = await t.call('hv_import', {});
+    const result = await t.call('hv_inspect', {});
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('MISSING_CONNECTION');
     expect(result.next).toContain('hv_connect');
     await t.close();
   });
 
-  it('lists importable Railway projects when no name is given', async () => {
+  it('hv_import without an adoption target points agents to hv_inspect without opening a provider connection', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_import', {});
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.hint).toContain('hv_inspect');
+    expect(result.next).toContain('hv_inspect');
+    await t.close();
+  });
+
+  it('hv_inspect lists importable Railway projects when no name is given', async () => {
     createRailwayConnection();
     mockAdapter();
     const t = await makeClient();
 
-    const result = await t.call('hv_import', {});
+    const result = await t.call('hv_inspect', {});
     expect(result.ok).toBe(true);
     expect(result.data.projects).toEqual([
       { name: 'demo-app', railwayId: 'rp-1', environmentCount: 1, serviceCount: 1 },
@@ -195,23 +206,39 @@ describe('hv_import', () => {
     await t.close();
   });
 
-  it('returns raw inspection data with auto-detected mappings when no mappings are given', async () => {
+  it('hv_inspect returns raw inspection data with auto-detected mappings without writing local state', async () => {
     createRailwayConnection();
     mockAdapter();
     const t = await makeClient();
 
-    const result = await t.call('hv_import', { name: 'demo-app' });
+    const result = await t.call('hv_inspect', { name: 'demo-app' });
     expect(result.ok).toBe(true);
+    expect(result.data.inspected).toBe(true);
     expect(result.data.imported).toBe(false);
     expect(result.data.autoDetected).toEqual({ production: 'production' });
     expect(result.data.needsMapping).toEqual([]);
     expect(result.data.envVarNames).toEqual(['DATABASE_URL']);
     expect(result.data.components).toEqual([{ type: 'postgres', railwayId: 'plug-1' }]);
     expect(result.next).toContain('hv_import');
+    expect(new ProjectRepository().findByName('demo-app')).toBeNull();
     await t.close();
   });
 
-  it('performs the import when mappings are provided', async () => {
+  it('hv_import without mappings fails and points to hv_inspect', async () => {
+    createRailwayConnection();
+    mockAdapter();
+    const t = await makeClient();
+
+    const result = await t.call('hv_import', { name: 'demo-app' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('environmentMappings');
+    expect(result.hint).toContain('hv_inspect');
+    expect(new ProjectRepository().findByName('demo-app')).toBeNull();
+    await t.close();
+  });
+
+  it('hv_import requires confirmation before writing adoption bindings', async () => {
     createRailwayConnection();
     mockAdapter();
     const t = await makeClient();
@@ -219,6 +246,23 @@ describe('hv_import', () => {
     const result = await t.call('hv_import', {
       name: 'demo-app',
       environmentMappings: { production: 'production' },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('CONFIRM_REQUIRED');
+    expect(result.error.details.project).toEqual({ name: 'demo-app', railwayId: 'rp-1' });
+    expect(new ProjectRepository().findByName('demo-app')).toBeNull();
+    await t.close();
+  });
+
+  it('hv_import performs the import when mappings are provided and confirmed', async () => {
+    createRailwayConnection();
+    mockAdapter();
+    const t = await makeClient();
+
+    const result = await t.call('hv_import', {
+      name: 'demo-app',
+      environmentMappings: { production: 'production' },
+      confirm: true,
     });
     expect(result.ok).toBe(true);
     expect(result.data.imported).toBe(true);
@@ -243,10 +287,70 @@ describe('hv_import', () => {
     new ProjectRepository().create({ name: 'demo-app' });
     const t = await makeClient();
 
-    const result = await t.call('hv_import', { name: 'demo-app' });
+    const result = await t.call('hv_import', {
+      name: 'demo-app',
+      environmentMappings: { production: 'production' },
+      confirm: true,
+    });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('VALIDATION');
     expect(result.error.message).toContain('already exists');
+    await t.close();
+  });
+
+  it('hv_inspect does not guess when multiple Railway projects share an import name', async () => {
+    createRailwayConnection();
+    mockAdapter();
+    vi.spyOn(RailwayAdapter.prototype, 'findProjectsByName').mockResolvedValue([
+      { id: 'rp-1', name: 'demo-app' },
+      { id: 'rp-2', name: 'demo-app' },
+    ]);
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', { name: 'demo-app' });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('Multiple Railway projects named "demo-app"');
+    expect(result.error.details.projects).toEqual([
+      { name: 'demo-app', railwayId: 'rp-1' },
+      { name: 'demo-app', railwayId: 'rp-2' },
+    ]);
+    expect(result.hint).toContain('railwayProjectId');
+    await t.close();
+  });
+
+  it('force re-adopts a selected Railway project into an existing Hypervibe project', async () => {
+    createRailwayConnection();
+    mockAdapter();
+    const existing = new ProjectRepository().create({ name: 'demo-app', defaultPlatform: 'cloudrun' });
+    new EnvironmentRepository().create({
+      projectId: existing.id,
+      name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'old-rp' },
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_import', {
+      railwayProjectId: 'rp-1',
+      force: true,
+      environmentMappings: { production: 'production' },
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.imported).toBe(true);
+    expect(result.data.project.id).toBe(existing.id);
+    const project = new ProjectRepository().findById(existing.id);
+    expect(project?.defaultPlatform).toBe('railway');
+    const env = new EnvironmentRepository().findByProjectAndName(existing.id, 'production');
+    expect(env?.platformBindings).toMatchObject({
+      provider: 'railway',
+      projectId: 'rp-1',
+      environmentId: 'env-prod',
+      services: { web: { serviceId: 'svc-web' } },
+    });
+    expect(new ServiceRepository().findByProjectAndName(existing.id, 'web')).not.toBeNull();
     await t.close();
   });
 });

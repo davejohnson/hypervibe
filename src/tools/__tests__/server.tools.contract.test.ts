@@ -23,7 +23,7 @@ afterEach(() => {
 /** The pinned tool surface. Changing it is a deliberate, reviewed act. */
 const EXPECTED_TOOLS = [
   // Core spec/plan/apply loop
-  'hv_spec_set', 'hv_spec_get', 'hv_plan', 'hv_apply', 'hv_status', 'hv_import', 'hv_destroy',
+  'hv_spec_set', 'hv_spec_get', 'hv_plan', 'hv_apply', 'hv_status', 'hv_inspect', 'hv_import', 'hv_destroy',
   // Connections
   'hv_connect', 'hv_connections_list',
   // Deploy + observability
@@ -55,12 +55,12 @@ async function makeClient() {
 }
 
 describe('server tool surface', () => {
-  it('registers exactly the 41 pinned hv_* tools', async () => {
+  it('registers exactly the 42 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
-    expect(names).toHaveLength(41);
+    expect(names).toHaveLength(42);
     await client.close();
     await server.close();
   });

@@ -124,6 +124,22 @@ export class SupabaseAdapter implements IDatabaseAdapter {
       const projectName = options?.databaseName || `${environment.name}-db`;
       const dbPassword = this.generatePassword();
 
+      let existingByName: SupabaseProject[];
+      try {
+        existingByName = await this.findProjectsByName(orgId, projectName);
+      } catch (error) {
+        throw new Error([
+          `Could not check whether Supabase project "${projectName}" already exists, so Hypervibe refused to create a new project that might be a duplicate.`,
+          this.formatError(error),
+        ].join(' '));
+      }
+      if (existingByName.length > 0) {
+        throw new Error([
+          `Supabase project "${projectName}" already exists in organization ${orgId}: ${existingByName.map((p) => `${p.name} (${p.id})`).join(', ')}.`,
+          'Hypervibe will not create another Supabase project with the same name. Bind/import the intended database or delete the duplicate, then run hv_plan again.',
+        ].join(' '));
+      }
+
       // Create Supabase project
       const project = await this.request<SupabaseProject>('POST', '/projects', {
         organization_id: orgId,
@@ -310,6 +326,19 @@ export class SupabaseAdapter implements IDatabaseAdapter {
 
   // Helper methods
 
+  private async listProjects(): Promise<SupabaseProject[]> {
+    return this.request<SupabaseProject[]>('GET', '/projects');
+  }
+
+  private async findProjectsByName(organizationId: string, name: string): Promise<SupabaseProject[]> {
+    const normalized = name.toLowerCase();
+    const projects = await this.listProjects();
+    return projects.filter((project) =>
+      project.organization_id === organizationId
+      && project.name.toLowerCase() === normalized
+    );
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     if (!this.credentials) {
       throw new Error('Not connected');
@@ -413,6 +442,9 @@ providerRegistry.register({
     category: 'database',
     credentialsSchema: SupabaseCredentialsSchema,
     setupHelpUrl: 'https://supabase.com/dashboard/account/tokens',
+    credentials: {
+      defaultScalarKey: 'accessToken',
+    },
   },
   factory: (credentials) => {
     const adapter = new SupabaseAdapter();

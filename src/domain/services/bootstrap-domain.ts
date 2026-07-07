@@ -12,6 +12,7 @@ import {
   type DomainAttachCapableAdapter,
 } from './domain-attach-policy.js';
 import { normalizeProviderDnsRecord, type NormalizedDnsRecord } from './domain-dns-records.js';
+import { cloudflareScopeHintsForDomain, dnsZoneScopeForDomain, normalizeDomainName } from './domain-scope.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import { parseHostingBindings, type IHostingAdapter } from '../ports/hosting.port.js';
@@ -38,6 +39,9 @@ export async function attachBootstrapDomain(args: {
 }): Promise<void> {
   const { domain, environment, hostingAdapter, serviceWorkloads, scopeHints, targetPlatform, deployUrls, summary } = args;
   const secretStore = getSecretStore();
+  const normalizedDomain = normalizeDomainName(domain);
+  const zoneScope = dnsZoneScopeForDomain(normalizedDomain);
+  const cloudflareScopeHints = cloudflareScopeHintsForDomain(normalizedDomain, scopeHints);
 
   let providerDomainConfigured = false;
   let providerDomainAttachFailed = false;
@@ -78,19 +82,19 @@ export async function attachBootstrapDomain(args: {
         const dnsRecords = Array.isArray(receipt.data?.dnsRecords)
           ? receipt.data.dnsRecords as Array<Record<string, unknown>>
           : [];
-        const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [domain, ...scopeHints]);
+        const cfConnection = connectionRepo.findBestVerifiedMatchFromHints('cloudflare', cloudflareScopeHints);
 
         if (!cfConnection) {
           summary.domainDnsConfigured = false;
-          summary.domainDnsError = `No Cloudflare connection available for ${domain}. ${formatConnectionGuidance('cloudflare', { scope: domain })}`;
+          summary.domainDnsError = `No verified Cloudflare connection available for DNS zone ${zoneScope} (needed by ${normalizedDomain}). ${formatConnectionGuidance('cloudflare', { scope: zoneScope })}`;
         } else {
           const cfCreds = secretStore.decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted);
           const cfAdapter = new CloudflareAdapter();
           cfAdapter.connect(cfCreds);
-          const zone = await cfAdapter.findZoneByName(domain);
+          const zone = (await cfAdapter.findZoneByName(normalizedDomain)) ?? (await cfAdapter.findZoneByName(zoneScope));
           if (!zone) {
             summary.domainDnsConfigured = false;
-            summary.domainDnsError = `Cloudflare zone not found for ${domain}`;
+            summary.domainDnsError = `Cloudflare zone not found for ${zoneScope} (needed by ${normalizedDomain})`;
           } else if (dnsRecords.length === 0) {
             summary.domainDnsConfigured = false;
             summary.domainDnsError = `Railway did not return required DNS records for ${domain}`;
@@ -132,23 +136,23 @@ export async function attachBootstrapDomain(args: {
   if (!providerDomainConfigured && !providerDomainAttachFailed && deployUrls[0]) {
     try {
       const targetHost = new URL(deployUrls[0]).hostname;
-      const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [domain, ...scopeHints]);
+      const cfConnection = connectionRepo.findBestVerifiedMatchFromHints('cloudflare', cloudflareScopeHints);
       if (cfConnection) {
         const cfCreds = secretStore.decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted);
         const cfAdapter = new CloudflareAdapter();
         cfAdapter.connect(cfCreds);
-        const zone = await cfAdapter.findZoneByName(domain);
+        const zone = (await cfAdapter.findZoneByName(normalizedDomain)) ?? (await cfAdapter.findZoneByName(zoneScope));
         if (zone) {
-          const result = await cfAdapter.upsertDnsRecord(zone.id, domain, 'CNAME', targetHost, { proxied: true });
+          const result = await cfAdapter.upsertDnsRecord(zone.id, normalizedDomain, 'CNAME', targetHost, { proxied: true });
           summary.domainDnsConfigured = true;
-          summary.domainDns = { name: domain, type: 'CNAME', target: targetHost, action: result.action };
+          summary.domainDns = { name: normalizedDomain, type: 'CNAME', target: targetHost, action: result.action };
         } else {
           summary.domainDnsConfigured = false;
-          summary.domainDnsError = `Cloudflare zone not found for ${domain}`;
+          summary.domainDnsError = `Cloudflare zone not found for ${zoneScope} (needed by ${normalizedDomain})`;
         }
       } else {
         summary.domainDnsConfigured = false;
-        summary.domainDnsError = `No Cloudflare connection available for ${domain}. ${formatConnectionGuidance('cloudflare', { scope: domain })}`;
+        summary.domainDnsError = `No verified Cloudflare connection available for DNS zone ${zoneScope} (needed by ${normalizedDomain}). ${formatConnectionGuidance('cloudflare', { scope: zoneScope })}`;
       }
     } catch {
       summary.domainDnsConfigured = false;

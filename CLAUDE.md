@@ -107,6 +107,8 @@ This keeps tools simple and leverages Claude's intelligence.
 
 ## Architecture
 
+Read `ARCHITECTURE.md` before changing lifecycle, provider, plan/apply, deploy, database migration, DNS/domain, CI, connection, or secret-handling code. That file is the source of truth for Hypervibe's infrastructure model.
+
 - **Tools** (`src/tools/`): the pinned `hv_*` MCP tool surface (registered in `src/server.ts` via `ToolContext`); all responses use the `toolSuccess`/`toolError` envelope from `src/tools/respond.ts`
 - **Spec** (`src/domain/spec/`): the desired-state document (`ProjectSpec`, revisioned in the `project_specs` table via `SpecStore`)
 - **Plan** (`src/domain/plan/`): the reconciliation engine — observe live state, pure `diffEnvironment`, `ConvergeExecutor` with the planId handshake
@@ -115,6 +117,8 @@ This keeps tools simple and leverages Claude's intelligence.
 - **Repositories** (`src/adapters/db/repositories/`): SQLite data access (JSON columns validated via `parseJsonColumn`)
 
 Legacy `*.tools.ts` files that still exist but are not registered in `server.ts` are internal helper libraries pending extraction — do not register them or add new tools there.
+
+Provider-specific lifecycle behavior belongs behind the provider boundary. Do not add provider-name branches or direct adapter imports in generic plan/apply/services/tools code to express hosting behavior. Add provider-owned code under `src/adapters/providers/<provider>/...` and expose it through adapter capabilities or `providerRegistry` metadata. Opinionated product surfaces such as SendGrid email or Stripe payments can stay provider-specific when they are not part of generic infrastructure reconciliation.
 
 ## The spec → plan → apply loop
 

@@ -54,6 +54,7 @@ export function createServer(): McpServer {
         'Always use hv_* tools for infrastructure operations. Do NOT shell out to provider CLIs (railway, gcloud, vercel, doppler, op, bws, gh, etc.) or call provider APIs directly: Hypervibe holds the verified credentials, records run/audit history, and keeps its local state in sync — a CLI bypasses all of that and causes state drift.',
         'Core workflow: hv_spec_set (desired state) → hv_plan (diff against live infrastructure, returns planId) → hv_apply planId=... → hv_status / hv_logs / hv_health to verify.',
         'Custom domain and DNS changes must be modeled as desired infrastructure and reconciled through hv_plan/hv_apply. Do not bypass a blocked apply with one-off DNS/provider mutations.',
+        'When any hv_* output reports a missing required connection, use hv_connect if a safe credentialsRef is already available; otherwise stop and ask the user to add/export the token or provide a credentialsRef. Do not run hv_plan, hv_apply, hv_deploy, or one-off tools as a workaround for missing credentials.',
         'If a capability seems missing, check the other hv_* tools (most have action/target parameters) before reaching for anything outside Hypervibe.',
       ].join('\n'),
     }
@@ -61,7 +62,7 @@ export function createServer(): McpServer {
 
   const ctx = createToolContext();
 
-  // The consolidated intent-level tool surface (41 hv_* tools).
+  // The consolidated intent-level tool surface.
   registerCoreTools(server, ctx);
   registerLifecycleTools(server, ctx);
   registerConnectionsTools(server, ctx);

@@ -179,6 +179,9 @@ secretManagerRegistry.register({
     displayName: '1Password',
     credentialsSchema: OnePasswordCredentialsSchema,
     setupHelpUrl: 'https://www.1password.dev/service-accounts/',
+    credentials: {
+      defaultScalarKey: 'serviceAccountToken',
+    },
   },
   factory: () => new OnePasswordAdapter(),
   defaultCapabilities: {

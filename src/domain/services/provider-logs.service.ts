@@ -1,13 +1,12 @@
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
-import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import { StripeAdapter } from '../../adapters/providers/stripe/stripe.adapter.js';
-import type { RailwayCredentials } from '../../adapters/providers/railway/railway.adapter.js';
 import type { StripeCredentials, StripeMode } from '../../adapters/providers/stripe/stripe.adapter.js';
 import { adapterFactory } from './adapter.factory.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import type { Project } from '../entities/project.entity.js';
 import { NotSupportedError } from '../errors/not-supported.error.js';
+import { providerRegistry } from '../registry/provider.registry.js';
 
 const connectionRepo = new ConnectionRepository();
 
@@ -40,23 +39,28 @@ export function isErrorLike(log: UnifiedLog): boolean {
   );
 }
 
-const LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS = ['railway', 'cloudrun'] as const;
-const LOGS_BUILD_SUPPORTED_PROVIDERS = ['railway'] as const;
-
 export function supportsLogsDeploymentsProvider(provider: string): boolean {
-  return (LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS as readonly string[]).includes(provider.toLowerCase());
+  return Boolean(providerRegistry.getMetadata(provider.toLowerCase())?.orchestration?.logs?.deployments);
 }
 
 export function supportsLogsBuildProvider(provider: string): boolean {
-  return (LOGS_BUILD_SUPPORTED_PROVIDERS as readonly string[]).includes(provider.toLowerCase());
+  return Boolean(providerRegistry.getMetadata(provider.toLowerCase())?.orchestration?.logs?.build);
 }
 
 export function logsDeploymentsUnsupportedMessage(provider: string): string {
-  return `logs_deployments currently supports ${LOGS_DEPLOYMENTS_SUPPORTED_PROVIDERS.join(', ')} only (provider: ${provider}).`;
+  const supported = providerRegistry.all()
+    .filter((entry) => entry.metadata.orchestration?.logs?.deployments)
+    .map((entry) => entry.metadata.name)
+    .sort();
+  return `logs_deployments currently supports ${supported.join(', ') || '(none)'} only (provider: ${provider}).`;
 }
 
 export function logsBuildUnsupportedMessage(provider: string): string {
-  return `logs_build currently supports ${LOGS_BUILD_SUPPORTED_PROVIDERS.join(', ')} only (provider: ${provider}).`;
+  const supported = providerRegistry.all()
+    .filter((entry) => entry.metadata.orchestration?.logs?.build)
+    .map((entry) => entry.metadata.name)
+    .sort();
+  return `logs_build currently supports ${supported.join(', ') || '(none)'} only (provider: ${provider}).`;
 }
 
 export async function fetchProviderLogs(
@@ -73,20 +77,36 @@ export async function fetchProviderLogs(
     services?: Record<string, { serviceId: string }>;
   };
 
-  if (provider === 'railway') {
+  const result = await adapterFactory.getProviderAdapter(provider, project);
+  if (!result.success || !result.adapter) {
+    throw new Error(result.error || `Failed to create ${provider} adapter`);
+  }
+  const adapter = result.adapter as unknown as {
+    getDeployments?: (
+      projectId: string,
+      environmentId: string,
+      serviceId: string | undefined,
+      limit: number
+    ) => Promise<Array<{ id: string; status: string; createdAt?: string; staticUrl?: string }>>;
+    getDeploymentLogs?: (
+      deploymentId: string,
+      limit: number
+    ) => Promise<Array<{ timestamp: string; severity?: string; message: string }>>;
+    getLogs?: (
+      environment: { platformBindings: unknown; name: string },
+      serviceName: string,
+      options?: { limit?: number; errorsOnly?: boolean }
+    ) => Promise<Array<{ timestamp: Date; severity: string; message: string; raw: string }>>;
+    getDeployStatus?: (
+      environment: { platformBindings: unknown; name: string },
+      deploymentId: string
+    ) => Promise<{ status: string; url?: string }>;
+  };
+
+  if (typeof adapter.getDeployments === 'function' && typeof adapter.getDeploymentLogs === 'function') {
     if (!bindings.projectId || !bindings.environmentId || !bindings.services?.[serviceName]) {
-      throw new Error('Environment/service not fully bound to Railway');
+      throw new Error(`Environment/service not fully bound to ${provider}`);
     }
-    const connection = connectionRepo.findByProvider('railway');
-    if (!connection) {
-      throw new Error(`No Railway connection found. ${formatConnectionGuidance('railway')}`);
-    }
-
-    const secretStore = getSecretStore();
-    const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-    const adapter = new RailwayAdapter();
-    await adapter.connect(credentials);
-
     const deployments = await adapter.getDeployments(
       bindings.projectId,
       bindings.environmentId,
@@ -110,25 +130,7 @@ export async function fetchProviderLogs(
     };
   }
 
-  if (provider === 'cloudrun') {
-    const result = await adapterFactory.getProviderAdapter('cloudrun', project);
-    if (!result.success || !result.adapter) {
-      throw new Error(result.error || 'Failed to create Cloud Run adapter');
-    }
-    const adapter = result.adapter as unknown as {
-      getLogs: (
-        environment: { platformBindings: unknown; name: string },
-        serviceName: string,
-        options?: { limit?: number; errorsOnly?: boolean }
-      ) => Promise<Array<{ timestamp: Date; severity: string; message: string; raw: string }>>;
-      getDeployStatus?: (
-        environment: { platformBindings: unknown; name: string },
-        deploymentId: string
-      ) => Promise<{ status: string; url?: string }>;
-    };
-    if (typeof adapter.getLogs !== 'function') {
-      throw new NotSupportedError('cloudrun', 'log reads', 'Update Hypervibe so the Cloud Run adapter includes getLogs.');
-    }
+  if (typeof adapter.getLogs === 'function') {
     const deploymentId = bindings.services?.[serviceName]?.serviceId;
     const logs = await adapter.getLogs(environment, serviceName, { limit: lines, errorsOnly: options.errorsOnly });
     const status = deploymentId && typeof adapter.getDeployStatus === 'function'
@@ -177,56 +179,47 @@ export async function fetchProviderDeployments(
     services?: Record<string, { serviceId: string }>;
   };
 
-  if (provider === 'railway') {
+  const result = await adapterFactory.getProviderAdapter(provider, project);
+  if (!result.success || !result.adapter) {
+    throw new Error(result.error || `Failed to create ${provider} adapter`);
+  }
+  const adapter = result.adapter as unknown as {
+    listDeployments?: (
+      environment: { platformBindings: unknown; name: string },
+      serviceName?: string,
+      limit?: number
+    ) => Promise<ProviderDeployment[]>;
+    getDeployments?: (
+      projectId: string,
+      environmentId: string,
+      serviceId: string | undefined,
+      limit: number
+    ) => Promise<Array<{ id: string; status: string; createdAt?: string; staticUrl?: string }>>;
+  };
+
+  if (typeof adapter.listDeployments === 'function') {
+    return adapter.listDeployments(environment, serviceName, limit);
+  }
+
+  if (typeof adapter.getDeployments === 'function') {
     if (!bindings.projectId || !bindings.environmentId) {
-      throw new Error('Environment not deployed to Railway');
+      throw new Error(`Environment not deployed to ${provider}`);
     }
-    const connection = connectionRepo.findByProvider('railway');
-    if (!connection) {
-      throw new Error(`No Railway connection found. ${formatConnectionGuidance('railway')}`);
-    }
-
-    const secretStore = getSecretStore();
-    const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-    const adapter = new RailwayAdapter();
-    await adapter.connect(credentials);
-
-    let serviceId: string | undefined;
-    if (serviceName && bindings.services?.[serviceName]) {
-      serviceId = bindings.services[serviceName].serviceId;
-    }
-
+    const serviceId = serviceName && bindings.services?.[serviceName]
+      ? bindings.services[serviceName].serviceId
+      : undefined;
     const deployments = await adapter.getDeployments(
       bindings.projectId,
       bindings.environmentId,
       serviceId,
       limit
     );
-    return deployments.map((d) => ({
-      id: d.id,
-      status: d.status,
-      createdAt: d.createdAt,
-      url: d.staticUrl,
+    return deployments.map((deployment) => ({
+      id: deployment.id,
+      status: deployment.status,
+      createdAt: deployment.createdAt,
+      url: deployment.staticUrl,
     }));
-  }
-
-  if (provider === 'cloudrun') {
-    const result = await adapterFactory.getProviderAdapter('cloudrun', project);
-    if (!result.success || !result.adapter) {
-      throw new Error(result.error || 'Failed to create Cloud Run adapter');
-    }
-    const adapter = result.adapter as unknown as {
-      listDeployments: (
-        environment: { platformBindings: unknown; name: string },
-        serviceName?: string,
-        limit?: number
-      ) => Promise<ProviderDeployment[]>;
-    };
-    if (typeof adapter.listDeployments !== 'function') {
-      throw new NotSupportedError('cloudrun', 'deployment listing', 'Update Hypervibe so the Cloud Run adapter includes listDeployments.');
-    }
-
-    return adapter.listDeployments(environment, serviceName, limit);
   }
 
   throw new NotSupportedError(provider, 'deployment listing', logsDeploymentsUnsupportedMessage(provider));
@@ -249,39 +242,42 @@ export async function fetchProviderBuildLogs(
     services?: Record<string, { serviceId: string }>;
   };
 
-  if (provider === 'railway') {
-    if (!bindings.projectId || !bindings.environmentId) {
-      throw new Error('Environment not deployed to Railway');
-    }
-    const connection = connectionRepo.findByProvider('railway');
-    if (!connection) {
-      throw new Error(`No Railway connection found. ${formatConnectionGuidance('railway')}`);
-    }
-
-    const secretStore = getSecretStore();
-    const credentials = secretStore.decryptObject<RailwayCredentials>(connection.credentialsEncrypted);
-    const adapter = new RailwayAdapter();
-    await adapter.connect(credentials);
-
-    let targetDeploymentId = deploymentId;
-    if (!targetDeploymentId) {
-      const deployments = await adapter.getDeployments(
-        bindings.projectId,
-        bindings.environmentId,
-        bindings.services?.[serviceName]?.serviceId,
-        1
-      );
-      if (deployments.length === 0) {
-        throw new Error('No deployments found for service');
-      }
-      targetDeploymentId = deployments[0].id;
-    }
-
-    const buildLogs = await adapter.getBuildLogs(targetDeploymentId);
-    return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
+  const result = await adapterFactory.getProviderAdapter(provider, project);
+  if (!result.success || !result.adapter) {
+    throw new Error(result.error || `Failed to create ${provider} adapter`);
+  }
+  const adapter = result.adapter as unknown as {
+    getBuildLogs?: (deploymentId: string) => Promise<string>;
+    getDeployments?: (
+      projectId: string,
+      environmentId: string,
+      serviceId: string | undefined,
+      limit: number
+    ) => Promise<Array<{ id: string; status: string }>>;
+  };
+  if (typeof adapter.getBuildLogs !== 'function' || typeof adapter.getDeployments !== 'function') {
+    throw new NotSupportedError(provider, 'build log reads', logsBuildUnsupportedMessage(provider));
+  }
+  if (!bindings.projectId || !bindings.environmentId) {
+    throw new Error(`Environment not deployed to ${provider}`);
   }
 
-  throw new NotSupportedError(provider, 'build log reads', logsBuildUnsupportedMessage(provider));
+  let targetDeploymentId = deploymentId;
+  if (!targetDeploymentId) {
+    const deployments = await adapter.getDeployments(
+      bindings.projectId,
+      bindings.environmentId,
+      bindings.services?.[serviceName]?.serviceId,
+      1
+    );
+    if (deployments.length === 0) {
+      throw new Error('No deployments found for service');
+    }
+    targetDeploymentId = deployments[0].id;
+  }
+
+  const buildLogs = await adapter.getBuildLogs(targetDeploymentId);
+  return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
 }
 
 /**

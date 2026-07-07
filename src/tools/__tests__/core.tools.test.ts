@@ -350,7 +350,7 @@ describe('hv_spec_set / hv_spec_get', () => {
           production: {
             hosting: { provider: 'railway' },
             services: { web: { startCommand: 'npm start' } },
-            domain: 'apreskeys.com',
+            domain: 'staging.apreskeys.com',
           },
         },
       },
@@ -565,7 +565,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
     });
     verifyRailwayConnection();
-    verifyConnection('cloudflare', { apiToken: 'cf-token', accountId: 'acct-1' });
+    verifyConnection('cloudflare', { apiToken: 'cfat_dns', accountId: 'acct-1', registrarApiToken: 'cfut_registrar' });
     mockObserved(null);
     vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue(null);
     vi.spyOn(CloudflareAdapter.prototype, 'checkRegistrarDomains').mockResolvedValue([
@@ -593,6 +593,38 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('blocks Cloudflare domain registration early when only an account API token is connected', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'domain-account-token-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            domain: 'apreskeys.com',
+            domainRegistration: { provider: 'cloudflare', years: 1 },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('cloudflare', { apiToken: 'cfat_dns', accountId: 'acct-1' });
+    mockObserved(null);
+
+    const plan = await t.call('hv_plan', { project: 'domain-account-token-app', env: 'production' });
+
+    expect(plan.ok).toBe(true);
+    expect(plan.data.blocked).toContainEqual(expect.objectContaining({
+      provider: 'cloudflare',
+      reason: expect.stringContaining('CLOUDFLARE_REGISTRAR_API_TOKEN'),
+    }));
+    expect(plan.data.blocked).toContainEqual(expect.objectContaining({
+      reason: expect.stringContaining('https://dash.cloudflare.com/profile/api-tokens'),
+    }));
+    await t.close();
+  });
+
   it('applies Cloudflare domain registration only when the plan action is explicitly confirmed', async () => {
     const t = await makeClient();
     await t.call('hv_spec_set', {
@@ -609,7 +641,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
     });
     verifyRailwayConnection();
-    verifyConnection('cloudflare', { apiToken: 'cf-token', accountId: 'acct-1' });
+    verifyConnection('cloudflare', { apiToken: 'cfat_dns', accountId: 'acct-1', registrarApiToken: 'cfut_registrar' });
     const project = new ProjectRepository().findByName('domain-apply-app')!;
     new EnvironmentRepository().create({
       projectId: project.id,
@@ -678,6 +710,148 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(environment.platformBindings.domainRegistrations).toMatchObject({
       'apreskeys.com': { provider: 'cloudflare', accountId: 'acct-1', state: 'succeeded', completed: true },
     });
+    await t.close();
+  });
+
+  it('keeps Cloudflare domain registration pending while the Registrar workflow is in progress', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'domain-pending-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            domain: 'pending-example.com',
+            domainRegistration: { provider: 'cloudflare', years: 1, autoRenew: true },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('cloudflare', { apiToken: 'cfat_dns', accountId: 'acct-1', registrarApiToken: 'cfut_registrar' });
+    const project = new ProjectRepository().findByName('domain-pending-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'rp-1', services: { web: { serviceId: 'svc-1' } } },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      services: [{
+        name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [], envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'checkRegistrarDomains').mockResolvedValue([
+      {
+        name: 'pending-example.com',
+        registrable: true,
+        tier: 'standard',
+        pricing: { currency: 'USD', registration_cost: '10.00', renewal_cost: '10.00' },
+      },
+    ]);
+    const create = vi.spyOn(CloudflareAdapter.prototype, 'createRegistrarRegistration').mockResolvedValue({
+      completed: false,
+      created_at: '2026-06-15T00:00:00.000Z',
+      updated_at: '2026-06-15T00:00:01.000Z',
+      links: { self: '/status', resource: '/domain' },
+      state: 'in_progress',
+    });
+
+    const plan = await t.call('hv_plan', { project: 'domain-pending-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    const attach = plan.data.actions.find((action: { id: string }) => action.id === 'domain:pending-example.com');
+    expect(attach.dependsOn).toContain('domain:pending-example.com:register');
+
+    const apply = await t.call('hv_apply', {
+      project: 'domain-pending-app',
+      planId: plan.data.planId,
+      confirmActions: ['domain:pending-example.com:register'],
+    });
+
+    expect(apply.ok).toBe(true);
+    expect(apply.data.applied).toBe(false);
+    expect(apply.data.error).toBeUndefined();
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'domain:pending-example.com:register',
+      status: 'pending',
+      message: expect.stringContaining('in_progress'),
+    }));
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'domain:pending-example.com',
+      status: 'aborted',
+      message: expect.stringContaining('did not complete'),
+    }));
+    expect(apply.hint).toContain('pending provider workflows');
+    expect(create).toHaveBeenCalledWith('acct-1', {
+      domainName: 'pending-example.com',
+      autoRenew: true,
+      years: 1,
+    });
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    expect(environment.platformBindings.domainRegistrations).toMatchObject({
+      'pending-example.com': {
+        provider: 'cloudflare',
+        accountId: 'acct-1',
+        state: 'in_progress',
+        completed: false,
+      },
+    });
+    await t.close();
+  });
+
+  it('does not treat an existing Cloudflare DNS zone as completed domain registration', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'domain-zone-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            domain: 'zone-example.com',
+            domainRegistration: { provider: 'cloudflare', years: 1 },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('cloudflare', { apiToken: 'cfat_dns', accountId: 'acct-1', registrarApiToken: 'cfut_registrar' });
+    mockObserved(null);
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1',
+      name: 'zone-example.com',
+      status: 'active',
+      paused: false,
+      type: 'full',
+      name_servers: ['ns1.example.com', 'ns2.example.com'],
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'checkRegistrarDomains').mockResolvedValue([
+      {
+        name: 'zone-example.com',
+        registrable: true,
+        tier: 'standard',
+        pricing: { currency: 'USD', registration_cost: '10.00', renewal_cost: '10.00' },
+      },
+    ]);
+
+    const plan = await t.call('hv_plan', { project: 'domain-zone-app', env: 'production' });
+
+    expect(plan.ok).toBe(true);
+    expect(plan.data.actions).toContainEqual(expect.objectContaining({
+      id: 'domain:zone-example.com:register',
+      type: 'create',
+      requiresConfirm: true,
+    }));
     await t.close();
   });
 
@@ -967,9 +1141,16 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const apply = await t.call('hv_apply', { project: 'ci-missing-image-token-app', planId: plan.data.planId });
     expect(apply.ok).toBe(false);
     expect(apply.error.code).toBe('MISSING_CONNECTION');
-    expect(apply.error.details).toContainEqual(expect.objectContaining({
+    expect(apply.error.details.blocked).toContainEqual(expect.objectContaining({
       provider: 'github',
       reason: expect.stringContaining('repo/workflow API access plus packageReadToken'),
+    }));
+    expect(apply.error.details.connectionSetup).toContainEqual(expect.objectContaining({
+      provider: 'github',
+      requiredPermissions: expect.arrayContaining([
+        expect.stringContaining('apiToken must have repo and workflow'),
+        expect.stringContaining('packageReadToken must have read:packages'),
+      ]),
     }));
     expect(apply.hint).toContain('classic personal access token');
     expect(apply.hint).toContain('https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages');
@@ -1052,9 +1233,23 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const apply = await t.call('hv_apply', { project: 'ci-domain-soft-block-app', planId: plan.data.planId });
     expect(apply.ok).toBe(false);
     expect(apply.error.code).toBe('MISSING_CONNECTION');
-    expect(apply.error.details).toContainEqual(expect.objectContaining({ provider: 'cloudflare' }));
+    expect(apply.error.details.blocked).toContainEqual(expect.objectContaining({ provider: 'cloudflare' }));
+    expect(apply.error.details.connectionSetup).toContainEqual(expect.objectContaining({
+      provider: 'cloudflare',
+      setupUrls: expect.arrayContaining([
+        expect.stringContaining('https://dash.cloudflare.com/?to=/:account/api-tokens'),
+        expect.stringContaining('https://dash.cloudflare.com/profile/api-tokens'),
+      ]),
+    }));
     expect(apply.hint).toContain('Cloudflare Account API Token');
+    expect(apply.hint).toContain('Cloudflare User API Token');
     expect(apply.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
+    expect(apply.hint).toContain('https://dash.cloudflare.com/profile/api-tokens');
+    expect(apply.hint).toContain('Zone -> Zone -> Read');
+    expect(apply.hint).toContain('Zone -> DNS -> Edit');
+    expect(apply.hint).toContain('Zone Resources must be Include -> Specific zone');
+    expect(apply.hint).toContain('Registrar write permissions');
+    expect(apply.hint).toContain('Account API Tokens cannot be used for Registrar');
     expect(setSecret).not.toHaveBeenCalled();
     await t.close();
   });
@@ -1088,6 +1283,132 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(status.data.inSync).toBe(false);
     const drift = status.data.drift.find((a: { id: string }) => a.id === 'service:web');
     expect(drift.type).toBe('update');
+    await t.close();
+  });
+
+  it('uses provider metadata in hv_status so Railway web and worker kinds do not drift permanently', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'railway-worker-status-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { worker: { workloadKind: 'worker', startCommand: 'npm start' } },
+            envVars: { NODE_ENV: 'production' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    const { ProjectRepository } = await import('../../adapters/db/repositories/project.repository.js');
+    const project = new ProjectRepository().findByName('railway-worker-status-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'rp-1', services: { worker: { serviceId: 's-worker' } } },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      services: [{
+        name: 'worker',
+        externalId: 's-worker',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: ['NODE_ENV'],
+        envVarHashes: { NODE_ENV: hashEnvValue('production') },
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const status = await t.call('hv_status', { project: 'railway-worker-status-app', env: 'production' });
+
+    expect(status.ok).toBe(true);
+    expect(status.data.drift.find((a: { id: string }) => a.id === 'service:worker')).toBeUndefined();
+    expect(status.data.inSync).toBe(true);
+    await t.close();
+  });
+
+  it('tells agents to connect Cloudflare before planning domain DNS drift', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'domain-status-missing-connection-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            domain: 'hlspropertycare.com',
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    const project = new ProjectRepository().findByName('domain-status-missing-connection-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-1', url: 'https://web-production.up.railway.app' } },
+      },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web',
+        externalId: 'svc-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const status = await t.call('hv_status', { project: 'domain-status-missing-connection-app', env: 'production' });
+    expect(status.ok).toBe(true);
+    expect(status.data.blocked).toContainEqual(expect.objectContaining({
+      provider: 'cloudflare',
+      scope: 'hlspropertycare.com',
+    }));
+    expect(status.data.drift).toContainEqual(expect.objectContaining({
+      id: 'domain:hlspropertycare.com',
+      type: 'update',
+    }));
+    expect(status.data.connectionSetup).toContainEqual(expect.objectContaining({
+      provider: 'cloudflare',
+      scope: 'hlspropertycare.com',
+      setupUrls: expect.arrayContaining([
+        expect.stringContaining('https://dash.cloudflare.com/?to=/:account/api-tokens'),
+      ]),
+      requiredPermissions: expect.arrayContaining([
+        expect.stringContaining('Zone -> DNS -> Edit'),
+      ]),
+    }));
+    expect(status.hint).toContain('Cloudflare Account API Token');
+    expect(status.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
+    expect(status.hint).toContain('Zone -> DNS -> Edit');
+    expect(status.hint).toContain('stop and ask the user');
+    expect(status.hint).toContain('do not run hv_plan');
+    expect(status.next).toEqual(['hv_connect']);
     await t.close();
   });
 
@@ -1352,6 +1673,101 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(services).toMatchObject({ web: { serviceId: 's-web' } });
     expect(services.daily).toBeUndefined();
     expect(new ServiceRepository().findByProjectAndName(project.id, 'daily')).toBeNull();
+    await t.close();
+  });
+
+  it('deletes leftover Hypervibe task services without requiring a local binding', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'task-cleanup-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            envVars: { NODE_ENV: 'production' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    const project = new ProjectRepository().findByName('task-cleanup-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: {
+          web: { serviceId: 's-web' },
+        },
+      },
+    });
+
+    const observedState: ObservedState = {
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [
+        {
+          name: 'web', externalId: 's-web', workloadKind: 'web', customDomains: [],
+          config: { startCommand: 'npm start' },
+          envVarKeys: ['NODE_ENV'], envVarHashes: { NODE_ENV: hashEnvValue('production') },
+          status: 'running',
+        },
+        {
+          name: 'hv-task-123', externalId: 'task-svc-1', workloadKind: 'worker', customDomains: [],
+          config: {},
+          envVarKeys: [], envVarHashes: {},
+          status: 'unknown',
+        },
+      ],
+      databases: [],
+      partial: false,
+      warnings: [],
+    };
+    const deleteService = vi.fn(async () => ({ success: true }));
+    const adapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'], supportedComponents: ['postgres'],
+        supportsAutoWiring: true, supportsHealthChecks: true, supportsCronSchedule: true,
+        supportsReleaseCommand: false, supportsMultiEnvironment: true, managedTls: true,
+        supportsObserve: true,
+      },
+      connect: async () => {}, verify: async () => ({ success: true }),
+      ensureProject: async () => ({ success: true, message: 'ok' }),
+      ensureComponent: async () => { throw new Error('unused'); },
+      deploy: async () => { throw new Error('hosting deploy should not run for task cleanup'); },
+      setEnvVars: async () => ({ success: true, message: 'ok' }),
+      observe: async () => observedState,
+      deleteService,
+    };
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter } as any);
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter } as any);
+
+    const plan = await t.call('hv_plan', { project: 'task-cleanup-app', env: 'production' });
+    expect(plan.ok).toBe(true);
+    expect(plan.data.unmanaged).not.toContainEqual(expect.objectContaining({ kind: 'service', name: 'hv-task-123' }));
+    expect(plan.data.actions).toContainEqual(expect.objectContaining({
+      id: 'service:hv-task-123:destroy',
+      type: 'destroy',
+      metadata: {
+        operation: 'taskServiceCleanup',
+        externalId: 'task-svc-1',
+      },
+    }));
+
+    const apply = await t.call('hv_apply', { project: 'task-cleanup-app', planId: plan.data.planId });
+    expect(apply.ok).toBe(true);
+    expect(deleteService).toHaveBeenCalledWith('task-svc-1');
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'service:hv-task-123:destroy',
+      status: 'succeeded',
+    }));
     await t.close();
   });
 

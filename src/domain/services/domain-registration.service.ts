@@ -1,13 +1,18 @@
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
+import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { cloudflareTokenKind } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import type {
   RegistrarDomainCandidate,
   RegistrarWorkflowStatus,
 } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { getCloudflareAdapter } from './cloudflare-ops.service.js';
+import { cloudflareScopeHintsForDomain } from './domain-scope.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import type { PlanAction } from '../plan/plan.types.js';
+import type { ActionResult } from '../plan/converge.executor.js';
 
 const OPERATION = 'cloudflareRegistrarRegistration';
 
@@ -22,11 +27,6 @@ interface DomainRegistrationBinding {
 
 function normalizeDomain(domain: string): string {
   return domain.trim().replace(/\.$/, '').toLowerCase();
-}
-
-function apexOf(domain: string): string {
-  const parts = domain.split('.');
-  return parts.length <= 2 ? domain : parts.slice(-2).join('.');
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -61,6 +61,70 @@ function registrationOptions(environmentSpec: EnvironmentSpec): Record<string, u
 function registrationBinding(environment: Environment | null, domain: string): DomainRegistrationBinding | null {
   const registrations = asRecord(environment?.platformBindings?.domainRegistrations);
   return asRecord(registrations?.[domain]) as DomainRegistrationBinding | null;
+}
+
+export function cloudflareRegistrarCredentialProblem(domain: string): string | null {
+  const connection = new ConnectionRepository().findBestVerifiedMatchFromHints(
+    'cloudflare',
+    cloudflareScopeHintsForDomain(domain)
+  );
+  if (!connection) return null;
+
+  const credentials = getSecretStore().decryptObject<{
+    apiToken?: string;
+    apiTokenKind?: 'user' | 'account' | 'unknown';
+    registrarApiToken?: string;
+  }>(connection.credentialsEncrypted);
+  const registrarToken = credentials.registrarApiToken?.trim();
+  if (registrarToken) {
+    if (cloudflareTokenKind(registrarToken) === 'account') {
+      return `Cloudflare domain registration for ${domain} requires a Cloudflare User API Token (usually cfut_), but the stored registrarApiToken is an Account API Token (usually cfat_). Create a User API Token at https://dash.cloudflare.com/profile/api-tokens with Registrar write permissions. Then either use it as apiToken/CLOUDFLARE_API_TOKEN for a single-token setup, or keep the Account API Token as apiToken and store the User API Token as registrarApiToken/CLOUDFLARE_REGISTRAR_API_TOKEN.`;
+    }
+    return null;
+  }
+
+  if (
+    credentials.apiToken
+    && (cloudflareTokenKind(credentials.apiToken) === 'account' || credentials.apiTokenKind === 'account')
+  ) {
+    return `Cloudflare domain registration for ${domain} cannot use the stored apiToken because it is an Account API Token (usually cfat_). Account API Tokens are correct for durable DNS/custom-domain/email automation, but Cloudflare Registrar requires a User API Token (usually cfut_). Create it at https://dash.cloudflare.com/profile/api-tokens with Registrar write permissions. Then either use it as apiToken/CLOUDFLARE_API_TOKEN for a single-token setup, or keep the Account API Token as apiToken and store the User API Token as registrarApiToken/CLOUDFLARE_REGISTRAR_API_TOKEN.`;
+  }
+
+  return null;
+}
+
+function workflowActionResult(domain: string, workflow: RegistrarWorkflowStatus, action: 'started' | 'polled'): ActionResult {
+  if (workflow.state === 'succeeded') {
+    return { success: true, message: `Cloudflare registration for ${domain} succeeded`, data: { workflow } };
+  }
+  if (workflow.state === 'failed' || workflow.completed) {
+    return {
+      success: false,
+      message: `Cloudflare registration for ${domain} failed`,
+      error: workflow.error?.message ?? `Registration workflow reached terminal state ${workflow.state}.`,
+      data: { workflow },
+    };
+  }
+  if (workflow.state === 'action_required') {
+    return {
+      success: false,
+      status: 'blocked',
+      message: `Cloudflare registration for ${domain} requires user action`,
+      error: workflow.error?.message ?? 'Cloudflare paused the registration workflow and requires user action before Hypervibe can continue.',
+      data: { workflow },
+    };
+  }
+
+  const verb = action === 'started' ? 'started and is' : 'is';
+  const extra = workflow.state === 'blocked'
+    ? 'Cloudflare says progress is blocked by a third party such as the registry; re-run hv_plan/hv_apply later to poll it.'
+    : 'Re-run hv_plan/hv_apply later to poll it.';
+  return {
+    success: false,
+    status: 'pending',
+    message: `Cloudflare registration for ${domain} ${verb} ${workflow.state}. ${extra}`,
+    data: { workflow },
+  };
 }
 
 function registrationAction(params: {
@@ -134,16 +198,9 @@ export async function planCloudflareDomainRegistration(params: {
   }
 
   const binding = registrationBinding(environment, domain);
-  try {
-    const zone = (await adapter.findZoneByName(domain)) ?? (await adapter.findZoneByName(apexOf(domain)));
-    if (zone) {
-      return { warnings };
-    }
-  } catch (error) {
-    warnings.push(`Cloudflare zone check failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`);
+  if (binding?.completed && binding.state === 'succeeded') {
     return { warnings };
   }
-
   if (binding?.state && !binding.completed && binding.state !== 'failed') {
     return {
       action: registrationAction({
@@ -201,7 +258,7 @@ export async function applyCloudflareDomainRegistration(params: {
   envName: string;
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
-}): Promise<{ success: boolean; message: string; error?: string; data?: Record<string, unknown> }> {
+}): Promise<ActionResult> {
   const { project, envName, environmentSpec, action } = params;
   const domain = normalizeDomain(action.resource.name);
   const registrationSpec = environmentSpec.domainRegistration;
@@ -234,14 +291,7 @@ export async function applyCloudflareDomainRegistration(params: {
     try {
       const workflow = await adapter.getRegistrarRegistrationStatus(binding.accountId ?? accountId, domain);
       persistWorkflow(envRepo, project, envName, domain, binding.accountId ?? accountId, workflow);
-      return workflow.state === 'succeeded'
-        ? { success: true, message: `Cloudflare registration for ${domain} succeeded`, data: { workflow } }
-        : {
-          success: false,
-          message: `Cloudflare registration for ${domain} is ${workflow.state}`,
-          error: workflow.error?.message ?? `Registration workflow is ${workflow.state}; re-run hv_plan after it changes.`,
-          data: { workflow },
-        };
+      return workflowActionResult(domain, workflow, 'polled');
     } catch (error) {
       return {
         success: false,
@@ -287,14 +337,7 @@ export async function applyCloudflareDomainRegistration(params: {
       ...(registrationSpec.years !== undefined ? { years: registrationSpec.years } : {}),
     });
     persistWorkflow(envRepo, project, envName, domain, accountId, workflow);
-    return workflow.state === 'succeeded'
-      ? { success: true, message: `Cloudflare registration for ${domain} succeeded`, data: { workflow } }
-      : {
-        success: false,
-        message: `Cloudflare registration for ${domain} started and is ${workflow.state}`,
-        error: `Registration workflow is ${workflow.state}; re-run hv_plan after it completes.`,
-        data: { workflow },
-      };
+    return workflowActionResult(domain, workflow, 'started');
   } catch (error) {
     return {
       success: false,

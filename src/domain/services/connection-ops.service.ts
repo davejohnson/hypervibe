@@ -3,7 +3,6 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { secretManagerRegistry } from '../registry/secretmanager.registry.js';
-import { formatConnectionGuidance } from './connection-guidance.js';
 import { githubCiDeployPermissionProblem } from './ci-deploy.service.js';
 
 const connectionRepo = new ConnectionRepository();
@@ -102,7 +101,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
   if (!connection) {
     return {
       kind: 'not_found',
-      error: `No connection found for provider: ${provider} (${scopeDisplay}). ${formatConnectionGuidance(provider, { scope })}`,
+      error: `No connection found for provider: ${provider} (${scopeDisplay}).`,
     };
   }
 
@@ -133,19 +132,13 @@ export async function verifyConnection(provider: string, scope?: string): Promis
       connectionRepo.updateStatus(connection.id, 'failed');
       return {
         kind: 'failed',
-        error: `${result.error ?? 'Verification failed'} ${formatConnectionGuidance(provider, {
-          scope,
-          intro: 'Confirm the secret-manager credential type and permissions.',
-        })}`,
+        error: result.error ?? 'Verification failed',
       };
     } catch (error) {
       connectionRepo.updateStatus(connection.id, 'failed');
       return {
         kind: 'threw',
-        error: `${error instanceof Error ? error.message : String(error)} ${formatConnectionGuidance(provider, {
-          scope,
-          intro: 'Confirm the secret-manager credential type and permissions.',
-        })}`,
+        error: error instanceof Error ? error.message : String(error),
       };
     }
   }
@@ -183,6 +176,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         scopes?: string[];
         workspaceId?: string;
         workspaces?: Array<{ id: string; name?: string }>;
+        tokenKind?: 'user' | 'account' | 'unknown';
       }>
     }).verify(scope || undefined);
 
@@ -214,6 +208,19 @@ export async function verifyConnection(provider: string, scope?: string): Promis
             : {}),
         };
         if (JSON.stringify(nextCreds) !== JSON.stringify(creds)) {
+          const nextEncrypted = secretStore.encryptObject(nextCreds);
+          connectionRepo.updateCredentials(connection.id, nextEncrypted);
+        }
+      }
+      if (provider === 'cloudflare' && result.tokenKind) {
+        const creds = decryptedCreds as {
+          apiToken?: string;
+          accountId?: string;
+          registrarApiToken?: string;
+          apiTokenKind?: 'user' | 'account' | 'unknown';
+        };
+        if (creds.apiTokenKind !== result.tokenKind) {
+          const nextCreds = { ...creds, apiTokenKind: result.tokenKind };
           const nextEncrypted = secretStore.encryptObject(nextCreds);
           connectionRepo.updateCredentials(connection.id, nextEncrypted);
         }
@@ -266,7 +273,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         details: { provider, scope: scope || null, reason: result.error },
       });
 
-      const errorMsg = `${registeredProvider.metadata.displayName} verification failed: ${result.error}. ${formatConnectionGuidance(provider, { scope })}`;
+      const errorMsg = `${registeredProvider.metadata.displayName} verification failed: ${result.error}.`;
 
       return { kind: 'failed', error: errorMsg };
     }
@@ -279,7 +286,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
       details: { provider, scope: scope || null, error: String(error) },
     });
 
-    return { kind: 'threw', error: `Verification failed: ${error}. ${formatConnectionGuidance(provider, { scope })}` };
+    return { kind: 'threw', error: `Verification failed: ${error}.` };
   }
 }
 

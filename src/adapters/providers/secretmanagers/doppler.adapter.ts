@@ -284,6 +284,9 @@ secretManagerRegistry.register({
     displayName: 'Doppler',
     credentialsSchema: DopplerCredentialsSchema,
     setupHelpUrl: 'https://docs.doppler.com/docs/service-tokens',
+    credentials: {
+      defaultScalarKey: 'token',
+    },
   },
   factory: (credentials) => {
     const adapter = new DopplerAdapter();

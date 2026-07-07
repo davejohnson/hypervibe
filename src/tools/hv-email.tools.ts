@@ -30,6 +30,7 @@ import {
 import type { ToolContext } from './context.js';
 import { projectField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { connectionSetupDetails } from '../domain/services/connection-guidance.js';
 
 interface SendGridDnsEntry {
   name: string;
@@ -75,7 +76,9 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
       ];
       const sgResult = getSendGridAdapter(scopeHints.length ? scopeHints : undefined);
       if ('error' in sgResult) {
-        return toolError('MISSING_CONNECTION', sgResult.error);
+        return toolError('MISSING_CONNECTION', sgResult.error, {
+          details: { connectionSetup: connectionSetupDetails('sendgrid') },
+        });
       }
       const { adapter } = sgResult;
       const normalizedDomain = domain ? normalizeDomain(domain) : undefined;
@@ -260,7 +263,9 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
       const context = await resolveCloudflareEmailContext(dom);
       if ('error' in context) {
         const code = context.error.includes('connection') ? 'MISSING_CONNECTION' : 'NOT_FOUND';
-        return toolError(code, context.error);
+        return toolError(code, context.error, code === 'MISSING_CONNECTION'
+          ? { details: { connectionSetup: connectionSetupDetails('cloudflare', { scope: dom }) } }
+          : undefined);
       }
 
       switch (action) {
@@ -389,7 +394,9 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
       }
       const sgResult = getSendGridAdapter();
       if ('error' in sgResult) {
-        return toolError('MISSING_CONNECTION', sgResult.error);
+        return toolError('MISSING_CONNECTION', sgResult.error, {
+          details: { connectionSetup: connectionSetupDetails('sendgrid') },
+        });
       }
       const result = await sgResult.adapter.sendEmail({ to, from, subject, text: body });
       if (!result.success) {

@@ -28,6 +28,11 @@ export function diffEnvironment(input: {
   envName: string;
   observed: ObservedState | null;
   local: LocalSnapshot;
+  providerBehavior?: {
+    requiresBranchDeployForCode?: boolean;
+    workloadKindObservation?: 'exact' | 'cron-only';
+    presenceOnlyManagedEnvVar?: (params: { key: string; value: string }) => boolean;
+  };
   /** Repo/branch services should be linked to when spec.deploy.strategy is "branch". */
   expectedSource?: { repo: string; branch: string };
   /** Managed database env vars derived from the currently desired database component. */
@@ -35,6 +40,7 @@ export function diffEnvironment(input: {
   managedQueueEnvVars?: Record<string, string>;
 }): DiffResult {
   const { envName, observed, local, expectedSource, managedDatabaseEnvVars, managedQueueEnvVars } = input;
+  const providerBehavior = input.providerBehavior ?? {};
   const spec = withMigrationReleaseCommand(input.spec);
   const verified = observed !== null;
   const actions: PlanAction[] = [];
@@ -57,9 +63,9 @@ export function diffEnvironment(input: {
 
   // Without a branch deploy strategy, apply creates source-less services that
   // only receive code later if the user runs an out-of-band deploy.
-  if (provider === 'railway' && Object.keys(spec.services).length > 0 && spec.deploy?.strategy !== 'branch') {
+  if (providerBehavior.requiresBranchDeployForCode && Object.keys(spec.services).length > 0 && spec.deploy?.strategy !== 'branch') {
     warnings.push(
-      `deploy.strategy is "${spec.deploy?.strategy ?? 'unset'}": Railway apply will create services without a source, `
+      `deploy.strategy is "${spec.deploy?.strategy ?? 'unset'}": ${provider} apply will create services without a source, `
       + 'so NO CODE WILL BE DEPLOYED. '
       + 'Set deploy: { strategy: "branch", trigger: "ci" } so hv_plan/hv_apply can manage the GitHub Actions deploy workflow unless infrastructure-only is intended.'
     );
@@ -121,8 +127,8 @@ export function diffEnvironment(input: {
         continue;
       }
 
-      // Only cron-ness is structural (Cloud Run Job vs Service are different
-      // resources); web<->worker converges via redeploy (ingress/scaling).
+      // Only cron-ness is structural for providers that model scheduled jobs
+      // as a different resource; web<->worker converges via service config.
       if ((live.workloadKind === 'cron') !== (serviceSpec.workloadKind === 'cron')) {
         actions.push({
           id,
@@ -136,10 +142,19 @@ export function diffEnvironment(input: {
         continue;
       }
 
-      const diff = diffServiceConfig(serviceSpec, live, desiredEnvVars);
-      // Railway observe cannot distinguish web from worker, so a kind field
-      // diff there would never converge; skip it (documented observe gap).
-      if (live.workloadKind !== serviceSpec.workloadKind && provider !== 'railway') {
+      const presenceOnlyManagedEnvVars = providerBehavior.presenceOnlyManagedEnvVar
+        ? new Set(Object.entries({
+          ...(managedDatabaseEnvVars ?? {}),
+          ...(managedQueueEnvVars ?? {}),
+        })
+          .filter(([key, value]) => providerBehavior.presenceOnlyManagedEnvVar?.({ key, value }))
+          .map(([key]) => key))
+        : undefined;
+      const diff = diffServiceConfig(serviceSpec, live, desiredEnvVars, {
+        presenceOnlyEnvVars: presenceOnlyManagedEnvVars,
+      });
+      const workloadKindObservable = providerBehavior.workloadKindObservation !== 'cron-only';
+      if (live.workloadKind !== serviceSpec.workloadKind && workloadKindObservable) {
         diff.push({ field: 'workloadKind', from: live.workloadKind, to: serviceSpec.workloadKind });
       }
       const noCode = live.status === 'empty';
@@ -198,12 +213,18 @@ export function diffEnvironment(input: {
     }
   }
 
-  const serviceDestroyAction = (name: string, verifiedDestroy: boolean, reason: string): PlanAction => ({
+  const serviceDestroyAction = (
+    name: string,
+    verifiedDestroy: boolean,
+    reason: string,
+    metadata?: Record<string, unknown>
+  ): PlanAction => ({
     id: `service:${name}:destroy`,
     type: 'destroy',
     resource: { kind: 'service', name, provider },
     verified: verifiedDestroy,
     reason,
+    ...(metadata ? { metadata } : {}),
   });
 
   // Services absent from the spec: destroy previously managed bindings, but
@@ -212,7 +233,15 @@ export function diffEnvironment(input: {
   for (const live of observed?.services ?? []) {
     if (spec.services[live.name]) continue;
     const bound = Boolean(localServiceBindings[live.name]?.serviceId);
-    if (bound) {
+    if (live.name.startsWith('hv-task-')) {
+      actions.push(serviceDestroyAction(
+        live.name,
+        true,
+        'Leftover Hypervibe one-off task service',
+        { operation: 'taskServiceCleanup', externalId: live.externalId }
+      ));
+      plannedServiceDestroys.add(live.name);
+    } else if (bound) {
       actions.push(serviceDestroyAction(
         live.name,
         true,
@@ -275,8 +304,8 @@ export function diffEnvironment(input: {
     ? String(localDbBindings?.previousProvider ?? '') || undefined
     : undefined;
   const observedDb = observed?.databases.find((d) => d.engine === 'postgres');
-  const currentDbProvider = observedDb?.provider ?? localDbProvider;
-  const dbVerified = observed ? Boolean(observedDb) || !localDb : false;
+  const currentDbProvider = observed ? observedDb?.provider : localDbProvider;
+  const dbVerified = observed ? true : false;
   let activeDatabaseActionId: string | undefined;
 
   if (spec.database) {
@@ -451,7 +480,8 @@ function diffDeploySource(
 function diffServiceConfig(
   spec: ServiceSpec,
   live: ObservedService,
-  envVars: Record<string, string>
+  envVars: Record<string, string>,
+  options: { presenceOnlyEnvVars?: Set<string> } = {}
 ): PlanFieldDiff[] {
   const diff: PlanFieldDiff[] = [];
 
@@ -476,6 +506,8 @@ function diffServiceConfig(
     const liveHash = live.envVarHashes[key];
     if (liveHash === undefined) {
       diff.push({ field: `env:${key}` });
+    } else if (options.presenceOnlyEnvVars?.has(key)) {
+      continue;
     } else if (liveHash !== hashEnvValue(value)) {
       diff.push({ field: `env:${key}` });
     }

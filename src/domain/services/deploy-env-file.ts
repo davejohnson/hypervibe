@@ -1,10 +1,14 @@
-import { existsSync } from 'fs';
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { parseEnvFile } from '../../utils/env-parser.js';
 import { findRepoRoot } from '../spec/repo-spec-file.js';
 
 export interface DeployEnvFileResult {
   path: string;
+  baseEnvPath?: string;
+  createdEnvSpecificPath?: string;
+  syncedFromBaseKeys?: string[];
+  divergentFromBaseKeys?: string[];
   missingEnvSpecificPath?: string;
   usedBaseEnvFallback?: boolean;
   vars: Record<string, string>;
@@ -128,6 +132,78 @@ function envFileSuffix(envName: string | undefined): string | null {
   return trimmed;
 }
 
+function assignmentKeyFromLine(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith('#')) return null;
+  const assignment = trimmed.startsWith('export ')
+    ? trimmed.slice('export '.length).trim()
+    : trimmed;
+  const eqIndex = assignment.indexOf('=');
+  if (eqIndex === -1) return null;
+  const key = assignment.slice(0, eqIndex).trim();
+  return isValidEnvKey(key) ? key : null;
+}
+
+function ensureTrailingNewline(content: string): string {
+  if (!content) return '';
+  return content.endsWith('\n') ? content : `${content}\n`;
+}
+
+function assignmentLinesByKey(content: string): Map<string, string> {
+  const lines = content.split(/\r?\n/);
+  const byKey = new Map<string, string>();
+  for (const line of lines) {
+    const key = assignmentKeyFromLine(line);
+    if (key) {
+      // parseEnvFile keeps the last duplicate assignment; mirror that here.
+      byKey.set(key, line);
+    }
+  }
+  return byKey;
+}
+
+function syncEnvSpecificFromBase(basePath: string, envSpecificPath: string): {
+  created: boolean;
+  syncedKeys: string[];
+  divergentKeys: string[];
+} {
+  const baseContent = readFileSync(basePath, 'utf-8');
+  if (!existsSync(envSpecificPath)) {
+    copyFileSync(basePath, envSpecificPath);
+    return {
+      created: true,
+      syncedKeys: Object.keys(parseEnvFile(basePath)).sort(),
+      divergentKeys: [],
+    };
+  }
+
+  const baseVars = parseEnvFile(basePath);
+  const envSpecificVars = parseEnvFile(envSpecificPath);
+  const syncedKeys = Object.keys(baseVars)
+    .filter((key) => !(key in envSpecificVars))
+    .sort();
+  const divergentKeys = Object.keys(baseVars)
+    .filter((key) => key in envSpecificVars && envSpecificVars[key] !== baseVars[key])
+    .sort();
+
+  if (syncedKeys.length > 0) {
+    const linesByKey = assignmentLinesByKey(baseContent);
+    const linesToAppend = syncedKeys
+      .map((key) => linesByKey.get(key))
+      .filter((line): line is string => Boolean(line));
+    if (linesToAppend.length > 0) {
+      const envSpecificContent = readFileSync(envSpecificPath, 'utf-8');
+      const block = [
+        '# Copied from .env by Hypervibe. Review before deploying if values should differ.',
+        ...linesToAppend,
+      ].join('\n');
+      writeFileSync(envSpecificPath, `${ensureTrailingNewline(envSpecificContent)}\n${block}\n`, 'utf-8');
+    }
+  }
+
+  return { created: false, syncedKeys, divergentKeys };
+}
+
 function hostLooksLocal(host: string): boolean {
   const normalized = host.trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
   return normalized === 'localhost'
@@ -181,8 +257,12 @@ export function defaultDeployEnvFilePath(startDir = process.cwd(), envName?: str
   return resolveDefaultDeployEnvFile(startDir, envName).path;
 }
 
-function resolveDefaultDeployEnvFile(startDir = process.cwd(), envName?: string): {
+function resolveDefaultDeployEnvFile(startDir = process.cwd(), envName?: string, options: { syncEnvSpecific?: boolean } = {}): {
   path: string | null;
+  baseEnvPath?: string;
+  createdEnvSpecificPath?: string;
+  syncedFromBaseKeys?: string[];
+  divergentFromBaseKeys?: string[];
   missingEnvSpecificPath?: string;
   usedBaseEnvFallback?: boolean;
 } {
@@ -192,9 +272,30 @@ function resolveDefaultDeployEnvFile(startDir = process.cwd(), envName?: string)
   const basePath = path.join(root, '.env');
   const envSpecificPath = suffix ? path.join(root, `.env.${suffix}`) : null;
   if (envSpecificPath && existsSync(envSpecificPath)) {
+    if (options.syncEnvSpecific && existsSync(basePath)) {
+      const sync = syncEnvSpecificFromBase(basePath, envSpecificPath);
+      if (sync.syncedKeys.length === 0) {
+        return { path: envSpecificPath };
+      }
+      return {
+        path: envSpecificPath,
+        baseEnvPath: basePath,
+        syncedFromBaseKeys: sync.syncedKeys,
+        ...(sync.divergentKeys.length > 0 ? { divergentFromBaseKeys: sync.divergentKeys } : {}),
+      };
+    }
     return { path: envSpecificPath };
   }
   if (existsSync(basePath)) {
+    if (envSpecificPath && options.syncEnvSpecific) {
+      const sync = syncEnvSpecificFromBase(basePath, envSpecificPath);
+      return {
+        path: envSpecificPath,
+        baseEnvPath: basePath,
+        ...(sync.created ? { createdEnvSpecificPath: envSpecificPath } : {}),
+        ...(sync.syncedKeys.length > 0 ? { syncedFromBaseKeys: sync.syncedKeys } : {}),
+      };
+    }
     return {
       path: basePath,
       ...(envSpecificPath ? { missingEnvSpecificPath: envSpecificPath, usedBaseEnvFallback: true } : {}),
@@ -214,12 +315,13 @@ export function loadDeployEnvFile(options: {
   excludeKeys?: string[];
   envName?: string;
   startDir?: string;
+  syncEnvSpecific?: boolean;
 } = {}): DeployEnvFileResult | null {
   const mode = options.mode ?? 'runtime';
   if (options.includeEnvFile === false || mode === 'off') return null;
   const resolvedDefault = options.envFile
     ? { path: path.resolve(options.startDir ?? process.cwd(), options.envFile) }
-    : resolveDefaultDeployEnvFile(options.startDir, options.envName);
+    : resolveDefaultDeployEnvFile(options.startDir, options.envName, { syncEnvSpecific: options.syncEnvSpecific !== false });
   const filePath = resolvedDefault.path;
   if (!filePath) return null;
 
@@ -256,6 +358,10 @@ export function loadDeployEnvFile(options: {
 
   return {
     path: filePath,
+    ...(resolvedDefault.baseEnvPath ? { baseEnvPath: resolvedDefault.baseEnvPath } : {}),
+    ...(resolvedDefault.createdEnvSpecificPath ? { createdEnvSpecificPath: resolvedDefault.createdEnvSpecificPath } : {}),
+    ...(resolvedDefault.syncedFromBaseKeys ? { syncedFromBaseKeys: resolvedDefault.syncedFromBaseKeys } : {}),
+    ...(resolvedDefault.divergentFromBaseKeys ? { divergentFromBaseKeys: resolvedDefault.divergentFromBaseKeys } : {}),
     ...(resolvedDefault.missingEnvSpecificPath ? { missingEnvSpecificPath: resolvedDefault.missingEnvSpecificPath } : {}),
     ...(resolvedDefault.usedBaseEnvFallback ? { usedBaseEnvFallback: true } : {}),
     vars,

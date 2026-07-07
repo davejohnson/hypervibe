@@ -8,7 +8,11 @@ import { saveConnection, verifyConnection, deleteConnection } from '../domain/se
 import { SecretResolver } from '../domain/services/secret.resolver.js';
 import { parseSecretRef } from '../domain/ports/secretmanager.port.js';
 import { parseEnvFile } from '../utils/env-parser.js';
-import { formatConnectionGuidance, getConnectionGuidance } from '../domain/services/connection-guidance.js';
+import {
+  connectionSetupDetails,
+  formatConnectionGuidance,
+  getConnectionGuidance,
+} from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
 import { projectField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler } from './respond.js';
@@ -38,24 +42,8 @@ function resolveLocalSecretRef(ref: string): string {
 }
 
 function defaultScalarCredentialKey(provider: string): string | undefined {
-  switch (provider) {
-    case 'cloudflare':
-    case 'github':
-    case 'railway':
-      return 'apiToken';
-    case 'database':
-      return 'connectionUrl';
-    case 'doppler':
-      return 'token';
-    case '1password':
-      return 'serviceAccountToken';
-    case 'sendgrid':
-      return 'apiKey';
-    case 'supabase':
-      return 'accessToken';
-    default:
-      return undefined;
-  }
+  return providerRegistry.getMetadata(provider)?.credentials?.defaultScalarKey
+    ?? secretManagerRegistry.getMetadata(provider)?.credentials?.defaultScalarKey;
 }
 
 function scalarCredentialObject(provider: string, value: string, credentialsKey: string | undefined, source: string): Record<string, unknown> {
@@ -156,6 +144,10 @@ function warningExtras(data: Record<string, unknown>): { warnings: string[] } | 
     : undefined;
 }
 
+function setupDetails(provider: string, scope?: string) {
+  return { connectionSetup: connectionSetupDetails(provider, { scope }) };
+}
+
 export function registerConnectionsTools(server: McpServer, ctx: ToolContext): void {
   const providerNames = [...new Set([...providerRegistry.names(), ...secretManagerRegistry.names()])];
   if (providerNames.length === 0) {
@@ -245,6 +237,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         }
         if (!credentials && !credentialsRef) {
           return toolError('VALIDATION', 'credentials are required for action="add".', {
+            details: setupDetails(provider, scope),
             hint: `Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -261,6 +254,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
             : credentials!;
         } catch (error) {
           return toolError('VALIDATION', error instanceof Error ? error.message : String(error), {
+            details: setupDetails(provider, scope),
             hint: `Use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -268,6 +262,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         const saved = await saveConnection(provider, credentialsToSave, scope);
         if (!saved.success) {
           return toolError('VALIDATION', saved.error!, {
+            details: setupDetails(provider, scope),
             hint: `Fix the credentials object to match the provider schema and retry. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -276,7 +271,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         const verified = await verifyConnection(provider, scope);
         if (verified.kind !== 'verified') {
           return toolError('PROVIDER_ERROR', verified.error ?? 'Verification failed.', {
-            details: { connection: saved.connection },
+            details: { connection: saved.connection, ...setupDetails(provider, scope) },
             hint: `The connection was saved but failed verification. Confirm the token type and permissions, then re-run hv_connect action="verify" or action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -310,12 +305,14 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         }
         case 'not_found':
           return toolError('NOT_FOUND', verified.error, {
+            details: setupDetails(provider, scope),
             hint: `Add the connection first with hv_connect action="add". ${formatConnectionGuidance(provider, { scope })}`,
           });
         case 'unknown_provider':
           return toolError('UNSUPPORTED', verified.error);
         default:
           return toolError('PROVIDER_ERROR', verified.error, {
+            details: setupDetails(provider, scope),
             hint: `Confirm the token type and permissions, then re-run hv_connect action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
       }
@@ -338,6 +335,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         name: string;
         displayName: string;
         setupHelpUrl?: string;
+        setupHelpUrls?: Array<{ label: string; url: string }>;
         tokenType?: string;
         requiredPermissions?: string[];
         credentialExample?: string;
@@ -351,6 +349,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
           name: p.metadata.name,
           displayName: p.metadata.displayName,
           ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
+          ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
           ...(guidance ? {
             tokenType: guidance.tokenType,
             requiredPermissions: guidance.permissions,
@@ -366,6 +365,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
           name: p.metadata.name,
           displayName: p.metadata.displayName,
           ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
+          ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
           ...(guidance ? {
             tokenType: guidance.tokenType,
             requiredPermissions: guidance.permissions,
@@ -375,12 +375,13 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         });
       }
 
+      const discoveryHint = 'hv_connections_list is credential discovery only. If desired-state convergence is blocked by a missing connection and no usable credentialsRef is already available, stop and ask the user to add/export the token or provide a credentialsRef; do not run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
       return toolSuccess(
         { connections, availableProviders },
         {
           hint: connections.length === 0
-            ? 'No connections yet. Recommended: hv_connect provider="<name>" credentialsRef="env:NAME", credentialsRef="dotenv:/absolute/path/.env#KEY", or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if the user intentionally wants chat entry.'
-            : undefined,
+            ? `No connections yet. Recommended: hv_connect provider="<name>" credentialsRef="env:NAME", credentialsRef="dotenv:/absolute/path/.env#KEY", or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if the user intentionally wants chat entry. ${discoveryHint}`
+            : discoveryHint,
         }
       );
     })

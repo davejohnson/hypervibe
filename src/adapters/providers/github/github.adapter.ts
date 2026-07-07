@@ -756,6 +756,9 @@ providerRegistry.register({
     category: 'deployment',
     credentialsSchema: GitHubCredentialsSchema,
     setupHelpUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
+    credentials: {
+      defaultScalarKey: 'apiToken',
+    },
   },
   factory: (credentials) => {
     const adapter = new GitHubAdapter();

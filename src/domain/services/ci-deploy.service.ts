@@ -5,6 +5,7 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import type { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
+import { providerRegistry } from '../registry/provider.registry.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
@@ -13,33 +14,21 @@ import {
   buildBranchDeployWorkflow,
   getGitHubAdapter,
   resolveBranchDeployTargets,
-  type BranchDeployProvider,
   type BranchDeployWorkflow,
 } from './github-ops.service.js';
 import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
 
 const OPERATION = 'githubActionsDeployBranch';
-const SUPPORTED_PROVIDERS = new Set(['railway', 'cloudrun']);
-const PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL = new Set(['railway']);
 const GITHUB_CI_REQUIRED_CLASSIC_SCOPES = ['repo', 'workflow'];
 
 export function requiredProviderSecretNamesForGitHubActions(provider: string): string[] {
-  const names: string[] = [];
-  switch (provider) {
-    case 'railway':
-      names.push('RAILWAY_API_TOKEN');
-      break;
-    case 'cloudrun':
-      names.push('GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION');
-      break;
-    default:
-      break;
-  }
-  if (PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL.has(provider)) {
+  const ci = providerRegistry.getMetadata(provider)?.orchestration?.ci;
+  const names = [...(ci?.requiredSecrets ?? [])];
+  if (ci?.requiresGitHubPackagePull) {
     names.push('IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN');
   }
-  return names;
+  return Array.from(new Set(names));
 }
 
 export function missingProviderSecretsMessage(provider: string, missingProviderSecrets: string[]): string {
@@ -50,7 +39,8 @@ export function missingProviderSecretsMessage(provider: string, missingProviderS
     parts.push(`Connect and verify ${provider} so Hypervibe can sync its API credentials into GitHub Actions. ${formatConnectionGuidance(provider)}`);
   }
   if (missingImageRegistrySecrets) {
-    parts.push(`For Railway GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials (create the read:packages PAT here: ${GITHUB_TOKEN_URLS.packageRead}). The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable GHCR image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
+    const displayName = providerRegistry.getMetadata(provider)?.displayName ?? provider;
+    parts.push(`For ${displayName} GHCR image pulls, reconnect GitHub with both GitHub API and package-read credentials (create the read:packages PAT here: ${GITHUB_TOKEN_URLS.packageRead}). The GitHub apiToken needs repo + workflow for workflow/secrets management; packageReadToken needs read:packages for durable package/image pulls. ${formatConnectionGuidance('github', { intro: 'Confirm the GitHub token type and CI deploy permissions.' })}`);
   }
   return parts.join(' ');
 }
@@ -114,32 +104,21 @@ export function providerSecretsForGitHubActions(
 ): ProviderSecret[] {
   const secrets: ProviderSecret[] = [];
   const connection = connectionRepo.findBestVerifiedMatch(provider);
+  const ci = providerRegistry.getMetadata(provider)?.orchestration?.ci;
 
   if (connection) {
     const credentials = secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
-    switch (provider) {
-      case 'railway':
-        if (typeof credentials.apiToken === 'string' && credentials.apiToken.length > 0) {
-          secrets.push({ name: 'RAILWAY_API_TOKEN', value: credentials.apiToken });
-        }
-        break;
-      case 'cloudrun':
-        if (typeof credentials.credentials === 'string' && credentials.credentials.length > 0) {
-          secrets.push({ name: 'GCP_SERVICE_ACCOUNT_JSON', value: credentials.credentials });
-        }
-        if (typeof credentials.projectId === 'string' && credentials.projectId.length > 0) {
-          secrets.push({ name: 'GCP_PROJECT_ID', value: credentials.projectId });
-        }
-        if (typeof credentials.region === 'string' && credentials.region.length > 0) {
-          secrets.push({ name: 'GCP_REGION', value: credentials.region });
-        }
-        break;
-      default:
-        break;
+    for (const name of ci?.requiredSecrets ?? []) {
+      const credentialKey = ci?.secretCredentialKeys?.[name];
+      if (!credentialKey) continue;
+      const value = credentials[credentialKey];
+      if (typeof value === 'string' && value.length > 0) {
+        secrets.push({ name, value });
+      }
     }
   }
 
-  if (PROVIDERS_REQUIRING_GITHUB_PACKAGE_PULL.has(provider)) {
+  if (ci?.requiresGitHubPackagePull) {
     const pull = githubPackagePullCredentials({ githubRepo: options.githubRepo, githubLogin: options.githubLogin });
     if (pull) {
       secrets.push(
@@ -225,7 +204,7 @@ export async function planGitHubActionsDeploy(params: {
   if (!environmentUsesGitHubActionsDeploy(environmentSpec)) {
     return { warnings };
   }
-  if (!SUPPORTED_PROVIDERS.has(environmentSpec.hosting.provider)) {
+  if (!providerRegistry.getMetadata(environmentSpec.hosting.provider)?.orchestration?.ci) {
     warnings.push(`GitHub Actions branch deploys are not supported for provider "${environmentSpec.hosting.provider}".`);
     return { warnings };
   }
@@ -248,7 +227,7 @@ export async function planGitHubActionsDeploy(params: {
     return { warnings };
   }
 
-  const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider as BranchDeployProvider, target, migration);
+  const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider, target, migration);
   const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(environmentSpec.hosting.provider)
     .filter((name) => workflow.requiredSecrets.includes(name));
   const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider, { githubRepo: repo })
@@ -262,11 +241,11 @@ export async function planGitHubActionsDeploy(params: {
   if (
     workflow.requiredSecrets.includes('DATABASE_URL')
     && !availableSecrets.some((secret) => secret.name === 'DATABASE_URL')
-    && environmentSpec.hosting.provider === 'railway'
     && environmentSpec.database
   ) {
+    const providerName = providerRegistry.getMetadata(environmentSpec.hosting.provider)?.displayName ?? environmentSpec.hosting.provider;
     warnings.push(
-      'Tool-mode migrations run in GitHub Actions, but the Railway database has no externally reachable URL (no public TCP proxy), so DATABASE_URL cannot be synced and the migration step will fail. Recommended: migrations.mode="releaseCommand" with the command as the web service releaseCommand — Railway then runs migrations inside its network before each deploy. Alternatively a public TCP proxy makes DATABASE_URL syncable (hv_db_migrate mode="move" creates one).'
+      `Tool-mode migrations run in GitHub Actions, but the managed database for ${providerName} has no externally reachable URL, so DATABASE_URL cannot be synced and the migration step will fail. Prefer in-environment migrations where the provider supports them, or make the database externally reachable through a confirmed database operation before relying on CI migrations.`
     );
   }
   const availableSecretNames = availableSecrets.map((secret) => secret.name);
@@ -398,7 +377,7 @@ export async function applyGitHubActionsDeploy(params: {
   if (!target) {
     return { success: false, message: 'No GitHub Actions deploy target', error: `No deploy target found for ${environmentName}.` };
   }
-  const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider as BranchDeployProvider, target, migration);
+  const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider, target, migration);
   const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(environmentSpec.hosting.provider)
     .filter((name) => workflow.requiredSecrets.includes(name));
   const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider, { githubRepo: repo })

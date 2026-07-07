@@ -21,6 +21,7 @@ import {
   type NormalizedDnsRecord,
   type ProviderDnsRecord,
 } from './domain-dns-records.js';
+import { cloudflareScopeHintsForDomain, dnsZoneScopeForDomain, normalizeDomainName } from './domain-scope.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 
@@ -59,11 +60,6 @@ export interface DomainSetupResult {
   };
 }
 
-function apexOf(domain: string): string {
-  const parts = domain.split('.');
-  return parts.length <= 2 ? domain : parts.slice(-2).join('.');
-}
-
 /**
  * One-call custom-domain setup, mirroring the domain orchestration that
  * bootstrap/infra_apply performs: Cloudflare zone check, hosting
@@ -77,26 +73,28 @@ export async function setupCustomDomain(params: {
   serviceName?: string;
 }): Promise<DomainSetupResult> {
   const { project, environment } = params;
-  const domain = params.domain.trim().toLowerCase();
+  const domain = normalizeDomainName(params.domain);
   const scopeHints = getProjectScopeHints(project);
+  const zoneScope = dnsZoneScopeForDomain(domain);
+  const cloudflareScopeHints = cloudflareScopeHintsForDomain(domain, scopeHints);
 
   // Step 1: Cloudflare zone check.
-  const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [domain, apexOf(domain), ...scopeHints]);
+  const cfConnection = connectionRepo.findBestVerifiedMatchFromHints('cloudflare', cloudflareScopeHints);
   if (!cfConnection) {
     return {
       success: false,
       reason: 'no_connection',
-      error: `No Cloudflare connection available for ${domain}. ${formatConnectionGuidance('cloudflare', { scope: domain })}`,
+      error: `No verified Cloudflare connection available for DNS zone ${zoneScope} (needed by ${domain}). ${formatConnectionGuidance('cloudflare', { scope: zoneScope })}`,
     };
   }
   const cfAdapter = new CloudflareAdapter();
   cfAdapter.connect(getSecretStore().decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted));
-  const zone = (await cfAdapter.findZoneByName(domain)) ?? (await cfAdapter.findZoneByName(apexOf(domain)));
+  const zone = (await cfAdapter.findZoneByName(domain)) ?? (await cfAdapter.findZoneByName(zoneScope));
   if (!zone) {
     return {
       success: false,
       reason: 'no_zone',
-      error: `Cloudflare zone not found for ${domain}. Add the domain to Cloudflare or use a token scoped to it. ${formatConnectionGuidance('cloudflare', { scope: domain })}`,
+      error: `Cloudflare zone not found for ${zoneScope} (needed by ${domain}). Add the zone to Cloudflare or use a token scoped to it. ${formatConnectionGuidance('cloudflare', { scope: zoneScope })}`,
     };
   }
 

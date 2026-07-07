@@ -11,6 +11,7 @@ import type { Environment } from '../../../domain/entities/environment.entity.js
 import { serviceWorkloadKind, type Service } from '../../../domain/entities/service.entity.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { buildCloudRunGitHubActionsSteps, CLOUDRUN_CI_REQUIRED_SECRETS } from './cloudrun-ci.workflow.js';
 import { parseHostingBindings, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
 import * as pubsub from './pubsub.api.js';
 import { pubsubQueueResourceIds } from '../../../domain/services/queue-env.js';
@@ -3150,6 +3151,25 @@ providerRegistry.register({
     category: 'deployment',
     credentialsSchema: CloudRunCredentialsSchema,
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    orchestration: {
+      diff: {
+        workloadKindObservation: 'exact',
+      },
+      logs: {
+        runtime: true,
+        deployments: true,
+      },
+      ci: {
+        displayName: 'Cloud Run',
+        requiredSecrets: CLOUDRUN_CI_REQUIRED_SECRETS,
+        secretCredentialKeys: {
+          GCP_SERVICE_ACCOUNT_JSON: 'credentials',
+          GCP_PROJECT_ID: 'projectId',
+          GCP_REGION: 'region',
+        },
+        buildGitHubActionsSteps: buildCloudRunGitHubActionsSteps,
+      },
+    },
   },
   factory: (credentials) => {
     const adapter = new CloudRunAdapter();

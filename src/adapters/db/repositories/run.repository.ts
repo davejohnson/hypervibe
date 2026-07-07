@@ -65,7 +65,7 @@ export class RunRepository {
       db.prepare(`
         UPDATE runs SET status = ?, started_at = ? WHERE id = ?
       `).run(status, now, id);
-    } else if (status === 'succeeded' || status === 'failed') {
+    } else if (status === 'succeeded' || status === 'failed' || status === 'pending' || status === 'blocked' || status === 'cancelled') {
       db.prepare(`
         UPDATE runs SET status = ?, error = ?, completed_at = ? WHERE id = ?
       `).run(status, error ?? null, now, id);

@@ -6,10 +6,16 @@ import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.a
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
+import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../../../adapters/providers/railway/railway.adapter.js';
-import { buildOneOffDatabaseCommandEnv, buildRailwayProxyDatabaseUrl, resolveExternalDatabaseUrl } from '../database-ops.service.js';
+import {
+  buildOneOffDatabaseCommandEnv,
+  buildRailwayProxyDatabaseUrl,
+  isExternallyUsableDatabaseUrl,
+  resolveExternalDatabaseUrl,
+} from '../database-ops.service.js';
 import type { Project } from '../../entities/project.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
 
@@ -102,6 +108,42 @@ describe('resolveExternalDatabaseUrl via Railway TCP proxy', () => {
 
     expect(url).toBe('postgresql://postgres:pw@public.proxy.rlwy.net:44444/appdb');
     expect(getProxy).not.toHaveBeenCalled();
+  });
+
+  it('uses the requested service binding before falling back to datastore proxy resolution', async () => {
+    const services = new ServiceRepository();
+    services.create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+    services.create({ projectId: project.id, name: 'worker', buildConfig: {}, envVarSpec: {} });
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      services: {
+        web: { serviceId: 'svc-web' },
+        worker: { serviceId: 'svc-worker' },
+      },
+    });
+    environment = new EnvironmentRepository().findById(environment.id)!;
+    const getDatabaseUrl = vi.spyOn(RailwayAdapter.prototype, 'getDatabaseUrl')
+      .mockImplementation(async (_projectId, _environmentId, serviceId) =>
+        serviceId === 'svc-worker'
+          ? 'postgresql://worker:pw@worker-db.example.com:5432/app'
+          : 'postgresql://web:pw@web-db.example.com:5432/app'
+      );
+    const getProxy = vi.spyOn(RailwayAdapter.prototype, 'getTcpProxy');
+
+    const url = await resolveExternalDatabaseUrl(project, environment, 'worker');
+
+    expect(url).toBe('postgresql://worker:pw@worker-db.example.com:5432/app');
+    expect(getDatabaseUrl).toHaveBeenCalledWith('rail-proj-1', 'rail-env-1', 'svc-worker');
+    expect(getProxy).not.toHaveBeenCalled();
+  });
+});
+
+describe('isExternallyUsableDatabaseUrl', () => {
+  it('only accepts concrete externally reachable Postgres URLs', () => {
+    expect(isExternallyUsableDatabaseUrl('postgresql://user:pw@db.example.com:5432/app')).toBe(true);
+    expect(isExternallyUsableDatabaseUrl('${{Postgres.DATABASE_URL}}')).toBe(false);
+    expect(isExternallyUsableDatabaseUrl('postgresql://user:pw@postgres.railway.internal:5432/app')).toBe(false);
+    expect(isExternallyUsableDatabaseUrl('redis://localhost:6379')).toBe(false);
+    expect(isExternallyUsableDatabaseUrl(null)).toBe(false);
   });
 });
 

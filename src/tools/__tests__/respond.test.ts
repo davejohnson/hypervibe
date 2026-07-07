@@ -46,6 +46,31 @@ describe('toolSuccess', () => {
     expect(body.next).toEqual(['hv_plan']);
   });
 
+  it('tells agents to stop when successful tool output contains failed receipts', () => {
+    const response = toolSuccess({
+      applied: false,
+      receipts: [
+        { actionId: 'service:web', status: 'succeeded' },
+        { actionId: 'domain:example.com', status: 'failed', error: 'Missing Cloudflare connection' },
+      ],
+    });
+    const body = parse(response);
+    expect(body.agentInstruction).toMatchObject({
+      action: 'stop_and_report',
+    });
+    expect(response.content[0].text).toContain('🛑 Agent Instruction');
+    expect(response.content[0].text).toContain('Report which stage receipts succeeded');
+  });
+
+  it('tells agents to ask the user when output contains blockers', () => {
+    const body = parse(toolSuccess({
+      blocked: [{ provider: 'cloudflare', scope: 'example.com' }],
+    }));
+    expect(body.agentInstruction).toMatchObject({
+      action: 'ask_user',
+    });
+  });
+
   it('formats action ids with colons without corrupting markdown labels', () => {
     const response = toolSuccess({
       actions: [{
@@ -79,9 +104,46 @@ describe('toolError', () => {
     expect(response.content[0].text).not.toContain('**');
   });
 
+  it('defaults missing connection errors to stop-and-ask guidance', () => {
+    const response = toolError('MISSING_CONNECTION', 'No Cloudflare connection');
+    const body = parse(response);
+    expect(body.agentInstruction).toMatchObject({
+      action: 'ask_user',
+    });
+    expect(response.content[0].text).toContain('ask the user for an exported token');
+  });
+
   it('includes details when provided', () => {
     const body = parse(toolError('VALIDATION', 'bad input', { details: { field: 'domain' } }));
     expect(body.error?.details).toEqual({ field: 'domain' });
+  });
+
+  it('renders connection setup details as visible bullets instead of one long paragraph', () => {
+    const response = toolError('NOT_FOUND', 'No connection found.', {
+      details: {
+        connectionSetup: {
+          provider: 'cloudflare',
+          scope: 'hlspropertycare.com',
+          tokenType: 'Cloudflare Account API Token for DNS',
+          setupUrls: [
+            'Account API Tokens: https://dash.cloudflare.com/?to=/:account/api-tokens',
+            'User API Tokens: https://dash.cloudflare.com/profile/api-tokens',
+          ],
+          requiredPermissions: [
+            'For DNS/custom domains: grant Zone -> Zone -> Read.',
+            'For DNS/custom domains: grant Zone -> DNS -> Edit.',
+          ],
+          credentialExample: 'hv_connect provider="cloudflare" scope="hlspropertycare.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}',
+        },
+      },
+    });
+
+    const text = response.content[0].text;
+    expect(text).toContain('Connection Setup: 1');
+    expect(text).toContain('Token Type: Cloudflare Account API Token for DNS');
+    expect(text).toContain('Setup URL: Account API Tokens: https://dash.cloudflare.com/?to=/:account/api-tokens');
+    expect(text).toContain('Permission: For DNS/custom domains: grant Zone -> DNS -> Edit.');
+    expect(text).toContain('Connect: hv_connect provider="cloudflare" scope="hlspropertycare.com"');
   });
 });
 

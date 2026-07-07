@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { PlanService } from '../domain/plan/plan.service.js';
+import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { requiresProductionConfirm } from '../domain/services/policy.service.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { executeRollback, ROLLBACK_NOTE } from '../domain/services/rollback.service.js';
@@ -8,7 +9,12 @@ import { SpecStore } from '../domain/spec/spec.store.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { ToolContext } from './context.js';
-import { connectionProviders, connectionRecoveryHint, executePlanApply } from './apply-plan.js';
+import {
+  connectionProviders,
+  connectionRecoveryDetails,
+  connectionRecoveryHint,
+  executePlanApply,
+} from './apply-plan.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
 
@@ -26,34 +32,37 @@ function defaultBranchForEnvironment(envName: string): string {
   return envName.toLowerCase().includes('prod') ? 'main' : 'staging';
 }
 
-function railwayCiDeployGuidance(project: Project, envName: string): { branch: string; workflow: string } | null {
+function ciBranchDeployGuidance(project: Project, envName: string): { branch: string; workflow: string; providerName: string } | null {
   const specResult = new SpecStore().get(project);
   const envSpec = specResult?.spec.environments[envName];
   if (
-    envSpec?.hosting.provider !== 'railway'
+    !envSpec
     || envSpec.deploy?.strategy !== 'branch'
     || (envSpec.deploy.trigger ?? 'ci') !== 'ci'
+    || !providerRegistry.getMetadata(envSpec.hosting.provider)?.orchestration?.ci
   ) {
     return null;
   }
 
   const branch = envSpec.deploy.branch ?? defaultBranchForEnvironment(envName);
+  const workflowKind = envName.toLowerCase().includes('prod') ? 'production' : 'staging';
   return {
     branch,
-    workflow: `deploy-railway-${defaultBranchForEnvironment(envName) === 'main' ? 'production' : 'staging'}.yml`,
+    workflow: `deploy-${envSpec.hosting.provider}-${workflowKind}.yml`,
+    providerName: providerRegistry.getMetadata(envSpec.hosting.provider)?.displayName ?? envSpec.hosting.provider,
   };
 }
 
 export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_deploy',
-    'Deploy services to an environment (staging, production, etc.). Plan-gated: builds a plan from the spec and applies it immediately; the planId and applyRunId are returned for the audit trail. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If .env.<env> is missing and repo .env is used as fallback, the plan emits a warning so the user can create .env.<env> or adjust envFile policy before deploy. Use spec envFile.mode/include/exclude to control selection, envFile for a different local env file, or includeEnvFile=false to skip it. Requires a spec (hv_spec_set). Protected environments require confirm=true.',
+    'Deploy services to an environment (staging, production, etc.). Plan-gated: builds a plan from the spec and applies it immediately; the planId and applyRunId are returned for the audit trail. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If repo .env exists and .env.<env> is missing, the plan creates .env.<env> from .env before loading values; if both exist, newly added base .env keys are copied into .env.<env> while existing environment-specific values are preserved. Use spec envFile.mode/include/exclude to control selection, envFile for a different local env file, or includeEnvFile=false to skip it. Requires a spec (hv_spec_set). Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
       services: z.array(z.string()).optional().describe('Specific services to deploy (default: all)'),
       envVars: z.record(z.string()).optional().describe('Additional one-off environment variables; values are encrypted in the stored plan and win over .env and spec envVars.'),
-      envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env> then repo .env when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
+      envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
       confirm: confirmField,
     },
@@ -64,8 +73,8 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
       const specResult = new SpecStore().get(project);
       if (!specResult) {
         return toolError('NOT_FOUND', `Project "${project.name}" has no spec.`, {
-          hint: 'Define one with hv_spec_set (or hv_import an existing project), then hv_deploy.',
-          next: ['hv_spec_set', 'hv_import'],
+          hint: 'Define one with hv_spec_set, or inspect existing provider infrastructure with hv_inspect and adopt it with hv_import, then hv_deploy.',
+          next: ['hv_spec_set', 'hv_inspect', 'hv_import'],
         });
       }
       const envName = env?.trim() || 'staging';
@@ -88,13 +97,13 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
 
       assertConfirmed(project, environment, confirm, 'hv_deploy');
 
-      const railwayCi = railwayCiDeployGuidance(project, envName);
-      if (railwayCi) {
+      const ciDeploy = ciBranchDeployGuidance(project, envName);
+      if (ciDeploy) {
         return toolError(
           'VALIDATION',
-          `Environment "${envName}" uses Railway GitHub Actions branch deploys. hv_deploy does not build or push the image for this mode.`,
+          `Environment "${envName}" uses ${ciDeploy.providerName} GitHub Actions branch deploys. hv_deploy does not build or push the image for this mode.`,
           {
-            hint: `Run hv_plan/hv_apply to sync the workflow, then push to ${railwayCi.branch} or run hv_ci_trigger workflow="${railwayCi.workflow}" ref="${railwayCi.branch}". Check progress with hv_ci_status, then hv_health.`,
+            hint: `Run hv_plan/hv_apply to sync the workflow, then push to ${ciDeploy.branch} or run hv_ci_trigger workflow="${ciDeploy.workflow}" ref="${ciDeploy.branch}". Check progress with hv_ci_status, then hv_health.`,
             next: ['hv_plan', 'hv_apply', 'hv_ci_trigger', 'hv_ci_status'],
           }
         );
@@ -127,7 +136,10 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
       }
       if (outcome.kind === 'blocked') {
         return toolError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {
-          details: outcome.applyBlocked,
+          details: {
+            blocked: outcome.applyBlocked,
+            ...connectionRecoveryDetails(outcome.applyBlocked),
+          },
           hint: connectionRecoveryHint(outcome.applyBlocked, { after: 'Then re-run hv_deploy.' }),
           next: ['hv_connect', 'hv_deploy'],
         });
@@ -188,7 +200,9 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
         const code = result.reason === 'no_adapter' ? 'MISSING_CONNECTION'
           : result.reason === 'invalid_run' ? 'VALIDATION'
             : 'NOT_FOUND';
-        return toolError(code, result.error);
+        return toolError(code, result.error, code === 'MISSING_CONNECTION'
+          ? { details: connectionRecoveryDetails([{ provider: project.defaultPlatform }]) }
+          : undefined);
       }
 
       const { ok: _ok, success, ...payload } = result;

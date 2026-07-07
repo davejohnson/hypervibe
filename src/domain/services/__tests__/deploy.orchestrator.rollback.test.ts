@@ -219,6 +219,96 @@ describe('DeployOrchestrator local rollback', () => {
       },
     });
   });
+
+  it('skips stale service bindings during env pre-sync so deploy can repair them', async () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const serviceRepo = new ServiceRepository();
+
+    const project = projectRepo.create({ name: 'stale-binding-project', defaultPlatform: 'railway' });
+    const environment = envRepo.create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project',
+        environmentId: 'rail-staging-env',
+        services: {
+          web: { serviceId: 'production-only-web' },
+        },
+      },
+    });
+    const service = serviceRepo.create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { builder: 'nixpacks' },
+    });
+
+    const adapter: IHostingAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: true,
+        supportsCronSchedule: false,
+        supportsReleaseCommand: true,
+        supportsMultiEnvironment: true,
+        managedTls: true,
+        supportsAutoScaling: false,
+        supportsObserve: false,
+      },
+      async connect() {},
+      async verify() {
+        return { success: true };
+      },
+      async ensureProject() {
+        return {
+          success: true,
+          message: 'exists',
+          data: { projectId: 'rail-project', environmentId: 'rail-staging-env' },
+        };
+      },
+      async setEnvVars() {
+        return {
+          success: false,
+          message: 'cached service id is not in this environment',
+          data: { staleBinding: true, ignoredBoundServiceId: 'production-only-web' },
+        };
+      },
+      async deploy() {
+        return {
+          serviceId: service.id,
+          externalId: 'web-staging-service',
+          status: 'deploying',
+          receipt: {
+            success: true,
+            message: 'deploy started',
+            data: { environmentId: 'rail-staging-env', createdService: true },
+          },
+        };
+      },
+      async getDeployStatus() {
+        return { status: 'deployed' };
+      },
+      async deleteService() {
+        return { success: true };
+      },
+    };
+
+    const orchestrator = new DeployOrchestrator();
+    const result = await orchestrator.execute({
+      project,
+      environment,
+      services: [service],
+      adapter,
+      envVars: { DATABASE_URL: '${{postgres-db-staging.DATABASE_URL}}' },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.errors).toEqual([]);
+    const updated = envRepo.findById(environment.id)?.platformBindings as { services?: Record<string, { serviceId?: string }> };
+    expect(updated.services?.web?.serviceId).toBe('web-staging-service');
+  });
 });
 
 describe('DeployOrchestrator run plan secrecy', () => {

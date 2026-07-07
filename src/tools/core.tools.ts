@@ -22,11 +22,13 @@ import {
   actionScopedBlocksAllowedDuringApply,
   actionScopedBlocksRequiringConnectBeforeApply,
   connectionProviders,
+  connectionRecoveryDetails,
   connectionRecoveryHint,
   executePlanApply,
   splitActionScopedConnectionBlocks,
   syncProjectGitRemoteUrl,
 } from './apply-plan.js';
+import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from './apply-plan.js';
@@ -72,10 +74,16 @@ function providerNativeDeployChanges(
 }
 
 function nativeDeployConfirmationHint(changes: Array<{ environment: string; provider: string; branch?: string }>): string {
-  const hasRailway = changes.some((change) => change.provider === 'railway');
-  const providerDetail = hasRailway
-    ? ' Railway native deploys require the Railway GitHub App and project-member GitHub access.'
-    : '';
+  const providerDetails = Array.from(new Set(
+    changes
+      .map((change) => {
+        const metadata = providerRegistry.getMetadata(change.provider);
+        if (!metadata?.orchestration?.nativeBranchDeploy?.needsGitHubAppAccess) return null;
+        return `${metadata.displayName} native deploys require the ${metadata.displayName} GitHub App and project-member GitHub access.`;
+      })
+      .filter((value): value is string => Boolean(value))
+  ));
+  const providerDetail = providerDetails.length ? ` ${providerDetails.join(' ')}` : '';
   return `Provider-native branch deploys are provider-specific and are not Hypervibe's portable default. Do not switch from trigger="ci" to trigger="native" to avoid GitHub package-read/image credentials.${providerDetail} If the user explicitly wants provider-native deploys, rerun hv_spec_set with confirmNativeDeploy=true.`;
 }
 
@@ -129,11 +137,6 @@ function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Proje
     : project;
 }
 
-function apexOfDomain(domain: string): string {
-  const parts = domain.trim().toLowerCase().split('.').filter(Boolean);
-  return parts.length <= 2 ? parts.join('.') : parts.slice(-2).join('.');
-}
-
 function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
   const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string> }>();
   const add = (provider: string, environment: string, reason: string, scopeHints: string[] = []) => {
@@ -155,8 +158,7 @@ function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
     if (envSpec.database) add(envSpec.database.provider, envName, 'database');
     if (envSpec.domain) {
       add('cloudflare', envName, envSpec.domainRegistration ? 'domain registration and DNS' : 'domain DNS', [
-        envSpec.domain,
-        apexOfDomain(envSpec.domain),
+        ...cloudflareScopeHintsForDomain(envSpec.domain),
       ]);
     }
     if (envSpec.email.enabled) add('sendgrid', envName, 'transactional email');
@@ -173,8 +175,11 @@ function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
       const scopedConnection = scopeHints.length > 0
         ? ctx.repos.connections.findBestMatchFromHints(entry.provider, scopeHints)
         : null;
+      const verifiedScopedConnection = scopeHints.length > 0
+        ? ctx.repos.connections.findBestVerifiedMatchFromHints(entry.provider, scopeHints)
+        : null;
       const verified = scopeHints.length > 0
-        ? scopedConnection?.status === 'verified'
+        ? Boolean(verifiedScopedConnection)
         : connections.some((connection) => connection.status === 'verified');
       const scope = scopeHints[0];
       let status = 'missing';
@@ -334,13 +339,13 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_plan',
-    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If .env.<env> is missing and repo .env is used as fallback, hv_plan emits a warning so the user can create .env.<env> or adjust envFile policy before apply. The spec can set envFile.mode="all", "explicit", or "off", plus envFile.include/exclude. Optional envFile points at a different local env file; includeEnvFile=false skips env file loading. Optional services=[...] produces a partial deploy plan restricted to those spec services (domain/CI/iOS/destroy actions are excluded); optional envVars={...} freezes one-off env var overrides into the plan (values encrypted at rest, winning over .env and spec envVars at apply).',
+    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Do not call hv_plan as a workaround after hv_status/hv_connections_list reports a missing required connection; first run hv_connect if a safe credentialsRef is already available, otherwise stop and ask the user for the token/reference. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If repo .env exists and .env.<env> is missing, hv_plan creates .env.<env> from .env before loading values; if both exist, newly added base .env keys are copied into .env.<env> while existing environment-specific values are preserved. The spec can set envFile.mode="all", "explicit", or "off", plus envFile.include/exclude. Optional envFile points at a different local env file; includeEnvFile=false skips env file loading. Optional services=[...] produces a partial deploy plan restricted to those spec services (domain/CI/iOS/destroy actions are excluded); optional envVars={...} freezes one-off env var overrides into the plan (values encrypted at rest, winning over .env and spec envVars at apply).',
     {
       project: projectField,
       env: envField,
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
-      envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env> then repo .env when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
+      envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
     },
     wrapHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile }) => {
@@ -410,6 +415,9 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           unmanaged: result.unmanaged,
           blocked: hardBlocked,
           actionScopedBlocked: actionScopedBlocked.length > 0 ? actionScopedBlocked : undefined,
+          ...(result.blocked.length > 0 || actionScopedBlocked.length > 0
+            ? connectionRecoveryDetails([...result.blocked, ...actionScopedBlocked])
+            : {}),
         },
         {
           hint,
@@ -447,6 +455,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         envName,
         observed,
         local,
+        providerBehavior: providerRegistry.getMetadata(envSpec.hosting.provider)?.orchestration?.diff,
         expectedSource: planService.expectedDeploySource(projectForStatus, envName, envSpec),
       });
       const drift = diff.actions.filter((a) => a.type !== 'noop');
@@ -519,6 +528,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
       const queues = await planQueues({ project: projectForStatus, environmentSpec: envSpec, environment });
       const queueDrift = queues.actions.filter((action) => action.type !== 'noop');
+      const blocked = planService.preflight(envSpec);
       const iosGroupActions = ios.actions.filter((action) => action.id.startsWith('ios:group:'));
       const iosStatus = envSpec.ios
         ? {
@@ -552,7 +562,8 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           summary: summarizeActions([...diff.actions, ...ios.actions, ...queues.actions]),
           drift: [...drift, ...iosDrift, ...queueDrift],
           unmanaged: diff.unmanaged,
-          blocked: planService.preflight(envSpec),
+          blocked,
+          ...(blocked.length > 0 ? connectionRecoveryDetails(blocked) : {}),
           ...(iosStatus ? { ios: iosStatus } : {}),
           deploySource: {
             strategy: deployStrategy,
@@ -567,11 +578,16 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         },
         {
           warnings: [...warnings, ...diff.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings],
-          hint: sourceWarnings.length > 0
-            ? 'Fix Railway GitHub App repository access and project-member GitHub contributor access, then rerun hv_status or hv_plan.'
-            : deployStrategy === 'branch' && deployTrigger === 'ci' && ciNeedsSync
-              ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
-              : drift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
+          hint: blocked.length > 0
+            ? connectionRecoveryHint(blocked, {
+              after: 'After the connection verifies, rerun hv_status or hv_plan. Do not ask to run hv_plan for DNS/domain drift until the required connection is verified.',
+            })
+            : sourceWarnings.length > 0
+              ? 'Fix Railway GitHub App repository access and project-member GitHub contributor access, then rerun hv_status or hv_plan.'
+              : deployStrategy === 'branch' && deployTrigger === 'ci' && ciNeedsSync
+                ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
+                : drift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
+          next: blocked.length > 0 ? ['hv_connect'] : undefined,
         }
       );
     })
@@ -609,7 +625,10 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       }
       if (outcome.kind === 'blocked') {
         return toolError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {
-          details: outcome.applyBlocked,
+          details: {
+            blocked: outcome.applyBlocked,
+            ...connectionRecoveryDetails(outcome.applyBlocked),
+          },
           hint: connectionRecoveryHint(outcome.applyBlocked, { after: 'Then re-run hv_plan and hv_apply.' }),
           next: ['hv_connect', 'hv_plan', 'hv_apply'],
         });
@@ -617,6 +636,8 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
       const { result, envName } = outcome;
       const skipped = result.receipts.filter((r) => r.status === 'skipped_requires_confirm');
+      const pending = result.receipts.filter((r) => r.status === 'pending');
+      const blockedReceipts = result.receipts.filter((r) => r.status === 'blocked');
       if (!result.success && !result.applyRunId) {
         // Rejected before execution (stale plan, superseded spec, etc.)
         return toolError('VALIDATION', result.error ?? 'Apply rejected', { next: ['hv_plan'] });
@@ -634,6 +655,10 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         {
           hint: skipped.length > 0
             ? `Skipped confirm-gated actions: ${skipped.map((r) => r.actionId).join(', ')}. Re-run hv_plan, then hv_apply with confirmActions to execute them.`
+            : blockedReceipts.length > 0
+              ? `Apply is blocked by actions that need user/provider intervention: ${blockedReceipts.map((r) => r.actionId).join(', ')}. Inspect receipts, complete the required action, then re-run hv_plan and hv_apply.`
+              : pending.length > 0
+                ? `Apply has pending provider workflows: ${pending.map((r) => r.actionId).join(', ')}. Re-run hv_plan and hv_apply after they progress.`
             : result.success
               ? 'Apply complete. Check hv_status to verify convergence.'
               : 'Apply failed; compensations ran where registered. Inspect receipts and re-run hv_plan.',

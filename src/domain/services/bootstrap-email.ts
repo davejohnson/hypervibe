@@ -4,6 +4,7 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter, type CloudflareCredentials } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { SendGridAdapter, assessSendGridScopes, type SendGridCredentials } from '../../adapters/providers/sendgrid/sendgrid.adapter.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
+import { dnsZoneScopeForDomain, normalizeDomainName } from './domain-scope.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import type { IHostingAdapter } from '../ports/hosting.port.js';
@@ -84,19 +85,21 @@ export async function setupBootstrapEmail(args: {
   }
 
   if (domain) {
+    const normalizedDomain = normalizeDomainName(domain);
+    const zoneScope = dnsZoneScopeForDomain(normalizedDomain);
     const existingDomains = await sgAdapter.listDomainAuthentications();
-    const existingAuth = existingDomains.find((d) => d.domain.toLowerCase() === domain.toLowerCase());
-    const auth = existingAuth ?? await sgAdapter.createDomainAuthentication(domain, { default: false });
+    const existingAuth = existingDomains.find((d) => d.domain.toLowerCase() === normalizedDomain);
+    const auth = existingAuth ?? await sgAdapter.createDomainAuthentication(normalizedDomain, { default: false });
     const records = [auth.dns.dkim1, auth.dns.dkim2, auth.dns.mail_cname].filter(
       (r): r is NonNullable<typeof r> => Boolean(r)
     );
 
-    const cfConnection = connectionRepo.findBestMatchFromHints('cloudflare', [domain, ...scopeHints]);
+    const cfConnection = connectionRepo.findBestVerifiedMatchFromHints('cloudflare', [zoneScope, normalizedDomain, ...scopeHints]);
     if (cfConnection) {
       const cfCreds = secretStore.decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted);
       const cfAdapter = new CloudflareAdapter();
       cfAdapter.connect(cfCreds);
-      const zone = await cfAdapter.findZoneByName(domain);
+      const zone = (await cfAdapter.findZoneByName(normalizedDomain)) ?? (await cfAdapter.findZoneByName(zoneScope));
       if (zone) {
         const dnsResults: Array<{ name: string; type: string; action: string }> = [];
         for (const record of records) {
@@ -109,11 +112,11 @@ export async function setupBootstrapEmail(args: {
         summary.sendgridDnsRecords = dnsResults;
       } else {
         summary.sendgridDnsSynced = false;
-        summary.sendgridDnsError = `Cloudflare zone not found for ${domain}`;
+        summary.sendgridDnsError = `Cloudflare zone not found for ${zoneScope} (needed by ${normalizedDomain})`;
       }
     } else {
       summary.sendgridDnsSynced = false;
-      summary.sendgridDnsError = `No Cloudflare connection available for domain DNS setup. ${formatConnectionGuidance('cloudflare', { scope: domain })}`;
+      summary.sendgridDnsError = `No verified Cloudflare connection available for DNS zone ${zoneScope} (needed by ${normalizedDomain}). ${formatConnectionGuidance('cloudflare', { scope: zoneScope })}`;
     }
   }
 

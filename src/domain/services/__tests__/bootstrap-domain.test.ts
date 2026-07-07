@@ -288,7 +288,8 @@ describe('attachBootstrapDomain', () => {
 
     expect(summary.customDomainAttached).toBe(true);
     expect(summary.domainDnsConfigured).toBe(false);
-    expect(summary.domainDnsError).toContain('No Cloudflare connection available for app.example.com');
+    expect(summary.domainDnsError).toContain('No verified Cloudflare connection available for DNS zone example.com');
+    expect(summary.domainDnsError).toContain('needed by app.example.com');
     expect(summary.domainDnsError).toContain('hv_connect provider="cloudflare"');
     expect(upsertDnsRecord).not.toHaveBeenCalled();
   });

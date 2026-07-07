@@ -5,6 +5,7 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { adapterFactory } from '../services/adapter.factory.js';
+import { providerRegistry } from '../registry/provider.registry.js';
 import { SpecStore } from '../spec/spec.store.js';
 import type { ProjectSpec, EnvironmentSpec } from '../spec/spec.schema.js';
 import type { Project } from '../entities/project.entity.js';
@@ -20,6 +21,7 @@ import { fingerprintObservedState, type PlanRunDocument } from './converge.execu
 import { buildDatabaseEnvVarsFromComponent } from '../services/database-env.js';
 import {
   addDomainRegistrationDependency,
+  cloudflareRegistrarCredentialProblem,
   planCloudflareDomainRegistration,
 } from '../services/domain-registration.service.js';
 import {
@@ -31,6 +33,7 @@ import { planQueues } from '../services/queue-plan.service.js';
 import { resolveQueueEnvVars } from '../services/queue-env.js';
 import { formatConnectionGuidance } from '../services/connection-guidance.js';
 import { loadDeployEnvFile } from '../services/deploy-env-file.js';
+import { cloudflareScopeHintsForDomain } from '../services/domain-scope.js';
 
 export interface PlanOptions {
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
@@ -55,7 +58,7 @@ export interface EnvironmentPlan {
   unmanaged: DiffResult['unmanaged'];
   warnings: string[];
   /** Missing/unverified provider connections that block apply. */
-  blocked: Array<{ provider: string; reason: string; scope?: string }>;
+  blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }>;
 }
 
 function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Project {
@@ -65,9 +68,25 @@ function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Proje
     : project;
 }
 
-function apexOf(domain: string): string {
-  const parts = domain.trim().toLowerCase().split('.').filter(Boolean);
-  return parts.length <= 2 ? parts.join('.') : parts.slice(-2).join('.');
+function recordValue(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function recordMapValue(record: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
+  const value = record?.[key];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function hasProviderResourceBindings(bindings: Record<string, unknown> | undefined): boolean {
+  if (recordValue(bindings, 'environmentId')) return true;
+  const services = recordMapValue(bindings, 'services');
+  return Object.values(services ?? {}).some((value) => {
+    const service = value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined;
+    return Boolean(recordValue(service, 'serviceId') ?? recordValue(service, 'jobName'));
+  });
 }
 
 /**
@@ -140,8 +159,12 @@ export class PlanService {
     }
   }
 
-  buildLocalSnapshot(project: Project, environment: Environment | null): LocalSnapshot {
-    const bindings = environment?.platformBindings as LocalSnapshot['bindings'] | undefined;
+  buildLocalSnapshot(
+    project: Project,
+    environment: Environment | null,
+    effectiveBindings?: Record<string, unknown>
+  ): LocalSnapshot {
+    const bindings = (effectiveBindings ?? environment?.platformBindings) as LocalSnapshot['bindings'] | undefined;
     return {
       projectExists: true,
       environmentExists: Boolean(environment),
@@ -151,15 +174,92 @@ export class PlanService {
     };
   }
 
+  sharedProjectBindingForEnvironment(
+    project: Project,
+    environmentName: string,
+    environment: Environment | null,
+    provider: string
+  ): { bindings?: Record<string, unknown>; warnings: string[] } | { error: string } {
+    const metadata = providerRegistry.getMetadata(provider);
+    if (!metadata?.orchestration?.project?.shareAcrossEnvironments) {
+      return { warnings: [] };
+    }
+
+    const candidates = new Map<string, string[]>();
+    for (const sibling of this.envRepo.findByProjectId(project.id)) {
+      if (sibling.name === environmentName) continue;
+      const siblingBindings = sibling.platformBindings as Record<string, unknown>;
+      if (recordValue(siblingBindings, 'provider') !== provider) continue;
+      const siblingProjectId = recordValue(siblingBindings, 'projectId');
+      if (!siblingProjectId) continue;
+      const names = candidates.get(siblingProjectId) ?? [];
+      names.push(sibling.name);
+      candidates.set(siblingProjectId, names);
+    }
+
+    const currentBindings = environment?.platformBindings as Record<string, unknown> | undefined;
+    const currentProvider = recordValue(currentBindings, 'provider');
+    if (currentProvider && currentProvider !== provider) {
+      return { warnings: [] };
+    }
+
+    const currentProjectId = recordValue(currentBindings, 'projectId');
+    if (currentProjectId) {
+      if (candidates.size === 1 && !candidates.has(currentProjectId)) {
+        const [[projectId, envs]] = [...candidates.entries()];
+        if (hasProviderResourceBindings(currentBindings)) {
+          return {
+            error: `${metadata.displayName} is configured to share one provider project across environments, but environment "${environmentName}" is bound to ${currentProjectId} while environment "${envs[0]}" is bound to ${projectId}. Hypervibe will not guess because "${environmentName}" still has provider environment/service bindings. Import the intended project or destroy/reset the stale local environment binding first.`,
+          };
+        }
+        return {
+          bindings: { ...(currentBindings ?? {}), provider, projectId },
+          warnings: [`Replaced stale ${metadata.displayName} project binding ${currentProjectId} with shared project binding ${projectId} from environment "${envs[0]}" for environment "${environmentName}".`],
+        };
+      }
+      if (candidates.size > 1 && !candidates.has(currentProjectId)) {
+        const options = [...candidates.entries()]
+          .map(([projectId, envs]) => `${projectId} (${envs.join(', ')})`)
+          .join('; ');
+        return {
+          error: `${metadata.displayName} is configured to share one provider project across environments, but environment "${environmentName}" is bound to ${currentProjectId} and Hypervibe found multiple other ${provider} project bindings: ${options}. Import or set the intended project binding before planning.`,
+        };
+      }
+      if (currentProvider === provider) return { warnings: [] };
+      return {
+        bindings: { ...(currentBindings ?? {}), provider, projectId: currentProjectId },
+        warnings: [`Recorded ${metadata.displayName} as the provider for existing project binding ${currentProjectId} in environment "${environmentName}".`],
+      };
+    }
+
+    if (candidates.size === 0) {
+      return { warnings: [] };
+    }
+    if (candidates.size > 1) {
+      const options = [...candidates.entries()]
+        .map(([projectId, envs]) => `${projectId} (${envs.join(', ')})`)
+        .join('; ');
+      return {
+        error: `${metadata.displayName} is configured to share one provider project across environments, but Hypervibe found multiple existing ${provider} project bindings: ${options}. Import or set the intended project binding for "${environmentName}" before planning so Hypervibe does not create or target the wrong project.`,
+      };
+    }
+
+    const [[projectId, envs]] = [...candidates.entries()];
+    return {
+      bindings: { ...(currentBindings ?? {}), provider, projectId },
+      warnings: [`Reusing ${metadata.displayName} project binding ${projectId} from environment "${envs[0]}" for environment "${environmentName}".`],
+    };
+  }
+
   /** Connections that must exist+verify before apply can run. */
-  preflight(environmentSpec: EnvironmentSpec): Array<{ provider: string; reason: string; scope?: string }> {
-    const blocked: Array<{ provider: string; reason: string; scope?: string }> = [];
+  preflight(environmentSpec: EnvironmentSpec): Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }> {
+    const blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }> = [];
     const required: Array<{ provider: string; scopeHints?: string[] }> = [
       { provider: environmentSpec.hosting.provider },
     ];
     if (environmentSpec.database) required.push({ provider: environmentSpec.database.provider });
     if (environmentSpec.domain) {
-      required.push({ provider: 'cloudflare', scopeHints: [environmentSpec.domain, apexOf(environmentSpec.domain)] });
+      required.push({ provider: 'cloudflare', scopeHints: cloudflareScopeHintsForDomain(environmentSpec.domain) });
     }
     if (environmentSpec.email.enabled) required.push({ provider: 'sendgrid' });
     if (environmentUsesGitHubActionsDeploy(environmentSpec)) required.push({ provider: 'github' });
@@ -170,10 +270,10 @@ export class PlanService {
       if (seen.has(key)) continue;
       seen.add(key);
       const scoped = requirement.scopeHints?.length
-        ? this.connectionRepo.findBestMatchFromHints(requirement.provider, requirement.scopeHints)
+        ? this.connectionRepo.findBestVerifiedMatchFromHints(requirement.provider, requirement.scopeHints)
         : null;
       const verified = requirement.scopeHints?.length
-        ? scoped?.status === 'verified'
+        ? Boolean(scoped)
         : this.connectionRepo
           .findAllByProvider(requirement.provider)
           .some((c) => c.status === 'verified');
@@ -182,6 +282,19 @@ export class PlanService {
         blocked.push({
           provider: requirement.provider,
           reason: `No verified ${requirement.provider}${scope ? ` connection for ${scope}` : ' connection'}. ${formatConnectionGuidance(requirement.provider, { scope })}`,
+          policy: providerRegistry.getMetadata(requirement.provider)?.orchestration?.connections?.missingConnectionPolicy ?? 'hard',
+          ...(scope ? { scope } : {}),
+        });
+      }
+    }
+    if (environmentSpec.domainRegistration?.register && environmentSpec.domain) {
+      const registrarProblem = cloudflareRegistrarCredentialProblem(environmentSpec.domain);
+      if (registrarProblem) {
+        const scope = cloudflareScopeHintsForDomain(environmentSpec.domain)[0];
+        blocked.push({
+          provider: 'cloudflare',
+          reason: registrarProblem,
+          policy: 'hard',
           ...(scope ? { scope } : {}),
         });
       }
@@ -211,20 +324,20 @@ export class PlanService {
   }
 
   /**
-   * For native repo-linked branch deploys on Railway, verify the Railway GitHub
-   * App can actually see the repo. The API-level serviceConnect succeeds
-   * without it — builds work, but Railway's UI shows "repo not found" and
-   * pushes to GitHub never auto-deploy. Surfacing this at plan time lets the
-   * agent walk the user through the GitHub-side fix before applying.
+   * For native repo-linked branch deploys, let providers verify any external
+   * GitHub app visibility they need before apply records a source as connected.
    */
   async checkBranchDeploySource(
     project: Project,
     environmentSpec: EnvironmentSpec
   ): Promise<string[]> {
+    const provider = environmentSpec.hosting.provider;
+    const providerMetadata = providerRegistry.getMetadata(provider);
+    const branchDeployMetadata = providerMetadata?.orchestration?.nativeBranchDeploy;
     if (
-      environmentSpec.hosting.provider !== 'railway'
-      || environmentSpec.deploy?.strategy !== 'branch'
+      environmentSpec.deploy?.strategy !== 'branch'
       || environmentSpec.deploy.trigger !== 'native'
+      || !branchDeployMetadata?.needsGitHubAppAccess
     ) {
       return [];
     }
@@ -236,7 +349,7 @@ export class PlanService {
       ];
     }
 
-    const adapterResult = await adapterFactory.getProviderAdapter('railway', project);
+    const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
     const adapter = adapterResult.adapter as {
       isGitHubRepoAccessible?: (repo: string) => Promise<boolean | null>;
     } | undefined;
@@ -246,11 +359,14 @@ export class PlanService {
 
     const accessible = await adapter.isGitHubRepoAccessible(repo);
     if (accessible === false) {
+      const providerName = providerMetadata?.displayName ?? provider;
+      const installUrl = branchDeployMetadata.githubAppInstallUrl
+        ?? 'the provider GitHub App installation page';
       return [
-        `Railway's GitHub App cannot access ${repo}. Hypervibe can connect the repo via Railway's API for native deploys, but pushes to GitHub will NOT auto-deploy until Railway can see the repo.`,
-        `User action required: install/open the Railway GitHub App at https://github.com/apps/railway-app/installations/new and grant it access to ${repo}. If the app uses "Only select repositories", add ${repo} to that list.`,
-        'User action required: make sure at least one Railway project member has connected GitHub and has contributor access to the repository.',
-        'User action required: accept any pending Railway GitHub App permission updates in GitHub. After changes, wait a few minutes for Railway caches to refresh, then rerun hv_status or hv_plan.',
+        `${providerName}'s GitHub App cannot access ${repo}. Hypervibe can connect the repo via ${providerName}'s API for native deploys, but pushes to GitHub will NOT auto-deploy until ${providerName} can see the repo.`,
+        `User action required: install/open the ${providerName} GitHub App at ${installUrl} and grant it access to ${repo}. If the app uses "Only select repositories", add ${repo} to that list.`,
+        `User action required: make sure at least one ${providerName} project member has connected GitHub and has contributor access to the repository.`,
+        `User action required: accept any pending ${providerName} GitHub App permission updates in GitHub. After changes, wait a few minutes for provider caches to refresh, then rerun hv_status or hv_plan.`,
       ];
     }
     return [];
@@ -308,8 +424,42 @@ export class PlanService {
       : [];
 
     const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
-    const { observed, warnings: observeWarnings } = await this.observeEnvironment(projectForPlan, environment, environmentSpec);
-    const local = this.buildLocalSnapshot(projectForPlan, environment);
+    const sharedProjectBinding = this.sharedProjectBindingForEnvironment(
+      projectForPlan,
+      environmentName,
+      environment,
+      environmentSpec.hosting.provider
+    );
+    if ('error' in sharedProjectBinding) {
+      return { error: sharedProjectBinding.error };
+    }
+    const effectiveBindings = sharedProjectBinding.bindings
+      ? {
+        ...(environment?.platformBindings ?? {}),
+        ...sharedProjectBinding.bindings,
+      }
+      : environment?.platformBindings;
+    const effectiveBindingRecord = effectiveBindings ?? {};
+    let environmentForObserve = environment;
+    if (sharedProjectBinding.bindings) {
+      if (environment) {
+        environmentForObserve = this.envRepo.updatePlatformBindings(environment.id, sharedProjectBinding.bindings) ?? {
+          ...environment,
+          platformBindings: effectiveBindingRecord,
+        };
+      } else {
+        environmentForObserve = {
+          id: `untracked:${environmentName}`,
+          projectId: project.id,
+          name: environmentName,
+          platformBindings: effectiveBindingRecord,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+      }
+    }
+    const { observed, warnings: observeWarnings } = await this.observeEnvironment(projectForPlan, environmentForObserve, environmentSpec);
+    const local = this.buildLocalSnapshot(projectForPlan, environment, effectiveBindings);
     const localDb = local.components.find((component) => component.type === environmentSpec.database?.engine);
     const localDbProvider = localDb
       ? String((localDb.bindings as Record<string, unknown>).provider ?? '') || undefined
@@ -345,6 +495,7 @@ export class PlanService {
       envName: environmentName,
       observed,
       local,
+      providerBehavior: providerRegistry.getMetadata(environmentSpec.hosting.provider)?.orchestration?.diff,
       expectedSource: this.expectedDeploySource(projectForPlan, environmentName, environmentSpec),
       managedDatabaseEnvVars,
       managedQueueEnvVars,
@@ -433,6 +584,14 @@ export class PlanService {
       const shadowedByManaged = Object.keys(envFile.vars)
         .filter((key) => managedEnvKeys.has(key))
         .sort();
+      if (envFile.createdEnvSpecificPath && envFile.baseEnvPath) {
+        envFileWarnings.push(`Created environment-specific deploy env file at ${envFile.createdEnvSpecificPath} from base ${envFile.baseEnvPath} for environment "${environmentName}". Review it if these values should differ before apply.`);
+      } else if (envFile.syncedFromBaseKeys && envFile.syncedFromBaseKeys.length > 0 && envFile.baseEnvPath) {
+        envFileWarnings.push(`Updated environment-specific deploy env file ${envFile.path} with ${envFile.syncedFromBaseKeys.length} key(s) copied from base ${envFile.baseEnvPath}: ${envFile.syncedFromBaseKeys.join(', ')}.`);
+      }
+      if (envFile.divergentFromBaseKeys && envFile.divergentFromBaseKeys.length > 0 && envFile.baseEnvPath) {
+        envFileWarnings.push(`Preserved ${envFile.divergentFromBaseKeys.length} environment-specific .env key(s) in ${envFile.path} that differ from base ${envFile.baseEnvPath}: ${envFile.divergentFromBaseKeys.join(', ')}.`);
+      }
       if (envFile.usedBaseEnvFallback && envFile.missingEnvSpecificPath) {
         envFileWarnings.push(`No environment-specific deploy env file found at ${envFile.missingEnvSpecificPath}; using base ${envFile.path} for environment "${environmentName}" and copying selected runtime keys into the plan. Create ${envFile.missingEnvSpecificPath} or adjust envFile.mode/include/exclude if these values should differ.`);
       }
@@ -482,14 +641,14 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: diff.unmanaged,
-      warnings: [...specWarnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...filterWarnings],
       ...(overrides ? { overrides } : {}),
     };
 
     // Plans for untracked environments can't reference an environment row;
     // create the local record now so runs can attach to it.
     const environmentRecord = environment
-      ?? this.envRepo.create({ projectId: project.id, name: environmentName });
+      ?? this.envRepo.create({ projectId: project.id, name: environmentName, platformBindings: effectiveBindingRecord });
 
     const run = this.runRepo.create({
       projectId: project.id,

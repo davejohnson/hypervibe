@@ -11,7 +11,7 @@ import {
   removeServiceBinding,
   removeServiceFromDesiredState,
 } from '../domain/services/spec.service.js';
-import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import { parseQueueBindings } from '../domain/services/queue-plan.service.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField, confirmField } from './schemas.js';
@@ -19,87 +19,185 @@ import { toolSuccess, toolError, wrapHandler } from './respond.js';
 
 export function registerLifecycleTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
-    'hv_import',
-    'Adopt already-deployed provider infrastructure into Hypervibe (currently Railway). Three modes: no name → list importable provider projects; name without environmentMappings → return raw environments/services/components for you to interpret; name + environmentMappings → perform the import. Not for creating new infrastructure (use hv_spec_set + hv_apply).',
+    'hv_inspect',
+    'Read-only provider inspection for forensics/adoption planning. Currently Railway only. Omit name/railwayProjectId to list projects; pass name or railwayProjectId to inspect environments, services, components, and env var names. Never writes Hypervibe local state or provider resources.',
     {
-      provider: z.enum(['railway']).optional().describe('Source provider to import from (default: railway)'),
-      name: z.string().optional().describe('Existing provider project name to adopt. Omit to list projects available to import.'),
-      force: z.boolean().optional().describe('Set true to override the safety check when a Hypervibe project with the same name already exists.'),
-      environmentMappings: z
-        .record(z.string(), z.string())
-        .optional()
-        .describe('Map provider environment names to Hypervibe environments (e.g., {"prod-us-east": "production", "blue": "staging"})'),
+      provider: z.enum(['railway']).optional().describe('Provider to inspect (default: railway)'),
+      name: z.string().optional().describe('Existing provider project name to inspect. Omit name and railwayProjectId to list projects.'),
+      railwayProjectId: z.string().optional().describe('Exact Railway project id to inspect. Use this when multiple Railway projects have the same display name.'),
     },
-    wrapHandler(async ({ name, force = false, environmentMappings }) => {
+    wrapHandler(async ({ name, railwayProjectId }) => {
       const adapter = await connectRailwayForImport();
       if (!adapter) {
         return toolError('MISSING_CONNECTION', 'No Railway connection configured.', {
+          details: { connectionSetup: connectionSetupDetails('railway') },
           hint: formatConnectionGuidance('railway'),
           next: ['hv_connect'],
         });
       }
 
       try {
-        // Mode 1: no name — list importable Railway projects.
-        if (!name) {
+        if (!name && !railwayProjectId) {
           const projects = await listRailwayImportCandidates(adapter);
           return toolSuccess(
             { projects },
             {
               hint: projects.length > 0
-                ? 'Call hv_import name="<railway-project>" to inspect one for adoption.'
+                ? 'Call hv_inspect name="<railway-project>" to inspect one. If multiple projects share a name, pass railwayProjectId from this list.'
                 : 'No Railway projects found on this account.',
             }
           );
         }
 
-        const railwayProject = await adapter.findProjectByName(name);
-        if (!railwayProject) {
-          return toolError('NOT_FOUND', `Railway project "${name}" not found.`, {
-            hint: 'hv_import adopts existing infrastructure. For new infrastructure use hv_spec_set, hv_plan, and hv_apply.',
-          });
+        let selectedProjectId = railwayProjectId;
+        let selectedProjectName = name;
+        if (!selectedProjectId) {
+          const matches = await adapter.findProjectsByName(name!);
+          if (matches.length === 0) {
+            return toolError('NOT_FOUND', `Railway project "${name}" not found.`, {
+              hint: 'Use hv_inspect to inspect existing provider infrastructure. For new infrastructure use hv_spec_set, hv_plan, and hv_apply.',
+            });
+          }
+          if (matches.length > 1) {
+            return toolError('VALIDATION', `Multiple Railway projects named "${name}" are visible.`, {
+              details: {
+                projects: matches.map((project) => ({ name: project.name, railwayId: project.id })),
+              },
+              hint: 'Re-run hv_inspect with railwayProjectId set to the exact Railway project id. Hypervibe will not guess between duplicate provider projects.',
+              next: ['hv_inspect'],
+            });
+          }
+          selectedProjectId = matches[0].id;
+          selectedProjectName = matches[0].name;
         }
 
-        // Guardrail: import is adoption-only. Block when a Hypervibe project
-        // with the same name already exists unless force=true.
-        const existing = ctx.repos.projects.findByName(name);
-        if (existing && !force) {
-          return toolError('VALIDATION', `Hypervibe project "${name}" already exists. hv_import is adoption-only.`, {
-            hint: 'Use hv_plan/hv_apply for setup or retries. Re-run hv_import with force=true only to intentionally re-adopt this live Railway project.',
-          });
-        }
-
-        const inspection = await inspectRailwayProject(adapter, railwayProject.id);
+        const inspection = await inspectRailwayProject(adapter, selectedProjectId);
         if (!inspection) {
-          return toolError('PROVIDER_ERROR', `Could not fetch details for Railway project "${name}".`);
+          return toolError('PROVIDER_ERROR', `Could not fetch details for Railway project "${selectedProjectName ?? selectedProjectId}".`, {
+            hint: 'Use hv_inspect to inspect existing provider infrastructure. For new infrastructure use hv_spec_set, hv_plan, and hv_apply.',
+          });
         }
 
         const { details, environments, services, components, envVarNames, autoDetected, needsMapping } = inspection;
+        return toolSuccess(
+          {
+            inspected: true,
+            imported: false,
+            project: { name: details.name, railwayId: details.id },
+            environments,
+            services,
+            components,
+            envVarNames,
+            autoDetected,
+            needsMapping,
+          },
+          {
+            hint: needsMapping.length > 0
+              ? `Classify these environments (${needsMapping.join(', ')}) before adoption. To adopt, call hv_import with environmentMappings and confirm=true.`
+              : 'Inspection only. To adopt this provider project into Hypervibe, call hv_import with environmentMappings and confirm=true.',
+            next: ['hv_import'],
+          }
+        );
+      } finally {
+        await adapter.disconnect();
+      }
+    })
+  );
 
-        // Mode 2: no mappings — return raw data for the agent to interpret.
-        if (!environmentMappings) {
-          return toolSuccess(
-            {
-              imported: false,
-              project: { name: details.name, railwayId: details.id },
-              environments,
-              services,
-              components,
-              envVarNames,
-              autoDetected,
-              needsMapping,
-            },
-            {
-              hint: needsMapping.length > 0
-                ? `Classify these environments (${needsMapping.join(', ')}) and call hv_import again with environmentMappings to complete adoption.`
-                : 'Call hv_import again with environmentMappings to complete adoption (the auto-detected mappings are usually correct).',
-              next: ['hv_import'],
-            }
-          );
+  server.tool(
+    'hv_import',
+    'Adopt already-deployed provider infrastructure into Hypervibe local/repo state (currently Railway). Adoption writes Hypervibe project/environment/service/component bindings. For read-only provider data, use hv_inspect. Not for creating new infrastructure (use hv_spec_set + hv_apply).',
+    {
+      provider: z.enum(['railway']).optional().describe('Source provider to import from (default: railway)'),
+      name: z.string().optional().describe('Existing provider project name to adopt. Use hv_inspect first if you only need to read provider state.'),
+      railwayProjectId: z.string().optional().describe('Exact Railway project id to adopt. Use this when multiple Railway projects have the same display name.'),
+      force: z.boolean().optional().describe('Set true to override the safety check when a Hypervibe project with the same name already exists.'),
+      environmentMappings: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe('Map provider environment names to Hypervibe environments (e.g., {"prod-us-east": "production", "blue": "staging"})'),
+      confirm: confirmField,
+    },
+    wrapHandler(async ({ name, railwayProjectId, force = false, environmentMappings, confirm }) => {
+      if (!name && !railwayProjectId) {
+        return toolError('VALIDATION', 'hv_import is adoption-only and requires name or railwayProjectId.', {
+          hint: 'Use hv_inspect provider="railway" to list/read provider projects. Use hv_import only when adopting a selected provider project into Hypervibe.',
+          next: ['hv_inspect'],
+        });
+      }
+
+      if (!environmentMappings) {
+        return toolError('VALIDATION', 'hv_import requires environmentMappings because it writes Hypervibe adoption bindings.', {
+          hint: 'Use hv_inspect first to read environments/services/components, then call hv_import with environmentMappings and confirm=true when you want to adopt.',
+          next: ['hv_inspect'],
+        });
+      }
+
+      const adapter = await connectRailwayForImport();
+      if (!adapter) {
+        return toolError('MISSING_CONNECTION', 'No Railway connection configured.', {
+          details: { connectionSetup: connectionSetupDetails('railway') },
+          hint: formatConnectionGuidance('railway'),
+          next: ['hv_connect'],
+        });
+      }
+
+      try {
+        let selectedProjectId = railwayProjectId;
+        let selectedProjectName = name;
+        if (!selectedProjectId) {
+          const matches = await adapter.findProjectsByName(name!);
+          if (matches.length === 0) {
+            return toolError('NOT_FOUND', `Railway project "${name}" not found.`, {
+              hint: 'Use hv_inspect to inspect existing provider infrastructure. For new infrastructure use hv_spec_set, hv_plan, and hv_apply.',
+            });
+          }
+          if (matches.length > 1) {
+            return toolError('VALIDATION', `Multiple Railway projects named "${name}" are visible.`, {
+              details: {
+                projects: matches.map((project) => ({ name: project.name, railwayId: project.id })),
+              },
+              hint: 'Re-run hv_import with railwayProjectId set to the exact Railway project id. Hypervibe will not guess between duplicate provider projects.',
+              next: ['hv_inspect', 'hv_import'],
+            });
+          }
+          selectedProjectId = matches[0].id;
+          selectedProjectName = matches[0].name;
         }
 
-        // Mode 3: mappings provided — perform the import.
-        const result = await importRailwayProject(details, environmentMappings, services, components);
+        const inspection = await inspectRailwayProject(adapter, selectedProjectId);
+        if (!inspection) {
+          return toolError('PROVIDER_ERROR', `Could not fetch details for Railway project "${selectedProjectName ?? selectedProjectId}".`, {
+            hint: 'Use hv_inspect to inspect existing provider infrastructure. For new infrastructure use hv_spec_set, hv_plan, and hv_apply.',
+          });
+        }
+
+        const { details, environments, services, components } = inspection;
+
+        // Guardrail: import is adoption-only. Block when a Hypervibe project
+        // with the same name already exists unless force=true.
+        const existing = ctx.repos.projects.findByName(details.name);
+        if (existing && !force && environmentMappings) {
+          return toolError('VALIDATION', `Hypervibe project "${details.name}" already exists. hv_import is adoption-only.`, {
+            hint: 'Use hv_plan/hv_apply for setup or retries. Re-run hv_import with force=true only to intentionally re-adopt this live Railway project and update local bindings.',
+          });
+        }
+
+        if (!confirm) {
+          return toolError('CONFIRM_REQUIRED', `This will adopt Railway project "${details.name}" into Hypervibe local state. Provider resources are not changed.`, {
+            details: {
+              project: { name: details.name, railwayId: details.id },
+              environmentMappings,
+              environments,
+              services: services.map((service) => ({ name: service.name, railwayId: service.railwayId })),
+              components,
+            },
+            hint: 'Re-run hv_import with the same name/railwayProjectId, environmentMappings, and confirm=true to write local Hypervibe adoption bindings.',
+            next: ['hv_import'],
+          });
+        }
+
+        const result = await importRailwayProject(details, environmentMappings, services, components, { force });
         if (result.status === 'already_exists') {
           return toolError('VALIDATION', `Project "${details.name}" already exists in Hypervibe.`);
         }

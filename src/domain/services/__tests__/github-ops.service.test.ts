@@ -7,6 +7,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
+import '../../../adapters/providers/railway/railway.adapter.js';
+import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';

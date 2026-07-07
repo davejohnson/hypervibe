@@ -10,6 +10,10 @@ import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
+import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import { createToolContext } from '../context.js';
 import { registerHvDbTools } from '../hv-db.tools.js';
 
@@ -57,8 +61,87 @@ function seedDbProject() {
   return { project, environment };
 }
 
+function seedInternalRailwayDbProject() {
+  const project = new ProjectRepository().create({ name: 'rail-db-app', defaultPlatform: 'railway' });
+  const environment = new EnvironmentRepository().create({
+    projectId: project.id,
+    name: 'production',
+    platformBindings: {
+      provider: 'railway',
+      projectId: 'rail-proj-1',
+      environmentId: 'rail-env-1',
+    },
+  });
+  new ComponentRepository().create({
+    environmentId: environment.id,
+    type: 'postgres',
+    externalId: 'rail-db-svc-1',
+    bindings: {
+      provider: 'railway',
+      projectId: 'rail-proj-1',
+      connectionUrl: '${{Postgres.DATABASE_URL}}',
+    },
+  });
+  return { project, environment };
+}
+
+function seedServiceSpecificRailwayDbProject() {
+  const project = new ProjectRepository().create({ name: 'rail-service-db-app', defaultPlatform: 'railway' });
+  const environment = new EnvironmentRepository().create({
+    projectId: project.id,
+    name: 'production',
+    platformBindings: {
+      provider: 'railway',
+      projectId: 'rail-proj-1',
+      environmentId: 'rail-env-1',
+      services: {
+        web: { serviceId: 'svc-web' },
+        worker: { serviceId: 'svc-worker' },
+      },
+    },
+  });
+  new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+  new ServiceRepository().create({ projectId: project.id, name: 'worker', buildConfig: {}, envVarSpec: {} });
+  new ComponentRepository().create({
+    environmentId: environment.id,
+    type: 'postgres',
+    externalId: 'rail-db-svc-1',
+    bindings: {
+      provider: 'railway',
+      projectId: 'rail-proj-1',
+    },
+  });
+  const connection = new ConnectionRepository().create({
+    provider: 'railway',
+    credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
+  });
+  new ConnectionRepository().updateStatus(connection.id, 'verified');
+  return { project, environment };
+}
+
 describe('hv_db_query', () => {
   const URL = 'postgres://user:pw@localhost:5432/app';
+
+  it('rejects provider template refs before reaching the database adapter', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_db_query', { connectionUrl: '${{Postgres.DATABASE_URL}}', sql: 'SELECT 1' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('not a supported Postgres URL');
+    await t.close();
+  });
+
+  it('rejects private provider hosts passed as direct query URLs', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_db_query', {
+      connectionUrl: 'postgresql://user:pw@postgres.railway.internal:5432/app',
+      sql: 'SELECT 1',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('not externally reachable');
+    await t.close();
+  });
 
   it('rejects multi-statement SQL before connecting', async () => {
     const t = await makeClient();
@@ -85,6 +168,19 @@ describe('hv_db_query', () => {
     expect(result.error.code).toBe('CONFIRM_REQUIRED');
     await t.close();
   });
+
+  it('reports internal managed database targets as unreachable instead of unknown database type', async () => {
+    seedInternalRailwayDbProject();
+    const t = await makeClient();
+    const result = await t.call('hv_db_query', { project: 'rail-db-app', env: 'production', sql: 'SELECT 1' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('NOT_FOUND');
+    expect(result.error.message).toContain('externally reachable Postgres URL');
+    expect(result.error.message).not.toContain('Unknown database type');
+    expect(result.error.details.canCreateTcpProxy).toBe(true);
+    expect(result.hint).toContain('internal-only');
+    await t.close();
+  });
 });
 
 describe('hv_db_migrate', () => {
@@ -97,6 +193,19 @@ describe('hv_db_migrate', () => {
     const details = JSON.stringify(result.error.details);
     expect(details).not.toContain('secretpw');
     expect(details).toContain('***');
+    await t.close();
+  });
+
+  it('previews reset mode for internal managed databases without passing provider refs to the adapter', async () => {
+    seedInternalRailwayDbProject();
+    const t = await makeClient();
+    const result = await t.call('hv_db_migrate', { project: 'rail-db-app', env: 'production', mode: 'reset' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('CONFIRM_REQUIRED');
+    expect(result.error.message).toContain('drops ALL tables');
+    expect(result.error.details.reachable).toBe(false);
+    expect(result.error.details.canCreateTcpProxy).toBe(true);
+    expect(result.hint).toContain('confirm=true');
     await t.close();
   });
 
@@ -171,6 +280,41 @@ describe('hv_db_url', () => {
     const result = await t.call('hv_db_url', { project: 'no-db-app', env: 'staging' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('NOT_FOUND');
+    await t.close();
+  });
+
+  it('does not return provider runtime refs as database URLs', async () => {
+    seedInternalRailwayDbProject();
+    const t = await makeClient();
+    const result = await t.call('hv_db_url', { project: 'rail-db-app', env: 'production' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('NOT_FOUND');
+    expect(JSON.stringify(result)).not.toContain('${{Postgres.DATABASE_URL}}');
+    expect(result.hint).toContain('internal-only');
+    await t.close();
+  });
+
+  it('uses the requested service binding when resolving from Railway bindings', async () => {
+    seedServiceSpecificRailwayDbProject();
+    const getDatabaseUrl = vi.spyOn(RailwayAdapter.prototype, 'getDatabaseUrl')
+      .mockImplementation(async (_projectId, _environmentId, serviceId) =>
+        serviceId === 'svc-worker'
+          ? 'postgresql://worker:workerpw@worker-db.example.com:5432/app'
+          : 'postgresql://web:webpw@web-db.example.com:5432/app'
+      );
+    const t = await makeClient();
+
+    const result = await t.call('hv_db_url', {
+      project: 'rail-service-db-app',
+      env: 'production',
+      service: 'worker',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.source).toBe('rail-service-db-app/production/worker');
+    expect(result.data.databaseUrl).toContain('worker-db.example.com');
+    expect(result.data.databaseUrl).not.toContain('workerpw');
+    expect(getDatabaseUrl).toHaveBeenCalledWith('rail-proj-1', 'rail-env-1', 'svc-worker');
     await t.close();
   });
 });

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import '../../../adapters/providers/railway/railway.adapter.js';
+import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import {
   detectProviderName,
   isErrorLike,

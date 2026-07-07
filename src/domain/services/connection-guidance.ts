@@ -13,7 +13,19 @@ export interface ConnectionGuidance {
   displayName: string;
   tokenType: string;
   setupUrl?: string;
+  setupUrls?: Array<{ label: string; url: string }>;
   permissions: string[];
+  credentialExample: string;
+  notes?: string[];
+}
+
+export interface ConnectionSetupDetails {
+  provider: string;
+  scope?: string;
+  displayName?: string;
+  tokenType?: string;
+  setupUrls: string[];
+  requiredPermissions: string[];
   credentialExample: string;
   notes?: string[];
 }
@@ -67,22 +79,36 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   cloudflare: {
     provider: 'cloudflare',
     displayName: 'Cloudflare',
-    tokenType: 'Cloudflare Account API Token for DNS, custom domains, and email routing; Cloudflare User API Token for Registrar/domain purchase',
-    setupUrl: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
-    permissions: [
-      'Zone -> Zone -> Read.',
-      'Zone -> Zone Settings -> Read or Edit.',
-      'Zone -> DNS -> Edit.',
-      'Zone -> Email Routing Rules -> Edit (required for hv_email_setup/hv_email_forwarding rules).',
-      'Account -> Email Routing Addresses -> Edit (required to create/verify forwarding destination addresses).',
-      'Account -> Account Settings -> Read (lets Hypervibe auto-resolve accountId; otherwise pass accountId explicitly).',
-      'Registrar write permissions on the account (only for domain purchase via the Registrar API).',
-      'Zone Resources: Include -> Specific zone -> the target domain.',
+    tokenType: 'Cloudflare User API Token as apiToken for simple DNS, custom domains, email routing, and Registrar/domain purchase; or Cloudflare Account API Token as apiToken for durable DNS, custom domains, and email routing automation, with a separate User API Token only when that account-token setup also buys domains',
+    setupUrl: 'https://dash.cloudflare.com/profile/api-tokens',
+    setupUrls: [
+      {
+        label: 'User API Tokens for Registrar/domain purchase',
+        url: 'https://dash.cloudflare.com/profile/api-tokens',
+      },
+      {
+        label: 'Account API Tokens for DNS/custom domains/email routing',
+        url: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
+      },
     ],
-    credentialExample: 'hv_connect provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}',
+    permissions: [
+      'For the simplest setup, create a Cloudflare User API Token in Cloudflare Dashboard -> My Profile -> API Tokens at https://dash.cloudflare.com/profile/api-tokens and map it as apiToken/CLOUDFLARE_API_TOKEN. That one token can manage DNS, custom domains, and email routing, and when granted Registrar permissions it can also register domains.',
+      'For durable team/service automation that should not be tied to one user, create a Cloudflare Account API Token in Cloudflare Dashboard -> Manage Account -> Account API Tokens at https://dash.cloudflare.com/?to=/:account/api-tokens and map it as apiToken/CLOUDFLARE_API_TOKEN plus accountId/CLOUDFLARE_ACCOUNT_ID.',
+      'For DNS/custom domains with either token type: grant Zone -> Zone -> Read.',
+      'For DNS/custom domains with either token type: grant Zone -> DNS -> Edit.',
+      'For Railway/custom-domain verification and some zone lookups: grant Zone -> Zone Settings -> Read or Edit.',
+      'For DNS/custom domains with either token type: Zone Resources must be Include -> Specific zone -> the target domain, for example hlspropertycare.com.',
+      'For email routing only: grant Zone -> Email Routing Rules -> Edit.',
+      'For email routing only: grant Account -> Email Routing Addresses -> Edit.',
+      'For accountId auto-resolution: grant Account -> Account Settings -> Read; otherwise pass accountId/CLOUDFLARE_ACCOUNT_ID explicitly.',
+      'For Registrar/domain purchase: grant Registrar write permissions on a Cloudflare User API Token. If apiToken is already that User API Token, no second token is needed. If apiToken is an Account API Token, add a User API Token as registrarApiToken/CLOUDFLARE_REGISTRAR_API_TOKEN because Account API Tokens cannot be used for Registrar.',
+    ],
+    credentialExample: 'single User API Token: hv_connect provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}; account-token setup that also buys domains: hv_connect provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID","registrarApiToken":"CLOUDFLARE_REGISTRAR_API_TOKEN"}',
     notes: [
-      'Recommended for ordinary DNS/custom-domain/email work: create an Account API Token from Cloudflare Dashboard -> Manage Account -> Account API Tokens: https://dash.cloudflare.com/?to=/:account/api-tokens. New account tokens use the documented cfat_ prefix (older tokens are unprefixed and still work). Hypervibe also needs accountId/CLOUDFLARE_ACCOUNT_ID.',
-      'For Registrar/domain purchase: Cloudflare lists Registrar as NOT supported by Account API Tokens; create a User API Token with Registrar write permissions from My Profile -> API Tokens: https://dash.cloudflare.com/profile/api-tokens. New user tokens use the documented cfut_ prefix. The Registrar registration API is beta: premium domains and some TLDs are unsupported, and the account needs a billing profile and default registrant contact.',
+      'Create user tokens in Cloudflare Dashboard -> My Profile -> API Tokens at https://dash.cloudflare.com/profile/api-tokens; create account tokens in Cloudflare Dashboard -> Manage Account -> Account API Tokens at https://dash.cloudflare.com/?to=/:account/api-tokens.',
+      'User API Tokens are fine for DNS, custom domains, and email routing, and are the simplest path when Hypervibe may also register domains. New user tokens use the documented cfut_ prefix.',
+      'Account API Tokens are for durable service-principal style automation that should survive an individual user leaving the account. New account tokens use the documented cfat_ prefix (older tokens are unprefixed and still work). Cloudflare lists Registrar as NOT supported by Account API Tokens, so account-token setups need a User API Token only for Registrar/domain purchase.',
+      'If the spec does not purchase/register domains, omit registrarApiToken. If apiToken is a User API Token with Registrar permissions, omit registrarApiToken even when registering domains.',
       'For either token type, use Create Token, start from the Edit zone DNS template when available, then confirm the permissions above for the target zone. Cloudflare token verification only proves the token is active, not that it has these permissions — missing permissions surface at apply time.',
       'Use the token secret itself as apiToken/CLOUDFLARE_API_TOKEN; do not use the token name or token id. Do not use the legacy Global API Key.',
     ],
@@ -93,15 +119,15 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     tokenType: 'Google Cloud service account JSON key',
     setupUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     permissions: [
-      'roles/run.admin',
-      'roles/iam.serviceAccountUser (on the runtime service account)',
-      'roles/cloudbuild.builds.editor',
-      'roles/artifactregistry.admin (Hypervibe creates the Docker repository; artifactregistry.writer is enough if the repo already exists)',
-      'roles/serviceusage.serviceUsageAdmin so Hypervibe can auto-enable required APIs',
-      'roles/cloudsql.client when using Cloud SQL (plus roles/cloudsql.admin if Hypervibe provisions the instance)',
-      'roles/cloudscheduler.admin when using cron jobs',
-      'roles/pubsub.editor when using queues',
-      'roles/logging.viewer and roles/logging.viewAccessor for logs',
+      'Grant roles/run.admin on the target Google Cloud project so Hypervibe can create/update Cloud Run services and jobs.',
+      'Grant roles/iam.serviceAccountUser on the runtime service account.',
+      'Grant roles/cloudbuild.builds.editor so Hypervibe can run Cloud Build builds.',
+      'Grant roles/artifactregistry.admin when Hypervibe should create the Docker repository; roles/artifactregistry.writer is enough if the repository already exists.',
+      'Grant roles/serviceusage.serviceUsageAdmin so Hypervibe can auto-enable required APIs.',
+      'Grant roles/cloudsql.client when using Cloud SQL, plus roles/cloudsql.admin if Hypervibe provisions the instance.',
+      'Grant roles/cloudscheduler.admin when using cron jobs.',
+      'Grant roles/pubsub.editor when using queues.',
+      'Grant roles/logging.viewer and roles/logging.viewAccessor for logs.',
     ],
     credentialExample: 'hv_connect provider="cloudrun" credentialsRef="file:/absolute/path/cloudrun.json"',
     notes: [
@@ -147,7 +173,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     setupUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
     permissions: [
       `For CI deploy management, apiToken must have repo and workflow so Hypervibe can create/update .github/workflows files, read Actions runs/jobs/logs, trigger workflows, and manage repository secrets for private repos. Create it here: ${GITHUB_TOKEN_URLS.api}`,
-      `For Railway GHCR image pulls, packageReadToken must have read:packages — create it here: ${GITHUB_TOKEN_URLS.packageRead}. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.`,
+      `For private GHCR image pulls, packageReadToken must have read:packages — create it here: ${GITHUB_TOKEN_URLS.packageRead}. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.`,
       'If using a fine-grained PAT for apiToken, grant Contents read/write, Workflows write, Actions write, and Secrets write on the target repo; add Pages write for GitHub Pages custom domains and Administration write for branch protection. GHCR package access still requires a classic PAT (GitHub: "GitHub Packages only supports authentication using a personal access token (classic)"). Hypervibe cannot pre-check fine-grained permissions (no scopes header), so missing permissions surface at apply time.',
     ],
     credentialExample: 'hv_connect provider="github" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}',
@@ -197,7 +223,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     tokenType: 'SendGrid API key (Restricted Access for least privilege; Full Access is the reliable choice during setup)',
     setupUrl: 'https://app.sendgrid.com/settings/api_keys',
     permissions: [
-      'mail.send.',
+      'Grant mail.send so Hypervibe can sync a runtime SENDGRID_API_KEY that can send transactional email.',
       'For domain authentication: whitelabel.read, whitelabel.create, whitelabel.update (SendGrid still names these scopes "whitelabel" even though the UI says Sender Authentication).',
       'For single-sender verification: SendGrid publishes no restricted scope for the /verified_senders API — use a Full Access key for this path; hypervibe checks user.email.* as a best-effort signal.',
       'For event webhook setup: user.webhooks.event.settings.read and user.webhooks.event.settings.update.',
@@ -273,7 +299,7 @@ function credentialExample(guidance: ConnectionGuidance, scope?: string): string
   }
   switch (guidance.provider) {
     case 'cloudflare':
-      return guidance.credentialExample.replace('scope="example.com"', `scope="${scope}"`);
+      return guidance.credentialExample.replaceAll('scope="example.com"', `scope="${scope}"`);
     case 'github':
       return guidance.credentialExample.replace('provider="github"', `provider="github" scope="${scope}"`);
     case 'database':
@@ -283,6 +309,41 @@ function credentialExample(guidance: ConnectionGuidance, scope?: string): string
     default:
       return guidance.credentialExample;
   }
+}
+
+export function connectionSetupDetails(
+  provider: string,
+  options: { scope?: string } = {}
+): ConnectionSetupDetails {
+  const guidance = getConnectionGuidance(provider);
+  if (!guidance) {
+    return {
+      provider,
+      ...(options.scope ? { scope: options.scope } : {}),
+      setupUrls: [],
+      requiredPermissions: [],
+      credentialExample: `hv_connect provider="${provider}" credentialsRef="env:NAME"`,
+      notes: [
+        'Run hv_connections_list to see the provider schema and credential fields.',
+        'Prefer credentialsRef="env:NAME", credentialsRef="dotenv:/absolute/path/.env#KEY", or credentialsRef="file:/absolute/path" so secrets do not enter chat.',
+      ],
+    };
+  }
+
+  const setupUrls = guidance.setupUrls?.length
+    ? guidance.setupUrls.map((entry) => `${entry.label}: ${entry.url}`)
+    : guidance.setupUrl ? [guidance.setupUrl] : [];
+
+  return {
+    provider,
+    ...(options.scope ? { scope: options.scope } : {}),
+    displayName: guidance.displayName,
+    tokenType: guidance.tokenType,
+    setupUrls,
+    requiredPermissions: guidance.permissions,
+    credentialExample: credentialExample(guidance, options.scope),
+    ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
+  };
 }
 
 export function formatConnectionGuidance(
@@ -301,7 +362,9 @@ export function formatConnectionGuidance(
   const parts = [
     options.intro ?? `Confirm the ${guidance.displayName} credential type and permissions${scopeText}.`,
     `Token/credential type: ${guidance.tokenType}.`,
-    guidance.setupUrl ? `Create or review it here: ${guidance.setupUrl}.` : undefined,
+    guidance.setupUrls?.length
+      ? `Create or review it here: ${guidance.setupUrls.map((entry) => `${entry.label}: ${entry.url}`).join('; ')}.`
+      : guidance.setupUrl ? `Create or review it here: ${guidance.setupUrl}.` : undefined,
     `Required permissions: ${guidance.permissions.join(' ')}`,
     guidance.notes?.length ? `Notes: ${guidance.notes.join(' ')}` : undefined,
     `Connect with: ${credentialExample(guidance, options.scope)}.`,

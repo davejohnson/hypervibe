@@ -189,6 +189,62 @@ describe('ConvergeExecutor execution', () => {
     });
   });
 
+  it('records pending actions without treating them as failed and blocks dependents', async () => {
+    const handler = vi.fn(async (a: PlanAction) =>
+      a.id === 'domain:example.com:register'
+        ? { success: false, status: 'pending' as const, message: 'registration in progress', data: { state: 'in_progress' } }
+        : { success: true, message: 'ok' });
+    const planId = storePlan([
+      action({
+        id: 'domain:example.com:register',
+        resource: { kind: 'domain', name: 'example.com', provider: 'cloudflare' },
+      }),
+      action({
+        id: 'domain:example.com',
+        resource: { kind: 'domain', name: 'example.com', provider: 'railway' },
+        dependsOn: ['domain:example.com:register'],
+      }),
+    ]);
+
+    const result = await new ConvergeExecutor().execute({ planRunId: planId, currentSpecRevision: 1, handler });
+    expect(result.success).toBe(false);
+    expect(result.error).toBeUndefined();
+    const statuses = new Map(result.receipts.map((r) => [r.actionId, r.status]));
+    expect(statuses.get('domain:example.com:register')).toBe('pending');
+    expect(statuses.get('domain:example.com')).toBe('aborted');
+
+    const applyRun = runRepo().findById(result.applyRunId!)!;
+    expect(applyRun.status).toBe('pending');
+    expect(applyRun.completedAt).toBeInstanceOf(Date);
+    expect(applyRun.receipts.find((receipt) => receipt.step === 'domain:example.com:register')).toMatchObject({
+      status: 'pending',
+      result: { message: 'registration in progress', state: 'in_progress' },
+    });
+  });
+
+  it('records blocked actions separately from provider failures', async () => {
+    const handler = vi.fn(async () => ({
+      success: false,
+      status: 'blocked' as const,
+      message: 'user action required',
+      error: 'Verify registrant contact',
+    }));
+    const planId = storePlan([action({ id: 'domain:example.com:register' })]);
+
+    const result = await new ConvergeExecutor().execute({ planRunId: planId, currentSpecRevision: 1, handler });
+    expect(result.success).toBe(false);
+    expect(result.error).toBeUndefined();
+    expect(result.receipts[0]).toMatchObject({
+      actionId: 'domain:example.com:register',
+      status: 'blocked',
+      message: 'user action required',
+      error: 'Verify registrant contact',
+    });
+    const applyRun = runRepo().findById(result.applyRunId!)!;
+    expect(applyRun.status).toBe('blocked');
+    expect(applyRun.completedAt).toBeInstanceOf(Date);
+  });
+
   it('aborts remaining actions after a failure and records a failed apply run', async () => {
     const handler = vi.fn(async (a: PlanAction) =>
       a.id === 'service:web'

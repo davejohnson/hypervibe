@@ -2,21 +2,15 @@ import pg from 'pg';
 import { spawn } from 'child_process';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
-import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
-import { getSecretStore } from '../../adapters/secrets/secret-store.js';
-import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
-import type { RailwayCredentials } from '../../adapters/providers/railway/railway.adapter.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import { adapterFactory } from './adapter.factory.js';
-import { getProjectScopeHints } from './project-scope.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
 import { runEnvironmentTask } from './environment-task.service.js';
 
 const serviceRepo = new ServiceRepository();
 const componentRepo = new ComponentRepository();
-const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
 const { Client } = pg;
 
@@ -288,9 +282,15 @@ export async function runDatabaseMigration(params: {
   };
 }
 
-/** A URL usable from OUTSIDE the hosting provider's network (CI runners, local pg_dump). */
-function isExternallyUsableDatabaseUrl(url: string | null | undefined): url is string {
-  return Boolean(url && !url.includes('${{') && !url.includes('.railway.internal'));
+export function isPostgresDatabaseUrl(url: string | null | undefined): url is string {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return lower.startsWith('postgres://') || lower.startsWith('postgresql://');
+}
+
+/** A concrete Postgres URL usable from OUTSIDE the hosting provider's network (CI runners, local pg_dump). */
+export function isExternallyUsableDatabaseUrl(url: string | null | undefined): url is string {
+  return Boolean(isPostgresDatabaseUrl(url) && !url.includes('${{') && !url.includes('.railway.internal'));
 }
 
 /**
@@ -385,9 +385,10 @@ export function buildOneOffDatabaseCommandEnv(targetUrl: string): Record<string,
  */
 export async function resolveExternalDatabaseUrl(
   project: Project,
-  env: { id: string; name: string; platformBindings: Record<string, unknown> }
+  env: { id: string; name: string; platformBindings: Record<string, unknown> },
+  serviceName?: string
 ): Promise<string | null> {
-  const direct = await resolveEnvironmentDatabaseUrl(project, env);
+  const direct = await resolveEnvironmentDatabaseUrl(project, env, serviceName);
   if (isExternallyUsableDatabaseUrl(direct)) {
     return direct;
   }
@@ -437,9 +438,10 @@ export async function resolveExternalDatabaseUrl(
 
 export async function ensureExternalDatabaseUrl(
   project: Project,
-  env: { id: string; name: string; platformBindings: Record<string, unknown> }
+  env: { id: string; name: string; platformBindings: Record<string, unknown> },
+  serviceName?: string
 ): Promise<ExternalDatabaseUrlResult> {
-  const existing = await resolveExternalDatabaseUrl(project, env);
+  const existing = await resolveExternalDatabaseUrl(project, env, serviceName);
   if (existing) {
     return { ok: true, url: existing, source: 'direct', tcpProxyCreated: false };
   }
@@ -772,17 +774,19 @@ export async function resolveEnvironmentDatabaseUrl(
     return null;
   }
 
-  const scopeHints = getProjectScopeHints(project);
-  const railwayConnection = connectionRepo.findBestMatchFromHints('railway', scopeHints);
-  if (!railwayConnection) {
+  const adapterResult = await adapterFactory.getProviderAdapter(bindings.provider, project);
+  if (!adapterResult.success || !adapterResult.adapter) {
     return null;
   }
 
-  const secretStore = getSecretStore();
-  const railwayCreds = secretStore.decryptObject<RailwayCredentials>(railwayConnection.credentialsEncrypted);
-  const railwayAdapter = new RailwayAdapter();
-  await railwayAdapter.connect(railwayCreds);
-  return railwayAdapter.getDatabaseUrl(projectId, environmentId, serviceId);
+  const adapter = adapterResult.adapter as unknown as {
+    getDatabaseUrl?: (projectId: string, environmentId: string, serviceId: string) => Promise<string | null>;
+  };
+  if (typeof adapter.getDatabaseUrl !== 'function') {
+    return null;
+  }
+
+  return adapter.getDatabaseUrl(projectId, environmentId, serviceId);
 }
 
 export function maskDatabaseUrl(url: string): string {

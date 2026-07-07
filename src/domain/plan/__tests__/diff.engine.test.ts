@@ -114,6 +114,29 @@ describe('diffEnvironment — creates', () => {
     expect(byId.get('service:web')?.dependsOn).toEqual(['project:railway']);
     expect(byId.get('database:railway')?.type).toBe('create');
   });
+
+  it('does not let stale local service and database bindings mask missing observed environment resources', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'staging',
+      observed: observed({ services: [], databases: [] }),
+      local: local({
+        services: [localService('web')],
+        components: [localComponent({ provider: 'railway', resourceKind: 'service', pluginName: 'postgres-db' })],
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-staging',
+          services: { web: { serviceId: 'svc-web' } },
+        },
+      }),
+    });
+
+    const byId = new Map(result.actions.map((a) => [a.id, a]));
+    expect(byId.get('service:web')?.type).toBe('create');
+    expect(byId.get('database:railway')?.type).toBe('create');
+    expect(byId.get('database:railway')?.reason).toBe('No postgres database exists');
+  });
 });
 
 describe('diffEnvironment — config drift', () => {
@@ -173,6 +196,82 @@ describe('diffEnvironment — config drift', () => {
     expect(web.type).toBe('update');
     expect(web.diff).toContainEqual({ field: 'env:DATABASE_URL' });
     expect(web.diff).toContainEqual({ field: 'env:DATABASE_SSL' });
+  });
+
+  it('treats Railway managed database references as converged when the env var exists', () => {
+    const live = observedWeb({
+      envVarKeys: ['NODE_ENV', 'DATABASE_URL', 'DIRECT_URL'],
+      envVarHashes: {
+        NODE_ENV: hashEnvValue('production'),
+        // Railway may return resolved values for variables Hypervibe set as
+        // ${{postgres-db.*}} references, so the exact hash is not stable.
+        DATABASE_URL: hashEnvValue('postgres://resolved-internal-url'),
+        DIRECT_URL: hashEnvValue('postgres://resolved-private-url'),
+      },
+    });
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local(),
+      providerBehavior: {
+        presenceOnlyManagedEnvVar: ({ value }) => /^\$\{\{[^}]+\}\}$/.test(value),
+      },
+      managedDatabaseEnvVars: {
+        DATABASE_URL: '${{postgres-db.DATABASE_URL}}',
+        DIRECT_URL: '${{postgres-db.DATABASE_PRIVATE_URL}}',
+      },
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect((web.diff ?? []).some((entry) => entry.field === 'env:DATABASE_URL')).toBe(false);
+    expect((web.diff ?? []).some((entry) => entry.field === 'env:DIRECT_URL')).toBe(false);
+  });
+
+  it('still detects missing Railway managed database references', () => {
+    const live = observedWeb({
+      envVarKeys: ['NODE_ENV', 'DATABASE_URL'],
+      envVarHashes: {
+        NODE_ENV: hashEnvValue('production'),
+        DATABASE_URL: hashEnvValue('postgres://resolved-internal-url'),
+      },
+    });
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local(),
+      providerBehavior: {
+        presenceOnlyManagedEnvVar: ({ value }) => /^\$\{\{[^}]+\}\}$/.test(value),
+      },
+      managedDatabaseEnvVars: {
+        DATABASE_URL: '${{postgres-db.DATABASE_URL}}',
+        DIRECT_URL: '${{postgres-db.DATABASE_PRIVATE_URL}}',
+      },
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect((web.diff ?? []).some((entry) => entry.field === 'env:DATABASE_URL')).toBe(false);
+    expect(web.diff).toContainEqual({ field: 'env:DIRECT_URL' });
+  });
+
+  it('compares Railway-style references exactly for non-Railway hosts', () => {
+    const live = observedWeb({
+      envVarKeys: ['NODE_ENV', 'DATABASE_URL'],
+      envVarHashes: {
+        NODE_ENV: hashEnvValue('production'),
+        DATABASE_URL: hashEnvValue('postgres://resolved-internal-url'),
+      },
+    });
+    const result = diffEnvironment({
+      spec: spec({ hosting: { provider: 'cloudrun' } }),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local({ bindings: { provider: 'cloudrun' } }),
+      managedDatabaseEnvVars: {
+        DATABASE_URL: '${{postgres-db.DATABASE_URL}}',
+      },
+    });
+    const web = result.actions.find((a) => a.id === 'service:web')!;
+    expect(web.diff).toContainEqual({ field: 'env:DATABASE_URL' });
   });
 
   it('merges managed queue env vars into the desired env, with spec.envVars winning on conflict', () => {
@@ -280,7 +379,7 @@ describe('diffEnvironment — provider switches', () => {
     const result = diffEnvironment({
       spec: spec({ database: undefined }),
       envName: 'production',
-      observed: observed({ databases: [] }),
+      observed: observed(),
       local: local({
         components: [{
           id: 'c1', environmentId: 'e1', type: 'postgres',
@@ -292,6 +391,22 @@ describe('diffEnvironment — provider switches', () => {
     const destroy = result.actions.find((a) => a.id === 'database:railway:destroy')!;
     expect(destroy.requiresConfirm).toBe(true);
     expect(destroy.dataBearing).toBe(true);
+  });
+
+  it('does not plan a database destroy from stale local bindings when observation shows no live database', () => {
+    const result = diffEnvironment({
+      spec: spec({ database: undefined }),
+      envName: 'production',
+      observed: observed({ databases: [] }),
+      local: local({
+        components: [{
+          id: 'c1', environmentId: 'e1', type: 'postgres',
+          bindings: { provider: 'railway' }, externalId: 'db-1',
+          createdAt: new Date(), updatedAt: new Date(),
+        }],
+      }),
+    });
+    expect(result.actions.find((a) => a.id === 'database:railway:destroy')).toBeUndefined();
   });
 });
 
@@ -378,6 +493,27 @@ describe('diffEnvironment — unmanaged resources', () => {
       id: 'service:daily:destroy',
       type: 'destroy',
       verified: false,
+    }));
+  });
+
+  it('plans cleanup for leftover Hypervibe task services without reporting them unmanaged', () => {
+    const task = observedWeb({ name: 'hv-task-123', externalId: 'task-svc-1' });
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({ services: [observedWeb(), task] }),
+      local: local(),
+    });
+
+    expect(result.unmanaged).not.toContainEqual(expect.objectContaining({ kind: 'service', name: 'hv-task-123' }));
+    expect(result.actions).toContainEqual(expect.objectContaining({
+      id: 'service:hv-task-123:destroy',
+      type: 'destroy',
+      reason: 'Leftover Hypervibe one-off task service',
+      metadata: {
+        operation: 'taskServiceCleanup',
+        externalId: 'task-svc-1',
+      },
     }));
   });
 });
@@ -480,19 +616,26 @@ describe('diffEnvironment — domain and workload', () => {
     expect(web.diff).toContainEqual({ field: 'workloadKind', from: 'web', to: 'worker' });
   });
 
-  it('skips the web<->worker field diff on railway, whose observe cannot distinguish them', () => {
+  it('skips the web<->worker field diff when provider metadata says observe cannot distinguish them', () => {
     const workerSpec = spec({
       services: { web: { workloadKind: 'worker', startCommand: 'npm start', healthCheckPath: '/health', public: true } },
     });
-    const result = diffEnvironment({ spec: workerSpec, envName: 'production', observed: observed(), local: local() });
+    const result = diffEnvironment({
+      spec: workerSpec,
+      envName: 'production',
+      observed: observed(),
+      local: local(),
+      providerBehavior: { workloadKindObservation: 'cron-only' },
+    });
     const web = result.actions.find((a) => a.id === 'service:web')!;
     expect(web.type).toBe('noop');
   });
 });
 
 describe('diffEnvironment — deploy source', () => {
-  it('warns when a railway spec has services but deploy.strategy is not "branch"', () => {
-    const result = diffEnvironment({ spec: spec(), envName: 'production', observed: observed(), local: local() });
+  it('warns when provider metadata requires branch deploys but deploy.strategy is not "branch"', () => {
+    const providerBehavior = { requiresBranchDeployForCode: true };
+    const result = diffEnvironment({ spec: spec(), envName: 'production', observed: observed(), local: local(), providerBehavior });
     expect(result.warnings.some((w) => w.includes('NO CODE WILL BE DEPLOYED'))).toBe(true);
 
     const manual = diffEnvironment({
@@ -500,6 +643,7 @@ describe('diffEnvironment — deploy source', () => {
       envName: 'production',
       observed: observed(),
       local: local(),
+      providerBehavior,
     });
     expect(manual.warnings.some((w) => w.includes('NO CODE WILL BE DEPLOYED'))).toBe(true);
 
@@ -508,6 +652,7 @@ describe('diffEnvironment — deploy source', () => {
       envName: 'production',
       observed: observed(),
       local: local(),
+      providerBehavior,
     });
     expect(branch.warnings.some((w) => w.includes('NO CODE WILL BE DEPLOYED'))).toBe(false);
   });

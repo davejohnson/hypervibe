@@ -10,6 +10,11 @@ import { hashEnvValue } from '../../../domain/ports/observe.port.js';
 import type { ObservedDatabase, ObservedService, ObservedState } from '../../../domain/ports/observe.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import {
+  buildRailwayGitHubActionsSteps,
+  diagnoseRailwayWorkflowLog,
+  RAILWAY_CI_REQUIRED_SECRETS,
+} from './railway-ci.workflow.js';
+import {
   normalizeProviderDnsRecord,
   providerDnsRecordsAreConfigured,
   type NormalizedDnsRecord,
@@ -25,6 +30,18 @@ export const RailwayCredentialsSchema = z.object({
 export type RailwayCredentials = z.infer<typeof RailwayCredentialsSchema>;
 
 const RAILWAY_API_URL = 'https://backboard.railway.app/graphql/v2';
+
+export const TASK_EXIT_SENTINEL = /__HYPERVIBE_TASK_EXIT:(\d+)__/;
+export const TASK_EXIT_SENTINEL_PREFIX = '__HYPERVIBE_TASK_EXIT:';
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function buildTaskStartCommand(command: string): string {
+  const inner = `${command}; hv_exit=$?; echo "__HYPERVIBE_TASK_EXIT:\${hv_exit}__"; exit $hv_exit`;
+  return `/bin/sh -c ${shellSingleQuote(inner)}`;
+}
 
 function normalizeRailwayGitRepo(repo?: string): string | undefined {
   if (!repo) {
@@ -50,6 +67,16 @@ function cachedBranchForSource(
   return normalizeRailwayGitRepo(cachedSource.repo) === normalizeRailwayGitRepo(sourceRepo)
     ? cachedSource.branch
     : undefined;
+}
+
+function railwayNamePart(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-')
+    || 'default';
 }
 
 export class RailwayAdapter implements IProviderAdapter {
@@ -157,24 +184,50 @@ export class RailwayAdapter implements IProviderAdapter {
         }
       }
 
+      let existingByName: RailwayProject[];
+      try {
+        existingByName = await this.findProjectsByName(projectName);
+      } catch (error) {
+        return {
+          success: false,
+          message: 'Failed to ensure Railway project',
+          error: [
+            `Could not check whether Railway project "${projectName}" already exists, so Hypervibe refused to create a new project that might be a duplicate.`,
+            this.describeError(error),
+          ].join(' '),
+        };
+      }
+      if (existingByName.length === 1) {
+        const existing = existingByName[0];
+        return {
+          success: true,
+          message: `Using existing Railway project: ${existing.name}`,
+          data: { projectId: existing.id, projectName: existing.name, created: false },
+        };
+      }
+      if (existingByName.length > 1) {
+        return {
+          success: false,
+          message: 'Failed to ensure Railway project',
+          error: [
+            `Multiple Railway projects named "${projectName}" are visible: ${existingByName.map((p) => `${p.name} (${p.id})`).join(', ')}.`,
+            'Hypervibe will not create another project or guess which duplicate to manage. Bind/import the intended Railway project id or delete the duplicate, then run hv_plan again.',
+          ].join(' '),
+          data: {
+            projectName,
+            duplicateProjectIds: existingByName.map((p) => p.id),
+          },
+        };
+      }
+
       // Create a new Railway project. Railway GraphQL schema differs across accounts/versions,
       // so try a few compatible mutation shapes before failing.
       let created: { id: string; name: string } | null = null;
       let createError: string | undefined;
-      let reusedByName = false;
       try {
         created = await this.createProject(projectName);
       } catch (error) {
         createError = this.describeError(error);
-      }
-      if (!created) {
-        // Last-resort compatibility: if creation is blocked because a project already exists
-        // with this name, try to reuse it.
-        const existingByName = await this.findProjectByName(projectName);
-        if (existingByName) {
-          created = existingByName;
-          reusedByName = true;
-        }
       }
       if (!created) {
         return {
@@ -186,11 +239,11 @@ export class RailwayAdapter implements IProviderAdapter {
 
       return {
         success: true,
-        message: reusedByName ? `Using existing Railway project: ${created.name}` : `Created Railway project: ${created.name}`,
+        message: `Created Railway project: ${created.name}`,
         data: {
           projectId: created.id,
           projectName: created.name,
-          created: !reusedByName,
+          created: true,
         },
       };
     } catch (error) {
@@ -508,26 +561,82 @@ export class RailwayAdapter implements IProviderAdapter {
         },
       };
     }
-    const serviceName = `${type}-db`;
-    const existingServiceId = await this.resolveServiceIdForProject(projectId, serviceName);
+    const baseServiceName = `${type}-db`;
+    const serviceName = this.railwayServiceNameForEnvironment(baseServiceName, environment.name);
+    const serviceResolution = await this.resolveServiceIdForEnvironment(
+      projectId,
+      this.railwayServiceNameCandidates(baseServiceName, environment.name),
+      environmentId
+    );
+    const existingServiceId = serviceResolution.serviceId;
+    const existingServiceName = serviceResolution.serviceName ?? serviceName;
     if (existingServiceId) {
-      // An earlier provisioning attempt may have created this service without
+      const ensured = serviceResolution.verifiedInEnvironment
+        ? { success: true as const, created: false }
+        : await this.ensureServiceInstanceForEnvironment(
+          existingServiceId,
+          environmentId
+        );
+      if (!ensured.success) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type,
+            bindings: {},
+            externalId: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: false,
+            message: `Existing ${type} service ${existingServiceName} is missing an instance in Railway environment ${environment.name}`,
+            error: ensured.error,
+            data: { serviceId: existingServiceId, serviceName: existingServiceName, environmentId },
+          },
+        };
+      }
+      // An earlier provisioning attempt may have created this environment's service without
       // its bootstrap variables (the image then crashloops uninitialized).
       // Verify and repair before reusing.
-      let repaired = false;
+      const repairKinds: string[] = [];
+      if (ensured.created) {
+        repairKinds.push('Railway environment instance');
+      }
+      let repaired = ensured.created;
+      let needsRedeploy = ensured.created;
       const requiredVar = this.datastoreRequiredVar(type);
       if (requiredVar) {
+        let variableReadError: string | undefined;
         const existingVars = await this.fetchServiceVariables(projectId, existingServiceId, environmentId)
-          .catch(() => null);
+          .catch((error) => {
+            variableReadError = this.describeError(error);
+            return null;
+          });
+        if (!existingVars) {
+          return {
+            component: {
+              id: '',
+              environmentId: environment.id,
+              type,
+              bindings: {},
+              externalId: null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+            receipt: {
+              success: false,
+              message: `Existing ${type} service ${existingServiceName} could not be verified in Railway environment ${environment.name}`,
+              error: variableReadError ?? 'Could not read Railway service variables',
+            },
+          };
+        }
         if (existingVars && !existingVars[requiredVar]) {
-          const bootstrapVars = this.buildDatastoreBootstrapVars(type, serviceName);
+          const bootstrapVars = this.buildDatastoreBootstrapVars(type, existingServiceName);
           const varsSet = bootstrapVars
             ? await this.upsertServiceVariables(projectId, existingServiceId, environmentId, bootstrapVars)
             : { success: true as const };
-          const redeploy = varsSet.success
-            ? await this.redeployDatastoreService(existingServiceId, environmentId)
-            : varsSet;
-          if (!varsSet.success || !redeploy.success) {
+          if (!varsSet.success) {
             return {
               component: {
                 id: '',
@@ -540,12 +649,62 @@ export class RailwayAdapter implements IProviderAdapter {
               },
               receipt: {
                 success: false,
-                message: `Existing ${type} service ${serviceName} is missing ${requiredVar} and repair failed`,
-                error: ('error' in varsSet ? varsSet.error : undefined) ?? ('error' in redeploy ? redeploy.error : undefined),
+                message: `Existing ${type} service ${existingServiceName} is missing ${requiredVar} and repair failed`,
+                error: varsSet.error,
               },
             };
           }
           repaired = true;
+          repairKinds.push('missing bootstrap variables');
+          needsRedeploy = true;
+        }
+      }
+      const mountPath = this.datastoreVolumeMountPath(type);
+      let volumeId: string | undefined;
+      if (ensured.created && mountPath) {
+        const volume = await this.attachServiceVolume(projectId, environmentId, existingServiceId, mountPath);
+        if (!volume.success) {
+          return {
+            component: {
+              id: '',
+              environmentId: environment.id,
+              type,
+              bindings: {},
+              externalId: null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+            receipt: {
+              success: false,
+              message: `Existing ${type} service ${existingServiceName} was added to ${environment.name} but failed to attach a volume`,
+              error: volume.error,
+            },
+          };
+        }
+        volumeId = volume.volumeId;
+        repaired = true;
+        repairKinds.push('persistent volume');
+        needsRedeploy = true;
+      }
+      if (needsRedeploy) {
+        const redeploy = await this.redeployDatastoreService(existingServiceId, environmentId);
+        if (!redeploy.success) {
+          return {
+            component: {
+              id: '',
+              environmentId: environment.id,
+              type,
+              bindings: {},
+              externalId: null,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+            receipt: {
+              success: false,
+              message: `Existing ${type} service ${existingServiceName} was repaired but failed to redeploy`,
+              error: redeploy.error,
+            },
+          };
         }
       }
 
@@ -555,7 +714,8 @@ export class RailwayAdapter implements IProviderAdapter {
         type,
         bindings: {
           resourceKind: 'service',
-          pluginName: serviceName,
+          pluginName: existingServiceName,
+          ...(volumeId ? { volumeId } : {}),
         },
         externalId: existingServiceId,
         createdAt: new Date(),
@@ -566,9 +726,9 @@ export class RailwayAdapter implements IProviderAdapter {
         receipt: {
           success: true,
           message: repaired
-            ? `Using existing ${type} datastore service (${serviceName}); repaired missing bootstrap variables and redeployed`
-            : `Using existing ${type} datastore service (${serviceName})`,
-          data: { serviceId: existingServiceId, serviceName, serviceBacked: true, reused: true, ...(repaired ? { repaired: true } : {}) },
+            ? `Using existing ${type} datastore service (${existingServiceName}); repaired ${repairKinds.join(', ')} and redeployed`
+            : `Using existing ${type} datastore service (${existingServiceName})`,
+          data: { serviceId: existingServiceId, serviceName: existingServiceName, serviceBacked: true, reused: true, ...(repaired ? { repaired: true } : {}) },
         },
       };
     }
@@ -596,6 +756,29 @@ export class RailwayAdapter implements IProviderAdapter {
         }
       );
 
+      const ensured = await this.ensureServiceInstanceForEnvironment(
+        result.serviceCreate.id,
+        environmentId
+      );
+      if (!ensured.success) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type,
+            bindings: {},
+            externalId: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: false,
+            message: `Created ${type} service ${result.serviceCreate.name} but Railway did not expose an instance in ${environment.name}`,
+            error: ensured.error,
+          },
+        };
+      }
+
       const bootstrapVars = this.buildDatastoreBootstrapVars(type, serviceName);
       if (bootstrapVars) {
         const varsSet = await this.upsertServiceVariables(projectId, result.serviceCreate.id, environmentId, bootstrapVars);
@@ -621,6 +804,7 @@ export class RailwayAdapter implements IProviderAdapter {
 
       // Persist data across redeploys; without a volume the datastore is ephemeral.
       const mountPath = this.datastoreVolumeMountPath(type);
+      let volumeId: string | undefined;
       if (mountPath) {
         const volume = await this.attachServiceVolume(projectId, environmentId, result.serviceCreate.id, mountPath);
         if (!volume.success) {
@@ -641,6 +825,7 @@ export class RailwayAdapter implements IProviderAdapter {
             },
           };
         }
+        volumeId = volume.volumeId;
       }
 
       // serviceCreate with source.image starts the first deployment before the
@@ -673,6 +858,7 @@ export class RailwayAdapter implements IProviderAdapter {
         bindings: {
           resourceKind: 'service',
           pluginName: result.serviceCreate.name,
+          ...(volumeId ? { volumeId } : {}),
         },
         externalId: result.serviceCreate.id,
         createdAt: new Date(),
@@ -750,7 +936,7 @@ export class RailwayAdapter implements IProviderAdapter {
     environmentId: string,
     serviceId: string,
     mountPath: string
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{ success: boolean; error?: string; volumeId?: string }> {
     if (!this.client) {
       return { success: false, error: 'Not connected. Call connect() first.' };
     }
@@ -762,9 +948,30 @@ export class RailwayAdapter implements IProviderAdapter {
       }
     `;
     try {
-      await this.client.request(mutation, {
+      const result = await this.client.request<{ volumeCreate?: { id?: string } }>(mutation, {
         input: { projectId, environmentId, serviceId, mountPath },
       });
+      return { success: true, volumeId: result.volumeCreate?.id };
+    } catch (error) {
+      return { success: false, error: this.describeError(error) };
+    }
+  }
+
+  async deleteVolume(volumeId: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.client) {
+      return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+    const mutation = gql`
+      mutation DeleteVolume($volumeId: String!) {
+        volumeDelete(volumeId: $volumeId)
+      }
+    `;
+    try {
+      const result = await this.client.request<Record<string, unknown>>(mutation, { volumeId });
+      const value = result.volumeDelete;
+      if (value === false || value === null) {
+        return { success: false, error: 'volumeDelete returned unsuccessful payload' };
+      }
       return { success: true };
     } catch (error) {
       return { success: false, error: this.describeError(error) };
@@ -978,9 +1185,137 @@ export class RailwayAdapter implements IProviderAdapter {
     return byName?.id;
   }
 
-  private async listProjectServices(projectId: string): Promise<Array<{ id: string; name: string }>> {
+  private railwayServiceNameForEnvironment(baseName: string, environmentName: string): string {
+    const base = railwayNamePart(baseName);
+    const env = railwayNamePart(environmentName);
+    if (env === 'production' || env === 'prod') {
+      return base;
+    }
+    if (base.endsWith(`-${env}`)) {
+      return base;
+    }
+    return `${base}-${env}`.slice(0, 64).replace(/-+$/g, '') || base;
+  }
+
+  private railwayServiceNameCandidates(baseName: string, environmentName: string): string[] {
+    return Array.from(new Set([
+      baseName,
+      this.railwayServiceNameForEnvironment(baseName, environmentName),
+    ]));
+  }
+
+  private boundServiceNameForId(
+    services: Record<string, { serviceId?: string; source?: { repo?: string; branch?: string } }> | undefined,
+    serviceId: string
+  ): string | undefined {
+    return Object.entries(services ?? {})
+      .find(([, binding]) => binding.serviceId === serviceId)?.[0];
+  }
+
+  private hypervibeServiceNameFromRailwayName(providerName: string, environmentName: string): string {
+    const env = railwayNamePart(environmentName);
+    if (env === 'production' || env === 'prod') {
+      return providerName;
+    }
+    const suffix = `-${env}`;
+    return providerName.endsWith(suffix)
+      ? providerName.slice(0, -suffix.length) || providerName
+      : providerName;
+  }
+
+  private async resolveServiceIdForEnvironment(
+    projectId: string,
+    serviceNames: string | string[],
+    environmentId: string,
+    boundServiceId?: string
+  ): Promise<{ serviceId?: string; serviceName?: string; ignoredBoundServiceId?: string; verifiedInEnvironment?: boolean }> {
+    const services = await this.listProjectServices(projectId);
+    const names = new Set(Array.isArray(serviceNames) ? serviceNames : [serviceNames]);
+    const candidates = [
+      ...(boundServiceId && services.some((s) => s.id === boundServiceId) ? [boundServiceId] : []),
+      ...services
+        .filter((s) => names.has(s.name) && s.id !== boundServiceId)
+        .map((s) => s.id),
+    ];
+
+    for (const serviceId of candidates) {
+      const hasInstance = await this.serviceHasEnvironmentInstance(serviceId, environmentId).catch(() => false);
+      if (hasInstance) {
+        const serviceName = services.find((s) => s.id === serviceId)?.name;
+        return { serviceId, serviceName, verifiedInEnvironment: true };
+      }
+    }
+
+    return boundServiceId ? { ignoredBoundServiceId: boundServiceId } : {};
+  }
+
+  private async serviceHasEnvironmentInstance(
+    serviceId: string,
+    environmentId: string
+  ): Promise<boolean> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const query = gql`
+      query GetServiceEnvironmentInstance($serviceId: String!) {
+        service(id: $serviceId) {
+          id
+          serviceInstances {
+            edges {
+              node {
+                environmentId
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const result = await this.client.request<{
+      service?: {
+        serviceInstances?: {
+          edges?: Array<{ node?: { environmentId?: string } }>;
+        };
+      } | null;
+    }>(query, { serviceId });
+
+    return (result.service?.serviceInstances?.edges ?? [])
+      .some((edge) => edge.node?.environmentId === environmentId);
+  }
+
+  private async ensureServiceInstanceForEnvironment(
+    serviceId: string,
+    environmentId: string
+  ): Promise<{ success: true; created: boolean } | { success: false; error: string }> {
+    if (!this.client) {
+      return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+
+    try {
+      if (await this.serviceHasEnvironmentInstance(serviceId, environmentId)) {
+        return { success: true, created: false };
+      }
+
+      return {
+        success: false,
+        error: `Railway service ${serviceId} has no service instance in environment ${environmentId}. Re-run hv_plan/hv_apply so Hypervibe can create or bind an environment-scoped service before deploy/domain/task operations.`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: this.describeError(error),
+      };
+    }
+  }
+
+  private async listProjectServices(
+    projectId: string,
+    options?: { throwOnFailure?: boolean }
+  ): Promise<Array<{ id: string; name: string }>> {
     const client = this.client;
     if (!client) return [];
+    let lastError: unknown;
     const attempts = [
       gql`
         query GetProjectServicesConnection($projectId: String!) {
@@ -1029,9 +1364,14 @@ export class RailwayAdapter implements IProviderAdapter {
         return edges
           .map((e) => ({ id: e.node?.id ?? '', name: e.node?.name ?? '' }))
           .filter((s) => s.id.length > 0 && s.name.length > 0);
-      } catch {
+      } catch (error) {
+        lastError = error;
         // Try next shape.
       }
+    }
+
+    if (options?.throwOnFailure && lastError) {
+      throw lastError;
     }
 
     return [];
@@ -1098,56 +1438,25 @@ export class RailwayAdapter implements IProviderAdapter {
       return { success: false, error: 'Not connected. Call connect() first.' };
     }
 
-    const attempts: Array<{ mutation: string; variables: Record<string, unknown>; label: string }> = [
-      {
-        label: 'serviceDelete.id',
-        mutation: `
-          mutation DeleteService($id: String!) {
-            serviceDelete(id: $id)
-          }
-        `,
-        variables: { id: serviceId },
-      },
-      {
-        label: 'serviceDelete.input.id',
-        mutation: `
-          mutation DeleteService($id: String!) {
-            serviceDelete(input: { id: $id })
-          }
-        `,
-        variables: { id: serviceId },
-      },
-      {
-        label: 'serviceDelete.input.serviceId',
-        mutation: `
-          mutation DeleteService($id: String!) {
-            serviceDelete(input: { serviceId: $id })
-          }
-        `,
-        variables: { id: serviceId },
-      },
-    ];
-
-    const errors: string[] = [];
-    for (const attempt of attempts) {
-      try {
-        const result = await this.client.request<Record<string, unknown>>(gql`${attempt.mutation}`, attempt.variables);
-        const accepted = this.isDeleteAccepted(result, 'serviceDelete');
-        if (!accepted) {
-          errors.push(`${attempt.label}: delete mutation returned unsuccessful payload`);
-          continue;
+    try {
+      const mutation = gql`
+        mutation DeleteService($id: String!) {
+          serviceDelete(id: $id)
         }
-        const deleted = await this.waitUntilServiceDeleted(serviceId);
-        if (deleted) {
-          return { success: true };
-        }
-        errors.push(`${attempt.label}: delete acknowledged but service still exists (${serviceId})`);
-      } catch (error) {
-        errors.push(`${attempt.label}: ${this.describeError(error)}`);
+      `;
+      const result = await this.client.request<Record<string, unknown>>(mutation, { id: serviceId });
+      const accepted = this.isDeleteAccepted(result, 'serviceDelete');
+      if (!accepted) {
+        return { success: false, error: 'serviceDelete.id: delete mutation returned unsuccessful payload' };
       }
+      const deleted = await this.waitUntilServiceDeleted(serviceId);
+      if (deleted) {
+        return { success: true };
+      }
+      return { success: false, error: `serviceDelete.id: delete acknowledged but service still exists (${serviceId})` };
+    } catch (error) {
+      return { success: false, error: `serviceDelete.id: ${this.describeError(error)}` };
     }
-
-    return { success: false, error: errors.join(' | ') };
   }
 
   private isDeleteAccepted(payload: Record<string, unknown>, field: 'projectDelete' | 'serviceDelete'): boolean {
@@ -1280,12 +1589,17 @@ export class RailwayAdapter implements IProviderAdapter {
         };
       }
 
-      // Check if service already exists
-      let railwayServiceId = await this.resolveServiceIdForProject(
+      // Check if a service is already bound to this Railway environment. A
+      // project-level service that only has instances in another environment
+      // cannot be deployed here; create a target-environment service instead.
+      const providerServiceName = this.railwayServiceNameForEnvironment(service.name, environment.name);
+      const serviceResolution = await this.resolveServiceIdForEnvironment(
         projectId,
-        service.name,
+        this.railwayServiceNameCandidates(service.name, environment.name),
+        railwayEnvId,
         bindings.services?.[service.name]?.serviceId
       );
+      let railwayServiceId = serviceResolution.serviceId;
       let createdService = false;
 
       if (!railwayServiceId) {
@@ -1305,13 +1619,38 @@ export class RailwayAdapter implements IProviderAdapter {
             input: {
               projectId,
               environmentId: railwayEnvId,
-              name: service.name,
+              name: providerServiceName,
             },
           }
         );
 
         railwayServiceId = createResult.serviceCreate.id;
         createdService = true;
+      }
+
+      const ensuredInstance = serviceResolution.verifiedInEnvironment
+        ? { success: true as const, created: false }
+        : await this.ensureServiceInstanceForEnvironment(
+          railwayServiceId,
+          railwayEnvId
+        );
+      if (!ensuredInstance.success) {
+        return {
+          serviceId: service.id,
+          externalId: railwayServiceId,
+          status: 'failed',
+          receipt: {
+            success: false,
+            message: `Railway service ${service.name} is missing an instance in environment ${environment.name}`,
+            error: ensuredInstance.error,
+            data: {
+              provider: this.name,
+              phase: 'ensureServiceInstance',
+              serviceId: railwayServiceId,
+              environmentId: railwayEnvId,
+            },
+          },
+        };
       }
 
       const runtimeConfig = {
@@ -1395,6 +1734,7 @@ export class RailwayAdapter implements IProviderAdapter {
             railwayServiceId,
             environmentId: railwayEnvId,
             createdService,
+            ...(serviceResolution.ignoredBoundServiceId ? { replacedServiceBinding: serviceResolution.ignoredBoundServiceId } : {}),
             ...(url ? { url } : {}),
             ...(domainError ? { domainError } : {}),
           },
@@ -1438,15 +1778,34 @@ export class RailwayAdapter implements IProviderAdapter {
     }
 
     try {
-      const railwayServiceId = await this.resolveServiceIdForProject(
+      environmentId = await this.resolveRailwayEnvironmentId(projectId, environment);
+
+      if (!environmentId) {
+        return {
+          success: false,
+          message: 'No Railway environment ID available for variable update',
+        };
+      }
+
+      const serviceResolution = await this.resolveServiceIdForEnvironment(
         projectId,
-        service.name,
+        this.railwayServiceNameCandidates(service.name, environment.name),
+        environmentId,
         bindings.services?.[service.name]?.serviceId
       );
+      const railwayServiceId = serviceResolution.serviceId;
       if (!railwayServiceId) {
         return {
           success: false,
-          message: `Service ${service.name} not found in Railway project ${projectId}`,
+          message: `Service ${service.name} not found in Railway environment ${environment.name}`,
+          data: {
+            phase: 'resolveService',
+            projectId,
+            environmentId,
+            ...(serviceResolution.ignoredBoundServiceId
+              ? { staleBinding: true, ignoredBoundServiceId: serviceResolution.ignoredBoundServiceId }
+              : {}),
+          },
         };
       }
 
@@ -1463,12 +1822,20 @@ export class RailwayAdapter implements IProviderAdapter {
         }
       `;
 
-      environmentId = await this.resolveRailwayEnvironmentId(projectId, environment);
-
-      if (!environmentId) {
+      const ensuredInstance = await this.ensureServiceInstanceForEnvironment(
+        railwayServiceId,
+        environmentId
+      );
+      if (!ensuredInstance.success) {
         return {
           success: false,
-          message: 'No Railway environment ID available for variable update',
+          message: `Railway service ${service.name} is missing an instance in environment ${environment.name}`,
+          error: ensuredInstance.error,
+          data: {
+            phase: 'ensureServiceInstance',
+            serviceId: railwayServiceId,
+            environmentId,
+          },
         };
       }
 
@@ -1638,11 +2005,13 @@ export class RailwayAdapter implements IProviderAdapter {
     }
     const client = this.client;
     const startedAt = Date.now();
+    const cleanupWarnings: string[] = [];
     const fail = (message: string, error?: string, data?: Record<string, unknown>): JobResult => ({
       jobId: '',
       status: 'failed',
       runner: 'railway-temp-service',
       durationMs: Date.now() - startedAt,
+      ...(cleanupWarnings.length > 0 ? { cleanupWarning: cleanupWarnings.join(' ') } : {}),
       receipt: {
         success: false,
         message,
@@ -1663,6 +2032,23 @@ export class RailwayAdapter implements IProviderAdapter {
       return fail(
         `Railway environment task requires bindings for service ${service.name}`,
         'Missing Railway project/environment/service bindings. Apply service convergence first.'
+      );
+    }
+
+    const sweepWarning = await this.sweepTaskServices(projectId);
+    if (sweepWarning) {
+      cleanupWarnings.push(sweepWarning);
+    }
+
+    const ensuredSourceInstance = await this.ensureServiceInstanceForEnvironment(
+      sourceServiceId,
+      environmentId
+    );
+    if (!ensuredSourceInstance.success) {
+      return fail(
+        `Railway environment task requires service ${service.name} in environment ${environment.name}`,
+        ensuredSourceInstance.error,
+        { phase: 'ensureServiceInstance', serviceId: sourceServiceId, environmentId }
       );
     }
 
@@ -1742,8 +2128,7 @@ export class RailwayAdapter implements IProviderAdapter {
       const pull = image.startsWith('ghcr.io/') ? githubPackagePullCredentials() : null;
       // The sentinel is the exit-code source of truth: Railway deployment
       // statuses have no run-to-completion value for a NEVER-restart service.
-      const inner = `${command}; hv_exit=$?; echo "__HYPERVIBE_TASK_EXIT:$hv_exit__"; exit $hv_exit`;
-      const startCommand = `/bin/sh -c '${inner.replace(/'/g, `'\\''`)}'`;
+      const startCommand = buildTaskStartCommand(command);
       await client.request(
         gql`
           mutation ConfigureTaskService(
@@ -1780,13 +2165,18 @@ export class RailwayAdapter implements IProviderAdapter {
         return fail('Railway did not return a deployment id for the task service');
       }
 
-      const timeoutMs = options?.timeoutMs ?? 15 * 60 * 1000;
+      const timeoutMs = options?.timeoutMs ?? 4 * 60 * 1000;
       const pollIntervalMs = options?.pollIntervalMs ?? 3000;
-      const sentinel = /__HYPERVIBE_TASK_EXIT:(\d+)__/;
       const deadline = Date.now() + timeoutMs;
       let exitCode: number | undefined;
       let deployStatus = 'UNKNOWN';
       let logs: RailwayLogEntry[] = [];
+      const outputFrom = (entries: RailwayLogEntry[]): string => entries
+        .slice(-100)
+        .map((entry) => entry.message)
+        .filter((message) => !message.includes(TASK_EXIT_SENTINEL_PREFIX))
+        .join('\n')
+        .slice(-4000);
       for (;;) {
         try {
           const statusResult = await client.request<{ deployment?: { status?: string } }>(
@@ -1808,10 +2198,30 @@ export class RailwayAdapter implements IProviderAdapter {
         } catch {
           // Logs are unavailable while the image is still building.
         }
-        const match = logs.map((entry) => entry.message).join('\n').match(sentinel);
+        const logText = logs.map((entry) => entry.message).join('\n');
+        const match = logText.match(TASK_EXIT_SENTINEL);
         if (match) {
           exitCode = Number(match[1]);
           break;
+        }
+        if (logText.includes(TASK_EXIT_SENTINEL_PREFIX)) {
+          const durationMs = Date.now() - startedAt;
+          const output = outputFrom(logs);
+          const data = { taskService: taskName, taskServiceId, deploymentId, image, deployStatus };
+          return {
+            jobId: deploymentId,
+            status: 'failed',
+            durationMs,
+            output,
+            runner: 'railway-temp-service',
+            ...(cleanupWarnings.length > 0 ? { cleanupWarning: cleanupWarnings.join(' ') } : {}),
+            receipt: {
+              success: false,
+              message: 'Railway environment task emitted a malformed exit sentinel',
+              error: `Task logs contained ${TASK_EXIT_SENTINEL_PREFIX} but no parseable exit code. This indicates a Hypervibe command-wrapper bug.`,
+              data,
+            },
+          };
         }
         if (deployStatus === 'CRASHED' || deployStatus === 'FAILED') {
           break;
@@ -1823,12 +2233,7 @@ export class RailwayAdapter implements IProviderAdapter {
       }
 
       const durationMs = Date.now() - startedAt;
-      const output = logs
-        .slice(-100)
-        .map((entry) => entry.message)
-        .filter((message) => !sentinel.test(message))
-        .join('\n')
-        .slice(-4000);
+      const output = outputFrom(logs);
       const data = { taskService: taskName, taskServiceId, deploymentId, image, deployStatus };
       if (exitCode === 0) {
         return {
@@ -1897,17 +2302,41 @@ export class RailwayAdapter implements IProviderAdapter {
       );
     }
 
-    let cleanupWarning: string | undefined;
     try {
       const deleted = await this.deleteService(taskServiceId);
       if (!deleted.success) {
-        cleanupWarning = `Temporary task service ${taskName} (${taskServiceId}) could not be deleted: ${deleted.error ?? 'unknown error'}. Delete it in Railway to avoid billing.`;
+        cleanupWarnings.push(`Temporary task service ${taskName} (${taskServiceId}) could not be deleted: ${deleted.error ?? 'unknown error'}. Delete it in Railway to avoid billing.`);
       }
     } catch (error) {
-      cleanupWarning = `Temporary task service ${taskName} (${taskServiceId}) could not be deleted: ${error instanceof Error ? error.message : String(error)}. Delete it in Railway to avoid billing.`;
+      cleanupWarnings.push(`Temporary task service ${taskName} (${taskServiceId}) could not be deleted: ${error instanceof Error ? error.message : String(error)}. Delete it in Railway to avoid billing.`);
     }
 
-    return { ...outcome, ...(cleanupWarning ? { cleanupWarning } : {}) };
+    return { ...outcome, ...(cleanupWarnings.length > 0 ? { cleanupWarning: cleanupWarnings.join(' ') } : {}) };
+  }
+
+  private async sweepTaskServices(projectId: string): Promise<string | undefined> {
+    try {
+      const services = await this.listProjectServices(projectId, { throwOnFailure: true });
+      const taskServices = services.filter((service) => service.name.startsWith('hv-task-'));
+      const failures: string[] = [];
+
+      for (const service of taskServices) {
+        try {
+          const deleted = await this.deleteService(service.id);
+          if (!deleted.success) {
+            failures.push(`${service.name} (${service.id}): ${deleted.error ?? 'unknown error'}`);
+          }
+        } catch (error) {
+          failures.push(`${service.name} (${service.id}): ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      return failures.length > 0
+        ? `Could not delete leftover Railway task service(s): ${failures.join('; ')}.`
+        : undefined;
+    } catch (error) {
+      return `Could not inspect leftover Railway task services before run: ${error instanceof Error ? error.message : String(error)}.`;
+    }
   }
 
   /**
@@ -2460,6 +2889,24 @@ export class RailwayAdapter implements IProviderAdapter {
       };
     }
 
+    const ensuredInstance = await this.ensureServiceInstanceForEnvironment(
+      params.serviceId,
+      params.environmentId
+    );
+    if (!ensuredInstance.success) {
+      return {
+        success: false,
+        message: 'Failed to attach Railway custom domain',
+        error: `Railway service ${params.serviceId} has no service instance in environment ${params.environmentId}: ${ensuredInstance.error}`,
+        data: {
+          phase: 'ensureServiceInstance',
+          serviceId: params.serviceId,
+          environmentId: params.environmentId,
+          domain: params.domain,
+        },
+      };
+    }
+
     const existing = await this.getCustomDomainStatus(params);
     if (existing) {
       return {
@@ -2615,8 +3062,13 @@ export class RailwayAdapter implements IProviderAdapter {
   }
 
   async findProjectByName(name: string): Promise<RailwayProject | null> {
+    return (await this.findProjectsByName(name))[0] ?? null;
+  }
+
+  async findProjectsByName(name: string): Promise<RailwayProject[]> {
     const projects = await this.listProjects();
-    return projects.find((p) => p.name.toLowerCase() === name.toLowerCase()) ?? null;
+    const normalized = name.toLowerCase();
+    return projects.filter((p) => p.name.toLowerCase() === normalized);
   }
 
   /**
@@ -2862,7 +3314,16 @@ export class RailwayAdapter implements IProviderAdapter {
     }
     if (!environmentId) {
       warnings.push(`Could not resolve Railway environment for "${environment.name}"`);
-      partial = true;
+      return {
+        provider: 'railway',
+        observedAt,
+        projectExists: true,
+        projectId,
+        services: [],
+        databases: [],
+        partial: false,
+        warnings,
+      };
     }
 
     const services: ObservedService[] = [];
@@ -2870,6 +3331,12 @@ export class RailwayAdapter implements IProviderAdapter {
 
     for (const edge of details.services?.edges ?? []) {
       const node = edge.node;
+      const instanceEdges = node.serviceInstances?.edges ?? [];
+      const instance = instanceEdges.find((e) => e.node.environmentId === environmentId)?.node;
+      if (!instance) {
+        continue;
+      }
+
       const engine = this.classifyDatastoreEngine(node.name);
       if (engine) {
         databases.push({
@@ -2882,11 +3349,8 @@ export class RailwayAdapter implements IProviderAdapter {
         continue;
       }
 
-      const instanceEdges = node.serviceInstances?.edges ?? [];
-      const instance =
-        (environmentId
-          ? instanceEdges.find((e) => e.node.environmentId === environmentId)
-          : instanceEdges[0])?.node ?? instanceEdges[0]?.node;
+      const observedServiceName = this.boundServiceNameForId(bindings.services, node.id)
+        ?? this.hypervibeServiceNameFromRailwayName(node.name, environment.name);
 
       const serviceDomain = instance?.domains?.serviceDomains?.[0]?.domain;
       const customDomains = (instance?.domains?.customDomains ?? []).map((d) => d.domain);
@@ -2928,7 +3392,7 @@ export class RailwayAdapter implements IProviderAdapter {
               : 'empty';
           }
         } catch (error) {
-          warnings.push(`Failed to read service instance for "${node.name}": ${this.describeError(error)}`);
+          warnings.push(`Failed to read service instance for "${observedServiceName}" (${node.name}): ${this.describeError(error)}`);
           partial = true;
         }
       }
@@ -2943,7 +3407,7 @@ export class RailwayAdapter implements IProviderAdapter {
             envVarHashes[key] = hashEnvValue(value);
           }
         } catch (error) {
-          warnings.push(`Failed to read variables for "${node.name}": ${this.describeError(error)}`);
+          warnings.push(`Failed to read variables for "${observedServiceName}" (${node.name}): ${this.describeError(error)}`);
           partial = true;
         }
       }
@@ -2952,12 +3416,12 @@ export class RailwayAdapter implements IProviderAdapter {
       // repoTriggers on the Service is for webhook-configured deploys.
       // Use the instance source as primary, repoTriggers as fallback.
       const repoTrigger = node.repoTriggers?.edges?.[0]?.node;
-      const cachedSource = bindings.services?.[node.name]?.source;
+      const cachedSource = bindings.services?.[observedServiceName]?.source;
       const sourceRepo = instanceSourceRepo ?? repoTrigger?.repository ?? cachedSource?.repo;
       const sourceBranch = repoTrigger?.branch ?? cachedBranchForSource(cachedSource, sourceRepo);
 
       services.push({
-        name: node.name,
+        name: observedServiceName,
         externalId: node.id,
         workloadKind: cronSchedule ? 'cron' : 'web',
         url: serviceDomain ? `https://${serviceDomain}` : undefined,
@@ -3194,6 +3658,38 @@ providerRegistry.register({
     category: 'deployment',
     credentialsSchema: RailwayCredentialsSchema,
     setupHelpUrl: 'https://railway.com/account/tokens',
+    credentials: {
+      defaultScalarKey: 'apiToken',
+    },
+    orchestration: {
+      project: {
+        shareAcrossEnvironments: true,
+      },
+      diff: {
+        requiresBranchDeployForCode: true,
+        workloadKindObservation: 'cron-only',
+        presenceOnlyManagedEnvVar: ({ value }) => /^\$\{\{[^}]+\}\}$/.test(value),
+      },
+      logs: {
+        runtime: true,
+        deployments: true,
+        build: true,
+      },
+      ci: {
+        displayName: 'Railway',
+        requiredSecrets: RAILWAY_CI_REQUIRED_SECRETS,
+        secretCredentialKeys: {
+          RAILWAY_API_TOKEN: 'apiToken',
+        },
+        requiresGitHubPackagePull: true,
+        buildGitHubActionsSteps: buildRailwayGitHubActionsSteps,
+        diagnoseWorkflowLog: diagnoseRailwayWorkflowLog,
+      },
+      nativeBranchDeploy: {
+        needsGitHubAppAccess: true,
+        githubAppInstallUrl: 'https://github.com/apps/railway-app/installations/new',
+      },
+    },
   },
   factory: (credentials) => {
     const adapter = new RailwayAdapter();

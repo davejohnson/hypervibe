@@ -378,9 +378,14 @@ export class DeployOrchestrator {
           }
 
           const failures: string[] = [];
+          const skippedStaleBindings: string[] = [];
           for (const service of alreadyDeployed) {
             const receipt = await options.adapter.setEnvVars(environment, service, vars);
             if (!receipt.success) {
+              if ((receipt.data as Record<string, unknown> | undefined)?.staleBinding === true) {
+                skippedStaleBindings.push(service.name);
+                continue;
+              }
               failures.push(`${service.name}: ${receipt.error ?? receipt.message}`);
             }
           }
@@ -391,6 +396,7 @@ export class DeployOrchestrator {
             result: {
               serviceCount: alreadyDeployed.length,
               variableCount: Object.keys(vars).length,
+              ...(skippedStaleBindings.length > 0 ? { skippedStaleBindings } : {}),
             },
             error: failures.length > 0 ? failures.join('; ') : undefined,
             timestamp,

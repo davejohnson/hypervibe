@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseToolEnvelope } from './tool-result.js';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import '../../adapters/providers/railway/railway.adapter.js';
+import '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
@@ -63,6 +65,16 @@ async function makeClient() {
 }
 
 describe('hv_ci_setup', () => {
+  it('keeps provider-specific workflow diagnostics outside the generic CI tool', () => {
+    const source = readFileSync(new URL('../hv-ci.tools.ts', import.meta.url), 'utf8');
+
+    expect(source).not.toContain('RAILWAY_SERVICE_INSTANCE_MISSING');
+    expect(source).not.toContain('RAILWAY_DEPLOY_POLLING_GRAPHQL_400');
+    expect(source).not.toContain('Service Instance not found');
+    expect(source).not.toContain('serviceInstanceDeployV2');
+    expect(source).not.toContain('Railway API 400');
+  });
+
   it('creates a workflow from a template (kind="workflow")', async () => {
     seedProject();
     const createFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: true, updated: false } as any);
@@ -570,6 +582,42 @@ describe('hv_ci_status', () => {
     const railwayDiagnostic = res.data.diagnostics.find((entry: { code: string }) => entry.code === 'RAILWAY_DEPLOY_POLLING_GRAPHQL_400');
     expect(railwayDiagnostic.summary).toContain('serviceInstanceDeployV2');
     expect(railwayDiagnostic.next).toContainEqual(expect.stringContaining('hv_plan + hv_apply'));
+    await t.close();
+  });
+
+  it('diagnoses Railway missing service instances from deploy workflow logs', async () => {
+    seedProject();
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunJobs').mockResolvedValue({
+      total_count: 1,
+      jobs: [{
+        id: 101,
+        run_id: 456,
+        name: 'deploy',
+        status: 'completed',
+        conclusion: 'failure',
+        started_at: '2026-07-04T18:16:30Z',
+        completed_at: '2026-07-04T18:17:00Z',
+        html_url: 'https://github.com/davejohnson/billforge/actions/runs/456/job/101',
+        steps: [],
+      }],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getWorkflowJobLogs').mockResolvedValue([
+      'Railway GraphQL error during DeployServiceImage variables={"serviceId":"svc-web","environmentId":"env-staging"}: Service Instance not found',
+      'Railway service svc-web has no service instance in environment env-staging. Re-run Hypervibe hv_plan/hv_apply.',
+    ].join('\n'));
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', { project: 'billforge', include: ['logs'], runId: 456 });
+
+    expect(res.ok).toBe(true);
+    expect(res.data.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'RAILWAY_SERVICE_INSTANCE_MISSING',
+      jobId: 101,
+      jobName: 'deploy',
+    }));
+    const diagnostic = res.data.diagnostics.find((entry: { code: string }) => entry.code === 'RAILWAY_SERVICE_INSTANCE_MISSING');
+    expect(diagnostic.summary).toContain('no service instance');
+    expect(diagnostic.next).toContainEqual(expect.stringContaining('hv_plan'));
     await t.close();
   });
 });

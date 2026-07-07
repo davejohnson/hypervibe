@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
 import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
+import '../../../adapters/providers/railway/railway.adapter.js';
+import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
@@ -19,6 +21,7 @@ import { AppStoreConnectAdapter } from '../../../adapters/providers/appstoreconn
 import { isIosAction } from '../../services/appstore-plan.service.js';
 import { hashEnvValue, type ObservedState } from '../../ports/observe.port.js';
 import type { Project } from '../../entities/project.entity.js';
+import type { Environment } from '../../entities/environment.entity.js';
 import { buildBranchDeployWorkflow } from '../../services/github-ops.service.js';
 
 let project: Project;
@@ -145,6 +148,212 @@ describe('PlanService.plan', () => {
     expect(new EnvironmentRepository().findByProjectAndName(project.id, 'staging')).toBeTruthy();
   });
 
+  it('reuses a shared Railway project binding when planning a new environment', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          database: { provider: 'railway', engine: 'postgres' },
+          envVars: { NODE_ENV: 'production' },
+        },
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          database: { provider: 'railway', engine: 'postgres' },
+          envVars: { NODE_ENV: 'staging' },
+        },
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project-canonical',
+        environmentId: 'rail-env-prod',
+        services: { web: { serviceId: 'svc-prod' } },
+      },
+    });
+    const observedBindings: Record<string, unknown>[] = [];
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'railway',
+        capabilities: {
+          supportedBuilders: ['nixpacks'],
+          supportedComponents: ['postgres'],
+          supportsAutoWiring: true,
+          supportsHealthChecks: true,
+          supportsCronSchedule: true,
+          supportsReleaseCommand: false,
+          supportsMultiEnvironment: true,
+          managedTls: true,
+          supportsObserve: true,
+        },
+        connect: async () => {},
+        verify: async () => ({ success: true }),
+        ensureProject: async () => ({ success: true, message: 'ok' }),
+        ensureComponent: async () => { throw new Error('unused'); },
+        deploy: async () => { throw new Error('unused'); },
+        setEnvVars: async () => ({ success: true, message: 'ok' }),
+        observe: async (environment: Environment) => {
+          observedBindings.push(environment.platformBindings);
+          return {
+            provider: 'railway',
+            observedAt: new Date().toISOString(),
+            projectExists: true,
+            projectId: 'rail-project-canonical',
+            services: [],
+            databases: [],
+            partial: false,
+            warnings: ['Could not resolve Railway environment for "staging"'],
+          };
+        },
+      },
+    });
+
+    const result = await new PlanService().plan(project, 'staging');
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find((a) => a.id === 'project:railway')).toBeUndefined();
+    expect(plan.actions.find((a) => a.id === 'environment:staging')?.type).toBe('create');
+    expect(plan.actions.find((a) => a.id === 'service:web')?.type).toBe('create');
+    expect(plan.actions.find((a) => a.id === 'database:railway')?.type).toBe('create');
+    expect(observedBindings[0]).toMatchObject({
+      provider: 'railway',
+      projectId: 'rail-project-canonical',
+    });
+    expect(plan.warnings).toContain(
+      'Reusing Railway project binding rail-project-canonical from environment "production" for environment "staging".'
+    );
+    expect(new EnvironmentRepository().findByProjectAndName(project.id, 'staging')?.platformBindings).toMatchObject({
+      provider: 'railway',
+      projectId: 'rail-project-canonical',
+    });
+  });
+
+  it('does not guess the shared provider project when sibling environment bindings disagree', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: { NODE_ENV: 'staging' },
+        },
+      },
+    });
+    const envRepo = new EnvironmentRepository();
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'rail-project-1' },
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'preview',
+      platformBindings: { provider: 'railway', projectId: 'rail-project-2' },
+    });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'unused' });
+
+    const result = await new PlanService().plan(project, 'staging');
+
+    expect(result).toMatchObject({
+      error: expect.stringContaining('multiple existing railway project bindings'),
+    });
+  });
+
+  it('repairs an empty stale Railway project binding from the shared project binding', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: { NODE_ENV: 'production' },
+        },
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: { NODE_ENV: 'staging' },
+        },
+      },
+    });
+    const envRepo = new EnvironmentRepository();
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'rail-project-canonical' },
+    });
+    const staging = envRepo.create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { projectId: 'rail-project-stale' },
+    });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'no connection' });
+
+    const result = await new PlanService().plan(project, 'staging');
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find((a) => a.id === 'project:railway')).toBeUndefined();
+    expect(plan.warnings).toContain(
+      'Replaced stale Railway project binding rail-project-stale with shared project binding rail-project-canonical from environment "production" for environment "staging".'
+    );
+    expect(envRepo.findById(staging.id)?.platformBindings).toMatchObject({
+      provider: 'railway',
+      projectId: 'rail-project-canonical',
+    });
+  });
+
+  it('refuses to repair a stale shared project binding when service ids are still attached', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: { NODE_ENV: 'production' },
+        },
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: { NODE_ENV: 'staging' },
+        },
+      },
+    });
+    const envRepo = new EnvironmentRepository();
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'rail-project-canonical' },
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project-stale',
+        environmentId: 'rail-env-stale',
+        services: { web: { serviceId: 'svc-stale' } },
+      },
+    });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'unused' });
+
+    const result = await new PlanService().plan(project, 'staging');
+
+    expect(result).toMatchObject({
+      error: expect.stringContaining('will not guess because "staging" still has provider environment/service bindings'),
+    });
+  });
+
   it('reports blocked providers without verified connections', async () => {
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'no connection' });
     const result = await new PlanService().plan(project, 'staging');
@@ -176,6 +385,37 @@ describe('PlanService.plan', () => {
       hosting: { provider: 'railway' },
       services: {},
       domain: 'apreskeys.com',
+      email: { enabled: false },
+      envVars: {},
+    });
+    expect(unblocked.some((entry) => entry.provider === 'cloudflare')).toBe(false);
+  });
+
+  it('uses the parent Cloudflare zone scope for subdomain preflight', () => {
+    const connRepo = new ConnectionRepository();
+    const failedSubdomain = connRepo.create({ provider: 'cloudflare', scope: 'staging.apreskeys.com', credentialsEncrypted: 'x' });
+    connRepo.updateStatus(failedSubdomain.id, 'failed');
+
+    const service = new PlanService();
+    const missing = service.preflight({
+      hosting: { provider: 'railway' },
+      services: {},
+      domain: 'staging.apreskeys.com',
+      email: { enabled: false },
+      envVars: {},
+    });
+    expect(missing).toContainEqual(expect.objectContaining({
+      provider: 'cloudflare',
+      scope: 'apreskeys.com',
+      reason: expect.stringContaining('apreskeys.com'),
+    }));
+
+    const parent = connRepo.create({ provider: 'cloudflare', scope: 'apreskeys.com', credentialsEncrypted: 'x' });
+    connRepo.updateStatus(parent.id, 'verified');
+    const unblocked = service.preflight({
+      hosting: { provider: 'railway' },
+      services: {},
+      domain: 'staging.apreskeys.com',
       email: { enabled: false },
       envVars: {},
     });
@@ -987,7 +1227,7 @@ describe('PlanService.plan', () => {
       });
     });
 
-    it('warns when the environment-specific env file is missing and base .env is used', async () => {
+    it('creates the environment-specific env file from base .env before loading deploy vars', async () => {
       const oldCwd = process.cwd();
       const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-env-fallback-plan-'));
       mkdirSync(path.join(root, '.git'));
@@ -1028,12 +1268,12 @@ describe('PlanService.plan', () => {
         const result = await new PlanService().plan(project, 'staging');
         const plan = result as Exclude<typeof result, { error: string }>;
 
-        expect(plan.warnings).toContainEqual(expect.stringContaining(`No environment-specific deploy env file found at ${stagingEnvFile}`));
-        expect(plan.warnings).toContainEqual(expect.stringContaining(`using base ${baseEnvFile}`));
-        expect(plan.warnings).toContainEqual(expect.stringContaining('copying selected runtime keys into the plan'));
+        expect(plan.warnings).toContainEqual(expect.stringContaining(`Created environment-specific deploy env file at ${stagingEnvFile}`));
+        expect(plan.warnings).toContainEqual(expect.stringContaining(`from base ${baseEnvFile}`));
+        expect(existsSync(stagingEnvFile)).toBe(true);
         const doc = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
         const overrides = doc.overrides as Record<string, unknown>;
-        expect(overrides.envFilePath).toBe(baseEnvFile);
+        expect(overrides.envFilePath).toBe(stagingEnvFile);
         expect(overrides.envFileKeys).toEqual(['SENDGRID_API_KEY']);
       } finally {
         process.chdir(oldCwd);

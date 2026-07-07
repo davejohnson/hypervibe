@@ -27,6 +27,15 @@ export interface ToolEnvelope {
     message: string;
     details?: unknown;
   };
+  /**
+   * Agent-control guidance. Hypervibe tools are often used by autonomous
+   * coding agents; this tells them when to stop and ask instead of trying
+   * unrelated workaround calls.
+   */
+  agentInstruction?: {
+    action: 'continue' | 'stop_and_report' | 'ask_user';
+    message: string;
+  };
   /** What the agent should do next to make progress. */
   hint?: string;
   warnings?: string[];
@@ -46,6 +55,7 @@ export interface ResponseExtras {
   hint?: string;
   warnings?: string[];
   next?: string[];
+  agentInstruction?: ToolEnvelope['agentInstruction'];
 }
 
 const REDACTED = '[redacted]';
@@ -150,6 +160,56 @@ function redactForResponse(value: unknown, keyHint?: string, seen = new WeakSet<
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isNonEmptyArrayField(record: Record<string, unknown>, key: string): boolean {
+  const value = record[key];
+  return Array.isArray(value) && value.length > 0;
+}
+
+function hasReceiptStatus(value: unknown, statuses: Set<string>): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some((entry) => {
+    if (!isRecord(entry)) return false;
+    const status = typeof entry.status === 'string' ? entry.status.toLowerCase() : '';
+    return statuses.has(status);
+  });
+}
+
+function successAgentInstruction(data: unknown): ToolEnvelope['agentInstruction'] | undefined {
+  if (!isRecord(data)) return undefined;
+  if (isNonEmptyArrayField(data, 'blocked') || isNonEmptyArrayField(data, 'actionScopedBlocked')) {
+    return {
+      action: 'ask_user',
+      message: 'Stop here. Summarize the blockers and ask the user to provide the missing connection, confirmation, or direction before running more apply/deploy tools.',
+    };
+  }
+  if (data.applied === false || data.success === false || hasReceiptStatus(data.receipts, new Set(['failed', 'blocked', 'pending', 'aborted']))) {
+    return {
+      action: 'stop_and_report',
+      message: 'Stop here. Report which stage receipts succeeded, failed, were blocked, or are pending; ask the user before retrying or trying a different path.',
+    };
+  }
+  return undefined;
+}
+
+function errorAgentInstruction(code: ErrorCode): ToolEnvelope['agentInstruction'] {
+  if (code === 'CONFIRM_REQUIRED') {
+    return {
+      action: 'ask_user',
+      message: 'Stop here. Report the confirmation requirement and ask the user before rerunning with confirm=true or confirmActions.',
+    };
+  }
+  if (code === 'MISSING_CONNECTION') {
+    return {
+      action: 'ask_user',
+      message: 'Stop here. Report the missing connection and ask the user for an exported token, dotenv/file credentialsRef, or explicit chat entry; do not work around it with other tools.',
+    };
+  }
+  return {
+    action: 'stop_and_report',
+    message: 'Stop here. Summarize what worked and what failed, include the actionable error details, and ask the user before retrying or trying an alternate approach.',
+  };
 }
 
 function titleForKey(key: string): string {
@@ -344,6 +404,35 @@ function formatConnections(value: unknown): string[] {
   return lines;
 }
 
+function formatConnectionSetup(value: unknown): string[] {
+  const entries = Array.isArray(value) ? value : [value];
+  const validEntries = entries.filter(isRecord);
+  if (validEntries.length === 0) return [`Connection Setup: ${summarizeValue(value)}`];
+  const lines = [`Connection Setup: ${validEntries.length}`];
+  for (const entry of validEntries.slice(0, 6)) {
+    const provider = typeof entry.provider === 'string' ? entry.provider : 'provider';
+    const scope = typeof entry.scope === 'string' ? ` for ${entry.scope}` : '';
+    lines.push(`  - ${provider}${scope}`);
+    if (typeof entry.tokenType === 'string') {
+      lines.push(`  - Token Type: ${entry.tokenType}`);
+    }
+    const setupUrls = Array.isArray(entry.setupUrls) ? entry.setupUrls.filter((item): item is string => typeof item === 'string') : [];
+    setupUrls.slice(0, 4).forEach((url) => lines.push(`  - Setup URL: ${url}`));
+    const permissions = Array.isArray(entry.requiredPermissions)
+      ? entry.requiredPermissions.filter((item): item is string => typeof item === 'string')
+      : [];
+    permissions.slice(0, 8).forEach((permission) => lines.push(`  - Permission: ${permission}`));
+    if (permissions.length > 8) lines.push(`  - Permission: ... ${permissions.length - 8} more`);
+    if (typeof entry.credentialExample === 'string') {
+      lines.push(`  - Connect: ${entry.credentialExample}`);
+    }
+    const notes = Array.isArray(entry.notes) ? entry.notes.filter((item): item is string => typeof item === 'string') : [];
+    notes.slice(0, 3).forEach((note) => lines.push(`  - Note: ${note}`));
+  }
+  if (validEntries.length > 6) lines.push(`  - ... ${validEntries.length - 6} more`);
+  return lines;
+}
+
 function formatRecordLines(record: Record<string, unknown>): string[] {
   const lines: string[] = [];
   const priority = [
@@ -356,6 +445,7 @@ function formatRecordLines(record: Record<string, unknown>): string[] {
     'inSync',
     'summary',
     'connections',
+    'connectionSetup',
     'deploySource',
     'spec',
     'actions',
@@ -380,6 +470,8 @@ function formatRecordLines(record: Record<string, unknown>): string[] {
       specLines.slice(1).forEach((line) => lines.push(`  - ${line}`));
     } else if (key === 'connections') {
       lines.push(...formatConnections(value));
+    } else if (key === 'connectionSetup') {
+      lines.push(...formatConnectionSetup(value));
     } else if (Array.isArray(value)) {
       lines.push(...formatArray(key, value));
     } else if (isRecord(value)) {
@@ -442,6 +534,10 @@ function formatEnvelope(payload: ToolEnvelope): string {
     payload.warnings.forEach((warning) => lines.push(`• ${warning}`));
   }
 
+  if (payload.agentInstruction) {
+    lines.push('', '🛑 Agent Instruction', payload.agentInstruction.message);
+  }
+
   if (payload.hint) {
     lines.push('', '💡 Hint', payload.hint);
   }
@@ -464,9 +560,11 @@ function envelope(payload: ToolEnvelope): ToolResponse {
 }
 
 export function toolSuccess(data?: unknown, extras?: ResponseExtras): ToolResponse {
+  const agentInstruction = extras?.agentInstruction ?? successAgentInstruction(data);
   return envelope({
     ok: true,
     ...(data !== undefined ? { data } : {}),
+    ...(agentInstruction ? { agentInstruction } : {}),
     ...(extras?.hint ? { hint: extras.hint } : {}),
     ...(extras?.warnings?.length ? { warnings: extras.warnings } : {}),
     ...(extras?.next?.length ? { next: extras.next } : {}),
@@ -478,6 +576,7 @@ export function toolError(
   message: string,
   extras?: ResponseExtras & { details?: unknown }
 ): ToolResponse {
+  const agentInstruction = extras?.agentInstruction ?? errorAgentInstruction(code);
   return envelope({
     ok: false,
     error: {
@@ -485,6 +584,7 @@ export function toolError(
       message,
       ...(extras?.details !== undefined ? { details: extras.details } : {}),
     },
+    agentInstruction,
     ...(extras?.hint ? { hint: extras.hint } : {}),
     ...(extras?.warnings?.length ? { warnings: extras.warnings } : {}),
     ...(extras?.next?.length ? { next: extras.next } : {}),

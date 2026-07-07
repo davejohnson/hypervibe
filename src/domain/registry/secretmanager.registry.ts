@@ -10,6 +10,9 @@ export interface SecretManagerMetadata {
   displayName: string;
   credentialsSchema: z.ZodTypeAny;
   setupHelpUrl?: string;
+  credentials?: {
+    defaultScalarKey?: string;
+  };
 }
 
 export interface RegisteredSecretManager {

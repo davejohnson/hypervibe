@@ -228,6 +228,7 @@ describe('hv_connect', () => {
   it('surfaces provider verification warnings without failing the connection', async () => {
     vi.spyOn(CloudflareAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
+      tokenKind: 'account',
       warning: 'Token is valid, but zone access was not confirmed.',
     });
 
@@ -244,6 +245,8 @@ describe('hv_connect', () => {
 
     const connection = new ConnectionRepository().findByProviderAndScope('cloudflare', 'apreskeys.com');
     expect(connection?.status).toBe('verified');
+    const decrypted = getSecretStore().decryptObject<{ apiTokenKind?: string }>(connection!.credentialsEncrypted);
+    expect(decrypted.apiTokenKind).toBe('account');
     await t.close();
   });
 
@@ -299,6 +302,36 @@ describe('hv_connect', () => {
     await t.close();
   });
 
+  it('verify returns structured Cloudflare setup details when the scoped connection is missing', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'cloudflare',
+      scope: 'hlspropertycare.com',
+      action: 'verify',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('NOT_FOUND');
+    expect(result.error.message).toBe('No connection found for provider: cloudflare (hlspropertycare.com).');
+    expect(result.error.details.connectionSetup).toMatchObject({
+      provider: 'cloudflare',
+      scope: 'hlspropertycare.com',
+      tokenType: expect.stringContaining('Cloudflare Account API Token'),
+      credentialExample: expect.stringContaining('scope="hlspropertycare.com"'),
+    });
+    expect(result.error.details.connectionSetup.setupUrls).toEqual(expect.arrayContaining([
+      expect.stringContaining('https://dash.cloudflare.com/?to=/:account/api-tokens'),
+      expect.stringContaining('https://dash.cloudflare.com/profile/api-tokens'),
+    ]));
+    expect(result.error.details.connectionSetup.requiredPermissions).toEqual(expect.arrayContaining([
+      expect.stringContaining('Zone -> Zone -> Read'),
+      expect.stringContaining('Zone -> DNS -> Edit'),
+      expect.stringContaining('Zone Resources must be Include -> Specific zone'),
+      expect.stringContaining('Registrar write permissions'),
+    ]));
+    await t.close();
+  });
+
   it('remove deletes the connection', async () => {
     vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
     vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
@@ -328,6 +361,9 @@ describe('hv_connections_list', () => {
 
     const result = await t.call('hv_connections_list', {});
     expect(result.ok).toBe(true);
+    expect(result.hint).toContain('credential discovery only');
+    expect(result.hint).toContain('stop and ask the user');
+    expect(result.hint).toContain('do not run hv_plan');
     expect(result.data.connections).toHaveLength(1);
     expect(result.data.connections[0]).toMatchObject({
       provider: 'railway',
@@ -354,11 +390,23 @@ describe('hv_connections_list', () => {
       expect.objectContaining({
         name: 'cloudflare',
         displayName: 'Cloudflare',
-        setupHelpUrl: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
+        setupHelpUrl: 'https://dash.cloudflare.com/profile/api-tokens',
+        setupHelpUrls: expect.arrayContaining([
+          expect.objectContaining({
+            label: expect.stringContaining('Account API Tokens'),
+            url: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
+          }),
+          expect.objectContaining({
+            label: expect.stringContaining('User API Tokens'),
+            url: 'https://dash.cloudflare.com/profile/api-tokens',
+          }),
+        ]),
         tokenType: expect.stringContaining('Cloudflare Account API Token'),
         requiredPermissions: expect.arrayContaining([
           expect.stringContaining('Zone -> Zone -> Read'),
           expect.stringContaining('Zone -> DNS -> Edit.'),
+          expect.stringContaining('Zone Resources must be Include -> Specific zone'),
+          expect.stringContaining('Registrar write permissions'),
         ]),
         notes: expect.arrayContaining([
           expect.stringContaining('Cloudflare Dashboard -> Manage Account -> Account API Tokens'),

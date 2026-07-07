@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
 
 export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'tunnel' | 'local' | 'security' | 'database' | 'appstore';
 
@@ -8,6 +9,45 @@ export interface ProviderMetadata {
   category: ProviderCategory;
   credentialsSchema: z.ZodTypeAny;
   setupHelpUrl?: string;
+  credentials?: {
+    defaultScalarKey?: string;
+  };
+  orchestration?: ProviderOrchestrationMetadata;
+}
+
+export interface ProviderOrchestrationMetadata {
+  project?: {
+    /**
+     * Provider projects contain multiple deploy environments. When a new
+     * Hypervibe environment is added, reuse the existing project binding
+     * instead of creating another provider project.
+     */
+    shareAcrossEnvironments?: boolean;
+  };
+  diff?: {
+    /** Source-less services are expected unless branch deploys are configured. */
+    requiresBranchDeployForCode?: boolean;
+    /** Some providers cannot observe web vs worker, only cron vs non-cron. */
+    workloadKindObservation?: 'exact' | 'cron-only';
+    /**
+     * Some providers report generated/reference env vars as resolved values.
+     * Return true when Hypervibe should verify only that the key exists live.
+     */
+    presenceOnlyManagedEnvVar?: (params: { key: string; value: string }) => boolean;
+  };
+  connections?: {
+    missingConnectionPolicy?: 'hard' | 'action-scoped-if-independent-actions';
+  };
+  logs?: {
+    runtime?: boolean;
+    deployments?: boolean;
+    build?: boolean;
+  };
+  ci?: ProviderCiDeployMetadata;
+  nativeBranchDeploy?: {
+    needsGitHubAppAccess?: boolean;
+    githubAppInstallUrl?: string;
+  };
 }
 
 export interface RegisteredProvider {

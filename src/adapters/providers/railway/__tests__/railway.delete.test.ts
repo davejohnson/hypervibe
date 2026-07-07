@@ -27,5 +27,19 @@ describe('RailwayAdapter delete verification', () => {
 
     expect(result.success).toBe(true);
     expect(request).toHaveBeenCalledTimes(2);
+    expect(String(request.mock.calls[0]?.[0])).toContain('serviceDelete(id: $id)');
+    expect(String(request.mock.calls[0]?.[0])).not.toContain('serviceDelete(input:');
+  });
+
+  it('deletes volumes by id', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ volumeDelete: true });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.deleteVolume('vol-1');
+
+    expect(result.success).toBe(true);
+    expect(String(request.mock.calls[0]?.[0])).toContain('volumeDelete(volumeId: $volumeId)');
+    expect(request.mock.calls[0]?.[1]).toEqual({ volumeId: 'vol-1' });
   });
 });

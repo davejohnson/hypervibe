@@ -252,6 +252,9 @@ providerRegistry.register({
     category: 'database',
     credentialsSchema: DatabaseCredentialsSchema,
     setupHelpUrl: undefined,
+    credentials: {
+      defaultScalarKey: 'connectionUrl',
+    },
   },
   factory: (credentials) => {
     const adapter = new DatabaseAdapter();

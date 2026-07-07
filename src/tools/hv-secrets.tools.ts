@@ -10,7 +10,7 @@ import { SecretAccessLogRepository } from '../adapters/db/repositories/secret-ma
 import { parseSecretRef, type SecretManagerProvider } from '../domain/ports/secretmanager.port.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
-import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import { parseEnvFile } from '../utils/env-parser.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
@@ -31,6 +31,7 @@ async function managerAdapter(ctx: ToolContext, provider: (typeof SECRET_MANAGER
   const connection = ctx.repos.connections.findByProvider(provider);
   if (!connection || connection.status !== 'verified') {
     throw new HvError('MISSING_CONNECTION', `No verified connection for ${provider}.`, {
+      details: { connectionSetup: connectionSetupDetails(provider) },
       hint: formatConnectionGuidance(provider),
     });
   }
@@ -143,6 +144,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
         if ('error' in gh) {
           return toolError('MISSING_CONNECTION', gh.error, {
+            details: { connectionSetup: connectionSetupDetails('github', { scope: `${owner}/${repoName}` }) },
             hint: formatConnectionGuidance('github', { scope: `${owner}/${repoName}` }),
           });
         }
@@ -334,6 +336,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
         if ('error' in gh) {
           return toolError('MISSING_CONNECTION', gh.error, {
+            details: { connectionSetup: connectionSetupDetails('github', { scope: `${owner}/${repoName}` }) },
             hint: formatConnectionGuidance('github', { scope: `${owner}/${repoName}` }),
           });
         }

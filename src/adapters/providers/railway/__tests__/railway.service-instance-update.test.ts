@@ -88,6 +88,14 @@ describe('RailwayAdapter service instance updates', () => {
 
   it('attaches a custom domain and returns Railway-required DNS records', async () => {
     const request = vi.fn()
+      // ensureServiceInstanceForEnvironment
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod' } }],
+          },
+        },
+      })
       // getCustomDomainStatus before create
       .mockResolvedValueOnce({
         service: {
@@ -152,7 +160,7 @@ describe('RailwayAdapter service instance updates', () => {
     });
 
     expect(receipt.success).toBe(true);
-    expect(request.mock.calls[1]?.[1]).toEqual({
+    expect(request.mock.calls[2]?.[1]).toEqual({
       input: {
         projectId: 'rail-project-1',
         serviceId: 'svc-web',
@@ -213,6 +221,14 @@ describe('RailwayAdapter service instance updates', () => {
           },
         },
       })
+      // ensureServiceInstanceForEnvironment
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod' } }],
+          },
+        },
+      })
       // redeploy
       .mockResolvedValueOnce({
         serviceInstanceRedeploy: true,
@@ -268,7 +284,7 @@ describe('RailwayAdapter service instance updates', () => {
     expect(result.receipt.success).toBe(true);
     expect(result.url).toBe('https://web-production.up.railway.app');
     // serviceDomainCreate received the right input
-    expect(request.mock.calls[4]?.[1]).toEqual({
+    expect(request.mock.calls[5]?.[1]).toEqual({
       input: { serviceId: 'svc-web', environmentId: 'env-prod' },
     });
   });
@@ -286,6 +302,13 @@ describe('RailwayAdapter service instance updates', () => {
         project: {
           services: {
             edges: [{ node: { id: 'svc-worker', name: 'worker' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod' } }],
           },
         },
       })
@@ -324,7 +347,96 @@ describe('RailwayAdapter service instance updates', () => {
 
     expect(result.receipt.success).toBe(true);
     expect(result.url).toBeUndefined();
-    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenCalledTimes(4);
+  });
+
+  it('creates an environment-scoped service when the bound service only exists in another environment', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        project: {
+          environments: {
+            edges: [{ node: { id: 'env-staging', name: 'staging' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        project: {
+          services: {
+            edges: [{ node: { id: 'svc-web', name: 'web' } }],
+          },
+        },
+      })
+      // resolveServiceIdForEnvironment: bound/name-matched service only exists in production.
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod' } }],
+          },
+        },
+      })
+      // serviceCreate creates a staging-scoped replacement for this environment binding.
+      .mockResolvedValueOnce({
+        serviceCreate: {
+          id: 'svc-web-staging',
+          name: 'web-staging',
+        },
+      })
+      // ensureServiceInstanceForEnvironment verifies the new service has a staging instance.
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-staging' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        serviceInstanceRedeploy: true,
+      });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+    vi.spyOn(adapter, 'getPluginVariableReferences').mockResolvedValue({});
+
+    const environment: Environment = {
+      id: 'env-local',
+      projectId: 'proj-local',
+      name: 'staging',
+      platformBindings: {
+        projectId: 'rail-project-1',
+        environmentId: 'env-staging',
+        services: { web: { serviceId: 'svc-web' } },
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const service: Service = {
+      id: 'svc-local',
+      projectId: 'proj-local',
+      name: 'web',
+      buildConfig: {
+        builder: 'nixpacks',
+      },
+      envVarSpec: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await adapter.deploy(service, environment, {});
+
+    expect(result.receipt.success).toBe(true);
+    expect(result.externalId).toBe('svc-web-staging');
+    expect(result.receipt.data).toMatchObject({
+      createdService: true,
+      replacedServiceBinding: 'svc-web',
+    });
+    expect(String(request.mock.calls[3]?.[0])).toContain('serviceCreate');
+    expect(request.mock.calls[3]?.[1]).toEqual({
+      input: {
+        projectId: 'rail-project-1',
+        environmentId: 'env-staging',
+        name: 'web-staging',
+      },
+    });
   });
 
   it('applies runtime config before redeploying a service', async () => {
@@ -350,6 +462,14 @@ describe('RailwayAdapter service instance updates', () => {
         serviceCreate: {
           id: 'svc-web',
           name: 'web',
+        },
+      })
+      // ensureServiceInstanceForEnvironment
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod' } }],
+          },
         },
       })
       // redeploy

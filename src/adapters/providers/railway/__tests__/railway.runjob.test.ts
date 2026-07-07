@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { RailwayAdapter } from '../railway.adapter.js';
+import { spawnSync } from 'child_process';
+import { buildTaskStartCommand, RailwayAdapter, TASK_EXIT_SENTINEL } from '../railway.adapter.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../../domain/entities/service.entity.js';
 
@@ -35,6 +36,10 @@ function fakeClient(overrides: Record<string, (variables: Record<string, unknown
   const calls: Call[] = [];
   const counts = new Map<string, number>();
   const defaults: Record<string, (variables: Record<string, unknown>, call: number) => unknown> = {
+    GetProjectServicesConnection: () => ({ project: { services: { edges: [{ node: { id: 'src-svc-1', name: 'web' } }] } } }),
+    GetServiceEnvironmentInstance: () => ({
+      service: { serviceInstances: { edges: [{ node: { environmentId: 'railenv-1' } }] } },
+    }),
     TaskSourceInstance: () => ({ serviceInstance: { source: { image: 'ghcr.io/dave/app:sha1' } } }),
     GetVariables: () => ({ variables: { DATABASE_URL: 'postgresql://internal', RAILWAY_TOKEN_INJECTED: 'x', SESSION_SECRET: 's' } }),
     CreateTaskService: () => ({ serviceCreate: { id: 'task-svc-1', name: 'hv-task-x' } }),
@@ -69,6 +74,36 @@ function adapterWith(client: { request: ReturnType<typeof vi.fn> }): RailwayAdap
 
 const fastOptions = { timeoutMs: 2000, pollIntervalMs: 1 };
 
+describe('buildTaskStartCommand', () => {
+  function run(command: string) {
+    return spawnSync('/bin/sh', ['-c', buildTaskStartCommand(command)], { encoding: 'utf8' });
+  }
+
+  it('emits a parseable zero exit sentinel', () => {
+    const result = run('node -e "process.exit(0)"');
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toMatch(TASK_EXIT_SENTINEL);
+    expect(result.stdout.match(TASK_EXIT_SENTINEL)?.[1]).toBe('0');
+  });
+
+  it('round-trips a non-zero exit code through the sentinel', () => {
+    const result = run('node -e "process.exit(3)"');
+
+    expect(result.status).toBe(3);
+    expect(result.stdout).toMatch(TASK_EXIT_SENTINEL);
+    expect(result.stdout.match(TASK_EXIT_SENTINEL)?.[1]).toBe('3');
+  });
+
+  it('handles commands containing single quotes', () => {
+    const result = run('node -e "console.log(\'single quote ok\')"');
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('single quote ok');
+    expect(result.stdout.match(TASK_EXIT_SENTINEL)?.[1]).toBe('0');
+  });
+});
+
 describe('RailwayAdapter.runJob', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -89,9 +124,11 @@ describe('RailwayAdapter.runJob', () => {
     expect(result.cleanupWarning).toBeUndefined();
 
     const sequence = client.calls.map((call) => call.query);
-    expect(sequence.slice(0, 5)).toEqual([
-      'TaskSourceInstance', 'GetVariables', 'CreateTaskService', 'ConfigureTaskService', 'DeployTaskService',
+    expect(sequence.slice(0, 6)).toEqual([
+      'GetProjectServicesConnection', 'GetServiceEnvironmentInstance',
+      'TaskSourceInstance', 'GetVariables', 'CreateTaskService', 'ConfigureTaskService',
     ]);
+    expect(sequence).toContain('DeployTaskService');
     expect(sequence).toContain('serviceDelete');
 
     const create = client.calls.find((call) => call.query === 'CreateTaskService')!;
@@ -110,6 +147,68 @@ describe('RailwayAdapter.runJob', () => {
     expect(String(configureInput.startCommand)).toContain('npm run db:seed');
     expect(String(configureInput.startCommand)).toContain('__HYPERVIBE_TASK_EXIT:');
     expect(githubPackagePullCredentials).toHaveBeenCalled();
+  });
+
+  it('deletes leftover hv-task services before starting a new task', async () => {
+    const client = fakeClient({
+      GetProjectServicesConnection: () => ({
+        project: {
+          services: {
+            edges: [
+              { node: { id: 'src-svc-1', name: 'web' } },
+              { node: { id: 'old-task-1', name: 'hv-task-123' } },
+            ],
+          },
+        },
+      }),
+    });
+    const adapter = adapterWith(client);
+
+    const result = await adapter.runJob(environment, webService, 'npm run db:seed', fastOptions);
+
+    expect(result.status).toBe('completed');
+    const deleteCalls = client.calls.filter((call) => call.query === 'serviceDelete');
+    expect(deleteCalls.map((call) => call.variables)).toEqual([
+      { id: 'old-task-1' },
+      { id: 'task-svc-1' },
+    ]);
+  });
+
+  it('returns a warning when the pre-run hv-task sweep cannot delete an orphan', async () => {
+    const client = fakeClient({
+      GetProjectServicesConnection: () => ({
+        project: { services: { edges: [{ node: { id: 'old-task-1', name: 'hv-task-123' } }] } },
+      }),
+      serviceDelete: (variables) => {
+        if (variables.id === 'old-task-1') {
+          return { serviceDelete: false };
+        }
+        return { serviceDelete: true };
+      },
+    });
+    const adapter = adapterWith(client);
+
+    const result = await adapter.runJob(environment, webService, 'npm run db:seed', fastOptions);
+
+    expect(result.status).toBe('completed');
+    expect(result.cleanupWarning).toContain('Could not delete leftover Railway task service');
+    expect(result.cleanupWarning).toContain('old-task-1');
+  });
+
+  it('fails immediately when logs contain a malformed sentinel', async () => {
+    const client = fakeClient({
+      TaskDeploymentStatus: () => ({ deployment: { status: 'SUCCESS' } }),
+      GetLogs: () => ({ deploymentLogs: [{ timestamp: 't', message: '__HYPERVIBE_TASK_EXIT:', severity: 'error' }] }),
+    });
+    const adapter = adapterWith(client);
+
+    const result = await adapter.runJob(environment, webService, 'npm run db:seed', fastOptions);
+
+    expect(result.status).toBe('failed');
+    expect(String(result.receipt.message)).toContain('malformed exit sentinel');
+    expect(String(result.receipt.error)).toContain('no parseable exit code');
+    expect(client.calls.filter((call) => call.query === 'TaskDeploymentStatus')).toHaveLength(1);
+    expect(client.calls.map((call) => call.query)).toContain('serviceDelete');
   });
 
   it('reports a non-zero exit sentinel as failed with the exit code', async () => {

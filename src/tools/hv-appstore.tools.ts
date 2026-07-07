@@ -15,7 +15,7 @@ import {
   IMAGE_EXTENSIONS,
   type BetaTesterInput,
 } from '../domain/services/appstore-ops.service.js';
-import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type {
   AppStoreConnectAdapter,
   AppStoreBetaGroup,
@@ -34,7 +34,10 @@ type AscPlatform = 'IOS' | 'MAC_OS' | 'TV_OS' | undefined;
 function adapterOrThrow(scopeHint?: string): AppStoreConnectAdapter {
   const result = getAppStoreConnectAdapter(scopeHint);
   if ('error' in result) {
-    throw new HvError('MISSING_CONNECTION', result.error, { hint: SETUP_HINT });
+    throw new HvError('MISSING_CONNECTION', result.error, {
+      details: { connectionSetup: connectionSetupDetails('appstoreconnect', { scope: scopeHint }) },
+      hint: SETUP_HINT,
+    });
   }
   return result.adapter;
 }

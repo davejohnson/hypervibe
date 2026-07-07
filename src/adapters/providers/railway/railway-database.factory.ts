@@ -19,6 +19,7 @@ interface RailwayHostingOps {
   listPlugins: (projectId: string) => Promise<Array<{ id: string; name: string; type: string }>>;
   deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
   deleteService?: (serviceId: string) => Promise<{ success: boolean; error?: string }>;
+  deleteVolume?: (volumeId: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 /**
@@ -189,9 +190,10 @@ export function createRailwayDatabaseAdapter(params: {
         };
       }
 
-      let pluginName: string =
-        (componentResult.component.bindings as Record<string, unknown>)?.pluginName as string || type;
-      if (projectId && typeof railway.listPlugins === 'function') {
+      const componentBindings = componentResult.component.bindings as Record<string, unknown>;
+      const resourceKind = componentBindings?.resourceKind;
+      let pluginName: string = componentBindings?.pluginName as string || type;
+      if (resourceKind !== 'service' && projectId && typeof railway.listPlugins === 'function') {
         const plugins = await railway.listPlugins(projectId);
         const matched =
           plugins.find((p) => p.id === componentResult.component.externalId) ||
@@ -213,7 +215,7 @@ export function createRailwayDatabaseAdapter(params: {
             projectId: projectId ?? undefined,
             connectionUrl,
             pluginName,
-            resourceKind: (componentResult.component.bindings as Record<string, unknown>)?.resourceKind,
+            resourceKind,
           },
         },
         receipt: {
@@ -240,18 +242,43 @@ export function createRailwayDatabaseAdapter(params: {
     async destroy(component) {
       const bindings = component.bindings as Record<string, unknown>;
       const resourceKind = bindings.resourceKind;
+      const volumeId = typeof bindings.volumeId === 'string' ? bindings.volumeId : undefined;
+      const cleanupErrors: string[] = [];
       if (component.externalId && typeof railway.deleteService === 'function') {
         const deletedService = await railway.deleteService(component.externalId);
-        if (deletedService.success) {
+        if (!deletedService.success) {
+          cleanupErrors.push(`service ${component.externalId}: ${deletedService.error ?? 'unknown error'}`);
+        }
+        if (volumeId && typeof railway.deleteVolume === 'function') {
+          const deletedVolume = await railway.deleteVolume(volumeId);
+          if (!deletedVolume.success) {
+            cleanupErrors.push(`volume ${volumeId}: ${deletedVolume.error ?? 'unknown error'}`);
+          }
+        }
+        if (cleanupErrors.length === 0) {
           return {
             success: true,
-            message: `Deleted Railway service ${component.externalId}`,
+            message: `Deleted Railway service ${component.externalId}${volumeId ? ` and volume ${volumeId}` : ''}`,
           };
         }
         return {
           success: false,
-          message: `Failed to delete Railway service ${component.externalId}`,
-          error: deletedService.error,
+          message: `Failed to delete Railway database resources for ${component.externalId}`,
+          error: cleanupErrors.join('; '),
+        };
+      }
+      if (volumeId && typeof railway.deleteVolume === 'function') {
+        const deletedVolume = await railway.deleteVolume(volumeId);
+        if (deletedVolume.success) {
+          return {
+            success: true,
+            message: `Deleted Railway volume ${volumeId}`,
+          };
+        }
+        return {
+          success: false,
+          message: `Failed to delete Railway volume ${volumeId}`,
+          error: deletedVolume.error,
         };
       }
       return {

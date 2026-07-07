@@ -83,7 +83,8 @@ describe('setupCustomDomain', () => {
 
     expect(result.success).toBe(false);
     expect(result.reason).toBe('no_connection');
-    expect(result.error).toContain('No Cloudflare connection available');
+    expect(result.error).toContain('No verified Cloudflare connection available for DNS zone example.com');
+    expect(result.error).toContain('scope="example.com"');
   });
 
   it('does not write fallback DNS when provider custom-domain attach fails', async () => {

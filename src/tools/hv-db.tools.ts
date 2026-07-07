@@ -5,7 +5,11 @@ import {
   runDatabaseMigration,
   runDatabaseSeed,
   executeDatabaseReset,
-  resolveEnvironmentDatabaseUrl,
+  canCreateRailwayDatabaseTcpProxy,
+  ensureExternalDatabaseUrl,
+  isExternallyUsableDatabaseUrl,
+  isPostgresDatabaseUrl,
+  resolveExternalDatabaseUrl,
   maskDatabaseUrl,
 } from '../domain/services/database-ops.service.js';
 import {
@@ -20,15 +24,27 @@ import { formatConnectionGuidance } from '../domain/services/connection-guidance
 import { projectField, envField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
 
-/**
- * Resolve a database URL with the same priority the legacy db tools use:
- * direct URL > named connection > project/environment component bindings.
- */
-async function resolveTarget(
+type ResolvedDatabaseTarget = { url: string; source: string; project?: Project; tcpProxyCreated?: boolean; proxyDomain?: string };
+
+function assertPostgresTarget(url: string, source: string): void {
+  if (!isPostgresDatabaseUrl(url)) {
+    throw new HvError('VALIDATION', `Database target ${source} is not a supported Postgres URL.`, {
+      hint: 'Hypervibe database tools currently support postgres:// and postgresql:// URLs. Provider template refs and private runtime URLs must be resolved before querying.',
+    });
+  }
+  if (!isExternallyUsableDatabaseUrl(url)) {
+    throw new HvError('VALIDATION', `Database target ${source} is not externally reachable from Hypervibe.`, {
+      hint: 'Use a public/provider-supported database URL, create or reuse a managed TCP proxy through a confirmed database operation, or run migrations/seeds in-environment so no external database URL is needed.',
+    });
+  }
+}
+
+async function resolveConfiguredTarget(
   ctx: ToolContext,
   opts: { connectionUrl?: string; connectionName?: string; project?: string; env?: string; service?: string }
-): Promise<{ url: string; source: string; project?: Project }> {
+): Promise<ResolvedDatabaseTarget | null> {
   if (opts.connectionUrl) {
+    assertPostgresTarget(opts.connectionUrl, 'direct URL');
     return { url: opts.connectionUrl, source: 'direct URL' };
   }
   if (opts.connectionName) {
@@ -39,18 +55,69 @@ async function resolveTarget(
       });
     }
     const creds = ctx.secretStore.decryptObject<DatabaseCredentials>(connection.credentialsEncrypted);
+    assertPostgresTarget(creds.connectionUrl, `connection: ${opts.connectionName}`);
     return { url: creds.connectionUrl, source: `connection: ${opts.connectionName}` };
   }
+  return null;
+}
+
+function unavailableExternalDatabaseTarget(project: Project, environment: { name: string; id: string; platformBindings: Record<string, unknown> }): HvError {
+  const canCreateTcpProxy = canCreateRailwayDatabaseTcpProxy(environment);
+  return new HvError('NOT_FOUND', `Could not resolve an externally reachable Postgres URL for ${project.name}/${environment.name}.`, {
+    details: {
+      source: `${project.name}/${environment.name}`,
+      canCreateTcpProxy,
+    },
+    hint: canCreateTcpProxy
+      ? 'The managed database appears to be internal-only or stored as provider runtime references. Create or reuse a public TCP proxy through a confirmed database operation, or pass connectionUrl/connectionName explicitly. In-environment migrations/seeds do not need this because they run inside the hosting network.'
+      : 'Ensure the environment has a tracked Postgres database with an externally reachable connection URL, or pass connectionUrl/connectionName explicitly.',
+  });
+}
+
+/**
+ * Resolve a database URL usable by local Hypervibe tooling:
+ * direct URL > named connection > externally reachable project/env database.
+ *
+ * This intentionally does not return provider runtime refs like
+ * ${{Postgres.DATABASE_URL}} or private hosts such as *.railway.internal.
+ */
+async function resolveExternalTarget(
+  ctx: ToolContext,
+  opts: { connectionUrl?: string; connectionName?: string; project?: string; env?: string; service?: string }
+): Promise<ResolvedDatabaseTarget> {
+  const configured = await resolveConfiguredTarget(ctx, opts);
+  if (configured) return configured;
 
   const project = ctx.resolveProjectOrThrow({ project: opts.project });
   const environment = ctx.resolveEnvironmentOrThrow(project, opts.env);
-  const url = await resolveEnvironmentDatabaseUrl(project, environment, opts.service);
+  const url = await resolveExternalDatabaseUrl(project, environment, opts.service);
   if (!url) {
-    throw new HvError('NOT_FOUND', `Could not resolve a database URL for ${project.name}/${environment.name}.`, {
-      hint: 'Ensure the environment has a database component (hv_apply with database in the spec) or pass connectionUrl directly.',
-    });
+    throw unavailableExternalDatabaseTarget(project, environment);
   }
-  return { url, source: `${project.name}/${environment.name}`, project };
+  return { url, source: `${project.name}/${environment.name}${opts.service ? `/${opts.service}` : ''}`, project };
+}
+
+async function resolveConfirmedExternalTarget(
+  ctx: ToolContext,
+  opts: { connectionUrl?: string; connectionName?: string; project?: string; env?: string; service?: string }
+): Promise<ResolvedDatabaseTarget> {
+  const configured = await resolveConfiguredTarget(ctx, opts);
+  if (configured) return configured;
+
+  const project = ctx.resolveProjectOrThrow({ project: opts.project });
+  const environment = ctx.resolveEnvironmentOrThrow(project, opts.env);
+  const result = await ensureExternalDatabaseUrl(project, environment, opts.service);
+  if (!result.ok) {
+    const code = result.code === 'provider_error' ? 'PROVIDER_ERROR' : 'NOT_FOUND';
+    throw new HvError(code, result.error, { hint: result.hint });
+  }
+  return {
+    url: result.url,
+    source: `${project.name}/${environment.name}${opts.service ? `/${opts.service}` : ''}`,
+    project,
+    tcpProxyCreated: result.tcpProxyCreated,
+    proxyDomain: result.proxyDomain,
+  };
 }
 
 export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
@@ -68,7 +135,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
       service: z.string().optional().describe('Service name when resolving from project bindings'),
     },
     wrapHandler(async ({ project, env, sql, params, allowMutations, connectionUrl, connectionName, service }) => {
-      const target = await resolveTarget(ctx, { connectionUrl, connectionName, project, env, service });
+      const target = await resolveExternalTarget(ctx, { connectionUrl, connectionName, project, env, service });
 
       const dbAdapter = new DatabaseAdapter();
       dbAdapter.connect({ connectionUrl: target.url });
@@ -244,15 +311,38 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
       }
 
       if (mode === 'reset') {
-        const target = await resolveTarget(ctx, { project: projectRef, env, service });
         if (!confirm) {
+          const configured = await resolveConfiguredTarget(ctx, { project: projectRef, env, service });
+          const project = ctx.resolveProjectOrThrow({ project: projectRef });
+          const environment = ctx.resolveEnvironmentOrThrow(project, env);
+          const previewUrl = configured?.url ?? await resolveExternalDatabaseUrl(project, environment, service);
+          const canCreateTcpProxy = canCreateRailwayDatabaseTcpProxy(environment);
           return toolError('CONFIRM_REQUIRED', 'Database reset drops ALL tables and data.', {
-            details: { source: target.source, connectionUrl: maskDatabaseUrl(target.url) },
-            hint: 'Re-run with confirm=true to execute the reset.',
+            details: previewUrl
+              ? {
+                source: configured?.source ?? `${project.name}/${environment.name}${service ? `/${service}` : ''}`,
+                connectionUrl: maskDatabaseUrl(previewUrl),
+              }
+              : {
+                source: `${project.name}/${environment.name}${service ? `/${service}` : ''}`,
+                reachable: false,
+                canCreateTcpProxy,
+              },
+            hint: previewUrl
+              ? 'Re-run with confirm=true to execute the reset.'
+              : canCreateTcpProxy
+                ? 'The database is internal-only. Re-running with confirm=true will create or reuse a public TCP proxy before executing the reset.'
+                : 'No externally reachable database URL is available. Pass connectionUrl/connectionName explicitly or fix the managed database bindings before confirming.',
           });
         }
+        const target = await resolveConfirmedExternalTarget(ctx, { project: projectRef, env, service });
         const payload = await executeDatabaseReset(target.url, target.source);
-        return toolSuccess(payload);
+        return toolSuccess({
+          ...payload,
+          ...(target.tcpProxyCreated !== undefined
+            ? { tcpProxyCreated: target.tcpProxyCreated, proxyDomain: target.proxyDomain }
+            : {}),
+        });
       }
 
       const payload = await runDatabaseMigration({
@@ -284,7 +374,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
       reveal: z.boolean().optional().describe('Deprecated: raw URLs are not returned in tool output'),
     },
     wrapHandler(async ({ project, env, service, reveal }) => {
-      const target = await resolveTarget(ctx, { project, env, service });
+      const target = await resolveExternalTarget(ctx, { project, env, service });
       return toolSuccess(
         {
           source: target.source,

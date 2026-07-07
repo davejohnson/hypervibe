@@ -26,7 +26,11 @@ import {
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
 import { setupCustomDomain } from '../domain/services/domain.service.js';
-import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from '../domain/services/connection-guidance.js';
+import {
+  connectionSetupDetails,
+  formatConnectionGuidance,
+  GITHUB_TOKEN_URLS,
+} from '../domain/services/connection-guidance.js';
 import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
 import { StateManager } from '../agent/state.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
@@ -95,7 +99,16 @@ export function connectionRecoveryHint(
     ? ` For GitHub Actions image deploys, the GitHub connection must include both GitHub API access and GHCR package-read access: apiToken needs repo + workflow (create: ${GITHUB_TOKEN_URLS.api}), while packageReadToken needs read:packages for durable image pulls (create: ${GITHUB_TOKEN_URLS.packageRead}). A read:packages-only token is not enough as apiToken. Use credentialsRef="dotenv:/absolute/path/.env" with credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}; for one-token setup, map both keys to the same classic PAT with repo + workflow + read:packages. Or use credentialsRef="file:/absolute/path/github.json" containing apiToken plus packageReadToken.`
     : '';
   const after = options.after ? ` ${options.after}` : '';
-  return `Hypervibe can store and verify the missing provider connections with hv_connect (${providers}). ${commands}.${packageReadHint} Prefer exported env vars, existing .env files via credentialsRef="dotenv:/absolute/path/.env#KEY", or local JSON for structured credentials; raw credentials={...} is still accepted if the user intentionally wants chat entry.${after}`;
+  return `Hypervibe can store and verify the missing provider connections with hv_connect (${providers}). ${commands}.${packageReadHint} Prefer exported env vars, existing .env files via credentialsRef="dotenv:/absolute/path/.env#KEY", or local JSON for structured credentials; raw credentials={...} is still accepted if the user intentionally wants chat entry. If no usable credential reference is already available, stop and ask the user to add/export the token or provide a credentialsRef; do not run hv_plan, hv_apply, or hv_deploy as a workaround for a missing required connection.${after}`;
+}
+
+export function connectionRecoveryDetails(blocks: ConnectionBlock[]): {
+  connectionSetup: ReturnType<typeof connectionSetupDetails>[];
+} {
+  return {
+    connectionSetup: uniqueConnectionBlocks(blocks)
+      .map((block) => connectionSetupDetails(block.provider, { scope: block.scope })),
+  };
 }
 
 
@@ -375,6 +388,9 @@ export async function executePlanApply(ctx: ToolContext, params: {
       return destroyDatabase(ctx, applyProject, envName, action);
     }
     if (action.resource.kind === 'service' && action.type === 'destroy') {
+      if (action.metadata?.operation === 'taskServiceCleanup') {
+        return destroyTaskService(applyProject, action);
+      }
       if (action.metadata?.operation === 'previousHostingDestroy') {
         return destroyPreviousHostingService(ctx, applyProject, envName, action);
       }
@@ -489,6 +505,48 @@ async function applyDomain(
     message: `Domain setup failed for ${action.resource.name}`,
     error: result.error ?? result.dnsError ?? result.customDomainError ?? 'Domain setup failed',
     data: result as unknown as Record<string, unknown>,
+  };
+}
+
+async function destroyTaskService(
+  project: Project,
+  action: PlanAction
+): Promise<ActionResult> {
+  const serviceId = stringField(asRecord(action.metadata), 'externalId');
+  if (!serviceId) {
+    return {
+      success: false,
+      message: 'Task service cleanup target is missing provider id',
+      error: `No externalId recorded for ${action.resource.name}. Re-run hv_plan.`,
+    };
+  }
+
+  const adapterResult = await adapterFactory.getProviderAdapter(action.resource.provider, project);
+  if (!adapterResult.success || !adapterResult.adapter) {
+    return { success: false, message: `${action.resource.provider} adapter unavailable`, error: adapterResult.error };
+  }
+  const adapter = adapterResult.adapter as { deleteService?: (serviceId: string) => Promise<{ success: boolean; error?: string; message?: string }> };
+  if (typeof adapter.deleteService !== 'function') {
+    return {
+      success: false,
+      message: `${action.resource.provider} does not support service deletion via Hypervibe`,
+      error: `Manual cleanup required: ${action.resource.provider} service ${serviceId}`,
+    };
+  }
+
+  const deleted = await adapter.deleteService(serviceId);
+  if (!deleted.success) {
+    return {
+      success: false,
+      message: `Failed to delete leftover task service ${action.resource.name}`,
+      error: deleted.error,
+    };
+  }
+
+  return {
+    success: true,
+    message: `Deleted leftover task service ${action.resource.name}${deleted.message ? ` (${deleted.message})` : ''}`,
+    data: { serviceId },
   };
 }
 

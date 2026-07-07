@@ -68,6 +68,10 @@ export type ImportResult =
     intent: unknown;
   };
 
+export interface ImportRailwayProjectOptions {
+  force?: boolean;
+}
+
 export function mapPluginToComponentType(pluginName: string): ComponentType {
   const normalized = pluginName.toLowerCase();
   if (normalized.includes('postgres')) return 'postgres';
@@ -191,11 +195,11 @@ export async function importRailwayProject(
   details: RailwayProjectDetails,
   environmentMappings: Record<string, string>,
   services: ImportServiceSummary[],
-  components: ImportComponentSummary[]
+  components: ImportComponentSummary[],
+  options: ImportRailwayProjectOptions = {}
 ): Promise<ImportResult> {
-  // Check if project already exists
   const existingProject = projectRepo.findByName(details.name);
-  if (existingProject) {
+  if (existingProject && !options.force) {
     return { status: 'already_exists' };
   }
 
@@ -205,12 +209,17 @@ export async function importRailwayProject(
     ? `https://github.com/${repoUrl}`
     : detectGitRemoteUrl() ?? undefined;
 
-  // Create the project
-  const project = projectRepo.create({
-    name: details.name,
-    defaultPlatform: 'railway',
-    gitRemoteUrl,
-  });
+  const project = existingProject
+    ? projectRepo.update(existingProject.id, {
+      defaultPlatform: 'railway',
+      gitRemoteUrl: gitRemoteUrl ?? existingProject.gitRemoteUrl,
+      policies: existingProject.policies,
+    }) ?? existingProject
+    : projectRepo.create({
+      name: details.name,
+      defaultPlatform: 'railway',
+      gitRemoteUrl,
+    });
 
   // Create environments with Railway bindings
   const createdEnvironments: Array<{ name: string; id: string; railwayId: string }> = [];
@@ -219,16 +228,27 @@ export async function importRailwayProject(
     const railwayEnv = details.environments.edges.find((e) => e.node.name === railwayEnvName);
     if (!railwayEnv) continue;
 
-    const env = envRepo.create({
-      projectId: project.id,
-      name: infraType,
-      platformBindings: {
-        provider: 'railway',
-        projectId: details.id,
-        environmentId: railwayEnv.node.id,
-        services: {},
-      },
-    });
+    const existingEnv = envRepo.findByProjectAndName(project.id, infraType);
+    const env = existingEnv
+      ? envRepo.update(existingEnv.id, {
+        platformBindings: {
+          ...existingEnv.platformBindings,
+          provider: 'railway',
+          projectId: details.id,
+          environmentId: railwayEnv.node.id,
+          services: (existingEnv.platformBindings as { services?: Record<string, unknown> }).services ?? {},
+        },
+      }) ?? existingEnv
+      : envRepo.create({
+        projectId: project.id,
+        name: infraType,
+        platformBindings: {
+          provider: 'railway',
+          projectId: details.id,
+          environmentId: railwayEnv.node.id,
+          services: {},
+        },
+      });
 
     createdEnvironments.push({
       name: infraType,
@@ -242,16 +262,23 @@ export async function importRailwayProject(
 
   for (const svc of services) {
     const firstInstance = Object.values(svc.instancesByEnv)[0];
-    const service = serviceRepo.create({
-      projectId: project.id,
-      name: svc.name,
-      buildConfig: {
-        ...(svc.repo ? { builder: 'nixpacks' as const } : {}),
-        ...(firstInstance?.startCommand ? { startCommand: firstInstance.startCommand } : {}),
-        ...(firstInstance?.healthcheckPath ? { healthCheckPath: firstInstance.healthcheckPath } : {}),
-      },
-      envVarSpec: {},
-    });
+    const buildConfig = {
+      ...(svc.repo ? { builder: 'nixpacks' as const } : {}),
+      ...(firstInstance?.startCommand ? { startCommand: firstInstance.startCommand } : {}),
+      ...(firstInstance?.healthcheckPath ? { healthCheckPath: firstInstance.healthcheckPath } : {}),
+    };
+    const existingService = serviceRepo.findByProjectAndName(project.id, svc.name);
+    const service = existingService
+      ? serviceRepo.update(existingService.id, {
+        buildConfig: { ...existingService.buildConfig, ...buildConfig },
+        envVarSpec: existingService.envVarSpec,
+      }) ?? existingService
+      : serviceRepo.create({
+        projectId: project.id,
+        name: svc.name,
+        buildConfig,
+        envVarSpec: {},
+      });
 
     createdServices.push({
       name: svc.name,
@@ -281,12 +308,21 @@ export async function importRailwayProject(
 
   for (const comp of components) {
     for (const env of createdEnvironments) {
-      componentRepo.create({
-        environmentId: env.id,
-        type: comp.type,
-        externalId: comp.railwayId,
-        bindings: {},
-      });
+      const existingComponent = componentRepo.findByEnvironmentAndType(env.id, comp.type);
+      if (existingComponent) {
+        componentRepo.update(existingComponent.id, {
+          type: comp.type,
+          externalId: comp.railwayId,
+          bindings: existingComponent.bindings,
+        });
+      } else {
+        componentRepo.create({
+          environmentId: env.id,
+          type: comp.type,
+          externalId: comp.railwayId,
+          bindings: {},
+        });
+      }
 
       createdComponents.push({
         type: comp.type,
@@ -298,7 +334,7 @@ export async function importRailwayProject(
 
   // Audit log
   auditRepo.create({
-    action: 'project.imported',
+    action: existingProject ? 'project.reimported' : 'project.imported',
     resourceType: 'project',
     resourceId: project.id,
     details: {

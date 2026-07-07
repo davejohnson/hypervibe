@@ -38,6 +38,7 @@ export interface PlanRunDocument {
 
 export interface ActionResult {
   success: boolean;
+  status?: 'pending' | 'blocked';
   message: string;
   error?: string;
   data?: Record<string, unknown>;
@@ -67,6 +68,8 @@ export interface ConvergeParams {
 export type ActionReceiptStatus =
   | 'succeeded'
   | 'failed'
+  | 'pending'
+  | 'blocked'
   | 'skipped_noop'
   | 'skipped_requires_confirm'
   | 'aborted';
@@ -221,6 +224,8 @@ export class ConvergeExecutor {
     const receipts: ActionReceipt[] = [];
     const completed = new Set<string>();
     let failed = false;
+    let pending = false;
+    let blocked = false;
     let firstError: string | undefined;
 
     for (const action of ordered) {
@@ -258,7 +263,15 @@ export class ConvergeExecutor {
         receipts.push({ actionId: action.id, status, message, error, data });
         this.runRepo.addReceipt(applyRun.id, {
           step: action.id,
-          status: status === 'succeeded' ? 'success' : status === 'failed' ? 'failure' : 'skipped',
+          status: status === 'succeeded'
+            ? 'success'
+            : status === 'failed'
+              ? 'failure'
+              : status === 'pending'
+                ? 'pending'
+                : status === 'blocked'
+                  ? 'blocked'
+                  : 'skipped',
           error,
           result: message || data ? { ...(message ? { message } : {}), ...(data ?? {}) } : undefined,
           timestamp: new Date().toISOString(),
@@ -267,7 +280,13 @@ export class ConvergeExecutor {
 
       try {
         const result = await params.handler(action);
-        if (result.success) {
+        if (result.status === 'pending') {
+          pending = true;
+          recordReceipt('pending', result.message, result.error, result.data);
+        } else if (result.status === 'blocked') {
+          blocked = true;
+          recordReceipt('blocked', result.message, result.error, result.data);
+        } else if (result.success) {
           completed.add(action.id);
           recordReceipt('succeeded', result.message, undefined, result.data);
         } else {
@@ -282,9 +301,10 @@ export class ConvergeExecutor {
       }
     }
 
-    this.runRepo.updateStatus(applyRun.id, failed ? 'failed' : 'succeeded', firstError);
+    const runStatus = failed ? 'failed' : blocked ? 'blocked' : pending ? 'pending' : 'succeeded';
+    this.runRepo.updateStatus(applyRun.id, runStatus, firstError);
     return {
-      success: !failed,
+      success: !failed && !pending && !blocked,
       applyRunId: applyRun.id,
       ...(firstError ? { error: firstError } : {}),
       receipts,

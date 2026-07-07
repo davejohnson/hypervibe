@@ -164,7 +164,8 @@ export class ConnectionRepository {
       }
     }
 
-    return this.findBestVerifiedMatch(provider);
+    const global = this.findByProvider(provider);
+    return global?.status === 'verified' ? global : null;
   }
 
   findAll(): Connection[] {

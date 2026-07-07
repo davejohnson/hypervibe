@@ -1,43 +1,20 @@
 # Agent Notes
 
-Hypervibe is an infrastructure creation, migration, and destruction orchestrator.
-It is not a loose collection of imperative provider functions.
+Read `ARCHITECTURE.md` before changing lifecycle, provider, plan/apply, deploy, database migration, DNS/domain, CI, connection, or secret-handling code. That file is the source of truth for Hypervibe's infrastructure model.
 
-Treat the desired-state loop as the product center:
+Hypervibe is an infrastructure creation, migration, and destruction orchestrator. It is not a loose collection of imperative provider functions.
 
-1. `hv_spec_set` defines infrastructure intent.
-2. `hv_plan` observes live provider state, checks required connections, computes drift, orders dependencies, and surfaces warnings or blocked work.
-3. `hv_apply` converges from a specific plan, rejects stale plans, records receipts, and confirm-gates destructive or billable actions.
-4. `hv_status` verifies convergence and reports drift.
+Core rules for coding agents:
 
-Desired infrastructure state is repo-backed when Hypervibe runs inside a git worktree:
-
-- `.hypervibe/spec.json` is the committed source of truth for infrastructure shape.
-- `.hypervibe/bindings.json` stores non-secret provider identity bindings needed for team members to observe the same live resources.
-- Local SQLite remains a cache/history store for revisions, runs, receipts, and local credentials.
-
-When adding capabilities that create, mutate, purchase, migrate, or destroy infrastructure, default to modeling them in the spec and plan/apply flow. Use separate imperative tools only for read-only inspection, explicit operational actions, or narrow escape hatches; they should not become the primary path for lifecycle-managed infrastructure.
-
-Domain, DNS, registrar, hosting, database, and deploy-source changes are lifecycle infrastructure. Do not hide those mutations inside CI, diagnostics, or helper tools; add them to desired state, compute them in `hv_plan`, and converge them in `hv_apply`.
-
-Provider credentials and required external connections should be discovered as early as possible from the spec and reported before apply. Prefer `credentialsRef` with exported environment variables or local JSON files; raw credentials in chat are still accepted when the user intentionally chooses that path.
-
-Local `.env` files are deploy input candidates, not a raw publish list. Prefer `.env.<environment>` over `.env` when present. Keep env-file handling policy-driven through the environment spec (`envFile.mode`, `include`, `exclude`): default to high-confidence runtime keys, skip provider/control-plane credentials and local-looking values (`localhost`, `127.0.0.1`, `0.0.0.0`, `host.docker.internal`, `.local`, `.internal`), warn with key names for ignored/excluded/skipped keys, surface the env file path in plan previews, and never let stale local values override Hypervibe-managed infrastructure env vars such as database or queue URLs.
-
-Do not use temporary release-command changes to run one-off data operations. Release commands are durable deploy-time schema configuration. Provider-to-provider data moves belong in `hv_db_migrate mode="move"`. Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`, which plans a visible one-shot seed action, runs it through the provider-neutral environment task runner during `hv_apply`, and records completion on the database component only after terminal success; `hv_db_migrate mode="seed"` is only for explicit re-runs or repair operations and must be confirm-gated, masked, and audited.
-
-Connection guidance is part of the product contract, not incidental copy. Every provider or secret-manager connection should have a `ConnectionGuidance` entry in `src/domain/services/connection-guidance.ts`, and token/permission errors should route through `formatConnectionGuidance(...)` whenever possible.
-
-When adding or changing token guidance, include all of these details:
-
-- The exact credential kind, including distinctions that matter operationally, such as user token vs account token, classic PAT vs fine-grained PAT, service account JSON vs access token, or read token vs API-management token.
-- The official URL where the user creates or reviews that credential. If there are multiple valid token types, include the URL for each and say which use case needs which token.
-- The exact scopes, roles, IAM permissions, or product permission toggles required, including resource scoping such as repo, zone, project, account, team, or organization.
-- The expected shape/prefix/caveats when helpful, such as token prefixes, one-time-download keys, required companion ids like `accountId`, package-read tokens, or credentials that cannot support a feature.
-- A safe `hv_connect` example using `credentialsRef` (`env:...`, `dotenv:/absolute/path/.env#KEY`, `file:/absolute/path`, or a secret-manager ref). Use `credentialsMap` when a provider needs multiple fields.
-
-Tests should fail if new provider guidance omits these basics. Update `src/domain/services/__tests__/connection-guidance.test.ts` and add provider-specific verification-error assertions for ambiguous or commonly miscreated tokens.
-
-For push deploys, `deploy.trigger: "ci"` is the portable default. It means Hypervibe manages generated GitHub Actions workflows that call provider APIs directly. Do not switch a project to `deploy.trigger: "native"` just to avoid missing CI/package/image credentials; that changes the desired infrastructure contract. Provider-native deploys are an explicit opt-in and may require provider-specific external app access such as the Railway GitHub App.
-
-Do not introduce dependencies on provider CLIs for infrastructure operations. Hypervibe should use its provider adapters and recorded connections so state, audit history, and drift detection stay coherent.
+- Keep the desired-state loop central: `hv_spec_set` defines intent, `hv_plan` computes drift and blocked work, `hv_apply` converges a specific plan, and `hv_status` verifies convergence.
+- Lifecycle infrastructure changes belong in spec/plan/apply. Do not hide creates, attaches, purchases, migrations, deploy-source changes, DNS changes, schedules, or destroys inside CI, diagnostics, or helper tools.
+- Keep provider behavior behind the provider boundary. Generic plan/apply/services/tools code should route through adapter capabilities and provider registry metadata, not provider-name branches or direct provider adapter imports.
+- Report honestly. Do not return success unless provider receipts, health checks, logs, or live observation prove the intended state. Use explicit failed/skipped/pending/blocked receipts for partial progress.
+- Work stage-by-stage. After any blocked, failed, pending, or confirmation-required Hypervibe result, stop and report what worked, what failed, and the next decision needed from the user. Do not keep trying alternate tools, bypasses, or provider-specific workarounds unless the user explicitly asks you to investigate broadly or keep iterating.
+- Use `hv_inspect` for read-only provider forensics. Use `hv_import` only when the user explicitly wants to adopt existing provider infrastructure into Hypervibe local/repo state.
+- Secrets never cross output boundaries. Accept them through `credentialsRef`, encrypted plans, or verified connections; do not print them in tool output, warnings, logs, receipts, specs, or snapshots.
+- Prefer `credentialsRef` with exported environment variables, `dotenv:` references, local JSON files, or secret-manager refs when asking users for credentials. Raw credentials in chat are still accepted when the user intentionally chooses that path.
+- Token and permission guidance must include the exact credential type, official creation URL, required permissions/scopes, resource scope, caveats, and a safe `hv_connect` example.
+- For push deploys, `deploy.trigger: "ci"` is the portable default. Provider-native deploys are explicit opt-in and may require provider-specific external app access.
+- Do not use temporary release-command changes for one-off data operations. Use declarative `database.seedCommand` for first seed/bootstrap and `hv_db_migrate` for explicit data operations.
+- Do not introduce dependencies on provider CLIs for infrastructure operations. Use provider adapters and recorded Hypervibe connections so state, audit history, and drift detection stay coherent.

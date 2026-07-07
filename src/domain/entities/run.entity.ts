@@ -1,5 +1,5 @@
 export type RunType = 'deploy' | 'migrate' | 'rollback' | string;
-export type RunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+export type RunStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'cancelled';
 
 export interface RunStep {
   name: string;
@@ -15,7 +15,7 @@ export interface RunPlan {
 
 export interface RunReceipt {
   step: string;
-  status: 'success' | 'failure' | 'skipped';
+  status: 'success' | 'failure' | 'skipped' | 'pending' | 'blocked';
   result?: Record<string, unknown>;
   error?: string;
   timestamp: string;

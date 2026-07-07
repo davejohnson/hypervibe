@@ -607,6 +607,9 @@ providerRegistry.register({
     category: 'email',
     credentialsSchema: SendGridCredentialsSchema,
     setupHelpUrl: 'https://app.sendgrid.com/settings/api_keys',
+    credentials: {
+      defaultScalarKey: 'apiKey',
+    },
   },
   factory: (credentials) => {
     const adapter = new SendGridAdapter();

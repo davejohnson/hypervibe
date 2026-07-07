@@ -18,7 +18,12 @@ import {
   providerSecretsForGitHubActions,
   requiredProviderSecretNamesForGitHubActions,
 } from '../domain/services/ci-deploy.service.js';
-import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from '../domain/services/connection-guidance.js';
+import {
+  connectionSetupDetails,
+  formatConnectionGuidance,
+} from '../domain/services/connection-guidance.js';
+import { providerRegistry } from '../domain/registry/provider.registry.js';
+import type { CiWorkflowDiagnostic } from '../domain/ports/ci-deploy.port.js';
 import type { ToolContext } from './context.js';
 import { projectField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
@@ -82,6 +87,7 @@ function githubAdapterOrThrow({ owner, repo }: RepoRef): GitHubAdapter {
   const result = getGitHubAdapter(`${owner}/${repo}`);
   if ('error' in result) {
     throw new HvError('MISSING_CONNECTION', result.error, {
+      details: { connectionSetup: connectionSetupDetails('github', { scope: `${owner}/${repo}` }) },
       hint: formatConnectionGuidance('github', { scope: `${owner}/${repo}` }),
     });
   }
@@ -153,39 +159,8 @@ function tailLogText(text: string, requestedLines: number) {
   };
 }
 
-function diagnoseWorkflowLog(text: string): Array<{
-  code: string;
-  severity: 'error' | 'warning';
-  summary: string;
-  evidence: string;
-  next: string[];
-}> {
-  const diagnostics: Array<{
-    code: string;
-    severity: 'error' | 'warning';
-    summary: string;
-    evidence: string;
-    next: string[];
-  }> = [];
-
-  if (
-    /docker buildx imagetools inspect/i.test(text)
-    && /ghcr\.io/i.test(text)
-    && /403 Forbidden/i.test(text)
-  ) {
-    diagnostics.push({
-      code: 'GHCR_IMAGE_PULL_FORBIDDEN',
-      severity: 'error',
-      summary: 'The workflow pushed the image, but IMAGE_REGISTRY_USERNAME/IMAGE_REGISTRY_TOKEN cannot read it back from GHCR. Railway is not called until this check passes, so Railway will show no new deploy attempt.',
-      evidence: 'docker buildx imagetools inspect returned 403 Forbidden for the GHCR image.',
-      next: [
-        'Confirm IMAGE_REGISTRY_USERNAME is the GitHub login that owns the package-read token.',
-        `Set IMAGE_REGISTRY_TOKEN from a classic GitHub PAT with read:packages (create: ${GITHUB_TOKEN_URLS.packageRead}), and repo when the repo/package is private.`,
-        'Use hv_secrets_set target="github" key="IMAGE_REGISTRY_TOKEN" secretRef="dotenv:/absolute/path/.env#GHCR_TOKEN" to update the GitHub Actions secret without pasting the token into chat.',
-        'Re-run the workflow with hv_ci_trigger, then inspect logs with hv_ci_status include=["logs"].',
-      ],
-    });
-  }
+function diagnoseGenericWorkflowLog(text: string): CiWorkflowDiagnostic[] {
+  const diagnostics: CiWorkflowDiagnostic[] = [];
 
   if (/failed to read dockerfile|dockerfile.*no such file or directory/i.test(text)) {
     diagnostics.push({
@@ -208,8 +183,8 @@ function diagnoseWorkflowLog(text: string): Array<{
       summary: 'The migration step connected to localhost:5432 — DATABASE_URL is empty or unset in the workflow, so the database client fell back to local defaults.',
       evidence: 'ECONNREFUSED 127.0.0.1:5432 during the migration step.',
       next: [
-        'On Railway, prefer migrations.mode="releaseCommand" with the command as the web service releaseCommand: migrations then run inside Railway with the internal DATABASE_URL and no public exposure. Update the spec, then hv_plan and hv_apply.',
-        'If migrations must run in GitHub Actions, the database needs an externally reachable URL: once a public TCP proxy exists (hv_db_migrate mode="move" creates one), re-run hv_plan and hv_apply to sync DATABASE_URL into the repository secrets.',
+        'Prefer in-environment migrations where the hosting provider supports them, so migrations run with the deployed service image and managed database env vars.',
+        'If migrations must run in GitHub Actions, the managed database needs an externally reachable URL; re-run hv_plan/hv_apply after exposing one so DATABASE_URL can be synced into repository secrets.',
         'Re-run the workflow with hv_ci_trigger afterwards.',
       ],
     });
@@ -228,25 +203,16 @@ function diagnoseWorkflowLog(text: string): Array<{
     });
   }
 
-  if (
-    /Railway API 400/i.test(text)
-    && /Problem processing request/i.test(text)
-    && /waitForDeployment/i.test(text)
-  ) {
-    diagnostics.push({
-      code: 'RAILWAY_DEPLOY_POLLING_GRAPHQL_400',
-      severity: 'error',
-      summary: 'The workflow reached Railway deploy polling, then Railway returned a generic GraphQL 400. Older Hypervibe workflows passed the whole deploy mutation response as deploymentId instead of serviceInstanceDeployV2, which produces exactly this opaque Railway error.',
-      evidence: 'Railway API 400 "Problem processing request" occurred inside waitForDeployment.',
-      next: [
-        'Re-sync the deploy workflow with hv_plan + hv_apply, or hv_ci_setup kind="deploy-branch", so it extracts serviceInstanceDeployV2 before polling.',
-        'Re-run the workflow with hv_ci_trigger.',
-        'If it still fails after re-sync, inspect hv_ci_status include=["logs"]; newer workflows include the Railway GraphQL operation, redacted variables, and traceId.',
-      ],
-    });
-  }
-
   return diagnostics;
+}
+
+function diagnoseWorkflowLog(text: string): CiWorkflowDiagnostic[] {
+  return [
+    ...diagnoseGenericWorkflowLog(text),
+    ...providerRegistry
+      .all()
+      .flatMap((provider) => provider.metadata.orchestration?.ci?.diagnoseWorkflowLog?.(text) ?? []),
+  ];
 }
 
 const deployBranchConfigSchema = z.object({
@@ -288,10 +254,10 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_ci_setup',
     'Set up explicit CI/CD tasks on GitHub for a project. For desired-state push deploys, prefer hv_spec_set deploy.strategy="branch" trigger="ci", then hv_plan/hv_apply; that manages the deploy workflow and provider API secrets as infrastructure. Dispatches on kind; config holds the kind-specific fields (config.repo="owner/repo" overrides the project gitRemoteUrl for every kind). ' +
-      'kind="deploy-branch": explicit/backfill branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs). Requires a GitHub apiToken that can write workflow files and repo secrets (classic PAT scopes repo + workflow for private repos); Railway image deploys also require packageReadToken with read:packages for GHCR pull credentials. config { provider (railway|cloudrun, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
+      'kind="deploy-branch": explicit/backfill branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs). Requires a GitHub apiToken that can write workflow files and repo secrets (classic PAT scopes repo + workflow for private repos); provider-specific image pull or cloud API credentials are reported by hv_plan/hv_apply and hv_ci_setup from provider metadata. config { provider (railway|cloudrun, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
       'kind="ai-review": Claude PR review workflow; config { apiKey (required), model? }. ' +
       'kind="branch-protection": protection rules; config { branch (required), requireReviews?, requiredReviewers?, dismissStaleReviews?, requireCodeOwnerReviews?, requireStatusChecks?, statusChecks?, strictStatusChecks?, enforceAdmins?, requireLinearHistory?, allowForcePushes?, allowDeletions? }. ' +
-      'kind="workflow": a workflow from a template; config { template (required, e.g. node-test, lint, deploy-railway) }.',
+      'kind="workflow": a workflow from a template; config { template (required, e.g. node-test, lint) }.',
     {
       project: projectField,
       kind: z.enum(['deploy-branch', 'ai-review', 'branch-protection', 'workflow']).describe('What to set up'),
@@ -315,6 +281,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
                 repository: `${owner}/${repo}`,
                 missingScopes: permissionProblem.missingScopes,
                 currentScopes: verification.scopes,
+                connectionSetup: connectionSetupDetails('github', { scope: `${owner}/${repo}` }),
               },
               hint: permissionProblem.hint,
               next: ['hv_connect', 'hv_ci_setup'],
@@ -514,7 +481,11 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
             });
           }
           const workflowPath = `.github/workflows/${template.filename}`;
-          const fileResult = await adapter.createOrUpdateFile(owner, repo, workflowPath, template.content, `Add ${template.name} workflow`);
+          const content = template.content ?? template.buildContent?.();
+          if (!content) {
+            throw new HvError('VALIDATION', `Template ${cfg.template} has no workflow content.`);
+          }
+          const fileResult = await adapter.createOrUpdateFile(owner, repo, workflowPath, content, `Add ${template.name} workflow`);
           ctx.repos.audit.create({
             action: 'hv.ci_setup',
             resourceType: 'github_workflow',

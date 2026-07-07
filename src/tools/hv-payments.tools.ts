@@ -7,6 +7,7 @@ import { getStripeAdapter } from '../domain/services/stripe-ops.service.js';
 import type { ToolContext } from './context.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { connectionSetupDetails } from '../domain/services/connection-guidance.js';
 
 const modeField = z
   .enum(['sandbox', 'live'])
@@ -70,7 +71,9 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
     wrapHandler(async ({ project: projectRef, env, action = 'setup', webhookId, url, mode, service: serviceName }) => {
       const stripeResult = getStripeAdapter();
       if ('error' in stripeResult) {
-        return toolError('MISSING_CONNECTION', stripeResult.error);
+        return toolError('MISSING_CONNECTION', stripeResult.error, {
+          details: { connectionSetup: connectionSetupDetails('stripe') },
+        });
       }
       const { adapter } = stripeResult;
       const stripeMode = resolveMode(mode, env);
@@ -193,7 +196,9 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
     wrapHandler(async ({ project: projectRef, action = 'sync', sourceMode = 'sandbox', targetMode = 'live', dryRun, confirm }) => {
       const stripeResult = getStripeAdapter();
       if ('error' in stripeResult) {
-        return toolError('MISSING_CONNECTION', stripeResult.error);
+        return toolError('MISSING_CONNECTION', stripeResult.error, {
+          details: { connectionSetup: connectionSetupDetails('stripe') },
+        });
       }
       const { adapter } = stripeResult;
       const project = ctx.resolveProject({ project: projectRef });
