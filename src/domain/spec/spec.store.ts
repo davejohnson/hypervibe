@@ -75,7 +75,7 @@ export function desiredStateToSpec(project: Project): ProjectSpec | null {
   const branch = desired.deploy?.strategy === 'branch' && branchKind
     ? (branchKind === 'production'
       ? desired.deploy?.branches?.production ?? 'main'
-      : desired.deploy?.branches?.staging ?? 'staging')
+      : desired.deploy?.branches?.staging ?? 'main')
     : undefined;
 
   const environment: EnvironmentSpec = {

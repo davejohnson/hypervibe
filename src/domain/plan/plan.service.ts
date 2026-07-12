@@ -34,6 +34,10 @@ import { resolveQueueEnvVars } from '../services/queue-env.js';
 import { formatConnectionGuidance } from '../services/connection-guidance.js';
 import { loadDeployEnvFile } from '../services/deploy-env-file.js';
 import { cloudflareScopeHintsForDomain } from '../services/domain-scope.js';
+import {
+  githubCollaborationConnectionBlock,
+  planGitHubCollaboration,
+} from '../services/repo-collaboration.service.js';
 
 export interface PlanOptions {
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
@@ -302,6 +306,16 @@ export class PlanService {
     return blocked;
   }
 
+  /** Connections required by project-level desired state planned in one canonical environment. */
+  projectPreflight(
+    project: Project,
+    spec: ProjectSpec,
+    environmentName: string
+  ): Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }> {
+    const collaboration = githubCollaborationConnectionBlock({ project, spec, environmentName, connectionRepo: this.connectionRepo });
+    return collaboration ? [collaboration] : [];
+  }
+
   /**
    * Repo/branch each service should be linked to under native branch deploys
    * — used by the diff to flag missing/mismatched deploy sources.
@@ -500,7 +514,10 @@ export class PlanService {
       managedDatabaseEnvVars,
       managedQueueEnvVars,
     });
-    const blocked = this.preflight(environmentSpec);
+    const blocked = [
+      ...this.preflight(environmentSpec),
+      ...this.projectPreflight(projectForPlan, specResult.spec, environmentName),
+    ];
     const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
     const domainRegistration = await planCloudflareDomainRegistration({ environmentSpec, environment });
 
@@ -555,6 +572,15 @@ export class PlanService {
       }
     }
 
+    const repoCollaboration = await planGitHubCollaboration({
+      project: projectForPlan,
+      spec: specResult.spec,
+      environmentName,
+    });
+    if (repoCollaboration.action) {
+      actions.push(repoCollaboration.action);
+    }
+
     // iOS actions go last: the executor aborts remaining actions after a
     // failure, and an Apple-side failure must never block hosting convergence.
     const ios = await planIos({ project: projectForPlan, environmentSpec, environment });
@@ -574,7 +600,7 @@ export class PlanService {
         return false;
       });
       filterWarnings.push(
-        `Partial plan (services: ${serviceFilter.join(', ')}): domain, CI, iOS, queue, and destroy convergence was excluded; run hv_plan without services for full convergence.`
+        `Partial plan (services: ${serviceFilter.join(', ')}): domain, CI, collaboration, iOS, queue, and destroy convergence was excluded; run hv_plan without services for full convergence.`
       );
     }
 
@@ -641,7 +667,7 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: diff.unmanaged,
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...repoCollaboration.warnings, ...ios.warnings, ...queues.warnings, ...filterWarnings],
       ...(overrides ? { overrides } : {}),
     };
 

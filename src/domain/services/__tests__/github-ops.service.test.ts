@@ -85,6 +85,8 @@ describe('github tools', () => {
         environmentName: 'production',
         kind: 'production',
         branch: 'release',
+        autoDeployOnPush: false,
+        promoteFromEnvironment: 'staging',
         serviceNames: [],
         providerProjectId: undefined,
         providerEnvironmentId: undefined,
@@ -100,12 +102,15 @@ describe('github tools', () => {
     const workflow = buildBranchDeployWorkflow('railway', targets[0], migration);
     expect(workflow.template).toBe('deploy-railway-production');
     expect(workflow.branch).toBe('release');
+    expect(workflow.autoDeployOnPush).toBe(false);
     expect(workflow.environment).toBe('production');
     expect(workflow.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN', 'DATABASE_URL']);
     expect(workflow.requiredVariables).toEqual(['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS']);
-    expect(workflow.content).toContain('branches: [release]');
+    expect(workflow.content).not.toContain('  push:\n    branches:');
     expect(workflow.content).toContain('workflow_dispatch:');
+    expect(workflow.content).toContain('commit_sha:');
     expect(workflow.content).toContain('environment: production');
+    expect(workflow.content).toContain('ref: ${{ steps.deploy.outputs.sha }}');
     expect(workflow.content).toContain('run: npm run migrate');
     // Migrations need dependencies installed on the runner; the deploy steps
     // build a container image and never run npm ci themselves.
@@ -124,6 +129,7 @@ describe('github tools', () => {
     expect(workflow.content).toContain('IMAGE_REGISTRY_TOKEN: ${{ secrets.IMAGE_REGISTRY_TOKEN }}');
     expect(workflow.content).toContain('username: process.env.IMAGE_REGISTRY_USERNAME');
     expect(workflow.content).toContain('password: process.env.IMAGE_REGISTRY_TOKEN');
+    expect(workflow.content).toContain('DEPLOY_SHA: ${{ steps.deploy.outputs.sha }}');
     expect(workflow.content).toContain('uses: actions/github-script@v8');
     expect(workflow.content).toContain('Railway API \' + response.status + \' during \' + operation');
     expect(workflow.content).toContain('traceId=');
@@ -136,6 +142,57 @@ describe('github tools', () => {
     expect(workflow.content).not.toContain('secrets.GHCR_TOKEN');
     expect(workflow.content).not.toContain('railway-github-action');
     expect(workflow.content).not.toContain('vars.MIGRATION_COMMAND');
+  });
+
+  it('defaults to main auto-deploy for staging and manual main promotion for production', () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const project = projectRepo.create({
+      name: 'billforge',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/davejohnson/billforge',
+    });
+    envRepo.create({ projectId: project.id, name: 'staging' });
+    envRepo.create({ projectId: project.id, name: 'production' });
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          deploy: { strategy: 'branch', trigger: 'ci' },
+        },
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          deploy: { strategy: 'branch', trigger: 'ci' },
+        },
+      },
+    });
+
+    const { targets } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
+    expect(targets.map((target) => ({
+      env: target.environmentName,
+      branch: target.branch,
+      autoDeployOnPush: target.autoDeployOnPush,
+      promoteFromEnvironment: target.promoteFromEnvironment,
+    }))).toEqual([
+      { env: 'staging', branch: 'main', autoDeployOnPush: true, promoteFromEnvironment: undefined },
+      { env: 'production', branch: 'main', autoDeployOnPush: false, promoteFromEnvironment: 'staging' },
+    ]);
+
+    const stagingWorkflow = buildBranchDeployWorkflow('railway', targets[0], { includeStep: false });
+    expect(stagingWorkflow.content).toContain('push:');
+    expect(stagingWorkflow.content).toContain('branches: [main]');
+    expect(stagingWorkflow.content).toContain('workflow_dispatch:');
+    expect(stagingWorkflow.content).toContain('commit_sha:');
+
+    const productionWorkflow = buildBranchDeployWorkflow('railway', targets[1], { includeStep: false });
+    expect(productionWorkflow.content).not.toContain('  push:\n    branches:');
+    expect(productionWorkflow.content).toContain('workflow_dispatch:');
+    expect(productionWorkflow.content).toContain('commit_sha:');
+    expect(productionWorkflow.content).toContain('ref: ${{ steps.deploy.outputs.sha }}');
   });
 
   it('embeds Railway environment and service ids from stored specs when available', () => {
@@ -186,6 +243,7 @@ describe('github tools', () => {
       environmentName: 'production',
       kind: 'production' as const,
       branch: 'main',
+      autoDeployOnPush: false,
       serviceNames: ['web'],
       providerProjectId: undefined,
       providerEnvironmentId: undefined,
@@ -278,6 +336,7 @@ describe('github tools', () => {
       environmentName: 'production',
       kind: 'production' as const,
       branch: 'main',
+      autoDeployOnPush: false,
       serviceNames: ['web'],
       providerProjectId: undefined,
       providerEnvironmentId: 'env-1',

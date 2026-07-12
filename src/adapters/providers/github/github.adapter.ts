@@ -82,6 +82,12 @@ export interface GitHubPagesHealthCheck {
   } | null;
 }
 
+export interface GitHubLabel {
+  name: string;
+  color: string;
+  description?: string | null;
+}
+
 interface GitHubResponse<T> {
   data: T;
 }
@@ -439,6 +445,46 @@ export class GitHubAdapter {
     await this.request<void>('DELETE', `/repos/${owner}/${repo}/actions/secrets/${secretName}`);
   }
 
+  // ============= Repository Labels =============
+
+  async listLabels(owner: string, repo: string): Promise<GitHubLabel[]> {
+    return await this.request<GitHubLabel[]>('GET', `/repos/${owner}/${repo}/labels?per_page=100`);
+  }
+
+  async createOrUpdateLabel(
+    owner: string,
+    repo: string,
+    label: { name: string; color: string; description?: string }
+  ): Promise<{ created: boolean; updated: boolean }> {
+    const encodedName = encodeURIComponent(label.name);
+    const color = label.color.replace(/^#/, '').toLowerCase();
+    const description = label.description ?? '';
+    try {
+      const existing = await this.request<GitHubLabel>('GET', `/repos/${owner}/${repo}/labels/${encodedName}`);
+      const currentColor = existing.color.replace(/^#/, '').toLowerCase();
+      const currentDescription = existing.description ?? '';
+      if (currentColor === color && currentDescription === description) {
+        return { created: false, updated: false };
+      }
+      await this.request<GitHubLabel>('PATCH', `/repos/${owner}/${repo}/labels/${encodedName}`, {
+        name: label.name,
+        color,
+        description,
+      });
+      return { created: false, updated: true };
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) {
+        await this.request<GitHubLabel>('POST', `/repos/${owner}/${repo}/labels`, {
+          name: label.name,
+          color,
+          description,
+        });
+        return { created: true, updated: false };
+      }
+      throw error;
+    }
+  }
+
   // ============= Workflows =============
 
   /**
@@ -655,6 +701,7 @@ export class GitHubAdapter {
       statusChecks?: string[];
       strictStatusChecks?: boolean;
       enforceAdmins?: boolean;
+      preserveStatusChecks?: boolean;
       requireLinearHistory?: boolean;
       allowForcePushes?: boolean;
       allowDeletions?: boolean;
@@ -668,7 +715,16 @@ export class GitHubAdapter {
       restrictions: null, // We don't restrict who can push
     };
 
-    if (rules.requireStatusChecks && rules.statusChecks && rules.statusChecks.length > 0) {
+    if (rules.preserveStatusChecks) {
+      const existing = await this.getBranchProtection(owner, repo, branch);
+      const current = existing?.required_status_checks;
+      const contexts = current?.contexts?.length
+        ? current.contexts
+        : current?.checks?.map((check) => check.context).filter(Boolean) ?? [];
+      body.required_status_checks = current
+        ? { strict: current.strict, contexts }
+        : null;
+    } else if (rules.requireStatusChecks && rules.statusChecks && rules.statusChecks.length > 0) {
       body.required_status_checks = {
         strict: rules.strictStatusChecks ?? true,
         contexts: rules.statusChecks,

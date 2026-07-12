@@ -44,8 +44,49 @@ export const databaseSpecSchema = z.object({
 export const deploySpecSchema = z.object({
   strategy: z.enum(['branch', 'manual']).default('manual'),
   trigger: z.enum(['ci', 'native']).optional(),
+  /** Git branch used as the source ref. Defaults to main for staging and production. */
   branch: z.string().min(1).optional(),
+  /** CI branch deploys default to true for staging and false for production. */
+  autoDeploy: z.boolean().optional(),
+  /** Production promotion source label, usually staging. Used for workflow guidance. */
+  promoteFrom: z.string().min(1).optional(),
 });
+
+export const collaborationLabelSpecSchema = z.object({
+  name: z.string().min(1),
+  color: z.string().regex(/^[0-9a-fA-F]{6}$/, 'label color must be a 6-character hex value without #').optional(),
+  description: z.string().max(100).optional(),
+}).strict();
+
+export const collaborationSpecSchema = z.object({
+  provider: z.literal('github').default('github'),
+  enabled: z.boolean().default(true),
+  /** GitHub repository owner/name. Defaults to the project gitRemoteUrl. */
+  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'repository must be owner/name').optional(),
+  /** Environment whose hv_plan should include project-level repo collaboration actions. */
+  canonicalEnvironment: z.string().min(1).optional(),
+  issues: z.object({
+    enabled: z.boolean().default(true),
+    labels: z.array(collaborationLabelSpecSchema).default([]),
+    templates: z.boolean().default(true),
+  }).default({}),
+  pullRequests: z.object({
+    targetBranch: z.string().min(1).default('main'),
+    requirePr: z.boolean().default(true),
+    requireReview: z.boolean().default(true),
+    requiredReviewers: z.number().int().min(1).max(6).default(1),
+    dismissStaleReviews: z.boolean().default(false),
+    requireCodeOwnerReviews: z.boolean().default(false),
+    requireStatusChecks: z.boolean().default(false),
+    statusChecks: z.array(z.string().min(1)).default([]),
+    strictStatusChecks: z.boolean().default(true),
+    enforceAdmins: z.boolean().default(false),
+  }).default({}),
+  collaborators: z.array(z.object({
+    username: z.string().min(1),
+    permission: z.enum(['pull', 'triage', 'push', 'maintain', 'admin']).default('push'),
+  }).strict()).default([]),
+}).default({});
 
 export const envFileSpecSchema = z.object({
   /**
@@ -179,6 +220,7 @@ export const projectSpecSchema = z.object({
   version: z.literal(1),
   project: z.string().min(1),
   gitRemoteUrl: z.string().min(1).optional(),
+  collaboration: collaborationSpecSchema.optional(),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 });
 
@@ -189,5 +231,6 @@ export type QueueSpec = z.infer<typeof queueSpecSchema>;
 export type IosTestflightGroupSpec = z.infer<typeof iosTestflightGroupSpecSchema>;
 export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema>;
 export type EnvFileSpec = z.infer<typeof envFileSpecSchema>;
+export type CollaborationSpec = z.infer<typeof collaborationSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;

@@ -243,7 +243,8 @@ export function resolveBranchDeployTargets(project: Project): {
         continue;
       }
 
-      const branch = envSpec.deploy.branch ?? (kind === 'production' ? 'main' : 'staging');
+      const branch = envSpec.deploy.branch ?? 'main';
+      const autoDeployOnPush = envSpec.deploy.autoDeploy ?? kind !== 'production';
       desiredBranches[kind] = branch;
       const bindings = environmentBindings(project.id, environmentName);
       const serviceNames = Object.keys(envSpec.services);
@@ -258,6 +259,10 @@ export function resolveBranchDeployTargets(project: Project): {
         environmentName,
         kind,
         branch,
+        autoDeployOnPush,
+        ...(kind === 'production' && !autoDeployOnPush
+          ? { promoteFromEnvironment: envSpec.deploy.promoteFrom ?? 'staging' }
+          : {}),
         serviceNames: serviceNames.length > 0 ? serviceNames : bindings.boundServiceNames,
         providerProjectId: bindings.providerProjectId,
         providerEnvironmentId: bindings.providerEnvironmentId,
@@ -344,7 +349,9 @@ export function resolveBranchDeployTargets(project: Project): {
       kind,
       branch: kind === 'production'
         ? desiredBranches.production ?? 'main'
-        : desiredBranches.staging ?? 'staging',
+        : desiredBranches.staging ?? 'main',
+      autoDeployOnPush: kind !== 'production',
+      ...(kind === 'production' ? { promoteFromEnvironment: 'staging' } : {}),
       serviceNames: desiredServiceNames.length > 0 ? desiredServiceNames : bindings.boundServiceNames,
       providerProjectId: bindings.providerProjectId,
       providerEnvironmentId: bindings.providerEnvironmentId,
@@ -400,6 +407,21 @@ function buildProviderDeploySteps(provider: BranchDeployProvider, target: Branch
   return ci.buildGitHubActionsSteps(target);
 }
 
+function buildWorkflowTrigger(target: BranchDeployTarget): string {
+  const dispatch = `  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Commit SHA to deploy. Defaults to the selected ref when omitted.'
+        required: false
+        type: string`;
+  if (!target.autoDeployOnPush) {
+    return dispatch;
+  }
+  return `  push:
+    branches: [${target.branch}]
+${dispatch}`;
+}
+
 export function buildBranchDeployWorkflow(
   provider: BranchDeployProvider,
   target: BranchDeployTarget,
@@ -421,9 +443,7 @@ export function buildBranchDeployWorkflow(
   const content = `name: Deploy ${providerName} (${target.environmentName})
 
 on:
-  push:
-    branches: [${target.branch}]
-  workflow_dispatch:
+${buildWorkflowTrigger(target)}
 
 jobs:
   deploy:
@@ -431,13 +451,29 @@ jobs:
     environment: ${target.environmentName}
 ${permissionsBlock.trimEnd()}
     steps:
+      - name: Resolve deploy SHA
+        id: deploy
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const inputSha = ((context.payload.inputs || {}).commit_sha || '').trim();
+            const sha = inputSha || process.env.GITHUB_SHA;
+            if (!/^[0-9a-f]{7,40}$/i.test(sha)) {
+              throw new Error('commit_sha must be a Git commit SHA, got: ' + JSON.stringify(inputSha || sha));
+            }
+            core.setOutput('sha', sha);
+            core.info('Deploying commit ' + sha);
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ steps.deploy.outputs.sha }}
 ${migrationStep}${deployBlock.steps}`;
 
   return {
     template,
     templateName: `Deploy ${providerName} (${target.environmentName})`,
     branch: target.branch,
+    autoDeployOnPush: target.autoDeployOnPush,
+    ...(target.promoteFromEnvironment ? { promoteFromEnvironment: target.promoteFromEnvironment } : {}),
     environment: target.environmentName,
     path: `.github/workflows/${filename}`,
     content,

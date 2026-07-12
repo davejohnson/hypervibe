@@ -25,6 +25,10 @@ import {
   applyGitHubActionsDeploy,
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
+import {
+  applyGitHubCollaboration,
+  isGitHubCollaborationAction,
+} from '../domain/services/repo-collaboration.service.js';
 import { setupCustomDomain } from '../domain/services/domain.service.js';
 import {
   connectionSetupDetails,
@@ -277,7 +281,13 @@ export async function executePlanApply(ctx: ToolContext, params: {
     return { kind: 'env_missing', envName };
   }
 
-  const blocked = planService.preflight(envSpec);
+  const projectForPreflight = spec.gitRemoteUrl
+    ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
+    : project;
+  const blocked = [
+    ...planService.preflight(envSpec),
+    ...planService.projectPreflight(projectForPreflight, spec, envName),
+  ];
   const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions);
   const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
   const applyBlocked = [...hardBlocked, ...connectBeforeApply];
@@ -371,6 +381,9 @@ export async function executePlanApply(ctx: ToolContext, params: {
     }
     if (isGitHubActionsDeployAction(action)) {
       return applyGitHubActionsDeploy({ project: applyProject, environmentName: envName, environmentSpec: envSpec });
+    }
+    if (isGitHubCollaborationAction(action)) {
+      return applyGitHubCollaboration({ project: applyProject, spec, environmentName: envName });
     }
     if (isIosAction(action)) {
       return applyIosAction({ project: applyProject, envName, environmentSpec: envSpec, action });

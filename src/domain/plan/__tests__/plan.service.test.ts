@@ -92,6 +92,43 @@ describe('PlanService.plan', () => {
     expect(result).toMatchObject({ error: expect.stringContaining('production') });
   });
 
+  it('plans GitHub collaboration only on the canonical environment and blocks missing GitHub connection', async () => {
+    const projectRepo = new ProjectRepository();
+    project = projectRepo.update(project.id, { gitRemoteUrl: 'https://github.com/davejohnson/plan-test' })!;
+    const railway = new ConnectionRepository().create({
+      provider: 'railway',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
+    });
+    new ConnectionRepository().updateStatus(railway.id, 'verified');
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      collaboration: {},
+      environments: {
+        staging: { hosting: { provider: 'railway' }, services: { web: {} } },
+        production: { hosting: { provider: 'railway' }, services: { web: {} } },
+      },
+    });
+
+    const production = await new PlanService().plan(project, 'production');
+    expect(production).not.toHaveProperty('error');
+    const productionPlan = production as Exclude<typeof production, { error: string }>;
+    expect(productionPlan.actions.find((action) => action.id === 'repo:github-collaboration')).toMatchObject({
+      type: 'update',
+      resource: { kind: 'repo', name: 'davejohnson/plan-test', provider: 'github' },
+    });
+    expect(productionPlan.blocked).toEqual([
+      expect.objectContaining({ provider: 'github', scope: 'davejohnson/plan-test' }),
+    ]);
+    expect(productionPlan.blocked[0]?.reason).toContain('https://github.com/settings/tokens');
+
+    const staging = await new PlanService().plan(project, 'staging');
+    expect(staging).not.toHaveProperty('error');
+    const stagingPlan = staging as Exclude<typeof staging, { error: string }>;
+    expect(stagingPlan.actions.find((action) => action.id === 'repo:github-collaboration')).toBeUndefined();
+  });
+
   it('produces a verified plan from observed state and persists the plan run', async () => {
     new EnvironmentRepository().create({
       projectId: project.id,
@@ -634,6 +671,7 @@ describe('PlanService.plan', () => {
       environmentName: 'production',
       kind: 'production',
       branch: 'main',
+      autoDeployOnPush: false,
       serviceNames: ['web'],
       providerProjectId: 'rp-1',
       providerEnvironmentId: 'rail-env-1',
@@ -806,6 +844,7 @@ describe('PlanService.plan', () => {
       environmentName: 'production',
       kind: 'production',
       branch: 'main',
+      autoDeployOnPush: false,
       serviceNames: ['web'],
       providerProjectId: 'rp-1',
       providerEnvironmentId: 'rail-env-1',
@@ -906,6 +945,7 @@ describe('PlanService.plan', () => {
       environmentName: 'production',
       kind: 'production',
       branch: 'main',
+      autoDeployOnPush: false,
       serviceNames: ['web'],
       providerProjectId: 'rp-1',
       providerEnvironmentId: 'rail-env-1',
@@ -1012,6 +1052,7 @@ describe('PlanService.plan', () => {
       environmentName: 'production',
       kind: 'production',
       branch: 'main',
+      autoDeployOnPush: false,
       serviceNames: ['web'],
       providerProjectId: 'rp-1',
       providerEnvironmentId: 'rail-env-1',

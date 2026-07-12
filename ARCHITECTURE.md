@@ -40,6 +40,13 @@ Do not treat cached local state as proof of convergence when live observation is
 
 Legacy `*.tools.ts` files that still exist but are not registered in `server.ts` are internal helper libraries pending extraction. Do not register them or add new tools there.
 
+
+## Repository Collaboration
+
+Repository collaboration setup is lifecycle development infrastructure. GitHub issue labels, issue templates, PR templates, branch protection, and deploy-promotion guardrails should be expressed in the project spec and converged through `hv_plan`/`hv_apply`. Do not add one-off setup tools for these paths unless they are read-only inspection or explicit repair operations.
+
+Collaborator invitations are guidance-only by default. If Hypervibe ever mutates repository access, that must be confirm-gated, permission-audited, and represented as desired state rather than hidden inside a helper tool.
+
 ## Provider Boundary
 
 Keep provider behavior behind the provider boundary. Generic orchestration code in `src/domain/plan`, shared `src/domain/services`, and shared `src/tools` must not grow provider-name branches or direct imports from `src/adapters/providers/<provider>` just to express hosting behavior.
@@ -138,6 +145,16 @@ Keep env-file handling policy-driven through the environment spec (`envFile.mode
 ## CI And Push Deploys
 
 For push deploys, `deploy.trigger: "ci"` is the portable default. It means Hypervibe manages generated GitHub Actions workflows that call provider APIs directly.
+
+The standard team workflow is:
+
+1. short-lived feature branches,
+2. pull request into `main`,
+3. checks on the pull request,
+4. merge to `main` auto-deploys staging,
+5. production is manually promoted from `main`, ideally by passing the exact commit SHA that already passed staging.
+
+Do not default to a long-lived `staging` branch. `main` is the accepted-code branch, staging is the deployed preview of `main`, and production is a deliberate manual promotion. Generated production deploy workflows must not run from push events by default; they should use `workflow_dispatch` and support a `commit_sha` input.
 
 Do not switch a project to `deploy.trigger: "native"` just to avoid missing CI, package, or image credentials. That changes the desired infrastructure contract. Provider-native deploys are an explicit opt-in and may require provider-specific external app access such as the Railway GitHub App.
 

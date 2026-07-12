@@ -118,6 +118,11 @@ function stringField(record: Record<string, unknown> | null, key: string): strin
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
+function booleanField(record: Record<string, unknown> | null, key: string): boolean | undefined {
+  const value = record?.[key];
+  return typeof value === 'boolean' ? value : undefined;
+}
+
 function stringArrayField(record: Record<string, unknown> | null, key: string): string[] | undefined {
   const value = record?.[key];
   if (!Array.isArray(value)) return undefined;
@@ -224,7 +229,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
     'Create or update the desired-state spec for a project (the single source of truth that hv_plan diffs against live infrastructure). When run inside a git worktree, Hypervibe writes .hypervibe/spec.json so teams share the same infrastructure intent. Merges by default; pass replace=true to overwrite. In a merge, set a key to null to delete it (e.g. remove a service).',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|cloudsql|railway, seedCommand? }, domain?, domainRegistration?: { provider: cloudflare, register?: boolean, years?, autoRenew?, privacyMode? }, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations?, queues?: { <name>: { ackDeadlineSeconds? } }, ios?: { bundleId, appName?, platform?: IOS|MAC_OS, capabilities?: [PUSH_NOTIFICATIONS|...], testflight?: { groups: { <name>: { internal?, publicLinkEnabled?, publicLinkLimit?, feedbackEnabled?, hasAccessToAllBuilds?, testers?: [emails] } } } } } } }. database.seedCommand declares a one-shot database bootstrap command: hv_plan emits a visible seed action, hv_apply runs it inside the deployed service environment, and Hypervibe records successful completion on the database component only after terminal success so it does not re-run unless the command changes. ios declares the iOS identity + TestFlight fingerprint: hv_plan observes App Store Connect and converges bundle ID, capabilities (additive), beta groups, and tester membership; builds/submission stay in hv_testflight_*/hv_appstore_*. queues declares named message queues: Cloud Run environments get real Pub/Sub topics+subscriptions (QUEUE_TOPIC_*/QUEUE_SUBSCRIPTION_* env vars); railway environments are postgres-backed (pg-boss model, requires database; apps consume via DATABASE_URL). All queue environments get QUEUE_BACKEND and QUEUE_NAMES. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows. trigger "native" is provider-specific, requires confirmNativeDeploy=true when newly introduced, and must not be used merely to avoid CI/package credentials. "manual" provisions infrastructure only.'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, collaboration?: { provider?: github, repository?, canonicalEnvironment?, issues?: { enabled?, templates?, labels? }, pullRequests?: { targetBranch?, requireReview?, requiredReviewers?, requireStatusChecks?, statusChecks? }, collaborators?: [{ username, permission? }] }, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|cloudsql|railway, seedCommand? }, domain?, domainRegistration?: { provider: cloudflare, register?: boolean, years?, autoRenew?, privacyMode? }, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations?, queues?: { <name>: { ackDeadlineSeconds? } }, ios?: { bundleId, appName?, platform?: IOS|MAC_OS, capabilities?: [PUSH_NOTIFICATIONS|...], testflight?: { groups: { <name>: { internal?, publicLinkEnabled?, publicLinkLimit?, feedbackEnabled?, hasAccessToAllBuilds?, testers?: [emails] } } } } } } }. database.seedCommand declares a one-shot database bootstrap command: hv_plan emits a visible seed action, hv_apply runs it inside the deployed service environment, and Hypervibe records successful completion on the database component only after terminal success so it does not re-run unless the command changes. ios declares the iOS identity + TestFlight fingerprint: hv_plan observes App Store Connect and converges bundle ID, capabilities (additive), beta groups, and tester membership; builds/submission stay in hv_testflight_*/hv_appstore_*. queues declares named message queues: Cloud Run environments get real Pub/Sub topics+subscriptions (QUEUE_TOPIC_*/QUEUE_SUBSCRIPTION_* env vars); railway environments are postgres-backed (pg-boss model, requires database; apps consume via DATABASE_URL). All queue environments get QUEUE_BACKEND and QUEUE_NAMES. collaboration declares repo collaboration infrastructure: GitHub issue labels/templates, PR template, and main-branch guardrails are planned/applied through hv_plan/hv_apply; collaborator invitations are guidance-only in v1. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows. trigger "native" is provider-specific, requires confirmNativeDeploy=true when newly introduced, and must not be used merely to avoid CI/package credentials. "manual" provisions infrastructure only.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external app access such as the Railway GitHub App.'),
     },
@@ -496,6 +501,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       const ciMetadata = asRecord(ciAction?.metadata);
       const ciWorkflow = asRecord(ciMetadata?.workflow);
       const ciNeedsSync = Boolean(ciAction && ciAction.type !== 'noop');
+      const ciAutoDeployOnPush = booleanField(ciWorkflow, 'autoDeployOnPush') ?? false;
       const ciDeploySource = deployStrategy === 'branch' && deployTrigger === 'ci'
         ? {
           provider: 'github-actions',
@@ -507,6 +513,10 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
               workflow: {
                 path: stringField(ciWorkflow, 'path'),
                 branch: stringField(ciWorkflow, 'branch'),
+                autoDeployOnPush: ciAutoDeployOnPush,
+                ...(stringField(ciWorkflow, 'promoteFromEnvironment')
+                  ? { promoteFromEnvironment: stringField(ciWorkflow, 'promoteFromEnvironment') }
+                  : {}),
               },
             }
             : {}),
@@ -518,7 +528,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
             : {}),
         }
         : undefined;
-      const ciPushToDeploy = Boolean(deployStrategy === 'branch' && deployTrigger === 'ci' && ciAction?.type === 'noop');
+      const ciPushToDeploy = Boolean(deployStrategy === 'branch' && deployTrigger === 'ci' && ciAction?.type === 'noop' && ciAutoDeployOnPush);
 
       // iOS drift (identity + TestFlight) when the environment declares it.
       const ios = envSpec.ios

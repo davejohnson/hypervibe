@@ -256,10 +256,10 @@ export function buildDriftSignals(
     const distinct = stagingBranch !== productionBranch;
     drift.push({
       check: 'deploy.branchesDistinct',
-      status: distinct ? 'ok' : 'warning',
+      status: 'ok',
       message: distinct
         ? `Deploy branches are distinct (staging=${stagingBranch}, production=${productionBranch})`
-        : `Deploy branches are identical (${stagingBranch}); use separate branches for safer promotion`,
+        : `Staging and production both use ${stagingBranch}; this is expected when staging auto-deploys main and production is manually promoted`,
     });
   }
 

@@ -52,7 +52,7 @@ export function resolveGitDeploySource(
 
   const branch = kind === 'production'
     ? deploy?.branches?.production ?? 'main'
-    : deploy?.branches?.staging ?? 'staging';
+    : deploy?.branches?.staging ?? 'main';
 
   return {
     source: {

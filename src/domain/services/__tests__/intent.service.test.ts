@@ -67,7 +67,7 @@ describe('intent.service drift signals', () => {
 
     const checks = new Map(drift.map((d) => [d.check, d.status]));
     expect(checks.get('policy.productionProtected')).toBe('ok');
-    expect(checks.get('deploy.branchesDistinct')).toBe('warning');
+    expect(checks.get('deploy.branchesDistinct')).toBe('ok');
     expect(checks.get('migrations.deployMode')).toBe('warning');
   });
 });

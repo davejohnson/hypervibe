@@ -37,17 +37,19 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
           GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
           GCP_REGION: \${{ secrets.GCP_REGION }}
           GCP_ARTIFACT_REPOSITORY: \${{ vars.GCP_ARTIFACT_REPOSITORY }}
+          DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
             for (const key of ['GCP_PROJECT_ID', 'GCP_REGION']) {
               if (!process.env[key]) throw new Error(key + ' is required');
             }
+            if (!process.env.DEPLOY_SHA) throw new Error('DEPLOY_SHA is required');
             const registry = process.env.GCP_REGION + '-docker.pkg.dev';
             const repository = process.env.GCP_ARTIFACT_REPOSITORY || 'infraprint';
             const imageName = process.env.GITHUB_REPOSITORY.toLowerCase().replace(/[^a-z0-9._/-]/g, '-');
             core.setOutput('registry', registry);
             core.setOutput('repository', repository);
-            core.setOutput('uri', registry + '/' + process.env.GCP_PROJECT_ID + '/' + repository + '/' + imageName + ':' + process.env.GITHUB_SHA);
+            core.setOutput('uri', registry + '/' + process.env.GCP_PROJECT_ID + '/' + repository + '/' + imageName + ':' + process.env.DEPLOY_SHA);
       - name: Prepare GCP Artifact Registry
         id: gcp
         uses: actions/github-script@v8

@@ -181,6 +181,10 @@ function buildAction(params: {
       workflow: {
         path: params.workflow.path,
         branch: params.workflow.branch,
+        autoDeployOnPush: params.workflow.autoDeployOnPush,
+        ...(params.workflow.promoteFromEnvironment
+          ? { promoteFromEnvironment: params.workflow.promoteFromEnvironment }
+          : {}),
         requiredSecrets: params.workflow.requiredSecrets,
         requiredVariables: params.workflow.requiredVariables,
         contentHash: sha256(params.workflow.content),

@@ -254,7 +254,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_ci_setup',
     'Set up explicit CI/CD tasks on GitHub for a project. For desired-state push deploys, prefer hv_spec_set deploy.strategy="branch" trigger="ci", then hv_plan/hv_apply; that manages the deploy workflow and provider API secrets as infrastructure. Dispatches on kind; config holds the kind-specific fields (config.repo="owner/repo" overrides the project gitRemoteUrl for every kind). ' +
-      'kind="deploy-branch": explicit/backfill branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs). Requires a GitHub apiToken that can write workflow files and repo secrets (classic PAT scopes repo + workflow for private repos); provider-specific image pull or cloud API credentials are reported by hv_plan/hv_apply and hv_ci_setup from provider metadata. config { provider (railway|cloudrun, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
+      'kind="deploy-branch": explicit/backfill branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs). Standard flow is feature branch -> PR -> main, staging auto-deploys main, and production is manually promoted with workflow_dispatch plus optional commit_sha. Requires a GitHub apiToken that can write workflow files and repo secrets (classic PAT scopes repo + workflow for private repos); provider-specific image pull or cloud API credentials are reported by hv_plan/hv_apply and hv_ci_setup from provider metadata. config { provider (railway|cloudrun, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
       'kind="ai-review": Claude PR review workflow; config { apiKey (required), model? }. ' +
       'kind="branch-protection": protection rules; config { branch (required), requireReviews?, requiredReviewers?, dismissStaleReviews?, requireCodeOwnerReviews?, requireStatusChecks?, statusChecks?, strictStatusChecks?, enforceAdmins?, requireLinearHistory?, allowForcePushes?, allowDeletions? }. ' +
       'kind="workflow": a workflow from a template; config { template (required, e.g. node-test, lint) }.',
@@ -383,6 +383,18 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
             repository: `${owner}/${repo}`,
             provider: cfg.provider,
             branchMapping: Object.fromEntries(targets.map((target) => [target.kind, target.branch])),
+            deploymentTriggers: Object.fromEntries(targets.map((target) => [
+              target.environmentName,
+              target.autoDeployOnPush
+                ? { mode: 'push', branch: target.branch }
+                : {
+                    mode: 'manual',
+                    branch: target.branch,
+                    workflow: `.github/workflows/deploy-${cfg.provider}-${target.kind}.yml`,
+                    input: 'commit_sha',
+                    ...(target.promoteFromEnvironment ? { promoteFrom: target.promoteFromEnvironment } : {}),
+                  },
+            ])),
             workflows: created,
             errors: errors.length > 0 ? errors : undefined,
             branchProtection: cfg.protectBranches ? protectionResults : undefined,
@@ -417,7 +429,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
           }
           return toolSuccess(data, {
             warnings: warnings.length > 0 ? warnings : undefined,
-            hint: `Set the manual secrets (${data.manualSecrets.join(', ') || 'none'})${data.requiredVariables.length > 0 ? ` and variables (${data.requiredVariables.join(', ')})` : ''} in the GitHub repository, then pushes to the mapped branches will deploy.`,
+            hint: `Set the manual secrets (${data.manualSecrets.join(', ') || 'none'})${data.requiredVariables.length > 0 ? ` and variables (${data.requiredVariables.join(', ')})` : ''} in the GitHub repository. Staging deploys automatically from main by default; production is manual with hv_ci_trigger and optional inputs.commit_sha.`,
           });
         }
         case 'ai-review': {
@@ -660,7 +672,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_ci_trigger',
-    'Manually trigger a GitHub Actions workflow (requires a workflow_dispatch trigger in the workflow).',
+    'Manually trigger a GitHub Actions workflow (requires a workflow_dispatch trigger in the workflow). For production promotion, trigger the deploy-<provider>-production.yml workflow on ref="main" and pass inputs.commit_sha when promoting a specific SHA that already passed staging.',
     {
       project: projectField,
       repo: repoField,

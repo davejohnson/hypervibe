@@ -5,6 +5,8 @@ export interface BranchDeployTarget {
   environmentName: string;
   kind: BranchDeployEnvironmentKind;
   branch: string;
+  autoDeployOnPush: boolean;
+  promoteFromEnvironment?: string;
   serviceNames: string[];
   providerProjectId?: string;
   providerEnvironmentId?: string;
@@ -19,6 +21,8 @@ export interface BranchDeployWorkflow {
   template: string;
   templateName: string;
   branch: string;
+  autoDeployOnPush: boolean;
+  promoteFromEnvironment?: string;
   environment: string;
   path: string;
   content: string;

@@ -83,10 +83,13 @@ export function buildRailwayGitHubActionsSteps(target: BranchDeployTarget): Bran
     steps: `      - name: Resolve image URI
         id: image
         uses: actions/github-script@v8
+        env:
+          DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
+            if (!process.env.DEPLOY_SHA) throw new Error('DEPLOY_SHA is required');
             const repo = process.env.GITHUB_REPOSITORY.toLowerCase();
-            core.setOutput('uri', 'ghcr.io/' + repo + ':' + process.env.GITHUB_SHA);
+            core.setOutput('uri', 'ghcr.io/' + repo + ':' + process.env.DEPLOY_SHA);
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -116,10 +119,11 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           IMAGE_REGISTRY_USERNAME: \${{ secrets.IMAGE_REGISTRY_USERNAME }}
           IMAGE_REGISTRY_TOKEN: \${{ secrets.IMAGE_REGISTRY_TOKEN }}
           IMAGE_URI: \${{ steps.image.outputs.uri }}
+          DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
             const endpoint = 'https://backboard.railway.app/graphql/v2';
-            const required = ['RAILWAY_API_TOKEN', 'RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN', 'IMAGE_URI'];
+            const required = ['RAILWAY_API_TOKEN', 'RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN', 'IMAGE_URI', 'DEPLOY_SHA'];
             for (const key of required) {
               if (!process.env[key]) throw new Error(key + ' is required');
             }
@@ -299,7 +303,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
               const deploymentData = await railway(deployMutation, {
                 serviceId,
                 environmentId: process.env.RAILWAY_ENVIRONMENT_ID,
-                commitSha: process.env.GITHUB_SHA,
+                commitSha: process.env.DEPLOY_SHA,
               });
               const deploymentId = requireString(deploymentData.serviceInstanceDeployV2, 'serviceInstanceDeployV2 deployment id');
               await waitForDeployment(deploymentId, serviceId);

@@ -1468,7 +1468,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('reports push-to-deploy ready for synced GitHub Actions deploy workflows', async () => {
+  it('reports synced production GitHub Actions deploy workflows as manual promotion, not push-to-deploy', async () => {
     const t = await makeClient();
     await t.call('hv_spec_set', {
       spec: {
@@ -1536,11 +1536,16 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const status = await t.call('hv_status', { project: 'ci-status-app', env: 'production' });
 
     expect(status.ok).toBe(true);
-    expect(status.data.deploySource.pushToDeploy).toBe(true);
+    expect(status.data.deploySource.pushToDeploy).toBe(false);
     expect(status.data.deploySource.ci).toMatchObject({
       provider: 'github-actions',
       setup: 'in-sync',
-      workflow: { path: '.github/workflows/deploy-railway-production.yml', branch: 'main' },
+      workflow: {
+        path: '.github/workflows/deploy-railway-production.yml',
+        branch: 'main',
+        autoDeployOnPush: false,
+        promoteFromEnvironment: 'staging',
+      },
     });
     await t.close();
   });
