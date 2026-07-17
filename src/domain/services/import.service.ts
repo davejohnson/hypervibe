@@ -52,6 +52,7 @@ export interface RailwayProjectInspection {
   environments: Array<{ name: string; railwayId: string }>;
   services: ImportServiceSummary[];
   components: ImportComponentSummary[];
+  storage: Array<{ name: string; railwayId: string; environments: Array<{ name: string; region?: string }> }>;
   envVarNames: string[];
   autoDetected: Record<string, string>;
   needsMapping: string[];
@@ -70,6 +71,7 @@ export type ImportResult =
 
 export interface ImportRailwayProjectOptions {
   force?: boolean;
+  storageMappings?: Record<string, string>;
 }
 
 export function mapPluginToComponentType(pluginName: string): ComponentType {
@@ -158,6 +160,14 @@ export async function inspectRailwayProject(
     type: mapPluginToComponentType(e.node.name),
     railwayId: e.node.id,
   }));
+  const storage = (details.buckets?.edges ?? []).map((edge) => ({
+    name: edge.node.name,
+    railwayId: edge.node.id,
+    environments: details.environments.edges.flatMap((environment) => {
+      const instance = environment.node.config?.buckets?.[edge.node.id];
+      return instance && instance.isDeleted !== true ? [{ name: environment.node.name, region: instance.region }] : [];
+    }),
+  }));
 
   // Fetch environment variable names (raw data for the agent to interpret),
   // sampled from the first environment's first service.
@@ -184,7 +194,7 @@ export async function inspectRailwayProject(
     }
   }
 
-  return { details, environments, services, components, envVarNames, autoDetected, needsMapping };
+  return { details, environments, services, components, storage, envVarNames, autoDetected, needsMapping };
 }
 
 /**
@@ -249,6 +259,22 @@ export async function importRailwayProject(
           services: {},
         },
       });
+
+    const adoptedStorage = Object.entries(options.storageMappings ?? {}).flatMap(([bucketId, desiredName]) => {
+      const bucket = details.buckets?.edges.find((edge) => edge.node.id === bucketId)?.node;
+      const instance = railwayEnv.node.config?.buckets?.[bucketId];
+      if (!bucket || !instance || instance.isDeleted === true || !instance.region) return [];
+      return [[desiredName, {
+        provider: 'railway', externalId: bucket.id, region: instance.region,
+        services: [], envKeys: [], updatedAt: new Date().toISOString(),
+      }] as const];
+    });
+    if (adoptedStorage.length > 0) {
+      envRepo.updatePlatformBindings(env.id, {
+        storageProviders: { railway: { projectId: details.id, environmentId: railwayEnv.node.id } },
+        storage: Object.fromEntries(adoptedStorage),
+      });
+    }
 
     createdEnvironments.push({
       name: infraType,

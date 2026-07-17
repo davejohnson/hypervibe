@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'tunnel' | 'local' | 'security' | 'database' | 'appstore';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'tunnel' | 'local' | 'security' | 'database' | 'storage' | 'appstore';
 
 export interface ProviderMetadata {
   name: string;

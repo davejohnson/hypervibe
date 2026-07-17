@@ -52,6 +52,17 @@ export interface ObservedDatabase {
   status: string;
 }
 
+export interface ObservedStorage {
+  provider: string;
+  kind: 'object';
+  externalId: string;
+  name: string;
+  region?: string;
+  status: string;
+  objectCount?: number;
+  sizeBytes?: number;
+}
+
 export interface ObservedState {
   provider: string;
   observedAt: string;
@@ -60,6 +71,7 @@ export interface ObservedState {
   environmentId?: string;
   services: ObservedService[];
   databases: ObservedDatabase[];
+  storage?: ObservedStorage[];
   /** True when one or more sub-queries failed; see warnings. */
   partial: boolean;
   warnings: string[];

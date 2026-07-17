@@ -202,6 +202,8 @@ export async function planGitHubActionsDeploy(params: {
   environmentSpec: EnvironmentSpec;
   environment: Environment | null;
   dependsOn?: string[];
+  /** Service create/replace actions will change provider ids before CI sync runs. */
+  bindingsWillChange?: boolean;
 }): Promise<{ action?: PlanAction; warnings: string[] }> {
   const { project, environmentName, environmentSpec, environment } = params;
   const warnings: string[] = [];
@@ -267,15 +269,18 @@ export async function planGitHubActionsDeploy(params: {
   const adapterResult = getGitHubAdapter(repo);
   if ('error' in adapterResult) {
     warnings.push(`Cannot observe GitHub Actions workflow for ${repo}: ${adapterResult.error}`);
+    const type = params.bindingsWillChange || binding?.contentHash !== contentHash ? 'update' : 'noop';
     return {
       action: buildAction({
-        type: binding?.contentHash === contentHash ? 'noop' : 'update',
+        type,
         provider: environmentSpec.hosting.provider,
         repo,
         workflow,
-        reason: binding?.contentHash === contentHash
-          ? 'GitHub Actions deploy workflow was previously synced by Hypervibe'
-          : `GitHub Actions deploy workflow ${workflow.path} needs to be synced`,
+        reason: params.bindingsWillChange
+          ? 'Service bindings will change during apply; regenerate the GitHub Actions deploy workflow after service convergence'
+          : binding?.contentHash === contentHash
+            ? 'GitHub Actions deploy workflow was previously synced by Hypervibe'
+            : `GitHub Actions deploy workflow ${workflow.path} needs to be synced`,
         verified: false,
         availableSecretNames,
         missingProviderSecrets,
@@ -305,18 +310,22 @@ export async function planGitHubActionsDeploy(params: {
     missingProviderSecrets.length > 0
     || requiredProviderSecrets.some((name) => !syncedSecrets.has(name))
     || staleProviderSecrets.length > 0;
-  const type = currentContent === workflow.content && !missingSecretSync
-    ? 'noop'
-    : currentContent === null
-      ? 'create'
-      : 'update';
-  const reason = type === 'noop'
-    ? 'GitHub Actions deploy workflow is in sync'
-    : currentContent === null
-      ? `GitHub Actions deploy workflow ${workflow.path} is missing`
-      : missingSecretSync
-        ? `GitHub Actions deploy workflow ${workflow.path} exists but provider secrets need syncing`
-        : `GitHub Actions deploy workflow ${workflow.path} differs from desired content`;
+  const type = currentContent === null
+    ? 'create'
+    : params.bindingsWillChange
+      ? 'update'
+      : currentContent === workflow.content && !missingSecretSync
+        ? 'noop'
+        : 'update';
+  const reason = currentContent === null
+    ? `GitHub Actions deploy workflow ${workflow.path} is missing`
+    : params.bindingsWillChange
+      ? 'Service bindings will change during apply; regenerate the GitHub Actions deploy workflow after service convergence'
+      : type === 'noop'
+        ? 'GitHub Actions deploy workflow is in sync'
+        : missingSecretSync
+          ? `GitHub Actions deploy workflow ${workflow.path} exists but provider secrets need syncing`
+          : `GitHub Actions deploy workflow ${workflow.path} differs from desired content`;
 
   return {
     action: buildAction({

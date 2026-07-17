@@ -115,6 +115,7 @@ function redactSensitiveString(value: string): string {
     .replace(/\bgithub_pat_[A-Za-z0-9_]+/g, REDACTED)
     .replace(/\bgh[oprsu]_[A-Za-z0-9_]{20,}/g, REDACTED)
     .replace(/\bglpat-[A-Za-z0-9_-]{20,}/g, REDACTED)
+    .replace(/\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{16,}/g, REDACTED)
     .replace(/\bsk_(?:live|test)_[A-Za-z0-9]{16,}/g, REDACTED)
     .replace(/\brk_(?:live|test)_[A-Za-z0-9]{16,}/g, REDACTED)
     .replace(/\bwhsec_[A-Za-z0-9]{16,}/g, REDACTED)
@@ -297,6 +298,7 @@ function summarizeSpec(value: unknown): string[] {
     const database = isRecord(env.database) && typeof env.database.provider === 'string'
       ? `${env.database.provider}${typeof env.database.engine === 'string' ? `/${env.database.engine}` : ''}`
       : undefined;
+    const storage = isRecord(env.storage) ? Object.keys(env.storage) : [];
     const deploy = isRecord(env.deploy)
       ? `${typeof env.deploy.strategy === 'string' ? env.deploy.strategy : 'deploy'}${typeof env.deploy.trigger === 'string' ? `/${env.deploy.trigger}` : ''}${typeof env.deploy.branch === 'string' ? `@${env.deploy.branch}` : ''}`
       : undefined;
@@ -304,6 +306,7 @@ function summarizeSpec(value: unknown): string[] {
       `hosting ${hosting}`,
       services.length > 0 ? `services ${services.join(', ')}` : undefined,
       database ? `database ${database}` : undefined,
+      storage.length > 0 ? `storage ${storage.join(', ')}` : undefined,
       typeof env.domain === 'string' ? `domain ${env.domain}` : undefined,
       isRecord(env.email) && env.email.enabled === true ? 'email enabled' : undefined,
       deploy ? `deploy ${deploy}` : undefined,

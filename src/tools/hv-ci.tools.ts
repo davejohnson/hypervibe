@@ -520,7 +520,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_ci_status',
-    'Get GitHub Actions status for a project repository: workflows, recent runs for a workflow, run jobs/steps, bounded job log tails, GitHub Pages status, and branch protection rules. For deploy.strategy="branch" with trigger="ci", use this to check push-deploy workflow runs and inspect failed job logs through Hypervibe\'s stored GitHub connection.',
+    'Authoritative inspection path for Hypervibe-managed GitHub Actions deploys. Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls. Returns workflows, recent runs, run jobs/steps, bounded job log tails, GitHub Pages status, and branch protection rules through Hypervibe\'s stored GitHub connection. For deploy.strategy="branch" with trigger="ci", use it to check push-deploy workflow runs and diagnose failed job logs.',
     {
       project: projectField,
       repo: repoField,

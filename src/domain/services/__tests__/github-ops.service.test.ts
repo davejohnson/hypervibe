@@ -238,6 +238,47 @@ describe('github tools', () => {
     expect(workflow.content).toContain("RAILWAY_SERVICE_IDS: 'rail-web,rail-worker'");
   });
 
+  it('excludes stale provider bindings for services removed from the spec', () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const project = projectRepo.create({
+      name: 'billforge-pruned-worker',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/davejohnson/billforge-pruned-worker',
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project',
+        environmentId: 'rail-env',
+        services: {
+          web: { serviceId: 'rail-web' },
+          worker: { serviceId: 'rail-stale-worker' },
+        },
+      },
+    });
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+
+    const { targets } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
+    expect(targets[0].providerServiceIds).toEqual(['rail-web']);
+
+    const workflow = buildBranchDeployWorkflow('railway', targets[0], { includeStep: false });
+    expect(workflow.content).toContain("RAILWAY_SERVICE_IDS: 'rail-web'");
+    expect(workflow.content).not.toContain('rail-stale-worker');
+  });
+
   it('builds provider API branch deploy workflows without provider CLIs', () => {
     const baseTarget = {
       environmentName: 'production',

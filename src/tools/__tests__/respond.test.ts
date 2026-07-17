@@ -23,7 +23,7 @@ describe('toolSuccess', () => {
       secretName: 'DATABASE_URL',
       nested: {
         connectionUrl: 'postgresql://postgres:secretpw@db.example.com:5432/app',
-        message: 'failed for postgresql://postgres:secretpw@db.example.com:5432/app',
+        message: 'failed for postgresql://postgres:secretpw@db.example.com:5432/app using sk-ant-api03-abcdefghijklmnopqrstuvwxyz',
       },
     }));
     const serialized = JSON.stringify(body);
@@ -34,7 +34,7 @@ describe('toolSuccess', () => {
       secretName: 'DATABASE_URL',
       nested: {
         connectionUrl: '[redacted]',
-        message: 'failed for postgresql://[redacted]@db.example.com:5432/app',
+        message: 'failed for postgresql://[redacted]@db.example.com:5432/app using [redacted]',
       },
     });
   });

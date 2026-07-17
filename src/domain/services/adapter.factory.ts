@@ -5,8 +5,10 @@ import type { Project } from '../entities/project.entity.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import type { IHostingAdapter } from '../ports/hosting.port.js';
 import type { IDatabaseAdapter } from '../ports/database.port.js';
+import type { IStorageAdapter } from '../ports/storage.port.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { createRailwayDatabaseAdapter } from '../../adapters/providers/railway/railway-database.factory.js';
+import { createRailwayStorageAdapter } from '../../adapters/providers/railway/railway-storage.factory.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 
@@ -53,6 +55,15 @@ export class AdapterFactory {
       'database',
       project ? getProjectScopeHints(project) : undefined
     );
+  }
+
+  async getStorageAdapter(providerName: string, project?: Project): Promise<AdapterResult<IStorageAdapter>> {
+    if (providerName === 'railway') {
+      const result = await this.getProviderAdapter('railway', project);
+      if (!result.success || !result.adapter) return { success: false, error: result.error };
+      return { success: true, adapter: createRailwayStorageAdapter(result.adapter as import('../../adapters/providers/railway/railway.adapter.js').RailwayAdapter) };
+    }
+    return this.getAdapter<IStorageAdapter>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined);
   }
 
   /**

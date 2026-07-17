@@ -61,8 +61,24 @@ describe('server tool surface', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
     expect(names).toHaveLength(42);
+    expect(tools.find((tool) => tool.name === 'hv_ci_status')?.description).toContain(
+      'Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls.'
+    );
     await client.close();
     await server.close();
+  });
+
+  it('instructs agents to inspect managed deploys through Hypervibe', async () => {
+    const { HYPERVIBE_SERVER_INSTRUCTIONS } = await import('../../server.js');
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'always inspect workflows, runs, jobs, and logs with hv_ci_status'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'Do not use gh, a GitHub connector/app, the GitHub UI, or direct GitHub API calls to inspect deploys.'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'follow or report its connection/error guidance instead of bypassing Hypervibe'
+    );
   });
 
   it('every tool responds with the structured envelope on error paths', async () => {

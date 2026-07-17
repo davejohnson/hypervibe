@@ -20,7 +20,7 @@ import { toolSuccess, toolError, wrapHandler } from './respond.js';
 export function registerLifecycleTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_inspect',
-    'Read-only provider inspection for forensics/adoption planning. Currently Railway only. Omit name/railwayProjectId to list projects; pass name or railwayProjectId to inspect environments, services, components, and env var names. Never writes Hypervibe local state or provider resources.',
+    'Read-only provider inspection for forensics/adoption planning. Currently Railway only. Omit name/railwayProjectId to list projects; pass name or railwayProjectId to inspect environments, services, components, storage buckets, and env var names. Never writes Hypervibe local state or provider resources.',
     {
       provider: z.enum(['railway']).optional().describe('Provider to inspect (default: railway)'),
       name: z.string().optional().describe('Existing provider project name to inspect. Omit name and railwayProjectId to list projects.'),
@@ -78,7 +78,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
           });
         }
 
-        const { details, environments, services, components, envVarNames, autoDetected, needsMapping } = inspection;
+        const { details, environments, services, components, storage, envVarNames, autoDetected, needsMapping } = inspection;
         return toolSuccess(
           {
             inspected: true,
@@ -87,6 +87,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
             environments,
             services,
             components,
+            storage,
             envVarNames,
             autoDetected,
             needsMapping,
@@ -106,7 +107,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
 
   server.tool(
     'hv_import',
-    'Adopt already-deployed provider infrastructure into Hypervibe local/repo state (currently Railway). Adoption writes Hypervibe project/environment/service/component bindings. For read-only provider data, use hv_inspect. Not for creating new infrastructure (use hv_spec_set + hv_apply).',
+    'Adopt already-deployed provider infrastructure into Hypervibe local/repo state (currently Railway). Adoption writes explicit Hypervibe project/environment/service/component/storage bindings. For read-only provider data, use hv_inspect. Not for creating new infrastructure (use hv_spec_set + hv_apply).',
     {
       provider: z.enum(['railway']).optional().describe('Source provider to import from (default: railway)'),
       name: z.string().optional().describe('Existing provider project name to adopt. Use hv_inspect first if you only need to read provider state.'),
@@ -116,9 +117,10 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
         .record(z.string(), z.string())
         .optional()
         .describe('Map provider environment names to Hypervibe environments (e.g., {"prod-us-east": "production", "blue": "staging"})'),
+      storageMappings: z.record(z.string(), z.string()).optional().describe('Explicitly adopt Railway buckets by id, mapping bucket id to desired storage name (e.g. {"bucket-id":"uploads"}).'),
       confirm: confirmField,
     },
-    wrapHandler(async ({ name, railwayProjectId, force = false, environmentMappings, confirm }) => {
+    wrapHandler(async ({ name, railwayProjectId, force = false, environmentMappings, storageMappings, confirm }) => {
       if (!name && !railwayProjectId) {
         return toolError('VALIDATION', 'hv_import is adoption-only and requires name or railwayProjectId.', {
           hint: 'Use hv_inspect provider="railway" to list/read provider projects. Use hv_import only when adopting a selected provider project into Hypervibe.',
@@ -191,13 +193,15 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
               environments,
               services: services.map((service) => ({ name: service.name, railwayId: service.railwayId })),
               components,
+              storage: inspection.storage,
+              storageMappings: storageMappings ?? {},
             },
             hint: 'Re-run hv_import with the same name/railwayProjectId, environmentMappings, and confirm=true to write local Hypervibe adoption bindings.',
             next: ['hv_import'],
           });
         }
 
-        const result = await importRailwayProject(details, environmentMappings, services, components, { force });
+        const result = await importRailwayProject(details, environmentMappings, services, components, { force, storageMappings });
         if (result.status === 'already_exists') {
           return toolError('VALIDATION', `Project "${details.name}" already exists in Hypervibe.`);
         }

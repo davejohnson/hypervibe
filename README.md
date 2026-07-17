@@ -18,7 +18,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 ## Features
 
 **Infrastructure Providers**
-- **Railway** - Deploy apps, databases, cron jobs, queues
+- **Railway** - Deploy apps, databases, private S3-compatible storage buckets, cron jobs, queues
 - **Cloudflare** - DNS management, domain configuration
 - **Stripe** - Payment integration, webhooks, products
 - **SendGrid** - Email authentication, domain verification
@@ -32,6 +32,20 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 **Workloads & Queues**
 - Services declare `workloadKind: web | worker | cron`. Workers are always-on background consumers (on Cloud Run: internal-only ingress, minimum one instance; they must still listen on `PORT`).
 - `queues` in the spec declares named message queues: Cloud Run environments get real Pub/Sub topics + subscriptions (apps receive `QUEUE_TOPIC_*` / `QUEUE_SUBSCRIPTION_*`); Railway environments are postgres-backed (pg-boss model — requires a declared database; apps consume via `DATABASE_URL`). Every queue environment gets `QUEUE_BACKEND` and `QUEUE_NAMES`.
+- `storage` declares named private object buckets and an explicit `injectInto` service list. Railway is the first storage provider and works with Railway or cross-provider hosting. Selected services receive the standard `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET_NAME`, `AWS_DEFAULT_REGION`, and `AWS_S3_URL_STYLE` variables; credentials never appear in specs, bindings, plans, or tool output. Bucket deletion is data-bearing and confirmation-gated.
+
+  ```json
+  "storage": {
+    "documents": {
+      "provider": "railway",
+      "type": "bucket",
+      "region": "sjc",
+      "injectInto": ["web", "worker", "cron"]
+    }
+  }
+  ```
+
+  `region` is physical Railway placement (`sjc`, `iad`, `ams`, or `sin`). Railway's S3 credentials still expose signing region `auto`, which Hypervibe passes through as `AWS_DEFAULT_REGION`.
 
 **Developer Experience**
 - **Natural language** - No YAML, no clicking through dashboards
@@ -134,7 +148,7 @@ Secret references use the format: `provider://path[#key][@version]`
 
 Hypervibe exposes a focused surface of intent-level `hv_*` tools. The core is a terraform-style loop:
 
-1. `hv_spec_set` — declare the desired state (services, database, domain, email, env vars) as a revisioned spec
+1. `hv_spec_set` — declare the desired state (services, database, storage, domain, email, env vars) as a revisioned spec
 2. `hv_plan` — observe live infrastructure, diff against the spec, and get an executable plan
 3. `hv_apply planId=...` — converge. Stale plans are rejected; destroying data-bearing resources requires explicit confirmation
 4. `hv_status` — see drift between desired and observed state at any time
@@ -152,7 +166,7 @@ Hypervibe treats infrastructure as a repo-backed definition, not as one user's p
 .hypervibe/spec.json
 ```
 
-Commit that file with the app. It is the shared source of truth for environments, services, cron jobs, databases, domains, email, env vars, deploy strategy, and migrations. When a teammate clones the repo and runs `hv_spec_get`, `hv_plan`, or `hv_status`, Hypervibe reads this file, creates a local project cache if needed, and reports any missing provider connections before apply. The local `project_specs` table is a revision journal behind this file: if `spec.json` is edited outside Hypervibe (or pulled with new changes), the next read adopts it as a new revision and says so in a warning.
+Commit that file with the app. It is the shared source of truth for environments, services, cron jobs, databases, delegated secret ownership, domains, email, env vars, deploy strategy, and migrations. When a teammate clones the repo and runs `hv_spec_get`, `hv_plan`, or `hv_status`, Hypervibe reads this file, creates a local project cache if needed, and reports any missing provider connections before apply. The local `project_specs` table is a revision journal behind this file: if `spec.json` is edited outside Hypervibe (or pulled with new changes), the next read adopts it as a new revision and says so in a warning.
 
 Hypervibe also maintains non-secret provider identity bindings in:
 
@@ -161,6 +175,50 @@ Hypervibe also maintains non-secret provider identity bindings in:
 ```
 
 This file lets teammates observe and converge the same provider resources instead of planning duplicate projects/services. It is for non-secret IDs such as provider project IDs, environment IDs, service IDs, custom domain bindings, and CI workflow sync metadata. Credentials, tokens, passwords, database URLs, and secret values stay out of the repo and remain local/provider-side.
+
+### Delegated runtime secrets
+
+Use a delegated secret slot when a collaborator, customer, or app owner should supply and rotate a runtime credential without giving it to the repository owner. The spec records the environment-variable name, responsible principal, and target environments, but never the value:
+
+```json
+{
+  "secrets": {
+    "ANTHROPIC_API_KEY": {
+      "ownership": "delegated",
+      "principal": "github:alice",
+      "environments": ["production"],
+      "required": true,
+      "driftPolicy": "preserve"
+    }
+  }
+}
+```
+
+The principal is a non-secret ownership label, not an authenticated Hypervibe identity. Provider membership is still the enforcement boundary: invite Alice to only the Railway/GCP project she needs, keep GitHub review and branch protection enabled, and have her connect her own provider credentials locally. Changing `principal` or a collaborator list in a local checkout does not grant a provider role. Without a hosted control plane, Hypervibe cannot prove that the person supplying a key is `github:alice`; do not auto-apply unreviewed spec changes with an owner/admin credential.
+
+For Anthropic, Alice creates a standard workspace-scoped API key at [Claude Platform API keys](https://platform.claude.com/settings/keys). Claude subscription billing and Claude API billing are separate, so the Platform account/workspace must have API billing configured. She saves the value locally, outside the repository:
+
+```text
+# /Users/alice/.config/hypervibe/friend-app.env
+ANTHROPIC_API_KEY=...
+```
+
+For Railway, she creates her own **Account API token** at [Railway account tokens](https://railway.com/account/tokens), selects **No workspace**, and uses the access granted to her Railway account:
+
+```text
+hv_connect provider="railway" credentialsRef="dotenv:/Users/alice/.config/hypervibe/railway.env#HYPERVIBE_RAILWAY_TOKEN"
+```
+
+Then she creates and applies a plan without sending either token through chat:
+
+```text
+hv_plan project="friend-app" env="production" secretRefs={"ANTHROPIC_API_KEY":"dotenv:/Users/alice/.config/hypervibe/friend-app.env#ANTHROPIC_API_KEY"}
+hv_apply project="friend-app" planId="<planId>"
+```
+
+The value is resolved on Alice's machine, encrypted into that specific plan, injected into every service in the target environment, and never returned by a tool. Hypervibe records only the principal, a SHA-256 value hash, timestamp, and apply receipt in `.hypervibe/bindings.json`. Ordinary `envVars` and `.env` loading cannot overwrite a delegated key. Missing values, out-of-band drift, or a changed principal produce an inspectable but non-executable plan that preserves the live value until a new explicit `secretRefs` input is supplied.
+
+If a machine or local Hypervibe database is lost, recloning the committed `.hypervibe/spec.json` and `.hypervibe/bindings.json` restores the desired shape and accepted hashes. Provider connections must be reconnected and in-flight plans must be recreated; no runtime secret value is recoverable from the repo.
 
 ### Deploy env from `.env`
 
@@ -358,7 +416,7 @@ To repair a stale GitHub Actions secret without pasting the token into chat, poi
 hv_secrets_set project="apreskeys.com" target="github" repo="davejohnson/apreskeys.com" key="IMAGE_REGISTRY_TOKEN" secretRef="dotenv:/Users/dave/projects/condoshare/.env#GHCR_TOKEN"
 ```
 
-For GHCR failures, inspect the run through Hypervibe itself:
+For any Hypervibe-managed GitHub Actions deploy, inspect the workflow and logs through Hypervibe itself. Agents should use `hv_ci_status` instead of `gh`, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls so the verified connection, diagnostics, and audit boundary stay coherent:
 
 ```text
 hv_ci_status project="apreskeys.com" repo="davejohnson/apreskeys.com" include=["logs"] runId=28272281787

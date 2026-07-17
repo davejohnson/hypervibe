@@ -7,7 +7,7 @@ import type { Service } from '../../../domain/entities/service.entity.js';
 import { githubPackagePullCredentials } from '../github/package-pull.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { hashEnvValue } from '../../../domain/ports/observe.port.js';
-import type { ObservedDatabase, ObservedService, ObservedState } from '../../../domain/ports/observe.port.js';
+import type { ObservedDatabase, ObservedService, ObservedState, ObservedStorage } from '../../../domain/ports/observe.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import {
   buildRailwayGitHubActionsSteps,
@@ -2437,8 +2437,12 @@ export class RailwayAdapter implements IProviderAdapter {
                 node {
                   id
                   name
+                  config(decryptVariables: false)
                 }
               }
+            }
+            buckets {
+              edges { node { id name } }
             }
             services {
               edges {
@@ -3260,6 +3264,204 @@ export class RailwayAdapter implements IProviderAdapter {
       .join('\n');
   }
 
+  private async getBucketState(projectId: string, environmentId: string): Promise<{
+    projectBuckets: Array<{ id: string; name: string }>;
+    environmentBuckets: Record<string, { region?: string; isDeleted?: boolean }>;
+    unmergedChangesCount: number;
+  }> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const query = gql`
+      query GetBucketState($projectId: String!, $environmentId: String!) {
+        project(id: $projectId) {
+          buckets { edges { node { id name } } }
+          environments { edges { node { id unmergedChangesCount } } }
+        }
+        environment(id: $environmentId) { config(decryptVariables: false) }
+      }
+    `;
+    const result = await this.client.request<{
+      project: {
+        buckets?: { edges?: Array<{ node: { id: string; name: string } }> };
+        environments?: { edges?: Array<{ node: { id: string; unmergedChangesCount?: number | null } }> };
+      };
+      environment?: { config?: { buckets?: Record<string, { region?: string; isDeleted?: boolean }> } };
+    }>(query, { projectId, environmentId });
+    const environmentNode = result.project.environments?.edges?.find((edge) => edge.node.id === environmentId)?.node;
+    return {
+      projectBuckets: (result.project.buckets?.edges ?? []).map((edge) => edge.node),
+      environmentBuckets: result.environment?.config?.buckets ?? {},
+      unmergedChangesCount: environmentNode?.unmergedChangesCount ?? 0,
+    };
+  }
+
+  private async getBucketUsage(bucketId: string, environmentId: string): Promise<{ objectCount?: number; sizeBytes?: number }> {
+    if (!this.client) return {};
+    const query = gql`
+      query BucketUsage($bucketId: String!, $environmentId: String!) {
+        bucketInstanceDetails(bucketId: $bucketId, environmentId: $environmentId) { objectCount sizeBytes }
+      }
+    `;
+    try {
+      const result = await this.client.request<{ bucketInstanceDetails?: { objectCount?: number; sizeBytes?: number } }>(query, { bucketId, environmentId });
+      return result.bucketInstanceDetails ?? {};
+    } catch {
+      return {};
+    }
+  }
+
+  private async commitBucketPatch(
+    environmentId: string,
+    buckets: Record<string, Record<string, unknown>>,
+    commitMessage: string
+  ): Promise<void> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const mutation = gql`
+      mutation CommitBucketPatch($environmentId: String!, $patch: EnvironmentConfig!, $commitMessage: String) {
+        environmentPatchCommit(environmentId: $environmentId, patch: $patch, commitMessage: $commitMessage)
+      }
+    `;
+    await this.client.request(mutation, { environmentId, patch: { buckets }, commitMessage });
+  }
+
+  async ensureStorageContext(
+    projectName: string,
+    environment: Environment,
+    context: { projectId?: string; environmentId?: string } = {}
+  ): Promise<Receipt> {
+    const virtualEnvironment: Environment = {
+      ...environment,
+      platformBindings: {
+        projectId: context.projectId,
+        environmentId: context.environmentId,
+        services: {},
+      },
+    };
+    const projectReceipt = await this.ensureProject(projectName, virtualEnvironment);
+    if (!projectReceipt.success) return projectReceipt;
+    const projectId = typeof projectReceipt.data?.projectId === 'string' ? projectReceipt.data.projectId : context.projectId;
+    if (!projectId) return { success: false, message: 'Failed to resolve Railway storage project id' };
+    const envId = await this.resolveRailwayEnvironmentId(projectId, {
+      ...virtualEnvironment,
+      platformBindings: { projectId, environmentId: context.environmentId, services: {} },
+    });
+    if (!envId) {
+      return { success: false, message: `Failed to ensure Railway environment "${environment.name}" for storage` };
+    }
+    return {
+      success: true,
+      message: `Railway storage context is ready for ${projectName}/${environment.name}`,
+      data: { projectId, environmentId: envId },
+    };
+  }
+
+  async getStorageCredentials(
+    environment: Environment,
+    externalId: string
+  ): Promise<{ bucket: string; endpoint: string; accessKeyId: string; secretAccessKey: string; region: string; urlStyle: string }> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const bindings = environment.platformBindings as { projectId?: string; environmentId?: string };
+    if (!bindings.projectId || !bindings.environmentId) throw new Error('Railway storage context is missing');
+    const query = gql`
+      query BucketCredentials($projectId: String!, $environmentId: String!, $bucketId: String!) {
+        bucketS3Credentials(projectId: $projectId, environmentId: $environmentId, bucketId: $bucketId) {
+          endpoint accessKeyId secretAccessKey bucketName region urlStyle
+        }
+      }
+    `;
+    const result = await this.client.request<{
+      bucketS3Credentials: Array<{
+        endpoint: string; accessKeyId: string; secretAccessKey: string; bucketName: string; region: string; urlStyle: string;
+      }>;
+    }>(query, { projectId: bindings.projectId, environmentId: bindings.environmentId, bucketId: externalId });
+    const credential = result.bucketS3Credentials?.[0];
+    if (!credential) throw new Error('Railway returned no S3 credentials for the bucket');
+    return {
+      bucket: credential.bucketName,
+      endpoint: credential.endpoint,
+      accessKeyId: credential.accessKeyId,
+      secretAccessKey: credential.secretAccessKey,
+      region: credential.region,
+      urlStyle: credential.urlStyle,
+    };
+  }
+
+  async ensureStorage(environment: Environment, name: string, options: { region: string }): Promise<Receipt> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const bindings = environment.platformBindings as { projectId?: string; environmentId?: string };
+    if (!bindings.projectId || !bindings.environmentId) {
+      return { success: false, message: `Failed to create Railway bucket "${name}"`, error: 'Railway project/environment bindings are missing. Apply project scaffolding first.' };
+    }
+    try {
+      const state = await this.getBucketState(bindings.projectId, bindings.environmentId);
+      const existing = state.projectBuckets.find((bucket) => bucket.name.toLowerCase() === name.toLowerCase());
+      const existingInstance = existing ? state.environmentBuckets[existing.id] : undefined;
+      if (existing && existingInstance && existingInstance.isDeleted !== true) {
+        const region = existingInstance.region;
+        if (region && region !== options.region) {
+          return { success: false, message: `Railway bucket "${name}" has immutable region ${region}`, error: `Requested region ${options.region} requires an explicit data migration and replacement.` };
+        }
+        return { success: true, message: `Using existing Railway bucket "${name}"`, data: { externalId: existing.id, region: region ?? options.region, created: false } };
+      }
+      if (state.unmergedChangesCount > 0) {
+        return {
+          success: false,
+          message: `Railway environment has ${state.unmergedChangesCount} unmerged change(s)`,
+          error: 'Commit or discard the staged Railway environment changes before Hypervibe creates the bucket, then re-run hv_plan.',
+        };
+      }
+      let bucket = existing;
+      if (!bucket) {
+        const mutation = gql`
+          mutation CreateBucket($input: BucketCreateInput!) {
+            bucketCreate(input: $input) { id name projectId }
+          }
+        `;
+        const created = await this.client.request<{ bucketCreate: { id: string; name: string; projectId: string } }>(mutation, {
+          input: { projectId: bindings.projectId, name },
+        });
+        bucket = created.bucketCreate;
+      }
+      await this.commitBucketPatch(
+        bindings.environmentId,
+        { [bucket.id]: { region: options.region, isCreated: true, isDeleted: false } },
+        `Create bucket ${bucket.name}`
+      );
+      return { success: true, message: `Created Railway bucket "${bucket.name}" in ${options.region}`, data: { externalId: bucket.id, region: options.region, created: true } };
+    } catch (error) {
+      return { success: false, message: `Failed to ensure Railway bucket "${name}"`, error: this.describeError(error) };
+    }
+  }
+
+  async destroyStorage(environment: Environment, externalId: string): Promise<Receipt> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const bindings = environment.platformBindings as { projectId?: string; environmentId?: string };
+    if (!bindings.projectId || !bindings.environmentId) {
+      return { success: false, message: 'Failed to delete Railway bucket', error: 'Railway project/environment bindings are missing.' };
+    }
+    try {
+      const state = await this.getBucketState(bindings.projectId, bindings.environmentId);
+      const bucket = state.projectBuckets.find((candidate) => candidate.id === externalId);
+      if (!bucket || state.environmentBuckets[externalId]?.isDeleted === true) {
+        return { success: true, message: 'Railway bucket is already absent', data: { externalId, deleted: false } };
+      }
+      if (state.unmergedChangesCount > 0) {
+        return {
+          success: false,
+          message: `Railway environment has ${state.unmergedChangesCount} unmerged change(s)`,
+          error: 'Commit or discard the staged Railway environment changes before deleting the bucket, then re-run hv_plan.',
+        };
+      }
+      await this.commitBucketPatch(bindings.environmentId, { [externalId]: { isDeleted: true } }, `Delete bucket ${bucket.name}`);
+      return {
+        success: true,
+        message: `Deleted Railway bucket "${bucket.name}" (Railway permanently deletes it after its recovery window)`,
+        data: { externalId, deleted: true },
+      };
+    } catch (error) {
+      return { success: false, message: 'Failed to delete Railway bucket', error: this.describeError(error) };
+    }
+  }
+
   /**
    * Read back the live state of an environment for spec → observe → diff reconciliation.
    * Never includes raw env var values — only key names and sha256 hashes.
@@ -3328,6 +3530,23 @@ export class RailwayAdapter implements IProviderAdapter {
 
     const services: ObservedService[] = [];
     const databases: ObservedDatabase[] = [];
+    const storage: ObservedStorage[] = [];
+
+    const environmentConfig = projectEnvironments.find((candidate) => candidate.id === environmentId)?.config;
+    for (const edge of details.buckets?.edges ?? []) {
+      const instance = environmentConfig?.buckets?.[edge.node.id];
+      if (!instance || instance.isDeleted === true) continue;
+      const usage = await this.getBucketUsage(edge.node.id, environmentId);
+      storage.push({
+        provider: 'railway',
+        kind: 'object',
+        externalId: edge.node.id,
+        name: edge.node.name,
+        region: instance.region,
+        status: 'ready',
+        ...usage,
+      });
+    }
 
     for (const edge of details.services?.edges ?? []) {
       const node = edge.node;
@@ -3462,6 +3681,7 @@ export class RailwayAdapter implements IProviderAdapter {
       environmentId,
       services,
       databases,
+      storage,
       partial,
       warnings,
     };
@@ -3615,6 +3835,7 @@ export interface RailwayProjectDetails {
       node: {
         id: string;
         name: string;
+        config?: { buckets?: Record<string, { region?: string; isDeleted?: boolean }> };
       };
     }>;
   };
@@ -3647,6 +3868,9 @@ export interface RailwayProjectDetails {
         name: string;
       };
     }>;
+  };
+  buckets?: {
+    edges: Array<{ node: { id: string; name: string } }>;
   };
 }
 
