@@ -8,6 +8,11 @@ import { diffEnvironment } from '../domain/plan/diff.engine.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import { planIos } from '../domain/services/appstore-plan.service.js';
 import { planQueues } from '../domain/services/queue-plan.service.js';
+import { planStorage } from '../domain/services/storage-plan.service.js';
+import {
+  delegatedSecretsForEnvironment,
+  planDelegatedSecrets,
+} from '../domain/services/delegated-secret.service.js';
 import {
   environmentUsesGitHubActionsDeploy,
   planGitHubActionsDeploy,
@@ -170,6 +175,7 @@ function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
     if (environmentUsesGitHubActionsDeploy(envSpec)) add('github', envName, 'GitHub Actions deploy workflow');
     if (envSpec.ios) add('appstoreconnect', envName, 'iOS bundle ID / TestFlight', [envSpec.ios.bundleId]);
     if (envSpec.queues && Object.keys(envSpec.queues).length > 0) add(envSpec.hosting.provider, envName, 'queues');
+    for (const storage of Object.values(envSpec.storage ?? {})) add(storage.provider, envName, 'object storage');
   }
 
   const items = Array.from(required.values())
@@ -226,10 +232,10 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_spec_set',
-    'Create or update the desired-state spec for a project (the single source of truth that hv_plan diffs against live infrastructure). When run inside a git worktree, Hypervibe writes .hypervibe/spec.json so teams share the same infrastructure intent. Merges by default; pass replace=true to overwrite. In a merge, set a key to null to delete it (e.g. remove a service).',
+    'Create or update the desired-state spec for a project (services, databases, storage buckets, queues, domains, and deploy infrastructure). This is the source of truth that hv_plan diffs against live infrastructure. When run inside a git worktree, Hypervibe writes .hypervibe/spec.json. Merges by default; pass replace=true to overwrite or null to delete a key.',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, collaboration?: { provider?: github, repository?, canonicalEnvironment?, issues?: { enabled?, templates?, labels? }, pullRequests?: { targetBranch?, requireReview?, requiredReviewers?, requireStatusChecks?, statusChecks? }, collaborators?: [{ username, permission? }] }, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|cloudsql|railway, seedCommand? }, domain?, domainRegistration?: { provider: cloudflare, register?: boolean, years?, autoRenew?, privacyMode? }, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations?, queues?: { <name>: { ackDeadlineSeconds? } }, ios?: { bundleId, appName?, platform?: IOS|MAC_OS, capabilities?: [PUSH_NOTIFICATIONS|...], testflight?: { groups: { <name>: { internal?, publicLinkEnabled?, publicLinkLimit?, feedbackEnabled?, hasAccessToAllBuilds?, testers?: [emails] } } } } } } }. database.seedCommand declares a one-shot database bootstrap command: hv_plan emits a visible seed action, hv_apply runs it inside the deployed service environment, and Hypervibe records successful completion on the database component only after terminal success so it does not re-run unless the command changes. ios declares the iOS identity + TestFlight fingerprint: hv_plan observes App Store Connect and converges bundle ID, capabilities (additive), beta groups, and tester membership; builds/submission stay in hv_testflight_*/hv_appstore_*. queues declares named message queues: Cloud Run environments get real Pub/Sub topics+subscriptions (QUEUE_TOPIC_*/QUEUE_SUBSCRIPTION_* env vars); railway environments are postgres-backed (pg-boss model, requires database; apps consume via DATABASE_URL). All queue environments get QUEUE_BACKEND and QUEUE_NAMES. collaboration declares repo collaboration infrastructure: GitHub issue labels/templates, PR template, and main-branch guardrails are planned/applied through hv_plan/hv_apply; collaborator invitations are guidance-only in v1. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows. trigger "native" is provider-specific, requires confirmNativeDeploy=true when newly introduced, and must not be used merely to avoid CI/package credentials. "manual" provisions infrastructure only.'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Shape: { gitRemoteUrl?, collaboration?: { provider?: github, repository?, canonicalEnvironment?, issues?: { enabled?, templates?, labels? }, pullRequests?: { targetBranch?, requireReview?, requiredReviewers?, requireStatusChecks?, statusChecks? }, collaborators?: [{ username, permission? }] }, secrets?: { <ENV_KEY>: { ownership?: delegated, principal, environments: [names], required?: boolean, driftPolicy?: preserve } }, environments: { <env>: { hosting: { provider }, services: { <name>: { workloadKind?, startCommand?, releaseCommand?, healthCheckPath?, cronSchedule?, public? } }, database?: { provider: supabase|cloudsql|railway, seedCommand? }, domain?, domainRegistration?: { provider: cloudflare, register?: boolean, years?, autoRenew?, privacyMode? }, email?: { enabled }, envVars?, deploy?: { strategy: branch|manual, trigger?: ci|native, branch? }, migrations?, queues?: { <name>: { ackDeadlineSeconds? } }, ios?: { bundleId, appName?, platform?: IOS|MAC_OS, capabilities?: [PUSH_NOTIFICATIONS|...], testflight?: { groups: { <name>: { internal?, publicLinkEnabled?, publicLinkLimit?, feedbackEnabled?, hasAccessToAllBuilds?, testers?: [emails] } } } } } } }. Delegated secrets declare ownership and target environments but never contain values; hv_plan accepts their values only through secretRefs and excludes those keys from env files and ordinary envVars. database.seedCommand declares a one-shot database bootstrap command: hv_plan emits a visible seed action, hv_apply runs it inside the deployed service environment, and Hypervibe records successful completion on the database component only after terminal success so it does not re-run unless the command changes. ios declares the iOS identity + TestFlight fingerprint: hv_plan observes App Store Connect and converges bundle ID, capabilities (additive), beta groups, and tester membership; builds/submission stay in hv_testflight_*/hv_appstore_*. queues declares named message queues: Cloud Run environments get real Pub/Sub topics+subscriptions (QUEUE_TOPIC_*/QUEUE_SUBSCRIPTION_* env vars); railway environments are postgres-backed (pg-boss model, requires database; apps consume via DATABASE_URL). All queue environments get QUEUE_BACKEND and QUEUE_NAMES. collaboration declares repo collaboration infrastructure: GitHub issue labels/templates, PR template, and main-branch guardrails are planned/applied through hv_plan/hv_apply; collaborator invitations are guidance-only in v1. deploy.strategy "branch" uses push deploys; trigger "ci" (default) deploys through generated GitHub Actions/provider API workflows. trigger "native" is provider-specific, requires confirmNativeDeploy=true when newly introduced, and must not be used merely to avoid CI/package credentials. "manual" provisions infrastructure only.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external app access such as the Railway GitHub App.'),
     },
@@ -330,11 +336,14 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         specSource: result.source ?? { kind: 'local' },
         spec: result.spec,
         connections,
+        delegatedSecrets: Object.keys(result.spec.secrets),
         environments: Object.fromEntries(
           Object.entries(result.spec.environments).map(([name, env]) => [name, {
             hosting: env.hosting.provider,
             services: Object.keys(env.services),
             database: env.database?.provider ?? null,
+            storage: Object.keys(env.storage ?? {}),
+            delegatedSecrets: delegatedSecretsForEnvironment(result.spec, name).map(([key]) => key),
             domain: env.domain ?? null,
           }])
         ),
@@ -344,7 +353,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_plan',
-    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Do not call hv_plan as a workaround after hv_status/hv_connections_list reports a missing required connection; first run hv_connect if a safe credentialsRef is already available, otherwise stop and ask the user for the token/reference. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If repo .env exists and .env.<env> is missing, hv_plan creates .env.<env> from .env before loading values; if both exist, newly added base .env keys are copied into .env.<env> while existing environment-specific values are preserved. The spec can set envFile.mode="all", "explicit", or "off", plus envFile.include/exclude. Optional envFile points at a different local env file; includeEnvFile=false skips env file loading. Optional services=[...] produces a partial deploy plan restricted to those spec services (domain/CI/iOS/destroy actions are excluded); optional envVars={...} freezes one-off env var overrides into the plan (values encrypted at rest, winning over .env and spec envVars at apply).',
+    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Do not call hv_plan as a workaround after hv_status/hv_connections_list reports a missing required connection; first run hv_connect if a safe credentialsRef is already available, otherwise stop and ask the user for the token/reference. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply. Delegated secret slots declared by the spec accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally, encrypted into that plan, and never returned. Ordinary envVars and env files cannot override delegated keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If repo .env exists and .env.<env> is missing, hv_plan creates it while omitting envFile.exclude and delegated-secret keys. Optional services=[...] produces a partial deploy plan restricted to those spec services; delegated secret inputs require a full plan.',
     {
       project: projectField,
       env: envField,
@@ -352,14 +361,16 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
+      secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
     },
-    wrapHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile }) => {
+    wrapHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const result = await planService.plan(project, env?.trim() || 'staging', {
         ...(services?.length ? { serviceFilter: services } : {}),
         ...(envVars && Object.keys(envVars).length > 0 ? { envVarOverrides: envVars } : {}),
         ...(envFile ? { envFile } : {}),
         ...(includeEnvFile !== undefined ? { includeEnvFile } : {}),
+        ...(secretRefs && Object.keys(secretRefs).length > 0 ? { secretRefs } : {}),
       });
       if ('error' in result) {
         return toolError('VALIDATION', result.error, { next: ['hv_spec_set'] });
@@ -388,6 +399,8 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           includePackageRead: true,
           after: 'Then re-run hv_plan and hv_apply. GitHub Actions push-to-deploy cannot converge until these credentials are available.',
         });
+      } else if (result.inputRequired.length > 0) {
+        hint = `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Ask the declared principal to save the value locally, then re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Do not paste raw values into chat.`;
       } else if (pending.length === 0) {
         hint = 'Everything is in sync — nothing to apply.';
       } else if (softActionScopedBlocked.length > 0) {
@@ -400,6 +413,8 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
       if (hardBlocked.length > 0) {
         next = ['hv_connect', 'hv_plan'];
+      } else if (result.inputRequired.length > 0) {
+        next = ['hv_plan'];
       } else if (pending.length > 0) {
         next = connectBeforeApply.length > 0
           ? ['hv_connect', 'hv_plan']
@@ -418,6 +433,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           summary: summarizeActions(result.actions),
           actions: result.actions,
           unmanaged: result.unmanaged,
+          inputRequired: result.inputRequired.length > 0 ? result.inputRequired : undefined,
           blocked: hardBlocked,
           actionScopedBlocked: actionScopedBlocked.length > 0 ? actionScopedBlocked : undefined,
           ...(result.blocked.length > 0 || actionScopedBlocked.length > 0
@@ -428,6 +444,14 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           hint,
           warnings: [...result.warnings, ...actionScopedWarnings],
           next,
+          ...(result.inputRequired.length > 0
+            ? {
+              agentInstruction: {
+                action: 'ask_user' as const,
+                message: 'Stop before apply. Ask the declared delegated-secret principal to provide a safe local secretRef, then create a new plan.',
+              },
+            }
+            : {}),
         }
       );
     })
@@ -538,6 +562,16 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
       const queues = await planQueues({ project: projectForStatus, environmentSpec: envSpec, environment });
       const queueDrift = queues.actions.filter((action) => action.type !== 'noop');
+      const storage = planStorage({ environmentSpec: envSpec, environment, observed });
+      const storageDrift = storage.actions.filter((action) => action.type !== 'noop');
+      const delegatedSecrets = planDelegatedSecrets({
+        spec: specResult.spec,
+        environmentName: envName,
+        hostingProvider: envSpec.hosting.provider,
+        environment,
+        observed,
+      });
+      const delegatedSecretDrift = delegatedSecrets.actions.filter((action) => action.type !== 'noop');
       const blocked = planService.preflight(envSpec);
       const iosGroupActions = ios.actions.filter((action) => action.id.startsWith('ios:group:'));
       const iosStatus = envSpec.ios
@@ -568,10 +602,11 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           specRevision: specResult.revision,
           specSource: specResult.source ?? { kind: 'local' },
           verified: observed !== null,
-          inSync: drift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0,
-          summary: summarizeActions([...diff.actions, ...ios.actions, ...queues.actions]),
-          drift: [...drift, ...iosDrift, ...queueDrift],
-          unmanaged: diff.unmanaged,
+          inSync: drift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0,
+          summary: summarizeActions([...diff.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions]),
+          drift: [...drift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift],
+          unmanaged: [...diff.unmanaged, ...storage.unmanaged],
+          inputRequired: delegatedSecrets.inputRequired.length > 0 ? delegatedSecrets.inputRequired : undefined,
           blocked,
           ...(blocked.length > 0 ? connectionRecoveryDetails(blocked) : {}),
           ...(iosStatus ? { ios: iosStatus } : {}),
@@ -587,7 +622,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           },
         },
         {
-          warnings: [...warnings, ...diff.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings],
+          warnings: [...warnings, ...diff.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings],
           hint: blocked.length > 0
             ? connectionRecoveryHint(blocked, {
               after: 'After the connection verifies, rerun hv_status or hv_plan. Do not ask to run hv_plan for DNS/domain drift until the required connection is verified.',
@@ -596,7 +631,9 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
               ? 'Fix Railway GitHub App repository access and project-member GitHub contributor access, then rerun hv_status or hv_plan.'
               : deployStrategy === 'branch' && deployTrigger === 'ci' && ciNeedsSync
                 ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
-                : drift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
+              : delegatedSecrets.inputRequired.length > 0
+                ? 'Ask the declared principal for a safe local secretRef, then run hv_plan with secretRefs. Do not paste raw secret values into chat.'
+              : drift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
           next: blocked.length > 0 ? ['hv_connect'] : undefined,
         }
       );
@@ -632,6 +669,17 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       }
       if (outcome.kind === 'env_missing') {
         return toolError('VALIDATION', `Spec no longer has environment "${outcome.envName}".`, { next: ['hv_plan'] });
+      }
+      if (outcome.kind === 'input_required') {
+        return toolError('VALIDATION', 'This plan is missing required delegated secret inputs.', {
+          details: { environment: outcome.envName, inputRequired: outcome.requirements },
+          hint: 'Ask each declared principal to save the value locally, then create a new hv_plan with secretRefs. Do not paste raw secrets into chat.',
+          next: ['hv_plan'],
+          agentInstruction: {
+            action: 'ask_user',
+            message: 'Stop before apply and request safe local secret references for the declared delegated-secret slots.',
+          },
+        });
       }
       if (outcome.kind === 'blocked') {
         return toolError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {

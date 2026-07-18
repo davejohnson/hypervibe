@@ -16,6 +16,7 @@ export interface BootstrapParams {
   verifyHttpHealth?: boolean;
   /** Managed queue env vars resolved by the caller (see queue-env.ts). */
   queueEnvVars?: Record<string, string>;
+  storageServiceEnvVars?: Record<string, Record<string, string>>;
 }
 
 function classifyEnvName(name: string): 'staging' | 'production' | null {

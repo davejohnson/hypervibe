@@ -152,7 +152,7 @@ function classifyEnvironmentName(name: string): BranchDeployEnvironmentKind | nu
   return null;
 }
 
-function environmentBindings(projectId: string, environmentName: string): {
+function environmentBindings(projectId: string, environmentName: string, desiredServiceNames?: Set<string>): {
   providerProjectId?: string;
   providerEnvironmentId?: string;
   providerServiceIds: string[];
@@ -165,7 +165,8 @@ function environmentBindings(projectId: string, environmentName: string): {
   const boundServiceNames = Object.keys(services ?? {});
   const providerServiceIds: string[] = [];
   const providerJobNames: string[] = [];
-  for (const service of Object.values(services ?? {})) {
+  for (const [serviceName, service] of Object.entries(services ?? {})) {
+    if (desiredServiceNames && !desiredServiceNames.has(serviceName)) continue;
     const record = asRecord(service);
     const serviceId = typeof record?.serviceId === 'string' && record.serviceId.trim().length > 0
       ? record.serviceId.trim()
@@ -246,8 +247,8 @@ export function resolveBranchDeployTargets(project: Project): {
       const branch = envSpec.deploy.branch ?? 'main';
       const autoDeployOnPush = envSpec.deploy.autoDeploy ?? kind !== 'production';
       desiredBranches[kind] = branch;
-      const bindings = environmentBindings(project.id, environmentName);
       const serviceNames = Object.keys(envSpec.services);
+      const bindings = environmentBindings(project.id, environmentName, new Set(serviceNames));
       const runtimeServiceNames = Object.entries(envSpec.services)
         .filter(([, service]) => service.workloadKind !== 'cron')
         .map(([name]) => name);

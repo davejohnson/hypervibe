@@ -31,9 +31,16 @@ import {
 import { planIos } from '../services/appstore-plan.service.js';
 import { planQueues } from '../services/queue-plan.service.js';
 import { resolveQueueEnvVars } from '../services/queue-env.js';
+import { parseStorageProviderContexts, planStorage } from '../services/storage-plan.service.js';
 import { formatConnectionGuidance } from '../services/connection-guidance.js';
 import { loadDeployEnvFile } from '../services/deploy-env-file.js';
 import { cloudflareScopeHintsForDomain } from '../services/domain-scope.js';
+import {
+  delegatedSecretsForEnvironment,
+  planDelegatedSecrets,
+  type DelegatedSecretInputRequirement,
+} from '../services/delegated-secret.service.js';
+import { resolveSecretValueRef } from '../services/secret-value-ref.js';
 import {
   githubCollaborationConnectionBlock,
   planGitHubCollaboration,
@@ -48,6 +55,8 @@ export interface PlanOptions {
   envFile?: string;
   /** Set false to skip loading the local deploy env file. */
   includeEnvFile?: boolean;
+  /** Explicit chat-safe references for delegated secret slots declared in the spec. */
+  secretRefs?: Record<string, string>;
 }
 
 export interface EnvironmentPlan {
@@ -61,6 +70,8 @@ export interface EnvironmentPlan {
   actions: PlanAction[];
   unmanaged: DiffResult['unmanaged'];
   warnings: string[];
+  /** Delegated values that must be supplied in a new hv_plan call before apply. */
+  inputRequired: DelegatedSecretInputRequirement[];
   /** Missing/unverified provider connections that block apply. */
   blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }>;
 }
@@ -153,6 +164,27 @@ export class PlanService {
             observed.partial = true;
             observed.warnings.push(`Database observation failed: ${error instanceof Error ? error.message : String(error)}`);
           }
+        }
+      }
+
+      const storageProviders = Array.from(new Set(Object.values(environmentSpec.storage ?? {}).map((storage) => storage.provider)));
+      const contexts = parseStorageProviderContexts(environment);
+      for (const storageProvider of storageProviders) {
+        if (storageProvider === provider && (observed.storage?.length ?? 0) > 0) continue;
+        const context = contexts[storageProvider];
+        if (!context) continue;
+        const storageResult = await adapterFactory.getStorageAdapter(storageProvider, project);
+        if (!storageResult.success || !storageResult.adapter) {
+          observed.partial = true;
+          observed.warnings.push(`Storage observation failed (${storageProvider}): ${storageResult.error ?? 'adapter unavailable'}`);
+          continue;
+        }
+        try {
+          const items = await storageResult.adapter.observe(environment, context);
+          observed.storage = [...(observed.storage ?? []), ...items.filter((item) => !(observed.storage ?? []).some((existing) => existing.externalId === item.externalId))];
+        } catch (error) {
+          observed.partial = true;
+          observed.warnings.push(`Storage observation failed (${storageProvider}): ${error instanceof Error ? error.message : String(error)}`);
         }
       }
 
@@ -262,6 +294,7 @@ export class PlanService {
       { provider: environmentSpec.hosting.provider },
     ];
     if (environmentSpec.database) required.push({ provider: environmentSpec.database.provider });
+    for (const storage of Object.values(environmentSpec.storage ?? {})) required.push({ provider: storage.provider });
     if (environmentSpec.domain) {
       required.push({ provider: 'cloudflare', scopeHints: cloudflareScopeHintsForDomain(environmentSpec.domain) });
     }
@@ -413,18 +446,60 @@ export class PlanService {
         };
       }
     }
+    const delegatedSecretSlots = new Map(delegatedSecretsForEnvironment(specResult.spec, environmentName));
+    const requestedSecretRefs = options?.secretRefs && Object.keys(options.secretRefs).length > 0
+      ? options.secretRefs
+      : undefined;
+    if (serviceFilter && requestedSecretRefs) {
+      return {
+        error: 'Delegated secret inputs require a full environment plan; remove services= and re-run hv_plan with secretRefs.',
+      };
+    }
     const envVarOverrides = options?.envVarOverrides && Object.keys(options.envVarOverrides).length > 0
       ? options.envVarOverrides
       : undefined;
+    const delegatedOverrideCollisions = Object.keys(envVarOverrides ?? {}).filter((key) => delegatedSecretSlots.has(key));
+    if (delegatedOverrideCollisions.length > 0) {
+      return {
+        error: `Delegated secret keys cannot be passed through envVars: ${delegatedOverrideCollisions.join(', ')}. Use secretRefs with env:, dotenv:, file:, or a secret-manager reference.`,
+      };
+    }
+    const unknownSecretRefs = Object.keys(requestedSecretRefs ?? {}).filter((key) => !delegatedSecretSlots.has(key));
+    if (unknownSecretRefs.length > 0) {
+      return {
+        error: `secretRefs contains keys that are not delegated secret slots for environment "${environmentName}": ${unknownSecretRefs.join(', ')}.`,
+      };
+    }
+    const delegatedSecretValues: Record<string, string> = {};
+    try {
+      for (const [key, ref] of Object.entries(requestedSecretRefs ?? {})) {
+        const value = await resolveSecretValueRef(ref, {
+          projectId: project.id,
+          environmentName,
+        });
+        if (!value) {
+          return { error: `secretRefs["${key}"] resolved to an empty value.` };
+        }
+        delegatedSecretValues[key] = value;
+      }
+    } catch (error) {
+      return {
+        error: `Failed to resolve delegated secret input: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
     let envFile: ReturnType<typeof loadDeployEnvFile> = null;
     try {
       const envFilePolicy = environmentSpec.envFile;
+      const excludedEnvKeys = Array.from(new Set([
+        ...(envFilePolicy?.exclude ?? []),
+        ...delegatedSecretSlots.keys(),
+      ]));
       envFile = loadDeployEnvFile({
         envFile: options?.envFile,
         includeEnvFile: options?.includeEnvFile === false ? false : envFilePolicy?.mode !== 'off',
         mode: envFilePolicy?.mode,
         includeKeys: envFilePolicy?.include,
-        excludeKeys: envFilePolicy?.exclude,
+        excludeKeys: excludedEnvKeys,
         envName: environmentName,
       });
     } catch (error) {
@@ -473,6 +548,16 @@ export class PlanService {
       }
     }
     const { observed, warnings: observeWarnings } = await this.observeEnvironment(projectForPlan, environmentForObserve, environmentSpec);
+    const delegatedSecrets = serviceFilter
+      ? { actions: [], desiredEnvVars: {}, inputRequired: [], warnings: [] }
+      : planDelegatedSecrets({
+        spec: specResult.spec,
+        environmentName,
+        hostingProvider: environmentSpec.hosting.provider,
+        environment: environmentForObserve,
+        observed,
+        suppliedValues: delegatedSecretValues,
+      });
     const local = this.buildLocalSnapshot(projectForPlan, environment, effectiveBindings);
     const localDb = local.components.find((component) => component.type === environmentSpec.database?.engine);
     const localDbProvider = localDb
@@ -485,6 +570,7 @@ export class PlanService {
     const managedEnvKeys = new Set([
       ...Object.keys(managedDatabaseEnvVars ?? {}),
       ...Object.keys(managedQueueEnvVars ?? {}),
+      ...delegatedSecretSlots.keys(),
     ]);
     const envFileVars = envFile && Object.keys(envFile.vars).length > 0
       ? Object.fromEntries(Object.entries(envFile.vars).filter(([key]) => !managedEnvKeys.has(key)))
@@ -493,13 +579,14 @@ export class PlanService {
     // the base spec is untouched (preflight, CI, and domain planning see the
     // declared state). Precedence at apply is: .env < generated infra vars
     // < spec envVars < explicit envVars overrides.
-    const specForDiff = envFileVars || envVarOverrides
+    const specForDiff = envFileVars || envVarOverrides || Object.keys(delegatedSecrets.desiredEnvVars).length > 0
       ? {
         ...environmentSpec,
         envVars: {
           ...(envFileVars ?? {}),
           ...environmentSpec.envVars,
           ...(envVarOverrides ?? {}),
+          ...delegatedSecrets.desiredEnvVars,
         },
       }
       : environmentSpec;
@@ -549,6 +636,16 @@ export class PlanService {
         actions.splice(firstServiceIndex, 0, ...queues.actions);
       }
     }
+    const storage = planStorage({ environmentSpec, environment, observed });
+    if (storage.actions.length > 0) {
+      const ensureActions = storage.actions.filter((action) => action.metadata?.operation === 'storageEnsure');
+      const followupActions = storage.actions.filter((action) => action.metadata?.operation !== 'storageEnsure');
+      actions.unshift(...ensureActions);
+      const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
+      if (firstServiceIndex === -1) actions.push(...followupActions);
+      else actions.splice(firstServiceIndex, 0, ...followupActions);
+    }
+    actions.push(...delegatedSecrets.actions);
 
     // Destroys (including confirm-gated previous-provider cleanup) are never
     // prerequisites for CI setup — an unconfirmed destroy must not block the
@@ -556,12 +653,16 @@ export class PlanService {
     const ciDependsOn = actions
       .filter((action) => action.type !== 'noop' && action.type !== 'destroy' && ['project', 'environment', 'service'].includes(action.resource.kind))
       .map((action) => action.id);
+    const ciBindingsWillChange = actions.some((action) =>
+      action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace')
+    );
     const ciDeploy = await planGitHubActionsDeploy({
       project: projectForPlan,
       environmentName,
       environmentSpec,
       environment,
       dependsOn: ciDependsOn,
+      bindingsWillChange: ciBindingsWillChange,
     });
     if (ciDeploy.action) {
       const firstDomainIndex = actions.findIndex((action) => action.resource.kind === 'domain');
@@ -600,7 +701,7 @@ export class PlanService {
         return false;
       });
       filterWarnings.push(
-        `Partial plan (services: ${serviceFilter.join(', ')}): domain, CI, collaboration, iOS, queue, and destroy convergence was excluded; run hv_plan without services for full convergence.`
+        `Partial plan (services: ${serviceFilter.join(', ')}): delegated secrets, domain, CI, collaboration, iOS, queue, storage, and destroy convergence was excluded; run hv_plan without services for full convergence.`
       );
     }
 
@@ -641,7 +742,10 @@ export class PlanService {
       }
     }
 
-    const overrides = serviceFilter || envVarOverrides || (envFileVars && Object.keys(envFileVars).length > 0)
+    const overrides = serviceFilter
+      || envVarOverrides
+      || Object.keys(delegatedSecretValues).length > 0
+      || (envFileVars && Object.keys(envFileVars).length > 0)
       ? {
         ...(serviceFilter ? { services: serviceFilter } : {}),
         ...(envFileVars && Object.keys(envFileVars).length > 0
@@ -657,6 +761,12 @@ export class PlanService {
             envVarsEncrypted: getSecretStore().encryptObject(envVarOverrides),
           }
           : {}),
+        ...(Object.keys(delegatedSecretValues).length > 0
+          ? {
+            delegatedSecretKeys: Object.keys(delegatedSecretValues).sort(),
+            delegatedSecretVarsEncrypted: getSecretStore().encryptObject(delegatedSecretValues),
+          }
+          : {}),
       }
       : undefined;
 
@@ -666,8 +776,9 @@ export class PlanService {
       specRevision: specResult.revision,
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
-      unmanaged: diff.unmanaged,
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...repoCollaboration.warnings, ...ios.warnings, ...queues.warnings, ...filterWarnings],
+      unmanaged: [...diff.unmanaged, ...storage.unmanaged],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...repoCollaboration.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...filterWarnings],
+      ...(delegatedSecrets.inputRequired.length > 0 ? { inputRequired: delegatedSecrets.inputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };
 
@@ -692,8 +803,9 @@ export class PlanService {
       verified: observed !== null,
       observed,
       actions,
-      unmanaged: diff.unmanaged,
+      unmanaged: [...diff.unmanaged, ...storage.unmanaged],
       warnings: document.warnings ?? [],
+      inputRequired: delegatedSecrets.inputRequired,
       blocked,
     };
   }

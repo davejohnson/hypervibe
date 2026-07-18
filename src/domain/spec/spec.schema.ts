@@ -102,6 +102,19 @@ export const envFileSpecSchema = z.object({
   exclude: z.array(z.string().min(1)).default([]),
 }).default({});
 
+export const delegatedSecretSpecSchema = z.object({
+  /** Delegated values are supplied explicitly at plan time and never stored in the spec. */
+  ownership: z.literal('delegated').default('delegated'),
+  /** Non-secret identity that documents who is responsible for supplying and rotating the value. */
+  principal: z.string().min(1),
+  /** Environments in which this secret must be injected. */
+  environments: z.array(z.string().min(1)).min(1),
+  /** Missing or unaccepted values block convergence until the principal supplies a secretRef. */
+  required: z.boolean().default(true),
+  /** Never replace an accepted live value from a local env file or ordinary envVars input. */
+  driftPolicy: z.literal('preserve').default('preserve'),
+}).strict();
+
 export const migrationsSpecSchema = z.object({
   mode: z.enum(['none', 'releaseCommand', 'tool']),
   runInDeploy: z.boolean().optional(),
@@ -172,6 +185,20 @@ export const queueSpecSchema = z.object({
   ackDeadlineSeconds: z.number().int().min(10).max(600).optional(),
 }).strict();
 
+/**
+ * Named, durable object storage. The name is both the provider display name
+ * used by Railway variable references. Each selected service receives the
+ * conventional AWS S3 variable names, so one bucket may target each service.
+ */
+export const storageSpecSchema = z.object({
+  provider: z.literal('railway'),
+  type: z.literal('bucket'),
+  /** Railway bucket regions are immutable after the bucket instance is created. */
+  region: z.enum(['sjc', 'iad', 'ams', 'sin']),
+  /** Services that receive this bucket's generated runtime variables. */
+  injectInto: z.array(z.string().min(1)).min(1),
+}).strict();
+
 export const environmentSpecSchema = z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
@@ -191,6 +218,10 @@ export const environmentSpecSchema = z.object({
   queues: z.record(
     z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'queue names: lowercase alphanumeric and dashes, starting with a letter'),
     queueSpecSchema
+  ).optional(),
+  storage: z.record(
+    z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'storage names: lowercase alphanumeric and dashes, starting with a letter'),
+    storageSpecSchema
   ).optional(),
   /** Autofix agent log watches, synced on hv_apply. */
   autofix: z.object({
@@ -214,6 +245,28 @@ export const environmentSpecSchema = z.object({
       path: ['queues'],
     });
   }
+  const storageByService = new Map<string, string>();
+  for (const [storageName, storage] of Object.entries(environment.storage ?? {})) {
+    for (const serviceName of storage.injectInto) {
+      if (!environment.services[serviceName]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `storage target service "${serviceName}" is not declared in this environment`,
+          path: ['storage', storageName, 'injectInto'],
+        });
+      }
+      const existing = storageByService.get(serviceName);
+      if (existing) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `service "${serviceName}" cannot receive both "${existing}" and "${storageName}" because bucket wiring uses the standard AWS_* variable names`,
+          path: ['storage', storageName, 'injectInto'],
+        });
+      } else {
+        storageByService.set(serviceName, storageName);
+      }
+    }
+  }
 });
 
 export const projectSpecSchema = z.object({
@@ -221,16 +274,68 @@ export const projectSpecSchema = z.object({
   project: z.string().min(1),
   gitRemoteUrl: z.string().min(1).optional(),
   collaboration: collaborationSpecSchema.optional(),
+  secrets: z.record(
+    z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'secret names must be valid environment variable names'),
+    delegatedSecretSpecSchema
+  ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
+}).superRefine((spec, ctx) => {
+  for (const [key, secret] of Object.entries(spec.secrets)) {
+    const seen = new Set<string>();
+    for (const environmentName of secret.environments) {
+      if (seen.has(environmentName)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" lists environment "${environmentName}" more than once`,
+          path: ['secrets', key, 'environments'],
+        });
+        continue;
+      }
+      seen.add(environmentName);
+
+      const environment = spec.environments[environmentName];
+      if (!environment) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" targets unknown environment "${environmentName}"`,
+          path: ['secrets', key, 'environments'],
+        });
+        continue;
+      }
+      if (Object.keys(environment.services).length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" requires at least one service in environment "${environmentName}"`,
+          path: ['secrets', key, 'environments'],
+        });
+      }
+      if (key in environment.envVars) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" cannot also be declared in environments.${environmentName}.envVars`,
+          path: ['environments', environmentName, 'envVars', key],
+        });
+      }
+      if (environment.envFile?.include.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" cannot be selected through environments.${environmentName}.envFile.include`,
+          path: ['environments', environmentName, 'envFile', 'include'],
+        });
+      }
+    }
+  }
 });
 
 export type ServiceSpec = z.infer<typeof serviceSpecSchema>;
 export type DatabaseSpec = z.infer<typeof databaseSpecSchema>;
 export type IosSpec = z.infer<typeof iosSpecSchema>;
 export type QueueSpec = z.infer<typeof queueSpecSchema>;
+export type StorageSpec = z.infer<typeof storageSpecSchema>;
 export type IosTestflightGroupSpec = z.infer<typeof iosTestflightGroupSpecSchema>;
 export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema>;
 export type EnvFileSpec = z.infer<typeof envFileSpecSchema>;
+export type DelegatedSecretSpec = z.infer<typeof delegatedSecretSpecSchema>;
 export type CollaborationSpec = z.infer<typeof collaborationSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;

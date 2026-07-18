@@ -14,7 +14,7 @@ Treat the desired-state loop as the product center:
 
 When adding capabilities that create, mutate, purchase, migrate, deploy, schedule, or destroy infrastructure, default to modeling them in the spec and plan/apply flow. Use separate imperative tools only for read-only inspection, explicit operational actions, or narrow escape hatches; they should not become the primary path for lifecycle-managed infrastructure.
 
-Domain, DNS, registrar, hosting, database, queues, deploy-source, CI deploy, and recurring job changes are lifecycle infrastructure. Do not hide those mutations inside CI, diagnostics, or helper tools; add them to desired state, compute them in `hv_plan`, and converge them in `hv_apply`.
+Domain, DNS, registrar, hosting, database, object storage, queues, deploy-source, CI deploy, and recurring job changes are lifecycle infrastructure. Do not hide those mutations inside CI, diagnostics, or helper tools; add them to desired state, compute them in `hv_plan`, and converge them in `hv_apply`.
 
 Read-only provider forensics belong in `hv_inspect`. Adoption of already-existing provider infrastructure into Hypervibe local/repo state belongs in `hv_import` and must be explicit, mapping-driven, and confirmation-gated. Do not use `hv_import` as a generic read tool.
 
@@ -129,6 +129,21 @@ When adding or changing token guidance, include all of these details:
 
 Tests should fail if new provider guidance omits these basics. Update `src/domain/services/__tests__/connection-guidance.test.ts` and add provider-specific verification-error assertions for ambiguous or commonly miscreated tokens.
 
+## Delegated Runtime Secrets
+
+Delegated runtime secrets are lifecycle-managed slots, not ordinary environment variables and not provider connections:
+
+- `ProjectSpec.secrets` declares the environment-variable name, responsible principal, target environments, required/optional behavior, and preserve-only drift policy. It never contains a value.
+- `hv_plan secretRefs={...}` is the only write input. References are resolved locally, values are encrypted into that specific plan, and the plan action/preview contains only key names and non-secret metadata.
+- Declared keys are excluded from deploy env files and rejected from ordinary `envVars` overrides. An owner's local `.env` must never silently become the desired value for a delegated slot.
+- Missing, unaccepted, drifted, or newly reassigned required slots produce `inputRequired`. The plan remains inspectable but `hv_apply` must reject it before connection checks or provider mutations.
+- A successful provider receipt records `delegatedEnvBindings` metadata in environment bindings: key name, principal, SHA-256 value hash, timestamp, apply run id, and action id. The value itself is never stored in repo bindings or receipts.
+- Live observation compares provider hashes against the accepted hash. Matching values are preserved without needing the secret locally. Drift is reported and preserved until a new explicit plan input is supplied.
+
+`.hypervibe/spec.json` and the sanitized `.hypervibe/bindings.json` make this state reconstructible after a local database or checkout is lost. Provider connections and encrypted in-flight plans remain local and must be recreated.
+
+In the no-service model, `principal` is declarative attribution, not authenticated authorization. Git review/branch protection and provider-scoped membership enforce who may change the spec and mutate infrastructure. A local principal or collaborator edit cannot grant a Railway/GCP/GitHub role, but a caller who already holds provider mutation credentials can still change provider state. Do not treat delegated metadata as a centralized ACL or automatically apply unreviewed changes with privileged credentials; authenticated principal enforcement would require a trusted service or signed attestation.
+
 ## Deploy Env Files
 
 Local `.env` files are deploy input candidates, not a raw publish list. Prefer `.env.<environment>` over `.env` when present. When an environment deploy/plan uses the default repo convention and `.env` exists but `.env.<environment>` does not, Hypervibe creates `.env.<environment>` from `.env` before loading deploy vars. When both files exist, Hypervibe may copy newly added base `.env` keys into `.env.<environment>`, but it must preserve environment-specific values instead of overwriting them.
@@ -159,6 +174,8 @@ Do not default to a long-lived `staging` branch. `main` is the accepted-code bra
 Do not switch a project to `deploy.trigger: "native"` just to avoid missing CI, package, or image credentials. That changes the desired infrastructure contract. Provider-native deploys are an explicit opt-in and may require provider-specific external app access such as the Railway GitHub App.
 
 Generated provider CI workflow steps belong under provider-owned modules and are exposed through provider registry metadata. Generic GitHub orchestration should assemble workflows, sync files/secrets, inspect runs/logs, and diagnose failures without owning provider API scripts.
+
+`hv_ci_status` is the authoritative observation path for Hypervibe-managed GitHub Actions deploys. Agents should use it to inspect workflows, runs, jobs, and bounded log tails, then use `hv_health` after a successful run. They must not bypass it with `gh`, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls; a blocked `hv_ci_status` result should surface its connection/error guidance and stop the stage.
 
 ## Database Tasks And Seed Data
 

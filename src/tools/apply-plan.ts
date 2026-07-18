@@ -21,6 +21,12 @@ import {
 import { applyIosAction, isIosAction } from '../domain/services/appstore-plan.service.js';
 import { applyQueueAction, isQueueAction } from '../domain/services/queue-plan.service.js';
 import { resolveQueueEnvVars } from '../domain/services/queue-env.js';
+import { applyStorageAction, isStorageAction, resolveStorageServiceEnvVars } from '../domain/services/storage-plan.service.js';
+import {
+  isDelegatedSecretAction,
+  recordDelegatedSecretBindings,
+  type DelegatedSecretInputRequirement,
+} from '../domain/services/delegated-secret.service.js';
 import {
   applyGitHubActionsDeploy,
   isGitHubActionsDeployAction,
@@ -244,6 +250,7 @@ export function bootstrapActionResultFromSummary(
 export type PlanApplyOutcome =
   | { kind: 'plan_not_found'; error: string }
   | { kind: 'env_missing'; envName: string }
+  | { kind: 'input_required'; envName: string; requirements: DelegatedSecretInputRequirement[] }
   | { kind: 'blocked'; applyBlocked: ConnectionBlock[] }
   | {
     kind: 'executed';
@@ -279,6 +286,13 @@ export async function executePlanApply(ctx: ToolContext, params: {
   const envSpec = spec.environments[envName];
   if (!envSpec) {
     return { kind: 'env_missing', envName };
+  }
+  if (loaded.document.inputRequired?.length) {
+    return {
+      kind: 'input_required',
+      envName,
+      requirements: loaded.document.inputRequired,
+    };
   }
 
   const projectForPreflight = spec.gitRemoteUrl
@@ -321,6 +335,9 @@ export async function executePlanApply(ctx: ToolContext, params: {
   const overrideEnvVars = overrides?.envVarsEncrypted
     ? getSecretStore().decryptObject<Record<string, string>>(overrides.envVarsEncrypted)
     : undefined;
+  const delegatedSecretEnvVars = overrides?.delegatedSecretVarsEncrypted
+    ? getSecretStore().decryptObject<Record<string, string>>(overrides.delegatedSecretVarsEncrypted)
+    : undefined;
   let bootstrap: { success: boolean; summary: Record<string, unknown> } | null = null;
   const ensureBootstrap = async () => {
     if (!bootstrap) {
@@ -359,7 +376,10 @@ export async function executePlanApply(ctx: ToolContext, params: {
       if (overrides) {
         bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
           services: overrides.services,
-          envVars: overrideEnvVars,
+          envVars: {
+            ...(overrideEnvVars ?? {}),
+            ...(delegatedSecretEnvVars ?? {}),
+          },
         });
       }
       if (params.verifyHttpHealth) {
@@ -369,6 +389,10 @@ export async function executePlanApply(ctx: ToolContext, params: {
       const queueEnvVars = await resolveQueueEnvVars(applyProject, envSpec, latestEnvironment);
       if (queueEnvVars) {
         bootstrapParams = { ...bootstrapParams, queueEnvVars };
+      }
+      const storageServiceEnvVars = await resolveStorageServiceEnvVars(applyProject, envSpec, latestEnvironment);
+      if (storageServiceEnvVars) {
+        bootstrapParams = { ...bootstrapParams, storageServiceEnvVars };
       }
       bootstrap = await executeBootstrap(bootstrapParams);
     }
@@ -390,6 +414,13 @@ export async function executePlanApply(ctx: ToolContext, params: {
     }
     if (isQueueAction(action)) {
       return applyQueueAction({ project: applyProject, envName, environmentSpec: envSpec, action });
+    }
+    if (isStorageAction(action)) {
+      return applyStorageAction({ project: applyProject, envName, environmentSpec: envSpec, action });
+    }
+    if (isDelegatedSecretAction(action)) {
+      const result = await ensureBootstrap();
+      return bootstrapActionResultFromSummary(action, result);
     }
     if (action.resource.kind === 'database' && action.type === 'create') {
       return createDatabase(ctx, applyProject, envName, action);
@@ -434,6 +465,20 @@ export async function executePlanApply(ctx: ToolContext, params: {
         success: false,
         error: String(forced.summary.error ?? 'Deploy failed'),
       };
+    }
+  }
+
+  if (result.applyRunId && delegatedSecretEnvVars && Object.keys(delegatedSecretEnvVars).length > 0) {
+    const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (latestEnvironment) {
+      recordDelegatedSecretBindings({
+        environment: latestEnvironment,
+        spec,
+        environmentName: envName,
+        suppliedValues: delegatedSecretEnvVars,
+        applyRunId: result.applyRunId,
+        receipts: result.receipts,
+      });
     }
   }
 

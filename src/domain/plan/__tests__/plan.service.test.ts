@@ -639,6 +639,260 @@ describe('PlanService.plan', () => {
     expect(ids.indexOf('ci:github-actions:production:deploy-branch')).toBeLessThan(ids.indexOf('domain:apreskeys.com'));
   });
 
+  it('updates the CI workflow after creating a newly declared worker', async () => {
+    project = new ProjectRepository().update(project.id, { gitRemoteUrl: 'git@github.com:dave/worker-app.git' })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: {
+            web: { startCommand: 'npm start' },
+            worker: { workloadKind: 'worker', startCommand: 'npm run worker' },
+          },
+          envVars: {},
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+    const connRepo = new ConnectionRepository();
+    const github = connRepo.create({
+      provider: 'github',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        apiToken: 'gh-token',
+        login: 'dave',
+        packageReadToken: 'package-token',
+      }),
+    });
+    connRepo.updateStatus(github.id, 'verified');
+    const railway = connRepo.create({
+      provider: 'railway',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
+    });
+    connRepo.updateStatus(railway.id, 'verified');
+
+    const existingWorkflow = buildBranchDeployWorkflow('railway', {
+      environmentName: 'production',
+      kind: 'production',
+      branch: 'main',
+      autoDeployOnPush: false,
+      serviceNames: ['web'],
+      providerProjectId: 'rp-1',
+      providerEnvironmentId: 'rail-env-1',
+      providerServiceIds: ['svc-web'],
+    }, { includeStep: false });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 'svc-web' } },
+        ci: {
+          deployBranch: {
+            [existingWorkflow.path]: {
+              contentHash: sha256(existingWorkflow.content),
+              syncedSecrets: ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN'],
+              syncedSecretHashes: {
+                RAILWAY_API_TOKEN: sha256('railway-token'),
+                IMAGE_REGISTRY_USERNAME: sha256('dave'),
+                IMAGE_REGISTRY_TOKEN: sha256('package-token'),
+              },
+            },
+          },
+        },
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web',
+        externalId: 'svc-web',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(existingWorkflow.content);
+
+    const result = await new PlanService().plan(project, 'production');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find((action) => action.id === 'service:worker')).toMatchObject({ type: 'create' });
+    expect(plan.actions.find((action) => action.id === 'ci:github-actions:production:deploy-branch')).toMatchObject({
+      type: 'update',
+      dependsOn: expect.arrayContaining(['service:worker']),
+      reason: 'Service bindings will change during apply; regenerate the GitHub Actions deploy workflow after service convergence',
+    });
+  });
+
+  it('forces CI regeneration after a worker-to-cron replacement', async () => {
+    project = new ProjectRepository().update(project.id, { gitRemoteUrl: 'git@github.com:dave/cron-app.git' })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { jobs: { workloadKind: 'cron', cronSchedule: '*/5 * * * *' } },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+    const existingWorkflow = buildBranchDeployWorkflow('railway', {
+      environmentName: 'production',
+      kind: 'production',
+      branch: 'main',
+      autoDeployOnPush: false,
+      serviceNames: ['jobs'],
+      providerProjectId: 'rp-1',
+      providerEnvironmentId: 'rail-env-1',
+      providerServiceIds: ['svc-jobs'],
+    }, { includeStep: false });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { jobs: { serviceId: 'svc-jobs' } },
+        ci: { deployBranch: { [existingWorkflow.path]: { contentHash: sha256(existingWorkflow.content) } } },
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'jobs',
+        externalId: 'svc-jobs',
+        workloadKind: 'worker',
+        customDomains: [],
+        config: {},
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const result = await new PlanService().plan(project, 'production');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find((action) => action.id === 'service:jobs')).toMatchObject({ type: 'replace' });
+    expect(plan.actions.find((action) => action.id === 'ci:github-actions:production:deploy-branch')).toMatchObject({
+      type: 'update',
+      dependsOn: expect.arrayContaining(['service:jobs']),
+      reason: 'Service bindings will change during apply; regenerate the GitHub Actions deploy workflow after service convergence',
+    });
+  });
+
+  it('removes deleted worker ids from the desired CI workflow', async () => {
+    project = new ProjectRepository().update(project.id, { gitRemoteUrl: 'git@github.com:dave/pruned-worker-app.git' })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+    const oldWorkflow = buildBranchDeployWorkflow('railway', {
+      environmentName: 'production',
+      kind: 'production',
+      branch: 'main',
+      autoDeployOnPush: false,
+      serviceNames: ['web', 'worker'],
+      providerProjectId: 'rp-1',
+      providerEnvironmentId: 'rail-env-1',
+      providerServiceIds: ['svc-web', 'svc-worker'],
+    }, { includeStep: false });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: {
+          web: { serviceId: 'svc-web' },
+          worker: { serviceId: 'svc-worker' },
+        },
+        ci: { deployBranch: { [oldWorkflow.path]: { contentHash: sha256(oldWorkflow.content) } } },
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [
+        {
+          name: 'web',
+          externalId: 'svc-web',
+          workloadKind: 'web',
+          customDomains: [],
+          config: {},
+          envVarKeys: [],
+          envVarHashes: {},
+          status: 'running',
+        },
+        {
+          name: 'worker',
+          externalId: 'svc-worker',
+          workloadKind: 'worker',
+          customDomains: [],
+          config: {},
+          envVarKeys: [],
+          envVarHashes: {},
+          status: 'running',
+        },
+      ],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const result = await new PlanService().plan(project, 'production');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find((action) => action.id === 'service:worker:destroy')).toMatchObject({ type: 'destroy' });
+    const ci = plan.actions.find((action) => action.id === 'ci:github-actions:production:deploy-branch')!;
+    expect(ci.type).toBe('update');
+    const desiredWorkflow = buildBranchDeployWorkflow('railway', {
+      environmentName: 'production',
+      kind: 'production',
+      branch: 'main',
+      autoDeployOnPush: false,
+      serviceNames: ['web'],
+      providerProjectId: 'rp-1',
+      providerEnvironmentId: 'rail-env-1',
+      providerServiceIds: ['svc-web'],
+    }, { includeStep: false });
+    expect((ci.metadata?.workflow as { contentHash: string }).contentHash).toBe(sha256(desiredWorkflow.content));
+  });
+
   it('replans CI deploys when recorded image registry secrets are not available from current credentials', async () => {
     project = new ProjectRepository().update(project.id, { gitRemoteUrl: 'git@github.com:dave/apreskeys.com.git' })!;
     new SpecStore().replace(project, {

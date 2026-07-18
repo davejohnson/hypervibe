@@ -56,7 +56,7 @@ function ciBranchDeployGuidance(project: Project, envName: string): { branch: st
 export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_deploy',
-    'Deploy services to an environment (staging, production, etc.). Plan-gated: builds a plan from the spec and applies it immediately; the planId and applyRunId are returned for the audit trail. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If repo .env exists and .env.<env> is missing, the plan creates .env.<env> from .env before loading values; if both exist, newly added base .env keys are copied into .env.<env> while existing environment-specific values are preserved. Use spec envFile.mode/include/exclude to control selection, envFile for a different local env file, or includeEnvFile=false to skip it. Requires a spec (hv_spec_set). Protected environments require confirm=true.',
+    'Deploy services to an environment (staging, production, etc.). Plan-gated: builds a plan from the spec and applies it immediately; the planId and applyRunId are returned for the audit trail. Delegated secret slots accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally and encrypted into the plan. Ordinary envVars and env files cannot override delegated keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime". Requires a spec (hv_spec_set). Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
@@ -64,9 +64,10 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
       envVars: z.record(z.string()).optional().describe('Additional one-off environment variables; values are encrypted in the stored plan and win over .env and spec envVars.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
+      secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Never pass raw secret values.'),
       confirm: confirmField,
     },
-    wrapHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, confirm }) => {
+    wrapHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs, confirm }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
 
       // Deploys are plan-gated: the spec is the source of truth for what runs.
@@ -115,6 +116,7 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
         ...(envVars && Object.keys(envVars).length > 0 ? { envVarOverrides: envVars } : {}),
         ...(envFile ? { envFile } : {}),
         ...(includeEnvFile !== undefined ? { includeEnvFile } : {}),
+        ...(secretRefs && Object.keys(secretRefs).length > 0 ? { secretRefs } : {}),
       });
       if ('error' in planned) {
         return toolError('VALIDATION', planned.error, { next: ['hv_spec_set'] });
@@ -132,6 +134,17 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
       if (outcome.kind === 'plan_not_found' || outcome.kind === 'env_missing') {
         return toolError('INTERNAL', 'Deploy plan could not be applied immediately after planning.', {
           details: outcome,
+        });
+      }
+      if (outcome.kind === 'input_required') {
+        return toolError('VALIDATION', 'Deployment needs delegated secret inputs before it can apply.', {
+          details: { environment: outcome.envName, inputRequired: outcome.requirements },
+          hint: 'Ask each declared principal to save the value locally, then rerun hv_deploy with secretRefs. Do not paste raw secrets into chat.',
+          next: ['hv_deploy'],
+          agentInstruction: {
+            action: 'ask_user',
+            message: 'Stop before deploy and request safe local secret references for the declared delegated-secret slots.',
+          },
         });
       }
       if (outcome.kind === 'blocked') {

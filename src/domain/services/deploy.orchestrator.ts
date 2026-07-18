@@ -18,6 +18,7 @@ export interface DeployOptions {
   environment: Environment;
   services?: Service[];
   envVars?: Record<string, string>;
+  envVarsByService?: Record<string, Record<string, string>>;
   verifyHttpHealth?: boolean;
   /** The hosting adapter to use for deployment (can be IProviderAdapter or IHostingAdapter) */
   adapter: IProviderAdapter | IHostingAdapter;
@@ -90,11 +91,16 @@ export class DeployOrchestrator {
     // the persisted plan — runs.plan is returned verbatim by hv_runs, so
     // values (which include DATABASE_URL and resolved secrets) must never
     // be stored. The step reads the live options.envVars at execution time.
-    if (options.envVars && Object.keys(options.envVars).length > 0) {
+    if ((options.envVars && Object.keys(options.envVars).length > 0) || (options.envVarsByService && Object.keys(options.envVarsByService).length > 0)) {
       steps.push({
         name: 'set_env_vars',
         action: 'setEnvVars',
-        params: { envVarKeys: Object.keys(options.envVars).sort() },
+        params: {
+          envVarKeys: Object.keys(options.envVars ?? {}).sort(),
+          ...(options.envVarsByService && Object.keys(options.envVarsByService).length > 0
+            ? { serviceEnvVarKeys: Object.fromEntries(Object.entries(options.envVarsByService).map(([name, vars]) => [name, Object.keys(vars).sort()])) }
+            : {}),
+        },
       });
     }
 
@@ -354,7 +360,7 @@ export class DeployOrchestrator {
 
         case 'setEnvVars': {
           const vars = options.envVars ?? {};
-          if (Object.keys(vars).length === 0) {
+          if (Object.keys(vars).length === 0 && Object.keys(options.envVarsByService ?? {}).length === 0) {
             return {
               step: step.name,
               status: 'skipped',
@@ -380,7 +386,9 @@ export class DeployOrchestrator {
           const failures: string[] = [];
           const skippedStaleBindings: string[] = [];
           for (const service of alreadyDeployed) {
-            const receipt = await options.adapter.setEnvVars(environment, service, vars);
+            const serviceVars = { ...vars, ...(options.envVarsByService?.[service.name] ?? {}) };
+            if (Object.keys(serviceVars).length === 0) continue;
+            const receipt = await options.adapter.setEnvVars(environment, service, serviceVars);
             if (!receipt.success) {
               if ((receipt.data as Record<string, unknown> | undefined)?.staleBinding === true) {
                 skippedStaleBindings.push(service.name);
@@ -396,6 +404,7 @@ export class DeployOrchestrator {
             result: {
               serviceCount: alreadyDeployed.length,
               variableCount: Object.keys(vars).length,
+              serviceVariableCount: Object.values(options.envVarsByService ?? {}).reduce((count, serviceVars) => count + Object.keys(serviceVars).length, 0),
               ...(skippedStaleBindings.length > 0 ? { skippedStaleBindings } : {}),
             },
             error: failures.length > 0 ? failures.join('; ') : undefined,
@@ -419,7 +428,7 @@ export class DeployOrchestrator {
           const result = await options.adapter.deploy(
             service,
             environment,
-            options.envVars ?? {}
+            { ...(options.envVars ?? {}), ...(options.envVarsByService?.[service.name] ?? {}) }
           );
 
           // Update environment bindings with service info using platform-agnostic structure

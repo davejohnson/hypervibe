@@ -16,6 +16,7 @@ import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../github-ops.service.js';
 import type { Project } from '../../entities/project.entity.js';
 import {
+  applyGitHubActionsDeploy,
   environmentUsesGitHubActionsDeploy,
   githubCiDeployPermissionProblem,
   missingProviderSecretsMessage,
@@ -333,6 +334,32 @@ describe('ci-deploy.service', () => {
       expect(result.action?.metadata?.staleProviderSecrets).toBeUndefined();
     });
 
+    it('forces an update after service bindings change even when the pre-apply workflow still matches', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const workflow = expectedWorkflow(project);
+      envRepo.updatePlatformBindings(environmentId, {
+        ci: { deployBranch: { [workflow.path]: syncedBinding(workflow.content) } },
+      });
+      vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+
+      const result = await planGitHubActionsDeploy({
+        project,
+        environmentName: 'production',
+        environmentSpec,
+        environment: envRepo.findById(environmentId),
+        dependsOn: ['service:worker'],
+        bindingsWillChange: true,
+      });
+
+      expect(result.action).toMatchObject({
+        type: 'update',
+        verified: true,
+        reason: 'Service bindings will change during apply; regenerate the GitHub Actions deploy workflow after service convergence',
+        dependsOn: ['service:worker'],
+      });
+    });
+
     it('plans an update when the live workflow content differs from the desired content', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
@@ -431,6 +458,77 @@ describe('ci-deploy.service', () => {
       expect(result.warnings).toHaveLength(2);
       expect(result.warnings[0]).toContain('requires provider secrets that Hypervibe cannot sync: IMAGE_REGISTRY_USERNAME, IMAGE_REGISTRY_TOKEN');
       expect(result.warnings[1]).toContain('Cannot observe GitHub Actions workflow for davejohnson/billforge');
+    });
+
+    it('forces an update from stored bindings when GitHub observation is unavailable', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections({ github: false });
+      const workflow = expectedWorkflow(project);
+      envRepo.updatePlatformBindings(environmentId, {
+        ci: { deployBranch: { [workflow.path]: syncedBinding(workflow.content) } },
+      });
+
+      const result = await planGitHubActionsDeploy({
+        project,
+        environmentName: 'production',
+        environmentSpec,
+        environment: envRepo.findById(environmentId),
+        dependsOn: ['service:worker'],
+        bindingsWillChange: true,
+      });
+
+      expect(result.action).toMatchObject({
+        type: 'update',
+        verified: false,
+        reason: 'Service bindings will change during apply; regenerate the GitHub Actions deploy workflow after service convergence',
+        dependsOn: ['service:worker'],
+      });
+    });
+  });
+
+  describe('applyGitHubActionsDeploy', () => {
+    it('rebuilds the workflow from provider bindings recorded after worker creation', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const environmentSpec = environmentSpecSchema.parse({
+        hosting: { provider: 'railway' },
+        services: { web: {}, worker: { workloadKind: 'worker' } },
+        deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+      });
+      new SpecStore().replace(project, {
+        version: 1,
+        project: project.name,
+        environments: { production: environmentSpec },
+      });
+      envRepo.updatePlatformBindings(environmentId, {
+        services: {
+          web: { serviceId: 'rail-web' },
+          worker: { serviceId: 'rail-worker' },
+        },
+      });
+      vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+        success: true,
+        login: 'davejohnson',
+        scopes: ['repo', 'workflow'],
+      });
+      const createOrUpdateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
+        .mockResolvedValue({ created: false, updated: true });
+      vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+
+      const result = await applyGitHubActionsDeploy({
+        project,
+        environmentName: 'production',
+        environmentSpec,
+      });
+
+      expect(result.success).toBe(true);
+      expect(createOrUpdateFile).toHaveBeenCalledWith(
+        'davejohnson',
+        'billforge',
+        '.github/workflows/deploy-railway-production.yml',
+        expect.stringContaining("RAILWAY_SERVICE_IDS: 'rail-web,rail-worker'"),
+        expect.any(String)
+      );
     });
   });
 });

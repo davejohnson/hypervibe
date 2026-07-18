@@ -3,6 +3,7 @@ import { RunRepository } from '../../adapters/db/repositories/run.repository.js'
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { PlanAction } from './plan.types.js';
+import type { DelegatedSecretInputRequirement } from '../services/delegated-secret.service.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -21,6 +22,8 @@ export interface PlanRunDocument {
   actions: PlanAction[];
   unmanaged?: Array<{ kind: string; name: string; detail?: string }>;
   warnings?: string[];
+  /** A plan with unresolved delegated inputs is inspectable but not executable. */
+  inputRequired?: DelegatedSecretInputRequirement[];
   /**
    * One-off deploy overrides frozen into the plan (hv_plan services=/envVars=,
    * used by hv_deploy). envVar values are SecretStore-encrypted because
@@ -33,6 +36,8 @@ export interface PlanRunDocument {
     envFileVarsEncrypted?: string;
     envVarKeys?: string[];
     envVarsEncrypted?: string;
+    delegatedSecretKeys?: string[];
+    delegatedSecretVarsEncrypted?: string;
   };
 }
 
@@ -115,6 +120,18 @@ export function fingerprintObservedState(observed: ObservedState): string {
     databases: [...observed.databases]
       .sort((a, b) => a.externalId.localeCompare(b.externalId))
       .map((d) => ({ provider: d.provider, engine: d.engine, externalId: d.externalId })),
+    storage: [...(observed.storage ?? [])]
+      .sort((a, b) => a.externalId.localeCompare(b.externalId))
+      .map((item) => ({
+        provider: item.provider,
+        kind: item.kind,
+        externalId: item.externalId,
+        name: item.name,
+        region: item.region ?? null,
+        status: item.status,
+        objectCount: item.objectCount ?? null,
+        sizeBytes: item.sizeBytes ?? null,
+      })),
   };
   return createHash('sha256').update(JSON.stringify(essence), 'utf8').digest('hex');
 }

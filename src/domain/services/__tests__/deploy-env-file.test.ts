@@ -178,4 +178,27 @@ describe('deploy-env-file', () => {
       localValueKeys: [],
     });
   });
+
+  it('does not copy excluded delegated keys into a new environment-specific env file', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-deploy-env-delegated-'));
+    mkdirSync(path.join(root, '.git'));
+    mkdirSync(path.join(root, 'app'));
+    writeFileSync(path.join(root, '.env'), [
+      'ANTHROPIC_API_KEY=owner-key',
+      'SENDGRID_API_KEY=sendgrid-key',
+      '',
+    ].join('\n'));
+
+    const result = loadDeployEnvFile({
+      startDir: path.join(root, 'app'),
+      envName: 'production',
+      excludeKeys: ['ANTHROPIC_API_KEY'],
+    })!;
+    const productionFile = readFileSync(path.join(root, '.env.production'), 'utf8');
+
+    expect(productionFile).not.toContain('owner-key');
+    expect(productionFile).toContain('SENDGRID_API_KEY=sendgrid-key');
+    expect(result.vars).toEqual({ SENDGRID_API_KEY: 'sendgrid-key' });
+    expect(result.syncedFromBaseKeys).toEqual(['SENDGRID_API_KEY']);
+  });
 });

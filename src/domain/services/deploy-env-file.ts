@@ -162,17 +162,28 @@ function assignmentLinesByKey(content: string): Map<string, string> {
   return byKey;
 }
 
-function syncEnvSpecificFromBase(basePath: string, envSpecificPath: string): {
+function syncEnvSpecificFromBase(basePath: string, envSpecificPath: string, excludedKeys = new Set<string>()): {
   created: boolean;
   syncedKeys: string[];
   divergentKeys: string[];
 } {
   const baseContent = readFileSync(basePath, 'utf-8');
   if (!existsSync(envSpecificPath)) {
-    copyFileSync(basePath, envSpecificPath);
+    if (excludedKeys.size === 0) {
+      copyFileSync(basePath, envSpecificPath);
+    } else {
+      const filtered = baseContent
+        .split(/\r?\n/)
+        .filter((line) => {
+          const key = assignmentKeyFromLine(line);
+          return !key || !excludedKeys.has(key);
+        })
+        .join('\n');
+      writeFileSync(envSpecificPath, filtered, 'utf-8');
+    }
     return {
       created: true,
-      syncedKeys: Object.keys(parseEnvFile(basePath)).sort(),
+      syncedKeys: Object.keys(parseEnvFile(basePath)).filter((key) => !excludedKeys.has(key)).sort(),
       divergentKeys: [],
     };
   }
@@ -180,10 +191,10 @@ function syncEnvSpecificFromBase(basePath: string, envSpecificPath: string): {
   const baseVars = parseEnvFile(basePath);
   const envSpecificVars = parseEnvFile(envSpecificPath);
   const syncedKeys = Object.keys(baseVars)
-    .filter((key) => !(key in envSpecificVars))
+    .filter((key) => !excludedKeys.has(key) && !(key in envSpecificVars))
     .sort();
   const divergentKeys = Object.keys(baseVars)
-    .filter((key) => key in envSpecificVars && envSpecificVars[key] !== baseVars[key])
+    .filter((key) => !excludedKeys.has(key) && key in envSpecificVars && envSpecificVars[key] !== baseVars[key])
     .sort();
 
   if (syncedKeys.length > 0) {
@@ -257,7 +268,7 @@ export function defaultDeployEnvFilePath(startDir = process.cwd(), envName?: str
   return resolveDefaultDeployEnvFile(startDir, envName).path;
 }
 
-function resolveDefaultDeployEnvFile(startDir = process.cwd(), envName?: string, options: { syncEnvSpecific?: boolean } = {}): {
+function resolveDefaultDeployEnvFile(startDir = process.cwd(), envName?: string, options: { syncEnvSpecific?: boolean; excludedKeys?: string[] } = {}): {
   path: string | null;
   baseEnvPath?: string;
   createdEnvSpecificPath?: string;
@@ -273,7 +284,7 @@ function resolveDefaultDeployEnvFile(startDir = process.cwd(), envName?: string,
   const envSpecificPath = suffix ? path.join(root, `.env.${suffix}`) : null;
   if (envSpecificPath && existsSync(envSpecificPath)) {
     if (options.syncEnvSpecific && existsSync(basePath)) {
-      const sync = syncEnvSpecificFromBase(basePath, envSpecificPath);
+      const sync = syncEnvSpecificFromBase(basePath, envSpecificPath, new Set(options.excludedKeys ?? []));
       if (sync.syncedKeys.length === 0) {
         return { path: envSpecificPath };
       }
@@ -288,7 +299,7 @@ function resolveDefaultDeployEnvFile(startDir = process.cwd(), envName?: string,
   }
   if (existsSync(basePath)) {
     if (envSpecificPath && options.syncEnvSpecific) {
-      const sync = syncEnvSpecificFromBase(basePath, envSpecificPath);
+      const sync = syncEnvSpecificFromBase(basePath, envSpecificPath, new Set(options.excludedKeys ?? []));
       return {
         path: envSpecificPath,
         baseEnvPath: basePath,
@@ -321,7 +332,10 @@ export function loadDeployEnvFile(options: {
   if (options.includeEnvFile === false || mode === 'off') return null;
   const resolvedDefault = options.envFile
     ? { path: path.resolve(options.startDir ?? process.cwd(), options.envFile) }
-    : resolveDefaultDeployEnvFile(options.startDir, options.envName, { syncEnvSpecific: options.syncEnvSpecific !== false });
+    : resolveDefaultDeployEnvFile(options.startDir, options.envName, {
+      syncEnvSpecific: options.syncEnvSpecific !== false,
+      excludedKeys: options.excludeKeys,
+    });
   const filePath = resolvedDefault.path;
   if (!filePath) return null;
 
