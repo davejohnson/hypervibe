@@ -112,6 +112,97 @@ describe('CloudRunAdapter', () => {
     expect(template.volumes).toContainEqual(expect.objectContaining({ name: 'cloudsql' }));
   });
 
+  it('keeps exact-SHA CI as the code release boundary for an existing service', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+
+    const currentImage = 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:previous-compatible-sha';
+    const liveService = {
+      name: 'gcp-project-web',
+      uri: 'https://gcp-project-web.run.app',
+      terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
+      template: {
+        containers: [{
+          image: currentImage,
+          env: [{ name: 'NODE_ENV', value: 'production' }],
+        }],
+      },
+    };
+    let patchBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.includes('run.googleapis.com') && method === 'GET') {
+        return Response.json(liveService);
+      }
+      if (url.includes('run.googleapis.com') && method === 'PATCH') {
+        patchBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ name: 'operations/configure-service', done: true });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const now = new Date();
+    const environment: Environment = {
+      id: 'env-1',
+      projectId: 'project-1',
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        services: { web: { serviceId: 'gcp-project-web' } },
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const service: Service = {
+      id: 'service-1',
+      projectId: 'project-1',
+      name: 'web',
+      buildConfig: { builder: 'dockerfile', public: false },
+      envVarSpec: {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const preSync = await adapter.setEnvVars(
+      environment,
+      service,
+      { NEW_API_TOKEN: 'secret-value' },
+      { deferDeployment: true }
+    );
+    expect(preSync.data).toMatchObject({ deploymentDeferred: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const result = await adapter.deploy(
+      service,
+      environment,
+      {
+        IMAGE_URI: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:not-the-approved-sha',
+        NEW_API_TOKEN: 'secret-value',
+      },
+      { deferDeployment: true }
+    );
+
+    expect(result.status).toBe('configured');
+    expect(result.receipt.data).toMatchObject({ deploymentDeferred: true });
+    const template = patchBody?.template as { containers: Array<{ image: string; env: Array<{ name: string; value?: string }> }> };
+    expect(template.containers[0].image).toBe(currentImage);
+    expect(template.containers[0].env).toContainEqual({ name: 'NEW_API_TOKEN', value: 'secret-value' });
+  });
+
   it('explains missing source metadata when no image can be built', async () => {
     const adapter = new CloudRunAdapter();
     await adapter.connect({
@@ -792,6 +883,110 @@ describe('CloudRunAdapter', () => {
       name: 'SECRET_VALUE',
       valueSource: { secretKeyRef: { secret: 'secret', version: 'latest' } },
     });
+  });
+
+  it('deletes only explicitly retired service env vars while preserving the current image and other values', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key_id: 'key-id',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+        client_id: 'client-id',
+        auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+        token_uri: 'https://oauth2.googleapis.com/token',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+
+    let updated = false;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.includes('run.googleapis.com') && method === 'GET') {
+        return Response.json({
+          name: 'gcp-project-web',
+          uri: 'https://gcp-project-web.run.app',
+          terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
+          template: {
+            containers: [{
+              image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:compatible',
+              env: updated
+                ? [
+                  { name: 'KEEP_ME', value: 'preserved' },
+                  { name: 'SECRET_VALUE', valueSource: { secretKeyRef: { secret: 'secret', version: 'latest' } } },
+                ]
+                : [
+                  { name: 'OLD_API_TOKEN', value: 'must-not-leak' },
+                  { name: 'KEEP_ME', value: 'preserved' },
+                  { name: 'SECRET_VALUE', valueSource: { secretKeyRef: { secret: 'secret', version: 'latest' } } },
+                ],
+              resources: { limits: { cpu: '1', memory: '512Mi' } },
+            }],
+          },
+        });
+      }
+      if (url.includes('run.googleapis.com') && method === 'PATCH') {
+        updated = true;
+        return Response.json({ name: 'operations/remove-env', done: true });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const now = new Date();
+    const environment: Environment = {
+      id: 'env-1',
+      projectId: 'project-1',
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        services: { web: { serviceId: 'gcp-project-web' } },
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const service: Service = {
+      id: 'service-1',
+      projectId: 'project-1',
+      name: 'web',
+      buildConfig: { builder: 'dockerfile' },
+      envVarSpec: {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await adapter.deleteEnvVars!(
+      environment,
+      service,
+      ['OLD_API_TOKEN']
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        deletedKeys: ['OLD_API_TOKEN'],
+        variableCount: 1,
+        redeployMayBeTriggered: true,
+      },
+    });
+    const patchCall = fetchMock.mock.calls.find(([url, init]) =>
+      String(url).includes('run.googleapis.com') && init?.method === 'PATCH'
+    );
+    const patchBody = JSON.parse(String(patchCall?.[1]?.body));
+    expect(patchBody.template.containers[0].image)
+      .toBe('us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:compatible');
+    expect(patchBody.template.containers[0].env).toEqual([
+      { name: 'KEEP_ME', value: 'preserved' },
+      { name: 'SECRET_VALUE', valueSource: { secretKeyRef: { secret: 'secret', version: 'latest' } } },
+    ]);
+    expect(JSON.stringify(result)).not.toContain('must-not-leak');
   });
 
   it('removes stale Cloud SQL wiring when syncing Supabase database vars', async () => {

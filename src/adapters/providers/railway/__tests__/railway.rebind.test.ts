@@ -139,4 +139,125 @@ describe('RailwayAdapter stale binding recovery', () => {
     });
     expect(request).toHaveBeenCalledTimes(3);
   });
+
+  it('stages variable updates without triggering a deployment when requested', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        project: {
+          environments: {
+            edges: [{ node: { id: 'env-staging', name: 'staging' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        project: {
+          services: {
+            edges: [{ node: { id: 'svc-web', name: 'web' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-staging' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-staging' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({ variableCollectionUpsert: true });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.setEnvVars(
+      makeEnv({
+        projectId: 'proj-railway',
+        environmentId: 'env-staging',
+        services: { web: { serviceId: 'svc-web' } },
+      }),
+      makeService('web'),
+      { NEW_API_TOKEN: 'secret-value' },
+      { deferDeployment: true }
+    );
+
+    expect(receipt.success).toBe(true);
+    expect(receipt.data).toMatchObject({ deploymentDeferred: true });
+    const upsertCall = request.mock.calls.at(-1)!;
+    expect(String(upsertCall[0])).toContain('skipDeploys');
+    expect(upsertCall[1]).toMatchObject({ skipDeploys: true });
+  });
+
+  it('deletes only explicitly named variables and never returns their values', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        project: {
+          environments: {
+            edges: [{ node: { id: 'env-staging', name: 'staging' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        project: {
+          services: {
+            edges: [{ node: { id: 'svc-web', name: 'web' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-staging' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({ variableDelete: true })
+      .mockResolvedValueOnce({ variableDelete: true });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+    const receipt = await adapter.deleteEnvVars!(
+      makeEnv({
+        projectId: 'proj-railway',
+        environmentId: 'env-staging',
+        services: { web: { serviceId: 'svc-web' } },
+      }),
+      makeService('web'),
+      ['OLD_API_TOKEN', 'LEGACY_FEATURE_FLAG', 'OLD_API_TOKEN']
+    );
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: {
+        deletedKeys: ['LEGACY_FEATURE_FLAG', 'OLD_API_TOKEN'],
+        variableCount: 2,
+        redeployMayBeTriggered: true,
+      },
+    });
+    const deleteCalls = request.mock.calls.filter(([query]) => String(query).includes('variableDelete'));
+    expect(deleteCalls.map(([, variables]) => variables)).toEqual([
+      {
+        input: {
+          projectId: 'proj-railway',
+          serviceId: 'svc-web',
+          environmentId: 'env-staging',
+          name: 'LEGACY_FEATURE_FLAG',
+        },
+      },
+      {
+        input: {
+          projectId: 'proj-railway',
+          serviceId: 'svc-web',
+          environmentId: 'env-staging',
+          name: 'OLD_API_TOKEN',
+        },
+      },
+    ]);
+    expect(JSON.stringify(receipt)).not.toContain('secret-value');
+  });
 });

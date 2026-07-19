@@ -711,6 +711,24 @@ describe('infra_apply multi-service convergence', () => {
       gitRemoteUrl: 'git@github.com:davejohnson/ci-pending-project.git',
     });
 
+    const deploy = vi.fn<IHostingAdapter['deploy']>(async (service, _environment, _envVars, options) => {
+      expect(options).toEqual({ deferDeployment: true });
+      return {
+        serviceId: `provider-${service.name}`,
+        externalId: `provider-${service.name}`,
+        url: `https://${service.name}.example.com`,
+        status: 'configured',
+        receipt: {
+          success: true,
+          message: 'service configured',
+          data: { environmentId: 'rail-env-1', deploymentDeferred: true },
+        },
+      };
+    });
+    const getDeployStatus = vi.fn(async () => ({
+      status: 'deployed',
+      url: 'https://web.example.com',
+    }));
     const fakeHostingAdapter: IHostingAdapter = {
       name: 'railway',
       capabilities: {
@@ -723,6 +741,7 @@ describe('infra_apply multi-service convergence', () => {
         managedTls: true,
         supportsAutoScaling: false,
         supportsObserve: false,
+        supportsDeferredDeploy: true,
       },
       async connect() {},
       async verify() {
@@ -735,25 +754,11 @@ describe('infra_apply multi-service convergence', () => {
           data: { projectId: 'rail-project-1', environmentId: 'rail-env-1' },
         };
       },
-      async deploy(service) {
-        return {
-          serviceId: `provider-${service.name}`,
-          externalId: `provider-${service.name}`,
-          url: `https://${service.name}.example.com`,
-          status: 'deployed',
-          receipt: {
-            success: true,
-            message: 'service provisioned',
-            data: { environmentId: 'rail-env-1' },
-          },
-        };
-      },
+      deploy,
       async setEnvVars() {
         return { success: true, message: 'vars synced' };
       },
-      async getDeployStatus() {
-        return { status: 'deployed', url: 'https://web.example.com' };
-      },
+      getDeployStatus,
     };
 
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
@@ -774,6 +779,9 @@ describe('infra_apply multi-service convergence', () => {
     });
 
     expect(result.success).toBe(true);
+    expect(result.summary.deploymentDeferralRequested).toBe(true);
+    expect(deploy).toHaveBeenCalledTimes(1);
+    expect(getDeployStatus).not.toHaveBeenCalled();
     expect(result.summary.deploymentMode).toBe('provision');
     expect(result.summary.appDeployment).toMatchObject({
       status: 'pending_ci',

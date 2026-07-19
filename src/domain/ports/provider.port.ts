@@ -9,6 +9,16 @@ export interface Receipt {
   error?: string;
 }
 
+export interface DeploymentMutationOptions {
+  /**
+   * Apply service configuration and environment changes without independently
+   * sourcing or building new application code. A later exact-SHA CI deploy is
+   * the code release boundary; providers may still reconcile configuration
+   * against the currently deployed image.
+   */
+  deferDeployment?: boolean;
+}
+
 /**
  * Capabilities that a deployment provider supports.
  * Used to determine what features are available and how to configure deployments.
@@ -46,6 +56,9 @@ export interface ProviderCapabilities {
 
   /** Whether one-off in-environment tasks (runJob) are supported. */
   supportsOneOffTasks?: boolean;
+
+  /** Whether config can converge while exact-SHA CI remains the code release boundary. */
+  supportsDeferredDeploy?: boolean;
 }
 
 export interface ComponentResult {
@@ -57,7 +70,7 @@ export interface DeployResult {
   serviceId: string;
   externalId?: string;
   url?: string;
-  status: 'deploying' | 'deployed' | 'failed';
+  status: 'configured' | 'deploying' | 'deployed' | 'failed';
   receipt: Receipt;
 }
 
@@ -111,13 +124,22 @@ export interface IProviderAdapter {
   deploy(
     service: Service,
     environment: Environment,
-    envVars: Record<string, string>
+    envVars: Record<string, string>,
+    options?: DeploymentMutationOptions
   ): Promise<DeployResult>;
 
   setEnvVars(
     environment: Environment,
     service: Service,
-    vars: Record<string, string>
+    vars: Record<string, string>,
+    options?: DeploymentMutationOptions
+  ): Promise<Receipt>;
+
+  /** Delete only explicitly retired environment variable names. */
+  deleteEnvVars?(
+    environment: Environment,
+    service: Service,
+    keys: string[]
   ): Promise<Receipt>;
 
   getDeployStatus?(

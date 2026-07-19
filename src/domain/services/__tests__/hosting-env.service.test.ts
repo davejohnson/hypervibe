@@ -22,7 +22,11 @@ import { createToolContext } from '../../../tools/context.js';
 import { registerHvEmailTools } from '../../../tools/hv-email.tools.js';
 import { getSendGridAdapter, sendGridSetupReady, sendGridPermissionPayload } from '../sendgrid-ops.service.js';
 import { getProjectScopeHints } from '../project-scope.js';
-import { syncHostingEnvVars, readHostingEnvVars } from '../hosting-env.service.js';
+import {
+  readHostingEnvVars,
+  removeHostingEnvVars,
+  syncHostingEnvVars,
+} from '../hosting-env.service.js';
 
 type JsonObj = Record<string, unknown>;
 
@@ -99,6 +103,7 @@ describe('hosting env var tools', () => {
 
   function stubCloudRunHostingAdapter(varsByService = new Map<string, Record<string, string>>()) {
     const setEnvCalls: Array<{ environment: Environment; service: Service; vars: Record<string, string> }> = [];
+    const deleteEnvCalls: Array<{ environment: Environment; service: Service; keys: string[] }> = [];
     const adapter: IHostingAdapter & {
       getServiceVariables: (environment: Environment, serviceName: string) => Promise<Record<string, string>>;
     } = {
@@ -137,6 +142,17 @@ describe('hosting env var tools', () => {
         });
         return { success: true, message: 'vars synced' };
       },
+      async deleteEnvVars(environment, service, keys) {
+        deleteEnvCalls.push({ environment, service, keys });
+        const current = { ...(varsByService.get(service.name) ?? {}) };
+        for (const key of keys) delete current[key];
+        varsByService.set(service.name, current);
+        return {
+          success: true,
+          message: 'vars removed',
+          data: { deletedKeys: keys, variableCount: keys.length },
+        };
+      },
       async getDeployStatus() {
         return { status: 'deployed' };
       },
@@ -150,7 +166,7 @@ describe('hosting env var tools', () => {
       adapter: adapter as never,
     });
 
-    return { setEnvCalls, varsByService };
+    return { setEnvCalls, deleteEnvCalls, varsByService };
   }
 
   function stubSendGridScopes(scopes: string[]) {
@@ -233,6 +249,30 @@ describe('hosting env var tools', () => {
     expect(result.provider).toBe('cloudrun');
     expect(String(result.error ?? '')).not.toContain('Railway');
     expect(setEnvCalls).toHaveLength(1);
+  });
+
+  it('routes explicit removals through the bound hosting adapter without values', async () => {
+    const { project, environment, service } = await setupCloudRunProject();
+    const varsByService = new Map([
+      ['web', { OLD_API_TOKEN: 'must-not-leak', KEEP_ME: 'preserved' }],
+    ]);
+    const { deleteEnvCalls } = stubCloudRunHostingAdapter(varsByService);
+
+    const result = await removeHostingEnvVars({
+      project,
+      environment,
+      service,
+      keys: ['OLD_API_TOKEN'],
+    });
+
+    expect(result.success).toBe(true);
+    expect(deleteEnvCalls).toEqual([{
+      environment,
+      service,
+      keys: ['OLD_API_TOKEN'],
+    }]);
+    expect(varsByService.get('web')).toEqual({ KEEP_ME: 'preserved' });
+    expect(JSON.stringify(result)).not.toContain('must-not-leak');
   });
 
   it('SendGrid setup rejects keys that cannot authorize a sender email', async () => {

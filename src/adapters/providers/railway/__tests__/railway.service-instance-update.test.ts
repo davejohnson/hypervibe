@@ -535,4 +535,69 @@ describe('RailwayAdapter service instance updates', () => {
       { DATABASE_URL: 'postgres://db' }
     );
   });
+
+  it('configures a CI-managed service without redeploying its previous image', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        project: {
+          environments: {
+            edges: [{ node: { id: 'env-prod', name: 'production' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        project: {
+          services: {
+            edges: [{ node: { id: 'svc-web', name: 'web' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod' } }],
+          },
+        },
+      });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+    vi.spyOn(adapter, 'getPluginVariableReferences').mockResolvedValue({});
+
+    const environment: Environment = {
+      id: 'env-local',
+      projectId: 'proj-local',
+      name: 'production',
+      platformBindings: {
+        projectId: 'rail-project-1',
+        environmentId: 'env-prod',
+        services: { web: { serviceId: 'svc-web' } },
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const service: Service = {
+      id: 'svc-local',
+      projectId: 'proj-local',
+      name: 'web',
+      buildConfig: { builder: 'nixpacks' },
+      envVarSpec: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await adapter.deploy(
+      service,
+      environment,
+      {},
+      { deferDeployment: true }
+    );
+
+    expect(result.status).toBe('configured');
+    expect(result.receipt).toMatchObject({
+      success: true,
+      data: { deploymentDeferred: true },
+    });
+    expect(request.mock.calls.some(([query]) => String(query).includes('serviceInstanceRedeploy'))).toBe(false);
+  });
 });
