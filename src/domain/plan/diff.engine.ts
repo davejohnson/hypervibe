@@ -213,6 +213,38 @@ export function diffEnvironment(input: {
     }
   }
 
+  // Variable omission is preserve-only. Deletion is modeled separately from
+  // service configuration so it is visible, confirm-gated, and can never be
+  // inferred from a partial desired map.
+  if (!providerChanged && (spec.removeEnvVars?.length ?? 0) > 0) {
+    const retiredKeys = [...new Set(spec.removeEnvVars ?? [])].sort();
+    for (const name of Object.keys(spec.services)) {
+      const mainAction = actions.find((action) => action.id === `service:${name}`);
+      const live = observedServices.get(name);
+      const keys = observed
+        ? retiredKeys.filter((key) => live?.envVarKeys.includes(key))
+        : Boolean(localServiceBindings[name]?.serviceId)
+          ? retiredKeys
+          : [];
+      if (keys.length === 0) continue;
+
+      actions.push({
+        id: `service:${name}:env-remove`,
+        type: 'update',
+        resource: { kind: 'service', name, provider },
+        verified,
+        reason: `Remove explicitly retired environment variables from "${name}". Confirm only after a previously deployed revision no longer depends on: ${keys.join(', ')}`,
+        diff: keys.map((key) => ({ field: `env:${key}`, from: 'present', to: 'absent' })),
+        requiresConfirm: true,
+        ...(mainAction && mainAction.type !== 'noop' ? { dependsOn: [mainAction.id] } : {}),
+        metadata: {
+          operation: 'hostingEnvRemove',
+          keys,
+        },
+      });
+    }
+  }
+
   const serviceDestroyAction = (
     name: string,
     verifiedDestroy: boolean,

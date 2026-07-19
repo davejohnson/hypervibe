@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
-import type { Receipt, DeployResult, VerifyResult, JobResult } from './provider.port.js';
+import type {
+  Receipt,
+  DeployResult,
+  VerifyResult,
+  JobResult,
+  DeploymentMutationOptions,
+} from './provider.port.js';
 
 /**
  * Capabilities that a hosting platform supports.
@@ -34,6 +40,9 @@ export interface HostingCapabilities {
 
   /** Whether the adapter can read back live state via observe() */
   supportsObserve: boolean;
+
+  /** Whether config can converge while exact-SHA CI remains the code release boundary. */
+  supportsDeferredDeploy?: boolean;
 }
 
 /**
@@ -147,7 +156,8 @@ export interface IHostingAdapter {
   deploy(
     service: Service,
     environment: Environment,
-    envVars: Record<string, string>
+    envVars: Record<string, string>,
+    options?: DeploymentMutationOptions
   ): Promise<DeployResult>;
 
   /**
@@ -156,7 +166,18 @@ export interface IHostingAdapter {
   setEnvVars(
     environment: Environment,
     service: Service,
-    vars: Record<string, string>
+    vars: Record<string, string>,
+    options?: DeploymentMutationOptions
+  ): Promise<Receipt>;
+
+  /**
+   * Delete only explicitly retired environment variable names. Omitted
+   * variables are not deletions.
+   */
+  deleteEnvVars?(
+    environment: Environment,
+    service: Service,
+    keys: string[]
   ): Promise<Receipt>;
 
   /**

@@ -44,6 +44,10 @@ import {
   GITHUB_TOKEN_URLS,
 } from '../domain/services/connection-guidance.js';
 import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
+import {
+  isHostingEnvRemovalAction,
+  removeHostingEnvVars,
+} from '../domain/services/hosting-env.service.js';
 import { StateManager } from '../agent/state.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Project } from '../domain/entities/project.entity.js';
@@ -67,6 +71,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function stringField(record: Record<string, unknown> | null, key: string): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function stringArrayField(record: Record<string, unknown> | null, key: string): string[] {
+  const value = record?.[key];
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
 }
 
 export type ConnectionBlock = {
@@ -438,6 +449,25 @@ export async function executePlanApply(ctx: ToolContext, params: {
     if (isDelegatedSecretAction(action)) {
       const result = await ensureBootstrap();
       return bootstrapActionResultFromSummary(action, result);
+    }
+    if (isHostingEnvRemovalAction(action)) {
+      const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      const service = ctx.repos.services.findByProjectAndName(project.id, action.resource.name);
+      if (!latestEnvironment || !service) {
+        return {
+          success: false,
+          message: `Cannot remove environment variables from ${action.resource.name}`,
+          error: !latestEnvironment
+            ? `Environment "${envName}" is not tracked locally`
+            : `Service "${action.resource.name}" is not tracked locally`,
+        };
+      }
+      return removeHostingEnvVars({
+        project: applyProject,
+        environment: latestEnvironment,
+        service,
+        keys: stringArrayField(asRecord(action.metadata), 'keys'),
+      });
     }
     if (action.resource.kind === 'database' && action.type === 'create') {
       return createDatabase(ctx, applyProject, envName, action);

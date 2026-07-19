@@ -211,6 +211,13 @@ export const environmentSpecSchema = z.object({
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: z.object({ enabled: z.boolean() }).default({ enabled: false }),
   envVars: z.record(z.string()).default({}),
+  /**
+   * Durable, explicit tombstones for provider variables that Hypervibe should
+   * delete. Variables merely omitted from envVars remain untouched.
+   */
+  removeEnvVars: z.array(
+    z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'retired keys must be valid environment variable names')
+  ).optional(),
   envFile: envFileSpecSchema.optional(),
   deploy: deploySpecSchema.optional(),
   migrations: migrationsSpecSchema.optional(),
@@ -244,6 +251,31 @@ export const environmentSpecSchema = z.object({
       message: 'railway queues are postgres-backed (pg-boss model): declare spec.database',
       path: ['queues'],
     });
+  }
+  const retiredKeys = new Set<string>();
+  for (const key of environment.removeEnvVars ?? []) {
+    if (retiredKeys.has(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `retired environment variable "${key}" is listed more than once`,
+        path: ['removeEnvVars'],
+      });
+    }
+    retiredKeys.add(key);
+    if (key in environment.envVars) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `retired environment variable "${key}" cannot also be declared in envVars`,
+        path: ['removeEnvVars'],
+      });
+    }
+    if (environment.envFile?.include.includes(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `retired environment variable "${key}" cannot also be selected through envFile.include`,
+        path: ['removeEnvVars'],
+      });
+    }
   }
   const storageByService = new Map<string, string>();
   for (const [storageName, storage] of Object.entries(environment.storage ?? {})) {
@@ -321,6 +353,13 @@ export const projectSpecSchema = z.object({
           code: z.ZodIssueCode.custom,
           message: `delegated secret "${key}" cannot be selected through environments.${environmentName}.envFile.include`,
           path: ['environments', environmentName, 'envFile', 'include'],
+        });
+      }
+      if (environment.removeEnvVars?.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" cannot also be retired in environment "${environmentName}"`,
+          path: ['environments', environmentName, 'removeEnvVars'],
         });
       }
     }

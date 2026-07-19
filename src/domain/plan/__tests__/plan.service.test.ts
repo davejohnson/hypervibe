@@ -173,6 +173,86 @@ describe('PlanService.plan', () => {
     expect(doc.observedFingerprint).toBeTruthy();
   });
 
+  it('requires env-var retirement to be a separate release after service config converges', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: { NODE_ENV: 'staging', NEW_API_TOKEN_NAME: 'enabled' },
+          removeEnvVars: ['OLD_API_TOKEN_NAME'],
+        },
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { web: { serviceId: 's-1' } },
+      },
+    });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 're-1',
+      services: [{
+        name: 'web',
+        externalId: 's-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: ['NODE_ENV', 'OLD_API_TOKEN_NAME'],
+        envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const result = await new PlanService().plan(project, 'staging');
+    expect(result).toMatchObject({
+      error: expect.stringContaining('two-release rollout'),
+    });
+  });
+
+  it('does not allow tombstones for environment keys owned by declared infrastructure', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          database: { provider: 'railway' },
+          removeEnvVars: ['DATABASE_URL'],
+        },
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      services: [],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const result = await new PlanService().plan(project, 'staging');
+    expect(result).toMatchObject({
+      error: expect.stringContaining('Hypervibe-managed infrastructure keys'),
+    });
+  });
+
   it('falls back to unverified local diff when the provider has no adapter', async () => {
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: false, error: 'no connection' });
 

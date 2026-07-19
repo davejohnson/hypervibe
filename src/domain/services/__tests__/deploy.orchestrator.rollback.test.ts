@@ -353,4 +353,25 @@ describe('DeployOrchestrator run plan secrecy', () => {
     const setEnvStep = plan.steps.find((step) => step.action === 'setEnvVars')!;
     expect(setEnvStep.params).toEqual({ envVarKeys: ['DATABASE_URL', 'SENDGRID_API_KEY'] });
   });
+
+  it('records deployment deferral and omits misleading health checks', () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const serviceRepo = new ServiceRepository();
+
+    const project = projectRepo.create({ name: 'deferred-plan-project', defaultPlatform: 'railway' });
+    const environment = envRepo.create({ projectId: project.id, name: 'staging' });
+    const service = serviceRepo.create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+
+    const plan = new DeployOrchestrator().buildPlan({
+      project,
+      environment,
+      services: [service],
+      deferProviderDeployment: true,
+      adapter: { name: 'railway' } as unknown as IHostingAdapter,
+    });
+
+    expect(plan.steps.some((step) => step.action === 'verifyHealth')).toBe(false);
+    expect(plan.metadata).toMatchObject({ deploymentDeferralRequested: true });
+  });
 });

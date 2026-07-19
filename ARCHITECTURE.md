@@ -157,6 +157,48 @@ Keep env-file handling policy-driven through the environment spec (`envFile.mode
 - surface the env file path in plan previews,
 - never let stale local values override Hypervibe-managed infrastructure env vars such as database or queue URLs.
 
+## Runtime Environment Rollouts
+
+Environment-variable desired state is additive/preserve-only by default.
+Omission never means deletion because provider observation may be partial and
+live variables may be intentionally managed outside ordinary `envVars`.
+
+Deletion uses `EnvironmentSpec.removeEnvVars` as an explicit durable tombstone:
+
+- validate names and reject collisions with `envVars`, env-file includes,
+  delegated secret slots, overrides, and Hypervibe-managed database, queue,
+  storage, or source-integration keys;
+- plan only keys observed live (or locally bound keys when observation is
+  unavailable);
+- emit key names and presence/absence only, never values;
+- require per-action confirmation;
+- route apply through the provider adapter's `deleteEnvVars` capability;
+- keep the applied-spec hash dependent on successful removal.
+
+Renames are two-release operations. First add the replacement and deploy
+compatible code while preserving the old key. Only a later spec may tombstone
+the old key. Planning must reject removals while ordinary service
+configuration is not converged; provider-side variable deletion can create a
+revision or redeploy the current image even when exact-SHA CI owns the next
+code release.
+
+For `deploy.strategy: "branch"` with `trigger: "ci"`, generic orchestration
+passes a deployment-deferral option only to adapters that declare the
+capability. It means provider configuration may converge, but the adapter must
+not independently source or build new application code for an already-bound
+service:
+
+- Railway stages variable writes with deploys skipped and suppresses its
+  explicit service redeploy.
+- Cloud Run uses the existing service/job image while reconciling its
+  revision-scoped configuration. The exact-SHA workflow remains the next code
+  release boundary.
+
+Do not run deploy-status or HTTP health checks against the configuration pass;
+the later CI run and `hv_health` own that verification. New resources with no
+existing image may still require provider bootstrap before CI can target them,
+and receipts must report that honestly.
+
 ## CI And Push Deploys
 
 For push deploys, `deploy.trigger: "ci"` is the portable default. It means Hypervibe manages generated GitHub Actions workflows that call provider APIs directly.

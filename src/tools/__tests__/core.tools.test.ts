@@ -1586,6 +1586,109 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('applies an explicitly confirmed environment-variable tombstone through the hosting adapter', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'env-retirement-app',
+        environments: {
+          staging: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            envVars: { NODE_ENV: 'staging' },
+            removeEnvVars: ['OLD_API_TOKEN'],
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+
+    const project = new ProjectRepository().findByName('env-retirement-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-env-1',
+        services: { web: { serviceId: 's-web' } },
+      },
+    });
+    new ServiceRepository().create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { startCommand: 'npm start' },
+    });
+
+    const observedState: ObservedState = {
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-env-1',
+      services: [{
+        name: 'web',
+        externalId: 's-web',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: ['NODE_ENV', 'OLD_API_TOKEN'],
+        envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    };
+    const deleteEnvVars = vi.fn(async () => ({
+      success: true,
+      message: 'removed',
+      data: { deletedKeys: ['OLD_API_TOKEN'], variableCount: 1 },
+    }));
+    const adapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: ['nixpacks'], supportedComponents: ['postgres'],
+        supportsAutoWiring: true, supportsHealthChecks: true, supportsCronSchedule: true,
+        supportsReleaseCommand: false, supportsMultiEnvironment: true, managedTls: true,
+        supportsObserve: true,
+      },
+      connect: async () => {}, verify: async () => ({ success: true }),
+      ensureProject: async () => ({ success: true, message: 'ok' }),
+      ensureComponent: async () => { throw new Error('unused'); },
+      deploy: async () => { throw new Error('hosting deploy should not run for env removal'); },
+      setEnvVars: async () => ({ success: true, message: 'ok' }),
+      deleteEnvVars,
+      observe: async () => observedState,
+    };
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter } as any);
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter } as any);
+
+    const plan = await t.call('hv_plan', { project: 'env-retirement-app', env: 'staging' });
+    expect(plan.ok).toBe(true);
+    expect(plan.data.actions).toContainEqual(expect.objectContaining({
+      id: 'service:web:env-remove',
+      requiresConfirm: true,
+    }));
+
+    const apply = await t.call('hv_apply', {
+      project: 'env-retirement-app',
+      planId: plan.data.planId,
+      confirmActions: ['service:web:env-remove'],
+    });
+    expect(apply.ok).toBe(true);
+    expect(deleteEnvVars).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'staging' }),
+      expect.objectContaining({ name: 'web' }),
+      ['OLD_API_TOKEN']
+    );
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'service:web:env-remove',
+      status: 'succeeded',
+    }));
+    await t.close();
+  });
+
   it('destroys a locally managed provider service that was removed from the spec', async () => {
     const t = await makeClient();
     await t.call('hv_spec_set', { spec: SPEC });

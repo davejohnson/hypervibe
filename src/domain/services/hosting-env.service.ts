@@ -5,6 +5,8 @@ import { parseHostingBindings, type IHostingAdapter } from '../ports/hosting.por
 import type { Receipt } from '../ports/provider.port.js';
 import { adapterFactory } from './adapter.factory.js';
 
+export const HOSTING_ENV_REMOVE_OPERATION = 'hostingEnvRemove';
+
 type EnvReadableHostingAdapter = IHostingAdapter & {
   getServiceVariables?: (
     environmentOrProjectId: Environment | string,
@@ -34,6 +36,14 @@ export function serviceHasHostingBinding(environment: Environment, serviceName: 
   const bindings = parseHostingBindings(environment);
   const serviceBinding = bindings.services?.[serviceName];
   return Boolean(serviceBinding?.serviceId || serviceBinding?.jobName);
+}
+
+export function isHostingEnvRemovalAction(action: {
+  resource: { kind: string };
+  metadata?: Record<string, unknown>;
+}): boolean {
+  return action.resource.kind === 'service'
+    && action.metadata?.operation === HOSTING_ENV_REMOVE_OPERATION;
 }
 
 export async function syncHostingEnvVars(params: {
@@ -83,6 +93,70 @@ export async function syncHostingEnvVars(params: {
       provider,
       service: params.service.name,
       variableCount: Object.keys(params.vars).length,
+    },
+  };
+}
+
+export async function removeHostingEnvVars(params: {
+  project: Project;
+  environment: Environment;
+  service: Service;
+  keys: string[];
+}): Promise<Receipt & { provider?: string }> {
+  const provider = hostingProviderForEnvironment(params.project, params.environment);
+  const displayName = providerDisplayName(provider);
+  const keys = [...new Set(params.keys)]
+    .filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+    .sort();
+
+  if (keys.length !== new Set(params.keys).size || keys.length === 0) {
+    return {
+      success: false,
+      message: 'No valid environment variables were selected for deletion',
+      error: 'The plan action did not contain a valid, non-empty key list',
+      provider,
+    };
+  }
+
+  if (!serviceHasHostingBinding(params.environment, params.service.name)) {
+    return {
+      success: false,
+      message: `${params.service.name} is not deployed to ${displayName} in ${params.environment.name}`,
+      error: `Service ${params.service.name} is not bound in environment ${params.environment.name}`,
+      provider,
+    };
+  }
+
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  if (!adapterResult.success || !adapterResult.adapter) {
+    return {
+      success: false,
+      message: `No ${displayName} hosting adapter available`,
+      error: adapterResult.error || `No ${provider} hosting adapter available`,
+      provider,
+    };
+  }
+
+  const adapter = adapterResult.adapter as unknown as Partial<IHostingAdapter>;
+  if (typeof adapter.deleteEnvVars !== 'function') {
+    return {
+      success: false,
+      message: `${displayName} does not support explicit environment variable removal`,
+      error: `${provider} adapter does not implement deleteEnvVars`,
+      provider,
+    };
+  }
+
+  const receipt = await adapter.deleteEnvVars(params.environment, params.service, keys);
+  return {
+    ...receipt,
+    provider,
+    data: {
+      ...(receipt.data ?? {}),
+      provider,
+      service: params.service.name,
+      requestedKeys: keys,
+      requestedVariableCount: keys.length,
     },
   };
 }

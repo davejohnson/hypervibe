@@ -6,6 +6,7 @@ import type {
   DeployResult,
   JobResult,
   ProviderCapabilities,
+  DeploymentMutationOptions,
 } from '../../../domain/ports/provider.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import { serviceWorkloadKind, type Service } from '../../../domain/entities/service.entity.js';
@@ -266,6 +267,7 @@ export class CloudRunAdapter implements IProviderAdapter {
     supportsObserve: true,
     queues: { backend: 'pubsub' },
     supportsOneOffTasks: true,
+    supportsDeferredDeploy: true,
   };
 
   private credentials: CloudRunCredentials | null = null;
@@ -440,13 +442,34 @@ export class CloudRunAdapter implements IProviderAdapter {
   async deploy(
     service: Service,
     environment: Environment,
-    envVars: Record<string, string>
+    envVars: Record<string, string>,
+    options: DeploymentMutationOptions = {}
   ): Promise<DeployResult> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
 
-    const explicitImageUri = this.imageUriForService(service, envVars);
+    const deferredTarget = options.deferDeployment
+      ? await this.currentImageForDeferredDeployment(service, environment)
+      : undefined;
+    if (deferredTarget?.expectedExisting && !deferredTarget.imageUri) {
+      return {
+        serviceId: service.id,
+        status: 'failed',
+        receipt: {
+          success: false,
+          message: `Cloud Run could not preserve the current image for ${service.name}`,
+          error: 'The service is bound but its current image could not be read. Refusing to build branch code during an exact-SHA CI-managed apply.',
+          data: {
+            provider: this.name,
+            phase: 'defer_code_deployment',
+          },
+        },
+      };
+    }
+    const deferredImageUri = deferredTarget?.imageUri;
+    const deploymentDeferred = Boolean(deferredImageUri);
+    const explicitImageUri = deferredImageUri ?? this.imageUriForService(service, envVars);
     const buildResult = explicitImageUri
       ? undefined
       : await this.buildImageForService(service, environment, envVars);
@@ -489,6 +512,7 @@ export class CloudRunAdapter implements IProviderAdapter {
         buildResult,
         prefix,
         jobName: serviceName,
+        deploymentDeferred,
       });
     }
 
@@ -626,10 +650,12 @@ export class CloudRunAdapter implements IProviderAdapter {
         serviceId: service.id,
         externalId: serviceName,
         url,
-        status: 'deployed',
+        status: deploymentDeferred ? 'configured' : 'deployed',
         receipt: {
           success: true,
-          message: `Deployed ${serviceName} to Cloud Run`,
+          message: deploymentDeferred
+            ? `Prepared ${serviceName} for exact-SHA CI deployment using its current image`
+            : `Deployed ${serviceName} to Cloud Run`,
           data: {
             serviceName,
             url,
@@ -639,6 +665,7 @@ export class CloudRunAdapter implements IProviderAdapter {
             publicAccessConfigured: publicAccess,
             publicInvokerBindingUpdated,
             environmentId: region,
+            ...(deploymentDeferred ? { deploymentDeferred: true } : {}),
             ...(buildResult
               ? {
                   build: {
@@ -671,8 +698,17 @@ export class CloudRunAdapter implements IProviderAdapter {
     buildResult?: CloudBuildResult;
     prefix: string;
     jobName: string;
+    deploymentDeferred?: boolean;
   }): Promise<DeployResult> {
-    const { service, environment, envVars, imageUri, buildResult, jobName } = params;
+    const {
+      service,
+      environment,
+      envVars,
+      imageUri,
+      buildResult,
+      jobName,
+      deploymentDeferred,
+    } = params;
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
@@ -750,10 +786,12 @@ export class CloudRunAdapter implements IProviderAdapter {
       return {
         serviceId: service.id,
         externalId: schedulerJobName,
-        status: 'deployed',
+        status: deploymentDeferred ? 'configured' : 'deployed',
         receipt: {
           success: true,
-          message: `Deployed scheduled job ${jobName} to Cloud Run and Cloud Scheduler`,
+          message: deploymentDeferred
+            ? `Prepared scheduled job ${jobName} for exact-SHA CI deployment using its current image`
+            : `Deployed scheduled job ${jobName} to Cloud Run and Cloud Scheduler`,
           data: {
             resourceType: 'scheduledJob',
             jobName,
@@ -763,6 +801,7 @@ export class CloudRunAdapter implements IProviderAdapter {
             environmentId: region,
             createdJob,
             createdScheduler,
+            ...(deploymentDeferred ? { deploymentDeferred: true } : {}),
             ...(cleanupWarning ? { cleanupWarning } : {}),
             ...(buildResult
               ? {
@@ -826,7 +865,8 @@ export class CloudRunAdapter implements IProviderAdapter {
   async setEnvVars(
     environment: Environment,
     service: Service,
-    vars: Record<string, string>
+    vars: Record<string, string>,
+    options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -843,6 +883,18 @@ export class CloudRunAdapter implements IProviderAdapter {
     const serviceName = isCron
       ? bindings.services?.[service.name]?.jobName ?? this.sanitizeName(`${prefix}-${service.name}`)
       : bindings.services?.[service.name]?.serviceId ?? this.sanitizeName(`${prefix}-${service.name}`);
+
+    if (options.deferDeployment) {
+      const runtimeVars = this.runtimeEnvVarsForService(service, vars);
+      return {
+        success: true,
+        message: `Deferred ${Object.keys(runtimeVars).length} environment variables to the exact-SHA service configuration pass`,
+        data: {
+          variableCount: Object.keys(runtimeVars).length,
+          deploymentDeferred: true,
+        },
+      };
+    }
 
     try {
       const token = await this.getAccessToken();
@@ -988,6 +1040,192 @@ export class CloudRunAdapter implements IProviderAdapter {
       return {
         success: false,
         message: 'Failed to set environment variables',
+        error: this.formatError(error),
+      };
+    }
+  }
+
+  async deleteEnvVars(
+    environment: Environment,
+    service: Service,
+    keys: string[]
+  ): Promise<Receipt> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const uniqueKeys = [...new Set(keys)].sort();
+    const invalidKey = uniqueKeys.find((key) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
+    if (invalidKey || uniqueKeys.length === 0) {
+      return {
+        success: false,
+        message: 'Failed to delete environment variables',
+        error: invalidKey
+          ? `Invalid environment variable name: ${invalidKey}`
+          : 'No environment variable names were supplied',
+      };
+    }
+
+    const bindings = environment.platformBindings as {
+      projectId?: string;
+      services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
+    };
+    const prefix = bindings.projectId || 'hypervibe';
+    const isCron = serviceWorkloadKind(service) === 'cron';
+    const serviceName = isCron
+      ? bindings.services?.[service.name]?.jobName ?? this.sanitizeName(`${prefix}-${service.name}`)
+      : bindings.services?.[service.name]?.serviceId ?? this.sanitizeName(`${prefix}-${service.name}`);
+
+    try {
+      const token = await this.getAccessToken();
+      const retired = new Set(uniqueKeys);
+
+      if (isCron) {
+        const currentJob = await this.getCloudRunJob(serviceName, token);
+        const currentContainer = this.primaryJobContainer(currentJob);
+        if (!currentContainer?.image) {
+          return {
+            success: false,
+            message: `Scheduled job ${serviceName} does not have an image to preserve while deleting environment variables`,
+          };
+        }
+        const existingEnv = currentContainer.env ?? [];
+        const deletedKeys = uniqueKeys.filter((key) =>
+          existingEnv.some((entry) => entry.name === key)
+        );
+        if (deletedKeys.length === 0) {
+          return {
+            success: true,
+            message: 'Explicitly retired environment variables are already absent',
+            data: { deletedKeys: [], variableCount: 0, redeployMayBeTriggered: false },
+          };
+        }
+
+        const jobSpec = this.cloudRunJobSpec({
+          imageUri: currentContainer.image,
+          command: service.buildConfig.startCommand?.trim() || 'npm start',
+          env: existingEnv.filter((entry) => typeof entry.name !== 'string' || !retired.has(entry.name)),
+          resources: currentContainer.resources,
+          serviceAccount: currentJob?.template?.template?.serviceAccount
+            ?? currentJob?.template?.template?.serviceAccountName
+            ?? this.serviceAccountCreds?.client_email,
+          existingVolumes: currentJob?.template?.template?.volumes,
+          existingVolumeMounts: currentContainer.volumeMounts,
+          cloudSqlConnectionNames: this.cloudSqlConnectionNamesFromEnvVars(currentContainer.env),
+        });
+        await this.upsertCloudRunJob({
+          token,
+          jobName: serviceName,
+          jobSpec,
+          description: 'scheduled job env removal',
+        });
+        const updatedJob = await this.getCloudRunJob(serviceName, token);
+        const remainingJobKeys = new Set(
+          (this.primaryJobContainer(updatedJob)?.env ?? [])
+            .map((entry) => entry.name)
+            .filter((name): name is string => typeof name === 'string')
+        );
+        const failedJobKeys = deletedKeys.filter((key) => remainingJobKeys.has(key));
+        if (failedJobKeys.length > 0) {
+          return {
+            success: false,
+            message: 'Cloud Run accepted the scheduled job update but retired variables remain live',
+            error: `Failed to remove: ${failedJobKeys.join(', ')}`,
+          };
+        }
+
+        return {
+          success: true,
+          message: `Deleted ${deletedKeys.length} explicitly retired environment variables`,
+          data: {
+            deletedKeys,
+            variableCount: deletedKeys.length,
+            redeployMayBeTriggered: false,
+            scheduledJobConfigUpdated: true,
+          },
+        };
+      }
+
+      const currentService = await this.getService(serviceName);
+      const currentContainer = this.primaryContainer(currentService);
+      if (!currentService || !currentContainer?.image) {
+        return {
+          success: false,
+          message: `Service ${serviceName} does not have an image to preserve while deleting environment variables`,
+        };
+      }
+      const existingEnv = currentContainer.env ?? [];
+      const deletedKeys = uniqueKeys.filter((key) =>
+        existingEnv.some((entry) => entry.name === key)
+      );
+      if (deletedKeys.length === 0) {
+        return {
+          success: true,
+          message: 'Explicitly retired environment variables are already absent',
+          data: { deletedKeys: [], variableCount: 0, redeployMayBeTriggered: false },
+        };
+      }
+
+      const containerSpec = {
+        ...(currentContainer.name ? { name: currentContainer.name } : {}),
+        image: currentContainer.image,
+        ...(currentContainer.ports ? { ports: currentContainer.ports } : {}),
+        ...(currentContainer.command ? { command: currentContainer.command } : {}),
+        ...(currentContainer.args ? { args: currentContainer.args } : {}),
+        ...(currentContainer.resources ? { resources: currentContainer.resources } : {}),
+        ...(currentContainer.volumeMounts ? { volumeMounts: currentContainer.volumeMounts } : {}),
+        env: existingEnv.filter((entry) => typeof entry.name !== 'string' || !retired.has(entry.name)),
+      };
+      const { projectId, region } = this.credentials;
+      const response = await fetch(
+        `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}?updateMask=template.containers`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            template: { containers: [containerSpec] },
+          }),
+        }
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Cloud Run API error: ${response.status} ${text}`);
+      }
+      const operation = await response.json() as CloudRunOperation;
+      await this.waitForCloudRunOperation(token, operation, 'service env removal');
+      const updatedService = await this.waitForCloudRunServiceReady(serviceName, token);
+      const remainingKeys = new Set(
+        (this.primaryContainer(updatedService)?.env ?? [])
+          .map((entry) => entry.name)
+          .filter((name): name is string => typeof name === 'string')
+      );
+      const failedKeys = deletedKeys.filter((key) => remainingKeys.has(key));
+      if (failedKeys.length > 0) {
+        return {
+          success: false,
+          message: 'Cloud Run accepted the service update but retired variables remain live',
+          error: `Failed to remove: ${failedKeys.join(', ')}`,
+        };
+      }
+
+      return {
+        success: true,
+        message: `Deleted ${deletedKeys.length} explicitly retired environment variables`,
+        data: {
+          deletedKeys,
+          variableCount: deletedKeys.length,
+          // Cloud Run service configuration is revision-scoped; this PATCH
+          // necessarily creates a revision with the already-compatible image.
+          redeployMayBeTriggered: true,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to delete environment variables',
         error: this.formatError(error),
       };
     }
@@ -2487,6 +2725,38 @@ export class CloudRunAdapter implements IProviderAdapter {
     } catch {
       return null;
     }
+  }
+
+  private async currentImageForDeferredDeployment(
+    service: Service,
+    environment: Environment
+  ): Promise<{ expectedExisting: boolean; imageUri?: string }> {
+    const bindings = environment.platformBindings as {
+      projectId?: string;
+      services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
+    };
+    const serviceBinding = bindings.services?.[service.name];
+    const prefix = bindings.projectId || 'hypervibe';
+    if (serviceWorkloadKind(service) === 'cron') {
+      const expectedExisting = Boolean(serviceBinding?.jobName);
+      const jobName = serviceBinding?.jobName ?? this.sanitizeName(`${prefix}-${service.name}`);
+      const token = await this.getAccessToken();
+      const job = await this.getCloudRunJob(jobName, token);
+      const imageUri = this.primaryJobContainer(job)?.image;
+      return {
+        expectedExisting,
+        ...(imageUri ? { imageUri } : {}),
+      };
+    }
+
+    const expectedExisting = Boolean(serviceBinding?.serviceId);
+    const serviceName = serviceBinding?.serviceId ?? this.sanitizeName(`${prefix}-${service.name}`);
+    const current = await this.getService(serviceName);
+    const imageUri = this.primaryContainer(current)?.image;
+    return {
+      expectedExisting,
+      ...(imageUri ? { imageUri } : {}),
+    };
   }
 
   private primaryContainer(service: CloudRunService | null): CloudRunContainer | undefined {

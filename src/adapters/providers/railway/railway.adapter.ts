@@ -1,7 +1,15 @@
 import { GraphQLClient, gql } from 'graphql-request';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
-import type { IProviderAdapter, Receipt, ComponentResult, DeployResult, JobResult, ProviderCapabilities } from '../../../domain/ports/provider.port.js';
+import type {
+  IProviderAdapter,
+  Receipt,
+  ComponentResult,
+  DeployResult,
+  JobResult,
+  ProviderCapabilities,
+  DeploymentMutationOptions,
+} from '../../../domain/ports/provider.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
 import { githubPackagePullCredentials } from '../github/package-pull.js';
@@ -94,6 +102,7 @@ export class RailwayAdapter implements IProviderAdapter {
     supportsObserve: true,
     queues: { backend: 'postgres' },
     supportsOneOffTasks: true,
+    supportsDeferredDeploy: true,
   };
 
   private client: GraphQLClient | null = null;
@@ -1551,7 +1560,8 @@ export class RailwayAdapter implements IProviderAdapter {
   async deploy(
     service: Service,
     environment: Environment,
-    envVars: Record<string, string>
+    envVars: Record<string, string>,
+    options: DeploymentMutationOptions = {}
   ): Promise<DeployResult> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
@@ -1695,17 +1705,42 @@ export class RailwayAdapter implements IProviderAdapter {
             },
           },
         };
-        await this.setEnvVars(envForVarSync, service, allEnvVars);
+        const envReceipt = options.deferDeployment
+          ? await this.setEnvVars(
+            envForVarSync,
+            service,
+            allEnvVars,
+            { deferDeployment: true }
+          )
+          : await this.setEnvVars(envForVarSync, service, allEnvVars);
+        if (!envReceipt.success) {
+          return {
+            serviceId: service.id,
+            externalId: railwayServiceId,
+            status: 'failed',
+            receipt: {
+              success: false,
+              message: `Failed to configure environment variables for ${service.name}`,
+              error: envReceipt.error ?? envReceipt.message,
+              data: {
+                provider: this.name,
+                phase: 'setEnvVars',
+                railwayServiceId,
+                environmentId: railwayEnvId,
+              },
+            },
+          };
+        }
       }
 
-      // Trigger redeploy
-      const redeployMutation = gql`
-        mutation ServiceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
-          serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
-        }
-      `;
-
-      if (railwayEnvId) {
+      // CI-managed branch deploys release an exact SHA after hv_apply. Do not
+      // redeploy the previous image merely because its configuration changed.
+      if (!options.deferDeployment && railwayEnvId) {
+        const redeployMutation = gql`
+          mutation ServiceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
+            serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+          }
+        `;
         await this.client.request(redeployMutation, {
           serviceId: railwayServiceId,
           environmentId: railwayEnvId,
@@ -1726,14 +1761,17 @@ export class RailwayAdapter implements IProviderAdapter {
         serviceId: service.id,
         externalId: railwayServiceId,
         ...(url ? { url } : {}),
-        status: 'deploying',
+        status: options.deferDeployment ? 'configured' : 'deploying',
         receipt: {
           success: true,
-          message: `Deployment triggered for ${service.name}`,
+          message: options.deferDeployment
+            ? `Prepared ${service.name} for CI deployment`
+            : `Deployment triggered for ${service.name}`,
           data: {
             railwayServiceId,
             environmentId: railwayEnvId,
             createdService,
+            ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
             ...(serviceResolution.ignoredBoundServiceId ? { replacedServiceBinding: serviceResolution.ignoredBoundServiceId } : {}),
             ...(url ? { url } : {}),
             ...(domainError ? { domainError } : {}),
@@ -1756,7 +1794,8 @@ export class RailwayAdapter implements IProviderAdapter {
   async setEnvVars(
     environment: Environment,
     service: Service,
-    vars: Record<string, string>
+    vars: Record<string, string>,
+    options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
@@ -1810,13 +1849,14 @@ export class RailwayAdapter implements IProviderAdapter {
       }
 
       const mutation = gql`
-        mutation UpsertVariables($projectId: String!, $serviceId: String!, $environmentId: String!, $variables: EnvironmentVariables!) {
+        mutation UpsertVariables($projectId: String!, $serviceId: String!, $environmentId: String!, $variables: EnvironmentVariables!, $skipDeploys: Boolean!) {
           variableCollectionUpsert(
             input: {
               projectId: $projectId
               serviceId: $serviceId
               environmentId: $environmentId
               variables: $variables
+              skipDeploys: $skipDeploys
             }
           )
         }
@@ -1844,17 +1884,135 @@ export class RailwayAdapter implements IProviderAdapter {
         serviceId: railwayServiceId,
         environmentId: environmentId,
         variables: vars,
+        skipDeploys: options.deferDeployment === true,
       });
 
       return {
         success: true,
         message: `Set ${Object.keys(vars).length} environment variables`,
-        data: { variableCount: Object.keys(vars).length },
+        data: {
+          variableCount: Object.keys(vars).length,
+          ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
+        },
       };
     } catch (error) {
       return {
         success: false,
         message: 'Failed to set environment variables',
+        error: String(error),
+      };
+    }
+  }
+
+  async deleteEnvVars(
+    environment: Environment,
+    service: Service,
+    keys: string[]
+  ): Promise<Receipt> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const bindings = environment.platformBindings as {
+      projectId?: string;
+      environmentId?: string;
+      services?: Record<string, { serviceId: string }>;
+    };
+    const projectId = bindings.projectId;
+    if (!projectId) {
+      return {
+        success: false,
+        message: 'No Railway project bound to this environment',
+      };
+    }
+
+    const uniqueKeys = [...new Set(keys)].sort();
+    const invalidKey = uniqueKeys.find((key) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
+    if (invalidKey) {
+      return {
+        success: false,
+        message: 'Failed to delete environment variables',
+        error: `Invalid environment variable name: ${invalidKey}`,
+      };
+    }
+    if (uniqueKeys.length === 0) {
+      return {
+        success: true,
+        message: 'No environment variables were selected for deletion',
+        data: { deletedKeys: [], variableCount: 0, redeployMayBeTriggered: false },
+      };
+    }
+
+    try {
+      const environmentId = await this.resolveRailwayEnvironmentId(projectId, environment);
+      if (!environmentId) {
+        return {
+          success: false,
+          message: 'No Railway environment ID available for variable deletion',
+        };
+      }
+
+      const serviceResolution = await this.resolveServiceIdForEnvironment(
+        projectId,
+        this.railwayServiceNameCandidates(service.name, environment.name),
+        environmentId,
+        bindings.services?.[service.name]?.serviceId
+      );
+      const railwayServiceId = serviceResolution.serviceId;
+      if (!railwayServiceId) {
+        return {
+          success: false,
+          message: `Service ${service.name} not found in Railway environment ${environment.name}`,
+        };
+      }
+
+      const mutation = gql`
+        mutation DeleteVariable($input: VariableDeleteInput!) {
+          variableDelete(input: $input)
+        }
+      `;
+      const deletedKeys: string[] = [];
+      for (const key of uniqueKeys) {
+        try {
+          await this.client.request(mutation, {
+            input: {
+              projectId,
+              serviceId: railwayServiceId,
+              environmentId,
+              name: key,
+            },
+          });
+          deletedKeys.push(key);
+        } catch (error) {
+          return {
+            success: false,
+            message: `Deleted ${deletedKeys.length} of ${uniqueKeys.length} environment variables`,
+            error: String(error),
+            data: {
+              deletedKeys,
+              failedKey: key,
+              variableCount: deletedKeys.length,
+              redeployMayBeTriggered: deletedKeys.length > 0,
+            },
+          };
+        }
+      }
+
+      return {
+        success: true,
+        message: `Deleted ${deletedKeys.length} explicitly retired environment variables`,
+        data: {
+          deletedKeys,
+          variableCount: deletedKeys.length,
+          // Railway's documented single-variable delete does not expose the
+          // skipDeploys option available to variable upserts.
+          redeployMayBeTriggered: true,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to delete environment variables',
         error: String(error),
       };
     }

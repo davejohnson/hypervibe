@@ -320,6 +320,83 @@ describe('diffEnvironment — config drift', () => {
   });
 });
 
+describe('diffEnvironment — explicit environment variable retirement', () => {
+  it('confirm-gates deletion only when an explicitly retired key is live', () => {
+    const result = diffEnvironment({
+      spec: spec({ removeEnvVars: ['OLD_API_TOKEN'] }),
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          envVarKeys: ['NODE_ENV', 'OLD_API_TOKEN'],
+          envVarHashes: {
+            NODE_ENV: hashEnvValue('production'),
+            OLD_API_TOKEN: hashEnvValue('secret-value'),
+          },
+        })],
+      }),
+      local: local(),
+    });
+
+    const removal = result.actions.find((action) => action.id === 'service:web:env-remove');
+    expect(removal).toMatchObject({
+      type: 'update',
+      requiresConfirm: true,
+      verified: true,
+      metadata: {
+        operation: 'hostingEnvRemove',
+        keys: ['OLD_API_TOKEN'],
+      },
+      diff: [{ field: 'env:OLD_API_TOKEN', from: 'present', to: 'absent' }],
+    });
+    expect(removal?.reason).toContain('previously deployed revision');
+    expect(confirmGatedActionIds(result.actions)).toContain('service:web:env-remove');
+  });
+
+  it('does not delete omitted variables or emit work for an absent tombstone', () => {
+    const result = diffEnvironment({
+      spec: spec({ removeEnvVars: ['ALREADY_GONE'] }),
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          envVarKeys: ['NODE_ENV', 'UNMANAGED_TOKEN'],
+          envVarHashes: {
+            NODE_ENV: hashEnvValue('production'),
+            UNMANAGED_TOKEN: hashEnvValue('preserve-me'),
+          },
+        })],
+      }),
+      local: local(),
+    });
+
+    expect(result.actions.find((action) => action.id.endsWith(':env-remove'))).toBeUndefined();
+    expect(result.actions.find((action) => action.id === 'service:web')?.type).toBe('noop');
+  });
+
+  it('orders retirement after service configuration updates', () => {
+    const result = diffEnvironment({
+      spec: spec({
+        envVars: { NODE_ENV: 'production', NEW_FEATURE_FLAG: 'enabled' },
+        removeEnvVars: ['OLD_FEATURE_FLAG'],
+      }),
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          envVarKeys: ['NODE_ENV', 'OLD_FEATURE_FLAG'],
+          envVarHashes: {
+            NODE_ENV: hashEnvValue('production'),
+            OLD_FEATURE_FLAG: hashEnvValue('enabled'),
+          },
+        })],
+      }),
+      local: local(),
+    });
+
+    expect(result.actions.find((action) => action.id === 'service:web')?.type).toBe('update');
+    expect(result.actions.find((action) => action.id === 'service:web:env-remove')?.dependsOn)
+      .toEqual(['service:web']);
+  });
+});
+
 describe('diffEnvironment — provider switches', () => {
   it('creates the new database without destroying the old one in the initial provider change plan', () => {
     const result = diffEnvironment({

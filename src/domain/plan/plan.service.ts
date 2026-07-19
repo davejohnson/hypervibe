@@ -18,7 +18,7 @@ import { classifyDeployEnvironment, resolveGitDeploySource } from '../services/d
 import { diffEnvironment } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
 import { fingerprintObservedState, type PlanRunDocument } from './converge.executor.js';
-import { buildDatabaseEnvVarsFromComponent } from '../services/database-env.js';
+import { buildDatabaseEnvVarsFromComponent, DATABASE_ENV_KEYS } from '../services/database-env.js';
 import {
   addDomainRegistrationDependency,
   cloudflareRegistrarCredentialProblem,
@@ -31,8 +31,12 @@ import {
 } from '../services/ci-deploy.service.js';
 import { planIos } from '../services/appstore-plan.service.js';
 import { planQueues } from '../services/queue-plan.service.js';
-import { resolveQueueEnvVars } from '../services/queue-env.js';
-import { parseStorageProviderContexts, planStorage } from '../services/storage-plan.service.js';
+import { queueEnvVarSuffix, resolveQueueEnvVars } from '../services/queue-env.js';
+import {
+  parseStorageProviderContexts,
+  planStorage,
+  storageEnvKeys,
+} from '../services/storage-plan.service.js';
 import { formatConnectionGuidance } from '../services/connection-guidance.js';
 import { loadDeployEnvFile } from '../services/deploy-env-file.js';
 import { cloudflareScopeHintsForDomain } from '../services/domain-scope.js';
@@ -459,6 +463,14 @@ export class PlanService {
     const envVarOverrides = options?.envVarOverrides && Object.keys(options.envVarOverrides).length > 0
       ? options.envVarOverrides
       : undefined;
+    const retiredEnvKeys = new Set(environmentSpec.removeEnvVars ?? []);
+    const retiredOverrideCollisions = Object.keys(envVarOverrides ?? {})
+      .filter((key) => retiredEnvKeys.has(key));
+    if (retiredOverrideCollisions.length > 0) {
+      return {
+        error: `envVars cannot supply explicitly retired keys: ${retiredOverrideCollisions.join(', ')}. Remove the override or remove the key from removeEnvVars.`,
+      };
+    }
     const delegatedOverrideCollisions = Object.keys(envVarOverrides ?? {}).filter((key) => delegatedSecretSlots.has(key));
     if (delegatedOverrideCollisions.length > 0) {
       return {
@@ -494,6 +506,7 @@ export class PlanService {
       const excludedEnvKeys = Array.from(new Set([
         ...(envFilePolicy?.exclude ?? []),
         ...delegatedSecretSlots.keys(),
+        ...retiredEnvKeys,
       ]));
       envFile = loadDeployEnvFile({
         envFile: options?.envFile,
@@ -572,7 +585,31 @@ export class PlanService {
       ...Object.keys(managedDatabaseEnvVars ?? {}),
       ...Object.keys(managedQueueEnvVars ?? {}),
       ...delegatedSecretSlots.keys(),
+      ...(environmentSpec.database ? DATABASE_ENV_KEYS : []),
+      ...(environmentSpec.queues && Object.keys(environmentSpec.queues).length > 0
+        ? [
+          'QUEUE_BACKEND',
+          'QUEUE_NAMES',
+          ...Object.keys(environmentSpec.queues).flatMap((name) => {
+            const suffix = queueEnvVarSuffix(name);
+            return [`QUEUE_TOPIC_${suffix}`, `QUEUE_SUBSCRIPTION_${suffix}`];
+          }),
+        ]
+        : []),
+      ...(environmentSpec.storage && Object.keys(environmentSpec.storage).length > 0
+        ? storageEnvKeys(Object.keys(environmentSpec.storage)[0])
+        : []),
+      ...(projectForPlan.gitRemoteUrl
+        ? ['HYPERVIBE_SOURCE_REPO_URL', 'HYPERVIBE_SOURCE_REVISION', 'HYPERVIBE_GITHUB_TOKEN']
+        : []),
     ]);
+    const retiredManagedKeys = (environmentSpec.removeEnvVars ?? [])
+      .filter((key) => managedEnvKeys.has(key));
+    if (retiredManagedKeys.length > 0) {
+      return {
+        error: `removeEnvVars cannot retire Hypervibe-managed infrastructure keys: ${retiredManagedKeys.join(', ')}. Remove or reconfigure the owning database, queue, storage, delegated secret, or source integration instead.`,
+      };
+    }
     const envFileVars = envFile && Object.keys(envFile.vars).length > 0
       ? Object.fromEntries(Object.entries(envFile.vars).filter(([key]) => !managedEnvKeys.has(key)))
       : undefined;
@@ -647,6 +684,22 @@ export class PlanService {
       else actions.splice(firstServiceIndex, 0, ...followupActions);
     }
     actions.push(...delegatedSecrets.actions);
+
+    const removalRolloutConflicts = actions.some((action) =>
+      action.metadata?.operation === 'hostingEnvRemove'
+    )
+      ? actions.filter((action) =>
+        action.type !== 'noop'
+        && action.metadata?.operation !== 'hostingEnvRemove'
+        && ['project', 'environment', 'service', 'database', 'storage', 'queue', 'secret']
+          .includes(action.resource.kind)
+      )
+      : [];
+    if (removalRolloutConflicts.length > 0) {
+      return {
+        error: `removeEnvVars requires a two-release rollout. First apply and verify compatible code/infrastructure without any removals, then add removeEnvVars in a later spec change. Work not yet converged: ${removalRolloutConflicts.map((action) => action.id).join(', ')}.`,
+      };
+    }
 
     // Destroys (including confirm-gated previous-provider cleanup) are never
     // prerequisites for CI setup — an unconfirmed destroy must not block the

@@ -311,6 +311,9 @@ export async function executeBootstrap(params: {
   const orchestrator = new DeployOrchestrator();
   const deploySource = resolveGitDeploySource(project, params.environmentName, params.deploy);
   const deployTrigger = params.deploy?.trigger ?? 'ci';
+  const deferProviderDeployment = params.deploy?.strategy === 'branch'
+    && deployTrigger === 'ci'
+    && hostingAdapter.capabilities.supportsDeferredDeploy === true;
   const sourceRepoUrl = normalizeGitRemoteForBuild(project.gitRemoteUrl);
   const secretStore = getSecretStore();
   const githubConnection = sourceRepoUrl && hostingAdapter.name === 'cloudrun'
@@ -339,6 +342,7 @@ export async function executeBootstrap(params: {
     envVars: Object.keys(deployEnvVars).length > 0 ? deployEnvVars : undefined,
     ...(params.storageServiceEnvVars ? { envVarsByService: params.storageServiceEnvVars } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
+    ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),
     adapter: hostingAdapter,
   });
 
@@ -350,6 +354,7 @@ export async function executeBootstrap(params: {
     ...(cronWorkloads.length > 0 ? { crons: cronWorkloads.map((service) => service.name) } : {}),
     deploymentRunId: deploy.run.id,
     deploymentSuccess: deploy.success,
+    deploymentDeferralRequested: deferProviderDeployment,
     urls: deploy.urls,
     serviceUrls: deploy.serviceUrls,
     primaryUrl: deploy.primaryUrl,

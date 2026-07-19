@@ -1,5 +1,30 @@
 import type { Component } from '../entities/component.entity.js';
 
+/** Runtime keys owned by a declared database component. */
+export const DATABASE_ENV_KEYS = [
+  'DATABASE_URL',
+  'DIRECT_URL',
+  'CLOUD_SQL_CONNECTION_NAME',
+  'INSTANCE_CONNECTION_NAME',
+  'DATABASE_HOST',
+  'DB_HOST',
+  'PGHOST',
+  'DATABASE_SSL',
+  'DATABASE_POOLER_URL',
+  'DATABASE_PORT',
+  'DB_PORT',
+  'PGPORT',
+  'DATABASE_USER',
+  'DB_USER',
+  'PGUSER',
+  'DATABASE_PASSWORD',
+  'DB_PASSWORD',
+  'PGPASSWORD',
+  'DATABASE_NAME',
+  'DB_NAME',
+  'PGDATABASE',
+] as const;
+
 function stringBinding(bindings: Record<string, unknown>, key: string): string | undefined {
   const value = bindings[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;

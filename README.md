@@ -238,6 +238,44 @@ Tune this per environment in `.hypervibe/spec.json`:
 
 Modes are `runtime` (default), `all`, `explicit`, and `off`. Values loaded from the env file are encrypted into the plan and never printed. The plan warning names the env file path and selected keys so the agent can show the user exactly what source is being applied. Generated infrastructure values such as `DATABASE_URL` still win over stale local `.env` values.
 
+### Retiring or renaming runtime variables
+
+Omitting a key from `envVars`, an env file, or a local secret input means
+**preserve the provider value**. Hypervibe never treats a partial desired map
+as permission to delete live variables.
+
+Delete a retired key only through the environment's explicit tombstone list:
+
+```json
+{
+  "envVars": {
+    "NEW_FEATURE_FLAG": "enabled"
+  },
+  "removeEnvVars": ["OLD_FEATURE_FLAG"]
+}
+```
+
+`hv_plan` emits one `service:<name>:env-remove` action per affected service.
+The action shows key names but no values, and `hv_apply` skips it unless that
+exact action ID is passed in `confirmActions`. Railway and GCP Cloud Run both
+support these explicit removals. Hypervibe-managed database, queue, storage,
+delegated-secret, and source-integration keys cannot be tombstoned; change or
+remove the owning resource instead.
+
+Renames require two releases:
+
+1. Add the replacement key while keeping the old key. Deploy code that accepts
+   the replacement and temporarily falls back to the old key, then verify it in
+   staging and production.
+2. In a later spec change, stop supplying the old key and add it to
+   `removeEnvVars`. Review and explicitly confirm the removal action.
+
+Hypervibe rejects a removal plan while any service configuration is still
+drifting. This prevents a same-release `SOME_TOKEN` to `ANOTHER_TOKEN` change
+from removing the old value before compatible code is running. A confirmed
+removal may reconcile or redeploy the provider's already-compatible current
+image, so do not collapse these two releases into one.
+
 ### Database data operations
 
 Do not temporarily change a service `releaseCommand` just to seed or import production data. Release commands are desired deploy configuration for repeatable schema work, such as `migrations: { "mode": "releaseCommand", "command": "npm run db:migrate" }`.
@@ -423,6 +461,16 @@ contract stops before image build until the exact commit is reconciled:
 The marker is environment-specific: production-only desired-state changes do
 not block staging. Production workflows remain manual and enforce the same
 reconciliation check for the promoted SHA.
+
+During a CI-managed `hv_apply`, supported hosting adapters keep GitHub Actions
+as the application-code release boundary. Railway applies variable changes
+with deploys skipped and does not call its service redeploy mutation. For an
+existing Cloud Run service or job, Hypervibe applies configuration using the
+currently deployed image instead of independently building branch code; the
+generated workflow later swaps in the approved commit image. Cloud Run
+configuration is revision-scoped, which is why variable removals and
+incompatible value transitions still require the two-release process above.
+Health checks for this apply pass are deferred to the later CI deployment.
 
 For Railway GHCR deploys, the generated workflow grants `packages: write` and uses `${{ github.actor }}` plus `${{ secrets.GITHUB_TOKEN }}` only for the workflow-time image push. The hosting provider also needs durable image-pull credentials because GitHub's workflow token is short-lived and only exists inside the Actions job. Hypervibe syncs those pull credentials into `IMAGE_REGISTRY_USERNAME` and `IMAGE_REGISTRY_TOKEN` from the verified GitHub connection when it has a login and a package-read-capable `packageReadToken`. Do not use `${{ secrets.GITHUB_TOKEN }}` for `IMAGE_REGISTRY_TOKEN`, and do not use a `read:packages`-only token as the GitHub `apiToken`.
 

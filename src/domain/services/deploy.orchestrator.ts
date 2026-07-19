@@ -20,6 +20,11 @@ export interface DeployOptions {
   envVars?: Record<string, string>;
   envVarsByService?: Record<string, Record<string, string>>;
   verifyHttpHealth?: boolean;
+  /**
+   * Configure provider resources without sourcing/building new application
+   * code. Used when CI will deploy the exact commit after hv_apply succeeds.
+   */
+  deferProviderDeployment?: boolean;
   /** The hosting adapter to use for deployment (can be IProviderAdapter or IHostingAdapter) */
   adapter: IProviderAdapter | IHostingAdapter;
 }
@@ -118,11 +123,14 @@ export class DeployOrchestrator {
       });
     }
 
-    // Step 5: Verify health
-    steps.push({
-      name: 'verify_health',
-      action: 'verifyHealth',
-    });
+    // Health belongs to the later exact-SHA CI deployment when provider
+    // deployment is intentionally deferred.
+    if (!options.deferProviderDeployment) {
+      steps.push({
+        name: 'verify_health',
+        action: 'verifyHealth',
+      });
+    }
 
     return {
       steps,
@@ -130,6 +138,7 @@ export class DeployOrchestrator {
         projectId: options.project.id,
         environmentId: options.environment.id,
         serviceCount: services.length,
+        ...(options.deferProviderDeployment ? { deploymentDeferralRequested: true } : {}),
       },
     };
   }
@@ -388,7 +397,14 @@ export class DeployOrchestrator {
           for (const service of alreadyDeployed) {
             const serviceVars = { ...vars, ...(options.envVarsByService?.[service.name] ?? {}) };
             if (Object.keys(serviceVars).length === 0) continue;
-            const receipt = await options.adapter.setEnvVars(environment, service, serviceVars);
+            const receipt = options.deferProviderDeployment
+              ? await options.adapter.setEnvVars(
+                environment,
+                service,
+                serviceVars,
+                { deferDeployment: true }
+              )
+              : await options.adapter.setEnvVars(environment, service, serviceVars);
             if (!receipt.success) {
               if ((receipt.data as Record<string, unknown> | undefined)?.staleBinding === true) {
                 skippedStaleBindings.push(service.name);
@@ -425,11 +441,18 @@ export class DeployOrchestrator {
           }
 
           const environment = this.envRepo.findById(options.environment.id) ?? options.environment;
-          const result = await options.adapter.deploy(
-            service,
-            environment,
-            { ...(options.envVars ?? {}), ...(options.envVarsByService?.[service.name] ?? {}) }
-          );
+          const serviceEnvVars = {
+            ...(options.envVars ?? {}),
+            ...(options.envVarsByService?.[service.name] ?? {}),
+          };
+          const result = options.deferProviderDeployment
+            ? await options.adapter.deploy(
+              service,
+              environment,
+              serviceEnvVars,
+              { deferDeployment: true }
+            )
+            : await options.adapter.deploy(service, environment, serviceEnvVars);
 
           // Update environment bindings with service info using platform-agnostic structure
           if (result.externalId) {
