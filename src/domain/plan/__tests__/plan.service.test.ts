@@ -727,6 +727,7 @@ describe('PlanService.plan', () => {
       warnings: [],
     });
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(existingWorkflow.content);
+    vi.spyOn(GitHubAdapter.prototype, 'getEnvironmentVariable').mockResolvedValue(null);
 
     const result = await new PlanService().plan(project, 'production');
     const plan = result as Exclude<typeof result, { error: string }>;
@@ -735,6 +736,14 @@ describe('PlanService.plan', () => {
       type: 'update',
       dependsOn: expect.arrayContaining(['service:worker']),
       reason: 'Service bindings will change during apply; regenerate the GitHub Actions deploy workflow after service convergence',
+    });
+    expect(plan.actions.find((action) => action.id === 'ci:github-actions:production:applied-spec-hash')).toMatchObject({
+      type: 'update',
+      dependsOn: expect.arrayContaining([
+        'service:worker',
+        'ci:github-actions:production:deploy-branch',
+      ]),
+      reason: 'Record the reconciled production deployment contract in GitHub Actions',
     });
   });
 

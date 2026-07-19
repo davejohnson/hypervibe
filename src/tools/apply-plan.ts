@@ -28,7 +28,9 @@ import {
   type DelegatedSecretInputRequirement,
 } from '../domain/services/delegated-secret.service.js';
 import {
+  applyGitHubActionsAppliedSpecHash,
   applyGitHubActionsDeploy,
+  isGitHubActionsAppliedSpecHashAction,
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
 import {
@@ -405,6 +407,21 @@ export async function executePlanApply(ctx: ToolContext, params: {
     }
     if (isGitHubActionsDeployAction(action)) {
       return applyGitHubActionsDeploy({ project: applyProject, environmentName: envName, environmentSpec: envSpec });
+    }
+    if (isGitHubActionsAppliedSpecHashAction(action)) {
+      const desiredHash = stringField(asRecord(action.metadata), 'desiredHash');
+      if (!desiredHash) {
+        return {
+          success: false,
+          message: 'Applied deployment contract action is invalid',
+          error: 'Plan action is missing desiredHash.',
+        };
+      }
+      return applyGitHubActionsAppliedSpecHash({
+        project: applyProject,
+        environmentName: envName,
+        desiredHash,
+      });
     }
     if (isGitHubCollaborationAction(action)) {
       return applyGitHubCollaboration({ project: applyProject, spec, environmentName: envName });

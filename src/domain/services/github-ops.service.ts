@@ -423,6 +423,70 @@ function buildWorkflowTrigger(target: BranchDeployTarget): string {
 ${dispatch}`;
 }
 
+function buildDeploymentContractStep(environmentName: string): string {
+  return `      - name: Verify Hypervibe deployment contract
+        uses: actions/github-script@v8
+        env:
+          HYPERVIBE_ENVIRONMENT: ${JSON.stringify(environmentName)}
+          HYPERVIBE_APPLIED_SPEC_HASH: \${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}
+        with:
+          script: |
+            const { createHash } = require('crypto');
+            const { readFileSync } = require('fs');
+
+            function asRecord(value) {
+              return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+            }
+
+            function canonicalize(value) {
+              if (Array.isArray(value)) return value.map(canonicalize);
+              const record = asRecord(value);
+              if (!record) return value;
+              return Object.fromEntries(
+                Object.entries(record)
+                  .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+                  .map(([key, child]) => [key, canonicalize(child)])
+              );
+            }
+
+            const spec = JSON.parse(readFileSync('.hypervibe/spec.json', 'utf8'));
+            const environmentName = process.env.HYPERVIBE_ENVIRONMENT;
+            const environment = asRecord(spec.environments)?.[environmentName];
+            if (!asRecord(environment)) {
+              throw new Error('Hypervibe spec has no environment "' + environmentName + '".');
+            }
+            const secrets = Object.fromEntries(
+              Object.entries(asRecord(spec.secrets) || {})
+                .filter(([, value]) => {
+                  const environments = asRecord(value)?.environments;
+                  return Array.isArray(environments) && environments.includes(environmentName);
+                })
+                .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+            );
+            const contract = canonicalize({
+              version: spec.version,
+              project: spec.project,
+              gitRemoteUrl: spec.gitRemoteUrl || null,
+              environmentName,
+              environment,
+              secrets,
+            });
+            const desiredHash = createHash('sha256').update(JSON.stringify(contract), 'utf8').digest('hex');
+            const appliedHash = (process.env.HYPERVIBE_APPLIED_SPEC_HASH || '').trim();
+            core.info('Desired Hypervibe contract hash: ' + desiredHash);
+            core.info('Applied Hypervibe contract hash: ' + (appliedHash || '(missing)'));
+            if (!appliedHash || appliedHash !== desiredHash) {
+              throw new Error(
+                'Infrastructure reconciliation is required before this commit can deploy to '
+                + environmentName
+                + '. Check out this exact commit, run hv_plan then hv_apply for '
+                + environmentName
+                + ', and re-run this workflow with hv_ci_trigger.'
+              );
+            }
+`;
+}
+
 export function buildBranchDeployWorkflow(
   provider: BranchDeployProvider,
   target: BranchDeployTarget,
@@ -446,6 +510,10 @@ export function buildBranchDeployWorkflow(
 on:
 ${buildWorkflowTrigger(target)}
 
+concurrency:
+  group: hypervibe-deploy-${target.environmentName}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -467,7 +535,7 @@ ${permissionsBlock.trimEnd()}
       - uses: actions/checkout@v4
         with:
           ref: \${{ steps.deploy.outputs.sha }}
-${migrationStep}${deployBlock.steps}`;
+${buildDeploymentContractStep(target.environmentName)}${migrationStep}${deployBlock.steps}`;
 
   return {
     template,

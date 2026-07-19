@@ -175,6 +175,15 @@ Do not switch a project to `deploy.trigger: "native"` just to avoid missing CI, 
 
 Generated provider CI workflow steps belong under provider-owned modules and are exposed through provider registry metadata. Generic GitHub orchestration should assemble workflows, sync files/secrets, inspect runs/logs, and diagnose failures without owning provider API scripts.
 
+Generated workflows must gate image deployment on the environment-scoped
+`HYPERVIBE_APPLIED_SPEC_HASH` GitHub Actions variable. The desired hash covers
+only that environment plus its applicable delegated-secret declarations.
+`hv_plan` models updating this marker as the final dependency and `hv_apply`
+updates it only after every preceding action completes. This preserves
+automatic code-only staging deploys while preventing a changed desired-state
+contract from deploying before reconciliation. Missing, failed, pending, or
+unconfirmed dependencies must leave the previous marker intact.
+
 `hv_ci_status` is the authoritative observation path for Hypervibe-managed GitHub Actions deploys. Agents should use it to inspect workflows, runs, jobs, and bounded log tails, then use `hv_health` after a successful run. They must not bypass it with `gh`, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls; a blocked `hv_ci_status` result should surface its connection/error guidance and stop the stage.
 
 ## Database Tasks And Seed Data

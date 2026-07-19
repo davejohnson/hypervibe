@@ -8,7 +8,7 @@ import type { GitHubAdapter } from '../../adapters/providers/github/github.adapt
 import { providerRegistry } from '../registry/provider.registry.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
-import type { EnvironmentSpec } from '../spec/spec.schema.js';
+import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import {
   buildBranchDeployWorkflow,
@@ -18,6 +18,11 @@ import {
 } from './github-ops.service.js';
 import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
+import {
+  APPLIED_SPEC_HASH_OPERATION,
+  APPLIED_SPEC_HASH_VARIABLE,
+  environmentDeploymentContractHashForApply,
+} from './deployment-contract.service.js';
 
 const OPERATION = 'githubActionsDeployBranch';
 const GITHUB_CI_REQUIRED_CLASSIC_SCOPES = ['repo', 'workflow'];
@@ -96,6 +101,10 @@ export function environmentUsesGitHubActionsDeploy(environmentSpec: EnvironmentS
 
 export function isGitHubActionsDeployAction(action: PlanAction): boolean {
   return action.metadata?.operation === OPERATION;
+}
+
+export function isGitHubActionsAppliedSpecHashAction(action: PlanAction): boolean {
+  return action.metadata?.operation === APPLIED_SPEC_HASH_OPERATION;
 }
 
 export function providerSecretsForGitHubActions(
@@ -451,6 +460,169 @@ export async function applyGitHubActionsDeploy(params: {
   };
 }
 
+export async function planGitHubActionsAppliedSpecHash(params: {
+  project: Project;
+  spec: ProjectSpec;
+  environmentName: string;
+  environmentSpec: EnvironmentSpec;
+  environment: Environment | null;
+  dependsOn?: string[];
+}): Promise<{ action?: PlanAction; warnings: string[] }> {
+  const { project, spec, environmentName, environmentSpec } = params;
+  const warnings: string[] = [];
+  if (!environmentUsesGitHubActionsDeploy(environmentSpec)) {
+    return { warnings };
+  }
+
+  const repo = parseGitHubRepoFromRemote(project.gitRemoteUrl);
+  if (!repo) {
+    warnings.push('Cannot record the applied deployment contract because the project has no GitHub remote.');
+    return { warnings };
+  }
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) {
+    warnings.push(`Cannot record the applied deployment contract because ${repo} is not a valid GitHub repository.`);
+    return { warnings };
+  }
+
+  const desiredHash = environmentDeploymentContractHashForApply(spec, environmentName);
+  const action = (type: 'update' | 'noop', verified: boolean, reason: string): PlanAction => ({
+    id: `ci:github-actions:${environmentName}:applied-spec-hash`,
+    type,
+    resource: { kind: 'ci', name: `applied-spec-hash:${environmentName}`, provider: 'github' },
+    verified,
+    reason,
+    ...(type === 'update' && params.dependsOn?.length ? { dependsOn: params.dependsOn } : {}),
+    metadata: {
+      operation: APPLIED_SPEC_HASH_OPERATION,
+      repository: repo,
+      environmentName,
+      variableName: APPLIED_SPEC_HASH_VARIABLE,
+      desiredHash,
+    },
+  });
+
+  const adapterResult = getGitHubAdapter(repo);
+  if ('error' in adapterResult) {
+    warnings.push(`Cannot observe the applied deployment contract for ${repo}: ${adapterResult.error}`);
+    return {
+      action: action(
+        'update',
+        false,
+        `Record the reconciled ${environmentName} deployment contract in GitHub Actions`
+      ),
+      warnings,
+    };
+  }
+
+  try {
+    const current = await adapterResult.adapter.getEnvironmentVariable(
+      owner,
+      repoName,
+      environmentName,
+      APPLIED_SPEC_HASH_VARIABLE
+    );
+    const matches = current?.value === desiredHash;
+    return {
+      action: action(
+        matches ? 'noop' : 'update',
+        true,
+        matches
+          ? 'GitHub Actions deployment contract is reconciled'
+          : `Record the reconciled ${environmentName} deployment contract in GitHub Actions`
+      ),
+      warnings,
+    };
+  } catch (error) {
+    warnings.push(
+      `Cannot observe GitHub Actions environment variable ${APPLIED_SPEC_HASH_VARIABLE} for ${repo}/${environmentName}: `
+      + (error instanceof Error ? error.message : String(error))
+    );
+    return {
+      action: action(
+        'update',
+        false,
+        `Record the reconciled ${environmentName} deployment contract in GitHub Actions`
+      ),
+      warnings,
+    };
+  }
+}
+
+export async function applyGitHubActionsAppliedSpecHash(params: {
+  project: Project;
+  environmentName: string;
+  desiredHash: string;
+}): Promise<{ success: boolean; message: string; error?: string; data?: Record<string, unknown> }> {
+  const { project, environmentName, desiredHash } = params;
+  const repo = parseGitHubRepoFromRemote(project.gitRemoteUrl);
+  if (!repo) {
+    return {
+      success: false,
+      message: 'GitHub repository is missing',
+      error: 'Set project gitRemoteUrl to a GitHub remote.',
+    };
+  }
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) {
+    return { success: false, message: 'GitHub repository is invalid', error: `Could not parse ${repo}.` };
+  }
+  const adapterResult = getGitHubAdapter(repo);
+  if ('error' in adapterResult) {
+    return { success: false, message: 'GitHub adapter unavailable', error: adapterResult.error };
+  }
+  const verification = await adapterResult.adapter.verify();
+  if (!verification.success) {
+    return {
+      success: false,
+      message: 'GitHub connection verification failed',
+      error: verification.error ?? 'GitHub connection verification failed',
+    };
+  }
+  const permissionProblem = githubCiDeployPermissionProblem(verification, { repo });
+  if (permissionProblem) {
+    return {
+      success: false,
+      message: 'GitHub connection is missing CI deploy permissions',
+      error: permissionProblem.hint,
+      data: {
+        repository: repo,
+        missingScopes: permissionProblem.missingScopes,
+        currentScopes: verification.scopes,
+      },
+    };
+  }
+
+  try {
+    await adapterResult.adapter.setEnvironmentVariable(
+      owner,
+      repoName,
+      environmentName,
+      APPLIED_SPEC_HASH_VARIABLE,
+      desiredHash
+    );
+  } catch (error) {
+    return {
+      success: false,
+      message: 'Failed to record the applied deployment contract',
+      error: error instanceof Error ? error.message : String(error),
+      data: { repository: repo, environmentName, variableName: APPLIED_SPEC_HASH_VARIABLE },
+    };
+  }
+
+  persistAppliedSpecHashBinding(project, environmentName, desiredHash);
+  return {
+    success: true,
+    message: `Recorded the reconciled ${environmentName} deployment contract in GitHub Actions`,
+    data: {
+      repository: repo,
+      environmentName,
+      variableName: APPLIED_SPEC_HASH_VARIABLE,
+      desiredHash,
+    },
+  };
+}
+
 function persistWorkflowBinding(
   project: Project,
   environmentName: string,
@@ -473,6 +645,27 @@ function persistWorkflowBinding(
           syncedSecretHashes: secretHashes(syncedSecrets),
           updatedAt: new Date().toISOString(),
         },
+      },
+    },
+  });
+}
+
+function persistAppliedSpecHashBinding(
+  project: Project,
+  environmentName: string,
+  desiredHash: string
+): void {
+  const envRepo = new EnvironmentRepository();
+  const environment = envRepo.findByProjectAndName(project.id, environmentName)
+    ?? envRepo.create({ projectId: project.id, name: environmentName });
+  const ci = asRecord(environment.platformBindings.ci) ?? {};
+  envRepo.updatePlatformBindings(environment.id, {
+    ci: {
+      ...ci,
+      appliedSpecHash: {
+        hash: desiredHash,
+        variableName: APPLIED_SPEC_HASH_VARIABLE,
+        updatedAt: new Date().toISOString(),
       },
     },
   });

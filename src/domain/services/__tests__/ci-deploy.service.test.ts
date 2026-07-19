@@ -16,13 +16,16 @@ import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../github-ops.service.js';
 import type { Project } from '../../entities/project.entity.js';
 import {
+  applyGitHubActionsAppliedSpecHash,
   applyGitHubActionsDeploy,
   environmentUsesGitHubActionsDeploy,
   githubCiDeployPermissionProblem,
   missingProviderSecretsMessage,
+  planGitHubActionsAppliedSpecHash,
   planGitHubActionsDeploy,
   requiredProviderSecretNamesForGitHubActions,
 } from '../ci-deploy.service.js';
+import { environmentDeploymentContractHash } from '../deployment-contract.service.js';
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -529,6 +532,103 @@ describe('ci-deploy.service', () => {
         expect.stringContaining("RAILWAY_SERVICE_IDS: 'rail-web,rail-worker'"),
         expect.any(String)
       );
+    });
+  });
+
+  describe('applied deployment contract hash', () => {
+    it('plans the final hash update when GitHub has not recorded the desired state', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      vi.spyOn(GitHubAdapter.prototype, 'getEnvironmentVariable').mockResolvedValue(null);
+      const spec = new SpecStore().get(project)!.spec;
+      const desiredHash = environmentDeploymentContractHash(spec, 'production');
+
+      const result = await planGitHubActionsAppliedSpecHash({
+        project,
+        spec,
+        environmentName: 'production',
+        environmentSpec: spec.environments.production,
+        environment: envRepo.findById(environmentId),
+        dependsOn: ['service:web', 'ci:github-actions:production:deploy-branch'],
+      });
+
+      expect(result.warnings).toEqual([]);
+      expect(result.action).toMatchObject({
+        id: 'ci:github-actions:production:applied-spec-hash',
+        type: 'update',
+        resource: { kind: 'ci', name: 'applied-spec-hash:production', provider: 'github' },
+        dependsOn: ['service:web', 'ci:github-actions:production:deploy-branch'],
+        metadata: {
+          operation: 'githubActionsAppliedSpecHash',
+          repository: 'davejohnson/billforge',
+          environmentName: 'production',
+          variableName: 'HYPERVIBE_APPLIED_SPEC_HASH',
+          desiredHash,
+        },
+      });
+    });
+
+    it('plans a noop when the environment-scoped variable matches', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const spec = new SpecStore().get(project)!.spec;
+      const desiredHash = environmentDeploymentContractHash(spec, 'production');
+      vi.spyOn(GitHubAdapter.prototype, 'getEnvironmentVariable').mockResolvedValue({
+        name: 'HYPERVIBE_APPLIED_SPEC_HASH',
+        value: desiredHash,
+      });
+
+      const result = await planGitHubActionsAppliedSpecHash({
+        project,
+        spec,
+        environmentName: 'production',
+        environmentSpec: spec.environments.production,
+        environment: envRepo.findById(environmentId),
+        dependsOn: ['service:web'],
+      });
+
+      expect(result.action).toMatchObject({
+        type: 'noop',
+        verified: true,
+        reason: 'GitHub Actions deployment contract is reconciled',
+      });
+      expect(result.action?.dependsOn).toBeUndefined();
+    });
+
+    it('sets the environment variable and records only non-secret hash metadata', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const spec = new SpecStore().get(project)!.spec;
+      const desiredHash = environmentDeploymentContractHash(spec, 'production');
+      vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+        success: true,
+        login: 'davejohnson',
+        scopes: ['repo', 'workflow'],
+      });
+      const setVariable = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentVariable').mockResolvedValue();
+
+      const result = await applyGitHubActionsAppliedSpecHash({
+        project,
+        environmentName: 'production',
+        desiredHash,
+      });
+
+      expect(result.success).toBe(true);
+      expect(setVariable).toHaveBeenCalledWith(
+        'davejohnson',
+        'billforge',
+        'production',
+        'HYPERVIBE_APPLIED_SPEC_HASH',
+        desiredHash
+      );
+      expect(envRepo.findById(environmentId)?.platformBindings).toMatchObject({
+        ci: {
+          appliedSpecHash: {
+            hash: desiredHash,
+            variableName: 'HYPERVIBE_APPLIED_SPEC_HASH',
+          },
+        },
+      });
     });
   });
 });

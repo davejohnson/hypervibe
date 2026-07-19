@@ -111,13 +111,25 @@ describe('github tools', () => {
     expect(workflow.content).toContain('commit_sha:');
     expect(workflow.content).toContain('environment: production');
     expect(workflow.content).toContain('ref: ${{ steps.deploy.outputs.sha }}');
+    expect(workflow.content).toContain('name: Verify Hypervibe deployment contract');
+    expect(workflow.content).toContain('HYPERVIBE_APPLIED_SPEC_HASH: ${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}');
+    expect(workflow.content).toContain("readFileSync('.hypervibe/spec.json', 'utf8')");
+    expect(workflow.content).toContain('Infrastructure reconciliation is required before this commit can deploy');
+    expect(workflow.content).toContain('group: hypervibe-deploy-production');
+    expect(workflow.content).toContain('cancel-in-progress: false');
     expect(workflow.content).toContain('run: npm run migrate');
     // Migrations need dependencies installed on the runner; the deploy steps
     // build a container image and never run npm ci themselves.
     expect(workflow.content.indexOf('npm ci')).toBeGreaterThan(-1);
     expect(workflow.content.indexOf('npm ci')).toBeLessThan(workflow.content.indexOf('run: npm run migrate'));
+    expect(workflow.content.indexOf('Verify Hypervibe deployment contract'))
+      .toBeLessThan(workflow.content.indexOf('npm ci'));
     expect(workflow.content).toContain('actions/setup-node@v4');
     expect(workflow.content).toContain('docker/build-push-action@v6');
+    expect(workflow.content).toContain('if [ -f .npmrc ]; then');
+    expect(workflow.content).toContain('COPY package*.json .npmrc ./');
+    expect(workflow.content).toContain('RUN --mount=type=secret,id=npm_token');
+    expect(workflow.content).toContain('npm_token=${{ secrets.NODE_AUTH_TOKEN }}');
     expect(workflow.content).toContain('packages: write');
     expect(workflow.content).toContain('username: ${{ github.actor }}');
     expect(workflow.content).toContain('password: ${{ secrets.GITHUB_TOKEN }}');
@@ -392,6 +404,9 @@ describe('github tools', () => {
       // with the web service start command as CMD.
       expect(workflow.content).toContain('if [ -f Dockerfile ]; then');
       expect(workflow.content).toContain('FROM node:20-slim');
+      expect(workflow.content).toContain('if [ -f .npmrc ]; then');
+      expect(workflow.content).toContain('RUN --mount=type=secret,id=npm_token');
+      expect(workflow.content).toContain('npm_token=${{ secrets.NODE_AUTH_TOKEN }}');
       expect(workflow.content).toContain('CMD ["sh", "-lc", "npm run serve"]');
       // The generated Dockerfile step precedes the image build.
       expect(workflow.content.indexOf('Resolve Dockerfile')).toBeLessThan(workflow.content.indexOf('docker/build-push-action@v6'));
