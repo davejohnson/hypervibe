@@ -26,6 +26,7 @@ import {
 } from '../services/domain-registration.service.js';
 import {
   environmentUsesGitHubActionsDeploy,
+  planGitHubActionsAppliedSpecHash,
   planGitHubActionsDeploy,
 } from '../services/ci-deploy.service.js';
 import { planIos } from '../services/appstore-plan.service.js';
@@ -687,6 +688,24 @@ export class PlanService {
     const ios = await planIos({ project: projectForPlan, environmentSpec, environment });
     actions.push(...ios.actions);
 
+    // The applied-spec marker is the final release dependency. A changed
+    // contract must not unlock GitHub Actions until every planned action,
+    // including explicitly confirmed work, has completed.
+    const appliedSpecHashDependsOn = actions
+      .filter((action) => action.type !== 'noop')
+      .map((action) => action.id);
+    const appliedSpecHash = await planGitHubActionsAppliedSpecHash({
+      project: projectForPlan,
+      spec: specResult.spec,
+      environmentName,
+      environmentSpec,
+      environment,
+      dependsOn: appliedSpecHashDependsOn,
+    });
+    if (appliedSpecHash.action) {
+      actions.push(appliedSpecHash.action);
+    }
+
     const filterWarnings: string[] = [];
     if (serviceFilter) {
       // A filtered plan is an honest "deploy these services" plan: keep the
@@ -777,7 +796,7 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: [...diff.unmanaged, ...storage.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...repoCollaboration.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...filterWarnings],
       ...(delegatedSecrets.inputRequired.length > 0 ? { inputRequired: delegatedSecrets.inputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };

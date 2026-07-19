@@ -31,22 +31,36 @@ export function providerListValueOrVariable(values: string[], variableName: stri
 export function buildDockerfileStep(target: BranchDeployTarget): string {
   const startCommand = target.webStartCommand?.trim() || 'npm start';
   const cmdLine = `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`;
+  const commonTail = [
+    "'COPY . .'",
+    "'ENV PORT=8080'",
+    "'EXPOSE 8080'",
+    shellSingleQuoted(cmdLine),
+  ].join(' \\\n              ');
   return `      - name: Resolve Dockerfile
         id: dockerfile
         run: |
           if [ -f Dockerfile ]; then
             echo "path=Dockerfile" >> "$GITHUB_OUTPUT"
           elif [ -f package.json ]; then
-            printf '%s\\n' \\
-              'FROM node:20-slim' \\
-              'WORKDIR /app' \\
-              'COPY package*.json ./' \\
-              'RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi' \\
-              'COPY . .' \\
-              'ENV PORT=8080' \\
-              'EXPOSE 8080' \\
-              ${shellSingleQuoted(cmdLine)} \\
-              > Dockerfile.hypervibe
+            if [ -f .npmrc ]; then
+              printf '%s\\n' \\
+                '# syntax=docker/dockerfile:1.7' \\
+                'FROM node:20-slim' \\
+                'WORKDIR /app' \\
+                'COPY package*.json .npmrc ./' \\
+                'RUN --mount=type=secret,id=npm_token sh -c "export NODE_AUTH_TOKEN=$(cat /run/secrets/npm_token); if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi"' \\
+                ${commonTail} \\
+                > Dockerfile.hypervibe
+            else
+              printf '%s\\n' \\
+                'FROM node:20-slim' \\
+                'WORKDIR /app' \\
+                'COPY package*.json ./' \\
+                'RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi' \\
+                ${commonTail} \\
+                > Dockerfile.hypervibe
+            fi
             echo "path=Dockerfile.hypervibe" >> "$GITHUB_OUTPUT"
           else
             echo "No Dockerfile or package.json found. Node apps build automatically; anything else needs a Dockerfile in the repo." >&2

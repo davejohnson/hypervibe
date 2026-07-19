@@ -88,6 +88,13 @@ export interface GitHubLabel {
   description?: string | null;
 }
 
+export interface GitHubActionsVariable {
+  name: string;
+  value: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 interface GitHubResponse<T> {
   data: T;
 }
@@ -443,6 +450,62 @@ export class GitHubAdapter {
    */
   async deleteSecret(owner: string, repo: string, secretName: string): Promise<void> {
     await this.request<void>('DELETE', `/repos/${owner}/${repo}/actions/secrets/${secretName}`);
+  }
+
+  // ============= Environment Variables =============
+
+  /**
+   * Read an Actions variable scoped to a GitHub environment.
+   * Returns null when the variable has not been created yet.
+   */
+  async getEnvironmentVariable(
+    owner: string,
+    repo: string,
+    environmentName: string,
+    variableName: string
+  ): Promise<GitHubActionsVariable | null> {
+    const environment = encodeURIComponent(environmentName);
+    const variable = encodeURIComponent(variableName);
+    try {
+      return await this.request<GitHubActionsVariable>(
+        'GET',
+        `/repos/${owner}/${repo}/environments/${environment}/variables/${variable}`
+      );
+    } catch (error) {
+      if (error instanceof Error && /404|not found/i.test(error.message)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Create or update an Actions variable scoped to a GitHub environment.
+   */
+  async setEnvironmentVariable(
+    owner: string,
+    repo: string,
+    environmentName: string,
+    variableName: string,
+    value: string
+  ): Promise<void> {
+    const environment = encodeURIComponent(environmentName);
+    const variable = encodeURIComponent(variableName);
+    const endpoint = `/repos/${owner}/${repo}/environments/${environment}/variables`;
+    try {
+      await this.request<unknown>('GET', `/repos/${owner}/${repo}/environments/${environment}`);
+    } catch (error) {
+      if (!(error instanceof Error) || !/404|not found/i.test(error.message)) {
+        throw error;
+      }
+      await this.request<unknown>('PUT', `/repos/${owner}/${repo}/environments/${environment}`, {});
+    }
+    const existing = await this.getEnvironmentVariable(owner, repo, environmentName, variableName);
+    if (existing) {
+      await this.request<void>('PATCH', `${endpoint}/${variable}`, { name: variableName, value });
+      return;
+    }
+    await this.request<void>('POST', endpoint, { name: variableName, value });
   }
 
   // ============= Repository Labels =============

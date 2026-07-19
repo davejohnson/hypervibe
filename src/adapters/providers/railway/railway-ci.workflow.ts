@@ -102,6 +102,8 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           file: \${{ steps.dockerfile.outputs.path }}
           push: true
           tags: \${{ steps.image.outputs.uri }}
+          secrets: |
+            npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
       - name: Verify Railway image pull credentials
         uses: docker/login-action@v3
         with:

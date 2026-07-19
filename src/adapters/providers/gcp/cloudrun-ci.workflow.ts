@@ -124,6 +124,8 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           file: \${{ steps.dockerfile.outputs.path }}
           push: true
           tags: \${{ steps.image.outputs.uri }}
+          secrets: |
+            npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
       - name: Deploy image to Cloud Run
         uses: actions/github-script@v8
         env:

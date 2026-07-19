@@ -5,6 +5,8 @@ import { projectSpecSchema, type ProjectSpec } from './spec.schema.js';
 export interface RepoSpecFile {
   root: string;
   path: string;
+  /** Original JSON document, retained for release-contract hashing. */
+  document: unknown;
   spec: ProjectSpec;
 }
 
@@ -78,7 +80,7 @@ export function readRepoSpecFile(startDir = process.cwd()): RepoSpecFile | null 
       .join('; ');
     throw new Error(`${specPath} does not match the project spec schema: ${issues}. Fix the file (or delete it to fall back to the local spec) and retry.`);
   }
-  return { root, path: specPath, spec: parsed.data };
+  return { root, path: specPath, document, spec: parsed.data };
 }
 
 export function writeRepoSpecFile(spec: ProjectSpec, startDir = process.cwd()): RepoSpecWrite | null {

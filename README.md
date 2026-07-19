@@ -382,7 +382,7 @@ What hypervibe uses the GitHub token for, and the permission each operation need
 | List/trigger Actions workflows, read runs/jobs/logs (`hv_ci_status`, `hv_ci_trigger`) | `repo` | Actions: read/write |
 | Set/delete Actions repo secrets (`hv_secrets_set target="github"`) | `repo` | Secrets: read/write |
 | Branch protection (`hv_ci_setup kind="branch-protection"`) | `repo` + repo admin | Administration: read/write |
-| Generated push deploys (`hv_ci_setup kind="deploy-branch"`) | `repo` + `workflow`; add Secrets read/write if Hypervibe should sync provider API tokens | Contents: read/write, Actions: read/write, Secrets: read/write |
+| Generated push deploys (`hv_ci_setup kind="deploy-branch"`) | `repo` + `workflow`; add Secrets read/write if Hypervibe should sync provider API tokens | Contents: read/write, Actions: read/write, Secrets: read/write, Environments: read/write |
 | Manage the Railway GitHub App's repository access for `deploy.trigger: "native"` selected-repos installs | `repo` + repo admin — **classic PAT only**; GitHub's app-installation APIs do not accept fine-grained PATs | not supported |
 | Private repo source fetch for Cloud Run builds | `repo` | Contents: read |
 
@@ -405,6 +405,24 @@ Provider workflow behavior:
 |---|---|---|---|
 | `railway` | Build/push OCI image to GHCR with GitHub's built-in workflow token, update `ServiceInstance.source.image` via Railway GraphQL, then trigger deploy via Railway GraphQL | `RAILWAY_API_TOKEN`; `IMAGE_REGISTRY_USERNAME`/`IMAGE_REGISTRY_TOKEN` from the verified GitHub connection | Variables: `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_SERVICE_IDS` |
 | `cloudrun` | Build/push OCI image to Google Artifact Registry, patch Cloud Run services through Google APIs | `GCP_SERVICE_ACCOUNT_JSON`, `GCP_PROJECT_ID`, `GCP_REGION` | Variable: `CLOUDRUN_SERVICE_NAMES`; optional variable: `GCP_ARTIFACT_REPOSITORY` |
+
+Every generated workflow checks the selected environment's committed desired
+state before building. Hypervibe stores the last successfully applied
+environment contract hash in the environment-scoped GitHub Actions variable
+`HYPERVIBE_APPLIED_SPEC_HASH`. Code-only commits retain the same hash and
+continue to auto-deploy to staging. A commit that changes the environment
+contract stops before image build until the exact commit is reconciled:
+
+1. Check out the target commit.
+2. Run `hv_plan` and review the environment plan.
+3. Run `hv_apply` so all desired-state actions complete and the final hash
+   marker advances.
+4. Trigger that commit with `hv_ci_trigger`, inspect it with `hv_ci_status`,
+   and verify it with `hv_health`.
+
+The marker is environment-specific: production-only desired-state changes do
+not block staging. Production workflows remain manual and enforce the same
+reconciliation check for the promoted SHA.
 
 For Railway GHCR deploys, the generated workflow grants `packages: write` and uses `${{ github.actor }}` plus `${{ secrets.GITHUB_TOKEN }}` only for the workflow-time image push. The hosting provider also needs durable image-pull credentials because GitHub's workflow token is short-lived and only exists inside the Actions job. Hypervibe syncs those pull credentials into `IMAGE_REGISTRY_USERNAME` and `IMAGE_REGISTRY_TOKEN` from the verified GitHub connection when it has a login and a package-read-capable `packageReadToken`. Do not use `${{ secrets.GITHUB_TOKEN }}` for `IMAGE_REGISTRY_TOKEN`, and do not use a `read:packages`-only token as the GitHub `apiToken`.
 
