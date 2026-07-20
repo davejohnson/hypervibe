@@ -1,6 +1,6 @@
 # Hypervibe macOS Companion
 
-**Status:** Rev 4, v0 implementation in progress
+**Status:** Rev 4, v0 status and self-contained onboarding implemented
 **Shape:** A menu bar app in `apps/macos/`. Chat remains the control plane. The app provides ambient status, resource topology, notifications, and plan review.
 
 Rev 4 deliberately removes the companion read-model database. Hypervibe already has authoritative repo specs, local history, bindings, and live provider observation. The app should ask Hypervibe for those views through its existing local MCP process, retain only a small disposable cache, and never become another infrastructure state owner.
@@ -15,6 +15,8 @@ The companion answers:
 - Which external apps and providers are connected locally?
 - Is the last live observation current, in sync, drifted, blocked, partial, or failed?
 - What recent plan or apply needs attention?
+- How do I make this project's Hypervibe MCP available to Claude or Codex
+  without separately installing Node.js or editing configuration files?
 
 It does not:
 
@@ -58,12 +60,14 @@ The companion cache can always be deleted and rebuilt. Losing it must not change
 │ - notification acknowledgements       │
 │                                       │
 │ McpClient                             │
+│ McpHostConfigurator                   │
 └──────────────────┬────────────────────┘
-                   │ spawn per session, stdio
+                   │ bundled launcher, stdio
                    │ cwd = configured repo
                    ▼
 ┌───────────────────────────────────────┐
-│ Existing Hypervibe MCP                │
+│ Existing Hypervibe MCP + Node runtime │
+│ bundled unchanged inside the app      │
 │ hv_upgrade / hv_spec_get / hv_status  │
 │ hv_runs / hv_connections_list         │
 └───────────────┬───────────────┬───────┘
@@ -74,7 +78,48 @@ The companion cache can always be deleted and rebuilt. Losing it must not change
 
 There is no companion server, listening port, shared companion database, projection, trigger, or startup rebuild.
 
-The app launches a configured Hypervibe executable over stdio. Each project session uses that project's repository as `cwd` and its configured `HYPERVIBE_DATA_DIR`, if any. The executable is never resolved through a GUI process's assumed shell `PATH`, and the app never runs `@latest`.
+The distributed app launches its bundled Hypervibe executable over stdio using
+a bundled, pinned Node.js runtime. Each project session uses that project's
+repository as `cwd` and its configured `HYPERVIBE_DATA_DIR`, if any. The
+launcher and repo arguments are absolute paths; nothing is resolved through a
+GUI process's assumed shell `PATH`, and the app never runs `@latest`.
+
+Source-tree development builds retain the explicit executable and argument
+fields for local testing. A distributed build automatically migrates existing
+companion project entries to its bundled launcher.
+
+## Distribution and MCP-host onboarding
+
+The shipping artifact is a conventional drag-to-Applications DMG. The app
+bundle contains:
+
+- the SwiftUI companion;
+- a small native `hypervibe-mcp` stdio launcher;
+- the built, existing Hypervibe TypeScript server and production dependencies;
+- a pinned Node.js runtime and its license;
+- Hypervibe and included dependency licenses.
+
+The launcher changes to the configured project root, applies an explicit
+`HYPERVIBE_DATA_DIR` when present, and then replaces itself with the bundled
+Node/server process. It does not proxy MCP messages, listen on a port, add
+lifecycle behavior, or write to stdout before the MCP handshake.
+
+From Settings, a user can connect all registered projects to:
+
+- Claude Desktop via
+  `~/Library/Application Support/Claude/claude_desktop_config.json`;
+- Codex and ChatGPT desktop surfaces via `~/.codex/config.toml`.
+
+The configurator merges Claude's JSON and uses UUID-scoped marked blocks in
+Codex's TOML. It preserves unrelated settings, writes atomically, retains
+existing file permissions (or uses `0600` for a new file), and creates a
+one-time sibling backup before editing an existing configuration. Malformed
+or structurally ambiguous host configuration is reported and left untouched.
+Each project receives a distinct server name and explicit project-root
+argument. Removing a project removes its managed entries. Desktop clients must
+be fully restarted after changes.
+
+This is onboarding around the current MCP, not a second server implementation.
 
 ## Why not read SQLite directly?
 
@@ -95,7 +140,7 @@ Each entry contains:
 - stable companion UUID;
 - display name;
 - repository root path or security-scoped bookmark;
-- configured Hypervibe executable path;
+- bundled Hypervibe launcher path (or an explicit executable in development);
 - optional Hypervibe data directory;
 - enabled environments, if the user narrows the default;
 - refresh interval and scheduling opt-out;
@@ -308,12 +353,17 @@ v0/v1 use a copy-to-chat handoff for apply. Native Apply is out of scope until t
 ## Security
 
 - Direct distribution uses Developer ID, notarization, and hardened runtime.
+- Local development artifacts may use ad-hoc signing, but are not suitable for
+  public distribution.
+- The Node archive is version-pinned and checksum-verified while packaging.
 - The app does not open `hypervibe.db` or `.secret-key`.
 - MCP responses are decoded into allowlisted app models; raw responses are not persisted.
 - Notifications and pasteboard content contain names, plan IDs, and confirmation IDs only.
 - The app never handles provider tokens or delegated-secret values.
 - Logs exclude raw MCP payloads by default.
 - The spawned process has the same local privileges as the configured Hypervibe command.
+- MCP host configuration edits are scoped, backed up once, atomic, and never
+  contain provider credentials.
 
 ## Implementation plan
 
@@ -321,18 +371,23 @@ v0/v1 use a copy-to-chat handoff for apply. Native Apply is out of scope until t
 |---|---|---|
 | **Foundation** | Swift package/app target, project registry, snapshot models/cache, process/MCP session wrapper | None |
 | **v0 — Status** | Menu bar project/environment list, topology, connected apps, manual refresh, stale/error states, recent runs | Uses existing tools unchanged |
+| **v0 — Distribution** | Bundled runtime/server, native launcher, signed DMG, Claude/Codex registration | Packages the existing MCP unchanged |
 | **v1 — Ambient** | Scheduling, notifications, acknowledgements, power/network behavior | Uses existing read-only tools |
 | **Plan review** | Detachable review window and copy-to-chat handoff | Narrow `hv_runs get` sanitization/preview only |
 | **Later, only if needed** | One derived snapshot operation or native Apply | Separate reviewed decision |
 
-The implemented v0 slice now includes the Foundation and Status rows through
-manual refresh and recent runs. Scheduling, notifications, plan review, and
-all mutating actions remain out of scope.
+The implemented v0 slice now includes Foundation, Status through manual
+refresh and recent runs, and self-contained Distribution/onboarding.
+Scheduling, notifications, plan review, and all mutating actions remain out of
+scope.
 
 ## Acceptance criteria
 
 - Removing the companion's Application Support directory loses no infrastructure state.
 - Existing MCP tool names and lifecycle behavior remain unchanged for v0.
+- A clean Mac does not require a separate Node.js or Hypervibe installation.
+- Claude and Codex configuration preserves unrelated content and can be
+  disconnected per managed project.
 - No companion database migration or trigger exists in Hypervibe.
 - `hv_plan`, `hv_apply`, startup, and provider adapters have no companion-specific code.
 - Every subprocess uses an explicit repo root, executable, and data-directory context.
@@ -344,6 +399,8 @@ all mutating actions remain out of scope.
 ## Settled decisions
 
 - Keep the current MCP architecture intact.
+- Bundle that MCP and its Node runtime in the distributable app.
+- Configure supported desktop MCP hosts per project through a native launcher.
 - No direct SQLite reads and no server-owned companion read model.
 - App-owned storage tracks projects and UI state only.
 - Resource topology is derived from Hypervibe's existing spec/status views.

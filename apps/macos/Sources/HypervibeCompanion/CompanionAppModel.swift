@@ -10,6 +10,9 @@ final class CompanionAppModel: ObservableObject {
     @Published private(set) var refreshingProjectIDs: Set<UUID> = []
     @Published private(set) var refreshErrors: [UUID: String] = [:]
     @Published private(set) var loadError: String?
+    @Published private(set) var mcpHostStatuses: [MCPHost: MCPHostConnectionStatus] = [:]
+    @Published private(set) var mcpHostErrors: [MCPHost: String] = [:]
+    @Published private(set) var updatingMCPHosts: Set<MCPHost> = []
 
     private let registry = ProjectRegistryStore(
         fileURL: ProjectRegistryStore.defaultFileURL()
@@ -18,6 +21,7 @@ final class CompanionAppModel: ObservableObject {
         fileURL: SnapshotCache.defaultFileURL()
     )
     private let mcpClient = HypervibeMCPClient()
+    private let mcpHostConfigurator = MCPHostConfigurator()
     private var didLoad = false
 
     var selectedProject: CompanionProject? {
@@ -40,6 +44,25 @@ final class CompanionAppModel: ObservableObject {
 
         do {
             projects = try await registry.load()
+            if CompanionDistribution.isReadyForOnboarding {
+                var updatedProjects = projects
+                var didUpdateProjects = false
+                for index in updatedProjects.indices {
+                    if updatedProjects[index].hypervibeExecutablePath
+                        != CompanionDistribution.launcherURL.path
+                        || updatedProjects[index].hypervibeArguments != nil {
+                        updatedProjects[index].hypervibeExecutablePath =
+                            CompanionDistribution.launcherURL.path
+                        updatedProjects[index].hypervibeArguments = nil
+                        updatedProjects[index].updatedAt = Date()
+                        didUpdateProjects = true
+                    }
+                }
+                if didUpdateProjects {
+                    try await registry.save(updatedProjects)
+                    projects = updatedProjects
+                }
+            }
             let cachedSnapshots = try await cache.load()
             snapshots = Dictionary(
                 uniqueKeysWithValues: cachedSnapshots.map {
@@ -60,6 +83,7 @@ final class CompanionAppModel: ObservableObject {
         for project in projects {
             await refresh(projectID: project.id)
         }
+        await refreshMCPHostStatuses()
     }
 
     func refreshSelectedProject() async {
@@ -120,10 +144,19 @@ final class CompanionAppModel: ObservableObject {
         connections[project.id] = refresh.connections
         selectedProjectID = project.id
         refreshErrors.removeValue(forKey: project.id)
+        await refreshMCPHostStatuses()
     }
 
     func removeProject(id: UUID) async {
         do {
+            if let project = projects.first(where: { $0.id == id }) {
+                for host in MCPHost.allCases {
+                    try? await mcpHostConfigurator.disconnect(
+                        host,
+                        projects: [project]
+                    )
+                }
+            }
             projects = try await registry.remove(id: id)
             try await cache.remove(projectID: id)
             snapshots.removeValue(forKey: id)
@@ -132,8 +165,56 @@ final class CompanionAppModel: ObservableObject {
             if selectedProjectID == id {
                 selectedProjectID = projects.first?.id
             }
+            await refreshMCPHostStatuses()
         } catch {
             loadError = "Could not remove the project from the companion."
+        }
+    }
+
+    func refreshMCPHostStatuses(clearErrors: Bool = false) async {
+        for host in MCPHost.allCases {
+            do {
+                mcpHostStatuses[host] = try await mcpHostConfigurator.status(
+                    for: host,
+                    projects: projects,
+                    launcherURL: CompanionDistribution.launcherURL
+                )
+                if clearErrors {
+                    mcpHostErrors.removeValue(forKey: host)
+                }
+            } catch {
+                mcpHostErrors[host] = userFacingMessage(for: error)
+            }
+        }
+    }
+
+    func toggleMCPHost(_ host: MCPHost) async {
+        guard !updatingMCPHosts.contains(host) else { return }
+        guard CompanionDistribution.isReadyForOnboarding else {
+            mcpHostErrors[host] = CompanionDistribution.installationGuidance
+            return
+        }
+        updatingMCPHosts.insert(host)
+        defer { updatingMCPHosts.remove(host) }
+
+        do {
+            if mcpHostStatuses[host]?.isFullyConnected == true {
+                try await mcpHostConfigurator.disconnect(
+                    host,
+                    projects: projects
+                )
+            } else {
+                try await mcpHostConfigurator.connect(
+                    host,
+                    projects: projects,
+                    launcherURL: CompanionDistribution.launcherURL
+                )
+            }
+            mcpHostErrors.removeValue(forKey: host)
+            await refreshMCPHostStatuses(clearErrors: true)
+        } catch {
+            mcpHostErrors[host] = userFacingMessage(for: error)
+            await refreshMCPHostStatuses()
         }
     }
 
