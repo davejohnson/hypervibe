@@ -58,14 +58,32 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 
 ## Quick Start
 
-### 1. Install As Codex MCP
+### 1. Authenticate to the Private Package
+
+Hypervibe is distributed as a private package through GitHub Packages. Ask the
+package owner to grant your GitHub account read access, then create a
+[classic personal access token](https://github.com/settings/tokens/new?scopes=read%3Apackages)
+with the `read:packages` scope. If your account uses organization SSO, authorize
+the token for that organization.
+
+Configure npm to use GitHub Packages for the `@davejohnson` scope:
+
+```bash
+npm login --scope=@davejohnson --auth-type=legacy --registry=https://npm.pkg.github.com
+```
+
+Use your GitHub username, the classic token as the password, and your GitHub
+email address when prompted. Keep the token in your local npm configuration;
+never commit it to this repository.
+
+### 2. Install As Codex MCP
 
 ```bash
 codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest
 codex mcp list
 ```
 
-### 2. Install As Claude Code MCP
+### 3. Install As Claude Code MCP
 
 Add to `~/.claude/settings.json`:
 
@@ -80,7 +98,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-### 3. Connect Providers
+### 4. Connect Providers
 
 Restart Claude Code, then:
 
@@ -92,7 +110,7 @@ You: "Connect Cloudflare with API token xyz..."
 Claude: Validates and stores the connection.
 ```
 
-### 4. Deploy
+### 5. Deploy
 
 ```
 You: "Create a new project called my-app with staging and production environments"
@@ -101,7 +119,7 @@ You: "Add a custom domain api.myapp.com"
 You: "Run database migrations"
 ```
 
-### 5. Manage Secrets (Optional)
+### 6. Manage Secrets (Optional)
 
 Connect a secret manager and let hypervibe inject secrets at deploy time:
 

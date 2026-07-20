@@ -23,7 +23,8 @@
     "hypervibe": "dist/index.js"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "restricted",
+    "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
