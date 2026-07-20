@@ -140,6 +140,7 @@ vite.config.ts.timestamp-*
 
 # Project-specific
 .devbox/
+**/.build/
 data/*.db
 data/*.db-journal
 data/*.db-shm
