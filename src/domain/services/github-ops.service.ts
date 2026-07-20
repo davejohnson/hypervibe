@@ -424,11 +424,12 @@ ${dispatch}`;
 }
 
 function buildDeploymentContractStep(environmentName: string): string {
-  return `      - name: Verify Hypervibe deployment contract
+  return `      - name: "Deployment safety gate: verify Hypervibe reconciliation"
         uses: actions/github-script@v8
         env:
           HYPERVIBE_ENVIRONMENT: ${JSON.stringify(environmentName)}
           HYPERVIBE_APPLIED_SPEC_HASH: \${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}
+          HYPERVIBE_DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
             const { createHash } = require('crypto');
@@ -473,16 +474,48 @@ function buildDeploymentContractStep(environmentName: string): string {
             });
             const desiredHash = createHash('sha256').update(JSON.stringify(contract), 'utf8').digest('hex');
             const appliedHash = (process.env.HYPERVIBE_APPLIED_SPEC_HASH || '').trim();
+            const deploySha = (process.env.HYPERVIBE_DEPLOY_SHA || '').trim();
             core.info('Desired Hypervibe contract hash: ' + desiredHash);
             core.info('Applied Hypervibe contract hash: ' + (appliedHash || '(missing)'));
             if (!appliedHash || appliedHash !== desiredHash) {
-              throw new Error(
-                'Infrastructure reconciliation is required before this commit can deploy to '
-                + environmentName
-                + '. Check out this exact commit, run hv_plan then hv_apply for '
-                + environmentName
-                + ', and re-run this workflow with hv_ci_trigger.'
-              );
+              const annotationTitle = 'Deployment blocked — Hypervibe reconciliation required';
+              const cause = !appliedHash
+                ? 'applied hash missing'
+                : 'desired and applied hashes differ';
+              const failureMessage = !appliedHash
+                ? 'Deployment blocked for ' + environmentName + ': applied contract hash is missing.'
+                : 'Deployment blocked for ' + environmentName + ': desired and applied contract hashes differ.';
+
+              core.error(failureMessage, { title: annotationTitle });
+              await core.summary
+                .addHeading('🚧 ' + annotationTitle, 2)
+                .addRaw('**This is not an application build or test failure. No image was built and nothing was deployed.**')
+                .addBreak()
+                .addRaw(
+                  'The desired ' + environmentName + ' infrastructure contract for commit \`'
+                  + deploySha
+                  + '\` does not match the last contract applied through Hypervibe.'
+                )
+                .addBreak()
+                .addRaw('**Cause:** ' + cause)
+                .addBreak()
+                .addTable([
+                  [{ data: 'Field', header: true }, { data: 'Value', header: true }],
+                  ['Environment', environmentName],
+                  ['Desired hash', desiredHash],
+                  ['Applied hash', appliedHash || 'missing'],
+                  ['Prevented commit', deploySha],
+                ])
+                .addHeading('Next', 3)
+                .addList([
+                  'Check out commit \`' + deploySha + '\`.',
+                  'Run \`hv_status\` for \`' + environmentName + '\`.',
+                  'Run \`hv_plan\` for \`' + environmentName + '\`.',
+                  'Review and apply that exact plan with \`hv_apply\`.',
+                  'Retrigger this workflow with \`hv_ci_trigger\`.',
+                ], true)
+                .write();
+              core.setFailed(failureMessage);
             }
 `;
 }
