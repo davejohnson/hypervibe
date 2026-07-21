@@ -220,6 +220,132 @@ struct HypervibeResponseMapperTests {
     }
 
     @Test
+    func connectionCatalogMapsStructuredGuidanceAndSupportsOlderServers() throws {
+        let data = Data(
+            """
+            {
+              "ok": true,
+              "data": {
+                "connections": [],
+                "availableProviders": {
+                  "deployment": [{
+                    "name": "railway",
+                    "displayName": "Railway",
+                    "setupHelpUrl": "https://railway.com/account/tokens",
+                    "setupHelpUrls": [{
+                      "label": "Token setup",
+                      "url": "https://railway.com/account/tokens"
+                    }],
+                    "tokenType": "Railway Account API token",
+                    "requiredPermissions": ["Create services"],
+                    "notes": ["Use an account token"],
+                    "defaultScalarKey": "apiToken",
+                    "credentialFields": [{
+                      "name": "apiToken",
+                      "label": "API Token",
+                      "required": true,
+                      "sensitive": true,
+                      "inputKind": "secret"
+                    }, {
+                      "name": "workspaceId",
+                      "label": "Workspace ID",
+                      "required": false,
+                      "sensitive": false,
+                      "inputKind": "text"
+                    }]
+                  }],
+                  "legacy": [{ "name": "old-provider" }]
+                }
+              }
+            }
+            """.utf8
+        )
+
+        let catalog = try HypervibeResponseMapper.decodeConnectionCatalog(data)
+        let railway = try #require(catalog.providers.first { $0.name == "railway" })
+        let legacy = try #require(catalog.providers.first { $0.name == "old-provider" })
+
+        #expect(railway.category == "deployment")
+        #expect(railway.setupLinks.count == 1)
+        #expect(railway.defaultScalarKey == "apiToken")
+        #expect(railway.credentialFields?.map(\.name) == ["apiToken", "workspaceId"])
+        #expect(railway.credentialFields?.first?.inputKind == .secret)
+        #expect(legacy.displayName == "old-provider")
+        #expect(legacy.credentialFields == nil)
+    }
+
+    @Test
+    func connectionMutationKeepsSafeIdentityAndWarnings() throws {
+        let data = Data(
+            """
+            {
+              "ok": true,
+              "data": {
+                "provider": "github",
+                "scope": "global",
+                "status": "verified",
+                "message": "github connection verified",
+                "login": "davejohnson",
+                "credentialsSource": "env",
+                "credentialsEncrypted": "sentinel-secret-value"
+              },
+              "warnings": ["Token lacks an optional permission"]
+            }
+            """.utf8
+        )
+
+        let result = try HypervibeResponseMapper.decodeConnectionMutation(data)
+        #expect(result.status == .verified)
+        #expect(result.identity == "davejohnson")
+        #expect(result.warnings == ["Token lacks an optional permission"])
+        #expect(!String(describing: result).contains("sentinel-secret-value"))
+    }
+
+    @Test
+    func toolFailurePreservesActionableHint() {
+        let data = Data(
+            """
+            {
+              "ok": false,
+              "error": {
+                "code": "PROVIDER_ERROR",
+                "message": "invalid token"
+              },
+              "hint": "The connection was saved but failed verification. Replace it or verify again."
+            }
+            """.utf8
+        )
+
+        #expect(throws: HypervibeClientError.tool(
+            code: "PROVIDER_ERROR",
+            message: "invalid token",
+            hint: "The connection was saved but failed verification. Replace it or verify again."
+        )) {
+            try HypervibeResponseMapper.decodeConnectionMutation(data)
+        }
+    }
+
+    @Test
+    func connectionRequestBuildsDirectAndReferenceToolArguments() {
+        let direct = ConnectionRequest(
+            provider: "railway",
+            source: .direct(["apiToken": "token", "workspaceId": "workspace"]),
+            scope: " team "
+        ).toolArguments()
+        #expect(direct["action"]?.stringValue == "add")
+        #expect(direct["scope"]?.stringValue == "team")
+        #expect(direct["credentials"]?.objectValue?["apiToken"]?.stringValue == "token")
+
+        let reference = ConnectionRequest(
+            provider: "cloudrun",
+            source: .reference(value: "file:/tmp/gcp.json", credentialKey: " credentials ")
+        ).toolArguments()
+        #expect(reference["credentialsRef"]?.stringValue == "file:/tmp/gcp.json")
+        #expect(reference["credentialsKey"]?.stringValue == "credentials")
+        #expect(reference["credentials"] == nil)
+    }
+
+    @Test
     func upgradeStatusBlocksPendingMigrations() {
         let data = Data(
             """

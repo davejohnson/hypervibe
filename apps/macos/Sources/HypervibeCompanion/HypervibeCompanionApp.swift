@@ -1,6 +1,11 @@
 import AppKit
 import SwiftUI
 
+struct ConnectionWindowRoute: Codable, Hashable {
+    let projectID: UUID
+    let provider: String?
+}
+
 @main
 struct HypervibeCompanionApp: App {
     @NSApplicationDelegateAdaptor(CompanionApplicationDelegate.self)
@@ -32,6 +37,29 @@ struct HypervibeCompanionApp: App {
             }
         }
         .windowResizability(.contentSize)
+
+        WindowGroup(
+            "Provider Connections",
+            id: "connections",
+            for: ConnectionWindowRoute.self
+        ) { route in
+            if let route = route.wrappedValue,
+                let project = model.projects.first(where: { $0.id == route.projectID }) {
+                ConnectionsView(
+                    model: model,
+                    project: project,
+                    preselectedProvider: route.provider
+                )
+            } else {
+                ContentUnavailableView(
+                    "Project unavailable",
+                    systemImage: "shippingbox",
+                    description: Text("Choose a project from the Hypervibe menu bar app.")
+                )
+                .frame(width: 640, height: 460)
+            }
+        }
+        .defaultSize(width: 680, height: 520)
 
         Settings {
             CompanionSettingsView(model: model)

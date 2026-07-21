@@ -101,6 +101,10 @@ enum HypervibeResponseMapper {
     }
 
     static func decodeConnections(_ data: Data) throws -> [ConnectionSummary] {
+        try decodeConnectionCatalog(data).connections
+    }
+
+    static func decodeConnectionCatalog(_ data: Data) throws -> ConnectionCatalog {
         let envelope: ToolEnvelope<ConnectionsToolData> = try decodeEnvelope(data)
         guard let payload = envelope.data else {
             throw HypervibeClientError.malformedResponse(
@@ -108,7 +112,7 @@ enum HypervibeResponseMapper {
             )
         }
 
-        return payload.connections
+        let connections = payload.connections
             .map { connection in
                 ConnectionSummary(
                     provider: connection.provider,
@@ -125,6 +129,68 @@ enum HypervibeResponseMapper {
                 return $0.provider.localizedCaseInsensitiveCompare($1.provider)
                     == .orderedAscending
             }
+
+        let providers = payload.availableProviders.flatMap { category, entries in
+            entries.map { entry in
+                let links = setupLinks(for: entry)
+                return ProviderCatalogEntry(
+                    name: entry.name,
+                    displayName: entry.displayName ?? entry.name,
+                    category: category,
+                    setupLinks: links,
+                    tokenType: entry.tokenType,
+                    requiredPermissions: entry.requiredPermissions ?? [],
+                    notes: entry.notes ?? [],
+                    credentialFields: entry.credentialFields?.map { field in
+                        CredentialField(
+                            name: field.name,
+                            label: field.label ?? field.name,
+                            required: field.required ?? false,
+                            sensitive: field.sensitive ?? true,
+                            inputKind: CredentialInputKind(rawValue: field.inputKind ?? "secret") ?? .secret,
+                            options: field.options ?? [],
+                            description: field.description
+                        )
+                    },
+                    defaultScalarKey: entry.defaultScalarKey
+                )
+            }
+        }.sorted {
+            if $0.category == $1.category {
+                return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+            }
+            return $0.category.localizedCaseInsensitiveCompare($1.category) == .orderedAscending
+        }
+
+        return ConnectionCatalog(connections: connections, providers: providers)
+    }
+
+    static func decodeConnectionMutation(_ data: Data) throws -> ConnectionMutationResult {
+        let envelope: ToolEnvelope<ConnectionMutationToolData> = try decodeEnvelope(data)
+        guard let payload = envelope.data else {
+            throw HypervibeClientError.malformedResponse("hv_connect returned no data.")
+        }
+        let removed = payload.removed ?? false
+        let status = removed
+            ? ConnectionStatus.unknown
+            : ConnectionStatus(rawValue: payload.status ?? "") ?? .unknown
+        let message = payload.message
+            ?? (removed ? "\(payload.provider) connection removed." : "\(payload.provider) connection updated.")
+        let identity = payload.identity
+            ?? payload.login
+            ?? payload.email
+            ?? payload.accountId
+            ?? payload.workspaceId
+            ?? payload.version
+        return ConnectionMutationResult(
+            provider: payload.provider,
+            scope: payload.scope ?? "global",
+            status: status,
+            message: message,
+            identity: identity,
+            warnings: envelope.warnings ?? [],
+            removed: removed
+        )
     }
 
     static func decodeUpgradeStatus(_ data: Data) throws {
@@ -144,10 +210,28 @@ enum HypervibeResponseMapper {
         if !envelope.ok {
             throw HypervibeClientError.tool(
                 code: envelope.error?.code ?? "UNKNOWN",
-                message: envelope.error?.message ?? "Hypervibe returned an unknown error."
+                message: envelope.error?.message ?? "Hypervibe returned an unknown error.",
+                hint: envelope.hint
             )
         }
         return envelope
+    }
+
+    private static func setupLinks(for entry: ConnectionsToolData.Provider) -> [ProviderSetupLink] {
+        var links: [ProviderSetupLink] = []
+        var seen = Set<String>()
+        for link in entry.setupHelpUrls ?? [] {
+            guard let url = URL(string: link.url), seen.insert(url.absoluteString).inserted else {
+                continue
+            }
+            links.append(ProviderSetupLink(label: link.label, url: url))
+        }
+        if let rawURL = entry.setupHelpUrl,
+            let url = URL(string: rawURL),
+            seen.insert(url.absoluteString).inserted {
+            links.append(ProviderSetupLink(label: "Setup guide", url: url))
+        }
+        return links
     }
 
     private static func resources(
@@ -272,6 +356,8 @@ private struct ToolEnvelope<Payload: Decodable>: Decodable {
     let ok: Bool
     let data: Payload?
     let error: ToolError?
+    let hint: String?
+    let warnings: [String]?
 }
 
 private struct ToolError: Decodable {
@@ -437,6 +523,21 @@ private struct UpgradeToolData: Decodable {
 
 private struct ConnectionsToolData: Decodable {
     let connections: [Connection]
+    let availableProviders: [String: [Provider]]
+
+    private enum CodingKeys: String, CodingKey {
+        case connections
+        case availableProviders
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        connections = try container.decodeIfPresent([Connection].self, forKey: .connections) ?? []
+        availableProviders = try container.decodeIfPresent(
+            [String: [Provider]].self,
+            forKey: .availableProviders
+        ) ?? [:]
+    }
 
     struct Connection: Decodable {
         let provider: String
@@ -444,6 +545,47 @@ private struct ConnectionsToolData: Decodable {
         let status: String
         let lastVerifiedAt: String?
     }
+
+    struct Provider: Decodable {
+        let name: String
+        let displayName: String?
+        let setupHelpUrl: String?
+        let setupHelpUrls: [SetupLink]?
+        let tokenType: String?
+        let requiredPermissions: [String]?
+        let notes: [String]?
+        let credentialFields: [Field]?
+        let defaultScalarKey: String?
+    }
+
+    struct SetupLink: Decodable {
+        let label: String
+        let url: String
+    }
+
+    struct Field: Decodable {
+        let name: String
+        let label: String?
+        let required: Bool?
+        let sensitive: Bool?
+        let inputKind: String?
+        let options: [String]?
+        let description: String?
+    }
+}
+
+private struct ConnectionMutationToolData: Decodable {
+    let provider: String
+    let scope: String?
+    let status: String?
+    let message: String?
+    let identity: String?
+    let login: String?
+    let email: String?
+    let accountId: String?
+    let workspaceId: String?
+    let version: String?
+    let removed: Bool?
 }
 
 private struct IgnoredObject: Decodable {

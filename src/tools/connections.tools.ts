@@ -9,10 +9,12 @@ import { SecretResolver } from '../domain/services/secret.resolver.js';
 import { parseSecretRef } from '../domain/ports/secretmanager.port.js';
 import { parseEnvFile } from '../utils/env-parser.js';
 import {
+  credentialFieldsFromSchema,
   connectionSetupDetails,
   formatConnectionGuidance,
   getConnectionGuidance,
 } from '../domain/services/connection-guidance.js';
+import type { CredentialFieldDescriptor } from '../domain/services/connection-guidance.js';
 import type { ToolContext } from './context.js';
 import { projectField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler } from './respond.js';
@@ -340,14 +342,19 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         requiredPermissions?: string[];
         credentialExample?: string;
         notes?: string[];
+        credentialFields?: CredentialFieldDescriptor[];
+        defaultScalarKey?: string;
       }>> = {};
       for (const p of providerRegistry.all()) {
         const category = p.metadata.category;
         const guidance = getConnectionGuidance(p.metadata.name);
+        const credentialFields = credentialFieldsFromSchema(p.metadata.credentialsSchema);
         availableProviders[category] = availableProviders[category] ?? [];
         availableProviders[category].push({
           name: p.metadata.name,
           displayName: p.metadata.displayName,
+          ...(credentialFields !== undefined ? { credentialFields } : {}),
+          ...(p.metadata.credentials?.defaultScalarKey ? { defaultScalarKey: p.metadata.credentials.defaultScalarKey } : {}),
           ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
           ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
           ...(guidance ? {
@@ -360,10 +367,13 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
       }
       for (const p of secretManagerRegistry.all()) {
         const guidance = getConnectionGuidance(p.metadata.name);
+        const credentialFields = credentialFieldsFromSchema(p.metadata.credentialsSchema);
         availableProviders['secrets'] = availableProviders['secrets'] ?? [];
         availableProviders['secrets'].push({
           name: p.metadata.name,
           displayName: p.metadata.displayName,
+          ...(credentialFields !== undefined ? { credentialFields } : {}),
+          ...(p.metadata.credentials?.defaultScalarKey ? { defaultScalarKey: p.metadata.credentials.defaultScalarKey } : {}),
           ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
           ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
           ...(guidance ? {

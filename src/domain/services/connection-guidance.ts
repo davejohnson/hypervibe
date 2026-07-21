@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 /** Pre-filled GitHub classic PAT creation URLs, one per token role. */
 export const GITHUB_TOKEN_URLS = {
   /** apiToken: workflow/secrets management. */
@@ -28,6 +30,123 @@ export interface ConnectionSetupDetails {
   requiredPermissions: string[];
   credentialExample: string;
   notes?: string[];
+}
+
+export type CredentialInputKind = 'text' | 'secret' | 'multilineSecret' | 'choice';
+
+/**
+ * A provider-neutral description of one credential field. Clients use this to
+ * render connection forms without importing provider knowledge or schemas.
+ */
+export interface CredentialFieldDescriptor {
+  name: string;
+  label: string;
+  required: boolean;
+  sensitive: boolean;
+  inputKind: CredentialInputKind;
+  options?: string[];
+  description?: string;
+}
+
+function unwrapSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
+  let current = schema;
+  while (true) {
+    if (current instanceof z.ZodEffects) {
+      current = current.innerType();
+      continue;
+    }
+    if (
+      current instanceof z.ZodOptional
+      || current instanceof z.ZodNullable
+      || current instanceof z.ZodDefault
+      || current instanceof z.ZodCatch
+    ) {
+      current = current._def.innerType;
+      continue;
+    }
+    if (current instanceof z.ZodBranded) {
+      current = current._def.type;
+      continue;
+    }
+    return current;
+  }
+}
+
+function credentialFieldLabel(name: string): string {
+  const words = name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .split(/\s+/);
+  const acronyms: Record<string, string> = {
+    api: 'API',
+    aws: 'AWS',
+    gcp: 'GCP',
+    id: 'ID',
+    json: 'JSON',
+    oauth: 'OAuth',
+    url: 'URL',
+  };
+  return words
+    .map((word) => acronyms[word.toLowerCase()] ?? `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
+    .join(' ');
+}
+
+function isSensitiveCredentialField(name: string): boolean {
+  if (/(?:kind|mode|type)$/i.test(name)) {
+    return false;
+  }
+  return /(token|key|secret|password|credential|private|connection(?:url|string))/i.test(name);
+}
+
+function enumOptions(schema: z.ZodTypeAny): string[] | undefined {
+  if (schema instanceof z.ZodEnum) {
+    return [...schema.options];
+  }
+  if (schema instanceof z.ZodNativeEnum) {
+    const options = Object.values(schema.enum).filter((value): value is string => typeof value === 'string');
+    return [...new Set(options)];
+  }
+  return undefined;
+}
+
+/**
+ * Derive a safe form contract from a provider-owned Zod credential schema.
+ * Schemas which cannot be represented as an object are intentionally omitted;
+ * clients can fall back to credentialsRef for those providers.
+ */
+export function credentialFieldsFromSchema(
+  schema: z.ZodTypeAny
+): CredentialFieldDescriptor[] | undefined {
+  const objectSchema = unwrapSchema(schema);
+  if (!(objectSchema instanceof z.ZodObject)) {
+    return undefined;
+  }
+
+  return Object.entries(objectSchema.shape).map(([name, rawField]) => {
+    const field = rawField as z.ZodTypeAny;
+    const unwrapped = unwrapSchema(field);
+    const options = enumOptions(unwrapped);
+    const sensitive = isSensitiveCredentialField(name);
+    const inputKind: CredentialInputKind = options
+      ? 'choice'
+      : sensitive && /(credentials|private.*key)/i.test(name)
+        ? 'multilineSecret'
+        : sensitive
+          ? 'secret'
+          : 'text';
+    const description = field.description ?? unwrapped.description;
+
+    return {
+      name,
+      label: credentialFieldLabel(name),
+      required: !field.safeParse(undefined).success,
+      sensitive,
+      inputKind,
+      ...(options ? { options } : {}),
+      ...(description ? { description } : {}),
+    };
+  });
 }
 
 const GUIDANCE: Record<string, ConnectionGuidance> = {

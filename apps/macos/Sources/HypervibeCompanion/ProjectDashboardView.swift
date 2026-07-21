@@ -1,7 +1,9 @@
+import AppKit
 import HypervibeCompanionCore
 import SwiftUI
 
 struct ProjectDashboardView: View {
+    @Environment(\.openWindow) private var openWindow
     @State private var expandedEnvironments: [String: Bool] = [:]
     @State private var recentRunsExpanded = false
     @State private var connectionsExpanded = false
@@ -44,9 +46,7 @@ struct ProjectDashboardView: View {
                         recentRuns(snapshot.recentRuns)
                     }
 
-                    if !connections.isEmpty {
-                        connectionGrid
-                    }
+                    connectionGrid
                 } else if !isRefreshing {
                     ContentUnavailableView(
                         "No snapshot yet",
@@ -71,7 +71,23 @@ struct ProjectDashboardView: View {
             }
 
         return VStack(alignment: .leading, spacing: 8) {
-            DisclosureGroup(isExpanded: $connectionsExpanded) {
+            HStack {
+                Text("Connections")
+                    .font(.headline)
+                Spacer()
+                Text("\(connections.filter { $0.status == .verified }.count) verified")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    showConnections()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .help("Add provider connection")
+            }
+
+            DisclosureGroup("Show connections", isExpanded: $connectionsExpanded) {
                 LazyVGrid(
                     columns: [
                         GridItem(.flexible(), spacing: 8),
@@ -80,24 +96,41 @@ struct ProjectDashboardView: View {
                     spacing: 8
                 ) {
                     ForEach(groups, id: \.first?.provider) { group in
-                        ConnectionCard(connections: group)
+                        Button {
+                            showConnections(provider: group.first?.provider)
+                        } label: {
+                            ConnectionCard(connections: group)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.top, 9)
-            } label: {
-                HStack {
-                    Text("Connections")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(connections.filter { $0.status == .verified }.count) verified")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                if connections.isEmpty {
+                    HStack {
+                        Text("No provider connections yet.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Add Connection…") {
+                            showConnections()
+                        }
+                    }
+                    .padding(.top, 8)
                 }
             }
         }
         .padding(12)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
         .padding(.horizontal, 12)
+    }
+
+    private func showConnections(provider: String? = nil) {
+        let menuPanel = NSApplication.shared.keyWindow
+        openWindow(
+            id: "connections",
+            value: ConnectionWindowRoute(projectID: project.id, provider: provider)
+        )
+        menuPanel?.orderOut(nil)
     }
 
     private func environmentCard(

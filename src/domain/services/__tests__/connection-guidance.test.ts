@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import '../../../server.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import { secretManagerRegistry } from '../../registry/secretmanager.registry.js';
 import {
+  credentialFieldsFromSchema,
   formatConnectionGuidance,
   getConnectionGuidance,
 } from '../connection-guidance.js';
@@ -178,5 +180,54 @@ describe('connection guidance', () => {
         expect(guidance, `${provider}: ${snippet}`).toContain(snippet);
       }
     }
+  });
+});
+
+describe('credentialFieldsFromSchema', () => {
+  it('describes required, optional, secret, multiline, and choice fields', () => {
+    const schema = z.object({
+      apiToken: z.string().min(1),
+      workspaceId: z.string().optional(),
+      credentials: z.string().describe('Service account JSON'),
+      authMode: z.enum(['account', 'user']).default('account'),
+    });
+
+    expect(credentialFieldsFromSchema(schema)).toEqual([
+      { name: 'apiToken', label: 'API Token', required: true, sensitive: true, inputKind: 'secret' },
+      { name: 'workspaceId', label: 'Workspace ID', required: false, sensitive: false, inputKind: 'text' },
+      {
+        name: 'credentials',
+        label: 'Credentials',
+        required: true,
+        sensitive: true,
+        inputKind: 'multilineSecret',
+        description: 'Service account JSON',
+      },
+      {
+        name: 'authMode',
+        label: 'Auth Mode',
+        required: false,
+        sensitive: false,
+        inputKind: 'choice',
+        options: ['account', 'user'],
+      },
+    ]);
+  });
+
+  it('unwraps a refined object schema', () => {
+    const schema = z.object({ token: z.string() }).refine((value) => value.token.length > 0);
+    expect(credentialFieldsFromSchema(schema)?.[0]).toMatchObject({
+      name: 'token',
+      required: true,
+      sensitive: true,
+    });
+  });
+
+  it('returns an empty descriptor list for providers that need no credentials', () => {
+    expect(credentialFieldsFromSchema(z.object({}))).toEqual([]);
+  });
+
+  it('omits form metadata for schemas that cannot be represented safely', () => {
+    expect(credentialFieldsFromSchema(z.union([z.string(), z.object({ token: z.string() })]))).toBeUndefined();
   });
 });

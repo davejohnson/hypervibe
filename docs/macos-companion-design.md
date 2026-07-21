@@ -1,6 +1,6 @@
 # Hypervibe macOS Companion
 
-**Status:** Rev 4, v0 status and self-contained onboarding implemented
+**Status:** Rev 5, v0 status, self-contained onboarding, and provider connection management implemented
 **Shape:** A menu bar app in `apps/macos/`. Chat remains the control plane. The app provides ambient status, resource topology, notifications, and plan review.
 
 Rev 4 deliberately removes the companion read-model database. Hypervibe already has authoritative repo specs, local history, bindings, and live provider observation. The app should ask Hypervibe for those views through its existing local MCP process, retain only a small disposable cache, and never become another infrastructure state owner.
@@ -35,7 +35,7 @@ It does not:
 | Provider identity bindings | `.hypervibe/bindings.json` and current local state | Read through Hypervibe |
 | Live infrastructure | Provider APIs observed by `hv_status` / `hv_plan` | Display the latest response with freshness |
 | Plans, runs, receipts | Hypervibe SQLite | Read through `hv_runs` |
-| Credentials and encrypted plan inputs | Hypervibe secret/plan storage | Never request, cache, or display |
+| Credentials and encrypted plan inputs | Hypervibe secret/plan storage | Accept only in an in-memory form, send once to `hv_connect`, then discard |
 | Repositories watched on this Mac | Companion app | Store repo bookmarks/paths |
 | UI preferences and acknowledgements | Companion app | Store locally |
 | Last sanitized UI snapshot | Companion app | Disposable cache only |
@@ -67,9 +67,10 @@ The companion cache can always be deleted and rebuilt. Losing it must not change
                    ▼
 ┌───────────────────────────────────────┐
 │ Existing Hypervibe MCP + Node runtime │
-│ bundled unchanged inside the app      │
+│ bundled inside the app                │
 │ hv_upgrade / hv_spec_get / hv_status  │
 │ hv_runs / hv_connections_list         │
+│ hv_connect (connection management)    │
 └───────────────┬───────────────┬───────┘
                 │               │
                 ▼               ▼
@@ -180,8 +181,9 @@ It never stores:
 - arbitrary run metadata or receipts.
 
 The app may also show the provider, scope, status, and last-verification time
-returned by `hv_connections_list`. Those connection summaries are session-only
-and are not written to the snapshot cache.
+returned by `hv_connections_list`. Those connection summaries and the safe
+provider form catalog are session-only and are not written to the snapshot
+cache.
 
 Preferences can use `UserDefaults`; repository bookmarks, registry entries, acknowledgements, and cached snapshots can use a small app-owned JSON or SwiftData store. Keychain is reserved for app secrets if the app ever acquires any; v1 should not.
 
@@ -198,6 +200,33 @@ On launch and after executable changes:
 3. Call `hv_upgrade action="status"` to confirm package/schema readiness and project resolution.
 4. Call `hv_connections_list` and retain its safe connection summaries in memory only.
 5. Disable refresh actions if the executable or local schema is incompatible.
+
+### Provider connection management
+
+Connections are explicitly project-scoped because each configured project can
+use a different `HYPERVIBE_DATA_DIR` and therefore a different Hypervibe
+connection store. The companion opens a short MCP stdio session in that exact
+project context for each list, add, verify, or remove operation.
+
+`hv_connections_list` returns provider guidance plus a provider-neutral
+credential-field description derived from each adapter's Zod schema. The app
+uses that description to render forms without provider-name branches. Older
+executables that do not return field descriptions fall back to
+`credentialsRef` entry.
+
+All mutations call the existing `hv_connect` tool:
+
+- add passes either an in-memory credentials object or a `credentialsRef`;
+- verify rechecks the stored provider connection;
+- remove deletes the selected provider and scope after confirmation.
+
+Credential values exist only in SwiftUI form state and the one MCP tool call.
+They are cleared on success or dismissal, never logged, cached, added to the
+project registry, or written to app preferences. Hypervibe remains responsible
+for validation, encryption, verification, audit history, and storage. If add
+saves credentials but verification fails, the app refreshes the list, shows the
+failed stored connection, and presents Hypervibe's remediation hint so the user
+can replace, verify, or delete it.
 
 ### Topology
 

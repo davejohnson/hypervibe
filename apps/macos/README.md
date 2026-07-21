@@ -16,16 +16,22 @@ The current v0 slice contains:
 - desired resource topology from `hv_spec_get`;
 - live environment health and drift counts from `hv_status`;
 - recent plan/apply activity from `hv_runs`;
-- memory-only connected-app summaries from `hv_connections_list`;
+- memory-only connected-app summaries and provider form metadata from
+  `hv_connections_list`;
+- project-scoped provider add, verify, and remove through the existing
+  `hv_connect` MCP tool;
 - an app-owned project registry and disposable, strictly typed snapshot cache.
 
 The person installing the app does not need Node.js, npm, or a separate
 Hypervibe installation. The app does not read Hypervibe's SQLite database,
-run a local HTTP server, or change the Hypervibe MCP.
+run a local HTTP server, or replace the Hypervibe MCP with a second server.
 
 Connected-app summaries include only provider, scope, status, and verification
 time. They are held in memory for the current app session and are not written
-to the snapshot cache.
+to the snapshot cache. Credentials entered in the connection window remain in
+form memory only, are passed once to `hv_connect`, and are cleared when the
+form succeeds or closes. Hypervibe performs validation, verification,
+encryption, storage, and auditing.
 
 ## Install and connect
 

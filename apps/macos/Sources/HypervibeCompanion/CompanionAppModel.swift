@@ -6,6 +6,9 @@ final class CompanionAppModel: ObservableObject {
     @Published private(set) var projects: [CompanionProject] = []
     @Published private(set) var snapshots: [UUID: ProjectSnapshot] = [:]
     @Published private(set) var connections: [UUID: [ConnectionSummary]] = [:]
+    @Published private(set) var connectionCatalogs: [UUID: ConnectionCatalog] = [:]
+    @Published private(set) var loadingConnectionCatalogIDs: Set<UUID> = []
+    @Published private(set) var connectionCatalogErrors: [UUID: String] = [:]
     @Published var selectedProjectID: UUID?
     @Published private(set) var refreshingProjectIDs: Set<UUID> = []
     @Published private(set) var refreshErrors: [UUID: String] = [:]
@@ -114,6 +117,101 @@ final class CompanionAppModel: ObservableObject {
         }
     }
 
+    func loadConnectionCatalog(projectID: UUID) async {
+        guard let project = projects.first(where: { $0.id == projectID }),
+            !loadingConnectionCatalogIDs.contains(projectID) else {
+            return
+        }
+        loadingConnectionCatalogIDs.insert(projectID)
+        defer { loadingConnectionCatalogIDs.remove(projectID) }
+
+        do {
+            try await reloadConnectionCatalog(project: project)
+            connectionCatalogErrors.removeValue(forKey: projectID)
+        } catch {
+            connectionCatalogErrors[projectID] = userFacingMessage(for: error)
+        }
+    }
+
+    func addConnection(
+        projectID: UUID,
+        request: ConnectionRequest
+    ) async throws -> ConnectionMutationResult {
+        let project = try connectionProject(id: projectID)
+        do {
+            let result = try await mcpClient.addConnection(project: project, request: request)
+            await refreshCatalogAfterSuccessfulMutation(result, project: project)
+            return result
+        } catch let mutationError {
+            // hv_connect deliberately keeps a saved connection when verification
+            // fails. Re-read the catalog so the failed row is immediately visible.
+            do {
+                try await reloadConnectionCatalog(project: project)
+                connectionCatalogErrors.removeValue(forKey: projectID)
+            } catch {
+                if let clientError = mutationError as? HypervibeClientError,
+                    case .tool(let code, _, let hint) = clientError,
+                    code == "PROVIDER_ERROR",
+                    hint?.localizedCaseInsensitiveContains("connection was saved") == true {
+                    replaceLocalConnection(
+                        projectID: projectID,
+                        provider: request.provider,
+                        scope: request.scope,
+                        status: .failed,
+                        lastVerifiedAt: nil
+                    )
+                }
+            }
+            throw mutationError
+        }
+    }
+
+    func verifyConnection(
+        projectID: UUID,
+        provider: String,
+        scope: String
+    ) async throws -> ConnectionMutationResult {
+        let project = try connectionProject(id: projectID)
+        do {
+            let result = try await mcpClient.verifyConnection(
+                project: project,
+                provider: provider,
+                scope: scope
+            )
+            await refreshCatalogAfterSuccessfulMutation(result, project: project)
+            return result
+        } catch let mutationError {
+            do {
+                try await reloadConnectionCatalog(project: project)
+                connectionCatalogErrors.removeValue(forKey: projectID)
+            } catch {
+                replaceLocalConnection(
+                    projectID: projectID,
+                    provider: provider,
+                    scope: scope,
+                    status: .failed,
+                    lastVerifiedAt: nil
+                )
+            }
+            throw mutationError
+        }
+    }
+
+    func removeConnection(
+        projectID: UUID,
+        provider: String,
+        scope: String
+    ) async throws -> ConnectionMutationResult {
+        let project = try connectionProject(id: projectID)
+        let result = try await mcpClient.removeConnection(
+            project: project,
+            provider: provider,
+            scope: scope
+        )
+        await refreshCatalogAfterSuccessfulMutation(result, project: project)
+        return result
+    }
+
     func addProject(_ draft: ProjectDraft) async throws {
         var project = CompanionProject(
             displayName: draft.displayName.trimmingCharacters(
@@ -161,6 +259,8 @@ final class CompanionAppModel: ObservableObject {
             try await cache.remove(projectID: id)
             snapshots.removeValue(forKey: id)
             connections.removeValue(forKey: id)
+            connectionCatalogs.removeValue(forKey: id)
+            connectionCatalogErrors.removeValue(forKey: id)
             refreshErrors.removeValue(forKey: id)
             if selectedProjectID == id {
                 selectedProjectID = projects.first?.id
@@ -224,6 +324,120 @@ final class CompanionAppModel: ObservableObject {
             return description
         }
         return "Hypervibe refresh failed."
+    }
+
+    func connectionMessage(for error: Error) -> String {
+        userFacingMessage(for: error)
+    }
+
+    private func reloadConnectionCatalog(project: CompanionProject) async throws {
+        let catalog = try await mcpClient.connectionCatalog(project: project)
+        connectionCatalogs[project.id] = catalog
+        connections[project.id] = catalog.connections
+    }
+
+    private func refreshCatalogAfterSuccessfulMutation(
+        _ result: ConnectionMutationResult,
+        project: CompanionProject
+    ) async {
+        do {
+            try await reloadConnectionCatalog(project: project)
+            connectionCatalogErrors.removeValue(forKey: project.id)
+        } catch {
+            if result.removed {
+                removeLocalConnection(
+                    projectID: project.id,
+                    provider: result.provider,
+                    scope: result.scope
+                )
+            } else {
+                replaceLocalConnection(
+                    projectID: project.id,
+                    provider: result.provider,
+                    scope: result.scope,
+                    status: result.status,
+                    lastVerifiedAt: result.status == .verified ? Date() : nil
+                )
+            }
+            connectionCatalogErrors[project.id] =
+                "The connection changed successfully, but Hypervibe could not refresh the list."
+        }
+    }
+
+    private func replaceLocalConnection(
+        projectID: UUID,
+        provider: String,
+        scope: String?,
+        status: ConnectionStatus,
+        lastVerifiedAt: Date?
+    ) {
+        let normalizedScope = normalizedConnectionScope(scope)
+        var updated = connections[projectID] ?? []
+        updated.removeAll {
+            $0.provider == provider
+                && $0.scope.caseInsensitiveCompare(normalizedScope) == .orderedSame
+        }
+        updated.append(
+            ConnectionSummary(
+                provider: provider,
+                scope: normalizedScope,
+                status: status,
+                lastVerifiedAt: lastVerifiedAt
+            )
+        )
+        updateLocalConnections(updated, projectID: projectID)
+    }
+
+    private func removeLocalConnection(
+        projectID: UUID,
+        provider: String,
+        scope: String?
+    ) {
+        let normalizedScope = normalizedConnectionScope(scope)
+        let updated = (connections[projectID] ?? []).filter {
+            $0.provider != provider
+                || $0.scope.caseInsensitiveCompare(normalizedScope) != .orderedSame
+        }
+        updateLocalConnections(updated, projectID: projectID)
+    }
+
+    private func updateLocalConnections(
+        _ values: [ConnectionSummary],
+        projectID: UUID
+    ) {
+        let updated = values.sorted {
+            if $0.provider == $1.provider {
+                return $0.scope.localizedCaseInsensitiveCompare($1.scope) == .orderedAscending
+            }
+            return $0.provider.localizedCaseInsensitiveCompare($1.provider) == .orderedAscending
+        }
+        connections[projectID] = updated
+        if let catalog = connectionCatalogs[projectID] {
+            connectionCatalogs[projectID] = ConnectionCatalog(
+                connections: updated,
+                providers: catalog.providers
+            )
+        }
+    }
+
+    private func normalizedConnectionScope(_ scope: String?) -> String {
+        let value = scope?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? "global" : value
+    }
+
+    private func connectionProject(id: UUID) throws -> CompanionProject {
+        guard let project = projects.first(where: { $0.id == id }) else {
+            throw ConnectionManagementError.projectUnavailable
+        }
+        return project
+    }
+}
+
+private enum ConnectionManagementError: LocalizedError {
+    case projectUnavailable
+
+    var errorDescription: String? {
+        "This project is no longer available in Hypervibe Companion."
     }
 }
 
