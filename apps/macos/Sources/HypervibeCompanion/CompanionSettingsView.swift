@@ -62,6 +62,7 @@ struct CompanionSettingsView: View {
         }
         .padding(20)
         .frame(width: 620, height: 570)
+        .background(WindowFocusBridge())
         .task {
             await model.loadIfNeeded()
             await model.refreshMCPHostStatuses()
