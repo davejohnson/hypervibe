@@ -1,6 +1,18 @@
 import Foundation
 import MCP
 
+public struct HostingVariableTarget: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public var id: String { "\(environment)\u{0}\(service)" }
+
+    public let environment: String
+    public let service: String
+
+    public init(environment: String, service: String) {
+        self.environment = environment
+        self.service = service
+    }
+}
+
 public struct HostingVariableSummary: Codable, Equatable, Identifiable, Sendable {
     public var id: String { name }
 
@@ -29,6 +41,32 @@ public struct HostingVariableCatalog: Codable, Equatable, Sendable {
     }
 }
 
+public struct HostingVariableInventory: Equatable, Sendable {
+    public let catalogs: [HostingVariableTarget: HostingVariableCatalog]
+    public let failures: [HostingVariableTarget: String]
+
+    public init(
+        catalogs: [HostingVariableTarget: HostingVariableCatalog] = [:],
+        failures: [HostingVariableTarget: String] = [:]
+    ) {
+        self.catalogs = catalogs
+        self.failures = failures
+    }
+
+    public var keys: [String] {
+        Array(Set(catalogs.values.flatMap { $0.variables.map(\.name) })).sorted {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+    }
+
+    public func variable(
+        named name: String,
+        at target: HostingVariableTarget
+    ) -> HostingVariableSummary? {
+        catalogs[target]?.variables.first { $0.name == name }
+    }
+}
+
 public enum HostingVariableSource: Equatable, Sendable {
     case direct(String)
     case reference(String)
@@ -36,19 +74,16 @@ public enum HostingVariableSource: Equatable, Sendable {
 }
 
 public struct HostingVariableRequest: Equatable, Sendable {
-    public let environment: String
-    public let service: String
+    public let destinations: [HostingVariableTarget]
     public let key: String
     public let source: HostingVariableSource
 
     public init(
-        environment: String,
-        service: String,
+        destinations: [HostingVariableTarget],
         key: String,
         source: HostingVariableSource
     ) {
-        self.environment = environment
-        self.service = service
+        self.destinations = destinations
         self.key = key
         self.source = source
     }
@@ -56,8 +91,12 @@ public struct HostingVariableRequest: Equatable, Sendable {
     func toolArguments(projectName: String) -> [String: Value] {
         var arguments: [String: Value] = [
             "project": .string(projectName),
-            "env": .string(environment),
-            "service": .string(service),
+            "destinations": .array(destinations.map { destination in
+                .object([
+                    "env": .string(destination.environment),
+                    "service": .string(destination.service),
+                ])
+            }),
             "target": .string("hosting"),
             "key": .string(key.trimmingCharacters(in: .whitespacesAndNewlines)),
         ]
@@ -79,19 +118,16 @@ public struct HostingVariableRequest: Equatable, Sendable {
 }
 
 public struct HostingVariableMutationResult: Codable, Equatable, Sendable {
-    public let environment: String
-    public let service: String
+    public let destinations: [HostingVariableTarget]
     public let variables: [String]
     public let valueSource: String
 
     public init(
-        environment: String,
-        service: String,
+        destinations: [HostingVariableTarget],
         variables: [String],
         valueSource: String
     ) {
-        self.environment = environment
-        self.service = service
+        self.destinations = destinations
         self.variables = variables
         self.valueSource = valueSource
     }

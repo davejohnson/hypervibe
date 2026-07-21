@@ -180,20 +180,28 @@ public actor HypervibeMCPClient {
 
     public func hostingVariables(
         project: CompanionProject,
-        environment: String,
-        service: String
-    ) async throws -> HostingVariableCatalog {
+        targets: [HostingVariableTarget]
+    ) async throws -> HostingVariableInventory {
         try await withSession(project: project, requiredTools: ["hv_secrets_get"]) { client in
-            let data = try await self.call(
-                client: client,
-                tool: "hv_secrets_get",
-                arguments: [
-                    "project": .string(project.displayName),
-                    "env": .string(environment),
-                    "service": .string(service),
-                ]
-            )
-            return try HypervibeResponseMapper.decodeHostingVariables(data)
+            var catalogs: [HostingVariableTarget: HostingVariableCatalog] = [:]
+            var failures: [HostingVariableTarget: String] = [:]
+            for target in targets {
+                do {
+                    let data = try await self.call(
+                        client: client,
+                        tool: "hv_secrets_get",
+                        arguments: [
+                            "project": .string(project.displayName),
+                            "env": .string(target.environment),
+                            "service": .string(target.service),
+                        ]
+                    )
+                    catalogs[target] = try HypervibeResponseMapper.decodeHostingVariables(data)
+                } catch {
+                    failures[target] = Self.variableFailureMessage(error)
+                }
+            }
+            return HostingVariableInventory(catalogs: catalogs, failures: failures)
         }
     }
 
@@ -240,6 +248,15 @@ public actor HypervibeMCPClient {
             arguments["scope"] = .string(scope)
         }
         return arguments
+    }
+
+    private static func variableFailureMessage(_ error: Error) -> String {
+        if let localized = error as? LocalizedError,
+            let description = localized.errorDescription,
+            !description.isEmpty {
+            return description
+        }
+        return "Hypervibe could not read this target."
     }
 
     private func withSession<Result: Sendable>(

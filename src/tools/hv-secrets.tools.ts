@@ -115,11 +115,15 @@ function resolveHostingService(
 export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_secrets_set',
-    'Set secrets and environment variables. NEVER pass sensitive values via value/vars — they appear in the chat transcript; use secretRef (env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref — read locally, never enters chat) or generate=true for a new server-side random secret. target="hosting" (default) sets env vars on the deployed environment; "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time; "github" sets a GitHub Actions repo secret. remove=true deletes (mapping/github targets).',
+    'Set secrets and environment variables. NEVER pass sensitive values via value/vars — they appear in the chat transcript; use secretRef (env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref — read locally, never enters chat) or generate=true for a new server-side random secret. target="hosting" (default) sets env vars on the deployed environment; destinations explicitly shares one resolved/generated value across selected environment/service targets. "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time; "github" sets a GitHub Actions repo secret. remove=true deletes (mapping/github targets).',
     {
       project: projectField,
       env: envField,
       service: z.string().optional().describe('Service to scope hosting env vars to (default: first service)'),
+      destinations: z.array(z.object({
+        env: z.string().min(1),
+        service: z.string().min(1),
+      })).min(1).optional().describe('target=hosting: explicit environment/service destinations that should receive the same value. Omit to use env/service.'),
       target: z.enum(['hosting', 'manager', 'mapping', 'github']).optional().describe('Default "hosting"'),
       key: z.string().optional().describe('Variable/secret name'),
       value: z.string().optional().describe('Value for key. WARNING: values passed here appear in the chat transcript — prefer secretRef (reads the value locally) or generate=true (server-side random). Only use value when the secret is already exposed or not sensitive.'),
@@ -133,7 +137,27 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       repo: z.string().optional().describe('target=github: "owner/name" (defaults to project git remote)'),
       remove: z.boolean().optional().describe('Delete instead of set (mapping/github)'),
     },
-    wrapHandler(async ({ project: projectRef, env, service, target = 'hosting', key, value, generate, generateLength, vars, provider, path, secretRef, environments, repo, remove }) => {
+    wrapHandler(async ({ project: projectRef, env, service, destinations, target = 'hosting', key, value, generate, generateLength, vars, provider, path, secretRef, environments, repo, remove }) => {
+      if (destinations && target !== 'hosting') {
+        throw new HvError('VALIDATION', 'destinations is supported only for target="hosting".');
+      }
+      if (destinations && (env !== undefined || service !== undefined)) {
+        throw new HvError('VALIDATION', 'Pass destinations or env/service for target="hosting", not both.');
+      }
+      const hostingDestinations = destinations?.map((destination) => ({
+        env: destination.env.trim(),
+        service: destination.service.trim(),
+      }));
+      if (hostingDestinations?.some((destination) => !destination.env || !destination.service)) {
+        throw new HvError('VALIDATION', 'Every hosting destination requires a non-empty env and service.');
+      }
+      if (hostingDestinations) {
+        const unique = new Set(hostingDestinations.map((destination) => `${destination.env}\u0000${destination.service}`));
+        if (unique.size !== hostingDestinations.length) {
+          throw new HvError('VALIDATION', 'Hosting destinations must be unique.');
+        }
+      }
+
       // One chat-safe value pipeline for hosting/manager/github: an explicit
       // value (already in the transcript — warn), a secretRef (read locally),
       // or generate (server-side random, never shown).
@@ -152,7 +176,9 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const projectForRef = ctx.resolveProject({ project: projectRef });
         value = await resolveSecretValueRef(secretRef, {
           ...(projectForRef ? { projectId: projectForRef.id } : {}),
-          ...(env ? { environmentName: env } : {}),
+          ...(hostingDestinations?.[0]?.env || env
+            ? { environmentName: hostingDestinations?.[0]?.env ?? env }
+            : {}),
         });
       }
       const kv = vars ?? (key !== undefined && value !== undefined ? { [key]: value } : undefined);
@@ -238,21 +264,57 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
 
       // target === 'hosting'
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const environment = ctx.resolveEnvironmentOrThrow(project, env);
       if (!kv) {
         throw new HvError('VALIDATION', 'Provide key with secretRef/generate=true, or key+value / vars.', {
           hint: 'Prefer key + secretRef="dotenv:/absolute/path/.env#KEY" (value read locally) or key + generate=true (server-side random) so the value never enters chat.',
         });
       }
-      const targetService = resolveHostingService(ctx, project, environment.name, service);
-      const result = await syncHostingEnvVars({ project, environment, service: targetService, vars: kv });
-      if (!result.success) {
-        return toolError('PROVIDER_ERROR', result.error || result.message, {});
+      const requestedDestinations = hostingDestinations ?? [{ env, service }];
+      const resolvedDestinations = requestedDestinations.map((destination) => {
+        const environment = ctx.resolveEnvironmentOrThrow(project, destination.env);
+        return {
+          environment,
+          service: resolveHostingService(ctx, project, environment.name, destination.service),
+        };
+      });
+      const applied: Array<{ environment: string; service: string }> = [];
+      for (const destination of resolvedDestinations) {
+        const result = await syncHostingEnvVars({
+          project,
+          environment: destination.environment,
+          service: destination.service,
+          vars: kv,
+        });
+        if (!result.success) {
+          const failed = `${destination.environment.name}/${destination.service.name}`;
+          const progress = applied.length > 0
+            ? ` Applied ${Object.keys(kv).join(', ')} to ${applied.map((entry) => `${entry.environment}/${entry.service}`).join(', ')} before the failure; no later destinations were attempted.`
+            : ' No destinations were changed.';
+          return toolError(
+            'PROVIDER_ERROR',
+            `Could not apply ${Object.keys(kv).join(', ')} to ${failed}: ${result.error || result.message}.${progress}`,
+            {
+              details: {
+                applied,
+                failed: {
+                  environment: destination.environment.name,
+                  service: destination.service.name,
+                },
+              },
+            }
+          );
+        }
+        applied.push({
+          environment: destination.environment.name,
+          service: destination.service.name,
+        });
       }
+      const first = applied[0];
       return toolSuccess(
         {
-          environment: environment.name,
-          service: targetService.name,
+          environment: first.environment,
+          service: first.service,
+          destinations: applied,
           variables: Object.keys(kv),
           valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw',
         },

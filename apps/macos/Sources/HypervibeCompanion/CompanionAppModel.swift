@@ -222,14 +222,12 @@ final class CompanionAppModel: ObservableObject {
 
     func hostingVariables(
         projectID: UUID,
-        environment: String,
-        service: String
-    ) async throws -> HostingVariableCatalog {
+        targets: [HostingVariableTarget]
+    ) async throws -> HostingVariableInventory {
         let project = try connectionProject(id: projectID)
         return try await mcpClient.hostingVariables(
             project: project,
-            environment: environment,
-            service: service
+            targets: targets
         )
     }
 

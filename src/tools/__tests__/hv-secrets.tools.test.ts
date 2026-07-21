@@ -284,6 +284,98 @@ describe('hv_secrets_set target=hosting value sources', () => {
     await t.close();
   });
 
+  it('reuses one generated value across explicit environment and service destinations', async () => {
+    const project = seedHostingProject();
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+    const sync = vi.spyOn(hostingEnv, 'syncHostingEnvVars').mockResolvedValue({
+      success: true,
+      message: 'ok',
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_secrets_set', {
+      project: project.name,
+      destinations: [
+        { env: 'staging', service: 'web' },
+        { env: 'production', service: 'web' },
+      ],
+      key: 'SESSION_SECRET',
+      generate: true,
+      generateLength: 32,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.destinations).toEqual([
+      { environment: 'staging', service: 'web' },
+      { environment: 'production', service: 'web' },
+    ]);
+    expect(sync).toHaveBeenCalledTimes(2);
+    const firstValue = sync.mock.calls[0][0].vars.SESSION_SECRET;
+    const secondValue = sync.mock.calls[1][0].vars.SESSION_SECRET;
+    expect(firstValue).toHaveLength(32);
+    expect(secondValue).toBe(firstValue);
+    expect(JSON.stringify(result)).not.toContain(firstValue);
+    await t.close();
+  });
+
+  it('stops a shared write after a provider failure and reports partial progress', async () => {
+    const project = seedHostingProject();
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'preview' });
+    const sync = vi.spyOn(hostingEnv, 'syncHostingEnvVars')
+      .mockResolvedValueOnce({ success: true, message: 'ok' })
+      .mockResolvedValueOnce({ success: false, message: 'blocked', error: 'provider rejected write' })
+      .mockResolvedValueOnce({ success: true, message: 'must not run' });
+
+    const t = await makeClient();
+    const result = await t.call('hv_secrets_set', {
+      project: project.name,
+      destinations: [
+        { env: 'staging', service: 'web' },
+        { env: 'production', service: 'web' },
+        { env: 'preview', service: 'web' },
+      ],
+      key: 'FEATURE_FLAG',
+      value: 'enabled',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('PROVIDER_ERROR');
+    expect(result.error.message).toContain('staging/web before the failure');
+    expect(result.error.message).toContain('no later destinations were attempted');
+    expect(result.error.details).toEqual({
+      applied: [{ environment: 'staging', service: 'web' }],
+      failed: { environment: 'production', service: 'web' },
+    });
+    expect(sync).toHaveBeenCalledTimes(2);
+    await t.close();
+  });
+
+  it('validates every shared destination before changing any provider state', async () => {
+    const project = seedHostingProject();
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+    const sync = vi.spyOn(hostingEnv, 'syncHostingEnvVars').mockResolvedValue({
+      success: true,
+      message: 'must not run',
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_secrets_set', {
+      project: project.name,
+      destinations: [
+        { env: 'staging', service: 'web' },
+        { env: 'missing', service: 'web' },
+      ],
+      key: 'FEATURE_FLAG',
+      value: 'enabled',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('NOT_FOUND');
+    expect(sync).not.toHaveBeenCalled();
+    await t.close();
+  });
+
   it('warns loudly when a raw value is passed through chat', async () => {
     seedHostingProject();
     const sync = vi.spyOn(hostingEnv, 'syncHostingEnvVars').mockResolvedValue({ success: true, message: 'ok' });

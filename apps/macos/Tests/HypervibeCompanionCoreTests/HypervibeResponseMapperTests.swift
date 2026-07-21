@@ -459,6 +459,10 @@ struct HypervibeResponseMapperTests {
               "data": {
                 "environment": "staging",
                 "service": "worker",
+                "destinations": [
+                  { "environment": "staging", "service": "worker" },
+                  { "environment": "production", "service": "worker" }
+                ],
                 "variables": ["API_KEY"],
                 "valueSource": "dotenv",
                 "providerReceipt": { "value": "sentinel-secret-value" }
@@ -470,8 +474,10 @@ struct HypervibeResponseMapperTests {
 
         let result = try HypervibeResponseMapper.decodeHostingVariableMutation(data)
 
-        #expect(result.environment == "staging")
-        #expect(result.service == "worker")
+        #expect(result.destinations == [
+            HostingVariableTarget(environment: "staging", service: "worker"),
+            HostingVariableTarget(environment: "production", service: "worker")
+        ])
         #expect(result.variables == ["API_KEY"])
         #expect(result.valueSource == "dotenv")
         #expect(!String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
@@ -481,8 +487,10 @@ struct HypervibeResponseMapperTests {
     @Test
     func hostingVariableRequestBuildsDirectReferenceAndGeneratedArguments() {
         let direct = HostingVariableRequest(
-            environment: "production",
-            service: "web",
+            destinations: [
+                HostingVariableTarget(environment: "production", service: "web"),
+                HostingVariableTarget(environment: "staging", service: "worker"),
+            ],
             key: " SESSION_SECRET ",
             source: .direct("secret value")
         ).toolArguments(projectName: "invoice-perfect")
@@ -490,10 +498,14 @@ struct HypervibeResponseMapperTests {
         #expect(direct["target"]?.stringValue == "hosting")
         #expect(direct["key"]?.stringValue == "SESSION_SECRET")
         #expect(direct["value"]?.stringValue == "secret value")
+        #expect(direct["env"] == nil)
+        #expect(direct["service"] == nil)
+        #expect(direct["destinations"]?.arrayValue?.count == 2)
 
         let reference = HostingVariableRequest(
-            environment: "staging",
-            service: "worker",
+            destinations: [
+                HostingVariableTarget(environment: "staging", service: "worker")
+            ],
             key: "API_KEY",
             source: .reference(" dotenv:/tmp/.env#API_KEY ")
         ).toolArguments(projectName: "invoice-perfect")
@@ -501,13 +513,44 @@ struct HypervibeResponseMapperTests {
         #expect(reference["value"] == nil)
 
         let generated = HostingVariableRequest(
-            environment: "staging",
-            service: "web",
+            destinations: [
+                HostingVariableTarget(environment: "staging", service: "web")
+            ],
             key: "SESSION_SECRET",
             source: .generated(length: 64)
         ).toolArguments(projectName: "invoice-perfect")
         #expect(generated["generate"]?.boolValue == true)
         #expect(generated["generateLength"]?.intValue == 64)
+    }
+
+    @Test
+    func hostingVariableInventoryBuildsAProjectWideKeyCatalogWithMissingSlots() {
+        let staging = HostingVariableTarget(environment: "staging", service: "web")
+        let production = HostingVariableTarget(environment: "production", service: "web")
+        let inventory = HostingVariableInventory(
+            catalogs: [
+                staging: HostingVariableCatalog(
+                    environment: "staging",
+                    service: "web",
+                    variables: [
+                        HostingVariableSummary(name: "SHARED_KEY", maskedValue: "ab***yz"),
+                        HostingVariableSummary(name: "STAGING_ONLY", maskedValue: "12***90"),
+                    ]
+                ),
+                production: HostingVariableCatalog(
+                    environment: "production",
+                    service: "web",
+                    variables: [
+                        HostingVariableSummary(name: "SHARED_KEY", maskedValue: "cd***wx")
+                    ]
+                ),
+            ]
+        )
+
+        #expect(inventory.keys == ["SHARED_KEY", "STAGING_ONLY"])
+        #expect(inventory.variable(named: "SHARED_KEY", at: staging)?.maskedValue == "ab***yz")
+        #expect(inventory.variable(named: "SHARED_KEY", at: production)?.maskedValue == "cd***wx")
+        #expect(inventory.variable(named: "STAGING_ONLY", at: production) == nil)
     }
 
     @Test

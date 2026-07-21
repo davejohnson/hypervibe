@@ -239,9 +239,18 @@ enum HypervibeResponseMapper {
         guard let payload = envelope.data else {
             throw HypervibeClientError.malformedResponse("hv_secrets_set returned no data.")
         }
+        let destinations: [HostingVariableTarget]
+        if let explicit = payload.destinations, !explicit.isEmpty {
+            destinations = explicit
+        } else if let environment = payload.environment, let service = payload.service {
+            destinations = [HostingVariableTarget(environment: environment, service: service)]
+        } else {
+            throw HypervibeClientError.malformedResponse(
+                "hv_secrets_set returned no destination receipt."
+            )
+        }
         return HostingVariableMutationResult(
-            environment: payload.environment,
-            service: payload.service,
+            destinations: destinations,
             variables: payload.variables.sorted(),
             valueSource: payload.valueSource
         )
@@ -672,8 +681,9 @@ private struct HostingVariablesToolData: Decodable {
 }
 
 private struct HostingVariableMutationToolData: Decodable {
-    let environment: String
-    let service: String
+    let environment: String?
+    let service: String?
+    let destinations: [HostingVariableTarget]?
     let variables: [String]
     let valueSource: String
 }

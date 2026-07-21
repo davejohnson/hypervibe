@@ -41,6 +41,10 @@ not written to its snapshot cache. A value pasted into the add-variable form
 is held only in SwiftUI form state, passed once over the project's local MCP
 session, and cleared when the form succeeds or closes. The form also supports
 local `env:`, `dotenv:`, and `file:` references and server-generated values.
+The variables window builds a project-wide key inventory from every deployable
+environment and service, showing missing slots without writing blank provider
+values. New values target only the current environment and service by default;
+reusing the exact value anywhere else requires explicit target selection.
 Removing a desired variable remains a spec/plan/apply operation so durable
 configuration is not silently deleted outside Hypervibe's reconciliation loop.
 
