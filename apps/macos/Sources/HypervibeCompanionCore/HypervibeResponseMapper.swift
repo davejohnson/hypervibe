@@ -215,6 +215,38 @@ enum HypervibeResponseMapper {
         )
     }
 
+    static func decodeHostingVariables(_ data: Data) throws -> HostingVariableCatalog {
+        let envelope: ToolEnvelope<HostingVariablesToolData> = try decodeEnvelope(data)
+        guard let payload = envelope.data else {
+            throw HypervibeClientError.malformedResponse("hv_secrets_get returned no data.")
+        }
+        let variables = payload.vars.map { name, maskedValue in
+            HostingVariableSummary(name: name, maskedValue: maskedValue)
+        }.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        return HostingVariableCatalog(
+            environment: payload.environment,
+            service: payload.service,
+            variables: variables
+        )
+    }
+
+    static func decodeHostingVariableMutation(
+        _ data: Data
+    ) throws -> HostingVariableMutationResult {
+        let envelope: ToolEnvelope<HostingVariableMutationToolData> = try decodeEnvelope(data)
+        guard let payload = envelope.data else {
+            throw HypervibeClientError.malformedResponse("hv_secrets_set returned no data.")
+        }
+        return HostingVariableMutationResult(
+            environment: payload.environment,
+            service: payload.service,
+            variables: payload.variables.sorted(),
+            valueSource: payload.valueSource
+        )
+    }
+
     static func decodeUpgradeStatus(_ data: Data) throws {
         let envelope: ToolEnvelope<UpgradeToolData> = try decodeEnvelope(data)
         guard let payload = envelope.data else {
@@ -631,6 +663,19 @@ private struct ConnectionMutationToolData: Decodable {
     let workspaceId: String?
     let version: String?
     let removed: Bool?
+}
+
+private struct HostingVariablesToolData: Decodable {
+    let environment: String
+    let service: String
+    let vars: [String: String]
+}
+
+private struct HostingVariableMutationToolData: Decodable {
+    let environment: String
+    let service: String
+    let variables: [String]
+    let valueSource: String
 }
 
 private struct IgnoredObject: Decodable {

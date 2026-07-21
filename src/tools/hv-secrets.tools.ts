@@ -14,6 +14,8 @@ import { connectionSetupDetails, formatConnectionGuidance } from '../domain/serv
 import { parseEnvFile } from '../utils/env-parser.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
+import type { Service } from '../domain/entities/service.entity.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
 import { splitFragment } from '../utils/split-fragment.js';
@@ -70,6 +72,43 @@ function generateSecretValue(length: number): string {
     output += alphabet[bytes[i] % alphabet.length];
   }
   return output;
+}
+
+function resolveHostingService(
+  ctx: ToolContext,
+  project: Project,
+  environmentName: string,
+  requestedService?: string
+): Service {
+  const storedServices = ctx.repos.services.findByProjectId(project.id);
+  const requested = requestedService?.trim();
+  const stored = requested
+    ? storedServices.find((candidate) => candidate.name === requested)
+    : storedServices[0];
+  if (stored) return stored;
+
+  // Repo-backed projects can be fully observable on a fresh machine before
+  // their disposable SQLite cache contains service rows. Build the narrow
+  // provider input from desired state without writing or adopting local state.
+  const environmentSpec = new SpecStore().get(project)?.spec.environments[environmentName];
+  const serviceName = requested || Object.keys(environmentSpec?.services ?? {})[0];
+  const serviceSpec = serviceName ? environmentSpec?.services[serviceName] : undefined;
+  if (!serviceName || !serviceSpec) {
+    throw new HvError('NOT_FOUND', requested
+      ? `Service not found: ${requested}`
+      : 'No services found.');
+  }
+
+  const timestamp = new Date(0);
+  return {
+    id: `desired:${project.id}:${serviceName}`,
+    projectId: project.id,
+    name: serviceName,
+    buildConfig: { ...serviceSpec },
+    envVarSpec: {},
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
 }
 
 
@@ -205,11 +244,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
           hint: 'Prefer key + secretRef="dotenv:/absolute/path/.env#KEY" (value read locally) or key + generate=true (server-side random) so the value never enters chat.',
         });
       }
-      const services = ctx.repos.services.findByProjectId(project.id);
-      const targetService = service ? services.find((s) => s.name === service) : services[0];
-      if (!targetService) {
-        throw new HvError('NOT_FOUND', service ? `Service not found: ${service}` : 'No services found.');
-      }
+      const targetService = resolveHostingService(ctx, project, environment.name, service);
       const result = await syncHostingEnvVars({ project, environment, service: targetService, vars: kv });
       if (!result.success) {
         return toolError('PROVIDER_ERROR', result.error || result.message, {});
@@ -262,11 +297,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
 
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
-      const services = ctx.repos.services.findByProjectId(project.id);
-      const targetService = service ? services.find((s) => s.name === service) : services[0];
-      if (!targetService) {
-        throw new HvError('NOT_FOUND', service ? `Service not found: ${service}` : 'No services found.');
-      }
+      const targetService = resolveHostingService(ctx, project, environment.name, service);
       const result = await readHostingEnvVars({ project, environment, service: targetService });
       if (!result.success) {
         return toolError('PROVIDER_ERROR', result.error, {});
@@ -413,11 +444,16 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         };
 
         if (!dryRun && resolved.resolved > 0) {
-          const services = ctx.repos.services.findByProjectId(project.id);
-          const targetService = service ? services.find((s) => s.name === service) : services[0];
-          if (!targetService) {
-            entry.errors.push({ envVar: '*', error: 'No service found to set environment variables on' });
-          } else {
+          let targetService: Service | null = null;
+          try {
+            targetService = resolveHostingService(ctx, project, environment.name, service);
+          } catch (error) {
+            entry.errors.push({
+              envVar: '*',
+              error: error instanceof Error ? error.message : 'No service found to set environment variables on',
+            });
+          }
+          if (targetService) {
             const syncResult = await syncHostingEnvVars({ project, environment, service: targetService, vars: resolved.vars });
             entry.synced = syncResult.success;
             if (!syncResult.success) {

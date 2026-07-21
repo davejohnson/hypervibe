@@ -220,6 +220,30 @@ final class CompanionAppModel: ObservableObject {
         return result
     }
 
+    func hostingVariables(
+        projectID: UUID,
+        environment: String,
+        service: String
+    ) async throws -> HostingVariableCatalog {
+        let project = try connectionProject(id: projectID)
+        return try await mcpClient.hostingVariables(
+            project: project,
+            environment: environment,
+            service: service
+        )
+    }
+
+    func setHostingVariable(
+        projectID: UUID,
+        request: HostingVariableRequest
+    ) async throws -> HostingVariableMutationResult {
+        let project = try connectionProject(id: projectID)
+        return try await mcpClient.setHostingVariable(
+            project: project,
+            request: request
+        )
+    }
+
     func addProject(_ draft: ProjectDraft) async throws {
         var project = CompanionProject(
             displayName: draft.displayName.trimmingCharacters(

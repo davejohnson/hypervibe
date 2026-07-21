@@ -178,6 +178,39 @@ public actor HypervibeMCPClient {
         )
     }
 
+    public func hostingVariables(
+        project: CompanionProject,
+        environment: String,
+        service: String
+    ) async throws -> HostingVariableCatalog {
+        try await withSession(project: project, requiredTools: ["hv_secrets_get"]) { client in
+            let data = try await self.call(
+                client: client,
+                tool: "hv_secrets_get",
+                arguments: [
+                    "project": .string(project.displayName),
+                    "env": .string(environment),
+                    "service": .string(service),
+                ]
+            )
+            return try HypervibeResponseMapper.decodeHostingVariables(data)
+        }
+    }
+
+    public func setHostingVariable(
+        project: CompanionProject,
+        request: HostingVariableRequest
+    ) async throws -> HostingVariableMutationResult {
+        try await withSession(project: project, requiredTools: ["hv_secrets_set"]) { client in
+            let data = try await self.call(
+                client: client,
+                tool: "hv_secrets_set",
+                arguments: request.toolArguments(projectName: project.displayName)
+            )
+            return try HypervibeResponseMapper.decodeHostingVariableMutation(data)
+        }
+    }
+
     private func connectionMutation(
         project: CompanionProject,
         arguments: [String: Value]

@@ -6,6 +6,12 @@ struct ConnectionWindowRoute: Codable, Hashable {
     let provider: String?
 }
 
+struct VariableWindowRoute: Codable, Hashable {
+    let projectID: UUID
+    let environment: String
+    let service: String?
+}
+
 @main
 struct HypervibeCompanionApp: App {
     @NSApplicationDelegateAdaptor(CompanionApplicationDelegate.self)
@@ -57,6 +63,32 @@ struct HypervibeCompanionApp: App {
                     description: Text("Choose a project from the Hypervibe menu bar app.")
                 )
                 .frame(width: 640, height: 460)
+            }
+        }
+        .defaultSize(width: 680, height: 520)
+
+        WindowGroup(
+            "Variables & Secrets",
+            id: "variables",
+            for: VariableWindowRoute.self
+        ) { route in
+            if let route = route.wrappedValue,
+                let project = model.projects.first(where: { $0.id == route.projectID }),
+                let snapshot = model.snapshots[route.projectID] {
+                VariablesView(
+                    model: model,
+                    project: project,
+                    snapshot: snapshot,
+                    initialEnvironment: route.environment,
+                    initialService: route.service
+                )
+            } else {
+                ContentUnavailableView(
+                    "Project unavailable",
+                    systemImage: "shippingbox",
+                    description: Text("Refresh the project from the Hypervibe menu bar app.")
+                )
+                .frame(width: 620, height: 440)
             }
         }
         .defaultSize(width: 680, height: 520)

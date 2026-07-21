@@ -421,6 +421,96 @@ struct HypervibeResponseMapperTests {
     }
 
     @Test
+    func hostingVariablesKeepOnlyNamesAndMaskedValues() throws {
+        let data = Data(
+            """
+            {
+              "ok": true,
+              "data": {
+                "environment": "production",
+                "service": "web",
+                "masked": true,
+                "vars": {
+                  "SENDGRID_API_KEY": "SG**********yz",
+                  "DATABASE_URL": "po**********db"
+                },
+                "raw": "sentinel-secret-value"
+              }
+            }
+            """.utf8
+        )
+
+        let catalog = try HypervibeResponseMapper.decodeHostingVariables(data)
+
+        #expect(catalog.environment == "production")
+        #expect(catalog.service == "web")
+        #expect(catalog.variables.map(\.name) == ["DATABASE_URL", "SENDGRID_API_KEY"])
+        #expect(catalog.variables.last?.maskedValue == "SG**********yz")
+        #expect(!String(decoding: try JSONEncoder().encode(catalog), as: UTF8.self)
+            .contains("sentinel-secret-value"))
+    }
+
+    @Test
+    func hostingVariableMutationMapsOnlySafeReceiptFields() throws {
+        let data = Data(
+            """
+            {
+              "ok": true,
+              "data": {
+                "environment": "staging",
+                "service": "worker",
+                "variables": ["API_KEY"],
+                "valueSource": "dotenv",
+                "providerReceipt": { "value": "sentinel-secret-value" }
+              },
+              "warnings": ["sentinel-secret-value"]
+            }
+            """.utf8
+        )
+
+        let result = try HypervibeResponseMapper.decodeHostingVariableMutation(data)
+
+        #expect(result.environment == "staging")
+        #expect(result.service == "worker")
+        #expect(result.variables == ["API_KEY"])
+        #expect(result.valueSource == "dotenv")
+        #expect(!String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
+            .contains("sentinel-secret-value"))
+    }
+
+    @Test
+    func hostingVariableRequestBuildsDirectReferenceAndGeneratedArguments() {
+        let direct = HostingVariableRequest(
+            environment: "production",
+            service: "web",
+            key: " SESSION_SECRET ",
+            source: .direct("secret value")
+        ).toolArguments(projectName: "invoice-perfect")
+        #expect(direct["project"]?.stringValue == "invoice-perfect")
+        #expect(direct["target"]?.stringValue == "hosting")
+        #expect(direct["key"]?.stringValue == "SESSION_SECRET")
+        #expect(direct["value"]?.stringValue == "secret value")
+
+        let reference = HostingVariableRequest(
+            environment: "staging",
+            service: "worker",
+            key: "API_KEY",
+            source: .reference(" dotenv:/tmp/.env#API_KEY ")
+        ).toolArguments(projectName: "invoice-perfect")
+        #expect(reference["secretRef"]?.stringValue == "dotenv:/tmp/.env#API_KEY")
+        #expect(reference["value"] == nil)
+
+        let generated = HostingVariableRequest(
+            environment: "staging",
+            service: "web",
+            key: "SESSION_SECRET",
+            source: .generated(length: 64)
+        ).toolArguments(projectName: "invoice-perfect")
+        #expect(generated["generate"]?.boolValue == true)
+        #expect(generated["generateLength"]?.intValue == 64)
+    }
+
+    @Test
     func upgradeStatusBlocksPendingMigrations() {
         let data = Data(
             """

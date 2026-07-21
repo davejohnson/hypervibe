@@ -21,6 +21,8 @@ The current v0 slice contains:
   `hv_connections_list`;
 - project-scoped provider add, verify, and remove through the existing
   `hv_connect` MCP tool;
+- masked runtime-variable inventory plus add and replace for deployable
+  services through `hv_secrets_get` and `hv_secrets_set`;
 - an app-owned project registry and disposable, strictly typed snapshot cache.
 
 The person installing the app does not need Node.js, npm, or a separate
@@ -33,6 +35,14 @@ to the snapshot cache. Credentials entered in the connection window remain in
 form memory only, are passed once to `hv_connect`, and are cleared when the
 form succeeds or closes. Hypervibe performs validation, verification,
 encryption, storage, and auditing.
+
+Runtime-variable values returned to the companion are always masked and are
+not written to its snapshot cache. A value pasted into the add-variable form
+is held only in SwiftUI form state, passed once over the project's local MCP
+session, and cleared when the form succeeds or closes. The form also supports
+local `env:`, `dotenv:`, and `file:` references and server-generated values.
+Removing a desired variable remains a spec/plan/apply operation so durable
+configuration is not silently deleted outside Hypervibe's reconciliation loop.
 
 ## Install and connect
 

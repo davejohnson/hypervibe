@@ -167,6 +167,15 @@ struct ProjectDashboardView: View {
                                 )
                             }
                             Spacer()
+                            if environment.resources.contains(where: { $0.kind == .service }) {
+                                Button {
+                                    showVariables(environment: environment.name)
+                                } label: {
+                                    Label("Variables", systemImage: "key")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Manage runtime variables and secrets")
+                            }
                         }
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -229,6 +238,19 @@ struct ProjectDashboardView: View {
         return drifted
             .map { "\($0.name): \($0.actionType) pending on \($0.provider)" }
             .joined(separator: "\n")
+    }
+
+    private func showVariables(environment: String, service: String? = nil) {
+        let menuPanel = NSApplication.shared.keyWindow
+        openWindow(
+            id: "variables",
+            value: VariableWindowRoute(
+                projectID: project.id,
+                environment: environment,
+                service: service
+            )
+        )
+        menuPanel?.orderOut(nil)
     }
 
     private func environmentExpansion(_ environment: String) -> Binding<Bool> {

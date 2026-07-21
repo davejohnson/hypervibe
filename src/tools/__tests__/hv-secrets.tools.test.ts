@@ -16,6 +16,8 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { createToolContext } from '../context.js';
 import { registerHvSecretsTools } from '../hv-secrets.tools.js';
+import { SpecStore } from '../../domain/spec/spec.store.js';
+import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 
 let tempDir: string;
 
@@ -26,6 +28,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env.COMPANION_TEST_API_KEY;
   vi.restoreAllMocks();
   SqliteAdapter.resetInstance();
   rmSync(tempDir, { recursive: true, force: true });
@@ -188,6 +191,98 @@ describe('hv_secrets_set target=hosting value sources', () => {
     new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
     return project;
   }
+
+  it('uses repo-backed desired service metadata when the local service cache is empty', async () => {
+    const project = new ProjectRepository().create({
+      name: 'repo-backed-secrets-app',
+      defaultPlatform: 'cloudrun',
+    });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'cloudrun' },
+          services: { worker: { workloadKind: 'worker', startCommand: 'npm run worker' } },
+        },
+      },
+    });
+    vi.spyOn(SpecStore.prototype, 'get').mockReturnValue({ spec, revision: 1 });
+    const sync = vi.spyOn(hostingEnv, 'syncHostingEnvVars').mockResolvedValue({ success: true, message: 'ok' });
+
+    const t = await makeClient();
+    const result = await t.call('hv_secrets_set', {
+      project: project.name,
+      env: 'production',
+      service: 'worker',
+      key: 'API_KEY',
+      secretRef: 'env:COMPANION_TEST_API_KEY',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(sync).not.toHaveBeenCalled();
+
+    process.env.COMPANION_TEST_API_KEY = 'from-local-environment';
+    const retry = await t.call('hv_secrets_set', {
+      project: project.name,
+      env: 'production',
+      service: 'worker',
+      key: 'API_KEY',
+      secretRef: 'env:COMPANION_TEST_API_KEY',
+    });
+    delete process.env.COMPANION_TEST_API_KEY;
+
+    expect(retry.ok).toBe(true);
+    expect(sync).toHaveBeenCalledWith(expect.objectContaining({
+      service: expect.objectContaining({
+        name: 'worker',
+        buildConfig: expect.objectContaining({ workloadKind: 'worker' }),
+      }),
+      vars: { API_KEY: 'from-local-environment' },
+    }));
+    await t.close();
+  });
+
+  it('reads hosting variables using repo-backed service metadata on a fresh local cache', async () => {
+    const project = new ProjectRepository().create({
+      name: 'repo-backed-secrets-read-app',
+      defaultPlatform: 'railway',
+    });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { workloadKind: 'web' } },
+        },
+      },
+    });
+    vi.spyOn(SpecStore.prototype, 'get').mockReturnValue({ spec, revision: 1 });
+    const read = vi.spyOn(hostingEnv, 'readHostingEnvVars').mockResolvedValue({
+      success: true,
+      provider: 'railway',
+      variables: { API_KEY: 'provider-secret-value' },
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_secrets_get', {
+      project: project.name,
+      env: 'staging',
+      service: 'web',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.vars).toEqual({ API_KEY: 'pr************ue' });
+    expect(JSON.stringify(result)).not.toContain('provider-secret-value');
+    expect(read).toHaveBeenCalledWith(expect.objectContaining({
+      service: expect.objectContaining({ name: 'web', projectId: project.id }),
+    }));
+    await t.close();
+  });
 
   it('warns loudly when a raw value is passed through chat', async () => {
     seedHostingProject();
