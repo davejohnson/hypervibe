@@ -43,4 +43,11 @@ enum CompanionDistribution {
 
     static let installationGuidance =
         "Move Hypervibe to Applications, reopen it there, then connect your coding agent."
+
+    static var onboardingGuidance: String {
+        guard includesBundledServer else {
+            return "This development build does not include the bundled MCP runtime. Install the packaged Hypervibe app in Applications to enable Connect."
+        }
+        return installationGuidance
+    }
 }

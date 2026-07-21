@@ -128,9 +128,8 @@ struct CompanionSettingsView: View {
     }
 
     private func hostStatusText(_ host: MCPHost) -> String {
-        if CompanionDistribution.includesBundledServer,
-            !CompanionDistribution.hasStableInstallationPath {
-            return CompanionDistribution.installationGuidance
+        if !CompanionDistribution.isReadyForOnboarding {
+            return CompanionDistribution.onboardingGuidance
         }
         if let error = model.mcpHostErrors[host] {
             return error
