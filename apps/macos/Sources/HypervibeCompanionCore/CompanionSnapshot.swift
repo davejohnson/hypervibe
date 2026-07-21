@@ -61,6 +61,54 @@ public struct ResourceSummary: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public enum ServiceLiveStatus: String, Codable, Equatable, Sendable {
+    case running
+    case failed
+    case empty
+    case unknown
+}
+
+public struct ServiceObservation: Codable, Equatable, Sendable {
+    public let name: String
+    public let status: ServiceLiveStatus
+    public let url: URL?
+    public let customDomains: [String]
+
+    public init(
+        name: String,
+        status: ServiceLiveStatus,
+        url: URL?,
+        customDomains: [String]
+    ) {
+        self.name = name
+        self.status = status
+        self.url = url
+        self.customDomains = customDomains
+    }
+
+    /// Custom domain when one is attached, otherwise the provider URL.
+    public var preferredURL: URL? {
+        PublicServiceEndpoint.preferredURL(
+            customDomains: customDomains,
+            fallbackURL: url
+        )
+    }
+}
+
+public struct DriftedResource: Codable, Equatable, Sendable {
+    public let kind: String
+    public let name: String
+    public let actionType: String
+    public let provider: String
+
+    public init(kind: String, name: String, actionType: String, provider: String) {
+        self.kind = kind
+        self.name = name
+        self.actionType = actionType
+        self.provider = provider
+    }
+}
+
 public struct ObservationSummary: Codable, Equatable, Sendable {
     public let health: EnvironmentHealth
     public let verified: Bool
@@ -69,6 +117,9 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
     public let blockedProviders: [String]
     public let latestAttemptAt: Date
     public let latestSuccessfulAt: Date?
+    // Optional so snapshots cached by older companion builds still decode.
+    public let services: [ServiceObservation]?
+    public let driftedResources: [DriftedResource]?
 
     public init(
         health: EnvironmentHealth,
@@ -77,7 +128,9 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
         unmanagedCount: Int,
         blockedProviders: [String],
         latestAttemptAt: Date,
-        latestSuccessfulAt: Date?
+        latestSuccessfulAt: Date?,
+        services: [ServiceObservation]? = nil,
+        driftedResources: [DriftedResource]? = nil
     ) {
         self.health = health
         self.verified = verified
@@ -86,6 +139,49 @@ public struct ObservationSummary: Codable, Equatable, Sendable {
         self.blockedProviders = blockedProviders
         self.latestAttemptAt = latestAttemptAt
         self.latestSuccessfulAt = latestSuccessfulAt
+        self.services = services
+        self.driftedResources = driftedResources
+    }
+
+    public func service(named name: String) -> ServiceObservation? {
+        services?.first { $0.name == name }
+    }
+
+    public func driftedResource(matching resource: ResourceSummary) -> DriftedResource? {
+        guard let driftedResources else { return nil }
+        if let exactMatch = driftedResources.first(where: {
+            $0.kind == resource.kind.rawValue && $0.name == resource.name
+        }) {
+            return exactMatch
+        }
+
+        // These desired-state rows are singletons, while hv_status actions use
+        // provider-specific names such as the database engine or CI workflow.
+        switch resource.kind {
+        case .database, .ci, .ios:
+            return driftedResources.first { $0.kind == resource.kind.rawValue }
+        default:
+            return nil
+        }
+    }
+}
+
+public enum AggregateHealth {
+    public static func needsAttention(
+        snapshots: [ProjectSnapshot],
+        hasRefreshFailure: Bool
+    ) -> Bool {
+        if hasRefreshFailure { return true }
+        return snapshots.contains { snapshot in
+            snapshot.environments.contains { environment in
+                switch environment.observation?.health {
+                case .drifted, .blocked, .failed:
+                    return true
+                default:
+                    return false
+                }
+            }
+        }
     }
 }
 
@@ -229,7 +325,9 @@ public struct ProjectSnapshot: Codable, Equatable, Sendable {
                         unmanagedCount: observation.unmanagedCount,
                         blockedProviders: observation.blockedProviders,
                         latestAttemptAt: observation.latestAttemptAt,
-                        latestSuccessfulAt: observation.latestSuccessfulAt
+                        latestSuccessfulAt: observation.latestSuccessfulAt,
+                        services: observation.services,
+                        driftedResources: observation.driftedResources
                     )
                 )
             },

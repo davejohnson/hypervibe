@@ -141,6 +141,7 @@ vite.config.ts.timestamp-*
 # Project-specific
 .devbox/
 **/.build/
+/build/macos/
 data/*.db
 data/*.db-journal
 data/*.db-shm

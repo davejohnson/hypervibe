@@ -15,7 +15,7 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
     case schemaMigrationRequired
     case missingStructuredContent(String)
     case malformedResponse(String)
-    case tool(code: String, message: String)
+    case tool(code: String, message: String, hint: String?)
 
     public var errorDescription: String? {
         switch self {
@@ -35,21 +35,16 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
             return "\(tool) returned no structured response."
         case .malformedResponse(let message):
             return message
-        case .tool(_, let message):
+        case .tool(_, let message, let hint):
+            if let hint, !hint.isEmpty {
+                return "\(message)\n\n\(hint)"
+            }
             return message
         }
     }
 }
 
 public actor HypervibeMCPClient {
-    private static let requiredTools = [
-        "hv_upgrade",
-        "hv_spec_get",
-        "hv_status",
-        "hv_runs",
-        "hv_connections_list",
-    ]
-
     private let encoder = JSONEncoder()
 
     public init() {}
@@ -58,6 +53,217 @@ public actor HypervibeMCPClient {
         project: CompanionProject,
         previous: ProjectSnapshot? = nil
     ) async throws -> CompanionRefresh {
+        try await withSession(
+            project: project,
+            requiredTools: ["hv_spec_get", "hv_status", "hv_runs", "hv_connections_list"]
+        ) { client in
+            let specData = try await self.call(
+                client: client,
+                tool: "hv_spec_get",
+                arguments: [:]
+            )
+            let topology = try HypervibeResponseMapper.decodeTopology(specData)
+            let enabled = project.enabledEnvironments.map(Set.init)
+            let selectedEnvironments = topology.environments.filter {
+                enabled?.contains($0.name) ?? true
+            }
+            let attemptedAt = Date()
+            var environments: [EnvironmentSnapshot] = []
+
+            for environment in selectedEnvironments {
+                let previousObservation = previous?.environments
+                    .first(where: { $0.name == environment.name })?
+                    .observation
+                let observation: ObservationSummary
+                do {
+                    let statusData = try await self.call(
+                        client: client,
+                        tool: "hv_status",
+                        arguments: [
+                            "project": .string(topology.projectName),
+                            "env": .string(environment.name),
+                        ]
+                    )
+                    observation = try HypervibeResponseMapper.decodeObservation(
+                        statusData,
+                        attemptedAt: attemptedAt,
+                        previous: previousObservation
+                    )
+                } catch {
+                    observation = HypervibeResponseMapper.failedObservation(
+                        attemptedAt: attemptedAt,
+                        previous: previousObservation
+                    )
+                }
+
+                environments.append(
+                    EnvironmentSnapshot(
+                        name: environment.name,
+                        specRevision: topology.specRevision,
+                        resources: environment.resources,
+                        observation: observation
+                    )
+                )
+            }
+
+            let runsData = try await self.call(
+                client: client,
+                tool: "hv_runs",
+                arguments: [
+                    "action": "list",
+                    "project": .string(topology.projectName),
+                    "limit": 10,
+                ]
+            )
+            let runs = try HypervibeResponseMapper.decodeRuns(runsData)
+            let connectionsData = try await self.call(
+                client: client,
+                tool: "hv_connections_list",
+                arguments: [:]
+            )
+            let connections = try HypervibeResponseMapper.decodeConnections(connectionsData)
+            return CompanionRefresh(
+                snapshot: ProjectSnapshot(
+                    projectID: project.id,
+                    projectName: topology.projectName,
+                    generatedAt: attemptedAt,
+                    environments: environments,
+                    recentRuns: runs
+                ),
+                connections: connections
+            )
+        }
+    }
+
+    public func connectionCatalog(project: CompanionProject) async throws -> ConnectionCatalog {
+        try await withSession(project: project, requiredTools: ["hv_connections_list"]) { client in
+            let data = try await self.call(
+                client: client,
+                tool: "hv_connections_list",
+                arguments: [:]
+            )
+            return try HypervibeResponseMapper.decodeConnectionCatalog(data)
+        }
+    }
+
+    public func addConnection(
+        project: CompanionProject,
+        request: ConnectionRequest
+    ) async throws -> ConnectionMutationResult {
+        try await connectionMutation(
+            project: project,
+            arguments: request.toolArguments()
+        )
+    }
+
+    public func verifyConnection(
+        project: CompanionProject,
+        provider: String,
+        scope: String? = nil
+    ) async throws -> ConnectionMutationResult {
+        try await connectionMutation(
+            project: project,
+            arguments: mutationArguments(action: "verify", provider: provider, scope: scope)
+        )
+    }
+
+    public func removeConnection(
+        project: CompanionProject,
+        provider: String,
+        scope: String? = nil
+    ) async throws -> ConnectionMutationResult {
+        try await connectionMutation(
+            project: project,
+            arguments: mutationArguments(action: "remove", provider: provider, scope: scope)
+        )
+    }
+
+    public func hostingVariables(
+        project: CompanionProject,
+        targets: [HostingVariableTarget]
+    ) async throws -> HostingVariableInventory {
+        try await withSession(project: project, requiredTools: ["hv_secrets_get"]) { client in
+            var catalogs: [HostingVariableTarget: HostingVariableCatalog] = [:]
+            var failures: [HostingVariableTarget: String] = [:]
+            for target in targets {
+                do {
+                    let data = try await self.call(
+                        client: client,
+                        tool: "hv_secrets_get",
+                        arguments: [
+                            "project": .string(project.displayName),
+                            "env": .string(target.environment),
+                            "service": .string(target.service),
+                        ]
+                    )
+                    catalogs[target] = try HypervibeResponseMapper.decodeHostingVariables(data)
+                } catch {
+                    failures[target] = Self.variableFailureMessage(error)
+                }
+            }
+            return HostingVariableInventory(catalogs: catalogs, failures: failures)
+        }
+    }
+
+    public func setHostingVariable(
+        project: CompanionProject,
+        request: HostingVariableRequest
+    ) async throws -> HostingVariableMutationResult {
+        try await withSession(project: project, requiredTools: ["hv_secrets_set"]) { client in
+            let data = try await self.call(
+                client: client,
+                tool: "hv_secrets_set",
+                arguments: request.toolArguments(projectName: project.displayName)
+            )
+            return try HypervibeResponseMapper.decodeHostingVariableMutation(data)
+        }
+    }
+
+    private func connectionMutation(
+        project: CompanionProject,
+        arguments: [String: Value]
+    ) async throws -> ConnectionMutationResult {
+        try await withSession(project: project, requiredTools: ["hv_connect"]) { client in
+            let data = try await self.call(
+                client: client,
+                tool: "hv_connect",
+                arguments: arguments
+            )
+            return try HypervibeResponseMapper.decodeConnectionMutation(data)
+        }
+    }
+
+    private func mutationArguments(
+        action: String,
+        provider: String,
+        scope: String?
+    ) -> [String: Value] {
+        var arguments: [String: Value] = [
+            "action": .string(action),
+            "provider": .string(provider),
+        ]
+        if let scope = scope?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !scope.isEmpty,
+            scope.caseInsensitiveCompare("global") != .orderedSame {
+            arguments["scope"] = .string(scope)
+        }
+        return arguments
+    }
+
+    private static func variableFailureMessage(_ error: Error) -> String {
+        if let localized = error as? LocalizedError,
+            let description = localized.errorDescription,
+            !description.isEmpty {
+            return description
+        }
+        return "Hypervibe could not read this target."
+    }
+
+    private func withSession<Result: Sendable>(
+        project: CompanionProject,
+        requiredTools: [String],
+        operation: (Client) async throws -> Result
+    ) async throws -> Result {
         let repositoryURL = URL(fileURLWithPath: project.repositoryPath)
             .standardizedFileURL
         var isDirectory: ObjCBool = false
@@ -118,7 +324,7 @@ public actor HypervibeMCPClient {
             _ = try await client.connect(transport: transport)
             let (tools, _) = try await client.listTools()
             let names = Set(tools.map(\.name))
-            let missing = Self.requiredTools.filter { !names.contains($0) }
+            let missing = (["hv_upgrade"] + requiredTools).filter { !names.contains($0) }
             if !missing.isEmpty {
                 throw HypervibeClientError.incompatibleTools(missing)
             }
@@ -129,87 +335,9 @@ public actor HypervibeMCPClient {
                 arguments: ["action": "status"]
             )
             try HypervibeResponseMapper.decodeUpgradeStatus(upgradeData)
-
-            let specData = try await call(
-                client: client,
-                tool: "hv_spec_get",
-                arguments: [:]
-            )
-            let topology = try HypervibeResponseMapper.decodeTopology(specData)
-            let enabled = project.enabledEnvironments.map(Set.init)
-            let selectedEnvironments = topology.environments.filter {
-                enabled?.contains($0.name) ?? true
-            }
-            let attemptedAt = Date()
-            var environments: [EnvironmentSnapshot] = []
-
-            for environment in selectedEnvironments {
-                let previousObservation = previous?.environments
-                    .first(where: { $0.name == environment.name })?
-                    .observation
-                let observation: ObservationSummary
-                do {
-                    let statusData = try await call(
-                        client: client,
-                        tool: "hv_status",
-                        arguments: [
-                            "project": .string(topology.projectName),
-                            "env": .string(environment.name),
-                        ]
-                    )
-                    observation = try HypervibeResponseMapper.decodeObservation(
-                        statusData,
-                        attemptedAt: attemptedAt,
-                        previous: previousObservation
-                    )
-                } catch {
-                    observation = HypervibeResponseMapper.failedObservation(
-                        attemptedAt: attemptedAt,
-                        previous: previousObservation
-                    )
-                }
-
-                environments.append(
-                    EnvironmentSnapshot(
-                        name: environment.name,
-                        specRevision: topology.specRevision,
-                        resources: environment.resources,
-                        observation: observation
-                    )
-                )
-            }
-
-            let runsData = try await call(
-                client: client,
-                tool: "hv_runs",
-                arguments: [
-                    "action": "list",
-                    "project": .string(topology.projectName),
-                    "limit": 10,
-                ]
-            )
-            let runs = try HypervibeResponseMapper.decodeRuns(runsData)
-            let connectionsData = try await call(
-                client: client,
-                tool: "hv_connections_list",
-                arguments: [:]
-            )
-            let connections = try HypervibeResponseMapper.decodeConnections(
-                connectionsData
-            )
-            let snapshot = ProjectSnapshot(
-                projectID: project.id,
-                projectName: topology.projectName,
-                generatedAt: attemptedAt,
-                environments: environments,
-                recentRuns: runs
-            )
-
+            let result = try await operation(client)
             await stop(client: client, process: process, input: serverInput, output: serverOutput)
-            return CompanionRefresh(
-                snapshot: snapshot,
-                connections: connections
-            )
+            return result
         } catch {
             await stop(client: client, process: process, input: serverInput, output: serverOutput)
             if !process.isRunning, process.terminationStatus != 0,

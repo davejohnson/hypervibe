@@ -62,8 +62,28 @@ enum HypervibeResponseMapper {
             blockedProviders: blockedProviders,
             latestAttemptAt: attemptedAt,
             latestSuccessfulAt: payload.verified
-                ? attemptedAt
-                : previous?.latestSuccessfulAt
+                ? parseDate(payload.observedAt) ?? attemptedAt
+                : previous?.latestSuccessfulAt,
+            services: payload.services?.map { service in
+                ServiceObservation(
+                    name: service.name,
+                    status: ServiceLiveStatus(rawValue: service.status) ?? .unknown,
+                    url: PublicServiceEndpoint.originURL(from: service.url),
+                    customDomains: PublicServiceEndpoint.hostnames(
+                        from: service.customDomains ?? []
+                    )
+                )
+            },
+            driftedResources: payload.drift.compactMap { action in
+                action.resource.map { resource in
+                    DriftedResource(
+                        kind: resource.kind,
+                        name: resource.name,
+                        actionType: action.type ?? "change",
+                        provider: resource.provider
+                    )
+                }
+            }
         )
     }
 
@@ -78,7 +98,9 @@ enum HypervibeResponseMapper {
             unmanagedCount: previous?.unmanagedCount ?? 0,
             blockedProviders: previous?.blockedProviders ?? [],
             latestAttemptAt: attemptedAt,
-            latestSuccessfulAt: previous?.latestSuccessfulAt
+            latestSuccessfulAt: previous?.latestSuccessfulAt,
+            services: previous?.services,
+            driftedResources: previous?.driftedResources
         )
     }
 
@@ -101,6 +123,10 @@ enum HypervibeResponseMapper {
     }
 
     static func decodeConnections(_ data: Data) throws -> [ConnectionSummary] {
+        try decodeConnectionCatalog(data).connections
+    }
+
+    static func decodeConnectionCatalog(_ data: Data) throws -> ConnectionCatalog {
         let envelope: ToolEnvelope<ConnectionsToolData> = try decodeEnvelope(data)
         guard let payload = envelope.data else {
             throw HypervibeClientError.malformedResponse(
@@ -108,7 +134,7 @@ enum HypervibeResponseMapper {
             )
         }
 
-        return payload.connections
+        let connections = payload.connections
             .map { connection in
                 ConnectionSummary(
                     provider: connection.provider,
@@ -125,6 +151,109 @@ enum HypervibeResponseMapper {
                 return $0.provider.localizedCaseInsensitiveCompare($1.provider)
                     == .orderedAscending
             }
+
+        let providers = payload.availableProviders.flatMap { category, entries in
+            entries.map { entry in
+                let links = setupLinks(for: entry)
+                return ProviderCatalogEntry(
+                    name: entry.name,
+                    displayName: entry.displayName ?? entry.name,
+                    category: category,
+                    setupLinks: links,
+                    tokenType: entry.tokenType,
+                    requiredPermissions: entry.requiredPermissions ?? [],
+                    notes: entry.notes ?? [],
+                    credentialFields: entry.credentialFields?.map { field in
+                        CredentialField(
+                            name: field.name,
+                            label: field.label ?? field.name,
+                            required: field.required ?? false,
+                            sensitive: field.sensitive ?? true,
+                            inputKind: CredentialInputKind(rawValue: field.inputKind ?? "secret") ?? .secret,
+                            options: field.options ?? [],
+                            description: field.description
+                        )
+                    },
+                    defaultScalarKey: entry.defaultScalarKey
+                )
+            }
+        }.sorted {
+            if $0.category == $1.category {
+                return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+            }
+            return $0.category.localizedCaseInsensitiveCompare($1.category) == .orderedAscending
+        }
+
+        return ConnectionCatalog(connections: connections, providers: providers)
+    }
+
+    static func decodeConnectionMutation(_ data: Data) throws -> ConnectionMutationResult {
+        let envelope: ToolEnvelope<ConnectionMutationToolData> = try decodeEnvelope(data)
+        guard let payload = envelope.data else {
+            throw HypervibeClientError.malformedResponse("hv_connect returned no data.")
+        }
+        let removed = payload.removed ?? false
+        let status = removed
+            ? ConnectionStatus.unknown
+            : ConnectionStatus(rawValue: payload.status ?? "") ?? .unknown
+        let message = payload.message
+            ?? (removed ? "\(payload.provider) connection removed." : "\(payload.provider) connection updated.")
+        let identity = payload.identity
+            ?? payload.login
+            ?? payload.email
+            ?? payload.accountId
+            ?? payload.workspaceId
+            ?? payload.version
+        return ConnectionMutationResult(
+            provider: payload.provider,
+            scope: payload.scope ?? "global",
+            status: status,
+            message: message,
+            identity: identity,
+            warnings: envelope.warnings ?? [],
+            removed: removed
+        )
+    }
+
+    static func decodeHostingVariables(_ data: Data) throws -> HostingVariableCatalog {
+        let envelope: ToolEnvelope<HostingVariablesToolData> = try decodeEnvelope(data)
+        guard let payload = envelope.data else {
+            throw HypervibeClientError.malformedResponse("hv_secrets_get returned no data.")
+        }
+        let variables = payload.vars.map { name, maskedValue in
+            HostingVariableSummary(name: name, maskedValue: maskedValue)
+        }.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        return HostingVariableCatalog(
+            environment: payload.environment,
+            service: payload.service,
+            variables: variables
+        )
+    }
+
+    static func decodeHostingVariableMutation(
+        _ data: Data
+    ) throws -> HostingVariableMutationResult {
+        let envelope: ToolEnvelope<HostingVariableMutationToolData> = try decodeEnvelope(data)
+        guard let payload = envelope.data else {
+            throw HypervibeClientError.malformedResponse("hv_secrets_set returned no data.")
+        }
+        let destinations: [HostingVariableTarget]
+        if let explicit = payload.destinations, !explicit.isEmpty {
+            destinations = explicit
+        } else if let environment = payload.environment, let service = payload.service {
+            destinations = [HostingVariableTarget(environment: environment, service: service)]
+        } else {
+            throw HypervibeClientError.malformedResponse(
+                "hv_secrets_set returned no destination receipt."
+            )
+        }
+        return HostingVariableMutationResult(
+            destinations: destinations,
+            variables: payload.variables.sorted(),
+            valueSource: payload.valueSource
+        )
     }
 
     static func decodeUpgradeStatus(_ data: Data) throws {
@@ -144,10 +273,28 @@ enum HypervibeResponseMapper {
         if !envelope.ok {
             throw HypervibeClientError.tool(
                 code: envelope.error?.code ?? "UNKNOWN",
-                message: envelope.error?.message ?? "Hypervibe returned an unknown error."
+                message: envelope.error?.message ?? "Hypervibe returned an unknown error.",
+                hint: envelope.hint
             )
         }
         return envelope
+    }
+
+    private static func setupLinks(for entry: ConnectionsToolData.Provider) -> [ProviderSetupLink] {
+        var links: [ProviderSetupLink] = []
+        var seen = Set<String>()
+        for link in entry.setupHelpUrls ?? [] {
+            guard let url = URL(string: link.url), seen.insert(url.absoluteString).inserted else {
+                continue
+            }
+            links.append(ProviderSetupLink(label: link.label, url: url))
+        }
+        if let rawURL = entry.setupHelpUrl,
+            let url = URL(string: rawURL),
+            seen.insert(url.absoluteString).inserted {
+            links.append(ProviderSetupLink(label: "Setup guide", url: url))
+        }
+        return links
     }
 
     private static func resources(
@@ -272,6 +419,8 @@ private struct ToolEnvelope<Payload: Decodable>: Decodable {
     let ok: Bool
     let data: Payload?
     let error: ToolError?
+    let hint: String?
+    let warnings: [String]?
 }
 
 private struct ToolError: Decodable {
@@ -378,10 +527,12 @@ private typealias IOS = DesiredEnvironment.IOS
 private struct StatusToolData: Decodable {
     let verified: Bool
     let inSync: Bool
-    let drift: CountedItems
+    let drift: [DriftAction]
     let unmanaged: CountedItems
     let blocked: [Block]
     let inputRequired: CountedItems
+    let observedAt: String?
+    let services: [Service]?
 
     private enum CodingKeys: String, CodingKey {
         case verified
@@ -390,14 +541,15 @@ private struct StatusToolData: Decodable {
         case unmanaged
         case blocked
         case inputRequired
+        case observedAt
+        case services
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         verified = try container.decode(Bool.self, forKey: .verified)
         inSync = try container.decode(Bool.self, forKey: .inSync)
-        drift = try container.decodeIfPresent(CountedItems.self, forKey: .drift)
-            ?? CountedItems()
+        drift = try container.decodeIfPresent([DriftAction].self, forKey: .drift) ?? []
         unmanaged = try container.decodeIfPresent(
             CountedItems.self,
             forKey: .unmanaged
@@ -407,10 +559,30 @@ private struct StatusToolData: Decodable {
             CountedItems.self,
             forKey: .inputRequired
         ) ?? CountedItems()
+        observedAt = try container.decodeIfPresent(String.self, forKey: .observedAt)
+        services = try container.decodeIfPresent([Service].self, forKey: .services)
     }
 
     struct Block: Decodable {
         let provider: String
+    }
+
+    struct DriftAction: Decodable {
+        let type: String?
+        let resource: Resource?
+
+        struct Resource: Decodable {
+            let kind: String
+            let name: String
+            let provider: String
+        }
+    }
+
+    struct Service: Decodable {
+        let name: String
+        let status: String
+        let url: String?
+        let customDomains: [String]?
     }
 }
 
@@ -437,6 +609,21 @@ private struct UpgradeToolData: Decodable {
 
 private struct ConnectionsToolData: Decodable {
     let connections: [Connection]
+    let availableProviders: [String: [Provider]]
+
+    private enum CodingKeys: String, CodingKey {
+        case connections
+        case availableProviders
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        connections = try container.decodeIfPresent([Connection].self, forKey: .connections) ?? []
+        availableProviders = try container.decodeIfPresent(
+            [String: [Provider]].self,
+            forKey: .availableProviders
+        ) ?? [:]
+    }
 
     struct Connection: Decodable {
         let provider: String
@@ -444,6 +631,61 @@ private struct ConnectionsToolData: Decodable {
         let status: String
         let lastVerifiedAt: String?
     }
+
+    struct Provider: Decodable {
+        let name: String
+        let displayName: String?
+        let setupHelpUrl: String?
+        let setupHelpUrls: [SetupLink]?
+        let tokenType: String?
+        let requiredPermissions: [String]?
+        let notes: [String]?
+        let credentialFields: [Field]?
+        let defaultScalarKey: String?
+    }
+
+    struct SetupLink: Decodable {
+        let label: String
+        let url: String
+    }
+
+    struct Field: Decodable {
+        let name: String
+        let label: String?
+        let required: Bool?
+        let sensitive: Bool?
+        let inputKind: String?
+        let options: [String]?
+        let description: String?
+    }
+}
+
+private struct ConnectionMutationToolData: Decodable {
+    let provider: String
+    let scope: String?
+    let status: String?
+    let message: String?
+    let identity: String?
+    let login: String?
+    let email: String?
+    let accountId: String?
+    let workspaceId: String?
+    let version: String?
+    let removed: Bool?
+}
+
+private struct HostingVariablesToolData: Decodable {
+    let environment: String
+    let service: String
+    let vars: [String: String]
+}
+
+private struct HostingVariableMutationToolData: Decodable {
+    let environment: String?
+    let service: String?
+    let destinations: [HostingVariableTarget]?
+    let variables: [String]
+    let valueSource: String
 }
 
 private struct IgnoredObject: Decodable {

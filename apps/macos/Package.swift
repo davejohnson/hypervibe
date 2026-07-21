@@ -16,6 +16,10 @@ let package = Package(
             name: "HypervibeCompanion",
             targets: ["HypervibeCompanion"]
         ),
+        .executable(
+            name: "HypervibeMCPLauncher",
+            targets: ["HypervibeMCPLauncher"]
+        ),
     ],
     dependencies: [
         .package(
@@ -38,6 +42,9 @@ let package = Package(
         .executableTarget(
             name: "HypervibeCompanion",
             dependencies: ["HypervibeCompanionCore"]
+        ),
+        .executableTarget(
+            name: "HypervibeMCPLauncher"
         ),
         .testTarget(
             name: "HypervibeCompanionCoreTests",

@@ -59,6 +59,7 @@ struct CompanionMenuView: View {
                 }
                 .labelsHidden()
                 .frame(maxWidth: 250)
+                .clickTargetCursor()
             }
 
             Spacer()
@@ -84,6 +85,7 @@ struct CompanionMenuView: View {
                 showProjectSetup()
             }
             .buttonStyle(.borderedProminent)
+            .clickTargetCursor()
         }
     }
 
@@ -96,6 +98,7 @@ struct CompanionMenuView: View {
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
+            .clickTargetCursor()
             .disabled(
                 model.selectedProject == nil
                     || model.selectedProject.map {
@@ -108,6 +111,7 @@ struct CompanionMenuView: View {
             } label: {
                 Label("Add", systemImage: "plus")
             }
+            .clickTargetCursor()
 
             Spacer()
 
@@ -115,13 +119,13 @@ struct CompanionMenuView: View {
                 Image(systemName: "gearshape")
             }
             .help("Settings")
+            .clickTargetCursor()
 
-            Button {
+            Button("Quit") {
                 NSApplication.shared.terminate(nil)
-            } label: {
-                Image(systemName: "power")
             }
             .help("Quit Hypervibe")
+            .clickTargetCursor()
         }
         .labelStyle(.titleAndIcon)
         .padding(.horizontal, 12)

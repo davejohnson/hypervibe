@@ -13,6 +13,7 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
+import '../../adapters/providers/secretmanagers/onepassword.adapter.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../context.js';
 
@@ -381,9 +382,48 @@ describe('hv_connections_list', () => {
         displayName: 'Railway',
         tokenType: expect.stringContaining('Railway Account API token'),
         setupHelpUrl: 'https://railway.com/account/tokens',
+        defaultScalarKey: 'apiToken',
+        credentialFields: [
+          {
+            name: 'apiToken',
+            label: 'API Token',
+            required: true,
+            sensitive: true,
+            inputKind: 'secret',
+          },
+          {
+            name: 'workspaceId',
+            label: 'Workspace ID',
+            required: false,
+            sensitive: false,
+            inputKind: 'text',
+          },
+          {
+            name: 'teamId',
+            label: 'Team ID',
+            required: false,
+            sensitive: false,
+            inputKind: 'text',
+          },
+        ],
         requiredPermissions: expect.arrayContaining([
           expect.stringContaining('create projects, services, environments, variables, databases, domains, and deployments'),
         ]),
+      })
+    );
+    expect(result.data.availableProviders.secrets).toContainEqual(
+      expect.objectContaining({
+        name: '1password',
+        defaultScalarKey: 'serviceAccountToken',
+        credentialFields: [
+          {
+            name: 'serviceAccountToken',
+            label: 'Service Account Token',
+            required: true,
+            sensitive: true,
+            inputKind: 'secret',
+          },
+        ],
       })
     );
     expect(result.data.availableProviders.dns).toContainEqual(

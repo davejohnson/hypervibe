@@ -23,12 +23,20 @@ struct HypervibeMCPClientLiveTests {
             hypervibeDataDirectory: environment["HYPERVIBE_COMPANION_TEST_DATA_DIR"]
         )
 
-        let refresh = try await HypervibeMCPClient().refresh(project: project)
+        let client = HypervibeMCPClient()
+        let refresh = try await client.refresh(project: project)
         let snapshot = refresh.snapshot
 
         #expect(!snapshot.projectName.isEmpty)
         #expect(!snapshot.environments.isEmpty)
         #expect(snapshot.environments.allSatisfy { !$0.resources.isEmpty })
         #expect(refresh.connections.allSatisfy { !$0.provider.isEmpty })
+
+        let catalog = try await client.connectionCatalog(project: project)
+        #expect(!catalog.providers.isEmpty)
+        #expect(
+            catalog.providers.first { $0.name == "railway" }?
+                .credentialFields?.contains { $0.name == "apiToken" } == true
+        )
     }
 }

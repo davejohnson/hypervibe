@@ -14,6 +14,8 @@ import { connectionSetupDetails, formatConnectionGuidance } from '../domain/serv
 import { parseEnvFile } from '../utils/env-parser.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
+import type { Service } from '../domain/entities/service.entity.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
 import { splitFragment } from '../utils/split-fragment.js';
@@ -72,15 +74,56 @@ function generateSecretValue(length: number): string {
   return output;
 }
 
+function resolveHostingService(
+  ctx: ToolContext,
+  project: Project,
+  environmentName: string,
+  requestedService?: string
+): Service {
+  const storedServices = ctx.repos.services.findByProjectId(project.id);
+  const requested = requestedService?.trim();
+  const stored = requested
+    ? storedServices.find((candidate) => candidate.name === requested)
+    : storedServices[0];
+  if (stored) return stored;
+
+  // Repo-backed projects can be fully observable on a fresh machine before
+  // their disposable SQLite cache contains service rows. Build the narrow
+  // provider input from desired state without writing or adopting local state.
+  const environmentSpec = new SpecStore().get(project)?.spec.environments[environmentName];
+  const serviceName = requested || Object.keys(environmentSpec?.services ?? {})[0];
+  const serviceSpec = serviceName ? environmentSpec?.services[serviceName] : undefined;
+  if (!serviceName || !serviceSpec) {
+    throw new HvError('NOT_FOUND', requested
+      ? `Service not found: ${requested}`
+      : 'No services found.');
+  }
+
+  const timestamp = new Date(0);
+  return {
+    id: `desired:${project.id}:${serviceName}`,
+    projectId: project.id,
+    name: serviceName,
+    buildConfig: { ...serviceSpec },
+    envVarSpec: {},
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
 
 export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_secrets_set',
-    'Set secrets and environment variables. NEVER pass sensitive values via value/vars — they appear in the chat transcript; use secretRef (env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref — read locally, never enters chat) or generate=true for a new server-side random secret. target="hosting" (default) sets env vars on the deployed environment; "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time; "github" sets a GitHub Actions repo secret. remove=true deletes (mapping/github targets).',
+    'Set secrets and environment variables. NEVER pass sensitive values via value/vars — they appear in the chat transcript; use secretRef (env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref — read locally, never enters chat) or generate=true for a new server-side random secret. target="hosting" (default) sets env vars on the deployed environment; destinations explicitly shares one resolved/generated value across selected environment/service targets. "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time; "github" sets a GitHub Actions repo secret. remove=true deletes (mapping/github targets).',
     {
       project: projectField,
       env: envField,
       service: z.string().optional().describe('Service to scope hosting env vars to (default: first service)'),
+      destinations: z.array(z.object({
+        env: z.string().min(1),
+        service: z.string().min(1),
+      })).min(1).optional().describe('target=hosting: explicit environment/service destinations that should receive the same value. Omit to use env/service.'),
       target: z.enum(['hosting', 'manager', 'mapping', 'github']).optional().describe('Default "hosting"'),
       key: z.string().optional().describe('Variable/secret name'),
       value: z.string().optional().describe('Value for key. WARNING: values passed here appear in the chat transcript — prefer secretRef (reads the value locally) or generate=true (server-side random). Only use value when the secret is already exposed or not sensitive.'),
@@ -94,7 +137,27 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       repo: z.string().optional().describe('target=github: "owner/name" (defaults to project git remote)'),
       remove: z.boolean().optional().describe('Delete instead of set (mapping/github)'),
     },
-    wrapHandler(async ({ project: projectRef, env, service, target = 'hosting', key, value, generate, generateLength, vars, provider, path, secretRef, environments, repo, remove }) => {
+    wrapHandler(async ({ project: projectRef, env, service, destinations, target = 'hosting', key, value, generate, generateLength, vars, provider, path, secretRef, environments, repo, remove }) => {
+      if (destinations && target !== 'hosting') {
+        throw new HvError('VALIDATION', 'destinations is supported only for target="hosting".');
+      }
+      if (destinations && (env !== undefined || service !== undefined)) {
+        throw new HvError('VALIDATION', 'Pass destinations or env/service for target="hosting", not both.');
+      }
+      const hostingDestinations = destinations?.map((destination) => ({
+        env: destination.env.trim(),
+        service: destination.service.trim(),
+      }));
+      if (hostingDestinations?.some((destination) => !destination.env || !destination.service)) {
+        throw new HvError('VALIDATION', 'Every hosting destination requires a non-empty env and service.');
+      }
+      if (hostingDestinations) {
+        const unique = new Set(hostingDestinations.map((destination) => `${destination.env}\u0000${destination.service}`));
+        if (unique.size !== hostingDestinations.length) {
+          throw new HvError('VALIDATION', 'Hosting destinations must be unique.');
+        }
+      }
+
       // One chat-safe value pipeline for hosting/manager/github: an explicit
       // value (already in the transcript — warn), a secretRef (read locally),
       // or generate (server-side random, never shown).
@@ -113,7 +176,9 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const projectForRef = ctx.resolveProject({ project: projectRef });
         value = await resolveSecretValueRef(secretRef, {
           ...(projectForRef ? { projectId: projectForRef.id } : {}),
-          ...(env ? { environmentName: env } : {}),
+          ...(hostingDestinations?.[0]?.env || env
+            ? { environmentName: hostingDestinations?.[0]?.env ?? env }
+            : {}),
         });
       }
       const kv = vars ?? (key !== undefined && value !== undefined ? { [key]: value } : undefined);
@@ -199,25 +264,57 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
 
       // target === 'hosting'
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const environment = ctx.resolveEnvironmentOrThrow(project, env);
       if (!kv) {
         throw new HvError('VALIDATION', 'Provide key with secretRef/generate=true, or key+value / vars.', {
           hint: 'Prefer key + secretRef="dotenv:/absolute/path/.env#KEY" (value read locally) or key + generate=true (server-side random) so the value never enters chat.',
         });
       }
-      const services = ctx.repos.services.findByProjectId(project.id);
-      const targetService = service ? services.find((s) => s.name === service) : services[0];
-      if (!targetService) {
-        throw new HvError('NOT_FOUND', service ? `Service not found: ${service}` : 'No services found.');
+      const requestedDestinations = hostingDestinations ?? [{ env, service }];
+      const resolvedDestinations = requestedDestinations.map((destination) => {
+        const environment = ctx.resolveEnvironmentOrThrow(project, destination.env);
+        return {
+          environment,
+          service: resolveHostingService(ctx, project, environment.name, destination.service),
+        };
+      });
+      const applied: Array<{ environment: string; service: string }> = [];
+      for (const destination of resolvedDestinations) {
+        const result = await syncHostingEnvVars({
+          project,
+          environment: destination.environment,
+          service: destination.service,
+          vars: kv,
+        });
+        if (!result.success) {
+          const failed = `${destination.environment.name}/${destination.service.name}`;
+          const progress = applied.length > 0
+            ? ` Applied ${Object.keys(kv).join(', ')} to ${applied.map((entry) => `${entry.environment}/${entry.service}`).join(', ')} before the failure; no later destinations were attempted.`
+            : ' No destinations were changed.';
+          return toolError(
+            'PROVIDER_ERROR',
+            `Could not apply ${Object.keys(kv).join(', ')} to ${failed}: ${result.error || result.message}.${progress}`,
+            {
+              details: {
+                applied,
+                failed: {
+                  environment: destination.environment.name,
+                  service: destination.service.name,
+                },
+              },
+            }
+          );
+        }
+        applied.push({
+          environment: destination.environment.name,
+          service: destination.service.name,
+        });
       }
-      const result = await syncHostingEnvVars({ project, environment, service: targetService, vars: kv });
-      if (!result.success) {
-        return toolError('PROVIDER_ERROR', result.error || result.message, {});
-      }
+      const first = applied[0];
       return toolSuccess(
         {
-          environment: environment.name,
-          service: targetService.name,
+          environment: first.environment,
+          service: first.service,
+          destinations: applied,
           variables: Object.keys(kv),
           valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw',
         },
@@ -262,11 +359,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
 
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
-      const services = ctx.repos.services.findByProjectId(project.id);
-      const targetService = service ? services.find((s) => s.name === service) : services[0];
-      if (!targetService) {
-        throw new HvError('NOT_FOUND', service ? `Service not found: ${service}` : 'No services found.');
-      }
+      const targetService = resolveHostingService(ctx, project, environment.name, service);
       const result = await readHostingEnvVars({ project, environment, service: targetService });
       if (!result.success) {
         return toolError('PROVIDER_ERROR', result.error, {});
@@ -413,11 +506,16 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         };
 
         if (!dryRun && resolved.resolved > 0) {
-          const services = ctx.repos.services.findByProjectId(project.id);
-          const targetService = service ? services.find((s) => s.name === service) : services[0];
-          if (!targetService) {
-            entry.errors.push({ envVar: '*', error: 'No service found to set environment variables on' });
-          } else {
+          let targetService: Service | null = null;
+          try {
+            targetService = resolveHostingService(ctx, project, environment.name, service);
+          } catch (error) {
+            entry.errors.push({
+              envVar: '*',
+              error: error instanceof Error ? error.message : 'No service found to set environment variables on',
+            });
+          }
+          if (targetService) {
             const syncResult = await syncHostingEnvVars({ project, environment, service: targetService, vars: resolved.vars });
             entry.synced = syncResult.success;
             if (!syncResult.success) {

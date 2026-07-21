@@ -114,6 +114,43 @@ function normalizeGitSourceRepo(repo?: string): string | undefined {
     .toLowerCase() || undefined;
 }
 
+/** Normalize an observed service endpoint to a public http(s) origin. */
+function sanitizeServiceUrl(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw.includes('://') ? raw.trim() : `https://${raw.trim()}`);
+  } catch {
+    return undefined;
+  }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password) {
+    return undefined;
+  }
+  return url.origin;
+}
+
+function sanitizeHostname(raw: string): string | undefined {
+  const hostname = raw.trim().toLowerCase();
+  if (hostname.length === 0 || hostname.length > 253) return undefined;
+  const labels = hostname.split('.');
+  if (labels.length < 2) return undefined;
+  if (labels.some((label) => (
+    label.length === 0
+    || label.length > 63
+    || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+  ))) {
+    return undefined;
+  }
+  return hostname;
+}
+
+function sanitizeCustomDomains(domains: string[]): string[] {
+  return [...new Set(domains.flatMap((domain) => {
+    const hostname = sanitizeHostname(domain);
+    return hostname ? [hostname] : [];
+  }))];
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
@@ -459,7 +496,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_status',
-    'Show desired vs observed state for an environment: drift, unmanaged resources, and blocked connections. Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
+    'Show desired vs observed state for an environment: drift, unmanaged resources, blocked connections, and observed service endpoints (name, live status, URL, custom domains). Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
     { project: projectField, env: envField },
     wrapHandler(async ({ project: projectRef, env }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -602,6 +639,21 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           specRevision: specResult.revision,
           specSource: specResult.source ?? { kind: 'local' },
           verified: observed !== null,
+          ...(observed
+            ? {
+              observedAt: observed.observedAt,
+              services: observed.services.map((service) => {
+                const url = sanitizeServiceUrl(service.url);
+                const customDomains = sanitizeCustomDomains(service.customDomains);
+                return {
+                  name: service.name,
+                  status: service.status,
+                  ...(url ? { url } : {}),
+                  ...(customDomains.length > 0 ? { customDomains } : {}),
+                };
+              }),
+            }
+            : {}),
           inSync: drift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0,
           summary: summarizeActions([...diff.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions]),
           drift: [...drift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift],

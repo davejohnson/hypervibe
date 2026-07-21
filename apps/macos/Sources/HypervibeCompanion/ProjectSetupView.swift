@@ -21,6 +21,16 @@ struct ProjectDraft {
         let fileManager = FileManager.default
         let repository = URL(fileURLWithPath: fileManager.currentDirectoryPath)
             .standardizedFileURL
+        if CompanionDistribution.includesBundledServer {
+            return ProjectDraft(
+                displayName: repository.lastPathComponent,
+                repositoryPath: repository.path,
+                executablePath: CompanionDistribution.launcherURL.path,
+                argumentsText: "",
+                dataDirectory: ""
+            )
+        }
+
         let localServer = repository.appendingPathComponent("dist/index.js")
         let node = executable(named: "node")
         let installedHypervibe = executable(named: "hypervibe")
@@ -94,26 +104,37 @@ struct ProjectSetupView: View {
                     }
                 }
 
-                GridRow(alignment: .firstTextBaseline) {
-                    fieldLabel("Executable")
-                    pathField(text: $draft.executablePath) {
-                        chooseFile { draft.executablePath = $0 }
+                if CompanionDistribution.includesBundledServer {
+                    GridRow(alignment: .firstTextBaseline) {
+                        fieldLabel("Runtime")
+                        Label(
+                            "Included with Hypervibe",
+                            systemImage: "checkmark.seal.fill"
+                        )
+                        .foregroundStyle(.secondary)
                     }
-                }
-
-                GridRow(alignment: .top) {
-                    fieldLabel("Arguments")
-                        .padding(.top, 5)
-                    TextEditor(text: $draft.argumentsText)
-                        .font(.system(.body, design: .monospaced))
-                        .scrollContentBackground(.hidden)
-                        .padding(5)
-                        .frame(width: 450, height: 72)
-                        .background(.background, in: RoundedRectangle(cornerRadius: 6))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(.separator)
+                } else {
+                    GridRow(alignment: .firstTextBaseline) {
+                        fieldLabel("Executable")
+                        pathField(text: $draft.executablePath) {
+                            chooseFile { draft.executablePath = $0 }
                         }
+                    }
+
+                    GridRow(alignment: .top) {
+                        fieldLabel("Arguments")
+                            .padding(.top, 5)
+                        TextEditor(text: $draft.argumentsText)
+                            .font(.system(.body, design: .monospaced))
+                            .scrollContentBackground(.hidden)
+                            .padding(5)
+                            .frame(width: 450, height: 72)
+                            .background(.background, in: RoundedRectangle(cornerRadius: 6))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(.separator)
+                            }
+                    }
                 }
 
                 GridRow(alignment: .firstTextBaseline) {
@@ -124,9 +145,14 @@ struct ProjectSetupView: View {
                 }
             }
 
-            Text("Enter one process argument per line. Leave the data directory blank to use Hypervibe’s default local data directory.")
+            Text(setupHelp)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(
+                    CompanionDistribution.includesBundledServer
+                        && !CompanionDistribution.hasStableInstallationPath
+                        ? AnyShapeStyle(.red)
+                        : AnyShapeStyle(.secondary)
+                )
 
             if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
@@ -140,6 +166,7 @@ struct ProjectSetupView: View {
                     dismiss()
                 }
                 .keyboardShortcut(.cancelAction)
+                .clickTargetCursor()
 
                 Spacer()
 
@@ -151,6 +178,7 @@ struct ProjectSetupView: View {
                     save()
                 }
                 .keyboardShortcut(.defaultAction)
+                .clickTargetCursor()
                 .disabled(
                     isSaving
                         || draft.displayName.trimmingCharacters(
@@ -158,12 +186,24 @@ struct ProjectSetupView: View {
                         ).isEmpty
                         || draft.repositoryPath.isEmpty
                         || draft.executablePath.isEmpty
+                        || (CompanionDistribution.includesBundledServer
+                            && !CompanionDistribution.hasStableInstallationPath)
                 )
             }
         }
         .padding(22)
         .frame(width: 650)
-        .background(ProjectWindowFocusBridge())
+        .background(WindowFocusBridge())
+    }
+
+    private var setupHelp: String {
+        if CompanionDistribution.includesBundledServer {
+            if !CompanionDistribution.hasStableInstallationPath {
+                return CompanionDistribution.installationGuidance
+            }
+            return "Hypervibe includes its own runtime. Leave the data directory blank to use Hypervibe’s default local data directory."
+        }
+        return "Enter one process argument per line. Leave the data directory blank to use Hypervibe’s default local data directory."
     }
 
     private func pathField(
@@ -174,6 +214,7 @@ struct ProjectSetupView: View {
             TextField("", text: text)
                 .textFieldStyle(.roundedBorder)
             Button("Browse…", action: browse)
+                .clickTargetCursor()
         }
         .frame(width: 450)
     }
@@ -220,34 +261,4 @@ struct ProjectSetupView: View {
         }
     }
 
-}
-
-private struct ProjectWindowFocusBridge: NSViewRepresentable {
-    final class Coordinator {
-        var didFocus = false
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        focusWindow(from: view, coordinator: context.coordinator)
-        return view
-    }
-
-    func updateNSView(_ view: NSView, context: Context) {
-        focusWindow(from: view, coordinator: context.coordinator)
-    }
-
-    private func focusWindow(from view: NSView, coordinator: Coordinator) {
-        guard !coordinator.didFocus else { return }
-        DispatchQueue.main.async {
-            guard !coordinator.didFocus, let window = view.window else { return }
-            coordinator.didFocus = true
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-        }
-    }
 }
