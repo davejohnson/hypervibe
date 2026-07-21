@@ -6,6 +6,24 @@ function stubClient(adapter: RailwayAdapter, request: ReturnType<typeof vi.fn>):
 }
 
 describe('RailwayAdapter TCP proxy', () => {
+  const environment = {
+    id: 'env-local-1',
+    projectId: 'project-local-1',
+    name: 'production',
+    platformBindings: { projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  const component = {
+    id: 'component-1',
+    environmentId: 'env-local-1',
+    type: 'postgres' as const,
+    externalId: 'rail-svc-db-1',
+    bindings: { provider: 'railway', projectId: 'rail-proj-1' },
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
   it('creates a TCP proxy when none exists for the application port', async () => {
     const request = vi.fn()
       // tcpProxies lookup — nothing yet
@@ -20,7 +38,7 @@ describe('RailwayAdapter TCP proxy', () => {
 
     const result = await adapter.ensureTcpProxy('rail-env-1', 'rail-svc-db-1', 5432);
 
-    expect(result).toEqual({ domain: 'tramway.proxy.rlwy.net', proxyPort: 12345, created: true });
+    expect(result).toEqual({ id: 'proxy-1', domain: 'tramway.proxy.rlwy.net', proxyPort: 12345, created: true });
     expect(request).toHaveBeenCalledTimes(2);
     expect(request.mock.calls[0]?.[1]).toEqual({ environmentId: 'rail-env-1', serviceId: 'rail-svc-db-1' });
     expect(request.mock.calls[1]?.[1]).toEqual({
@@ -41,7 +59,7 @@ describe('RailwayAdapter TCP proxy', () => {
 
     const result = await adapter.ensureTcpProxy('rail-env-1', 'rail-svc-db-1', 5432);
 
-    expect(result).toEqual({ domain: 'db.proxy.rlwy.net', proxyPort: 22222, created: false });
+    expect(result).toEqual({ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 22222, created: false });
     expect(request).toHaveBeenCalledTimes(1);
   });
 
@@ -80,5 +98,104 @@ describe('RailwayAdapter TCP proxy', () => {
     const failing = new RailwayAdapter();
     stubClient(failing, vi.fn().mockRejectedValueOnce(new Error('boom')));
     expect(await failing.getTcpProxy('rail-env-1', 'rail-svc-db-1', 5432)).toBeNull();
+  });
+
+  it('deletes a TCP proxy and verifies that it is no longer active', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        tcpProxies: [{ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
+      })
+      .mockResolvedValueOnce({ tcpProxyDelete: true })
+      .mockResolvedValueOnce({ tcpProxies: [] });
+    const adapter = new RailwayAdapter();
+    stubClient(adapter, request);
+
+    await adapter.deleteTcpProxy('rail-env-1', 'rail-svc-db-1', 'proxy-pg');
+
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request.mock.calls[0]?.[1]).toEqual({ environmentId: 'rail-env-1', serviceId: 'rail-svc-db-1' });
+    expect(request.mock.calls[1]?.[1]).toEqual({ id: 'proxy-pg' });
+    expect(request.mock.calls[2]?.[1]).toEqual({ environmentId: 'rail-env-1', serviceId: 'rail-svc-db-1' });
+  });
+
+  it('treats an already absent TCP proxy as successfully deleted', async () => {
+    const request = vi.fn().mockResolvedValue({ tcpProxies: [] });
+    const adapter = new RailwayAdapter();
+    stubClient(adapter, request);
+
+    await adapter.deleteTcpProxy('rail-env-1', 'rail-svc-db-1', 'proxy-pg');
+    await adapter.deleteTcpProxy('rail-env-1', 'rail-svc-db-1', 'proxy-pg');
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.every((call) => call[1]?.environmentId === 'rail-env-1')).toBe(true);
+  });
+
+  it('fails cleanup when Railway does not confirm TCP proxy deletion', async () => {
+    const adapter = new RailwayAdapter();
+    stubClient(adapter, vi.fn()
+      .mockResolvedValueOnce({
+        tcpProxies: [{ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
+      })
+      .mockResolvedValueOnce({ tcpProxyDelete: false })
+      .mockResolvedValueOnce({
+        tcpProxies: [{ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
+      }));
+
+    await expect(adapter.deleteTcpProxy('rail-env-1', 'rail-svc-db-1', 'proxy-pg'))
+      .rejects.toThrow('did not confirm deletion');
+  });
+
+  it('ignores proxies already deleting during cleanup verification', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        tcpProxies: [{ id: 'proxy-pg', domain: 'db.proxy.rlwy.net', proxyPort: 33333, applicationPort: 5432 }],
+      })
+      .mockResolvedValueOnce({ tcpProxyDelete: true })
+      .mockResolvedValueOnce({
+        tcpProxies: [{
+          id: 'proxy-pg',
+          domain: 'db.proxy.rlwy.net',
+          proxyPort: 33333,
+          applicationPort: 5432,
+          syncStatus: 'DELETING',
+        }],
+      });
+    const adapter = new RailwayAdapter();
+    stubClient(adapter, request);
+
+    await expect(adapter.deleteTcpProxy('rail-env-1', 'rail-svc-db-1', 'proxy-pg')).resolves.toBeUndefined();
+  });
+
+  it('returns a releasable lease only for a newly created database proxy', async () => {
+    const adapter = new RailwayAdapter();
+    vi.spyOn(adapter, 'ensureTcpProxy').mockResolvedValue({
+      id: 'proxy-temp', domain: 'db.proxy.rlwy.net.', proxyPort: 33333, created: true,
+    });
+    vi.spyOn(adapter, 'getServiceVariables').mockResolvedValue({
+      PGUSER: 'postgres', POSTGRES_PASSWORD: 'secret', PGDATABASE: 'app',
+    });
+
+    const access = await adapter.acquireTemporaryDatabaseAccess(environment, component, 5432);
+
+    expect(access).toEqual({
+      connectionUrl: 'postgresql://postgres:secret@db.proxy.rlwy.net:33333/app',
+      source: 'created_proxy',
+      endpoint: 'db.proxy.rlwy.net:33333',
+      temporary: true,
+      releaseToken: 'proxy-temp',
+    });
+  });
+
+  it('removes a newly created proxy when acquiring database credentials fails', async () => {
+    const adapter = new RailwayAdapter();
+    vi.spyOn(adapter, 'ensureTcpProxy').mockResolvedValue({
+      id: 'proxy-temp', domain: 'db.proxy.rlwy.net', proxyPort: 33333, created: true,
+    });
+    vi.spyOn(adapter, 'getServiceVariables').mockResolvedValue({});
+    const deleteProxy = vi.spyOn(adapter, 'deleteTcpProxy').mockResolvedValue();
+
+    await expect(adapter.acquireTemporaryDatabaseAccess(environment, component, 5432))
+      .rejects.toThrow('missing PGUSER or POSTGRES_PASSWORD');
+    expect(deleteProxy).toHaveBeenCalledWith('rail-env-1', 'rail-svc-db-1', 'proxy-temp');
   });
 });

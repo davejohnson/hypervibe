@@ -98,6 +98,21 @@ export interface QueryResult {
   warning?: string;
 }
 
+export interface QueryOptions {
+  /** Enforce PostgreSQL transaction-level read-only mode. */
+  readOnly?: boolean;
+  /** Reject results larger than this row count. Default 500. */
+  maxRows?: number;
+  /** Reject model-visible results larger than this many UTF-8 bytes. Default 512 KiB. */
+  maxResponseBytes?: number;
+  /** PostgreSQL statement timeout, capped at 30 seconds. */
+  statementTimeoutMs?: number;
+}
+
+export const DEFAULT_MAX_QUERY_ROWS = 500;
+export const DEFAULT_MAX_QUERY_RESPONSE_BYTES = 512 * 1024;
+export const MAX_QUERY_STATEMENT_TIMEOUT_MS = 30_000;
+
 export class DatabaseAdapter {
   private credentials: DatabaseCredentials | null = null;
 
@@ -178,20 +193,58 @@ export class DatabaseAdapter {
   /**
    * Execute a SQL query against Postgres
    */
-  async queryPostgres(sql: string, params?: unknown[]): Promise<QueryResult> {
+  async queryPostgres(sql: string, params?: unknown[], options: QueryOptions = {}): Promise<QueryResult> {
     if (!this.credentials) {
       return { success: false, error: 'Not connected. Call connect() first.' };
     }
 
+    const statementTimeoutMs = Math.min(
+      MAX_QUERY_STATEMENT_TIMEOUT_MS,
+      Math.max(1, options.statementTimeoutMs ?? MAX_QUERY_STATEMENT_TIMEOUT_MS)
+    );
     const client = new Client({
       connectionString: this.credentials.connectionUrl,
       connectionTimeoutMillis: 10000,
-      statement_timeout: 30000, // 30 second query timeout
+      statement_timeout: statementTimeoutMs,
+      query_timeout: statementTimeoutMs,
     });
 
+    let transactionStarted = false;
     try {
       await client.connect();
+      if (options.readOnly) {
+        await client.query('BEGIN READ ONLY');
+        transactionStarted = true;
+      }
       const result = await client.query(sql, params);
+
+      const maxRows = options.maxRows ?? DEFAULT_MAX_QUERY_ROWS;
+      if (result.rows.length > maxRows) {
+        if (transactionStarted) await client.query('ROLLBACK');
+        transactionStarted = false;
+        return {
+          success: false,
+          rowCount: result.rowCount ?? result.rows.length,
+          error: `Query result exceeded the ${maxRows}-row diagnostic limit. Add a narrower WHERE clause or LIMIT.`,
+        };
+      }
+
+      const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_QUERY_RESPONSE_BYTES;
+      const responseBytes = Buffer.byteLength(JSON.stringify(result.rows), 'utf8');
+      if (responseBytes > maxResponseBytes) {
+        if (transactionStarted) await client.query('ROLLBACK');
+        transactionStarted = false;
+        return {
+          success: false,
+          rowCount: result.rowCount ?? result.rows.length,
+          error: `Query result exceeded the ${maxResponseBytes}-byte diagnostic response limit. Select fewer or smaller columns.`,
+        };
+      }
+
+      if (transactionStarted) {
+        await client.query('COMMIT');
+        transactionStarted = false;
+      }
 
       return {
         success: true,
@@ -203,6 +256,10 @@ export class DatabaseAdapter {
         })),
       };
     } catch (error) {
+      if (transactionStarted) {
+        await client.query('ROLLBACK').catch(() => {});
+        transactionStarted = false;
+      }
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -215,12 +272,12 @@ export class DatabaseAdapter {
   /**
    * Execute a query (routes to appropriate database type)
    */
-  async query(sql: string, params?: unknown[]): Promise<QueryResult> {
+  async query(sql: string, params?: unknown[], options: QueryOptions = {}): Promise<QueryResult> {
     const dbType = this.getDbType();
 
     switch (dbType) {
       case 'postgres':
-        return this.queryPostgres(sql, params);
+        return this.queryPostgres(sql, params, options);
       default:
         return { success: false, error: `Unknown database type. URL should start with postgres://` };
     }

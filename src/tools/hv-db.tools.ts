@@ -1,6 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createHash } from 'crypto';
 import { z } from 'zod';
-import { DatabaseAdapter, type DatabaseCredentials } from '../adapters/providers/database/database.adapter.js';
+import {
+  DatabaseAdapter,
+  stripSqlLiteralsAndComments,
+  type DatabaseCredentials,
+} from '../adapters/providers/database/database.adapter.js';
 import {
   runDatabaseMigration,
   runDatabaseSeed,
@@ -17,6 +22,12 @@ import {
   executeManagedDatabaseMove,
   resolveManagedMoveTargets,
 } from '../domain/services/database-move.service.js';
+import {
+  acquireExistingDatabaseAccess,
+  acquireManagedDatabaseAccess,
+  type DatabaseAccessCleanup,
+  type DatabaseAccessLease,
+} from '../domain/services/database-access.service.js';
 import { resolveSecretValueRef } from '../domain/services/secret-value-ref.js';
 import type { ToolContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
@@ -24,7 +35,25 @@ import { formatConnectionGuidance } from '../domain/services/connection-guidance
 import { projectField, envField, confirmField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
 
-type ResolvedDatabaseTarget = { url: string; source: string; project?: Project; tcpProxyCreated?: boolean; proxyDomain?: string };
+type ResolvedDatabaseTarget = {
+  url: string;
+  source: string;
+  project?: Project;
+  tcpProxyCreated?: boolean;
+  proxyDomain?: string;
+};
+
+type ResolvedDatabaseAccessTarget = {
+  source: string;
+  project?: Project;
+  environment?: string;
+  databaseAccess: DatabaseAccessLease;
+};
+
+function sqlFingerprint(sql: string): string {
+  const normalized = stripSqlLiteralsAndComments(sql).trim().replace(/\s+/g, ' ').toLowerCase();
+  return createHash('sha256').update(normalized).digest('hex');
+}
 
 function assertPostgresTarget(url: string, source: string): void {
   if (!isPostgresDatabaseUrl(url)) {
@@ -120,10 +149,45 @@ async function resolveConfirmedExternalTarget(
   };
 }
 
+async function resolveTemporaryExternalTarget(
+  ctx: ToolContext,
+  opts: { connectionUrl?: string; connectionName?: string; project?: string; env?: string; service?: string }
+): Promise<ResolvedDatabaseAccessTarget> {
+  const configured = await resolveConfiguredTarget(ctx, opts);
+  if (configured) {
+    return {
+      source: configured.source,
+      project: configured.project,
+      databaseAccess: acquireExistingDatabaseAccess(configured.url),
+    };
+  }
+
+  const project = ctx.resolveProjectOrThrow({ project: opts.project });
+  const environment = ctx.resolveEnvironmentOrThrow(project, opts.env);
+  const result = await acquireManagedDatabaseAccess(project, environment, opts.service);
+  if (!result.ok) {
+    const code = result.code === 'provider_error' ? 'PROVIDER_ERROR' : 'NOT_FOUND';
+    throw new HvError(code, result.error, {
+      details: {
+        provider: result.provider,
+        resourceCreated: result.resourceCreated,
+        cleanup: result.cleanup,
+      },
+      hint: result.hint,
+    });
+  }
+  return {
+    source: `${project.name}/${environment.name}${opts.service ? `/${opts.service}` : ''}`,
+    project,
+    environment: environment.name,
+    databaseAccess: result.lease,
+  };
+}
+
 export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_db_query',
-    'Run a single SQL statement against a database. SELECT only by default; allowMutations=true enables INSERT/UPDATE/DELETE/DDL. Multi-statement SQL is always rejected.',
+    'Run one bounded SQL statement against a database. For an internal-only managed database, Hypervibe acquires operation-scoped access and releases it after the query, reporting cleanup status. SELECT is database-enforced read-only by default; allowMutations=true enables INSERT/UPDATE/DELETE/DDL. Multi-statement SQL is always rejected.',
     {
       project: projectField,
       env: envField,
@@ -135,10 +199,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
       service: z.string().optional().describe('Service name when resolving from project bindings'),
     },
     wrapHandler(async ({ project, env, sql, params, allowMutations, connectionUrl, connectionName, service }) => {
-      const target = await resolveExternalTarget(ctx, { connectionUrl, connectionName, project, env, service });
-
       const dbAdapter = new DatabaseAdapter();
-      dbAdapter.connect({ connectionUrl: target.url });
       const analysis = dbAdapter.analyzeQuery(sql);
 
       if (analysis.multiStatement) {
@@ -147,25 +208,124 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
         });
       }
       if (analysis.isMutation && !allowMutations) {
+        const requestedSource = connectionName
+          ? `connection: ${connectionName}`
+          : connectionUrl
+            ? 'direct URL'
+            : `${project ?? 'auto-detected project'}/${env ?? 'staging'}${service ? `/${service}` : ''}`;
         return toolError('CONFIRM_REQUIRED', 'Mutation query blocked for safety.', {
-          details: { source: target.source, warnings: analysis.warnings },
+          details: { source: requestedSource, warnings: analysis.warnings },
           hint: 'Re-run with allowMutations=true to execute INSERT/UPDATE/DELETE/DDL.',
         });
       }
 
-      const result = await dbAdapter.query(sql, params);
-      if (!result.success) {
-        return toolError('PROVIDER_ERROR', result.error ?? 'Query failed', { details: { source: target.source } });
+      const target = await resolveTemporaryExternalTarget(ctx, { connectionUrl, connectionName, project, env, service });
+      const lease = target.databaseAccess;
+      const startedAt = Date.now();
+      let result: Awaited<ReturnType<DatabaseAdapter['query']>> | undefined;
+      let queryError: unknown;
+      let cleanup: DatabaseAccessCleanup = { status: 'no_op' };
+      try {
+        result = await lease.withConnection(async (resolvedUrl) => {
+          dbAdapter.connect({ connectionUrl: resolvedUrl });
+          return dbAdapter.query(sql, params, { readOnly: !analysis.isMutation });
+        });
+      } catch (error) {
+        queryError = error;
+      } finally {
+        try {
+          cleanup = await lease.release();
+        } catch {
+          cleanup = {
+            status: 'failed',
+            safeResourceId: lease.safeResourceId,
+            warning: 'Temporary database access cleanup failed unexpectedly and could not be verified.',
+          };
+        }
       }
 
-      return toolSuccess({
-        source: target.source,
-        queryType: analysis.isMutation ? 'mutation' : 'select',
-        rowCount: result.rowCount,
-        ...(analysis.isMutation
-          ? { warnings: analysis.warnings.length ? analysis.warnings : undefined }
-          : { rows: result.rows, fields: result.fields?.map((f) => f.name) }),
-      });
+      const durationMs = Date.now() - startedAt;
+      const access = {
+        mode: lease.mode,
+        provider: lease.provider,
+        leaseId: lease.id,
+        leaseCreated: lease.createdByInvocation,
+        cleanup: cleanup.status,
+        ...(lease.expiresAt ? { expiresAt: lease.expiresAt } : {}),
+        ...(cleanup.safeResourceId ? { resourceId: cleanup.safeResourceId } : {}),
+      };
+      let auditWarning: string | undefined;
+      try {
+        ctx.repos.audit.create({
+          action: result?.success === true && !queryError ? 'db_query.succeeded' : 'db_query.failed',
+          resourceType: 'database',
+          resourceId: target.source,
+          details: {
+            project: target.project?.name ?? project ?? null,
+            environment: target.environment ?? env ?? null,
+            provider: lease.provider,
+            queryType: analysis.isMutation ? 'mutation' : 'select',
+            sqlFingerprint: sqlFingerprint(sql),
+            durationMs,
+            rowCount: result?.rowCount,
+            accessMode: lease.mode,
+            leaseId: lease.id,
+            leaseCreated: lease.createdByInvocation,
+            cleanup: cleanup.status,
+            cleanupResourceId: cleanup.safeResourceId,
+          },
+        });
+      } catch {
+        auditWarning = 'The query completed, but Hypervibe could not record its local diagnostic audit event.';
+      }
+
+      const responseWarnings = [cleanup.warning, auditWarning].filter((value): value is string => Boolean(value));
+      if (queryError) {
+        return toolError('PROVIDER_ERROR', queryError instanceof Error ? queryError.message : String(queryError), {
+          details: { source: target.source, durationMs, access },
+          warnings: responseWarnings,
+          hint: cleanup.status === 'failed'
+            ? 'The query and cleanup both failed. Inspect the managed database with hv_inspect before retrying.'
+            : 'Check the database connection and SQL, then retry the diagnostic query.',
+        });
+      }
+      if (!result) {
+        throw new Error('Database query returned no result.');
+      }
+      if (!result.success) {
+        return toolError('PROVIDER_ERROR', result.error ?? 'Query failed', {
+          details: { source: target.source, durationMs, access },
+          warnings: responseWarnings,
+          hint: cleanup.status === 'failed'
+            ? 'The query failed and temporary access cleanup is pending. Inspect with hv_inspect before retrying.'
+            : undefined,
+        });
+      }
+
+      return toolSuccess(
+        {
+          source: target.source,
+          queryType: analysis.isMutation ? 'mutation' : 'select',
+          rowCount: result.rowCount,
+          durationMs,
+          access,
+          ...(analysis.isMutation
+            ? { warnings: analysis.warnings.length ? analysis.warnings : undefined }
+            : { rows: result.rows, fields: result.fields?.map((f) => f.name) }),
+        },
+        {
+          warnings: responseWarnings,
+          ...(cleanup.status === 'failed'
+            ? {
+              agentInstruction: {
+                action: 'stop_and_report' as const,
+                message: 'The query result is valid, but temporary database access cleanup failed. Report the safe resource id and inspect it with hv_inspect before another query.',
+              },
+              hint: 'The query succeeded, but public access may remain until the registered cleanup retry succeeds. Inspect with hv_inspect.',
+            }
+            : {}),
+        }
+      );
     })
   );
 

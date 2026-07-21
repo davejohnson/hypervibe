@@ -176,6 +176,12 @@ Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/healt
 - Full generated catalog: `docs/TOOLS.md`
 - Regenerate after tool changes: `npm run build && npm run docs:tools`
 
+### Database diagnostics
+
+`hv_db_query` can diagnose an internal-only managed Postgres database without asking you to expose it permanently. When needed, Hypervibe creates operation-scoped provider access, runs one query, and releases only the access it created. Concurrent queries share the same short-lived lease, and every response reports the access mode and cleanup status without returning database credentials or the public endpoint.
+
+Diagnostic reads run in a PostgreSQL read-only transaction with a 30-second statement timeout. Results are capped at 500 rows and 512 KiB. Mutations still require `allowMutations=true`, and multi-statement SQL remains blocked.
+
 ## Team-Shared Desired State
 
 Hypervibe treats infrastructure as a repo-backed definition, not as one user's private local state. When run from a git worktree, `hv_spec_set` writes the desired infrastructure shape to:

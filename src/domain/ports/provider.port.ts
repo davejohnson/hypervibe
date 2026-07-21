@@ -59,6 +59,9 @@ export interface ProviderCapabilities {
 
   /** Whether config can converge while exact-SHA CI remains the code release boundary. */
   supportsDeferredDeploy?: boolean;
+
+  /** Whether bounded operations can temporarily expose an internal database. */
+  supportsTemporaryDatabaseAccess?: boolean;
 }
 
 export interface ComponentResult {
@@ -86,6 +89,20 @@ export interface JobResult {
   /** Set when the temp task service could not be deleted (manual cleanup). */
   cleanupWarning?: string;
   receipt: Receipt;
+}
+
+/**
+ * An externally reachable database endpoint acquired for one bounded
+ * operation. Providers may reuse an endpoint that already exists; only
+ * endpoints marked temporary are released after the operation.
+ */
+export interface TemporaryDatabaseAccess {
+  connectionUrl: string;
+  source: 'direct' | 'private_connector' | 'existing_proxy' | 'created_proxy';
+  endpoint?: string;
+  temporary: boolean;
+  /** Opaque provider resource id used only for cleanup. */
+  releaseToken?: string;
 }
 
 export interface ProjectInfo {
@@ -157,6 +174,24 @@ export interface IProviderAdapter {
     service: Service,
     command: string
   ): Promise<JobResult>;
+
+  /**
+   * Acquire an externally reachable database endpoint for one bounded
+   * operation. Implementations must distinguish reused access from a newly
+   * created temporary resource so callers never remove user-managed access.
+   */
+  acquireTemporaryDatabaseAccess?(
+    environment: Environment,
+    component: Component,
+    applicationPort: number
+  ): Promise<TemporaryDatabaseAccess>;
+
+  /** Release only access returned with temporary=true by this adapter. */
+  releaseTemporaryDatabaseAccess?(
+    environment: Environment,
+    component: Component,
+    access: TemporaryDatabaseAccess
+  ): Promise<void>;
 
   /**
    * Delete a provider project/app that was created by Hypervibe.
