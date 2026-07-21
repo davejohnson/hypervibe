@@ -3,15 +3,14 @@ import SwiftUI
 
 @main
 struct HypervibeCompanionApp: App {
+    @NSApplicationDelegateAdaptor(CompanionApplicationDelegate.self)
+    private var applicationDelegate
     @StateObject private var model: CompanionAppModel
 
     init() {
         let model = CompanionAppModel()
         _model = StateObject(wrappedValue: model)
         NSApplication.shared.setActivationPolicy(.accessory)
-        Task {
-            await model.loadIfNeeded()
-        }
     }
 
     var body: some Scene {

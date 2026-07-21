@@ -8,6 +8,8 @@ The current v0 slice contains:
 - a SwiftUI menu bar app with project setup and removal;
 - a self-contained distribution with a pinned Node.js runtime and the built
   Hypervibe server;
+- a user-scoped process lock that keeps packaged and development copies from
+  running simultaneously;
 - per-project MCP sessions over stdio using the official Swift SDK;
 - safe one-click registration of every configured project with Claude Desktop
   and Codex / ChatGPT desktop clients;

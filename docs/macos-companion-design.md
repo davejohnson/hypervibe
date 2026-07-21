@@ -104,6 +104,10 @@ The launcher changes to the configured project root, applies an explicit
 Node/server process. It does not proxy MCP messages, listen on a port, add
 lifecycle behavior, or write to stdout before the MCP handshake.
 
+The companion holds a user-scoped advisory process lock for its lifetime.
+Launching another packaged or development copy activates the existing process
+and exits before showing a second menu bar item.
+
 From Settings, a user can connect all registered projects to:
 
 - Claude Desktop via
