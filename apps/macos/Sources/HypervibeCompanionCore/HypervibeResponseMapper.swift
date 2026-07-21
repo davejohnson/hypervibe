@@ -62,8 +62,28 @@ enum HypervibeResponseMapper {
             blockedProviders: blockedProviders,
             latestAttemptAt: attemptedAt,
             latestSuccessfulAt: payload.verified
-                ? attemptedAt
-                : previous?.latestSuccessfulAt
+                ? parseDate(payload.observedAt) ?? attemptedAt
+                : previous?.latestSuccessfulAt,
+            services: payload.services?.map { service in
+                ServiceObservation(
+                    name: service.name,
+                    status: ServiceLiveStatus(rawValue: service.status) ?? .unknown,
+                    url: PublicServiceEndpoint.originURL(from: service.url),
+                    customDomains: PublicServiceEndpoint.hostnames(
+                        from: service.customDomains ?? []
+                    )
+                )
+            },
+            driftedResources: payload.drift.compactMap { action in
+                action.resource.map { resource in
+                    DriftedResource(
+                        kind: resource.kind,
+                        name: resource.name,
+                        actionType: action.type ?? "change",
+                        provider: resource.provider
+                    )
+                }
+            }
         )
     }
 
@@ -78,7 +98,9 @@ enum HypervibeResponseMapper {
             unmanagedCount: previous?.unmanagedCount ?? 0,
             blockedProviders: previous?.blockedProviders ?? [],
             latestAttemptAt: attemptedAt,
-            latestSuccessfulAt: previous?.latestSuccessfulAt
+            latestSuccessfulAt: previous?.latestSuccessfulAt,
+            services: previous?.services,
+            driftedResources: previous?.driftedResources
         )
     }
 
@@ -464,10 +486,12 @@ private typealias IOS = DesiredEnvironment.IOS
 private struct StatusToolData: Decodable {
     let verified: Bool
     let inSync: Bool
-    let drift: CountedItems
+    let drift: [DriftAction]
     let unmanaged: CountedItems
     let blocked: [Block]
     let inputRequired: CountedItems
+    let observedAt: String?
+    let services: [Service]?
 
     private enum CodingKeys: String, CodingKey {
         case verified
@@ -476,14 +500,15 @@ private struct StatusToolData: Decodable {
         case unmanaged
         case blocked
         case inputRequired
+        case observedAt
+        case services
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         verified = try container.decode(Bool.self, forKey: .verified)
         inSync = try container.decode(Bool.self, forKey: .inSync)
-        drift = try container.decodeIfPresent(CountedItems.self, forKey: .drift)
-            ?? CountedItems()
+        drift = try container.decodeIfPresent([DriftAction].self, forKey: .drift) ?? []
         unmanaged = try container.decodeIfPresent(
             CountedItems.self,
             forKey: .unmanaged
@@ -493,10 +518,30 @@ private struct StatusToolData: Decodable {
             CountedItems.self,
             forKey: .inputRequired
         ) ?? CountedItems()
+        observedAt = try container.decodeIfPresent(String.self, forKey: .observedAt)
+        services = try container.decodeIfPresent([Service].self, forKey: .services)
     }
 
     struct Block: Decodable {
         let provider: String
+    }
+
+    struct DriftAction: Decodable {
+        let type: String?
+        let resource: Resource?
+
+        struct Resource: Decodable {
+            let kind: String
+            let name: String
+            let provider: String
+        }
+    }
+
+    struct Service: Decodable {
+        let name: String
+        let status: String
+        let url: String?
+        let customDomains: [String]?
     }
 }
 

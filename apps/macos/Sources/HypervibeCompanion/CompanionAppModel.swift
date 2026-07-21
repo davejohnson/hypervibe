@@ -41,6 +41,14 @@ final class CompanionAppModel: ObservableObject {
         return connections[projectID] ?? []
     }
 
+    /// Any environment in any project is drifted, blocked, or failed to refresh.
+    var needsAttention: Bool {
+        AggregateHealth.needsAttention(
+            snapshots: Array(snapshots.values),
+            hasRefreshFailure: loadError != nil || !refreshErrors.isEmpty
+        )
+    }
+
     func loadIfNeeded() async {
         guard !didLoad else { return }
         didLoad = true

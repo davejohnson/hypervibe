@@ -191,7 +191,7 @@ struct ProjectSetupView: View {
         }
         .padding(22)
         .frame(width: 650)
-        .background(ProjectWindowFocusBridge())
+        .background(WindowFocusBridge())
     }
 
     private var setupHelp: String {
@@ -258,34 +258,4 @@ struct ProjectSetupView: View {
         }
     }
 
-}
-
-private struct ProjectWindowFocusBridge: NSViewRepresentable {
-    final class Coordinator {
-        var didFocus = false
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        focusWindow(from: view, coordinator: context.coordinator)
-        return view
-    }
-
-    func updateNSView(_ view: NSView, context: Context) {
-        focusWindow(from: view, coordinator: context.coordinator)
-    }
-
-    private func focusWindow(from view: NSView, coordinator: Coordinator) {
-        guard !coordinator.didFocus else { return }
-        DispatchQueue.main.async {
-            guard !coordinator.didFocus, let window = view.window else { return }
-            coordinator.didFocus = true
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-        }
-    }
 }

@@ -1286,6 +1286,55 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('exposes sanitized observed service endpoints via hv_status', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', { spec: SPEC });
+    verifyRailwayConnection();
+    const { ProjectRepository } = await import('../../adapters/db/repositories/project.repository.js');
+    const project = new ProjectRepository().findByName('core-spec-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { provider: 'railway', projectId: 'rp-1', services: { web: { serviceId: 's-1' } } },
+    });
+    const observedAt = new Date().toISOString();
+    mockObserved({
+      provider: 'railway', observedAt,
+      projectExists: true, projectId: 'rp-1',
+      services: [{
+        name: 'web', externalId: 's-1', workloadKind: 'web',
+        url: 'https://web-staging-1234.up.railway.app/private/sentinel-path?token=sentinel-query#sentinel-fragment',
+        customDomains: ['App.Example.com', 'app.example.com', 'not a domain', 'ftp://weird'],
+        config: { startCommand: 'npm start' },
+        envVarKeys: ['NODE_ENV'], envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+        status: 'running',
+      }, {
+        name: 'worker', externalId: 's-2', workloadKind: 'worker',
+        url: 'https://sentinel-user:sentinel-password@worker.example.com',
+        customDomains: ['a'.repeat(64) + '.example.com'],
+        config: { startCommand: 'npm run worker' },
+        envVarKeys: [], envVarHashes: {},
+        status: 'failed',
+      }],
+      databases: [], partial: false, warnings: [],
+    });
+
+    const status = await t.call('hv_status', { project: 'core-spec-app', env: 'staging' });
+    expect(status.ok).toBe(true);
+    expect(status.data.observedAt).toBe(observedAt);
+    expect(status.data.services).toEqual([{
+      name: 'web',
+      status: 'running',
+      url: 'https://web-staging-1234.up.railway.app',
+      customDomains: ['app.example.com'],
+    }, {
+      name: 'worker',
+      status: 'failed',
+    }]);
+    expect(JSON.stringify(status.data.services)).not.toContain('sentinel');
+    await t.close();
+  });
+
   it('uses provider metadata in hv_status so Railway web and worker kinds do not drift permanently', async () => {
     const t = await makeClient();
     await t.call('hv_spec_set', {

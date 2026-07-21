@@ -71,23 +71,7 @@ struct ProjectDashboardView: View {
             }
 
         return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Connections")
-                    .font(.headline)
-                Spacer()
-                Text("\(connections.filter { $0.status == .verified }.count) verified")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button {
-                    showConnections()
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .buttonStyle(.borderless)
-                .help("Add provider connection")
-            }
-
-            DisclosureGroup("Show connections", isExpanded: $connectionsExpanded) {
+            DisclosureGroup(isExpanded: $connectionsExpanded) {
                 LazyVGrid(
                     columns: [
                         GridItem(.flexible(), spacing: 8),
@@ -117,6 +101,24 @@ struct ProjectDashboardView: View {
                     }
                     .padding(.top, 8)
                 }
+            } label: {
+                HStack {
+                    Text("Connections")
+                        .font(.headline)
+                    Spacer()
+                    if !connections.isEmpty {
+                        Text("\(connections.filter { $0.status == .verified }.count) verified")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button {
+                        showConnections()
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Add provider connection")
+                }
             }
         }
         .padding(12)
@@ -143,16 +145,28 @@ struct ProjectDashboardView: View {
                 VStack(alignment: .leading, spacing: 9) {
                     if let observation = environment.observation {
                         HStack(spacing: 12) {
-                            Label(
-                                "\(observation.driftCount) drift",
-                                systemImage: "arrow.triangle.2.circlepath"
-                            )
-                            Label(
-                                "\(observation.unmanagedCount) unmanaged",
-                                systemImage: "questionmark.diamond"
-                            )
+                            if let checkedAt = observation.latestSuccessfulAt {
+                                Label(
+                                    "checked \(checkedAt.formatted(.relative(presentation: .named)))",
+                                    systemImage: "clock"
+                                )
+                                .help("Last successful observation of this environment")
+                            }
+                            if observation.driftCount > 0 {
+                                Label(
+                                    "\(observation.driftCount) drifted",
+                                    systemImage: "arrow.triangle.2.circlepath"
+                                )
+                                .foregroundStyle(.orange)
+                                .help(driftSummary(observation))
+                            }
+                            if observation.unmanagedCount > 0 {
+                                Label(
+                                    "\(observation.unmanagedCount) unmanaged",
+                                    systemImage: "questionmark.diamond"
+                                )
+                            }
                             Spacer()
-                            Text("spec \(environment.specRevision)")
                         }
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -167,7 +181,7 @@ struct ProjectDashboardView: View {
                     Divider()
 
                     ForEach(environment.resources) { resource in
-                        resourceRow(resource)
+                        resourceRow(resource, observation: environment.observation)
                     }
                 }
                 .padding(.top, 8)
@@ -204,6 +218,17 @@ struct ProjectDashboardView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .help("Spec revision \(environment.specRevision)")
+    }
+
+    private func driftSummary(_ observation: ObservationSummary) -> String {
+        let drifted = observation.driftedResources ?? []
+        guard !drifted.isEmpty else {
+            return "Run hv_plan for details."
+        }
+        return drifted
+            .map { "\($0.name): \($0.actionType) pending on \($0.provider)" }
+            .joined(separator: "\n")
     }
 
     private func environmentExpansion(_ environment: String) -> Binding<Bool> {
@@ -214,19 +239,51 @@ struct ProjectDashboardView: View {
         )
     }
 
-    private func resourceRow(_ resource: ResourceSummary) -> some View {
-        HStack(alignment: .top, spacing: 9) {
+    private func resourceRow(
+        _ resource: ResourceSummary,
+        observation: ObservationSummary?
+    ) -> some View {
+        let service = resource.kind == .service
+            ? observation?.service(named: resource.name)
+            : nil
+        let drift = observation?.driftedResource(matching: resource)
+        return HStack(alignment: .top, spacing: 9) {
             Image(systemName: resource.kind.systemImage)
                 .frame(width: 18)
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text(resource.name)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(resource.name)
+                        .lineLimit(1)
+                    if let drift {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .help("\(drift.actionType) pending on \(drift.provider)")
+                    }
+                    if service?.status == .failed {
+                        Text("failed")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.red)
+                    } else if service?.status == .empty {
+                        Text("not deployed")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 if !resource.relationships.isEmpty {
                     Text(resource.relationships.map(\.displayText).joined(separator: " · "))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
+                }
+                if let url = service?.preferredURL, let host = url.host() {
+                    Link(destination: url) {
+                        Text(host)
+                            .font(.caption2)
+                            .lineLimit(1)
+                    }
+                    .help("Open \(url.absoluteString)")
                 }
             }
             Spacer()
@@ -269,19 +326,41 @@ struct ProjectDashboardView: View {
                 }
                 .padding(.top, 8)
             } label: {
-                HStack {
-                    Text("Recent runs")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(runs.count)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                recentRunsLabel(runs)
             }
         }
         .padding(12)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
         .padding(.horizontal, 12)
+    }
+
+    private func recentRunsLabel(_ runs: [RecentRunSummary]) -> some View {
+        HStack(spacing: 6) {
+            Text("Recent runs")
+                .font(.headline)
+            Spacer()
+            if !recentRunsExpanded, let latest = runs.first {
+                Image(systemName: latest.status.systemImage)
+                    .font(.caption)
+                    .foregroundStyle(latest.status.color)
+                Text(latestRunSummary(latest))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text("\(runs.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func latestRunSummary(_ run: RecentRunSummary) -> String {
+        var parts = ["\(run.type) \(run.status.title.lowercased())"]
+        if let startedAt = run.startedAt {
+            parts.append(startedAt.formatted(.relative(presentation: .named)))
+        }
+        return parts.joined(separator: " · ")
     }
 }
 

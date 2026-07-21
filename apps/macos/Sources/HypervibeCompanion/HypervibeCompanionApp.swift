@@ -22,7 +22,7 @@ struct HypervibeCompanionApp: App {
         MenuBarExtra {
             CompanionMenuView(model: model)
         } label: {
-            RocketIcon()
+            RocketIcon(alert: model.needsAttention)
                 .frame(width: 17, height: 17)
         }
         .menuBarExtraStyle(.window)

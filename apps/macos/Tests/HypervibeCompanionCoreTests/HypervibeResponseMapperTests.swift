@@ -121,6 +121,81 @@ struct HypervibeResponseMapperTests {
     }
 
     @Test
+    func observationDecodesServiceEndpointsAndDriftIdentity() throws {
+        let attemptedAt = Date(timeIntervalSince1970: 500)
+        let data = Data(
+            """
+            {
+              "ok": true,
+              "data": {
+                "environment": "production",
+                "verified": true,
+                "inSync": false,
+                "observedAt": "2026-07-20T10:00:00.000Z",
+                "services": [
+                  {
+                    "name": "web",
+                    "status": "running",
+                    "url": "https://web-production-1234.up.railway.app/private/sentinel-path?token=sentinel-query#sentinel-fragment",
+                    "customDomains": ["App.Example.com", "app.example.com", "bad/path"]
+                  },
+                  {
+                    "name": "worker",
+                    "status": "failed",
+                    "url": "https://sentinel-user:sentinel-password@worker.example.com"
+                  }
+                ],
+                "drift": [{
+                  "id": "service:worker",
+                  "type": "update",
+                  "resource": { "kind": "service", "name": "worker", "provider": "railway" },
+                  "metadata": { "token": "sentinel-secret-value" }
+                }],
+                "unmanaged": [],
+                "blocked": [],
+                "inputRequired": []
+              }
+            }
+            """.utf8
+        )
+
+        let observation = try HypervibeResponseMapper.decodeObservation(
+            data,
+            attemptedAt: attemptedAt,
+            previous: nil
+        )
+
+        let web = observation.service(named: "web")
+        #expect(web?.status == .running)
+        #expect(web?.url?.absoluteString == "https://web-production-1234.up.railway.app")
+        #expect(web?.customDomains == ["app.example.com"])
+        #expect(web?.preferredURL?.absoluteString == "https://app.example.com")
+        let worker = observation.service(named: "worker")
+        #expect(worker?.status == .failed)
+        #expect(worker?.url == nil)
+        #expect(worker?.preferredURL == nil)
+        #expect(
+            observation.driftedResources == [
+                DriftedResource(
+                    kind: "service",
+                    name: "worker",
+                    actionType: "update",
+                    provider: "railway"
+                ),
+            ]
+        )
+        #expect(
+            observation.latestSuccessfulAt
+                == ISO8601DateFormatter().date(from: "2026-07-20T10:00:00Z")
+        )
+        let encoded = try JSONEncoder().encode(observation)
+        #expect(!String(decoding: encoded, as: UTF8.self).contains("sentinel-secret-value"))
+        #expect(!String(decoding: encoded, as: UTF8.self).contains("sentinel-path"))
+        #expect(!String(decoding: encoded, as: UTF8.self).contains("sentinel-query"))
+        #expect(!String(decoding: encoded, as: UTF8.self).contains("sentinel-password"))
+    }
+
+    @Test
     func failedAttemptPreservesLastSuccessfulObservationTime() {
         let successfulAt = Date(timeIntervalSince1970: 100)
         let previous = ObservationSummary(

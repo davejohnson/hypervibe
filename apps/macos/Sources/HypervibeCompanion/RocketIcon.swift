@@ -2,17 +2,19 @@ import AppKit
 import SwiftUI
 
 struct RocketIcon: View {
+    var alert = false
+
     var body: some View {
-        Image(nsImage: RocketTemplateImage.make())
+        Image(nsImage: RocketTemplateImage.make(alert: alert))
             .resizable()
             .scaledToFit()
-            .accessibilityLabel("Hypervibe")
+            .accessibilityLabel(alert ? "Hypervibe — needs attention" : "Hypervibe")
     }
 }
 
 @MainActor
 enum RocketTemplateImage {
-    static func make() -> NSImage {
+    static func make(alert: Bool = false) -> NSImage {
         let image = NSImage(
             size: NSSize(width: 18, height: 18),
             flipped: false
@@ -23,6 +25,14 @@ enum RocketTemplateImage {
                 NSPoint(
                     x: bounds.minX + x * scaleX,
                     y: bounds.maxY - y * scaleY
+                )
+            }
+            func rect(_ x: CGFloat, _ y: CGFloat, _ width: CGFloat, _ height: CGFloat) -> NSRect {
+                NSRect(
+                    x: bounds.minX + x * scaleX,
+                    y: bounds.maxY - (y + height) * scaleY,
+                    width: width * scaleX,
+                    height: height * scaleY
                 )
             }
 
@@ -89,6 +99,26 @@ enum RocketTemplateImage {
 
             NSColor.black.setFill()
             path.fill()
+
+            if alert {
+                // Monochrome exclamation badge; the erased margin keeps it
+                // legible as a template image against the rocket silhouette.
+                let context = NSGraphicsContext.current?.cgContext
+                context?.setBlendMode(.destinationOut)
+                NSBezierPath(ovalIn: rect(9.7, 9.7, 8.9, 8.9)).fill()
+                context?.setBlendMode(.normal)
+
+                let badge = NSBezierPath()
+                badge.windingRule = .evenOdd
+                badge.appendOval(in: rect(10.6, 10.6, 7.1, 7.1))
+                badge.appendRoundedRect(
+                    rect(13.7, 12.1, 0.9, 2.7),
+                    xRadius: 0.45 * scaleX,
+                    yRadius: 0.45 * scaleY
+                )
+                badge.appendOval(in: rect(13.65, 15.5, 1.0, 1.0))
+                badge.fill()
+            }
             return true
         }
         image.isTemplate = true

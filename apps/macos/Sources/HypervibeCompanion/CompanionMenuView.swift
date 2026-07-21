@@ -116,10 +116,8 @@ struct CompanionMenuView: View {
             }
             .help("Settings")
 
-            Button {
+            Button("Quit") {
                 NSApplication.shared.terminate(nil)
-            } label: {
-                Image(systemName: "power")
             }
             .help("Quit Hypervibe")
         }

@@ -26,6 +26,7 @@ struct ConnectionsView: View {
             footer
         }
         .frame(minWidth: 640, idealWidth: 680, minHeight: 460, idealHeight: 520)
+        .background(WindowFocusBridge())
         .task(id: project.id) {
             await model.loadConnectionCatalog(projectID: project.id)
             guard !didResolveInitialRoute else { return }

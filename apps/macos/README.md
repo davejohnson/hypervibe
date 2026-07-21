@@ -14,7 +14,8 @@ The current v0 slice contains:
 - safe one-click registration of every configured project with Claude Desktop
   and Codex / ChatGPT desktop clients;
 - desired resource topology from `hv_spec_get`;
-- live environment health and drift counts from `hv_status`;
+- live environment health, drift identity, and service endpoints from
+  `hv_status`;
 - recent plan/apply activity from `hv_runs`;
 - memory-only connected-app summaries and provider form metadata from
   `hv_connections_list`;
