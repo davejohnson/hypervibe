@@ -12,20 +12,25 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
+import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
+import { DatabaseAdapter } from '../../adapters/providers/database/database.adapter.js';
 import { createToolContext } from '../context.js';
 import { registerHvDbTools } from '../hv-db.tools.js';
+import { databaseAccessLeaseCoordinator } from '../../domain/services/database-access.service.js';
 
 let tempDir: string;
 
 beforeEach(() => {
+  databaseAccessLeaseCoordinator.resetForTests();
   SqliteAdapter.resetInstance();
   tempDir = mkdtempSync(path.join(tmpdir(), 'hypervibe-hv-db-'));
   SqliteAdapter.getInstance(path.join(tempDir, 'test.db')).migrate();
 });
 
 afterEach(() => {
+  databaseAccessLeaseCoordinator.resetForTests();
   vi.restoreAllMocks();
   SqliteAdapter.resetInstance();
   rmSync(tempDir, { recursive: true, force: true });
@@ -83,6 +88,14 @@ function seedInternalRailwayDbProject() {
     },
   });
   return { project, environment };
+}
+
+function seedVerifiedRailwayConnection() {
+  const connection = new ConnectionRepository().create({
+    provider: 'railway',
+    credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
+  });
+  new ConnectionRepository().updateStatus(connection.id, 'verified');
 }
 
 function seedServiceSpecificRailwayDbProject() {
@@ -169,16 +182,179 @@ describe('hv_db_query', () => {
     await t.close();
   });
 
-  it('reports internal managed database targets as unreachable instead of unknown database type', async () => {
+  it('creates a TCP proxy for an internal managed database and removes it after the query', async () => {
     seedInternalRailwayDbProject();
+    seedVerifiedRailwayConnection();
+    vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue({
+      PGUSER: 'postgres',
+      POSTGRES_PASSWORD: 'secret',
+      PGDATABASE: 'app',
+      DATABASE_URL: 'postgresql://postgres:secret@postgres.railway.internal:5432/app',
+    });
+    vi.spyOn(RailwayAdapter.prototype, 'getTcpProxy').mockResolvedValue(null);
+    const ensureProxy = vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy').mockResolvedValue({
+      id: 'proxy-temp',
+      domain: 'temp.proxy.rlwy.net',
+      proxyPort: 33333,
+      created: true,
+    });
+    const deleteProxy = vi.spyOn(RailwayAdapter.prototype, 'deleteTcpProxy').mockResolvedValue();
+    vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({
+      success: true,
+      rowCount: 1,
+      rows: [{ one: 1 }],
+      fields: [{ name: 'one', dataType: '23' }],
+    });
     const t = await makeClient();
     const result = await t.call('hv_db_query', { project: 'rail-db-app', env: 'production', sql: 'SELECT 1' });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      rows: [{ one: 1 }],
+      access: {
+        mode: 'ephemeral_proxy',
+        provider: 'railway',
+        leaseCreated: true,
+        cleanup: 'completed',
+        resourceId: 'proxy-temp',
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('temp.proxy.rlwy.net');
+    expect(JSON.stringify(result)).not.toContain('secret');
+    expect(ensureProxy).toHaveBeenCalledWith('rail-env-1', 'rail-db-svc-1', 5432);
+    expect(deleteProxy).toHaveBeenCalledWith('rail-env-1', 'rail-db-svc-1', 'proxy-temp');
+    await t.close();
+  });
+
+  it('removes the temporary proxy when the database query fails', async () => {
+    seedInternalRailwayDbProject();
+    seedVerifiedRailwayConnection();
+    vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue({
+      PGUSER: 'postgres', POSTGRES_PASSWORD: 'secret', PGDATABASE: 'app',
+    });
+    vi.spyOn(RailwayAdapter.prototype, 'getTcpProxy').mockResolvedValue(null);
+    vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy').mockResolvedValue({
+      id: 'proxy-temp', domain: 'temp.proxy.rlwy.net', proxyPort: 33333, created: true,
+    });
+    const deleteProxy = vi.spyOn(RailwayAdapter.prototype, 'deleteTcpProxy').mockResolvedValue();
+    vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({ success: false, error: 'query exploded' });
+    const t = await makeClient();
+
+    const result = await t.call('hv_db_query', { project: 'rail-db-app', env: 'production', sql: 'SELECT 1' });
+
     expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('NOT_FOUND');
-    expect(result.error.message).toContain('externally reachable Postgres URL');
-    expect(result.error.message).not.toContain('Unknown database type');
-    expect(result.error.details.canCreateTcpProxy).toBe(true);
-    expect(result.hint).toContain('internal-only');
+    expect(result.error.code).toBe('PROVIDER_ERROR');
+    expect(result.error.message).toContain('query exploded');
+    expect(result.error.details.access).toMatchObject({
+      mode: 'ephemeral_proxy',
+      leaseCreated: true,
+      cleanup: 'completed',
+      resourceId: 'proxy-temp',
+    });
+    expect(deleteProxy).toHaveBeenCalledWith('rail-env-1', 'rail-db-svc-1', 'proxy-temp');
+    await t.close();
+  });
+
+  it('preserves a successful query result but stops when temporary proxy cleanup fails', async () => {
+    seedInternalRailwayDbProject();
+    seedVerifiedRailwayConnection();
+    vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue({
+      PGUSER: 'postgres', POSTGRES_PASSWORD: 'secret', PGDATABASE: 'app',
+    });
+    vi.spyOn(RailwayAdapter.prototype, 'getTcpProxy').mockResolvedValue(null);
+    vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy').mockResolvedValue({
+      id: 'proxy-temp', domain: 'temp.proxy.rlwy.net', proxyPort: 33333, created: true,
+    });
+    vi.spyOn(RailwayAdapter.prototype, 'deleteTcpProxy').mockRejectedValue(new Error('cleanup denied'));
+    vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({ success: true, rowCount: 1, rows: [{ one: 1 }] });
+    const t = await makeClient();
+
+    const result = await t.call('hv_db_query', { project: 'rail-db-app', env: 'production', sql: 'SELECT 1' });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      rows: [{ one: 1 }],
+      access: {
+        mode: 'ephemeral_proxy',
+        leaseCreated: true,
+        cleanup: 'failed',
+        resourceId: 'proxy-temp',
+      },
+    });
+    expect(result.agentInstruction.action).toBe('stop_and_report');
+    expect(result.warnings.join(' ')).toContain('cleanup failed');
+    expect(result.hint).toContain('hv_inspect');
+    await t.close();
+  });
+
+  it('rejects unsafe SQL before creating temporary database access', async () => {
+    seedInternalRailwayDbProject();
+    const ensureProxy = vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy');
+    const t = await makeClient();
+
+    const result = await t.call('hv_db_query', {
+      project: 'rail-db-app', env: 'production', sql: 'SELECT 1; DROP TABLE users',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(ensureProxy).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('uses an already reachable managed database without creating provider access', async () => {
+    seedDbProject();
+    const ensureProxy = vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy');
+    const query = vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({
+      success: true,
+      rowCount: 1,
+      rows: [{ healthy: true }],
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_db_query', { project: 'db-app', env: 'staging', sql: 'SELECT true AS healthy' });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.access).toMatchObject({
+      mode: 'existing',
+      leaseCreated: false,
+      cleanup: 'no_op',
+    });
+    expect(ensureProxy).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledWith('SELECT true AS healthy', undefined, { readOnly: true });
+    await t.close();
+  });
+
+  it('records safe diagnostic audit metadata without SQL, parameters, rows, or credentials', async () => {
+    vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({
+      success: true,
+      rowCount: 1,
+      rows: [{ value: 'row-secret' }],
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_db_query', {
+      connectionUrl: 'postgresql://audit-user:url-secret@database.example.com:5432/app',
+      sql: 'SELECT $1::text AS value',
+      params: ['param-secret'],
+    });
+
+    expect(result.ok).toBe(true);
+    const [audit] = new AuditRepository().findByAction('db_query.succeeded');
+    expect(audit).toBeDefined();
+    expect(audit.details).toMatchObject({
+      queryType: 'select',
+      accessMode: 'existing',
+      leaseCreated: false,
+      cleanup: 'no_op',
+      rowCount: 1,
+    });
+    expect(audit.details.sqlFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    const serializedAudit = JSON.stringify(audit);
+    expect(serializedAudit).not.toContain('SELECT $1');
+    expect(serializedAudit).not.toContain('param-secret');
+    expect(serializedAudit).not.toContain('row-secret');
+    expect(serializedAudit).not.toContain('url-secret');
     await t.close();
   });
 });
