@@ -20,6 +20,7 @@ struct CompanionSettingsView: View {
                 } label: {
                     Label("Add Project", systemImage: "plus")
                 }
+                .clickTargetCursor()
             }
 
             if model.projects.isEmpty {
@@ -43,6 +44,7 @@ struct CompanionSettingsView: View {
                                     Image(systemName: "trash")
                                 }
                                 .buttonStyle(.borderless)
+                                .clickTargetCursor()
                             }
                             Text(project.repositoryPath)
                                 .font(.caption)
@@ -107,6 +109,7 @@ struct CompanionSettingsView: View {
                             await model.toggleMCPHost(host)
                         }
                     }
+                    .clickTargetCursor()
                     .disabled(
                         model.projects.isEmpty
                             || !CompanionDistribution.isReadyForOnboarding

@@ -86,6 +86,7 @@ struct ProjectDashboardView: View {
                             ConnectionCard(connections: group)
                         }
                         .buttonStyle(.plain)
+                        .clickTargetCursor()
                     }
                 }
                 .padding(.top, 9)
@@ -98,6 +99,7 @@ struct ProjectDashboardView: View {
                         Button("Add Connection…") {
                             showConnections()
                         }
+                        .clickTargetCursor()
                     }
                     .padding(.top, 8)
                 }
@@ -119,6 +121,7 @@ struct ProjectDashboardView: View {
                     .buttonStyle(.borderless)
                     .help("Add provider connection")
                 }
+                .clickTargetCursor()
             }
         }
         .padding(12)
@@ -175,6 +178,7 @@ struct ProjectDashboardView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .help("Manage runtime variables and secrets")
+                                .clickTargetCursor()
                             }
                         }
                         .font(.caption)
@@ -196,6 +200,7 @@ struct ProjectDashboardView: View {
                 .padding(.top, 8)
             } label: {
                 environmentHeader(environment)
+                    .clickTargetCursor()
             }
         }
         .padding(12)
@@ -306,6 +311,7 @@ struct ProjectDashboardView: View {
                             .lineLimit(1)
                     }
                     .help("Open \(url.absoluteString)")
+                    .clickTargetCursor()
                 }
             }
             Spacer()
@@ -349,6 +355,7 @@ struct ProjectDashboardView: View {
                 .padding(.top, 8)
             } label: {
                 recentRunsLabel(runs)
+                    .clickTargetCursor()
             }
         }
         .padding(12)

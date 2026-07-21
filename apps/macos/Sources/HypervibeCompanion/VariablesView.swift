@@ -156,6 +156,7 @@ struct VariablesView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .help("Refresh variables")
+            .clickTargetCursor()
             .disabled(loading || selectedService.isEmpty)
         }
         .padding(16)
@@ -169,6 +170,7 @@ struct VariablesView: View {
                 }
             }
             .frame(maxWidth: .infinity)
+            .clickTargetCursor()
 
             Picker("Service", selection: $selectedService) {
                 ForEach(services) { service in
@@ -176,6 +178,7 @@ struct VariablesView: View {
                 }
             }
             .frame(maxWidth: .infinity)
+            .clickTargetCursor()
 
             if let selectedProvider {
                 ProviderLogo(provider: selectedProvider, size: 26)
@@ -203,6 +206,7 @@ struct VariablesView: View {
                 Button("Retry") {
                     Task { await loadVariables() }
                 }
+                .clickTargetCursor()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -250,6 +254,7 @@ struct VariablesView: View {
                     } actions: {
                         Button("Add Variable…") { showingAdd = true }
                             .buttonStyle(.borderedProminent)
+                            .clickTargetCursor()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -275,6 +280,7 @@ struct VariablesView: View {
                 Label("Add Variable", systemImage: "plus")
             }
             .buttonStyle(.borderedProminent)
+            .clickTargetCursor()
             .disabled(selectedService.isEmpty || loading)
         }
         .padding(14)
@@ -495,6 +501,7 @@ private struct AddHostingVariableView: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    .clickTargetCursor()
 
                     sourceFields
                     destinationFields
@@ -525,6 +532,7 @@ private struct AddHostingVariableView: View {
                     clearSecretState()
                     dismiss()
                 }
+                .clickTargetCursor()
                 Spacer()
                 if submitting {
                     ProgressView()
@@ -534,6 +542,7 @@ private struct AddHostingVariableView: View {
                     Task { await submit() }
                 }
                 .buttonStyle(.borderedProminent)
+                .clickTargetCursor()
                 .disabled(!canSubmit || submitting)
             }
             .padding(14)
@@ -566,7 +575,8 @@ private struct AddHostingVariableView: View {
                     Text("Local or secret-manager reference")
                         .font(.caption.weight(.medium))
                     Spacer()
-                    Button("Choose File…") { chooseReferenceFile() }
+                Button("Choose File…") { chooseReferenceFile() }
+                    .clickTargetCursor()
                 }
                 TextField(
                     "env:NAME, dotenv:/path/.env#KEY, file:/path, or 1password://…",
@@ -585,6 +595,7 @@ private struct AddHostingVariableView: View {
                     in: 16...128,
                     step: 8
                 )
+                .clickTargetCursor()
                 Text("Hypervibe creates one value and applies that same value to every selected target without returning it to the app.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -612,6 +623,7 @@ private struct AddHostingVariableView: View {
                 Toggle("Share this exact value with more environments or services", isOn: $sharingValue)
                     .toggleStyle(.switch)
                     .font(.callout)
+                    .clickTargetCursor()
             }
 
             if sharingValue {
@@ -641,6 +653,7 @@ private struct AddHostingVariableView: View {
                                             }
                                         }
                                         .toggleStyle(.checkbox)
+                                        .clickTargetCursor()
                                     }
                                 }
                             }

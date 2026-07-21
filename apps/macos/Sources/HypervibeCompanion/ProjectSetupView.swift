@@ -166,6 +166,7 @@ struct ProjectSetupView: View {
                     dismiss()
                 }
                 .keyboardShortcut(.cancelAction)
+                .clickTargetCursor()
 
                 Spacer()
 
@@ -177,6 +178,7 @@ struct ProjectSetupView: View {
                     save()
                 }
                 .keyboardShortcut(.defaultAction)
+                .clickTargetCursor()
                 .disabled(
                     isSaving
                         || draft.displayName.trimmingCharacters(
@@ -212,6 +214,7 @@ struct ProjectSetupView: View {
             TextField("", text: text)
                 .textFieldStyle(.roundedBorder)
             Button("Browse…", action: browse)
+                .clickTargetCursor()
         }
         .frame(width: 450)
     }

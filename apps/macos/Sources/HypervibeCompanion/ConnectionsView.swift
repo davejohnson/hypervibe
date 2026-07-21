@@ -65,9 +65,11 @@ struct ConnectionsView: View {
                 pendingDelete = nil
                 Task { await remove(connection) }
             }
+            .clickTargetCursor()
             Button("Cancel", role: .cancel) {
                 pendingDelete = nil
             }
+            .clickTargetCursor()
         } message: {
             Text("Hypervibe will remove the encrypted \(pendingDelete?.provider ?? "provider") credentials for scope \(pendingDelete?.scope ?? "global") from this project's local connection store.")
         }
@@ -96,6 +98,7 @@ struct ConnectionsView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .help("Refresh connections")
+            .clickTargetCursor()
         }
         .padding(16)
     }
@@ -111,6 +114,7 @@ struct ConnectionsView: View {
                 Button("Retry") {
                     Task { await model.loadConnectionCatalog(projectID: project.id) }
                 }
+                .clickTargetCursor()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let catalog {
@@ -150,6 +154,7 @@ struct ConnectionsView: View {
                     } actions: {
                         Button("Add Connection…") { showingAdd = true }
                             .buttonStyle(.borderedProminent)
+                            .clickTargetCursor()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -181,6 +186,7 @@ struct ConnectionsView: View {
                 Label("Add Connection", systemImage: "plus")
             }
             .buttonStyle(.borderedProminent)
+            .clickTargetCursor()
             .disabled(catalog == nil)
         }
         .padding(14)
@@ -226,12 +232,14 @@ struct ConnectionsView: View {
                 Button("Verify") {
                     Task { await verify(connection) }
                 }
+                .clickTargetCursor()
                 Button(role: .destructive) {
                     pendingDelete = connection
                 } label: {
                     Image(systemName: "trash")
                 }
                 .help("Delete \(provider?.displayName ?? connection.provider) connection")
+                .clickTargetCursor()
             }
         }
         .padding(.vertical, 7)
@@ -403,6 +411,7 @@ private struct AddConnectionView: View {
                                     .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
                                 }
                                 .buttonStyle(.plain)
+                                .clickTargetCursor()
                             }
                         }
                     }
@@ -437,6 +446,7 @@ private struct AddConnectionView: View {
                             Image(systemName: "chevron.left")
                         }
                         .buttonStyle(.borderless)
+                        .clickTargetCursor()
                         ProviderLogo(provider: provider.name, size: 38)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(provider.displayName)
@@ -454,11 +464,12 @@ private struct AddConnectionView: View {
                                 Label(link.label, systemImage: "arrow.up.right.square")
                             }
                             .font(.caption)
+                            .clickTargetCursor()
                         }
                     }
 
                     if !provider.requiredPermissions.isEmpty || !provider.notes.isEmpty {
-                        DisclosureGroup("Permissions and setup notes", isExpanded: $showingGuidance) {
+                        DisclosureGroup(isExpanded: $showingGuidance) {
                             VStack(alignment: .leading, spacing: 7) {
                                 ForEach(provider.requiredPermissions, id: \.self) { permission in
                                     Label(permission, systemImage: "checkmark.circle")
@@ -470,6 +481,9 @@ private struct AddConnectionView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.top, 8)
+                        } label: {
+                            Text("Permissions and setup notes")
+                                .clickTargetCursor()
                         }
                     }
 
@@ -480,6 +494,7 @@ private struct AddConnectionView: View {
                             }
                         }
                         .pickerStyle(.segmented)
+                        .clickTargetCursor()
                     } else {
                         Label(
                             "This Hypervibe version does not describe this provider's fields. Use a secure reference instead.",
@@ -531,6 +546,7 @@ private struct AddConnectionView: View {
                     clearCredentialState()
                     dismiss()
                 }
+                .clickTargetCursor()
                 Spacer()
                 if submitting {
                     ProgressView()
@@ -543,6 +559,7 @@ private struct AddConnectionView: View {
                     Task { await submit(provider) }
                 }
                 .buttonStyle(.borderedProminent)
+                .clickTargetCursor()
                 .disabled(!canSubmit(provider) || submitting)
             }
             .padding(14)
@@ -571,6 +588,7 @@ private struct AddConnectionView: View {
                 }
                 .labelsHidden()
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .clickTargetCursor()
             case .secret:
                 SecureField(field.label, text: fieldBinding(field.name))
                     .textFieldStyle(.roundedBorder)
@@ -581,6 +599,7 @@ private struct AddConnectionView: View {
                     Button("Load File…") {
                         loadFile(into: field.name)
                     }
+                    .clickTargetCursor()
                 }
             case .text:
                 TextField(field.label, text: fieldBinding(field.name))
@@ -604,6 +623,7 @@ private struct AddConnectionView: View {
                     Button("Choose File…") {
                         chooseReferenceFile()
                     }
+                    .clickTargetCursor()
                 }
                 TextField(
                     "env:NAME, dotenv:/path/.env#KEY, file:/path, or 1password://…",
