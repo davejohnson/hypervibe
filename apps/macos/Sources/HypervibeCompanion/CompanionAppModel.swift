@@ -321,7 +321,7 @@ final class CompanionAppModel: ObservableObject {
     func toggleMCPHost(_ host: MCPHost) async {
         guard !updatingMCPHosts.contains(host) else { return }
         guard CompanionDistribution.isReadyForOnboarding else {
-            mcpHostErrors[host] = CompanionDistribution.installationGuidance
+            mcpHostErrors[host] = CompanionDistribution.onboardingGuidance
             return
         }
         updatingMCPHosts.insert(host)

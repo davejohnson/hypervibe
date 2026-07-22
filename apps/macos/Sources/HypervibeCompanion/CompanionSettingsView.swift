@@ -62,6 +62,7 @@ struct CompanionSettingsView: View {
         }
         .padding(20)
         .frame(width: 620, height: 570)
+        .background(WindowFocusBridge())
         .task {
             await model.loadIfNeeded()
             await model.refreshMCPHostStatuses()
@@ -127,9 +128,8 @@ struct CompanionSettingsView: View {
     }
 
     private func hostStatusText(_ host: MCPHost) -> String {
-        if CompanionDistribution.includesBundledServer,
-            !CompanionDistribution.hasStableInstallationPath {
-            return CompanionDistribution.installationGuidance
+        if !CompanionDistribution.isReadyForOnboarding {
+            return CompanionDistribution.onboardingGuidance
         }
         if let error = model.mcpHostErrors[host] {
             return error
