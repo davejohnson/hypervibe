@@ -10,7 +10,7 @@ interface LegacyDesiredState {
   serviceName?: string;
   crons?: Record<string, { schedule: string; command?: string; timeZone?: string }>;
   domain?: string;
-  databaseProvider?: 'supabase' | 'cloudsql' | 'railway';
+  databaseProvider?: 'supabase' | 'cloudsql' | 'railway' | 'rds';
   setupEmail?: boolean;
   serviceConfig?: Record<string, {
     startCommand?: string;

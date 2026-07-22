@@ -19,6 +19,9 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 
 **Infrastructure Providers**
 - **Railway** - Deploy apps, databases, private S3-compatible storage buckets, cron jobs, queues
+- **Google Cloud** - Cloud Run hosting and Cloud SQL Postgres
+- **Amazon RDS** - Managed Postgres with operation-scoped diagnostic ingress
+- **Supabase** - Managed Postgres with direct or pooled connectivity
 - **Cloudflare** - DNS management, domain configuration
 - **Stripe** - Payment integration, webhooks, products
 - **SendGrid** - Email authentication, domain verification
@@ -185,7 +188,7 @@ Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/healt
 
 ### Database diagnostics
 
-`hv_db_query` can diagnose an internal-only managed Postgres database without asking you to expose it permanently. When needed, Hypervibe creates operation-scoped provider access, runs one query, and releases only the access it created. Concurrent queries share the same short-lived lease, and every response reports the access mode and cleanup status without returning database credentials or the public endpoint.
+`hv_db_query` can diagnose managed Postgres without asking you to expose it permanently. Railway uses a temporary TCP proxy, Cloud SQL uses a local authenticated connector, and a publicly addressable RDS instance gets a temporary `/32` security-group rule for the Hypervibe caller. Supabase normally uses its existing direct endpoint, so no temporary provider resource is needed. Hypervibe releases only access it created; concurrent queries share the same short-lived lease, and every response reports the access mode and cleanup status without returning database credentials or endpoints.
 
 Diagnostic reads run in a PostgreSQL read-only transaction with a 30-second statement timeout. Results are capped at 500 rows and 512 KiB. Mutations still require `allowMutations=true`, and multi-statement SQL remains blocked.
 
@@ -565,7 +568,7 @@ Provider credentials remain local and encrypted. Database component bindings (co
 
 `workloadKind: "job"` was removed from the service spec — it never had run-to-completion deploy semantics. Specs using it fail validation; choose `worker` (always-on, internal-only on Cloud Run with a minimum of one instance — note Cloud Run workers must still listen on `PORT`) or `cron` (scheduled). Railway's observe cannot distinguish `web` from `worker`, so kind drift is not detected there.
 
-Hosting support for Vercel, Render, Heroku, DigitalOcean, and AWS App Runner (plus AWS RDS databases) was removed. Specs that reference those providers no longer validate; move the environment to `railway` or `cloudrun` (databases: `supabase`, `cloudsql`, or `railway`) and re-run `hv_plan`. Stored connections for removed providers can still be deleted with `hv_connect action="remove"`.
+Hosting support for Vercel, Render, Heroku, DigitalOcean, and AWS App Runner was removed. Specs that reference those hosting providers no longer validate; move the environment to `railway` or `cloudrun` and re-run `hv_plan`. Supported database providers are `supabase`, `cloudsql`, `railway`, and `rds`. Stored connections for removed providers can still be deleted with `hv_connect action="remove"`.
 
 The `redis`, `mysql`, and `mongodb` component types were removed — `postgres` is the only provisionable datastore. Existing live Redis/MySQL/MongoDB instances are no longer managed and observe as `unknown` engines.
 

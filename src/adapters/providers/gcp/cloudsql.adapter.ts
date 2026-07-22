@@ -1,7 +1,13 @@
 import { z } from 'zod';
+import { randomUUID } from 'crypto';
+import { mkdtemp, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import path from 'path';
+import { Connector, IpAddressTypes } from '@google-cloud/cloud-sql-connector';
+import { GoogleAuth } from 'google-auth-library';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Component } from '../../../domain/entities/component.entity.js';
-import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
+import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from '../../../domain/ports/provider.port.js';
 import type {
   IDatabaseAdapter,
   DatabaseCapabilities,
@@ -60,12 +66,15 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
     supportsReadReplicas: true,
     supportsPointInTimeRecovery: true,
     serverlessOptimized: false,
+    supportsTemporaryDatabaseAccess: true,
+    prefersTemporaryDatabaseAccess: true,
   };
 
   private credentials: CloudSqlCredentials | null = null;
   private serviceAccountCreds: ServiceAccountCredentials | null = null;
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
+  private temporaryConnectors = new Map<string, { connector: Connector; directory: string }>();
 
   async connect(credentials: unknown): Promise<void> {
     this.credentials = credentials as CloudSqlCredentials;
@@ -99,7 +108,8 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
             success: false,
             error: [
               'Cloud SQL Admin API probe failed with 403.',
-              `Grant roles/cloudsql.admin to serviceAccount:${this.serviceAccountCreds.client_email} on project ${projectId},`,
+              `Grant roles/cloudsql.viewer and roles/cloudsql.client to serviceAccount:${this.serviceAccountCreds.client_email} on project ${projectId};`,
+              'also grant roles/cloudsql.admin if Hypervibe should provision or delete databases,',
               'and make sure the sqladmin.googleapis.com API is enabled (hv_connect provider="cloudrun" action="prepare" enables it).',
               `Original error: ${text}`,
             ].join(' '),
@@ -122,6 +132,11 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
   }
 
   async disconnect(): Promise<void> {
+    for (const temporary of this.temporaryConnectors.values()) {
+      temporary.connector.close();
+      await rm(temporary.directory, { recursive: true, force: true }).catch(() => {});
+    }
+    this.temporaryConnectors.clear();
     this.credentials = null;
     this.serviceAccountCreds = null;
     this.accessToken = null;
@@ -378,6 +393,91 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
     }
 
     return bindings.connectionUrl ?? bindings.connectionString ?? null;
+  }
+
+  async acquireTemporaryDatabaseAccess(
+    _environment: Environment,
+    component: Component,
+    applicationPort: number
+  ): Promise<TemporaryDatabaseAccess> {
+    if (!this.credentials || !this.serviceAccountCreds) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    if (applicationPort !== 5432) {
+      throw new Error(`Cloud SQL PostgreSQL access requires application port 5432, received ${applicationPort}.`);
+    }
+
+    const bindings = component.bindings as Record<string, unknown>;
+    const instanceName = component.externalId
+      ?? (typeof bindings.instanceId === 'string' ? bindings.instanceId : undefined);
+    const connectionName = typeof bindings.connectionName === 'string'
+      ? bindings.connectionName
+      : instanceName ? `${this.credentials.projectId}:${this.credentials.region}:${instanceName}` : undefined;
+    if (!connectionName) {
+      throw new Error('Cloud SQL component is missing its instance connection name.');
+    }
+
+    const storedUrl = typeof bindings.connectionUrl === 'string'
+      ? bindings.connectionUrl
+      : typeof bindings.connectionString === 'string' ? bindings.connectionString : undefined;
+    let parsedUrl: URL | undefined;
+    try {
+      parsedUrl = storedUrl ? new URL(storedUrl) : undefined;
+    } catch {
+      parsedUrl = undefined;
+    }
+    const username = typeof bindings.username === 'string' ? bindings.username : parsedUrl?.username;
+    const password = typeof bindings.password === 'string' ? bindings.password : parsedUrl?.password;
+    const database = typeof bindings.database === 'string'
+      ? bindings.database
+      : parsedUrl?.pathname.replace(/^\//, '');
+    if (!username || !password || !database) {
+      throw new Error('Cloud SQL bindings are missing the database username, password, or database name.');
+    }
+
+    const auth = new GoogleAuth({
+      credentials: this.serviceAccountCreds,
+      scopes: ['https://www.googleapis.com/auth/sqlservice.admin'],
+    });
+    const connector = new Connector({ auth });
+    const directory = await mkdtemp(path.join(tmpdir(), 'hv-cloudsql-'));
+    const socketPath = path.join(directory, '.s.PGSQL.5432');
+    try {
+      await connector.startLocalProxy({
+        instanceConnectionName: connectionName,
+        ipType: IpAddressTypes.PUBLIC,
+        listenOptions: { path: socketPath },
+      });
+      const releaseToken = randomUUID();
+      this.temporaryConnectors.set(releaseToken, { connector, directory });
+      const authPart = `${encodeURIComponent(username)}:${encodeURIComponent(password)}`;
+      return {
+        connectionUrl: `postgresql://${authPart}@localhost/${encodeURIComponent(database)}?host=${encodeURIComponent(directory)}`,
+        source: 'private_connector',
+        temporary: true,
+        releaseToken,
+      };
+    } catch (error) {
+      connector.close();
+      await rm(directory, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
+  }
+
+  async releaseTemporaryDatabaseAccess(
+    _environment: Environment,
+    _component: Component,
+    access: TemporaryDatabaseAccess
+  ): Promise<void> {
+    if (!access.temporary) return;
+    if (!access.releaseToken) {
+      throw new Error('Temporary Cloud SQL access is missing its cleanup token.');
+    }
+    const temporary = this.temporaryConnectors.get(access.releaseToken);
+    if (!temporary) return;
+    temporary.connector.close();
+    await rm(temporary.directory, { recursive: true, force: true });
+    this.temporaryConnectors.delete(access.releaseToken);
   }
 
   async destroy(component: Component): Promise<Receipt> {

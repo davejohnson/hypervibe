@@ -30,7 +30,7 @@ export const serviceSpecSchema = z.object({
 });
 
 export const databaseSpecSchema = z.object({
-  provider: z.enum(['supabase', 'cloudsql', 'railway']),
+  provider: z.enum(['supabase', 'cloudsql', 'railway', 'rds']),
   engine: z.literal('postgres').default('postgres'),
   /**
    * Optional one-shot bootstrap/seed command. hv_plan emits a visible database

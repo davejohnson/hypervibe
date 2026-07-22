@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Connector, IpAddressTypes } from '@google-cloud/cloud-sql-connector';
 import { CloudSqlAdapter } from '../cloudsql.adapter.js';
 import type { Component } from '../../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
@@ -62,6 +63,8 @@ describe('CloudSqlAdapter', () => {
     const result = await adapter.verify();
 
     expect(result.success).toBe(false);
+    expect(result.error).toContain('roles/cloudsql.viewer');
+    expect(result.error).toContain('roles/cloudsql.client');
     expect(result.error).toContain('roles/cloudsql.admin');
     expect(result.error).toContain('sqladmin.googleapis.com');
     expect(result.error).toContain('serviceAccount:deploy@gcp-project.iam.gserviceaccount.com');
@@ -290,5 +293,76 @@ describe('CloudSqlAdapter', () => {
     };
 
     await expect(adapter.observeDatabase(environment)).resolves.toBeNull();
+  });
+
+  it('opens and releases a local authenticated connector for one database operation', async () => {
+    const adapter = await connectedAdapter();
+    const startLocalProxy = vi.spyOn(Connector.prototype, 'startLocalProxy').mockResolvedValue();
+    const close = vi.spyOn(Connector.prototype, 'close').mockImplementation(() => {});
+    const now = new Date();
+    const environment: Environment = {
+      id: 'env-1',
+      projectId: 'project-1',
+      name: 'production',
+      platformBindings: {},
+      createdAt: now,
+      updatedAt: now,
+    };
+    const component: Component = {
+      id: 'component-1',
+      environmentId: environment.id,
+      type: 'postgres',
+      externalId: 'production-postgres',
+      bindings: {
+        provider: 'cloudsql',
+        connectionName: 'gcp-project:us-central1:production-postgres',
+        username: 'postgres',
+        password: 'db-secret',
+        database: 'app',
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const access = await adapter.acquireTemporaryDatabaseAccess(environment, component, 5432);
+
+    expect(access).toMatchObject({
+      source: 'private_connector',
+      temporary: true,
+    });
+    expect(access.releaseToken).toEqual(expect.any(String));
+    expect(access.connectionUrl).toMatch(/^postgresql:\/\/postgres:db-secret@localhost\/app\?host=/);
+    expect(startLocalProxy).toHaveBeenCalledWith({
+      instanceConnectionName: 'gcp-project:us-central1:production-postgres',
+      ipType: IpAddressTypes.PUBLIC,
+      listenOptions: { path: expect.stringMatching(/hv-cloudsql-.*\.s\.PGSQL\.5432$/) },
+    });
+
+    await adapter.releaseTemporaryDatabaseAccess(environment, component, access);
+    await adapter.releaseTemporaryDatabaseAccess(environment, component, access);
+
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes a failed connector acquisition before surfacing the error', async () => {
+    const adapter = await connectedAdapter();
+    vi.spyOn(Connector.prototype, 'startLocalProxy').mockRejectedValue(new Error('connector denied'));
+    const close = vi.spyOn(Connector.prototype, 'close').mockImplementation(() => {});
+    const now = new Date();
+    const environment = {
+      id: 'env-1', projectId: 'project-1', name: 'production', platformBindings: {}, createdAt: now, updatedAt: now,
+    } as Environment;
+    const component = {
+      id: 'component-1', environmentId: environment.id, type: 'postgres', externalId: 'production-postgres',
+      bindings: {
+        provider: 'cloudsql', connectionName: 'gcp-project:us-central1:production-postgres',
+        username: 'postgres', password: 'db-secret', database: 'app',
+      },
+      createdAt: now, updatedAt: now,
+    } as Component;
+
+    await expect(adapter.acquireTemporaryDatabaseAccess(environment, component, 5432))
+      .rejects.toThrow('connector denied');
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });
