@@ -1,18 +1,22 @@
-name: Publish Private MCP Package
+name: Publish Hypervibe Release
 
 on:
-  workflow_dispatch:
   push:
     tags:
       - "v*"
 
-permissions:
-  contents: read
-  packages: write
+permissions: {}
+
+concurrency:
+  group: hypervibe-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  validate-package:
+    name: Validate npm package
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -21,16 +25,13 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.17.1"
           cache: npm
-          registry-url: https://npm.pkg.github.com
-          scope: "@davejohnson"
 
       - name: Install dependencies
         run: npm ci
 
       - name: Verify tag matches package version
-        if: github.event_name == 'push'
         shell: bash
         run: |
           expected_version="${GITHUB_REF_NAME#v}"
@@ -40,10 +41,138 @@ jobs:
             exit 1
           fi
 
-      - name: Test
-        run: npm test
+      - name: Validate release package
+        run: npm run release:check
+
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.17.1"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test macOS companion
+        run: swift test --package-path apps/macos
+
+      - name: Build macOS installer
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: ./scripts/build-macos-installer.sh
+
+      - name: Create checksum
+        shell: bash
+        run: |
+          artifact="$(find build/macos -maxdepth 1 -type f -name 'Hypervibe-*-${{ matrix.arch }}.dmg' -print -quit)"
+          if [[ -z "$artifact" ]]; then
+            echo "No ${{ matrix.arch }} DMG was produced." >&2
+            exit 1
+          fi
+          artifact_dir="$(dirname "$artifact")"
+          artifact_name="$(basename "$artifact")"
+          (
+            cd "$artifact_dir"
+            shasum -a 256 "$artifact_name" > "$artifact_name.sha256"
+          )
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hypervibe-${{ matrix.arch }}
+          path: |
+            build/macos/Hypervibe-*-${{ matrix.arch }}.dmg
+            build/macos/Hypervibe-*-${{ matrix.arch }}.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-package:
+    name: Publish npm package
+    needs: [validate-package, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.17.1"
+          cache: npm
+          registry-url: https://npm.pkg.github.com
+          scope: "@davejohnson"
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Publish restricted package
         run: npm publish --access restricted
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    name: Publish GitHub Release
+    needs: [publish-package, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download macOS installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Hypervibe-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          expected=(
+            "release-assets/Hypervibe-${GITHUB_REF_NAME#v}-arm64.dmg"
+            "release-assets/Hypervibe-${GITHUB_REF_NAME#v}-arm64.dmg.sha256"
+            "release-assets/Hypervibe-${GITHUB_REF_NAME#v}-x86_64.dmg"
+            "release-assets/Hypervibe-${GITHUB_REF_NAME#v}-x86_64.dmg.sha256"
+          )
+          for artifact in "${expected[@]}"; do
+            if [[ ! -f "$artifact" ]]; then
+              echo "Missing release asset: $artifact" >&2
+              exit 1
+            fi
+          done
+          (
+            cd release-assets
+            sha256sum --check *.dmg.sha256
+          )
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "Hypervibe ${GITHUB_REF_NAME#v}"

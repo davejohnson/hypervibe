@@ -58,6 +58,13 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 
 ## Quick Start
 
+### Download the macOS Companion
+
+Download the latest installer from
+[GitHub Releases](https://github.com/davejohnson/hypervibe/releases/latest).
+Choose `arm64` for Apple Silicon Macs or `x86_64` for Intel Macs. Each DMG has
+an adjacent `.sha256` checksum file.
+
 ### 1. Authenticate to the Private Package
 
 Hypervibe is distributed as a private package through GitHub Packages. Ask the
@@ -589,6 +596,43 @@ Then import in `server.ts`:
 ```typescript
 import './adapters/providers/example/example.adapter.js';
 ```
+
+## Releasing Hypervibe
+
+Releases are one command from a clean, up-to-date `main` checkout:
+
+```bash
+npm ci
+npm run release -- patch
+```
+
+Use `minor`, `major`, or an exact stable version such as `0.2.0` instead of
+`patch`. The release command verifies that `main` exactly matches
+`origin/main`, updates `package.json` and `package-lock.json`, runs the full
+test/typecheck/build/package-safety suite, creates the release commit and an
+annotated `vX.Y.Z` tag, and atomically pushes both. The tag starts
+`publish-private-package.yml`; it publishes the private npm package, builds
+native Apple Silicon (`arm64`) and Intel (`x86_64`) DMGs on matching GitHub
+macOS runners, creates SHA-256 checksum files, and attaches all four files to
+a public [GitHub Release](https://github.com/davejohnson/hypervibe/releases).
+By default the command watches that workflow through `gh` and fails if any
+package, installer, or release job fails.
+
+Preview the next version and git operations without changing anything:
+
+```bash
+npm run release -- patch --dry-run
+```
+
+Pass `--no-wait` only when another process will monitor the GitHub package
+workflow. If validation fails before the release commit, the script restores
+the original package version files. If the atomic push fails, it keeps the
+local release commit and tag and prints the exact retry command.
+
+The GitHub-hosted DMGs are currently ad-hoc signed, matching the default local
+installer build. They are suitable for testing, but macOS Gatekeeper may ask
+the recipient to confirm the first launch. Configure Developer ID signing and
+notarization before treating them as polished public distribution artifacts.
 
 ## Philosophy
 
