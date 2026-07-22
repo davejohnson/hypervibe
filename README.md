@@ -590,6 +590,34 @@ Then import in `server.ts`:
 import './adapters/providers/example/example.adapter.js';
 ```
 
+## Releasing Hypervibe
+
+Releases are one command from a clean, up-to-date `main` checkout:
+
+```bash
+npm ci
+npm run release -- patch
+```
+
+Use `minor`, `major`, or an exact stable version such as `0.2.0` instead of
+`patch`. The release command verifies that `main` exactly matches
+`origin/main`, updates `package.json` and `package-lock.json`, runs the full
+test/typecheck/build/package-safety suite, creates the release commit and an
+annotated `vX.Y.Z` tag, and atomically pushes both. The tag starts
+`publish-private-package.yml`; by default the command watches that workflow
+through `gh` and fails if publication fails.
+
+Preview the next version and git operations without changing anything:
+
+```bash
+npm run release -- patch --dry-run
+```
+
+Pass `--no-wait` only when another process will monitor the GitHub package
+workflow. If validation fails before the release commit, the script restores
+the original package version files. If the atomic push fails, it keeps the
+local release commit and tag and prints the exact retry command.
+
 ## Philosophy
 
 **Let LLMs handle the fuzzy stuff.** Hypervibe returns raw data and lets your agent interpret it. No complex pattern matching or hardcoded rules—your agent figures out that "prod-us-east" means production.

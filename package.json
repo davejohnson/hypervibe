@@ -35,6 +35,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "docs:tools": "node scripts/generate-tools-doc.mjs",
+    "release:check": "npm test && npm run typecheck && npm run build && npm run prepublish-check",
+    "release": "node scripts/release.mjs",
     "autofix": "node dist/agent/index.js",
     "prepublish-check": "bash scripts/prepublish-check.sh",
     "prepublishOnly": "npm run build && npm run prepublish-check"
