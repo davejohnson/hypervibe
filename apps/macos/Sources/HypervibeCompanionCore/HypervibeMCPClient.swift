@@ -128,7 +128,8 @@ public actor HypervibeMCPClient {
                     projectName: topology.projectName,
                     generatedAt: attemptedAt,
                     environments: environments,
-                    recentRuns: runs
+                    recentRuns: runs,
+                    github: topology.github
                 ),
                 connections: connections
             )

@@ -288,18 +288,39 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   github: {
     provider: 'github',
     displayName: 'GitHub',
-    tokenType: 'classic personal access token for Hypervibe GitHub API operations; optional second classic PAT for GHCR package reads',
-    setupUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
-    permissions: [
-      `For repository collaboration and CI deploy management, apiToken must have repo and workflow so Hypervibe can create/update .github files, labels, issue/PR templates, branch protection, Actions runs/jobs/logs, workflow dispatches, and repository secrets for private repos. Create it here: ${GITHUB_TOKEN_URLS.api}`,
-      `For private GHCR image pulls, packageReadToken must have read:packages — create it here: ${GITHUB_TOKEN_URLS.packageRead}. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.`,
-      'If using a fine-grained PAT for apiToken, grant Metadata read, Contents read/write, Issues read/write, Pull requests read/write, Workflows write, Actions read/write, Secrets write, and Environments read/write for deployment-contract markers; add Administration write for branch protection and Pages write for GitHub Pages custom domains. GHCR package access still requires a classic PAT (GitHub: "GitHub Packages only supports authentication using a personal access token (classic)"). Hypervibe cannot pre-check fine-grained permissions (no scopes header), so missing permissions surface at apply time.',
+    tokenType: 'fine-grained GitHub personal access token scoped to the selected repository; optional classic PAT with read:packages for private GHCR pulls',
+    setupUrl: 'https://github.com/settings/personal-access-tokens/new',
+    setupUrls: [
+      { label: 'Create recommended fine-grained repository token', url: 'https://github.com/settings/personal-access-tokens/new' },
+      { label: 'Create optional classic GHCR package token', url: GITHUB_TOKEN_URLS.packageRead },
+      { label: 'GitHub fine-grained permission reference', url: 'https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens' },
     ],
-    credentialExample: 'hv_connect provider="github" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}',
+    permissions: [
+      'Select the repository owner and only the repositories Hypervibe should manage. Grant Metadata read; Administration read/write; Actions read/write; Contents read/write; Issues read/write; Pull requests read/write; Secrets read/write; and Workflows read/write.',
+      'When enabled in desired state, also grant Dependabot alerts read/write, Code scanning alerts read/write, and Secret scanning alerts read/write. Organization policy and product entitlement can still block these settings; Hypervibe reports that without claiming success.',
+      `For private GHCR image pulls, packageReadToken must have read:packages — create it here: ${GITHUB_TOKEN_URLS.packageRead}. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.`,
+    ],
+    credentialExample: 'hv_connect provider="github" scope="owner/repository" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}',
     notes: [
-      'A read:packages-only token is not enough for CI deploy setup because it cannot write workflows or repository secrets.',
-      `For the simplest setup, create one classic PAT with repo, workflow, and read:packages (${GITHUB_TOKEN_URLS.combined}), then map both apiToken and packageReadToken to the same .env variable.`,
-      `For least privilege, use two classic PATs: HYPERVIBE_GITHUB_TOKEN with repo + workflow (${GITHUB_TOKEN_URLS.api}), and HYPERVIBE_GITHUB_PACKAGES_TOKEN with read:packages (${GITHUB_TOKEN_URLS.packageRead}).`,
+      'A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.',
+      'Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.',
+      `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
+    ],
+  },
+  openai: {
+    provider: 'openai',
+    displayName: 'OpenAI API',
+    tokenType: 'OpenAI project API key stored as apiKey (not a ChatGPT subscription or browser session)',
+    setupUrl: 'https://platform.openai.com/api-keys',
+    permissions: [
+      'Create the key in the OpenAI project that should pay for and audit Hypervibe coding automation.',
+      'The project must have access to gpt-5.6-sol and the key must allow model reads plus Responses API writes.',
+      'Scope the key to this project and keep it out of the repository; Hypervibe syncs it only as the OPENAI_API_KEY Actions secret.',
+    ],
+    credentialExample: 'hv_connect provider="openai" scope="owner/repository" credentialsRef="env:OPENAI_API_KEY"',
+    notes: [
+      'OpenAI API billing is separate from ChatGPT plans. Set project budgets and usage limits in the OpenAI Platform before enabling scheduled AI automation.',
+      'The key is never included in specs, plans, logs, snapshots, or workflow files.',
     ],
   },
   local: {

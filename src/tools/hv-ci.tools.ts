@@ -4,20 +4,7 @@ import type { GitHubAdapter } from '../adapters/providers/github/github.adapter.
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
   getGitHubAdapter,
-  resolveBranchDeployTargets,
-  buildBranchDeployWorkflow,
-  WORKFLOW_TEMPLATES,
-  AI_REVIEW_WORKFLOW_PATH,
-  AI_REVIEW_DEFAULT_MODEL,
-  buildAiReviewWorkflowContent,
 } from '../domain/services/github-ops.service.js';
-import {
-  databaseUrlSecretForGitHubActions,
-  githubCiDeployPermissionProblem,
-  missingProviderSecretsMessage,
-  providerSecretsForGitHubActions,
-  requiredProviderSecretNamesForGitHubActions,
-} from '../domain/services/ci-deploy.service.js';
 import {
   connectionSetupDetails,
   formatConnectionGuidance,
@@ -27,16 +14,13 @@ import type { CiWorkflowDiagnostic } from '../domain/ports/ci-deploy.port.js';
 import type { ToolContext } from './context.js';
 import { projectField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { canonicalizeLegacyGitHubSpec, deepMergeSpec, SpecStore } from '../domain/spec/spec.store.js';
+import { projectSpecSchema } from '../domain/spec/spec.schema.js';
 
 const repoField = z
   .string()
   .optional()
   .describe('GitHub repository as "owner/repo". Defaults from the project gitRemoteUrl.');
-
-const statusChecksField = z.preprocess(
-  (value) => value === false ? undefined : value,
-  z.array(z.string()).optional()
-);
 
 const numericIdField = z.preprocess(
   (value) => {
@@ -92,17 +76,6 @@ function githubAdapterOrThrow({ owner, repo }: RepoRef): GitHubAdapter {
     });
   }
   return result.adapter;
-}
-
-function parseKindConfig<T extends z.ZodTypeAny>(schema: T, config: unknown, kind: string): z.infer<T> {
-  const parsed = schema.safeParse(config ?? {});
-  if (!parsed.success) {
-    throw new HvError('VALIDATION', `Invalid config for kind "${kind}".`, {
-      details: parsed.error.flatten().fieldErrors,
-      hint: 'See the hv_ci_setup description for the fields each kind expects.',
-    });
-  }
-  return parsed.data;
 }
 
 function summarizeWorkflowJob(job: {
@@ -169,7 +142,7 @@ function diagnoseGenericWorkflowLog(text: string): CiWorkflowDiagnostic[] {
       summary: 'The Docker build step found no Dockerfile in the repository. Current Hypervibe workflows generate one automatically for Node apps (package.json), so this workflow predates that support.',
       evidence: 'failed to read dockerfile during the image build step.',
       next: [
-        'Re-sync the deploy workflow so it picks up the auto-Dockerfile step: hv_ci_setup kind="deploy-branch", or hv_plan + hv_apply.',
+        'Re-sync the declarative deploy workflow with hv_plan + hv_apply so it picks up the auto-Dockerfile step.',
         'A Dockerfile in the repo is only needed for non-Node apps (no package.json); if present it always takes precedence over the generated one.',
         'Re-run the workflow with hv_ci_trigger afterwards.',
       ],
@@ -197,7 +170,7 @@ function diagnoseGenericWorkflowLog(text: string): CiWorkflowDiagnostic[] {
       summary: 'This deploy workflow still uses actions/github-script@v7, which runs on the deprecated Node 20 action runtime. Current Hypervibe workflows use actions/github-script@v8.',
       evidence: 'GitHub Actions reported Node 20 deprecation for actions/github-script@v7.',
       next: [
-        'Re-sync the deploy workflow with hv_plan + hv_apply, or hv_ci_setup kind="deploy-branch", so the workflow uses actions/github-script@v8.',
+        'Re-sync the declarative deploy workflow with hv_plan + hv_apply so it uses actions/github-script@v8.',
         'Re-run the workflow with hv_ci_trigger afterwards.',
       ],
     });
@@ -215,306 +188,137 @@ function diagnoseWorkflowLog(text: string): CiWorkflowDiagnostic[] {
   ];
 }
 
-const deployBranchConfigSchema = z.object({
-  repo: z.string().optional(),
-  provider: z.enum(['railway', 'cloudrun']),
-  protectBranches: z.boolean().optional(),
-  statusChecks: statusChecksField,
-  requiredReviewers: z.number().optional(),
-});
+export function deprecatedCiSetupPatch(
+  kind: 'deploy-branch' | 'ai-review' | 'branch-protection' | 'workflow',
+  rawConfig: Record<string, unknown>,
+  current: ReturnType<typeof projectSpecSchema.parse>
+): Record<string, unknown> {
+  const repository = typeof rawConfig.repo === 'string' ? rawConfig.repo : undefined;
+  const githubBase = repository ? { repository } : {};
+  if (kind === 'ai-review') {
+    return { github: { ...githubBase, actions: { 'pr-review': { kind: 'pull-request-review' } } } };
+  }
+  if (kind === 'workflow') {
+    const template = String(rawConfig.template ?? '');
+    const templates: Record<string, Record<string, unknown>> = {
+      'node-test': { kind: 'check', category: 'test', runtime: { kind: 'node' }, commands: ['npm test'], triggers: { pullRequest: true } },
+      lint: { kind: 'check', category: 'lint', runtime: { kind: 'node' }, commands: ['npm run lint'], triggers: { pullRequest: true } },
+      'python-test': { kind: 'check', category: 'test', runtime: { kind: 'python' }, commands: ['python -m pytest'], triggers: { pullRequest: true } },
+    };
+    const automation = templates[template];
+    if (!automation) {
+      throw new HvError('VALIDATION', `The deprecated workflow template "${template}" cannot be migrated.`, {
+        hint: 'Declare a typed spec.github.actions check with category, runtime, commands, and triggers.',
+      });
+    }
+    return { github: { ...githubBase, actions: { [template]: automation } } };
+  }
+  if (kind === 'branch-protection') {
+    if (rawConfig.allowForcePushes === true || rawConfig.allowDeletions === true) {
+      throw new HvError('VALIDATION', 'Hypervibe GitHub desired state does not enable force-pushes or protected-branch deletion.', {
+        hint: 'Remove allowForcePushes/allowDeletions or manage that exceptional policy outside Hypervibe.',
+      });
+    }
+    return {
+      github: {
+        ...githubBase,
+        collaboration: {
+          pullRequests: {
+            targetBranch: rawConfig.branch,
+            requirePr: true,
+            requireReview: rawConfig.requireReviews ?? true,
+            requiredReviewers: rawConfig.requiredReviewers ?? 1,
+            dismissStaleReviews: rawConfig.dismissStaleReviews ?? false,
+            requireCodeOwnerReviews: rawConfig.requireCodeOwnerReviews ?? false,
+            requireStatusChecks: rawConfig.requireStatusChecks ?? false,
+            statusChecks: rawConfig.statusChecks ?? [],
+            strictStatusChecks: rawConfig.strictStatusChecks ?? true,
+            enforceAdmins: rawConfig.enforceAdmins ?? false,
+          },
+        },
+      },
+    };
+  }
 
-const aiReviewConfigSchema = z.object({
-  repo: z.string().optional(),
-  apiKey: z.string(),
-  model: z.string().optional(),
-});
-
-const branchProtectionConfigSchema = z.object({
-  repo: z.string().optional(),
-  branch: z.string(),
-  requireReviews: z.boolean().optional(),
-  requiredReviewers: z.number().optional(),
-  dismissStaleReviews: z.boolean().optional(),
-  requireCodeOwnerReviews: z.boolean().optional(),
-  requireStatusChecks: z.boolean().optional(),
-  statusChecks: statusChecksField,
-  strictStatusChecks: z.boolean().optional(),
-  enforceAdmins: z.boolean().optional(),
-  requireLinearHistory: z.boolean().optional(),
-  allowForcePushes: z.boolean().optional(),
-  allowDeletions: z.boolean().optional(),
-});
-
-const workflowConfigSchema = z.object({
-  repo: z.string().optional(),
-  template: z.string(),
-});
+  const provider = String(rawConfig.provider ?? '');
+  const environments = Object.fromEntries(Object.entries(current.environments)
+    .filter(([name, environment]) => /stag|prod/i.test(name) && environment.hosting.provider === provider)
+    .map(([name, environment]) => [name, {
+      deploy: {
+        ...environment.deploy,
+        strategy: 'branch',
+        trigger: 'ci',
+        branch: environment.deploy?.branch ?? 'main',
+      },
+    }]));
+  if (Object.keys(environments).length === 0) {
+    throw new HvError('NOT_FOUND', `No staging/production environments use provider "${provider}".`, {
+      hint: 'Update the desired environment deploy fields directly with hv_spec_set.',
+    });
+  }
+  return {
+    github: {
+      ...githubBase,
+      ...(rawConfig.protectBranches === true ? {
+        collaboration: {
+          pullRequests: {
+            requirePr: true,
+            requireReview: true,
+            requiredReviewers: rawConfig.requiredReviewers ?? 1,
+            requireStatusChecks: Array.isArray(rawConfig.statusChecks) && rawConfig.statusChecks.length > 0,
+            statusChecks: rawConfig.statusChecks ?? [],
+          },
+        },
+      } : {}),
+    },
+    environments,
+  };
+}
 
 export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
   server.tool(
     'hv_ci_setup',
-    'Set up explicit CI/CD tasks on GitHub for a project. For desired-state push deploys, prefer hv_spec_set deploy.strategy="branch" trigger="ci", then hv_plan/hv_apply; that manages the deploy workflow and provider API secrets as infrastructure. Dispatches on kind; config holds the kind-specific fields (config.repo="owner/repo" overrides the project gitRemoteUrl for every kind). ' +
-      'kind="deploy-branch": explicit/backfill branch-based GitHub Actions deploy workflows from the project environments using provider APIs (no provider CLIs). Standard flow is feature branch -> PR -> main, staging auto-deploys main, and production is manually promoted with workflow_dispatch plus optional commit_sha. Requires a GitHub apiToken that can write workflow files and repo secrets (classic PAT scopes repo + workflow for private repos); provider-specific image pull or cloud API credentials are reported by hv_plan/hv_apply and hv_ci_setup from provider metadata. config { provider (railway|cloudrun, required), protectBranches?, statusChecks?, requiredReviewers? }. ' +
-      'kind="ai-review": Claude PR review workflow; config { apiKey (required), model? }. ' +
-      'kind="branch-protection": protection rules; config { branch (required), requireReviews?, requiredReviewers?, dismissStaleReviews?, requireCodeOwnerReviews?, requireStatusChecks?, statusChecks?, strictStatusChecks?, enforceAdmins?, requireLinearHistory?, allowForcePushes?, allowDeletions? }. ' +
-      'kind="workflow": a workflow from a template; config { template (required, e.g. node-test, lint) }.',
+    'Deprecated one-release compatibility bridge. Converts old setup requests into spec.github desired state and returns the revision to plan; it never mutates GitHub. Prefer hv_spec_set followed by hv_plan/hv_apply. deploy-branch maps environment deploy state; ai-review maps to an OpenAI pull-request-review and ignores legacy raw apiKey input; branch-protection maps github.collaboration; workflow maps known templates to typed checks.',
     {
       project: projectField,
       kind: z.enum(['deploy-branch', 'ai-review', 'branch-protection', 'workflow']).describe('What to set up'),
       config: z.record(z.unknown()).optional().describe('Kind-specific configuration (see tool description)'),
     },
     wrapHandler(async ({ project: projectRef, kind, config }) => {
-      switch (kind) {
-        case 'deploy-branch': {
-          const cfg = parseKindConfig(deployBranchConfigSchema, config, kind);
-          const { project, owner, repo } = resolveRepoOrThrow(ctx, projectRef, cfg.repo);
-          const adapter = githubAdapterOrThrow({ owner, repo });
-
-          const verification = await adapter.verify();
-          if (!verification.success) {
-            return toolError('PROVIDER_ERROR', verification.error || 'GitHub connection verification failed');
-          }
-          const permissionProblem = githubCiDeployPermissionProblem(verification, { repo: `${owner}/${repo}` });
-          if (permissionProblem) {
-            return toolError('MISSING_CONNECTION', 'GitHub connection is missing CI deploy permissions.', {
-              details: {
-                repository: `${owner}/${repo}`,
-                missingScopes: permissionProblem.missingScopes,
-                currentScopes: verification.scopes,
-                connectionSetup: connectionSetupDetails('github', { scope: `${owner}/${repo}` }),
-              },
-              hint: permissionProblem.hint,
-              next: ['hv_connect', 'hv_ci_setup'],
-            });
-          }
-
-          const { targets, migration, skippedEnvironments } = resolveBranchDeployTargets(project);
-          if (targets.length === 0) {
-            return toolError('NOT_FOUND', `Project "${project.name}" has no deployable staging/production environments for branch setup.`, {
-              details: { skippedEnvironments },
-            });
-          }
-
-          const workflows = targets.map((target) => buildBranchDeployWorkflow(cfg.provider, target, migration));
-          const created: Array<{ template: string; branch: string; path: string; created: boolean; updated: boolean }> = [];
-          const errors: Array<{ template: string; path: string; error: string }> = [];
-          for (const workflow of workflows) {
-            try {
-              const fileResult = await adapter.createOrUpdateFile(owner, repo, workflow.path, workflow.content, `Add ${workflow.templateName} workflow`);
-              created.push({ template: workflow.template, branch: workflow.branch, path: workflow.path, created: fileResult.created, updated: fileResult.updated });
-            } catch (error) {
-              errors.push({ template: workflow.template, path: workflow.path, error: error instanceof Error ? error.message : String(error) });
-            }
-          }
-
-          const requiredSecrets = Array.from(new Set(workflows.flatMap((workflow) => workflow.requiredSecrets)));
-          const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(cfg.provider)
-            .filter((name) => requiredSecrets.includes(name));
-          const syncedSecrets: string[] = [];
-          const secretSyncErrors: Array<{ name: string; error: string }> = [];
-          const secretsToSync = providerSecretsForGitHubActions(cfg.provider, {
-            githubLogin: verification.login,
-            githubRepo: `${owner}/${repo}`,
-          });
-          // DATABASE_URL is per-environment but stored as one repo secret:
-          // sync it only when every deploy target resolves to the same URL.
-          if (requiredSecrets.includes('DATABASE_URL')) {
-            const urls = new Set<string>();
-            for (const target of targets) {
-              const secret = await databaseUrlSecretForGitHubActions(project, target.environmentName);
-              if (secret) urls.add(secret.value);
-            }
-            if (urls.size === 1) {
-              secretsToSync.push({ name: 'DATABASE_URL', value: Array.from(urls)[0] });
-            } else if (urls.size > 1) {
-              secretSyncErrors.push({ name: 'DATABASE_URL', error: 'Deploy targets resolve to different database URLs; set the repository secret manually per environment.' });
-            }
-          }
-          for (const secret of secretsToSync) {
-            if (!requiredSecrets.includes(secret.name)) {
-              continue;
-            }
-            try {
-              await adapter.setRepositorySecret(owner, repo, secret.name, secret.value);
-              syncedSecrets.push(secret.name);
-            } catch (error) {
-              secretSyncErrors.push({
-                name: secret.name,
-                error: error instanceof Error ? error.message : String(error),
-              });
-            }
-          }
-          const missingProviderSecrets = requiredProviderSecrets.filter((name) => !syncedSecrets.includes(name));
-
-          const protectedBranches = Array.from(new Set(targets.map((target) => target.branch)));
-          const protectionResults: Array<{ branch: string; success: boolean; error?: string }> = [];
-          if (cfg.protectBranches && errors.length === 0) {
-            const rules = {
-              requireReviews: true,
-              requiredReviewers: cfg.requiredReviewers ?? 1,
-              dismissStaleReviews: true,
-              requireCodeOwnerReviews: false,
-              requireStatusChecks: (cfg.statusChecks?.length ?? 0) > 0,
-              statusChecks: cfg.statusChecks ?? [],
-              strictStatusChecks: true,
-              enforceAdmins: true,
-              requireLinearHistory: false,
-              allowForcePushes: false,
-              allowDeletions: false,
-            };
-            for (const branch of protectedBranches) {
-              try {
-                await adapter.updateBranchProtection(owner, repo, branch, rules);
-                protectionResults.push({ branch, success: true });
-              } catch (error) {
-                protectionResults.push({ branch, success: false, error: error instanceof Error ? error.message : String(error) });
-              }
-            }
-          }
-
-          ctx.repos.audit.create({
-            action: 'hv.ci_setup',
-            resourceType: 'github_workflow',
-            resourceId: `${owner}/${repo}/branch-deploy/${cfg.provider}`,
-            details: { kind, project: project.name, provider: cfg.provider, workflows: created, errors, branchProtection: protectionResults },
-          });
-
-          const data = {
-            repository: `${owner}/${repo}`,
-            provider: cfg.provider,
-            branchMapping: Object.fromEntries(targets.map((target) => [target.kind, target.branch])),
-            deploymentTriggers: Object.fromEntries(targets.map((target) => [
-              target.environmentName,
-              target.autoDeployOnPush
-                ? { mode: 'push', branch: target.branch }
-                : {
-                    mode: 'manual',
-                    branch: target.branch,
-                    workflow: `.github/workflows/deploy-${cfg.provider}-${target.kind}.yml`,
-                    input: 'commit_sha',
-                    ...(target.promoteFromEnvironment ? { promoteFrom: target.promoteFromEnvironment } : {}),
-                  },
-            ])),
-            workflows: created,
-            errors: errors.length > 0 ? errors : undefined,
-            branchProtection: cfg.protectBranches ? protectionResults : undefined,
-            requiredSecrets,
-            requiredVariables: Array.from(new Set(workflows.flatMap((workflow) => workflow.requiredVariables))),
-            syncedSecrets: syncedSecrets.length > 0 ? syncedSecrets : undefined,
-            manualSecrets: requiredSecrets.filter((name) => !syncedSecrets.includes(name)),
-            missingProviderSecrets: missingProviderSecrets.length > 0 ? missingProviderSecrets : undefined,
-            secretSyncErrors: secretSyncErrors.length > 0 ? secretSyncErrors : undefined,
-            skippedEnvironments: skippedEnvironments.length > 0 ? skippedEnvironments : undefined,
-          };
-          const protectionFailures = protectionResults.filter((r) => !r.success);
-          if (errors.length > 0 || protectionFailures.length > 0) {
-            return toolError('PROVIDER_ERROR', 'Branch deploy setup had errors.', {
-              details: data,
-              hint: formatConnectionGuidance('github', {
-                scope: `${owner}/${repo}`,
-                intro: 'If GitHub rejected workflow or secret changes, confirm the GitHub token type and CI deploy permissions.',
-              }),
-            });
-          }
-          const warnings = [
-            ...secretSyncErrors.map((entry) => `Failed to sync GitHub Actions secret ${entry.name}: ${entry.error}`),
-            ...(missingProviderSecrets.length > 0
-              ? [missingProviderSecretsMessage(cfg.provider, missingProviderSecrets)]
-              : []),
-          ];
-          if (created.some((entry) => entry.created || entry.updated)) {
-            warnings.push(
-              `Workflow file(s) were committed directly to the GitHub repository (${created.map((entry) => entry.path).join(', ')}); any local checkout is now behind — run git pull before editing workflows locally.`
-            );
-          }
-          return toolSuccess(data, {
-            warnings: warnings.length > 0 ? warnings : undefined,
-            hint: `Set the manual secrets (${data.manualSecrets.join(', ') || 'none'})${data.requiredVariables.length > 0 ? ` and variables (${data.requiredVariables.join(', ')})` : ''} in the GitHub repository. Staging deploys automatically from main by default; production is manual with hv_ci_trigger and optional inputs.commit_sha.`,
-          });
-        }
-        case 'ai-review': {
-          const cfg = parseKindConfig(aiReviewConfigSchema, config, kind);
-          const { owner, repo } = resolveRepoOrThrow(ctx, projectRef, cfg.repo);
-          const adapter = githubAdapterOrThrow({ owner, repo });
-
-          const model = cfg.model ?? AI_REVIEW_DEFAULT_MODEL;
-          const fileResult = await adapter.createOrUpdateFile(owner, repo, AI_REVIEW_WORKFLOW_PATH, buildAiReviewWorkflowContent(model), 'Add AI code review workflow');
-          let secretError: string | undefined;
-          try {
-            await adapter.setRepositorySecret(owner, repo, 'ANTHROPIC_API_KEY', cfg.apiKey);
-          } catch (error) {
-            secretError = error instanceof Error ? error.message : String(error);
-          }
-
-          ctx.repos.audit.create({
-            action: 'hv.ci_setup',
-            resourceType: 'github_workflow',
-            resourceId: `${owner}/${repo}`,
-            details: { kind, model, workflowCreated: fileResult.created, workflowUpdated: fileResult.updated, secretSet: !secretError },
-          });
-
-          return toolSuccess(
-            {
-              repository: `${owner}/${repo}`,
-              workflow: { path: AI_REVIEW_WORKFLOW_PATH, created: fileResult.created, updated: fileResult.updated },
-              secret: { name: 'ANTHROPIC_API_KEY', set: !secretError },
-              model,
-            },
-            {
-              warnings: secretError ? [`Failed to set ANTHROPIC_API_KEY secret: ${secretError}. Set it manually in repo Settings > Secrets.`] : undefined,
-              hint: `PRs will be reviewed by Claude (${model}).`,
-            }
-          );
-        }
-        case 'branch-protection': {
-          const cfg = parseKindConfig(branchProtectionConfigSchema, config, kind);
-          const { owner, repo } = resolveRepoOrThrow(ctx, projectRef, cfg.repo);
-          const adapter = githubAdapterOrThrow({ owner, repo });
-
-          const { repo: _repoOverride, branch, ...rules } = cfg;
-          await adapter.updateBranchProtection(owner, repo, branch, rules);
-          ctx.repos.audit.create({
-            action: 'hv.ci_setup',
-            resourceType: 'github_branch',
-            resourceId: `${owner}/${repo}/${branch}`,
-            details: { kind, branch, rules },
-          });
-          return toolSuccess({ repository: `${owner}/${repo}`, branch, appliedRules: rules });
-        }
-        case 'workflow': {
-          const cfg = parseKindConfig(workflowConfigSchema, config, kind);
-          const { owner, repo } = resolveRepoOrThrow(ctx, projectRef, cfg.repo);
-          const adapter = githubAdapterOrThrow({ owner, repo });
-
-          const template = WORKFLOW_TEMPLATES[cfg.template];
-          if (!template) {
-            throw new HvError('VALIDATION', `Unknown template: ${cfg.template}.`, {
-              hint: `Available templates: ${Object.keys(WORKFLOW_TEMPLATES).join(', ')}.`,
-            });
-          }
-          const workflowPath = `.github/workflows/${template.filename}`;
-          const content = template.content ?? template.buildContent?.();
-          if (!content) {
-            throw new HvError('VALIDATION', `Template ${cfg.template} has no workflow content.`);
-          }
-          const fileResult = await adapter.createOrUpdateFile(owner, repo, workflowPath, content, `Add ${template.name} workflow`);
-          ctx.repos.audit.create({
-            action: 'hv.ci_setup',
-            resourceType: 'github_workflow',
-            resourceId: `${owner}/${repo}/${workflowPath}`,
-            details: { kind, template: cfg.template, path: workflowPath, created: fileResult.created, updated: fileResult.updated },
-          });
-          return toolSuccess({
-            repository: `${owner}/${repo}`,
-            template: cfg.template,
-            path: workflowPath,
-            created: fileResult.created,
-            updated: fileResult.updated,
-            requiredSecrets: template.requiredSecrets ?? [],
-            requiredVariables: template.requiredVariables ?? [],
-          });
-        }
+      const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      const specStore = new SpecStore();
+      const stored = specStore.get(project);
+      if (!stored) {
+        throw new HvError('NOT_FOUND', `Project "${project.name}" has no spec.`, {
+          hint: 'Create desired state with hv_spec_set first.',
+        });
       }
+      const canonicalCurrent = projectSpecSchema.parse(canonicalizeLegacyGitHubSpec(stored.spec));
+      const patch = deprecatedCiSetupPatch(kind, (config ?? {}) as Record<string, unknown>, canonicalCurrent);
+      const next = projectSpecSchema.parse(deepMergeSpec(canonicalCurrent, patch));
+      const result = specStore.replace(project, next);
+      ctx.repos.audit.create({
+        action: 'hv.ci_setup.deprecated_bridge',
+        resourceType: 'project_spec',
+        resourceId: project.id,
+        details: { kind, revision: result.revision },
+      });
+      const bridgeResult = toolSuccess({
+        project: project.name,
+        revision: result.revision,
+        spec: result.spec,
+        deprecated: true,
+      }, {
+        warnings: [
+          'hv_ci_setup is deprecated. The request was saved as desired state only; GitHub was not mutated.',
+          ...(kind === 'ai-review' && typeof (config as Record<string, unknown> | undefined)?.apiKey === 'string'
+            ? ['The legacy apiKey input was ignored and not stored. Connect OpenAI with hv_connect provider="openai" credentialsRef="env:OPENAI_API_KEY".']
+            : []),
+        ],
+        hint: 'Run hv_plan for the canonical environment, review the infrastructure-PR action, then run hv_apply with that planId.',
+        next: ['hv_plan'],
+      });
+      return bridgeResult;
     })
   );
 

@@ -322,8 +322,8 @@ describe('hv_spec_set / hv_spec_get', () => {
     expect(set.hint).toContain('Zone -> Zone Settings -> Read or Edit');
     expect(set.hint).toContain('Zone -> DNS -> Edit.');
     expect(set.hint).toContain('scope="connection-check-app.com"');
-    expect(set.hint).toContain('classic personal access token');
-    expect(set.hint).toContain('https://github.com/settings/tokens');
+    expect(set.hint).toContain('fine-grained GitHub personal access token');
+    expect(set.hint).toContain('https://github.com/settings/personal-access-tokens/new');
     expect(set.hint).toContain('Railway Account API token');
     expect(set.hint).toContain('https://railway.com/account/tokens');
     expect(set.hint).toContain('SendGrid API key (Restricted Access for least privilege');
@@ -789,7 +789,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.data.receipts).toContainEqual(expect.objectContaining({
       actionId: 'domain:pending-example.com',
       status: 'aborted',
-      message: expect.stringContaining('did not complete'),
+      message: expect.stringContaining('earlier pending result'),
     }));
     expect(apply.hint).toContain('pending provider workflows');
     expect(create).toHaveBeenCalledWith('acct-1', {
@@ -1148,12 +1148,14 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.error.details.connectionSetup).toContainEqual(expect.objectContaining({
       provider: 'github',
       requiredPermissions: expect.arrayContaining([
-        expect.stringContaining('apiToken must have repo and workflow'),
+        expect.stringContaining('Contents read/write'),
+        expect.stringContaining('Workflows read/write'),
         expect.stringContaining('packageReadToken must have read:packages'),
       ]),
     }));
-    expect(apply.hint).toContain('classic personal access token');
-    expect(apply.hint).toContain('https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages');
+    expect(apply.hint).toContain('fine-grained GitHub personal access token');
+    expect(apply.hint).toContain('https://github.com/settings/personal-access-tokens/new');
+    expect(apply.hint).toContain('https://github.com/settings/tokens/new?scopes=read:packages');
     expect(apply.hint).toContain('apiToken needs repo + workflow');
     expect(apply.hint).toContain('read:packages');
     expect(apply.hint).toContain('packageReadToken');

@@ -82,6 +82,47 @@ struct HypervibeResponseMapperTests {
     }
 
     @Test
+    func topologyMapsGenericGitHubInfrastructureWithoutCredentials() throws {
+        let data = Data(
+            """
+            {
+              "ok": true,
+              "data": {
+                "project": { "name": "example" },
+                "revision": 3,
+                "spec": {
+                  "github": {
+                    "repository": "owner/example",
+                    "canonicalEnvironment": "production",
+                    "actions": {
+                      "tests": {
+                        "kind": "check",
+                        "triggers": { "schedule": { "cron": "15 4 * * *", "timezone": "America/Vancouver" } }
+                      },
+                      "fix": { "kind": "autofix", "sources": ["tests"] }
+                    },
+                    "dependencies": { "alerts": true, "versionUpdates": [{ "ecosystem": "npm" }] },
+                    "security": { "secretScanning": true, "pushProtection": true }
+                  },
+                  "environments": {
+                    "production": { "hosting": { "provider": "railway" }, "services": {} }
+                  }
+                }
+              }
+            }
+            """.utf8
+        )
+
+        let github = try #require(HypervibeResponseMapper.decodeTopology(data).github)
+        #expect(github.repository == "owner/example")
+        #expect(github.automations.map(\.id) == ["fix", "tests"])
+        #expect(github.automations.first { $0.id == "fix" }?.requiresOpenAI == true)
+        #expect(github.automations.first { $0.id == "tests" }?.cron == "15 4 * * *")
+        #expect(github.dependencyFeatures == ["Alerts", "Version updates"])
+        #expect(github.securityFeatures == ["Secret scanning", "Push protection"])
+    }
+
+    @Test
     func observationCountsDriftWithoutRetainingActionPayloads() throws {
         let attemptedAt = Date(timeIntervalSince1970: 500)
         let data = Data(

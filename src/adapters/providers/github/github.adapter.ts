@@ -3,6 +3,7 @@ import { createRequire } from 'module';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 
 const GITHUB_API_URL = 'https://api.github.com';
+const GITHUB_API_VERSION = '2026-03-10';
 const require = createRequire(import.meta.url);
 
 // Credentials schema for self-registration
@@ -119,7 +120,7 @@ export class GitHubAdapter {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.credentials.apiToken}`,
       Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
+      'X-GitHub-Api-Version': GITHUB_API_VERSION,
     };
 
     if (body) {
@@ -131,7 +132,7 @@ export class GitHubAdapter {
       headers,
     };
 
-    if (body && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+    if (body && (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE')) {
       options.body = JSON.stringify(body);
     }
 
@@ -171,7 +172,7 @@ export class GitHubAdapter {
       headers: {
         Authorization: `Bearer ${this.credentials.apiToken}`,
         Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
+        'X-GitHub-Api-Version': GITHUB_API_VERSION,
       },
     });
 
@@ -201,7 +202,7 @@ export class GitHubAdapter {
         headers: {
           Authorization: `Bearer ${this.credentials.apiToken}`,
           Accept: 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
+          'X-GitHub-Api-Version': GITHUB_API_VERSION,
         },
       });
       if (!response.ok) {
@@ -357,6 +358,61 @@ export class GitHubAdapter {
     }
   }
 
+  async getRepository(owner: string, repo: string): Promise<{
+    default_branch: string;
+    private?: boolean;
+    security_and_analysis?: {
+      advanced_security?: { status: 'enabled' | 'disabled' };
+      secret_scanning?: { status: 'enabled' | 'disabled' };
+      secret_scanning_push_protection?: { status: 'enabled' | 'disabled' };
+      dependabot_security_updates?: { status: 'enabled' | 'disabled' };
+    };
+  }> {
+    return this.request('GET', `/repos/${owner}/${repo}`);
+  }
+
+  async getRef(owner: string, repo: string, ref: string): Promise<{ ref: string; object: { sha: string } } | null> {
+    try {
+      return await this.request<{ ref: string; object: { sha: string } }>(
+        'GET',
+        `/repos/${owner}/${repo}/git/ref/${encodeURIComponent(ref)}`
+      );
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) return null;
+      throw error;
+    }
+  }
+
+  async createRef(owner: string, repo: string, ref: string, sha: string): Promise<void> {
+    await this.request('POST', `/repos/${owner}/${repo}/git/refs`, { ref, sha });
+  }
+
+  async updateRef(owner: string, repo: string, ref: string, sha: string): Promise<void> {
+    await this.request('PATCH', `/repos/${owner}/${repo}/git/refs/${encodeURIComponent(ref)}`, {
+      sha,
+      force: false,
+    });
+  }
+
+  async getFile(
+    owner: string,
+    repo: string,
+    path: string,
+    ref?: string
+  ): Promise<{ sha: string; content: string } | null> {
+    try {
+      const suffix = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+      const existing = await this.request<{ sha: string; content: string }>(
+        'GET',
+        `/repos/${owner}/${repo}/contents/${path}${suffix}`
+      );
+      return { sha: existing.sha, content: atob(existing.content.replace(/\n/g, '')) };
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) return null;
+      throw error;
+    }
+  }
+
   /**
    * Create or update a file in a repository via the Contents API.
    */
@@ -365,7 +421,8 @@ export class GitHubAdapter {
     repo: string,
     path: string,
     content: string,
-    commitMessage: string
+    commitMessage: string,
+    branch?: string
   ): Promise<{ created: boolean; updated: boolean }> {
     const contentBase64 = btoa(content);
 
@@ -373,7 +430,7 @@ export class GitHubAdapter {
     try {
       const existing = await this.request<{ sha: string; content: string }>(
         'GET',
-        `/repos/${owner}/${repo}/contents/${path}`
+        `/repos/${owner}/${repo}/contents/${path}${branch ? `?ref=${encodeURIComponent(branch)}` : ''}`
       );
 
       // Update existing file
@@ -381,6 +438,7 @@ export class GitHubAdapter {
         message: commitMessage,
         content: contentBase64,
         sha: existing.sha,
+        ...(branch ? { branch } : {}),
       });
 
       return { created: false, updated: true };
@@ -390,12 +448,125 @@ export class GitHubAdapter {
         await this.request<unknown>('PUT', `/repos/${owner}/${repo}/contents/${path}`, {
           message: commitMessage,
           content: contentBase64,
+          ...(branch ? { branch } : {}),
         });
 
         return { created: true, updated: false };
       }
       throw error;
     }
+  }
+
+  async deleteFile(
+    owner: string,
+    repo: string,
+    path: string,
+    sha: string,
+    commitMessage: string,
+    branch: string
+  ): Promise<void> {
+    await this.request('DELETE', `/repos/${owner}/${repo}/contents/${path}`, {
+      message: commitMessage,
+      sha,
+      branch,
+    });
+  }
+
+  async listPullRequests(
+    owner: string,
+    repo: string,
+    options: { state?: 'open' | 'closed' | 'all'; head?: string; base?: string } = {}
+  ): Promise<Array<{ number: number; html_url: string; head: { ref: string }; base: { ref: string } }>> {
+    const params = new URLSearchParams({ state: options.state ?? 'open', per_page: '100' });
+    if (options.head) params.set('head', options.head);
+    if (options.base) params.set('base', options.base);
+    return this.request('GET', `/repos/${owner}/${repo}/pulls?${params.toString()}`);
+  }
+
+  async createPullRequest(owner: string, repo: string, input: {
+    title: string;
+    head: string;
+    base: string;
+    body: string;
+    draft: boolean;
+  }): Promise<{ number: number; html_url: string }> {
+    return this.request('POST', `/repos/${owner}/${repo}/pulls`, input);
+  }
+
+  async compareCommits(
+    owner: string,
+    repo: string,
+    base: string,
+    head: string
+  ): Promise<{ status: 'ahead' | 'behind' | 'diverged' | 'identical'; ahead_by: number; behind_by: number }> {
+    return this.request(
+      'GET',
+      `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`
+    );
+  }
+
+  async listRepositorySecrets(owner: string, repo: string): Promise<string[]> {
+    const response = await this.request<{ secrets: Array<{ name: string }> }>(
+      'GET',
+      `/repos/${owner}/${repo}/actions/secrets?per_page=100`
+    );
+    return response.secrets.map((secret) => secret.name);
+  }
+
+  async getVulnerabilityAlertsEnabled(owner: string, repo: string): Promise<boolean> {
+    try {
+      await this.request('GET', `/repos/${owner}/${repo}/vulnerability-alerts`);
+      return true;
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) return false;
+      throw error;
+    }
+  }
+
+  async enableVulnerabilityAlerts(owner: string, repo: string): Promise<void> {
+    await this.request('PUT', `/repos/${owner}/${repo}/vulnerability-alerts`);
+  }
+
+  async updateRepositorySecurity(owner: string, repo: string, settings: {
+    advancedSecurity?: boolean;
+    secretScanning?: boolean;
+    pushProtection?: boolean;
+    dependabotSecurityUpdates?: boolean;
+  }): Promise<void> {
+    const security_and_analysis: Record<string, { status: 'enabled' }> = {};
+    if (settings.advancedSecurity) security_and_analysis.advanced_security = { status: 'enabled' };
+    if (settings.secretScanning) security_and_analysis.secret_scanning = { status: 'enabled' };
+    if (settings.pushProtection) security_and_analysis.secret_scanning_push_protection = { status: 'enabled' };
+    if (settings.dependabotSecurityUpdates) security_and_analysis.dependabot_security_updates = { status: 'enabled' };
+    await this.request('PATCH', `/repos/${owner}/${repo}`, { security_and_analysis });
+  }
+
+  async getCodeScanningDefaultSetup(owner: string, repo: string): Promise<{ state?: string } | null> {
+    try {
+      return await this.request('GET', `/repos/${owner}/${repo}/code-scanning/default-setup`);
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) return null;
+      throw error;
+    }
+  }
+
+  async enableCodeScanningDefaultSetup(owner: string, repo: string): Promise<void> {
+    await this.request('PATCH', `/repos/${owner}/${repo}/code-scanning/default-setup`, { state: 'configured' });
+  }
+
+  async getWorkflowPermissions(owner: string, repo: string): Promise<{
+    default_workflow_permissions: 'read' | 'write';
+    can_approve_pull_request_reviews: boolean;
+  }> {
+    return this.request('GET', `/repos/${owner}/${repo}/actions/permissions/workflow`);
+  }
+
+  async allowActionsPullRequests(owner: string, repo: string): Promise<void> {
+    const current = await this.getWorkflowPermissions(owner, repo);
+    await this.request('PUT', `/repos/${owner}/${repo}/actions/permissions/workflow`, {
+      default_workflow_permissions: current.default_workflow_permissions,
+      can_approve_pull_request_reviews: true,
+    });
   }
 
   /**
@@ -874,7 +1045,7 @@ providerRegistry.register({
     displayName: 'GitHub',
     category: 'deployment',
     credentialsSchema: GitHubCredentialsSchema,
-    setupHelpUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
+    setupHelpUrl: 'https://github.com/settings/personal-access-tokens/new',
     credentials: {
       defaultScalarKey: 'apiToken',
     },

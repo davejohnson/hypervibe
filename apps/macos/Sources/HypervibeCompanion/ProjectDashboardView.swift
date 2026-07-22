@@ -7,6 +7,7 @@ struct ProjectDashboardView: View {
     @State private var expandedEnvironments: [String: Bool] = [:]
     @State private var recentRunsExpanded = false
     @State private var connectionsExpanded = false
+    @State private var githubExpanded = true
 
     let project: CompanionProject
     let snapshot: ProjectSnapshot?
@@ -38,6 +39,8 @@ struct ProjectDashboardView: View {
                 }
 
                 if let snapshot {
+                    githubCard(snapshot.github)
+
                     ForEach(snapshot.environments) { environment in
                         environmentCard(environment)
                     }
@@ -58,6 +61,102 @@ struct ProjectDashboardView: View {
                 }
             }
             .padding(.vertical, 12)
+        }
+    }
+
+    private func githubCard(_ github: GitHubInfrastructureSummary?) -> some View {
+        let githubConnected = connections.contains { $0.provider == "github" && $0.status == .verified }
+        let openAIConnected = connections.contains { $0.provider == "openai" && $0.status == .verified }
+        let needsOpenAI = github?.automations.contains { $0.enabled && $0.requiresOpenAI } ?? false
+
+        return VStack(alignment: .leading, spacing: 8) {
+            DisclosureGroup(isExpanded: $githubExpanded) {
+                VStack(alignment: .leading, spacing: 9) {
+                    if let github {
+                        if let repository = github.repository {
+                            Label(repository, systemImage: "shippingbox")
+                                .font(.callout)
+                        }
+                        ForEach(github.automations) { automation in
+                            HStack {
+                                Image(systemName: automation.enabled ? "checkmark.circle.fill" : "pause.circle")
+                                    .foregroundStyle(automation.enabled ? .green : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(automation.id)
+                                        .font(.callout.weight(.medium))
+                                    Text(automation.kind)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if let cron = automation.cron {
+                                    Text("\(cron) · \(automation.timezone ?? "UTC")")
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                        .help("Five-field POSIX cron and IANA timezone")
+                                }
+                            }
+                        }
+                        if !github.dependencyFeatures.isEmpty {
+                            Label(github.dependencyFeatures.joined(separator: ", "), systemImage: "arrow.triangle.2.circlepath")
+                                .font(.caption)
+                        }
+                        if !github.securityFeatures.isEmpty {
+                            Label(github.securityFeatures.joined(separator: ", "), systemImage: "lock.shield")
+                                .font(.caption)
+                        }
+                    } else {
+                        Text("No GitHub infrastructure is declared. Hypervibe still works for local state and any connected infrastructure providers.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if github != nil && !githubConnected {
+                        connectionPrompt(
+                            "Connect GitHub to plan and apply this section.",
+                            provider: "github"
+                        )
+                    }
+                    if needsOpenAI && !openAIConnected {
+                        connectionPrompt(
+                            "Connect OpenAI for AI automations. Checks and other Hypervibe features remain available.",
+                            provider: "openai"
+                        )
+                    }
+                }
+                .padding(.top, 9)
+            } label: {
+                HStack {
+                    Label("GitHub", systemImage: "point.3.connected.trianglepath.dotted")
+                        .font(.headline)
+                    Spacer()
+                    if github != nil {
+                        Text("\(github?.automations.filter(\.enabled).count ?? 0) automations")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Optional")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .clickTargetCursor()
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 12)
+    }
+
+    private func connectionPrompt(_ message: String, provider: String) -> some View {
+        HStack {
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.orange)
+            Spacer()
+            Button("Set Up…") { showConnections(provider: provider) }
+                .controlSize(.small)
+                .clickTargetCursor()
         }
     }
 

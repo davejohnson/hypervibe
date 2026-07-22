@@ -77,7 +77,7 @@ describe('repo-collaboration.service', () => {
     expect(block?.reason).toContain('https://github.com/settings/tokens');
     expect(block?.reason).toContain('issue templates, labels, pull request templates, and branch protection');
     expect(block?.reason).toContain('Issues read/write');
-    expect(block?.reason).toContain('Administration write');
+    expect(block?.reason).toContain('Administration read/write');
   });
 
   it('plans templates, labels, and branch protection drift', async () => {

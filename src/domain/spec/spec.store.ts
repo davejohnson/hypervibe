@@ -137,6 +137,30 @@ export function deepMergeSpec(base: unknown, patch: unknown): unknown {
   return result;
 }
 
+/** Old documents remain readable; the next explicit spec update writes the canonical GitHub shape. */
+export function canonicalizeLegacyGitHubSpec(document: unknown): unknown {
+  if (!document || typeof document !== 'object' || Array.isArray(document)) return document;
+  const source = document as Record<string, unknown>;
+  if (source.github || !source.collaboration || typeof source.collaboration !== 'object' || Array.isArray(source.collaboration)) {
+    return document;
+  }
+  const legacy = source.collaboration as Record<string, unknown>;
+  const { collaboration: _legacy, ...rest } = source;
+  return {
+    ...rest,
+    github: {
+      ...(legacy.enabled !== undefined ? { enabled: legacy.enabled } : {}),
+      ...(legacy.repository !== undefined ? { repository: legacy.repository } : {}),
+      ...(legacy.canonicalEnvironment !== undefined ? { canonicalEnvironment: legacy.canonicalEnvironment } : {}),
+      collaboration: {
+        ...(legacy.issues !== undefined ? { issues: legacy.issues } : {}),
+        ...(legacy.pullRequests !== undefined ? { pullRequests: legacy.pullRequests } : {}),
+        ...(legacy.collaborators !== undefined ? { collaborators: legacy.collaborators } : {}),
+      },
+    },
+  };
+}
+
 export interface SpecResult {
   spec: ProjectSpec;
   revision: number;

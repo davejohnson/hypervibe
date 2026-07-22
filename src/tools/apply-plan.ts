@@ -37,6 +37,14 @@ import {
   applyGitHubCollaboration,
   isGitHubCollaborationAction,
 } from '../domain/services/repo-collaboration.service.js';
+import {
+  applyGitHubInfrastructure,
+  applyGitHubNativeSetting,
+  applyGitHubOpenAISecret,
+  isGitHubInfrastructureAction,
+  isGitHubNativeSettingAction,
+  isGitHubOpenAISecretAction,
+} from '../domain/services/github-infrastructure.service.js';
 import { setupCustomDomain } from '../domain/services/domain.service.js';
 import {
   connectionSetupDetails,
@@ -85,6 +93,7 @@ export type ConnectionBlock = {
   reason?: string;
   scope?: string;
   policy?: 'hard' | 'action-scoped-if-independent-actions';
+  actionIds?: string[];
 };
 
 function uniqueConnectionBlocks(blocks: ConnectionBlock[]): ConnectionBlock[] {
@@ -197,7 +206,8 @@ export function splitActionScopedConnectionBlocks(
     && !isCloudflareDomainRegistrationAction(action)
   );
   const actionScopedBlocked = blocked.filter((entry) =>
-    entry.policy === 'action-scoped-if-independent-actions' && hasIndependentPendingAction
+    entry.policy === 'action-scoped-if-independent-actions'
+    && (entry.actionIds?.some((id) => actions.some((action) => action.id === id && action.type !== 'noop')) ?? hasIndependentPendingAction)
   );
   const actionScopedProviders = new Set(actionScopedBlocked.map((entry) => entry.provider));
   const ciCredentialBlocks = actions.flatMap((action) => {
@@ -436,6 +446,15 @@ export async function executePlanApply(ctx: ToolContext, params: {
     }
     if (isGitHubCollaborationAction(action)) {
       return applyGitHubCollaboration({ project: applyProject, spec, environmentName: envName });
+    }
+    if (isGitHubInfrastructureAction(action)) {
+      return applyGitHubInfrastructure({ action });
+    }
+    if (isGitHubOpenAISecretAction(action)) {
+      return applyGitHubOpenAISecret({ project: applyProject, environmentName: envName, action });
+    }
+    if (isGitHubNativeSettingAction(action)) {
+      return applyGitHubNativeSetting({ action });
     }
     if (isIosAction(action)) {
       return applyIosAction({ project: applyProject, envName, environmentSpec: envSpec, action });

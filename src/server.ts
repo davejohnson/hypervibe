@@ -17,6 +17,7 @@ import './adapters/providers/tunnel/tunnel.manager.js';
 import './adapters/providers/local/compose.generator.js';
 import './adapters/providers/recaptcha/recaptcha.adapter.js';
 import './adapters/providers/github/github.adapter.js';
+import './adapters/providers/openai/openai.adapter.js';
 import './adapters/providers/database/database.adapter.js';
 import './adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
 import './adapters/providers/xcode/xcode.adapter.js';

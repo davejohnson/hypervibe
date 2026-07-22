@@ -397,6 +397,11 @@ If the token is valid but Hypervibe cannot confirm zone access during `hv_connec
 
 ### GitHub token permissions
 
+For the current desired-state GitHub model—including generic checks, autofix,
+pull-request review, code audit, dependency/security controls, exact token
+permissions, beginner-safe connection examples, and the infrastructure PR
+flow—see [GitHub infrastructure for beginners](docs/github-infrastructure.md).
+
 Recommended: connect without pasting the token into chat by exporting it locally:
 
 ```bash
@@ -447,11 +452,11 @@ What hypervibe uses the GitHub token for, and the permission each operation need
 
 | Operation | Classic PAT scope | Fine-grained permission |
 |---|---|---|
-| Commit CI/config files (`hv_ci_setup`: workflows, AI review, SEO files) | `repo` (+ `workflow` for files under `.github/workflows/`) | Contents: read/write |
+| Propose managed CI/config files through the Hypervibe infrastructure PR | `repo` (+ `workflow` for files under `.github/workflows/`) | Contents: read/write, Pull requests: read/write, Workflows: read/write |
 | List/trigger Actions workflows, read runs/jobs/logs (`hv_ci_status`, `hv_ci_trigger`) | `repo` | Actions: read/write |
 | Set/delete Actions repo secrets (`hv_secrets_set target="github"`) | `repo` | Secrets: read/write |
-| Branch protection (`hv_ci_setup kind="branch-protection"`) | `repo` + repo admin | Administration: read/write |
-| Generated push deploys (`hv_ci_setup kind="deploy-branch"`) | `repo` + `workflow`; add Secrets read/write if Hypervibe should sync provider API tokens | Contents: read/write, Actions: read/write, Secrets: read/write, Environments: read/write |
+| Branch protection (`github.collaboration.pullRequests`) | `repo` + repo admin | Administration: read/write |
+| Generated push deploys (`deploy.trigger: "ci"`) | `repo` + `workflow`; add Secrets read/write if Hypervibe should sync provider API tokens | Contents: read/write, Actions: read/write, Secrets: read/write, Environments: read/write |
 | Manage the Railway GitHub App's repository access for `deploy.trigger: "native"` selected-repos installs | `repo` + repo admin — **classic PAT only**; GitHub's app-installation APIs do not accept fine-grained PATs | not supported |
 | Private repo source fetch for Cloud Run builds | `repo` | Contents: read |
 
@@ -465,7 +470,7 @@ Typical setup:
 
 - Define the environment with `deploy: { strategy: "branch", branch: "main" }` or an explicit `trigger: "ci"`.
 - Run `hv_apply` first so Hypervibe records provider project, environment, and service ID bindings.
-- Run `hv_ci_setup kind="deploy-branch" config={"provider":"<provider>"}`.
+- Declare `deploy.strategy="branch"` and `deploy.trigger="ci"` with `hv_spec_set`, then run `hv_plan` and `hv_apply`.
 - Check the returned `requiredSecrets`, `syncedSecrets`, `manualSecrets`, and `requiredVariables`. Hypervibe syncs provider API credentials to GitHub Actions secrets when the provider connection is verified and the GitHub token can write repo secrets.
 
 Provider workflow behavior:

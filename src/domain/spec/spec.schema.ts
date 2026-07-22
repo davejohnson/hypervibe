@@ -88,6 +88,254 @@ export const collaborationSpecSchema = z.object({
   }).strict()).default([]),
 }).default({});
 
+const automationIdSchema = z.string().regex(
+  /^[a-z][a-z0-9-]{0,62}$/,
+  'automation ids must be lowercase slugs starting with a letter'
+);
+
+const fiveFieldCronSchema = z.string().superRefine((value, ctx) => {
+  const fields = value.trim().split(/\s+/);
+  if (fields.length !== 5) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'schedule.cron must use five-field POSIX cron: minute hour day-of-month month day-of-week',
+    });
+    return;
+  }
+  const allowed = /^[0-9A-Za-z*?,\/-]+$/;
+  if (fields.some((field) => !allowed.test(field)) || fields.some((field) => /[?]/.test(field))) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'schedule.cron contains syntax GitHub Actions does not support; use POSIX numbers/names with *, comma, dash, and slash',
+    });
+  }
+  if (/^@(yearly|monthly|weekly|daily|hourly|reboot)$/i.test(value.trim())) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'GitHub Actions does not support cron aliases such as @daily; use five fields',
+    });
+  }
+});
+
+const ianaTimezoneSchema = z.string().min(1).superRefine((value, ctx) => {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value }).format();
+  } catch {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'schedule.timezone must be a valid IANA timezone such as UTC or America/Vancouver',
+    });
+  }
+});
+
+export const githubScheduleSpecSchema = z.object({
+  /** GitHub Actions uses five-field POSIX cron. */
+  cron: fiveFieldCronSchema,
+  /** IANA timezone used by the workflow's schedule guard. Defaults to UTC. */
+  timezone: ianaTimezoneSchema.default('UTC'),
+}).strict();
+
+const githubAutomationTriggersSchema = z.object({
+  pullRequest: z.boolean().default(false),
+  push: z.array(z.string().min(1)).default([]),
+  schedule: githubScheduleSpecSchema.optional(),
+  manual: z.boolean().default(true),
+}).strict().default({});
+
+const githubAutomationRuntimeSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('node'),
+    version: z.string().min(1).default('22'),
+    installCommand: z.string().min(1).default('npm ci'),
+  }).strict(),
+  z.object({
+    kind: z.literal('python'),
+    version: z.string().min(1).default('3.13'),
+    installCommand: z.string().min(1).default('python -m pip install -r requirements.txt'),
+  }).strict(),
+]);
+
+const githubFailureArtifactPathSchema = z.string().min(1).superRefine((value, ctx) => {
+  const unsafe = value.trim() !== value
+    || /[\r\n\0]/.test(value)
+    || value.startsWith('/')
+    || value.split('/').includes('..')
+    || /(^|\/)\.git(?:\/|$)/i.test(value)
+    || /(^|\/)\.env(?:\.|\/|$)/i.test(value)
+    || /(^|\/)(?:secret|secrets|credentials)(?:\.|\/|$)/i.test(value)
+    || ['.', '*', '**', '**/*'].includes(value);
+  if (unsafe) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'failure artifact paths must be narrow relative result paths and cannot target credentials, .env, .git, or the whole workspace',
+    });
+  }
+});
+
+const githubAiAgentSchema = z.object({
+  provider: z.literal('openai').default('openai'),
+  model: z.literal('gpt-5.6-sol').default('gpt-5.6-sol'),
+  effort: z.enum(['low', 'medium', 'high', 'xhigh']).default('high'),
+}).strict().default({});
+
+export const githubCheckAutomationSpecSchema = z.object({
+  kind: z.literal('check'),
+  enabled: z.boolean().default(true),
+  category: z.enum([
+    'test',
+    'lint',
+    'typecheck',
+    'build',
+    'dependency-audit',
+    'performance',
+    'accessibility',
+  ]),
+  triggers: githubAutomationTriggersSchema,
+  runtime: githubAutomationRuntimeSchema,
+  commands: z.array(z.string().min(1)).min(1),
+  failureArtifacts: z.array(githubFailureArtifactPathSchema).default([]),
+}).strict();
+
+export const githubAutofixAutomationSpecSchema = z.object({
+  kind: z.literal('autofix'),
+  enabled: z.boolean().default(true),
+  /** Check automation ids whose completed failed runs may produce a patch. */
+  sources: z.array(automationIdSchema).min(1),
+  agent: githubAiAgentSchema,
+  draftPullRequest: z.literal(true).default(true),
+}).strict();
+
+export const githubPullRequestReviewAutomationSpecSchema = z.object({
+  kind: z.literal('pull-request-review'),
+  enabled: z.boolean().default(true),
+  agent: githubAiAgentSchema,
+}).strict();
+
+export const githubCodeAuditAutomationSpecSchema = z.object({
+  kind: z.literal('code-audit'),
+  enabled: z.boolean().default(true),
+  schedule: githubScheduleSpecSchema,
+  agent: githubAiAgentSchema,
+  /** Stable issue-per-finding lifecycle; line numbers are deliberately excluded from fingerprints. */
+  findings: z.object({
+    createIssues: z.literal(true).default(true),
+    closeAfterCleanRuns: z.literal(1).default(1),
+  }).strict().default({}),
+}).strict();
+
+export const githubAutomationSpecSchema = z.discriminatedUnion('kind', [
+  githubCheckAutomationSpecSchema,
+  githubAutofixAutomationSpecSchema,
+  githubPullRequestReviewAutomationSpecSchema,
+  githubCodeAuditAutomationSpecSchema,
+]);
+
+const githubCollaborationSpecSchema = z.object({
+  issues: z.object({
+    enabled: z.boolean().default(true),
+    labels: z.array(collaborationLabelSpecSchema).default([]),
+    templates: z.boolean().default(true),
+  }).default({}),
+  pullRequests: z.object({
+    targetBranch: z.string().min(1).default('main'),
+    requirePr: z.boolean().default(true),
+    requireReview: z.boolean().default(true),
+    requiredReviewers: z.number().int().min(1).max(6).default(1),
+    dismissStaleReviews: z.boolean().default(false),
+    requireCodeOwnerReviews: z.boolean().default(false),
+    requireStatusChecks: z.boolean().default(false),
+    statusChecks: z.array(z.string().min(1)).default([]),
+    strictStatusChecks: z.boolean().default(true),
+    enforceAdmins: z.boolean().default(false),
+  }).default({}),
+  collaborators: z.array(z.object({
+    username: z.string().min(1),
+    permission: z.enum(['pull', 'triage', 'push', 'maintain', 'admin']).default('push'),
+  }).strict()).default([]),
+}).strict().default({});
+
+export const githubSpecSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** GitHub repository owner/name. Defaults to the project gitRemoteUrl. */
+  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'repository must be owner/name').optional(),
+  /** Environment whose hv_plan owns project-level GitHub infrastructure. */
+  canonicalEnvironment: z.string().min(1).optional(),
+  collaboration: githubCollaborationSpecSchema,
+  actions: z.record(automationIdSchema, githubAutomationSpecSchema).default({}),
+  /** Existing workflow names that autofix may consume but Hypervibe does not own. */
+  externalWorkflows: z.record(automationIdSchema, z.object({
+    workflowName: z.string().min(1),
+    failureArtifacts: z.array(githubFailureArtifactPathSchema).default([]),
+  }).strict()).default({}),
+  dependencies: z.object({
+    alerts: z.boolean().default(false),
+    securityUpdates: z.boolean().default(false),
+    versionUpdates: z.array(z.object({
+      ecosystem: z.string().min(1),
+      directory: z.string().startsWith('/').default('/'),
+      interval: z.enum(['daily', 'weekly', 'monthly']).default('weekly'),
+      targetBranch: z.string().min(1).optional(),
+    }).strict()).default([]),
+  }).strict().default({}),
+  security: z.object({
+    codeScanning: z.boolean().default(false),
+    secretScanning: z.boolean().default(false),
+    pushProtection: z.boolean().default(false),
+  }).strict().default({}),
+}).strict().superRefine((github, ctx) => {
+  for (const [id, automation] of Object.entries(github.actions)) {
+    if (automation.kind === 'check') {
+      const triggers = automation.triggers;
+      if (!triggers.manual && !triggers.pullRequest && triggers.push.length === 0 && !triggers.schedule) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'check automation requires at least one trigger',
+          path: ['actions', id, 'triggers'],
+        });
+      }
+    }
+    if (automation.kind !== 'autofix') continue;
+    const seen = new Set<string>();
+    for (const source of automation.sources) {
+      if (seen.has(source)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `autofix source "${source}" is listed more than once`,
+          path: ['actions', id, 'sources'],
+        });
+      }
+      seen.add(source);
+      const managed = github.actions[source];
+      if (!managed && !github.externalWorkflows[source]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `autofix source "${source}" is not a managed check or external workflow`,
+          path: ['actions', id, 'sources'],
+        });
+      } else if (managed && managed.kind !== 'check') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `autofix source "${source}" must reference a check automation`,
+          path: ['actions', id, 'sources'],
+        });
+      } else if (automation.enabled && managed?.kind === 'check' && !managed.enabled) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `enabled autofix source "${source}" references a disabled check`,
+          path: ['actions', id, 'sources'],
+        });
+      }
+    }
+  }
+  if (github.security.pushProtection && !github.security.secretScanning) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'pushProtection requires secretScanning',
+      path: ['security', 'pushProtection'],
+    });
+  }
+});
+
 export const envFileSpecSchema = z.object({
   /**
    * runtime: include high-confidence app runtime keys from .env (default).
@@ -305,6 +553,8 @@ export const projectSpecSchema = z.object({
   version: z.literal(1),
   project: z.string().min(1),
   gitRemoteUrl: z.string().min(1).optional(),
+  github: githubSpecSchema.optional(),
+  /** @deprecated Use github.collaboration. Accepted for one compatibility period. */
   collaboration: collaborationSpecSchema.optional(),
   secrets: z.record(
     z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'secret names must be valid environment variable names'),
@@ -312,6 +562,20 @@ export const projectSpecSchema = z.object({
   ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 }).superRefine((spec, ctx) => {
+  if (spec.github && spec.collaboration) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Use github.collaboration; github and legacy top-level collaboration cannot both be declared',
+      path: ['collaboration'],
+    });
+  }
+  if (spec.github?.canonicalEnvironment && !spec.environments[spec.github.canonicalEnvironment]) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `github.canonicalEnvironment targets unknown environment "${spec.github.canonicalEnvironment}"`,
+      path: ['github', 'canonicalEnvironment'],
+    });
+  }
   for (const [key, secret] of Object.entries(spec.secrets)) {
     const seen = new Set<string>();
     for (const environmentName of secret.environments) {
@@ -376,5 +640,8 @@ export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema
 export type EnvFileSpec = z.infer<typeof envFileSpecSchema>;
 export type DelegatedSecretSpec = z.infer<typeof delegatedSecretSpecSchema>;
 export type CollaborationSpec = z.infer<typeof collaborationSpecSchema>;
+export type GitHubScheduleSpec = z.infer<typeof githubScheduleSpecSchema>;
+export type GitHubAutomationSpec = z.infer<typeof githubAutomationSpecSchema>;
+export type GitHubSpec = z.infer<typeof githubSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;

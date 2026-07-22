@@ -23,8 +23,8 @@ export function githubConnectionRank(scope: string | null, repo?: string): numbe
 
 /**
  * GHCR pull credentials (username + read:packages token) from the best
- * verified GitHub connection — the same pair hv_ci_setup syncs to GitHub
- * Actions as IMAGE_REGISTRY_USERNAME/IMAGE_REGISTRY_TOKEN.
+ * verified GitHub connection — the same pair declarative plan/apply syncs to
+ * GitHub Actions as IMAGE_REGISTRY_USERNAME/IMAGE_REGISTRY_TOKEN.
  */
 export function githubPackagePullCredentials(
   options: { githubRepo?: string; githubLogin?: string } = {}

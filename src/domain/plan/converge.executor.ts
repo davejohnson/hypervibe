@@ -246,8 +246,9 @@ export class ConvergeExecutor {
     let firstError: string | undefined;
 
     for (const action of ordered) {
-      if (failed) {
-        receipts.push({ actionId: action.id, status: 'aborted', message: 'Skipped after earlier failure' });
+      if (failed || pending || blocked) {
+        const state = failed ? 'failure' : pending ? 'pending result' : 'blocked result';
+        receipts.push({ actionId: action.id, status: 'aborted', message: `Skipped after earlier ${state}` });
         continue;
       }
       if (action.type === 'noop') {
@@ -256,11 +257,19 @@ export class ConvergeExecutor {
         continue;
       }
       if (action.requiresConfirm && !confirmed.has(action.id)) {
-        receipts.push({
+        const receipt: ActionReceipt = {
           actionId: action.id,
           status: 'skipped_requires_confirm',
           message: `Requires explicit confirmation: pass confirmActions: ["${action.id}"]`,
-        });
+        };
+        receipts.push(receipt);
+        this.runRepo.addReceipt(applyRun.id, {
+          step: action.id,
+          status: 'blocked',
+          result: { message: receipt.message },
+          timestamp: new Date().toISOString(),
+        } as RunReceipt);
+        blocked = true;
         continue;
       }
       // A dependency that was skipped (not completed) blocks dependents.
