@@ -60,6 +60,7 @@ npm run build --prefix "$ROOT"
 echo "Building macOS companion"
 swift build --package-path "$MACOS_ROOT" -c release --product HypervibeCompanion
 swift build --package-path "$MACOS_ROOT" -c release --product HypervibeMCPLauncher
+swift build --package-path "$MACOS_ROOT" -c release --product HypervibeCompanionUpdater
 SWIFT_BIN_DIR="$(swift build --package-path "$MACOS_ROOT" -c release --show-bin-path)"
 
 echo "Downloading Node.js v$NODE_VERSION for $NODE_ARCH"
@@ -79,6 +80,7 @@ cp -R "$ROOT/dist" "$SERVER_STAGE/dist"
 
 cp "$SWIFT_BIN_DIR/HypervibeCompanion" "$CONTENTS/MacOS/HypervibeCompanion"
 cp "$SWIFT_BIN_DIR/HypervibeMCPLauncher" "$CONTENTS/MacOS/hypervibe-mcp"
+cp "$SWIFT_BIN_DIR/HypervibeCompanionUpdater" "$CONTENTS/MacOS/hypervibe-updater"
 cp "$NODE_DIR/bin/node" "$RESOURCES/runtime/node"
 cp "$NODE_DIR/LICENSE" "$RESOURCES/runtime/LICENSE"
 cp -R "$SERVER_STAGE/dist" "$RESOURCES/server/dist"
@@ -108,11 +110,14 @@ done < <(find "$RESOURCES" -type f -print0)
 
 if [ "$CODESIGN_IDENTITY" = "-" ]; then
     codesign --force --sign - --timestamp=none "$CONTENTS/MacOS/hypervibe-mcp"
+    codesign --force --sign - --timestamp=none "$CONTENTS/MacOS/hypervibe-updater"
     codesign --force --sign - --timestamp=none "$CONTENTS/MacOS/HypervibeCompanion"
     codesign --force --sign - --timestamp=none "$APP"
 else
     codesign --force --options runtime --timestamp \
         --sign "$CODESIGN_IDENTITY" "$CONTENTS/MacOS/hypervibe-mcp"
+    codesign --force --options runtime --timestamp \
+        --sign "$CODESIGN_IDENTITY" "$CONTENTS/MacOS/hypervibe-updater"
     codesign --force --options runtime --timestamp \
         --sign "$CODESIGN_IDENTITY" "$CONTENTS/MacOS/HypervibeCompanion"
     codesign --force --options runtime --timestamp \

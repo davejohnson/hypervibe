@@ -95,6 +95,7 @@ The shipping artifact is a conventional drag-to-Applications DMG. The app
 bundle contains:
 
 - the SwiftUI companion;
+- a small native restart helper used only after an update is fully staged;
 - a small native `hypervibe-mcp` stdio launcher;
 - the built, existing Hypervibe TypeScript server and production dependencies;
 - a pinned Node.js runtime and its license;
@@ -108,6 +109,15 @@ lifecycle behavior, or write to stdout before the MCP handshake.
 The companion holds a user-scoped advisory process lock for its lifetime.
 Launching another packaged or development copy activates the existing process
 and exits before showing a second menu bar item.
+
+The companion compares its bundle version with the latest published release
+from `davejohnson/hypervibe` on GitHub. A newer stable release is eligible only
+when it contains the exact DMG name for the running architecture and GitHub
+provides a SHA-256 asset digest. **Restart and Update** verifies that digest,
+the mounted app's bundle id and version, and its code signature before copying
+anything beside the installed app. A separate native helper waits for the
+companion to exit, swaps the staged bundle using a rollback copy, and reopens
+the app. It restores the previous bundle if replacement or relaunch fails.
 
 From Settings, a user can connect all registered projects to:
 
@@ -404,7 +414,7 @@ v0/v1 use a copy-to-chat handoff for apply. Native Apply is out of scope until t
 |---|---|---|
 | **Foundation** | Swift package/app target, project registry, snapshot models/cache, process/MCP session wrapper | None |
 | **v0 — Status** | Menu bar project/environment list, topology, connected apps, manual refresh, stale/error states, recent runs | Uses existing tools unchanged |
-| **v0 — Distribution** | Bundled runtime/server, native launcher, signed DMG, Claude/Codex registration | Packages the existing MCP unchanged |
+| **v0 — Distribution** | Bundled runtime/server, native launcher/updater, signed DMG, GitHub update checks, Claude/Codex registration | Packages the existing MCP unchanged |
 | **v1 — Ambient** | Scheduling, notifications, acknowledgements, power/network behavior | Uses existing read-only tools |
 | **Plan review** | Detachable review window and copy-to-chat handoff | Narrow `hv_runs get` sanitization/preview only |
 | **Later, only if needed** | One derived snapshot operation or native Apply | Separate reviewed decision |
@@ -419,6 +429,10 @@ scope.
 - Removing the companion's Application Support directory loses no infrastructure state.
 - Existing MCP tool names and lifecycle behavior remain unchanged for v0.
 - A clean Mac does not require a separate Node.js or Hypervibe installation.
+- The companion offers an update only for a strictly newer GitHub release with
+  a matching architecture asset and SHA-256 digest.
+- A failed update before replacement leaves the installed app untouched; a
+  failed replacement or relaunch restores the previous app bundle.
 - Claude and Codex configuration preserves unrelated content and can be
   disconnected per managed project.
 - No companion database migration or trigger exists in Hypervibe.

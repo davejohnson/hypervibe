@@ -1,4 +1,5 @@
 import Foundation
+import HypervibeCompanionCore
 
 enum CompanionDistribution {
     private static var launcherOverride: String? {
@@ -18,6 +19,16 @@ enum CompanionDistribution {
         return Bundle.main.bundleURL
             .appendingPathComponent("Contents/MacOS/hypervibe-mcp")
             .standardizedFileURL
+    }
+
+    static var currentVersion: String? {
+        guard let value = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String,
+            CompanionVersion(value) != nil else {
+            return nil
+        }
+        return value
     }
 
     static var includesBundledServer: Bool {

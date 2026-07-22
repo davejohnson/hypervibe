@@ -7,6 +7,10 @@ struct CompanionSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            companionUpdates
+
+            Divider()
+
             mcpClients
 
             Divider()
@@ -61,12 +65,111 @@ struct CompanionSettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 620, height: 570)
+        .frame(width: 620, height: 680)
         .background(WindowFocusBridge())
         .task {
             await model.loadIfNeeded()
             await model.refreshMCPHostStatuses()
+            await model.checkForCompanionUpdate()
         }
+    }
+
+    private var companionUpdates: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Hypervibe Companion")
+                        .font(.title2.weight(.semibold))
+                    Text(updateStatusText)
+                        .font(.caption)
+                        .foregroundStyle(updateStatusIsError ? .red : .secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer()
+
+                if model.companionUpdateState.isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                if updateActionIsPrimary {
+                    updateActionButton
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    updateActionButton
+                        .buttonStyle(.bordered)
+                }
+            }
+
+            if case .available(let release) = model.companionUpdateState {
+                Link("View Hypervibe \(release.version) on GitHub", destination: release.releasePageURL)
+                    .font(.caption)
+            }
+        }
+    }
+
+    private var updateStatusText: String {
+        let installed = CompanionDistribution.currentVersion ?? "development"
+        switch model.companionUpdateState {
+        case .idle:
+            return "Version \(installed). Checking GitHub for updates…"
+        case .checking:
+            return "Version \(installed). Checking the latest GitHub release…"
+        case .upToDate(let version):
+            return "Version \(version) is up to date."
+        case .available(let release):
+            return "Version \(release.version) is available on GitHub; version \(installed) is installed."
+        case .installing(let version):
+            return "Downloading and verifying version \(version)… Hypervibe will restart when it is ready."
+        case .failed(let message):
+            return message
+        }
+    }
+
+    private var updateStatusIsError: Bool {
+        if case .failed = model.companionUpdateState {
+            return true
+        }
+        return false
+    }
+
+    private var updateActionTitle: String {
+        switch model.companionUpdateState {
+        case .available:
+            "Restart and Update"
+        case .checking:
+            "Checking…"
+        case .installing:
+            "Updating…"
+        case .failed:
+            "Try Again"
+        case .idle:
+            "Check for Updates"
+        case .upToDate:
+            "Check Again"
+        }
+    }
+
+    private var updateActionIsPrimary: Bool {
+        if case .available = model.companionUpdateState {
+            return true
+        }
+        return false
+    }
+
+    private var updateActionButton: some View {
+        Button(updateActionTitle) {
+            Task {
+                if case .available = model.companionUpdateState {
+                    await model.restartAndUpdateCompanion()
+                } else {
+                    await model.checkForCompanionUpdate(force: true)
+                }
+            }
+        }
+        .clickTargetCursor()
+        .disabled(model.companionUpdateState.isBusy)
     }
 
     private var mcpClients: some View {
