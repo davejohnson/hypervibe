@@ -50,6 +50,10 @@ import {
   githubCollaborationConnectionBlock,
   planGitHubCollaboration,
 } from '../services/repo-collaboration.service.js';
+import {
+  githubInfrastructureConnectionBlock,
+  planGitHubInfrastructure,
+} from '../services/github-infrastructure.service.js';
 
 export interface PlanOptions {
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
@@ -78,7 +82,7 @@ export interface EnvironmentPlan {
   /** Delegated values that must be supplied in a new hv_plan call before apply. */
   inputRequired: DelegatedSecretInputRequirement[];
   /** Missing/unverified provider connections that block apply. */
-  blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }>;
+  blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions'; actionIds?: string[] }>;
 }
 
 function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Project {
@@ -349,9 +353,10 @@ export class PlanService {
     project: Project,
     spec: ProjectSpec,
     environmentName: string
-  ): Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }> {
+  ): Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions'; actionIds?: string[] }> {
     const collaboration = githubCollaborationConnectionBlock({ project, spec, environmentName, connectionRepo: this.connectionRepo });
-    return collaboration ? [collaboration] : [];
+    const github = githubInfrastructureConnectionBlock({ project, spec, environmentName, connectionRepo: this.connectionRepo });
+    return [collaboration, github].filter((block): block is NonNullable<typeof block> => block !== null);
   }
 
   /**
@@ -735,11 +740,20 @@ export class PlanService {
     if (repoCollaboration.action) {
       actions.push(repoCollaboration.action);
     }
+    const githubInfrastructure = await planGitHubInfrastructure({
+      project: projectForPlan,
+      spec: specResult.spec,
+      environmentName,
+    });
+    const githubConfirmationActions = githubInfrastructure.actions.filter((action) => action.requiresConfirm);
+    actions.push(...githubInfrastructure.actions.filter((action) => !action.requiresConfirm));
+    blocked.push(...githubInfrastructure.blocked);
 
     // iOS actions go last: the executor aborts remaining actions after a
     // failure, and an Apple-side failure must never block hosting convergence.
     const ios = await planIos({ project: projectForPlan, environmentSpec, environment });
     actions.push(...ios.actions);
+    actions.push(...githubConfirmationActions);
 
     // The applied-spec marker is the final release dependency. A changed
     // contract must not unlock GitHub Actions until every planned action,
@@ -849,7 +863,7 @@ export class PlanService {
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       actions,
       unmanaged: [...diff.unmanaged, ...storage.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...filterWarnings],
       ...(delegatedSecrets.inputRequired.length > 0 ? { inputRequired: delegatedSecrets.inputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };

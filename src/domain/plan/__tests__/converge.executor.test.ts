@@ -150,6 +150,13 @@ describe('ConvergeExecutor execution', () => {
     expect(statuses.get('database:railway:destroy')).toBe('skipped_requires_confirm');
     expect(statuses.get('cleanup:after')).toBe('aborted');
     expect(handler).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    const applyRun = runRepo().findById(result.applyRunId!)!;
+    expect(applyRun.status).toBe('blocked');
+    expect(applyRun.receipts.find((receipt) => receipt.step === 'database:railway:destroy')).toMatchObject({
+      status: 'blocked',
+      result: { message: expect.stringContaining('confirmActions') },
+    });
   });
 
   it('executes confirm-gated destroys when explicitly confirmed', async () => {
@@ -220,6 +227,19 @@ describe('ConvergeExecutor execution', () => {
       status: 'pending',
       result: { message: 'registration in progress', state: 'in_progress' },
     });
+  });
+
+  it('stops the stage after pending work even when a later action is independent', async () => {
+    const handler = vi.fn(async (a: PlanAction) => a.id === 'repo:github-infrastructure-pr'
+      ? { success: false, status: 'pending' as const, message: 'awaiting PR merge' }
+      : { success: true, message: 'should not run' });
+    const planId = storePlan([
+      action({ id: 'repo:github-infrastructure-pr', resource: { kind: 'repo', name: 'owner/repo', provider: 'github' } }),
+      action({ id: 'service:web' }),
+    ]);
+    const result = await new ConvergeExecutor().execute({ planRunId: planId, currentSpecRevision: 1, handler });
+    expect(result.receipts.map((receipt) => receipt.status)).toEqual(['pending', 'aborted']);
+    expect(handler).toHaveBeenCalledOnce();
   });
 
   it('records blocked actions separately from provider failures', async () => {

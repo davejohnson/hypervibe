@@ -5,6 +5,7 @@ enum HypervibeResponseMapper {
         let projectName: String
         let specRevision: Int
         let environments: [EnvironmentSnapshot]
+        let github: GitHubInfrastructureSummary?
     }
 
     static func decodeTopology(_ data: Data) throws -> Topology {
@@ -27,7 +28,40 @@ enum HypervibeResponseMapper {
         return Topology(
             projectName: payload.project.name,
             specRevision: payload.revision,
-            environments: environments
+            environments: environments,
+            github: githubSummary(payload.spec.github)
+        )
+    }
+
+    private static func githubSummary(
+        _ github: DesiredProjectSpec.GitHub?
+    ) -> GitHubInfrastructureSummary? {
+        guard let github, github.enabled else { return nil }
+        let automations: [GitHubAutomationSummary] = github.actions.map { id, automation in
+            let schedule = automation.schedule ?? automation.triggers?.schedule
+            return GitHubAutomationSummary(
+                id: id,
+                kind: automation.kind,
+                enabled: automation.enabled,
+                cron: schedule?.cron,
+                timezone: schedule?.timezone,
+                requiresOpenAI: automation.kind != "check"
+            )
+        }.sorted { $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending }
+        var dependencyFeatures: [String] = []
+        if github.dependencies.alerts { dependencyFeatures.append("Alerts") }
+        if github.dependencies.securityUpdates { dependencyFeatures.append("Security updates") }
+        if !github.dependencies.versionUpdates.isEmpty { dependencyFeatures.append("Version updates") }
+        var securityFeatures: [String] = []
+        if github.security.codeScanning { securityFeatures.append("Code scanning") }
+        if github.security.secretScanning { securityFeatures.append("Secret scanning") }
+        if github.security.pushProtection { securityFeatures.append("Push protection") }
+        return GitHubInfrastructureSummary(
+            repository: github.repository,
+            canonicalEnvironment: github.canonicalEnvironment,
+            automations: automations,
+            dependencyFeatures: dependencyFeatures,
+            securityFeatures: securityFeatures
         )
     }
 
@@ -440,6 +474,95 @@ private struct ProjectReference: Decodable {
 
 private struct DesiredProjectSpec: Decodable {
     let environments: [String: DesiredEnvironment]
+    let github: GitHub?
+
+    struct GitHub: Decodable {
+        let enabled: Bool
+        let repository: String?
+        let canonicalEnvironment: String?
+        let actions: [String: Automation]
+        let dependencies: Dependencies
+        let security: Security
+
+        private enum CodingKeys: String, CodingKey {
+            case enabled, repository, canonicalEnvironment, actions, dependencies, security
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            repository = try container.decodeIfPresent(String.self, forKey: .repository)
+            canonicalEnvironment = try container.decodeIfPresent(String.self, forKey: .canonicalEnvironment)
+            actions = try container.decodeIfPresent([String: Automation].self, forKey: .actions) ?? [:]
+            dependencies = try container.decodeIfPresent(Dependencies.self, forKey: .dependencies) ?? Dependencies()
+            security = try container.decodeIfPresent(Security.self, forKey: .security) ?? Security()
+        }
+
+        struct Automation: Decodable {
+            let kind: String
+            let enabled: Bool
+            let schedule: Schedule?
+            let triggers: Triggers?
+
+            private enum CodingKeys: String, CodingKey { case kind, enabled, schedule, triggers }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                kind = try container.decode(String.self, forKey: .kind)
+                enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+                schedule = try container.decodeIfPresent(Schedule.self, forKey: .schedule)
+                triggers = try container.decodeIfPresent(Triggers.self, forKey: .triggers)
+            }
+        }
+
+        struct Triggers: Decodable { let schedule: Schedule? }
+        struct Schedule: Decodable { let cron: String; let timezone: String? }
+        struct VersionUpdate: Decodable {}
+        struct Dependencies: Decodable {
+            let alerts: Bool
+            let securityUpdates: Bool
+            let versionUpdates: [VersionUpdate]
+
+            private enum CodingKeys: String, CodingKey {
+                case alerts, securityUpdates, versionUpdates
+            }
+
+            init() {
+                alerts = false
+                securityUpdates = false
+                versionUpdates = []
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                alerts = try container.decodeIfPresent(Bool.self, forKey: .alerts) ?? false
+                securityUpdates = try container.decodeIfPresent(Bool.self, forKey: .securityUpdates) ?? false
+                versionUpdates = try container.decodeIfPresent([VersionUpdate].self, forKey: .versionUpdates) ?? []
+            }
+        }
+        struct Security: Decodable {
+            let codeScanning: Bool
+            let secretScanning: Bool
+            let pushProtection: Bool
+
+            private enum CodingKeys: String, CodingKey {
+                case codeScanning, secretScanning, pushProtection
+            }
+
+            init() {
+                codeScanning = false
+                secretScanning = false
+                pushProtection = false
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                codeScanning = try container.decodeIfPresent(Bool.self, forKey: .codeScanning) ?? false
+                secretScanning = try container.decodeIfPresent(Bool.self, forKey: .secretScanning) ?? false
+                pushProtection = try container.decodeIfPresent(Bool.self, forKey: .pushProtection) ?? false
+            }
+        }
+    }
 }
 
 private struct DesiredEnvironment: Decodable {

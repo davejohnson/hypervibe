@@ -290,19 +290,22 @@ public struct ProjectSnapshot: Codable, Equatable, Sendable {
     public let generatedAt: Date
     public let environments: [EnvironmentSnapshot]
     public let recentRuns: [RecentRunSummary]
+    public let github: GitHubInfrastructureSummary?
 
     public init(
         projectID: UUID,
         projectName: String,
         generatedAt: Date,
         environments: [EnvironmentSnapshot],
-        recentRuns: [RecentRunSummary]
+        recentRuns: [RecentRunSummary],
+        github: GitHubInfrastructureSummary? = nil
     ) {
         self.projectID = projectID
         self.projectName = projectName
         self.generatedAt = generatedAt
         self.environments = environments
         self.recentRuns = recentRuns
+        self.github = github
     }
 
     public func markingObservationsStale() -> ProjectSnapshot {
@@ -331,7 +334,55 @@ public struct ProjectSnapshot: Codable, Equatable, Sendable {
                     )
                 )
             },
-            recentRuns: recentRuns
+            recentRuns: recentRuns,
+            github: github
         )
+    }
+}
+
+public struct GitHubAutomationSummary: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let kind: String
+    public let enabled: Bool
+    public let cron: String?
+    public let timezone: String?
+    public let requiresOpenAI: Bool
+
+    public init(
+        id: String,
+        kind: String,
+        enabled: Bool,
+        cron: String?,
+        timezone: String?,
+        requiresOpenAI: Bool
+    ) {
+        self.id = id
+        self.kind = kind
+        self.enabled = enabled
+        self.cron = cron
+        self.timezone = timezone
+        self.requiresOpenAI = requiresOpenAI
+    }
+}
+
+public struct GitHubInfrastructureSummary: Codable, Equatable, Sendable {
+    public let repository: String?
+    public let canonicalEnvironment: String?
+    public let automations: [GitHubAutomationSummary]
+    public let dependencyFeatures: [String]
+    public let securityFeatures: [String]
+
+    public init(
+        repository: String?,
+        canonicalEnvironment: String?,
+        automations: [GitHubAutomationSummary],
+        dependencyFeatures: [String],
+        securityFeatures: [String]
+    ) {
+        self.repository = repository
+        self.canonicalEnvironment = canonicalEnvironment
+        self.automations = automations
+        self.dependencyFeatures = dependencyFeatures
+        self.securityFeatures = securityFeatures
     }
 }

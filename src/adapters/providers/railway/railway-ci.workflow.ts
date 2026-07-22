@@ -55,7 +55,7 @@ export function diagnoseRailwayWorkflowLog(text: string): CiWorkflowDiagnostic[]
       summary: 'The workflow reached Railway deploy polling, then Railway returned a generic GraphQL 400. Older Hypervibe workflows passed the whole deploy mutation response as deploymentId instead of serviceInstanceDeployV2, which produces exactly this opaque Railway error.',
       evidence: 'Railway API 400 "Problem processing request" occurred inside waitForDeployment.',
       next: [
-        'Re-sync the deploy workflow with hv_plan + hv_apply, or hv_ci_setup kind="deploy-branch", so it extracts serviceInstanceDeployV2 before polling.',
+        'Re-sync the declarative deploy workflow with hv_plan + hv_apply so it extracts serviceInstanceDeployV2 before polling.',
         'Re-run the workflow with hv_ci_trigger.',
         'If it still fails after re-sync, inspect hv_ci_status include=["logs"]; newer workflows include the Railway GraphQL operation, redacted variables, and traceId.',
       ],
