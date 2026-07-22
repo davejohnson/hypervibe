@@ -13,6 +13,8 @@ The current v0 slice contains:
 - per-project MCP sessions over stdio using the official Swift SDK;
 - safe one-click registration of every configured project with Claude Desktop
   and Codex / ChatGPT desktop clients;
+- update checks against the latest published GitHub release, with a verified
+  in-place **Restart and Update** flow for the matching Mac architecture;
 - desired resource topology from `hv_spec_get`;
 - live environment health, drift identity, and service endpoints from
   `hv_status`;
@@ -72,6 +74,20 @@ Before its first edit of an existing file, Hypervibe creates a sibling file
 whose name ends in `.hypervibe-backup`. Removing a project from the companion
 also removes that project's Hypervibe-managed entries.
 
+## Companion updates
+
+Hypervibe checks the repository's latest published GitHub release and compares
+its `vX.Y.Z` tag with the installed app's `CFBundleShortVersionString`. If a
+newer version has an asset named `Hypervibe-X.Y.Z-arm64.dmg` or
+`Hypervibe-X.Y.Z-x86_64.dmg` for the current Mac, Settings offers **Restart and
+Update**.
+
+The updater downloads only that matching asset, verifies GitHub's SHA-256
+digest, mounts the disk image read-only, and checks the app's bundle identifier,
+version, and code signature. It stages the verified app beside the existing
+installation, quits Hypervibe, swaps the app bundles with a rollback copy, and
+reopens Hypervibe. A failed replacement restores the previous app.
+
 ## Develop
 
 Run the tests:
@@ -80,7 +96,7 @@ Run the tests:
 swift test --package-path apps/macos
 ```
 
-Build the menu bar executable and launcher:
+Build the menu bar executable and native helpers:
 
 ```sh
 swift build -c release --package-path apps/macos
@@ -122,8 +138,9 @@ Build an ad-hoc-signed DMG for the current Mac architecture:
 The artifact is written to `build/macos/`. The build downloads a pinned
 Node.js 22.17.1 archive from nodejs.org, verifies its SHA-256 checksum, installs
 production dependencies with that runtime, builds the Swift executables, and
-signs the complete bundle. Build Apple Silicon and Intel artifacts on matching
-Mac architectures; cross-architecture packaging is intentionally rejected.
+signs the complete bundle, including the native restart helper. Build Apple
+Silicon and Intel artifacts on matching Mac architectures; cross-architecture
+packaging is intentionally rejected.
 
 Tagged repository releases run the installer build on matching GitHub-hosted
 Apple Silicon and Intel runners. After the npm package and both installer jobs

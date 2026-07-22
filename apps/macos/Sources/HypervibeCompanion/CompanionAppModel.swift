@@ -1,5 +1,24 @@
+import AppKit
 import Foundation
 import HypervibeCompanionCore
+
+enum CompanionUpdateState: Equatable {
+    case idle
+    case checking
+    case upToDate(version: String)
+    case available(CompanionRelease)
+    case installing(version: String)
+    case failed(String)
+
+    var isBusy: Bool {
+        switch self {
+        case .checking, .installing:
+            true
+        default:
+            false
+        }
+    }
+}
 
 @MainActor
 final class CompanionAppModel: ObservableObject {
@@ -16,6 +35,7 @@ final class CompanionAppModel: ObservableObject {
     @Published private(set) var mcpHostStatuses: [MCPHost: MCPHostConnectionStatus] = [:]
     @Published private(set) var mcpHostErrors: [MCPHost: String] = [:]
     @Published private(set) var updatingMCPHosts: Set<MCPHost> = []
+    @Published private(set) var companionUpdateState: CompanionUpdateState = .idle
 
     private let registry = ProjectRegistryStore(
         fileURL: ProjectRegistryStore.defaultFileURL()
@@ -25,6 +45,8 @@ final class CompanionAppModel: ObservableObject {
     )
     private let mcpClient = HypervibeMCPClient()
     private let mcpHostConfigurator = MCPHostConfigurator()
+    private let releaseClient = GitHubReleaseClient()
+    private let updateInstaller = CompanionUpdateInstaller()
     private var didLoad = false
 
     var selectedProject: CompanionProject? {
@@ -345,6 +367,51 @@ final class CompanionAppModel: ObservableObject {
         } catch {
             mcpHostErrors[host] = userFacingMessage(for: error)
             await refreshMCPHostStatuses()
+        }
+    }
+
+    func checkForCompanionUpdate(force: Bool = false) async {
+        guard !companionUpdateState.isBusy else { return }
+        if !force, companionUpdateState != .idle {
+            return
+        }
+        guard let currentVersion = CompanionDistribution.currentVersion else {
+            companionUpdateState = .failed(
+                "Version checks are available in the packaged Hypervibe app."
+            )
+            return
+        }
+
+        companionUpdateState = .checking
+        do {
+            if let release = try await releaseClient.latestUpdate(
+                currentVersion: currentVersion
+            ) {
+                companionUpdateState = .available(release)
+            } else {
+                companionUpdateState = .upToDate(version: currentVersion)
+            }
+        } catch {
+            companionUpdateState = .failed(userFacingMessage(for: error))
+        }
+    }
+
+    func restartAndUpdateCompanion() async {
+        guard case .available(let release) = companionUpdateState else { return }
+        companionUpdateState = .installing(version: release.version)
+
+        do {
+            let prepared = try await updateInstaller.prepare(
+                release: release,
+                currentBundleURL: Bundle.main.bundleURL
+            )
+            try await updateInstaller.launchRestartHelper(
+                prepared,
+                processIdentifier: ProcessInfo.processInfo.processIdentifier
+            )
+            NSApplication.shared.terminate(nil)
+        } catch {
+            companionUpdateState = .failed(userFacingMessage(for: error))
         }
     }
 

@@ -38,6 +38,7 @@ struct CompanionMenuView: View {
         .frame(width: 460, height: 590)
         .task {
             await model.loadIfNeeded()
+            await model.checkForCompanionUpdate()
         }
     }
 
@@ -115,11 +116,19 @@ struct CompanionMenuView: View {
 
             Spacer()
 
-            SettingsLink {
-                Image(systemName: "gearshape")
+            if case .available(let release) = model.companionUpdateState {
+                SettingsLink {
+                    Label("Update \(release.version)", systemImage: "arrow.down.circle.fill")
+                }
+                .help("Restart and update Hypervibe")
+                .clickTargetCursor()
+            } else {
+                SettingsLink {
+                    Image(systemName: "gearshape")
+                }
+                .help("Settings")
+                .clickTargetCursor()
             }
-            .help("Settings")
-            .clickTargetCursor()
 
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
