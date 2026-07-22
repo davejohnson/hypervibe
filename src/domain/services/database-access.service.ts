@@ -3,7 +3,7 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import type { Component } from '../entities/component.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
-import type { IProviderAdapter, TemporaryDatabaseAccess } from '../ports/provider.port.js';
+import type { TemporaryDatabaseAccess } from '../ports/provider.port.js';
 import { adapterFactory } from './adapter.factory.js';
 import { isExternallyUsableDatabaseUrl, resolveExternalDatabaseUrl } from './database-ops.service.js';
 
@@ -12,7 +12,7 @@ const DEFAULT_LEASE_TTL_MS = 2 * 60 * 1000;
 const CLEANUP_RETRY_DELAYS_MS = [0, 100, 300] as const;
 const FAILED_CLEANUP_RETRY_MS = 5_000;
 
-export type DatabaseAccessMode = 'existing' | 'private_connector' | 'ephemeral_proxy';
+export type DatabaseAccessMode = 'existing' | 'private_connector' | 'ephemeral_proxy' | 'temporary_firewall';
 export type DatabaseAccessCleanupStatus = 'no_op' | 'deferred' | 'completed' | 'failed';
 
 export interface DatabaseAccessCleanup {
@@ -49,7 +49,7 @@ interface SharedLease {
   id: string;
   provider: string;
   access: TemporaryDatabaseAccess;
-  adapter: IProviderAdapter;
+  adapter: TemporaryDatabaseAccessAdapter;
   environment: Environment;
   component: Component;
   references: number;
@@ -58,12 +58,21 @@ interface SharedLease {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+type TemporaryDatabaseAccessAdapter = {
+  releaseTemporaryDatabaseAccess?: (
+    environment: Environment,
+    component: Component,
+    access: TemporaryDatabaseAccess
+  ) => Promise<void>;
+};
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function accessMode(access: TemporaryDatabaseAccess): DatabaseAccessMode {
   if (access.source === 'private_connector') return 'private_connector';
+  if (access.source === 'temporary_firewall') return 'temporary_firewall';
   return access.temporary ? 'ephemeral_proxy' : 'existing';
 }
 
@@ -100,7 +109,7 @@ export class DatabaseAccessLeaseCoordinator {
   async acquire(params: {
     key: string;
     provider: string;
-    adapter: IProviderAdapter;
+    adapter: TemporaryDatabaseAccessAdapter;
     environment: Environment;
     component: Component;
     create: () => Promise<TemporaryDatabaseAccess>;
@@ -292,10 +301,6 @@ export async function acquireManagedDatabaseAccess(
       ? environment.platformBindings.provider
       : undefined;
 
-  const existing = await resolveExternalDatabaseUrl(project, environment, serviceName);
-  if (existing) {
-    return { ok: true, lease: noopLease(existing, provider ?? 'database') };
-  }
   if (!component) {
     return {
       ok: false,
@@ -316,15 +321,48 @@ export async function acquireManagedDatabaseAccess(
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
+  const existing = await resolveExternalDatabaseUrl(project, environment, serviceName);
+  const adapterResult = await adapterFactory.getDatabaseAdapter(provider, project);
   const adapter = adapterResult.adapter;
-  if (
-    !adapterResult.success
-    || !adapter
-    || !adapter.capabilities.supportsTemporaryDatabaseAccess
-    || typeof adapter.acquireTemporaryDatabaseAccess !== 'function'
-    || typeof adapter.releaseTemporaryDatabaseAccess !== 'function'
-  ) {
+  const supportsTemporaryAccess = Boolean(
+    adapterResult.success
+    && adapter
+    && adapter.capabilities.supportsTemporaryDatabaseAccess
+    && typeof adapter.acquireTemporaryDatabaseAccess === 'function'
+    && typeof adapter.releaseTemporaryDatabaseAccess === 'function'
+  );
+  const shouldAcquireTemporaryAccess = supportsTemporaryAccess
+    && (adapter!.capabilities.prefersTemporaryDatabaseAccess === true || !existing);
+
+  if (shouldAcquireTemporaryAccess) {
+    try {
+      const lease = await databaseAccessLeaseCoordinator.acquire({
+        key: `${provider}:${environment.id}:${component.id}:5432`,
+        provider,
+        adapter: adapter!,
+        environment,
+        component,
+        create: () => adapter!.acquireTemporaryDatabaseAccess!(environment, component, 5432),
+      });
+      return { ok: true, lease };
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'provider_error',
+        error: `Failed to acquire operation-scoped database access from ${provider}: ${error instanceof Error ? error.message : String(error)}`,
+        provider,
+        resourceCreated: 'unknown',
+        cleanup: 'unknown',
+        hint: 'Inspect the managed database and provider connection with hv_inspect before retrying.',
+      };
+    }
+  }
+
+  if (existing) {
+    return { ok: true, lease: noopLease(existing, provider) };
+  }
+
+  if (!supportsTemporaryAccess) {
     return {
       ok: false,
       code: adapterResult.success ? 'no_external_access' : 'provider_error',
@@ -336,25 +374,12 @@ export async function acquireManagedDatabaseAccess(
     };
   }
 
-  try {
-    const lease = await databaseAccessLeaseCoordinator.acquire({
-      key: `${provider}:${environment.id}:${component.id}:5432`,
-      provider,
-      adapter,
-      environment,
-      component,
-      create: () => adapter.acquireTemporaryDatabaseAccess!(environment, component, 5432),
-    });
-    return { ok: true, lease };
-  } catch (error) {
-    return {
-      ok: false,
-      code: 'provider_error',
-      error: `Failed to acquire operation-scoped database access from ${provider}: ${error instanceof Error ? error.message : String(error)}`,
-      provider,
-      resourceCreated: 'unknown',
-      cleanup: 'unknown',
-      hint: 'Inspect the managed database and provider connection with hv_inspect before retrying.',
-    };
-  }
+  return {
+    ok: false,
+    code: 'no_external_access',
+    error: `${provider} did not provide externally usable database access.`,
+    provider,
+    resourceCreated: false,
+    cleanup: 'not_needed',
+  };
 }

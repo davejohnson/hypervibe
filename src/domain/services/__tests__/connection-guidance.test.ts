@@ -127,8 +127,17 @@ describe('connection guidance', () => {
       ],
       cloudsql: [
         'https://console.cloud.google.com/iam-admin/serviceaccounts',
+        'roles/cloudsql.viewer',
         'roles/cloudsql.admin',
         'roles/cloudsql.client',
+      ],
+      rds: [
+        'https://console.aws.amazon.com/iam/home#/security_credentials',
+        'AWS IAM access key',
+        'rds:DescribeDBInstances',
+        'ec2:AuthorizeSecurityGroupIngress',
+        'ec2:RevokeSecurityGroupIngress',
+        'credentialsRef="file:/absolute/path/rds.json"',
       ],
       supabase: [
         'https://supabase.com/dashboard/account/tokens',

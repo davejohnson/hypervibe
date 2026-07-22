@@ -7,7 +7,7 @@ export interface BootstrapParams {
   services: string[];
   crons?: DesiredState['crons'];
   domain?: string;
-  databaseProvider?: 'supabase' | 'cloudsql' | 'railway';
+  databaseProvider?: 'supabase' | 'cloudsql' | 'railway' | 'rds';
   setupEmail: boolean;
   serviceConfig?: DesiredState['serviceConfig'];
   envVars?: DesiredState['envVars'];

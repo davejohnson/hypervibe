@@ -260,8 +260,10 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     tokenType: 'Google Cloud service account JSON key',
     setupUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     permissions: [
-      'roles/cloudsql.admin (instance and database create/delete).',
-      'roles/cloudsql.client is needed by the Cloud Run runtime service account for the /cloudsql socket, not by this connection.',
+      'Grant roles/cloudsql.viewer to the connected service account so connection verification can list and inspect Cloud SQL instances.',
+      'Grant roles/cloudsql.client to the connected service account so hv_db_query can open its operation-scoped authenticated connector.',
+      'Also grant roles/cloudsql.admin when Hypervibe should create or delete Cloud SQL instances and logical databases through hv_plan/hv_apply.',
+      'The Cloud Run runtime service account separately needs roles/cloudsql.client when deployed services connect through /cloudsql.',
       'The sqladmin.googleapis.com API must already be enabled — hv_connect provider="cloudrun" action="prepare" enables it.',
     ],
     credentialExample: 'hv_connect provider="cloudsql" credentialsRef="file:/absolute/path/cloudsql.json"',
@@ -308,6 +310,24 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     tokenType: 'local Docker socket path',
     permissions: ['The local user must be able to access the Docker socket.'],
     credentialExample: 'hv_connect provider="local" credentials={"dockerSocket":"/var/run/docker.sock"}',
+  },
+  rds: {
+    provider: 'rds',
+    displayName: 'Amazon RDS',
+    tokenType: 'AWS IAM access key (accessKeyId/secretAccessKey, plus sessionToken for temporary STS credentials)',
+    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+    permissions: [
+      'For verification and observation: rds:DescribeDBInstances, ec2:DescribeVpcs, ec2:DescribeSecurityGroups, and ec2:DescribeSecurityGroupRules.',
+      'For operation-scoped hv_db_query access: ec2:AuthorizeSecurityGroupIngress and ec2:RevokeSecurityGroupIngress on the database security group.',
+      'For lifecycle management through hv_plan/hv_apply: rds:CreateDBInstance, rds:DeleteDBInstance, rds:AddTagsToResource, ec2:CreateSecurityGroup, ec2:DeleteSecurityGroup, and ec2:CreateTags.',
+    ],
+    credentialExample: 'hv_connect provider="rds" credentialsRef="file:/absolute/path/rds.json"',
+    notes: [
+      'The JSON must include accessKeyId, secretAccessKey, and region; include sessionToken for temporary STS credentials, plus vpcId/dbSubnetGroupName when the region has no suitable default VPC.',
+      'Scope RDS mutation permissions to the intended DB instance ARNs and EC2 mutation permissions to security groups in the intended account, region, and VPC. AWS describe actions generally require Resource="*".',
+      'Hypervibe-created RDS instances are publicly addressable but start with no public ingress. hv_db_query adds only the current caller IPv4 /32 and removes it after the query. Private-only RDS requires a durable VPC/SSM path declared outside this diagnostic call.',
+      'Prefer temporary STS credentials. IAM user secret access keys are shown only once when created and should be rotated regularly.',
+    ],
   },
   railway: {
     provider: 'railway',

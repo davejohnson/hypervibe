@@ -1,6 +1,6 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Component, ComponentType } from '../entities/component.entity.js';
-import type { Receipt, VerifyResult } from './provider.port.js';
+import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from './provider.port.js';
 
 /**
  * Supported database types that can be provisioned
@@ -30,6 +30,12 @@ export interface DatabaseCapabilities {
 
   /** Whether the provider is optimized for serverless workloads */
   serverlessOptimized: boolean;
+
+  /** Whether bounded operations can acquire and release provider-owned access. */
+  supportsTemporaryDatabaseAccess?: boolean;
+
+  /** Prefer provider-owned access even when a stored public-looking URL exists. */
+  prefersTemporaryDatabaseAccess?: boolean;
 }
 
 /**
@@ -53,7 +59,7 @@ export interface ProvisionResult {
  * Standard binding keys used for database components
  */
 export interface DatabaseBindings {
-  /** Provider name (e.g., 'supabase', 'cloudsql', 'railway') */
+  /** Provider name (e.g., 'supabase', 'cloudsql', 'railway', 'rds') */
   provider: string;
 
   /** External database/instance ID */
@@ -135,4 +141,22 @@ export interface IDatabaseAdapter {
     status: 'running' | 'stopped' | 'provisioning' | 'error' | 'unknown';
     message?: string;
   }>;
+
+  /**
+   * Acquire an externally usable endpoint for one bounded operation.
+   * Implementations must mark reused access temporary=false so callers never
+   * remove user-managed access.
+   */
+  acquireTemporaryDatabaseAccess?(
+    environment: Environment,
+    component: Component,
+    applicationPort: number
+  ): Promise<TemporaryDatabaseAccess>;
+
+  /** Release only access returned with temporary=true by this adapter. */
+  releaseTemporaryDatabaseAccess?(
+    environment: Environment,
+    component: Component,
+    access: TemporaryDatabaseAccess
+  ): Promise<void>;
 }

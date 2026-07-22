@@ -20,7 +20,7 @@ const envRepo = new EnvironmentRepository();
 const componentRepo = new ComponentRepository();
 const { Client } = pg;
 
-const DB_PROVIDERS = ['supabase', 'cloudsql', 'railway'] as const;
+const DB_PROVIDERS = ['supabase', 'cloudsql', 'railway', 'rds'] as const;
 const DB_MIGRATION_STRATEGIES = ['snapshot', 'logical_replication', 'managed_migration', 'read_replica_promote'] as const;
 
 export async function provisionTargetDatabaseUrl(params: {

@@ -79,6 +79,15 @@ describe('spec.service desired state resolution', () => {
     expect(desired.databaseProvider).toBe('railway');
   });
 
+  it('accepts Amazon RDS as a desired database provider override', () => {
+    const desired = resolveDesiredState(
+      { databaseProvider: 'supabase' },
+      { databaseProvider: 'rds' }
+    );
+
+    expect(desired.databaseProvider).toBe('rds');
+  });
+
   it('falls back to legacy serviceName when services are not persisted', () => {
     const desired = resolveDesiredState(
       {

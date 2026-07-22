@@ -42,9 +42,13 @@
   "dependencies": {
     "@1password/sdk": "^0.4.0",
     "@anthropic-ai/sdk": "^0.30.0",
+    "@aws-sdk/client-ec2": "^3.1092.0",
+    "@aws-sdk/client-rds": "^3.1092.0",
     "@bitwarden/sdk-napi": "^1.0.0",
+    "@google-cloud/cloud-sql-connector": "1.10.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^11.0.0",
+    "google-auth-library": "^10.9.0",
     "graphql": "^16.9.0",
     "graphql-request": "^7.0.0",
     "pg": "^8.17.2",

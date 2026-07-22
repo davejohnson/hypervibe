@@ -98,7 +98,7 @@ export interface JobResult {
  */
 export interface TemporaryDatabaseAccess {
   connectionUrl: string;
-  source: 'direct' | 'private_connector' | 'existing_proxy' | 'created_proxy';
+  source: 'direct' | 'private_connector' | 'existing_proxy' | 'created_proxy' | 'temporary_firewall';
   endpoint?: string;
   temporary: boolean;
   /** Opaque provider resource id used only for cleanup. */

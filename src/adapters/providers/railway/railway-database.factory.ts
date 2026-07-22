@@ -1,7 +1,7 @@
 import type { Project } from '../../../domain/entities/project.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
-import type { IProviderAdapter } from '../../../domain/ports/provider.port.js';
+import type { IProviderAdapter, TemporaryDatabaseAccess } from '../../../domain/ports/provider.port.js';
 import type { IDatabaseAdapter, ProvisionResult, ProvisionableType } from '../../../domain/ports/database.port.js';
 import type { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
 
@@ -20,6 +20,16 @@ interface RailwayHostingOps {
   deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
   deleteService?: (serviceId: string) => Promise<{ success: boolean; error?: string }>;
   deleteVolume?: (volumeId: string) => Promise<{ success: boolean; error?: string }>;
+  acquireTemporaryDatabaseAccess?: (
+    environment: Environment,
+    component: Component,
+    applicationPort: number
+  ) => Promise<TemporaryDatabaseAccess>;
+  releaseTemporaryDatabaseAccess?: (
+    environment: Environment,
+    component: Component,
+    access: TemporaryDatabaseAccess
+  ) => Promise<void>;
 }
 
 /**
@@ -59,6 +69,7 @@ export function createRailwayDatabaseAdapter(params: {
       supportsReadReplicas: false,
       supportsPointInTimeRecovery: false,
       serverlessOptimized: false,
+      supportsTemporaryDatabaseAccess: true,
     },
     async connect() {
       // Already connected via factory; no-op for compatibility.
@@ -238,6 +249,18 @@ export function createRailwayDatabaseAdapter(params: {
       const bindings = component.bindings as Record<string, unknown>;
       const value = bindings.connectionUrl;
       return typeof value === 'string' ? value : null;
+    },
+    async acquireTemporaryDatabaseAccess(environment, component, applicationPort) {
+      if (typeof railway.acquireTemporaryDatabaseAccess !== 'function') {
+        throw new Error('Railway does not expose temporary database access.');
+      }
+      return railway.acquireTemporaryDatabaseAccess(environment, component, applicationPort);
+    },
+    async releaseTemporaryDatabaseAccess(environment, component, access) {
+      if (typeof railway.releaseTemporaryDatabaseAccess !== 'function') {
+        throw new Error('Railway does not expose temporary database access cleanup.');
+      }
+      await railway.releaseTemporaryDatabaseAccess(environment, component, access);
     },
     async destroy(component) {
       const bindings = component.bindings as Record<string, unknown>;

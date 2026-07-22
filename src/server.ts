@@ -8,6 +8,7 @@ import './adapters/providers/gcp/cloudrun.adapter.js';
 // Database providers (Railway Postgres is handled via the Railway adapter shim in adapterFactory)
 import './adapters/providers/supabase/supabase.adapter.js';
 import './adapters/providers/gcp/cloudsql.adapter.js';
+import './adapters/providers/aws/rds.adapter.js';
 
 // Other providers
 import './adapters/providers/stripe/stripe.adapter.js';

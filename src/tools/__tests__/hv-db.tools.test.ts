@@ -15,6 +15,8 @@ import { ServiceRepository } from '../../adapters/db/repositories/service.reposi
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
+import { CloudSqlAdapter } from '../../adapters/providers/gcp/cloudsql.adapter.js';
+import { RdsAdapter } from '../../adapters/providers/aws/rds.adapter.js';
 import { DatabaseAdapter } from '../../adapters/providers/database/database.adapter.js';
 import { createToolContext } from '../context.js';
 import { registerHvDbTools } from '../hv-db.tools.js';
@@ -96,6 +98,73 @@ function seedVerifiedRailwayConnection() {
     credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
   });
   new ConnectionRepository().updateStatus(connection.id, 'verified');
+}
+
+function seedCloudSqlDbProject() {
+  const project = new ProjectRepository().create({ name: 'cloudsql-db-app', defaultPlatform: 'cloudrun' });
+  const environment = new EnvironmentRepository().create({
+    projectId: project.id,
+    name: 'production',
+    platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
+  });
+  new ComponentRepository().create({
+    environmentId: environment.id,
+    type: 'postgres',
+    externalId: 'production-postgres',
+    bindings: {
+      provider: 'cloudsql',
+      connectionName: 'gcp-project:us-central1:production-postgres',
+      username: 'postgres',
+      password: 'db-secret',
+      database: 'app',
+    },
+  });
+  const connection = new ConnectionRepository().create({
+    provider: 'cloudsql',
+    credentialsEncrypted: getSecretStore().encryptObject({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key: 'dummy',
+        client_email: 'hypervibe@gcp-project.iam.gserviceaccount.com',
+      }),
+    }),
+  });
+  new ConnectionRepository().updateStatus(connection.id, 'verified');
+  return { project, environment };
+}
+
+function seedRdsDbProject() {
+  const project = new ProjectRepository().create({ name: 'rds-db-app', defaultPlatform: 'cloudrun' });
+  const environment = new EnvironmentRepository().create({
+    projectId: project.id,
+    name: 'production',
+    platformBindings: { provider: 'cloudrun', projectId: 'gcp-project' },
+  });
+  new ComponentRepository().create({
+    environmentId: environment.id,
+    type: 'postgres',
+    externalId: 'production-postgres',
+    bindings: {
+      provider: 'rds',
+      username: 'hypervibe_admin',
+      password: 'db-secret',
+      database: 'app',
+      securityGroupId: 'sg-database',
+    },
+  });
+  const connection = new ConnectionRepository().create({
+    provider: 'rds',
+    credentialsEncrypted: getSecretStore().encryptObject({
+      accessKeyId: 'AKIAEXAMPLE',
+      secretAccessKey: 'aws-secret',
+      region: 'us-west-2',
+    }),
+  });
+  new ConnectionRepository().updateStatus(connection.id, 'verified');
+  return { project, environment };
 }
 
 function seedServiceSpecificRailwayDbProject() {
@@ -302,6 +371,86 @@ describe('hv_db_query', () => {
     await t.close();
   });
 
+  it('uses and releases a Cloud SQL authenticated connector for the query', async () => {
+    seedCloudSqlDbProject();
+    vi.spyOn(CloudSqlAdapter.prototype, 'getConnectionUrl')
+      .mockResolvedValue('postgresql://postgres:db-secret@34.1.2.3:5432/app');
+    const acquire = vi.spyOn(CloudSqlAdapter.prototype, 'acquireTemporaryDatabaseAccess').mockResolvedValue({
+      connectionUrl: 'postgresql://postgres:db-secret@localhost/app?host=%2Ftmp%2Fhv-cloudsql-test',
+      source: 'private_connector',
+      temporary: true,
+      releaseToken: 'cloudsql-lease',
+    });
+    const release = vi.spyOn(CloudSqlAdapter.prototype, 'releaseTemporaryDatabaseAccess').mockResolvedValue();
+    vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({
+      success: true,
+      rowCount: 1,
+      rows: [{ provider: 'cloudsql' }],
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_db_query', {
+      project: 'cloudsql-db-app', env: 'production', sql: 'SELECT current_database()',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.access).toMatchObject({
+      provider: 'cloudsql',
+      mode: 'private_connector',
+      leaseCreated: true,
+      cleanup: 'completed',
+      resourceId: 'cloudsql-lease',
+    });
+    expect(acquire).toHaveBeenCalledWith(expect.objectContaining({ name: 'production' }), expect.objectContaining({ externalId: 'production-postgres' }), 5432);
+    expect(release).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'production' }),
+      expect.objectContaining({ externalId: 'production-postgres' }),
+      expect.objectContaining({ releaseToken: 'cloudsql-lease' })
+    );
+    expect(JSON.stringify(result)).not.toContain('db-secret');
+    await t.close();
+  });
+
+  it('uses and releases temporary Amazon RDS firewall ingress for the query', async () => {
+    seedRdsDbProject();
+    vi.spyOn(RdsAdapter.prototype, 'getConnectionUrl')
+      .mockResolvedValue('postgresql://hypervibe_admin:db-secret@db.example.rds.amazonaws.com:5432/app');
+    const acquire = vi.spyOn(RdsAdapter.prototype, 'acquireTemporaryDatabaseAccess').mockResolvedValue({
+      connectionUrl: 'postgresql://hypervibe_admin:db-secret@db.example.rds.amazonaws.com:5432/app',
+      source: 'temporary_firewall',
+      temporary: true,
+      releaseToken: 'sgr-query',
+    });
+    const release = vi.spyOn(RdsAdapter.prototype, 'releaseTemporaryDatabaseAccess').mockResolvedValue();
+    vi.spyOn(DatabaseAdapter.prototype, 'query').mockResolvedValue({
+      success: true,
+      rowCount: 1,
+      rows: [{ provider: 'rds' }],
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_db_query', {
+      project: 'rds-db-app', env: 'production', sql: 'SELECT current_database()',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.access).toMatchObject({
+      provider: 'rds',
+      mode: 'temporary_firewall',
+      leaseCreated: true,
+      cleanup: 'completed',
+      resourceId: 'sgr-query',
+    });
+    expect(acquire).toHaveBeenCalledWith(expect.objectContaining({ name: 'production' }), expect.objectContaining({ externalId: 'production-postgres' }), 5432);
+    expect(release).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'production' }),
+      expect.objectContaining({ externalId: 'production-postgres' }),
+      expect.objectContaining({ releaseToken: 'sgr-query' })
+    );
+    expect(JSON.stringify(result)).not.toContain('db-secret');
+    await t.close();
+  });
+
   it('uses an already reachable managed database without creating provider access', async () => {
     seedDbProject();
     const ensureProxy = vi.spyOn(RailwayAdapter.prototype, 'ensureTcpProxy');
@@ -316,6 +465,7 @@ describe('hv_db_query', () => {
 
     expect(result.ok).toBe(true);
     expect(result.data.access).toMatchObject({
+      provider: 'supabase',
       mode: 'existing',
       leaseCreated: false,
       cleanup: 'no_op',
