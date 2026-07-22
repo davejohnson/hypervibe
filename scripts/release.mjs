@@ -9,13 +9,14 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const packageJsonPath = path.join(repoRoot, 'package.json');
 const packageLockPath = path.join(repoRoot, 'package-lock.json');
-const publishWorkflow = 'publish-private-package.yml';
+const releaseWorkflow = 'publish-private-package.yml';
 const semverPattern = /^(\d+)\.(\d+)\.(\d+)$/;
 
 function usage() {
   console.log(`Usage: npm run release -- [patch|minor|major|X.Y.Z] [options]
 
 Build, validate, commit, tag, and publish a Hypervibe release from main.
+The tag publishes the npm package plus Apple Silicon and Intel DMGs.
 
 Options:
   --dry-run   Validate git state and print the release plan without changing files
@@ -92,14 +93,14 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function waitForPublishRun(commitSha) {
+async function waitForReleaseRun(commitSha) {
   const deadline = Date.now() + 90_000;
-  process.stdout.write('Waiting for the GitHub package workflow');
+  process.stdout.write('Waiting for the GitHub release workflow');
 
   while (Date.now() < deadline) {
     const result = run('gh', [
       'run', 'list',
-      '--workflow', publishWorkflow,
+      '--workflow', releaseWorkflow,
       '--event', 'push',
       '--limit', '20',
       '--json', 'databaseId,headSha,status,conclusion,url',
@@ -111,7 +112,7 @@ async function waitForPublishRun(commitSha) {
       if (releaseRun) {
         console.log(`\nWatching ${releaseRun.url}`);
         run('gh', ['run', 'watch', String(releaseRun.databaseId), '--exit-status']);
-        console.log(`Published by ${releaseRun.url}`);
+        console.log(`Release published by ${releaseRun.url}`);
         return;
       }
     }
@@ -121,8 +122,8 @@ async function waitForPublishRun(commitSha) {
   }
 
   throw new Error(
-    `The release was pushed, but ${publishWorkflow} did not appear within 90 seconds. ` +
-    `Inspect it with: gh run list --workflow ${publishWorkflow}`
+    `The release was pushed, but ${releaseWorkflow} did not appear within 90 seconds. ` +
+    `Inspect it with: gh run list --workflow ${releaseWorkflow}`
   );
 }
 
@@ -242,9 +243,9 @@ async function main() {
   }
 
   if (waitForWorkflow) {
-    await waitForPublishRun(releaseCommit);
+    await waitForReleaseRun(releaseCommit);
   } else {
-    console.log(`Release pushed. Inspect publication with: gh run list --workflow ${publishWorkflow}`);
+    console.log(`Release pushed. Inspect publication with: gh run list --workflow ${releaseWorkflow}`);
   }
 
   console.log(`\nHypervibe ${nextVersion} release complete.`);

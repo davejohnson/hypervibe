@@ -125,6 +125,16 @@ production dependencies with that runtime, builds the Swift executables, and
 signs the complete bundle. Build Apple Silicon and Intel artifacts on matching
 Mac architectures; cross-architecture packaging is intentionally rejected.
 
+Tagged repository releases run the installer build on matching GitHub-hosted
+Apple Silicon and Intel runners. After the npm package and both installer jobs
+succeed, the release workflow creates a public GitHub Release containing:
+
+- `Hypervibe-<version>-arm64.dmg` and its SHA-256 checksum;
+- `Hypervibe-<version>-x86_64.dmg` and its SHA-256 checksum.
+
+These CI artifacts use the default ad-hoc signature until Developer ID and
+notarization credentials are configured for the workflow.
+
 For a public artifact, provide a Developer ID identity and a `notarytool`
 keychain profile:
 
