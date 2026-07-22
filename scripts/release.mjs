@@ -52,6 +52,11 @@ function output(command, args) {
   return run(command, args, { capture: true }).stdout.trim();
 }
 
+function workingTreeStatus() {
+  return run('git', ['status', '--porcelain=v1', '--untracked-files=all'], { capture: true })
+    .stdout.trimEnd();
+}
+
 function parseVersion(version, label) {
   const match = semverPattern.exec(version);
   if (!match) {
@@ -146,7 +151,7 @@ async function main() {
   run('git', ['--version'], { capture: true });
   run('npm', ['--version'], { capture: true });
 
-  const status = output('git', ['status', '--porcelain=v1', '--untracked-files=all']);
+  const status = workingTreeStatus();
   if (status) {
     throw new Error(`Release requires a clean worktree. Commit or stash these changes first:\n${status}`);
   }
@@ -198,7 +203,7 @@ async function main() {
     run('npm', ['version', nextVersion, '--no-git-tag-version']);
     run('npm', ['run', 'release:check']);
 
-    const changedFiles = output('git', ['status', '--porcelain=v1', '--untracked-files=all'])
+    const changedFiles = workingTreeStatus()
       .split('\n')
       .filter(Boolean)
       .map((line) => line.slice(3));
