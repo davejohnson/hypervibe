@@ -501,8 +501,15 @@ describe('ci-deploy.service', () => {
       new SpecStore().replace(project, {
         version: 1,
         project: project.name,
+        github: {
+          collaboration: {
+            issues: { enabled: false, templates: false },
+            pullRequests: { requirePr: true },
+          },
+        },
         environments: { production: environmentSpec },
       });
+      const spec = new SpecStore().get(project)!.spec;
       envRepo.updatePlatformBindings(environmentId, {
         services: {
           web: { serviceId: 'rail-web' },
@@ -536,6 +543,7 @@ describe('ci-deploy.service', () => {
 
       const result = await applyGitHubActionsDeploy({
         project,
+        spec,
         environmentName: 'production',
         environmentSpec,
       });
@@ -556,6 +564,22 @@ describe('ci-deploy.service', () => {
         expect.any(String),
         'hypervibe/github-infrastructure'
       );
+      expect(createOrUpdateFile).toHaveBeenCalledWith(
+        'davejohnson',
+        'billforge',
+        '.github/pull_request_template.md',
+        expect.stringContaining('## Summary'),
+        expect.any(String),
+        'hypervibe/github-infrastructure'
+      );
+      expect(createOrUpdateFile).toHaveBeenCalledWith(
+        'davejohnson',
+        'billforge',
+        '.github/hypervibe/manifest.json',
+        expect.stringContaining('.github/pull_request_template.md'),
+        expect.any(String),
+        'hypervibe/github-infrastructure'
+      );
       expect(setRepositorySecret).not.toHaveBeenCalled();
       expect(envRepo.findById(environmentId)?.platformBindings.ci).toBeUndefined();
     });
@@ -564,6 +588,7 @@ describe('ci-deploy.service', () => {
       const { project } = seedProjectWithSpec();
       seedVerifiedConnections();
       const environmentSpec = environmentSpecSchema.parse(CI_ENVIRONMENT_SPEC);
+      const spec = new SpecStore().get(project)!.spec;
       const workflow = expectedWorkflow(project);
       vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
         success: true,
@@ -576,6 +601,7 @@ describe('ci-deploy.service', () => {
 
       const result = await applyGitHubActionsDeploy({
         project,
+        spec,
         environmentName: 'production',
         environmentSpec,
       });

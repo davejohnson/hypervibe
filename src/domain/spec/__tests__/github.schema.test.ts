@@ -92,6 +92,19 @@ describe('github desired state', () => {
     expect(result.success).toBe(false);
   });
 
+  it('rejects opting out of owned pull-request templates', () => {
+    const result = projectSpecSchema.safeParse(baseSpec({
+      collaboration: {
+        pullRequests: {
+          requirePr: true,
+          manageTemplate: false,
+        },
+      },
+    }));
+
+    expect(result.success).toBe(false);
+  });
+
   it('rejects ambiguous legacy and canonical collaboration state', () => {
     const result = projectSpecSchema.safeParse({
       ...baseSpec({}),

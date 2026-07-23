@@ -6,11 +6,14 @@ import type { Project } from '../entities/project.entity.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import type { CollaborationSpec, ProjectSpec } from '../spec/spec.schema.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
+import {
+  canonicalPullRequestTemplateContent,
+  GITHUB_PULL_REQUEST_TEMPLATE,
+} from './github-infrastructure.service.js';
 import { getGitHubAdapter } from './github-ops.service.js';
 
 const OPERATION = 'githubCollaboration';
 const ISSUE_TEMPLATE_PATH = '.github/ISSUE_TEMPLATE/task.yml';
-const PR_TEMPLATE_PATH = '.github/PULL_REQUEST_TEMPLATE.md';
 
 export type CollaborationConnectionBlock = {
   provider: string;
@@ -101,33 +104,17 @@ function issueTemplateContent(): string {
   ].join('\n');
 }
 
-function pullRequestTemplateContent(): string {
-  return [
-    '## Summary',
-    '',
-    '- ',
-    '',
-    '## Verification',
-    '',
-    '- [ ] Tests/checks run or noted',
-    '- [ ] Screenshots or manual verification added when UI changed',
-    '',
-    '## Deployment',
-    '',
-    '- [ ] Merge to main is intended to deploy staging',
-    '- [ ] Production promotion is a separate manual action using the tested SHA',
-    '',
-    'Refs #',
-    '',
-  ].join('\n');
-}
-
 function desiredFiles(collaboration: CollaborationSpec): Array<{ path: string; content: string; hash: string }> {
-  if (!collaboration.issues.enabled || !collaboration.issues.templates) return [];
-  const files = [
-    { path: ISSUE_TEMPLATE_PATH, content: issueTemplateContent() },
-    { path: PR_TEMPLATE_PATH, content: pullRequestTemplateContent() },
-  ];
+  const files: Array<{ path: string; content: string }> = [];
+  if (collaboration.issues.enabled && collaboration.issues.templates) {
+    files.push({ path: ISSUE_TEMPLATE_PATH, content: issueTemplateContent() });
+  }
+  if (collaboration.pullRequests.requirePr) {
+    files.push({
+      path: GITHUB_PULL_REQUEST_TEMPLATE,
+      content: canonicalPullRequestTemplateContent(),
+    });
+  }
   return files.map((file) => ({ ...file, hash: sha256(file.content) }));
 }
 
@@ -299,7 +286,7 @@ export async function planGitHubCollaboration(params: {
     repository: repo,
     canonicalEnvironment: environmentName,
     issueTemplatePath: ISSUE_TEMPLATE_PATH,
-    pullRequestTemplatePath: PR_TEMPLATE_PATH,
+    pullRequestTemplatePath: GITHUB_PULL_REQUEST_TEMPLATE,
     targetBranch: collaboration.pullRequests.targetBranch,
     collaborators: collaboration.collaborators.map((entry) => ({ username: entry.username, permission: entry.permission })),
   };

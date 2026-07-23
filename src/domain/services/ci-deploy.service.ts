@@ -16,7 +16,13 @@ import {
   resolveBranchDeployTargets,
   type BranchDeployWorkflow,
 } from './github-ops.service.js';
-import { proposeGitHubInfrastructureFiles } from './github-infrastructure.service.js';
+import {
+  compileManagedGitHubFiles,
+  proposeGitHubInfrastructureFiles,
+  resolveGitHubInfrastructureRepository,
+  shouldPlanGitHubInfrastructure,
+  type ManagedGitHubFile,
+} from './github-infrastructure.service.js';
 import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
 import {
@@ -356,10 +362,11 @@ export async function planGitHubActionsDeploy(params: {
 
 export async function applyGitHubActionsDeploy(params: {
   project: Project;
+  spec: ProjectSpec;
   environmentName: string;
   environmentSpec: EnvironmentSpec;
 }): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
-  const { project, environmentName, environmentSpec } = params;
+  const { project, spec, environmentName, environmentSpec } = params;
   const repo = parseGitHubRepoFromRemote(project.gitRemoteUrl);
   if (!repo) {
     return { success: false, message: 'GitHub repository is missing', error: 'Set project gitRemoteUrl to a GitHub remote.' };
@@ -426,13 +433,23 @@ export async function applyGitHubActionsDeploy(params: {
     };
   }
   if (currentWorkflowContent !== workflow.content) {
+    const workflowFile: ManagedGitHubFile = {
+      path: workflow.path,
+      content: workflow.content,
+      hash: sha256(workflow.content),
+    };
+    const canBatchGitHubInfrastructure = shouldPlanGitHubInfrastructure(spec, environmentName)
+      && spec.github
+      && resolveGitHubInfrastructureRepository(project, spec) === repo;
+    const repositoryFiles = canBatchGitHubInfrastructure
+      ? compileManagedGitHubFiles(spec.github!)
+      : [];
+    const desiredFiles = new Map(repositoryFiles.map((file) => [file.path, file]));
+    desiredFiles.set(workflowFile.path, workflowFile);
     const proposal = await proposeGitHubInfrastructureFiles({
       repository: repo,
-      desiredFiles: [{
-        path: workflow.path,
-        content: workflow.content,
-        hash: sha256(workflow.content),
-      }],
+      desiredFiles: [...desiredFiles.values()].sort((left, right) => left.path.localeCompare(right.path)),
+      reconcileManifest: repositoryFiles.length > 0,
     });
     return {
       ...proposal,

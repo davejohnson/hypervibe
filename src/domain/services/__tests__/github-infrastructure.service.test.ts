@@ -36,7 +36,7 @@ describe('GitHub infrastructure compiler', () => {
       '.github/dependabot.yml',
       '.github/hypervibe/manifest.json',
       '.github/ISSUE_TEMPLATE/task.yml',
-      '.github/PULL_REQUEST_TEMPLATE.md',
+      '.github/pull_request_template.md',
       '.github/workflows/hypervibe-audit.yml',
       '.github/workflows/hypervibe-fix-tests.yml',
       '.github/workflows/hypervibe-review.yml',
@@ -49,7 +49,7 @@ describe('GitHub infrastructure compiler', () => {
     expect(files.every((file) => file.hash.length === 64)).toBe(true);
   });
 
-  it('leaves a repository-owned pull-request template unmanaged when requested', () => {
+  it('owns a canonical pull-request template whenever pull requests are required', () => {
     const github = projectSpecSchema.parse({
       version: 1,
       project: 'template-owner',
@@ -61,7 +61,6 @@ describe('GitHub infrastructure compiler', () => {
           },
           pullRequests: {
             requirePr: true,
-            manageTemplate: false,
           },
         },
       },
@@ -69,10 +68,32 @@ describe('GitHub infrastructure compiler', () => {
     }).github!;
 
     const files = compileManagedGitHubFiles(github);
+    const template = files.find((file) => file.path === '.github/pull_request_template.md');
 
-    expect(files.map((file) => file.path)).not.toContain('.github/PULL_REQUEST_TEMPLATE.md');
+    expect(template?.content).toContain('## Related issue');
+    expect(template?.content).toContain('## Deployment and infrastructure impact');
+    expect(template?.content).toContain('## Existing behavior or tests changed');
+    expect(template?.content).toContain('## Risks and follow-up');
     expect(JSON.parse(files.find((file) => file.path === '.github/hypervibe/manifest.json')!.content))
-      .toMatchObject({ files: [] });
+      .toMatchObject({ files: ['.github/pull_request_template.md'] });
+  });
+
+  it('does not manage a pull-request template when pull requests are disabled', () => {
+    const github = projectSpecSchema.parse({
+      version: 1,
+      project: 'direct-change-repository',
+      github: {
+        collaboration: {
+          issues: { enabled: false, templates: false },
+          pullRequests: { requirePr: false },
+        },
+      },
+      environments: { production: { hosting: { provider: 'railway' }, services: {} } },
+    }).github!;
+
+    const files = compileManagedGitHubFiles(github);
+
+    expect(files.map((file) => file.path)).not.toContain('.github/pull_request_template.md');
   });
 
   it('keeps the model key out of the generated patch-running job and separates PR writes', () => {

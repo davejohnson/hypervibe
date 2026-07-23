@@ -15,7 +15,7 @@ export const GITHUB_INFRASTRUCTURE_OPERATION = 'githubInfrastructurePullRequest'
 export const GITHUB_INFRASTRUCTURE_BRANCH = 'hypervibe/github-infrastructure';
 export const GITHUB_INFRASTRUCTURE_PR_TITLE = '[Hypervibe] Sync GitHub infrastructure';
 export const GITHUB_INFRASTRUCTURE_MANIFEST = '.github/hypervibe/manifest.json';
-export const GITHUB_PULL_REQUEST_TEMPLATE = '.github/PULL_REQUEST_TEMPLATE.md';
+export const GITHUB_PULL_REQUEST_TEMPLATE = '.github/pull_request_template.md';
 export const OPENAI_ACTIONS_SECRET = 'OPENAI_API_KEY';
 export const GITHUB_INFRASTRUCTURE_ACTION_ID = 'repo:github-infrastructure-pr';
 export const GITHUB_OPENAI_SECRET_ACTION_ID = 'secret:github-openai-actions';
@@ -570,13 +570,45 @@ function issueTemplateContent(): string {
   ].join('\n');
 }
 
-function pullRequestTemplateContent(): string {
+export function canonicalPullRequestTemplateContent(): string {
   return [
     MANAGED_HEADER,
-    '## Summary', '', '- ', '',
-    '## Verification', '', '- [ ] Tests/checks run or noted',
-    '- [ ] Screenshots or manual verification added when UI changed', '',
-    '## Deployment', '', '- [ ] Deployment impact is described', '', 'Refs #',
+    '',
+    '## Summary',
+    '',
+    '- What changed and why?',
+    '',
+    '## Related issue',
+    '',
+    'Closes #',
+    '',
+    '## Screenshots or recording',
+    '',
+    '- Add visual evidence for UI changes, or write “Not applicable.”',
+    '',
+    '## Verification',
+    '',
+    '- [ ] Focused automated checks are listed with their results.',
+    '- [ ] Manual verification is described, when applicable.',
+    '- [ ] Any intentionally skipped broad checks are called out.',
+    '',
+    '## Deployment and infrastructure impact',
+    '',
+    '- Describe configuration, secrets, migrations, rollout, or rollback concerns, or write “None.”',
+    '',
+    '## Existing behavior or tests changed',
+    '',
+    '- List changed or removed expectations and the product reason, or write “None.”',
+    '',
+    '## Risks and follow-up',
+    '',
+    '- Note known risks, uncertainties, or follow-up work, or write “None.”',
+    '',
+    '## Review checklist',
+    '',
+    '- [ ] The existing mechanism was reused, or a new mechanism is justified.',
+    '- [ ] Sensitive values and credentials are not included.',
+    '- [ ] Compatibility and deployment consequences are understood.',
   ].join('\n');
 }
 
@@ -606,11 +638,8 @@ export function compileManagedGitHubFiles(github: GitHubSpec): ManagedGitHubFile
   if (github.collaboration.issues.enabled && github.collaboration.issues.templates) {
     files.push(managedFile('.github/ISSUE_TEMPLATE/task.yml', issueTemplateContent()));
   }
-  if (
-    github.collaboration.pullRequests.requirePr
-    && github.collaboration.pullRequests.manageTemplate
-  ) {
-    files.push(managedFile(GITHUB_PULL_REQUEST_TEMPLATE, pullRequestTemplateContent()));
+  if (github.collaboration.pullRequests.requirePr) {
+    files.push(managedFile(GITHUB_PULL_REQUEST_TEMPLATE, canonicalPullRequestTemplateContent()));
   }
   for (const [id, automation] of Object.entries(github.actions).sort(([a], [b]) => a.localeCompare(b))) {
     if (!automation.enabled) continue;
@@ -688,7 +717,6 @@ function desiredFileMetadata(files: ManagedGitHubFile[]): Array<{ path: string; 
 function infrastructureAction(params: {
   repository: string;
   files: ManagedGitHubFile[];
-  preservePaths: string[];
   type: 'update' | 'noop';
   verified: boolean;
   drift: string[];
@@ -710,7 +738,6 @@ function infrastructureAction(params: {
       branch: GITHUB_INFRASTRUCTURE_BRANCH,
       pullRequestTitle: GITHUB_INFRASTRUCTURE_PR_TITLE,
       desiredFiles: desiredFileMetadata(params.files),
-      preservePaths: params.preservePaths,
     },
   };
 }
@@ -752,16 +779,12 @@ export async function planGitHubInfrastructure(params: {
   if (!parts) return { actions: [], warnings: [`Could not parse GitHub repository ${repository}.`], blocked: [] };
 
   const files = compileManagedGitHubFiles(params.spec.github);
-  const preservePaths = params.spec.github.collaboration.pullRequests.manageTemplate
-    ? []
-    : [GITHUB_PULL_REQUEST_TEMPLATE];
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
     return {
       actions: [infrastructureAction({
         repository,
         files,
-        preservePaths,
         type: 'update',
         verified: false,
         drift: [],
@@ -787,7 +810,6 @@ export async function planGitHubInfrastructure(params: {
   const actions: PlanAction[] = [infrastructureAction({
     repository,
     files,
-    preservePaths,
     type: drift.length > 0 ? 'update' : 'noop',
     verified,
     drift,
@@ -1041,7 +1063,6 @@ export async function proposeGitHubInfrastructureFiles(params: {
   desiredFiles: ManagedGitHubFile[];
   targetBranch?: string;
   reconcileManifest?: boolean;
-  preservePaths?: string[];
 }): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
   const { repository, desiredFiles } = params;
   if (desiredFiles.length === 0) {
@@ -1121,10 +1142,8 @@ export async function proposeGitHubInfrastructureFiles(params: {
     ? parseManifest(oldManifest?.content ?? null)
     : [];
   const desiredPaths = new Set(desiredFiles.map((file) => file.path));
-  const preservePaths = new Set(params.preservePaths ?? []);
   const changed: string[] = [];
   const removed: string[] = [];
-  const preserved: string[] = [];
   const manifestFile = desiredFiles.find((file) => file.path === GITHUB_INFRASTRUCTURE_MANIFEST);
   const contentFiles = desiredFiles.filter((file) => file.path !== GITHUB_INFRASTRUCTURE_MANIFEST);
   for (const file of contentFiles) {
@@ -1141,10 +1160,6 @@ export async function proposeGitHubInfrastructureFiles(params: {
     changed.push(file.path);
   }
   for (const path of previousPaths.filter((path) => !desiredPaths.has(path))) {
-    if (preservePaths.has(path)) {
-      preserved.push(path);
-      continue;
-    }
     const current = await adapter.getFile(parts.owner, parts.repo, path, GITHUB_INFRASTRUCTURE_BRANCH);
     if (!current) continue;
     await adapter.deleteFile(
@@ -1195,7 +1210,6 @@ export async function proposeGitHubInfrastructureFiles(params: {
       pullRequestUrl: pull.html_url,
       changed,
       removed,
-      preserved,
     },
   };
 }
@@ -1226,15 +1240,11 @@ export async function applyGitHubInfrastructure(params: {
   const targetBranch = typeof params.action.metadata?.targetBranch === 'string'
     ? params.action.metadata.targetBranch
     : undefined;
-  const preservePaths = Array.isArray(params.action.metadata?.preservePaths)
-    ? params.action.metadata.preservePaths.filter((path): path is string => typeof path === 'string')
-    : [];
   return proposeGitHubInfrastructureFiles({
     repository,
     desiredFiles,
     ...(targetBranch ? { targetBranch } : {}),
     reconcileManifest: true,
-    preservePaths,
   });
 }
 

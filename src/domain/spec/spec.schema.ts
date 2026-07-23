@@ -73,8 +73,6 @@ export const collaborationSpecSchema = z.object({
   pullRequests: z.object({
     targetBranch: z.string().min(1).default('main'),
     requirePr: z.boolean().default(true),
-    /** Whether Hypervibe owns .github/PULL_REQUEST_TEMPLATE.md. */
-    manageTemplate: z.boolean().default(true),
     requireReview: z.boolean().default(true),
     requiredReviewers: z.number().int().min(1).max(6).default(1),
     dismissStaleReviews: z.boolean().default(false),
@@ -83,7 +81,7 @@ export const collaborationSpecSchema = z.object({
     statusChecks: z.array(z.string().min(1)).default([]),
     strictStatusChecks: z.boolean().default(true),
     enforceAdmins: z.boolean().default(false),
-  }).default({}),
+  }).strict().default({}),
   collaborators: z.array(z.object({
     username: z.string().min(1),
     permission: z.enum(['pull', 'triage', 'push', 'maintain', 'admin']).default('push'),
@@ -241,8 +239,6 @@ const githubCollaborationSpecSchema = z.object({
   pullRequests: z.object({
     targetBranch: z.string().min(1).default('main'),
     requirePr: z.boolean().default(true),
-    /** Whether Hypervibe owns .github/PULL_REQUEST_TEMPLATE.md. */
-    manageTemplate: z.boolean().default(true),
     requireReview: z.boolean().default(true),
     requiredReviewers: z.number().int().min(1).max(6).default(1),
     dismissStaleReviews: z.boolean().default(false),
@@ -251,7 +247,7 @@ const githubCollaborationSpecSchema = z.object({
     statusChecks: z.array(z.string().min(1)).default([]),
     strictStatusChecks: z.boolean().default(true),
     enforceAdmins: z.boolean().default(false),
-  }).default({}),
+  }).strict().default({}),
   collaborators: z.array(z.object({
     username: z.string().min(1),
     permission: z.enum(['pull', 'triage', 'push', 'maintain', 'admin']).default('push'),
