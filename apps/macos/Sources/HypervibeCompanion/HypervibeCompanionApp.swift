@@ -94,7 +94,10 @@ struct HypervibeCompanionApp: App {
         .defaultSize(width: 680, height: 520)
 
         Settings {
-            CompanionSettingsView(model: model)
+            CompanionSettingsView(
+                model: model,
+                loginItemController: CompanionLoginItemSystem.controller
+            )
         }
     }
 }

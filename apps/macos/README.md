@@ -59,6 +59,11 @@ configuration is not silently deleted outside Hypervibe's reconciliation loop.
    Codex / ChatGPT.
 5. Fully quit and restart the desktop client.
 
+On its first launch from Applications, Hypervibe registers itself as a macOS
+login item so the menu bar companion starts after future sign-ins. This can be
+turned off or restored at any time from Hypervibe Settings. If macOS requires
+approval, enable Hypervibe under **System Settings → General → Login Items**.
+
 Hypervibe adds one stdio MCP server entry per project. Each entry invokes the
 bundled launcher with an absolute repository path, so the server resolves that
 project's repo-backed spec and bindings. Existing unrelated MCP entries and

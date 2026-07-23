@@ -1,13 +1,19 @@
 import HypervibeCompanionCore
+import ServiceManagement
 import SwiftUI
 
 struct CompanionSettingsView: View {
     @ObservedObject var model: CompanionAppModel
+    @ObservedObject var loginItemController: CompanionLoginItemController
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             companionUpdates
+
+            Divider()
+
+            launchAtLogin
 
             Divider()
 
@@ -65,12 +71,69 @@ struct CompanionSettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 620, height: 680)
+        .frame(width: 620, height: 750)
         .background(WindowFocusBridge())
         .task {
             await model.loadIfNeeded()
             await model.refreshMCPHostStatuses()
             await model.checkForCompanionUpdate()
+            loginItemController.refresh()
+        }
+    }
+
+    private var launchAtLogin: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "person.crop.circle.badge.clock")
+                .frame(width: 24)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Launch at login")
+                    .font(.headline)
+                Text(loginItemStatusText)
+                    .font(.caption)
+                    .foregroundStyle(
+                        loginItemController.errorMessage == nil
+                            ? AnyShapeStyle(.secondary)
+                            : AnyShapeStyle(.red)
+                    )
+                    .lineLimit(2)
+
+                if loginItemController.status == .requiresApproval {
+                    Button("Open Login Items") {
+                        SMAppService.openSystemSettingsLoginItems()
+                    }
+                    .buttonStyle(.link)
+                    .clickTargetCursor()
+                }
+            }
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { loginItemController.isEnabled },
+                set: { loginItemController.setEnabled($0) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .disabled(loginItemController.status == .unavailable)
+        }
+    }
+
+    private var loginItemStatusText: String {
+        if let errorMessage = loginItemController.errorMessage {
+            return errorMessage
+        }
+
+        switch loginItemController.status {
+        case .enabled:
+            return "Hypervibe opens automatically after you sign in to this Mac."
+        case .disabled:
+            return "Hypervibe opens only when you launch it."
+        case .requiresApproval:
+            return "Allow Hypervibe in System Settings → General → Login Items."
+        case .unavailable:
+            return "Move Hypervibe to Applications and reopen it to enable this setting."
         }
     }
 
