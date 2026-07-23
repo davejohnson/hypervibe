@@ -111,6 +111,21 @@ describe('github desired state', () => {
     }).github).toBeUndefined();
   });
 
+  it('rejects legacy runtime autofix intent with migration guidance', () => {
+    const legacy = baseSpec({});
+    legacy.environments.production = {
+      ...legacy.environments.production,
+      autofix: { enabled: true, services: ['web'] },
+    } as typeof legacy.environments.production;
+
+    const result = projectSpecSchema.safeParse(legacy);
+    expect(result.success).toBe(false);
+    const messages = result.success ? [] : result.error.issues.map((issue) => issue.message);
+    expect(messages).toContain(
+      'environments.*.autofix has been removed. Use hv_errors action="list" or action="summary" for live runtime errors; use github.actions.<id> kind="autofix" to repair failed GitHub workflow checks.'
+    );
+  });
+
   it('canonicalizes legacy collaboration on the next explicit spec update', () => {
     const canonical = projectSpecSchema.parse(canonicalizeLegacyGitHubSpec({
       version: 1,

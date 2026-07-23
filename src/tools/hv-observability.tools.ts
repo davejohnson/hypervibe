@@ -1,6 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { StateManager, type TrackedError } from '../agent/state.js';
 import { detectProviderName } from '../domain/services/provider-logs.service.js';
 import {
   fetchProviderLogs,
@@ -25,8 +24,6 @@ import {
 import type { ToolContext } from './context.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
-
-const stateManager = new StateManager();
 
 function resolveEnvOrThrow(ctx: ToolContext, projectRef: string | undefined, envName: string | undefined) {
   const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -104,42 +101,15 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
 
   server.tool(
     'hv_errors',
-    'Surface production errors: list recent error log lines, summarize error health per service, or manage autofix-tracked error fingerprints.',
+    'Surface production errors: list recent error log lines or summarize error and deployment health per service.',
     {
       project: projectField,
       env: envField,
-      action: z.enum(['list', 'summary', 'tracked', 'ignore']).optional()
-        .describe('list = recent error log lines; summary = per-service error/deploy health; tracked = autofix-agent tracked errors; ignore = stop auto-fixing a tracked fingerprint. Default list.'),
-      limit: z.number().int().min(1).max(200).optional().describe('Max errors for list/tracked (default 20)'),
-      fingerprint: z.string().optional().describe('action=ignore: tracked error fingerprint'),
-      status: z.enum(['all', 'new', 'pr_created', 'ignored']).optional().describe('action=tracked: filter by status'),
+      action: z.enum(['list', 'summary']).optional()
+        .describe('list = recent error log lines; summary = per-service error/deploy health. Default list.'),
+      limit: z.number().int().min(1).max(200).optional().describe('Max errors for list (default 20)'),
     },
-    wrapHandler(async ({ project: projectRef, env, action = 'list', limit = 20, fingerprint, status }) => {
-      if (action === 'tracked' || action === 'ignore') {
-        if (action === 'ignore') {
-          if (!fingerprint) {
-            throw new HvError('VALIDATION', 'fingerprint is required for action=ignore.');
-          }
-          const error = stateManager.getError(fingerprint);
-          if (!error) {
-            return toolError('NOT_FOUND', `Tracked error not found: ${fingerprint}`);
-          }
-          stateManager.updateErrorStatus(fingerprint, 'ignored');
-          stateManager.save();
-          return toolSuccess({ fingerprint, ...stateManager.getError(fingerprint) });
-        }
-
-        let entries: Array<[string, TrackedError]> = Object.entries(stateManager.getAllErrors());
-        if (status && status !== 'all') {
-          entries = entries.filter(([, e]) => e.status === status);
-        }
-        entries.sort((a, b) => new Date(b[1].lastSeen).getTime() - new Date(a[1].lastSeen).getTime());
-        return toolSuccess({
-          totalCount: entries.length,
-          errors: entries.slice(0, limit).map(([fp, e]) => ({ fingerprint: fp, ...e })),
-        });
-      }
-
+    wrapHandler(async ({ project: projectRef, env, action = 'list', limit = 20 }) => {
       const { project, environment, provider } = resolveEnvOrThrow(ctx, projectRef, env);
       if (action === 'summary') {
         const summary = await collectErrorsSummary(provider, project, environment);

@@ -478,13 +478,16 @@ export const environmentSpecSchema = z.object({
     z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'storage names: lowercase alphanumeric and dashes, starting with a letter'),
     storageSpecSchema
   ).optional(),
-  /** Autofix agent log watches, synced on hv_apply. */
-  autofix: z.object({
-    enabled: z.boolean(),
-    /** Services to watch (default: all services in this environment). */
-    services: z.array(z.string().min(1)).optional(),
-  }).optional(),
+  /** Kept only to produce an actionable migration error for old specs. */
+  autofix: z.unknown().optional(),
 }).superRefine((environment, ctx) => {
+  if (environment.autofix !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'environments.*.autofix has been removed. Use hv_errors action="list" or action="summary" for live runtime errors; use github.actions.<id> kind="autofix" to repair failed GitHub workflow checks.',
+      path: ['autofix'],
+    });
+  }
   if (environment.domainRegistration && !environment.domain) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

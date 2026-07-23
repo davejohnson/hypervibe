@@ -186,3 +186,16 @@ Add an IANA timezone such as `America/Vancouver`; omitted timezones default to
   state and tells you to run `hv_plan`; it no longer writes GitHub directly.
 
 Use `hv_status` after a successful deploy workflow to verify the actual service.
+
+## Runtime error visibility
+
+GitHub workflow autofix repairs failed checks; it does not poll production
+service logs. Use `hv_errors action="list"` for recent runtime error lines and
+`hv_errors action="summary"` for per-service error and deployment health. Both
+read through the configured hosting provider connection and do not create
+branches or pull requests.
+
+The former environment-level `environments.<env>.autofix` runtime repair agent
+has been removed. Existing specs that contain it fail validation with migration
+guidance instead of silently losing intent. Scheduled runtime-error alerts or a
+desktop error inbox can be added later as a separate desired-state capability.
