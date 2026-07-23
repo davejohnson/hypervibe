@@ -98,6 +98,47 @@ describe('GitHub Actions environment variables', () => {
 });
 
 describe('GitHub repository infrastructure', () => {
+  const unicodeWorkflow = 'Deployment blocked — Hypervibe reconciliation required 🚧\n';
+
+  it('writes Unicode file content as UTF-8 Base64', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(response({ sha: 'existing-sha', content: '' }))
+      .mockResolvedValueOnce(response({ content: { sha: 'updated-sha' } }));
+
+    await connectedAdapter().createOrUpdateFile(
+      'dave',
+      'app',
+      '.github/workflows/deploy.yml',
+      unicodeWorkflow,
+      'Update deploy workflow'
+    );
+
+    const request = fetchMock.mock.calls[1]?.[1];
+    const body = JSON.parse(String(request?.body));
+    expect(Buffer.from(body.content, 'base64').toString('utf8')).toBe(unicodeWorkflow);
+  });
+
+  it('reads Unicode file content from UTF-8 Base64', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({
+      content: Buffer.from(unicodeWorkflow, 'utf8').toString('base64'),
+    }));
+
+    await expect(
+      connectedAdapter().getFileContent('dave', 'app', '.github/workflows/deploy.yml')
+    ).resolves.toBe(unicodeWorkflow);
+  });
+
+  it('reads branch-scoped Unicode file content from UTF-8 Base64', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({
+      sha: 'workflow-sha',
+      content: Buffer.from(unicodeWorkflow, 'utf8').toString('base64'),
+    }));
+
+    await expect(
+      connectedAdapter().getFile('dave', 'app', '.github/workflows/deploy.yml', 'managed')
+    ).resolves.toEqual({ sha: 'workflow-sha', content: unicodeWorkflow });
+  });
+
   it('fast-forwards managed refs without force', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response(undefined, 204));
 
