@@ -226,6 +226,12 @@ automatic code-only staging deploys while preventing a changed desired-state
 contract from deploying before reconciliation. Missing, failed, pending, or
 unconfirmed dependencies must leave the previous marker intact.
 
+Generated deployment workflow files are repository infrastructure and must be
+delivered through the deterministic `hypervibe/github-infrastructure` branch
+and reviewable pull request. Applying file drift returns a pending receipt and
+must defer workflow secrets, bindings, and the applied-spec marker until the
+reviewed file is present on the default branch.
+
 `hv_ci_status` is the authoritative observation path for Hypervibe-managed GitHub Actions deploys. Agents should use it to inspect workflows, runs, jobs, and bounded log tails, then use `hv_health` after a successful run. They must not bypass it with `gh`, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls; a blocked `hv_ci_status` result should surface its connection/error guidance and stop the stage.
 
 ## Database Tasks And Seed Data

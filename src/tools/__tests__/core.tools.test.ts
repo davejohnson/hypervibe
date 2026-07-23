@@ -1031,6 +1031,21 @@ describe('hv_plan / hv_status / hv_apply', () => {
       login: 'davejohnson',
       scopes: ['repo', 'workflow', 'read:packages'],
     });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        ref: 'refs/heads/hypervibe/github-infrastructure',
+        object: { sha: 'base-sha' },
+      });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
+    vi.spyOn(GitHubAdapter.prototype, 'createRef').mockResolvedValue();
+    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
+      number: 42,
+      html_url: 'https://github.com/davejohnson/ci-plan-app/pull/42',
+    });
     const writeWorkflow = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
       created: true,
       updated: false,
@@ -1048,26 +1063,27 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
     const apply = await t.call('hv_apply', { project: 'ci-plan-app', planId: plan.data.planId });
     expect(apply.ok).toBe(true);
+    expect(apply.data.applied).toBe(false);
     expect(apply.data.receipts).toContainEqual(expect.objectContaining({
       actionId: 'ci:github-actions:production:deploy-branch',
-      status: 'succeeded',
+      status: 'pending',
+      data: expect.objectContaining({
+        pullRequestNumber: 42,
+        pullRequestUrl: 'https://github.com/davejohnson/ci-plan-app/pull/42',
+      }),
     }));
     expect(writeWorkflow).toHaveBeenCalledWith(
       'davejohnson',
       'ci-plan-app',
       '.github/workflows/deploy-railway-production.yml',
       expect.stringContaining('Deploy Railway (production)'),
-      'Add Deploy Railway (production) workflow'
+      expect.any(String),
+      'hypervibe/github-infrastructure'
     );
-    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-plan-app', 'RAILWAY_API_TOKEN', 'railway-token');
-    expect(setSecret).toHaveBeenCalledWith('davejohnson', 'ci-plan-app', 'IMAGE_REGISTRY_TOKEN', 'gh-package-token');
+    expect(setSecret).not.toHaveBeenCalled();
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
-    expect(environment.platformBindings.ci).toBeDefined();
-    const ciBindingText = JSON.stringify(environment.platformBindings.ci);
-    expect(ciBindingText).toContain('syncedSecretHashes');
-    expect(ciBindingText).toContain('IMAGE_REGISTRY_TOKEN');
-    expect(ciBindingText).not.toContain('gh-package-token');
-    expect(ciBindingText).not.toContain('railway-token');
+    expect(environment.platformBindings.ci).toBeUndefined();
+    expect(apply.hint).toContain('pending provider workflows');
     await t.close();
   });
 

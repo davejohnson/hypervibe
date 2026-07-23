@@ -15,6 +15,7 @@ export const GITHUB_INFRASTRUCTURE_OPERATION = 'githubInfrastructurePullRequest'
 export const GITHUB_INFRASTRUCTURE_BRANCH = 'hypervibe/github-infrastructure';
 export const GITHUB_INFRASTRUCTURE_PR_TITLE = '[Hypervibe] Sync GitHub infrastructure';
 export const GITHUB_INFRASTRUCTURE_MANIFEST = '.github/hypervibe/manifest.json';
+export const GITHUB_PULL_REQUEST_TEMPLATE = '.github/PULL_REQUEST_TEMPLATE.md';
 export const OPENAI_ACTIONS_SECRET = 'OPENAI_API_KEY';
 export const GITHUB_INFRASTRUCTURE_ACTION_ID = 'repo:github-infrastructure-pr';
 export const GITHUB_OPENAI_SECRET_ACTION_ID = 'secret:github-openai-actions';
@@ -605,8 +606,11 @@ export function compileManagedGitHubFiles(github: GitHubSpec): ManagedGitHubFile
   if (github.collaboration.issues.enabled && github.collaboration.issues.templates) {
     files.push(managedFile('.github/ISSUE_TEMPLATE/task.yml', issueTemplateContent()));
   }
-  if (github.collaboration.pullRequests.requirePr) {
-    files.push(managedFile('.github/PULL_REQUEST_TEMPLATE.md', pullRequestTemplateContent()));
+  if (
+    github.collaboration.pullRequests.requirePr
+    && github.collaboration.pullRequests.manageTemplate
+  ) {
+    files.push(managedFile(GITHUB_PULL_REQUEST_TEMPLATE, pullRequestTemplateContent()));
   }
   for (const [id, automation] of Object.entries(github.actions).sort(([a], [b]) => a.localeCompare(b))) {
     if (!automation.enabled) continue;
@@ -684,6 +688,7 @@ function desiredFileMetadata(files: ManagedGitHubFile[]): Array<{ path: string; 
 function infrastructureAction(params: {
   repository: string;
   files: ManagedGitHubFile[];
+  preservePaths: string[];
   type: 'update' | 'noop';
   verified: boolean;
   drift: string[];
@@ -705,6 +710,7 @@ function infrastructureAction(params: {
       branch: GITHUB_INFRASTRUCTURE_BRANCH,
       pullRequestTitle: GITHUB_INFRASTRUCTURE_PR_TITLE,
       desiredFiles: desiredFileMetadata(params.files),
+      preservePaths: params.preservePaths,
     },
   };
 }
@@ -746,10 +752,20 @@ export async function planGitHubInfrastructure(params: {
   if (!parts) return { actions: [], warnings: [`Could not parse GitHub repository ${repository}.`], blocked: [] };
 
   const files = compileManagedGitHubFiles(params.spec.github);
+  const preservePaths = params.spec.github.collaboration.pullRequests.manageTemplate
+    ? []
+    : [GITHUB_PULL_REQUEST_TEMPLATE];
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
     return {
-      actions: [infrastructureAction({ repository, files, type: 'update', verified: false, drift: [] })],
+      actions: [infrastructureAction({
+        repository,
+        files,
+        preservePaths,
+        type: 'update',
+        verified: false,
+        drift: [],
+      })],
       warnings: [`Cannot observe GitHub infrastructure for ${repository}: ${adapterResult.error}`],
       blocked: [],
     };
@@ -771,6 +787,7 @@ export async function planGitHubInfrastructure(params: {
   const actions: PlanAction[] = [infrastructureAction({
     repository,
     files,
+    preservePaths,
     type: drift.length > 0 ? 'update' : 'noop',
     verified,
     drift,
@@ -1019,19 +1036,15 @@ function parseManifest(content: string | null): string[] {
   }
 }
 
-export async function applyGitHubInfrastructure(params: {
-  action: PlanAction;
+export async function proposeGitHubInfrastructureFiles(params: {
+  repository: string;
+  desiredFiles: ManagedGitHubFile[];
+  targetBranch?: string;
+  reconcileManifest?: boolean;
+  preservePaths?: string[];
 }): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
-  const repository = typeof params.action.metadata?.repository === 'string' ? params.action.metadata.repository : undefined;
-  const rawFiles = params.action.metadata?.desiredFiles;
-  const desiredFiles = Array.isArray(rawFiles)
-    ? rawFiles.filter((file): file is { path: string; content: string; hash: string } => {
-      if (!file || typeof file !== 'object' || Array.isArray(file)) return false;
-      const record = file as Record<string, unknown>;
-      return typeof record.path === 'string' && typeof record.content === 'string' && typeof record.hash === 'string';
-    })
-    : [];
-  if (!repository || desiredFiles.length === 0) {
+  const { repository, desiredFiles } = params;
+  if (desiredFiles.length === 0) {
     return { success: false, message: 'GitHub infrastructure plan action is invalid', error: 'Repository or desired files are missing.' };
   }
   const parts = repoParts(repository);
@@ -1045,8 +1058,7 @@ export async function applyGitHubInfrastructure(params: {
   }
 
   const repositoryInfo = await adapter.getRepository(parts.owner, parts.repo);
-  const base = params.action.metadata?.targetBranch;
-  const baseBranch = typeof base === 'string' ? base : repositoryInfo.default_branch;
+  const baseBranch = params.targetBranch ?? repositoryInfo.default_branch;
   const baseRef = await adapter.getRef(parts.owner, parts.repo, `heads/${baseBranch}`);
   if (!baseRef) return { success: false, message: 'GitHub default branch is missing', error: `Could not read ${baseBranch}.` };
 
@@ -1097,16 +1109,22 @@ export async function applyGitHubInfrastructure(params: {
     branchRef = await adapter.getRef(parts.owner, parts.repo, branchRefName);
   }
 
-  const oldManifest = await adapter.getFile(
-    parts.owner,
-    parts.repo,
-    GITHUB_INFRASTRUCTURE_MANIFEST,
-    GITHUB_INFRASTRUCTURE_BRANCH
-  );
-  const previousPaths = parseManifest(oldManifest?.content ?? null);
+  const oldManifest = params.reconcileManifest
+    ? await adapter.getFile(
+      parts.owner,
+      parts.repo,
+      GITHUB_INFRASTRUCTURE_MANIFEST,
+      GITHUB_INFRASTRUCTURE_BRANCH
+    )
+    : null;
+  const previousPaths = params.reconcileManifest
+    ? parseManifest(oldManifest?.content ?? null)
+    : [];
   const desiredPaths = new Set(desiredFiles.map((file) => file.path));
+  const preservePaths = new Set(params.preservePaths ?? []);
   const changed: string[] = [];
   const removed: string[] = [];
+  const preserved: string[] = [];
   const manifestFile = desiredFiles.find((file) => file.path === GITHUB_INFRASTRUCTURE_MANIFEST);
   const contentFiles = desiredFiles.filter((file) => file.path !== GITHUB_INFRASTRUCTURE_MANIFEST);
   for (const file of contentFiles) {
@@ -1123,6 +1141,10 @@ export async function applyGitHubInfrastructure(params: {
     changed.push(file.path);
   }
   for (const path of previousPaths.filter((path) => !desiredPaths.has(path))) {
+    if (preservePaths.has(path)) {
+      preserved.push(path);
+      continue;
+    }
     const current = await adapter.getFile(parts.owner, parts.repo, path, GITHUB_INFRASTRUCTURE_BRANCH);
     if (!current) continue;
     await adapter.deleteFile(
@@ -1156,7 +1178,7 @@ export async function applyGitHubInfrastructure(params: {
     base: baseBranch,
     draft: false,
     body: [
-      'Hypervibe generated this pull request from the project\'s declared `github` desired state.',
+      'Hypervibe generated this pull request from the project\'s declared infrastructure desired state.',
       '',
       'Review and merge it to activate the repository-file portion of the plan.',
       'Hypervibe will verify the merge and converge dependent secrets/settings in a later plan.',
@@ -1167,8 +1189,53 @@ export async function applyGitHubInfrastructure(params: {
     success: false,
     status: 'pending',
     message: `GitHub infrastructure pull request is awaiting review: ${pull.html_url}`,
-    data: { repository, pullRequestNumber: pull.number, pullRequestUrl: pull.html_url, changed, removed },
+    data: {
+      repository,
+      pullRequestNumber: pull.number,
+      pullRequestUrl: pull.html_url,
+      changed,
+      removed,
+      preserved,
+    },
   };
+}
+
+export async function applyGitHubInfrastructure(params: {
+  action: PlanAction;
+}): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
+  const repository = typeof params.action.metadata?.repository === 'string'
+    ? params.action.metadata.repository
+    : undefined;
+  const rawFiles = params.action.metadata?.desiredFiles;
+  const desiredFiles = Array.isArray(rawFiles)
+    ? rawFiles.filter((file): file is ManagedGitHubFile => {
+      if (!file || typeof file !== 'object' || Array.isArray(file)) return false;
+      const record = file as Record<string, unknown>;
+      return typeof record.path === 'string'
+        && typeof record.content === 'string'
+        && typeof record.hash === 'string';
+    })
+    : [];
+  if (!repository || desiredFiles.length === 0) {
+    return {
+      success: false,
+      message: 'GitHub infrastructure plan action is invalid',
+      error: 'Repository or desired files are missing.',
+    };
+  }
+  const targetBranch = typeof params.action.metadata?.targetBranch === 'string'
+    ? params.action.metadata.targetBranch
+    : undefined;
+  const preservePaths = Array.isArray(params.action.metadata?.preservePaths)
+    ? params.action.metadata.preservePaths.filter((path): path is string => typeof path === 'string')
+    : [];
+  return proposeGitHubInfrastructureFiles({
+    repository,
+    desiredFiles,
+    ...(targetBranch ? { targetBranch } : {}),
+    reconcileManifest: true,
+    preservePaths,
+  });
 }
 
 export async function applyGitHubOpenAISecret(params: {

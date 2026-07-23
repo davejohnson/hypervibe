@@ -49,6 +49,32 @@ describe('GitHub infrastructure compiler', () => {
     expect(files.every((file) => file.hash.length === 64)).toBe(true);
   });
 
+  it('leaves a repository-owned pull-request template unmanaged when requested', () => {
+    const github = projectSpecSchema.parse({
+      version: 1,
+      project: 'template-owner',
+      github: {
+        collaboration: {
+          issues: {
+            enabled: false,
+            templates: false,
+          },
+          pullRequests: {
+            requirePr: true,
+            manageTemplate: false,
+          },
+        },
+      },
+      environments: { production: { hosting: { provider: 'railway' }, services: {} } },
+    }).github!;
+
+    const files = compileManagedGitHubFiles(github);
+
+    expect(files.map((file) => file.path)).not.toContain('.github/PULL_REQUEST_TEMPLATE.md');
+    expect(JSON.parse(files.find((file) => file.path === '.github/hypervibe/manifest.json')!.content))
+      .toMatchObject({ files: [] });
+  });
+
   it('keeps the model key out of the generated patch-running job and separates PR writes', () => {
     const files = compileManagedGitHubFiles(githubSpec());
     const workflow = files.find((file) => file.path.endsWith('hypervibe-fix-tests.yml'))!.content;
