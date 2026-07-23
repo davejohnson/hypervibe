@@ -81,20 +81,31 @@ describe('hv_logs', () => {
 });
 
 describe('hv_errors', () => {
-  it('validates fingerprint for action=ignore', async () => {
+  it.each([
+    ['list', { totalFound: 0, errors: [] }],
+    ['summary', {
+      summary: { totalServices: 0, totalErrors: 0, failedDeployments: 0, healthyServices: 0 },
+      services: [],
+    }],
+  ] as const)('keeps provider-neutral runtime error %s visibility', async (action, expected) => {
+    const project = new ProjectRepository().create({ name: `errors-${action}-app` });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway', services: {} },
+    });
     const t = await makeClient();
-    const result = await t.call('hv_errors', { action: 'ignore' });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('VALIDATION');
-    await t.close();
-  });
-
-  it('lists tracked autofix errors', async () => {
-    const t = await makeClient();
-    const result = await t.call('hv_errors', { action: 'tracked' });
+    const result = await t.call('hv_errors', {
+      project: project.name,
+      env: 'production',
+      action,
+    });
     expect(result.ok).toBe(true);
-    expect(result.data).toHaveProperty('totalCount');
-    expect(Array.isArray(result.data.errors)).toBe(true);
+    expect(result.data).toMatchObject({
+      environment: 'production',
+      provider: 'railway',
+      ...expected,
+    });
     await t.close();
   });
 });

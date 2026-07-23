@@ -37,13 +37,11 @@
     "docs:tools": "node scripts/generate-tools-doc.mjs",
     "release:check": "npm test && npm run typecheck && npm run build && npm run prepublish-check",
     "release": "node scripts/release.mjs",
-    "autofix": "node dist/agent/index.js",
     "prepublish-check": "bash scripts/prepublish-check.sh",
     "prepublishOnly": "npm run build && npm run prepublish-check"
   },
   "dependencies": {
     "@1password/sdk": "^0.4.0",
-    "@anthropic-ai/sdk": "^0.30.0",
     "@aws-sdk/client-ec2": "^3.1092.0",
     "@aws-sdk/client-rds": "^3.1092.0",
     "@bitwarden/sdk-napi": "^1.0.0",

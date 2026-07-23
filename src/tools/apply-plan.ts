@@ -56,7 +56,6 @@ import {
   isHostingEnvRemovalAction,
   removeHostingEnvVars,
 } from '../domain/services/hosting-env.service.js';
-import { StateManager } from '../agent/state.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
@@ -548,10 +547,6 @@ export async function executePlanApply(ctx: ToolContext, params: {
     }
   }
 
-  if (result.success) {
-    syncAutofixWatches(ctx, applyProject, envName, envSpec);
-  }
-
   return {
     kind: 'executed',
     envName,
@@ -559,34 +554,6 @@ export async function executePlanApply(ctx: ToolContext, params: {
     ...(bootstrap ? { bootstrapSummary: (bootstrap as { summary: Record<string, unknown> }).summary } : {}),
     actionScopedWarnings,
   };
-}
-
-/** Sync spec.autofix to the autofix agent's watch list after a successful apply. */
-function syncAutofixWatches(
-  ctx: ToolContext,
-  project: Project,
-  envName: string,
-  envSpec: EnvironmentSpec
-): void {
-  if (!envSpec.autofix) return;
-  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-  if (!environment) return;
-
-  try {
-    const stateManager = new StateManager();
-    const serviceNames = envSpec.autofix.services ?? Object.keys(envSpec.services);
-    for (const serviceName of serviceNames) {
-      if (envSpec.autofix.enabled) {
-        stateManager.addWatch({ projectId: project.id, environmentId: environment.id, serviceName, enabled: true });
-      } else {
-        stateManager.removeWatch(project.id, environment.id, serviceName);
-      }
-    }
-    stateManager.save();
-  } catch (error) {
-    // Watch sync must never fail an apply.
-    console.warn(`[hypervibe] autofix watch sync failed: ${error instanceof Error ? error.message : String(error)}`);
-  }
 }
 
 function projectSpecReferencesService(spec: ProjectSpec, serviceName: string): boolean {
