@@ -6,6 +6,14 @@ const GITHUB_API_URL = 'https://api.github.com';
 const GITHUB_API_VERSION = '2026-03-10';
 const require = createRequire(import.meta.url);
 
+function encodeFileContent(content: string): string {
+  return Buffer.from(content, 'utf8').toString('base64');
+}
+
+function decodeFileContent(content: string): string {
+  return Buffer.from(content.replace(/\n/g, ''), 'base64').toString('utf8');
+}
+
 // Credentials schema for self-registration
 export const GitHubCredentialsSchema = z.object({
   apiToken: z.string().min(1, 'API token is required'),
@@ -303,7 +311,7 @@ export class GitHubAdapter {
       ? 'CNAME'
       : `${sourcePath.replace(/^\//, '')}/CNAME`;
 
-    const content = btoa(`${domain}\n`);
+    const content = encodeFileContent(`${domain}\n`);
 
     // Check if file already exists
     try {
@@ -313,7 +321,7 @@ export class GitHubAdapter {
       }>('GET', `/repos/${owner}/${repo}/contents/${filePath}`);
 
       // File exists - check if content matches
-      const existingContent = atob(existing.content.replace(/\n/g, ''));
+      const existingContent = decodeFileContent(existing.content);
       if (existingContent.trim() === domain) {
         return { created: false, updated: false };
       }
@@ -349,7 +357,7 @@ export class GitHubAdapter {
         'GET',
         `/repos/${owner}/${repo}/contents/${path}`
       );
-      return atob(existing.content.replace(/\n/g, ''));
+      return decodeFileContent(existing.content);
     } catch (error) {
       if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) {
         return null;
@@ -406,7 +414,7 @@ export class GitHubAdapter {
         'GET',
         `/repos/${owner}/${repo}/contents/${path}${suffix}`
       );
-      return { sha: existing.sha, content: atob(existing.content.replace(/\n/g, '')) };
+      return { sha: existing.sha, content: decodeFileContent(existing.content) };
     } catch (error) {
       if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) return null;
       throw error;
@@ -424,7 +432,7 @@ export class GitHubAdapter {
     commitMessage: string,
     branch?: string
   ): Promise<{ created: boolean; updated: boolean }> {
-    const contentBase64 = btoa(content);
+    const contentBase64 = encodeFileContent(content);
 
     // Check if file already exists
     try {
