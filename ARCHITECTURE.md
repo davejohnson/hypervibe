@@ -232,6 +232,20 @@ and reviewable pull request. Applying file drift returns a pending receipt and
 must defer workflow secrets, bindings, and the applied-spec marker until the
 reviewed file is present on the default branch.
 
+GitHub desired state uses capability-level opt-in with exclusive ownership.
+Once a capability is enabled, Hypervibe owns and reconciles every generated
+file and setting for that capability; individual managed files cannot be
+delegated back to the repository. Requiring pull requests therefore owns the
+canonical lowercase `.github/pull_request_template.md`. `externalWorkflows`
+remains a read-only integration surface because it names workflows Hypervibe
+observes but does not manage.
+
+When a canonical environment has both deployment-workflow drift and other
+managed GitHub file drift, apply must combine all known repository files and
+the manifest into the same infrastructure pull request. Dependent secrets,
+bindings, repository settings, and the applied-spec marker remain deferred
+until the reviewed commit is present on the default branch.
+
 `hv_ci_status` is the authoritative observation path for Hypervibe-managed GitHub Actions deploys. Agents should use it to inspect workflows, runs, jobs, and bounded log tails, then use `hv_health` after a successful run. They must not bypass it with `gh`, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls; a blocked `hv_ci_status` result should surface its connection/error guidance and stop the stage.
 
 ## Database Tasks And Seed Data

@@ -6,6 +6,14 @@ state. GitHub and OpenAI connections are optional: without them you can still
 edit/read the spec, inspect local state and history, use the desktop companion,
 and manage every independently connected provider.
 
+GitHub capabilities are opt-in, but ownership is not split after a capability
+is enabled. Hypervibe exclusively owns the files and settings generated for
+that capability and reconciles manual drift. For example, requiring pull
+requests means Hypervibe owns the canonical
+`.github/pull_request_template.md`. Disable the capability if the repository
+must own that surface itself. `externalWorkflows` is the deliberate exception:
+those workflows remain read-only inputs to Hypervibe automation.
+
 ## What happens when you apply
 
 1. `hv_spec_set` records the `github` intent.
@@ -23,27 +31,16 @@ Hypervibe also owns `.github/hypervibe/manifest.json`, which limits cleanup to
 files that Hypervibe previously managed.
 
 Generated environment deployment workflows use the same deterministic branch
-and pull-request flow. Hypervibe does not sync their provider secrets or record
-the workflow binding until the reviewed workflow is present on the repository's
-default branch.
+and pull-request flow. When possible, workflow drift and all other known
+repository-file drift are combined into that one infrastructure pull request.
+Hypervibe does not sync provider secrets, record workflow bindings, apply
+dependent repository settings, or advance the applied desired-state marker
+until the reviewed files are present on the repository's default branch.
 
-When a repository already owns its pull-request template, keep it outside
-Hypervibe's manifest while still requiring pull requests:
-
-```json
-{
-  "github": {
-    "collaboration": {
-      "pullRequests": {
-        "requirePr": true,
-        "manageTemplate": false
-      }
-    }
-  }
-}
-```
-
-`manageTemplate` defaults to `true` for compatibility with existing specs.
+The canonical pull-request template asks for a summary, related issue, visual
+evidence, verification, deployment impact, changed expectations, risks, and
+review checks. Projects can add detail in individual pull requests, while the
+owned template keeps the required review contract consistent.
 
 ## A practical starting spec
 

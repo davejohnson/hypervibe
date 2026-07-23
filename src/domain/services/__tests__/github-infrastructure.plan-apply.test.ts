@@ -157,14 +157,14 @@ describe('GitHub infrastructure plan/apply', () => {
     );
   });
 
-  it('releases pull-request template ownership without deleting the repository file', async () => {
+  it('replaces the canonical pull-request template and removes the retired uppercase path', async () => {
     const github = projectSpecSchema.parse({
       version: 1,
       project: 'example',
       github: {
         collaboration: {
           issues: { enabled: false, templates: false },
-          pullRequests: { requirePr: true, manageTemplate: false },
+          pullRequests: { requirePr: true },
         },
       },
       environments: { production: { hosting: { provider: 'railway' }, services: {} } },
@@ -179,7 +179,6 @@ describe('GitHub infrastructure plan/apply', () => {
         operation: 'githubInfrastructurePullRequest',
         repository: REPOSITORY,
         desiredFiles: compileManagedGitHubFiles(github),
-        preservePaths: ['.github/PULL_REQUEST_TEMPLATE.md'],
       },
     };
     const oldManifest = JSON.stringify({
@@ -199,12 +198,16 @@ describe('GitHub infrastructure plan/apply', () => {
       if (filePath === GITHUB_INFRASTRUCTURE_MANIFEST) {
         return { sha: 'manifest-sha', content: oldManifest };
       }
+      if (filePath === '.github/pull_request_template.md') {
+        return { sha: 'lowercase-template-sha', content: 'repository-owned template' };
+      }
       if (filePath === '.github/PULL_REQUEST_TEMPLATE.md') {
-        return { sha: 'template-sha', content: 'repository-owned template' };
+        return { sha: 'uppercase-template-sha', content: 'old Hypervibe template' };
       }
       return null;
     });
-    vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({ created: false, updated: true });
+    const createOrUpdateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
+      .mockResolvedValue({ created: false, updated: true });
     const deleteFile = vi.spyOn(GitHubAdapter.prototype, 'deleteFile').mockResolvedValue();
     vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
       number: 43,
@@ -214,6 +217,21 @@ describe('GitHub infrastructure plan/apply', () => {
     const result = await applyGitHubInfrastructure({ action });
 
     expect(result).toMatchObject({ success: false, status: 'pending' });
-    expect(deleteFile).not.toHaveBeenCalled();
+    expect(createOrUpdateFile).toHaveBeenCalledWith(
+      'owner',
+      'example',
+      '.github/pull_request_template.md',
+      expect.stringContaining('## Summary'),
+      expect.any(String),
+      GITHUB_INFRASTRUCTURE_BRANCH
+    );
+    expect(deleteFile).toHaveBeenCalledWith(
+      'owner',
+      'example',
+      '.github/PULL_REQUEST_TEMPLATE.md',
+      'uppercase-template-sha',
+      expect.any(String),
+      GITHUB_INFRASTRUCTURE_BRANCH
+    );
   });
 });

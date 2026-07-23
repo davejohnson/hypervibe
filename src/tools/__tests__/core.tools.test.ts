@@ -987,6 +987,12 @@ describe('hv_plan / hv_status / hv_apply', () => {
       spec: {
         project: 'ci-plan-app',
         gitRemoteUrl: 'git@github.com:davejohnson/ci-plan-app.git',
+        github: {
+          collaboration: {
+            issues: { enabled: false, templates: false },
+            pullRequests: { requirePr: true },
+          },
+        },
         environments: {
           production: {
             hosting: { provider: 'railway' },
@@ -1077,6 +1083,22 @@ describe('hv_plan / hv_status / hv_apply', () => {
       'ci-plan-app',
       '.github/workflows/deploy-railway-production.yml',
       expect.stringContaining('Deploy Railway (production)'),
+      expect.any(String),
+      'hypervibe/github-infrastructure'
+    );
+    expect(writeWorkflow).toHaveBeenCalledWith(
+      'davejohnson',
+      'ci-plan-app',
+      '.github/pull_request_template.md',
+      expect.stringContaining('## Summary'),
+      expect.any(String),
+      'hypervibe/github-infrastructure'
+    );
+    expect(writeWorkflow).toHaveBeenCalledWith(
+      'davejohnson',
+      'ci-plan-app',
+      '.github/hypervibe/manifest.json',
+      expect.stringContaining('.github/pull_request_template.md'),
       expect.any(String),
       'hypervibe/github-infrastructure'
     );

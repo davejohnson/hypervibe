@@ -426,7 +426,12 @@ export async function executePlanApply(ctx: ToolContext, params: {
       return applyCloudflareDomainRegistration({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
     if (isGitHubActionsDeployAction(action)) {
-      return applyGitHubActionsDeploy({ project: applyProject, environmentName: envName, environmentSpec: envSpec });
+      return applyGitHubActionsDeploy({
+        project: applyProject,
+        spec,
+        environmentName: envName,
+        environmentSpec: envSpec,
+      });
     }
     if (isGitHubActionsAppliedSpecHashAction(action)) {
       const desiredHash = stringField(asRecord(action.metadata), 'desiredHash');
