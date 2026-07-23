@@ -1,4 +1,5 @@
 import AppKit
+import HypervibeCompanionCore
 import SwiftUI
 
 struct ConnectionWindowRoute: Codable, Hashable {
@@ -17,10 +18,12 @@ struct HypervibeCompanionApp: App {
     @NSApplicationDelegateAdaptor(CompanionApplicationDelegate.self)
     private var applicationDelegate
     @StateObject private var model: CompanionAppModel
+    private let needsInitialOnboarding: Bool
 
     init() {
         let model = CompanionAppModel()
         _model = StateObject(wrappedValue: model)
+        needsInitialOnboarding = !ProjectRegistryStore.hasStoredProjects()
         NSApplication.shared.setActivationPolicy(.accessory)
     }
 
@@ -33,13 +36,24 @@ struct HypervibeCompanionApp: App {
         }
         .menuBarExtraStyle(.window)
 
+        WindowGroup("Welcome to Hypervibe", id: "welcome") {
+            if needsInitialOnboarding {
+                ProjectSetupView { draft, hosts in
+                    try await model.addProject(draft, connectHosts: hosts)
+                }
+            } else {
+                OnboardingDismissView()
+            }
+        }
+        .windowResizability(.contentSize)
+
         WindowGroup(
             "Add Hypervibe Project",
             id: "project-setup",
             for: String.self
         ) { _ in
-            ProjectSetupView { draft in
-                try await model.addProject(draft)
+            ProjectSetupView { draft, hosts in
+                try await model.addProject(draft, connectHosts: hosts)
             }
         }
         .windowResizability(.contentSize)
@@ -99,5 +113,15 @@ struct HypervibeCompanionApp: App {
                 loginItemController: CompanionLoginItemSystem.controller
             )
         }
+    }
+}
+
+private struct OnboardingDismissView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .task { dismiss() }
     }
 }

@@ -363,8 +363,10 @@ describe('hv_connections_list', () => {
     const result = await t.call('hv_connections_list', {});
     expect(result.ok).toBe(true);
     expect(result.hint).toContain('credential discovery only');
-    expect(result.hint).toContain('stop and ask the user');
-    expect(result.hint).toContain('do not run hv_plan');
+    expect(result.hint).toContain('credentials the user already controls');
+    expect(result.hint).toContain('value-free handoff');
+    expect(result.hint).toContain('Do not assume provider membership');
+    expect(result.hint).toContain('run hv_plan');
     expect(result.data.connections).toHaveLength(1);
     expect(result.data.connections[0]).toMatchObject({
       provider: 'railway',

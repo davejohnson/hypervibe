@@ -387,14 +387,36 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         connections,
         delegatedSecrets: Object.keys(result.spec.secrets),
         environments: Object.fromEntries(
-          Object.entries(result.spec.environments).map(([name, env]) => [name, {
-            hosting: env.hosting.provider,
-            services: Object.keys(env.services),
-            database: env.database?.provider ?? null,
-            storage: Object.keys(env.storage ?? {}),
-            delegatedSecrets: delegatedSecretsForEnvironment(result.spec, name).map(([key]) => key),
-            domain: env.domain ?? null,
-          }])
+          Object.entries(result.spec.environments).map(([name, env]) => {
+            const storedEnvironment = ctx.repos.environments.findByProjectAndName(project.id, name);
+            const serviceBindings = asRecord(storedEnvironment?.platformBindings.services) ?? {};
+            const serviceDetails = Object.entries(env.services).map(([serviceName, service]) => {
+              const binding = asRecord(serviceBindings[serviceName]);
+              const customDomains = Array.isArray(binding?.customDomains)
+                ? binding.customDomains.filter((value): value is string => typeof value === 'string')
+                : [];
+              const boundUrl = [
+                typeof binding?.url === 'string' ? binding.url : undefined,
+                ...customDomains,
+              ].map(sanitizeServiceUrl).find((value) => value !== undefined);
+              return {
+                name: serviceName,
+                workloadKind: service.workloadKind,
+                public: service.workloadKind === 'web' && service.public !== false,
+                ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
+                ...(boundUrl ? { boundUrl } : {}),
+              };
+            });
+            return [name, {
+              hosting: env.hosting.provider,
+              services: Object.keys(env.services),
+              serviceDetails,
+              database: env.database?.provider ?? null,
+              storage: Object.keys(env.storage ?? {}),
+              delegatedSecrets: delegatedSecretsForEnvironment(result.spec, name).map(([key]) => key),
+              domain: env.domain ?? null,
+            }];
+          })
         ),
       }, extras);
     })
@@ -402,7 +424,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
 
   server.tool(
     'hv_plan',
-    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Do not call hv_plan as a workaround after hv_status/hv_connections_list reports a missing required connection; first run hv_connect if a safe credentialsRef is already available, otherwise stop and ask the user for the token/reference. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply. Delegated secret slots declared by the spec accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally, encrypted into that plan, and never returned. Ordinary envVars and env files cannot override delegated keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If repo .env exists and .env.<env> is missing, hv_plan creates it while omitting envFile.exclude and delegated-secret keys. Optional services=[...] produces a partial deploy plan restricted to those spec services; delegated secret inputs require a full plan.',
+    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Do not call hv_plan as a workaround after hv_status/hv_connections_list reports a missing required connection. Use hv_connect only when a safe credentialsRef is already available; otherwise explain the blocked task and offer to connect credentials the user already controls or prepare a value-free owner handoff. Do not assume provider membership. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply. Delegated secret slots declared by the spec accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally, encrypted into that plan, and never returned. Ordinary envVars and env files cannot override delegated keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If repo .env exists and .env.<env> is missing, hv_plan creates it while omitting envFile.exclude and delegated-secret keys. Optional services=[...] produces a partial deploy plan restricted to those spec services; delegated secret inputs require a full plan.',
     {
       project: projectField,
       env: envField,
@@ -449,7 +471,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           after: 'Then re-run hv_plan and hv_apply. GitHub Actions push-to-deploy cannot converge until these credentials are available.',
         });
       } else if (result.inputRequired.length > 0) {
-        hint = `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. Ask the declared principal to save the value locally, then re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Do not paste raw values into chat.`;
+        hint = `Delegated secret input required: ${result.inputRequired.map((entry) => `${entry.key} (${entry.principal})`).join(', ')}. If the value and provider access are available on this Mac, re-run hv_plan with secretRefs mapping each key to env:, dotenv:, file:, or a secret-manager reference. Otherwise prepare a value-free handoff naming the key, environment, and principal for the project owner; the value can be transferred through their agreed external channel or shared secret manager. Do not paste raw values into chat.`;
       } else if (pending.length === 0) {
         hint = 'Everything is in sync — nothing to apply.';
       } else if (softActionScopedBlocked.length > 0) {
@@ -497,7 +519,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
             ? {
               agentInstruction: {
                 action: 'ask_user' as const,
-                message: 'Stop before apply. Ask the declared delegated-secret principal to provide a safe local secretRef, then create a new plan.',
+                message: 'Stop before apply. Use a safe local secretRef when the value is available here; otherwise prepare a value-free owner handoff naming the delegated key, environment, and principal.',
               },
             }
             : {}),
@@ -696,7 +718,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
               : deployStrategy === 'branch' && deployTrigger === 'ci' && ciNeedsSync
                 ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
               : delegatedSecrets.inputRequired.length > 0
-                ? 'Ask the declared principal for a safe local secretRef, then run hv_plan with secretRefs. Do not paste raw secret values into chat.'
+                ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
               : drift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
           next: blocked.length > 0 ? ['hv_connect'] : undefined,
         }
@@ -737,11 +759,11 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       if (outcome.kind === 'input_required') {
         return toolError('VALIDATION', 'This plan is missing required delegated secret inputs.', {
           details: { environment: outcome.envName, inputRequired: outcome.requirements },
-          hint: 'Ask each declared principal to save the value locally, then create a new hv_plan with secretRefs. Do not paste raw secrets into chat.',
+          hint: 'Use safe local secretRefs for values available on this Mac. Otherwise prepare a value-free handoff naming each delegated key, environment, and principal for the project owner. Do not paste raw secrets into chat.',
           next: ['hv_plan'],
           agentInstruction: {
             action: 'ask_user',
-            message: 'Stop before apply and request safe local secret references for the declared delegated-secret slots.',
+            message: 'Stop before apply. Use safe local secret references when available, or prepare a value-free owner handoff for the delegated-secret slots.',
           },
         });
       }

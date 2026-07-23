@@ -12,10 +12,13 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { createToolContext } from '../context.js';
 import { registerHvObservabilityTools } from '../hv-observability.tools.js';
+import { SpecStore } from '../../domain/spec/spec.store.js';
+import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 
 let tempDir: string;
 
 beforeEach(() => {
+  vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', '1');
   SqliteAdapter.resetInstance();
   tempDir = mkdtempSync(path.join(tmpdir(), 'hypervibe-hv-obs-'));
   SqliteAdapter.getInstance(path.join(tempDir, 'test.db')).migrate();
@@ -139,6 +142,51 @@ describe('hv_health', () => {
     const result = await t.call('hv_health', { project: 'health-app', env: 'staging', service: 'web' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('NOT_FOUND');
+    await t.close();
+  });
+
+  it('checks a repo-backed service without a cached service row or provider connection', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('ok', { status: 200 })));
+    const project = new ProjectRepository().create({ name: 'fresh-clone-health' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        services: {
+          web: { serviceId: 'svc-web', url: 'https://web.example.com' },
+        },
+      },
+    });
+    new SpecStore().replace(project, projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: {
+            web: {
+              workloadKind: 'web',
+              public: true,
+              healthCheckPath: '/healthz',
+            },
+          },
+        },
+      },
+    }));
+
+    const t = await makeClient();
+    const result = await t.call('hv_health', {
+      project: project.name,
+      env: 'staging',
+      service: 'web',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.service).toBe('web');
+    expect(result.data.baseUrl).toBe('https://web.example.com');
+    expect(result.data.check.url).toBe('https://web.example.com/healthz');
+    expect(result.data.check.ok).toBe(true);
     await t.close();
   });
 });

@@ -19,7 +19,10 @@ enum HypervibeResponseMapper {
                 EnvironmentSnapshot(
                     name: name,
                     specRevision: payload.revision,
-                    resources: resources(for: environment),
+                    resources: resources(
+                        for: environment,
+                        serviceDetails: payload.environments?[name]?.serviceDetails ?? []
+                    ),
                     observation: nil
                 )
             }
@@ -135,6 +138,28 @@ enum HypervibeResponseMapper {
             latestSuccessfulAt: previous?.latestSuccessfulAt,
             services: previous?.services,
             driftedResources: previous?.driftedResources
+        )
+    }
+
+    static func decodePublicEndpointHealth(
+        _ data: Data,
+        fallbackService: String,
+        checkedAt: Date
+    ) throws -> PublicEndpointHealth {
+        let envelope: ToolEnvelope<HealthToolData> = try decodeEnvelope(data)
+        guard let payload = envelope.data,
+            let url = PublicServiceEndpoint.originURL(from: payload.check.url) else {
+            throw HypervibeClientError.malformedResponse(
+                "hv_health returned no safe endpoint result."
+            )
+        }
+        return PublicEndpointHealth(
+            service: payload.service ?? fallbackService,
+            url: url,
+            ok: payload.check.ok,
+            status: payload.check.status,
+            latencyMs: payload.check.latencyMs,
+            checkedAt: checkedAt
         )
     }
 
@@ -332,18 +357,27 @@ enum HypervibeResponseMapper {
     }
 
     private static func resources(
-        for environment: DesiredEnvironment
+        for environment: DesiredEnvironment,
+        serviceDetails: [SpecToolData.EnvironmentSummary.ServiceDetail]
     ) -> [ResourceSummary] {
         let databaseID = environment.database.map { _ in "database:primary" }
+        let detailsByName = Dictionary(uniqueKeysWithValues: serviceDetails.map { ($0.name, $0) })
         var resources: [ResourceSummary] = environment.services.keys.sorted().map { name in
-            ResourceSummary(
+            let service = environment.services[name]
+            let details = detailsByName[name]
+            return ResourceSummary(
                 id: "service:\(name)",
                 kind: .service,
                 name: name,
                 desiredProvider: environment.hosting.provider,
                 relationships: databaseID.map {
                     [ResourceRelationship(kind: .uses, targetResourceID: $0)]
-                } ?? []
+                } ?? [],
+                workloadKind: details?.workloadKind ?? service?.workloadKind ?? "web",
+                isPublic: details?.isPublic
+                    ?? ((service?.workloadKind ?? "web") == "web" && service?.isPublic != false),
+                healthCheckPath: details?.healthCheckPath ?? service?.healthCheckPath,
+                boundURL: PublicServiceEndpoint.originURL(from: details?.boundUrl)
             )
         }
 
@@ -466,6 +500,37 @@ private struct SpecToolData: Decodable {
     let project: ProjectReference
     let revision: Int
     let spec: DesiredProjectSpec
+    let environments: [String: EnvironmentSummary]?
+
+    struct EnvironmentSummary: Decodable {
+        let serviceDetails: [ServiceDetail]
+
+        private enum CodingKeys: String, CodingKey { case serviceDetails }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            serviceDetails = try container.decodeIfPresent(
+                [ServiceDetail].self,
+                forKey: .serviceDetails
+            ) ?? []
+        }
+
+        struct ServiceDetail: Decodable {
+            let name: String
+            let workloadKind: String
+            let isPublic: Bool
+            let healthCheckPath: String?
+            let boundUrl: String?
+
+            private enum CodingKeys: String, CodingKey {
+                case name
+                case workloadKind
+                case isPublic = "public"
+                case healthCheckPath
+                case boundUrl
+            }
+        }
+    }
 }
 
 private struct ProjectReference: Decodable {
@@ -567,7 +632,7 @@ private struct DesiredProjectSpec: Decodable {
 
 private struct DesiredEnvironment: Decodable {
     let hosting: Hosting
-    let services: [String: IgnoredObject]
+    let services: [String: DesiredService]
     let database: Database?
     let storage: [String: Storage]
     let queues: [String: IgnoredObject]
@@ -592,7 +657,7 @@ private struct DesiredEnvironment: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         hosting = try container.decode(Hosting.self, forKey: .hosting)
         services = try container.decodeIfPresent(
-            [String: IgnoredObject].self,
+            [String: DesiredService].self,
             forKey: .services
         ) ?? [:]
         database = try container.decodeIfPresent(Database.self, forKey: .database)
@@ -615,6 +680,31 @@ private struct DesiredEnvironment: Decodable {
 
     struct Hosting: Decodable {
         let provider: String
+    }
+
+    struct DesiredService: Decodable {
+        let workloadKind: String
+        let isPublic: Bool?
+        let healthCheckPath: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case workloadKind
+            case isPublic = "public"
+            case healthCheckPath
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            workloadKind = try container.decodeIfPresent(
+                String.self,
+                forKey: .workloadKind
+            ) ?? "web"
+            isPublic = try container.decodeIfPresent(Bool.self, forKey: .isPublic)
+            healthCheckPath = try container.decodeIfPresent(
+                String.self,
+                forKey: .healthCheckPath
+            )
+        }
     }
 
     struct Database: Decodable {
@@ -719,6 +809,18 @@ private struct RunsToolData: Decodable {
         let status: String
         let startedAt: String?
         let completedAt: String?
+    }
+}
+
+private struct HealthToolData: Decodable {
+    let service: String?
+    let check: Check
+
+    struct Check: Decodable {
+        let url: String
+        let ok: Bool
+        let status: Int?
+        let latencyMs: Int
     }
 }
 

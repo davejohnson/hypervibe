@@ -50,6 +50,14 @@ struct ProjectDashboardView: View {
                     }
 
                     connectionGrid
+                } else if project.readiness == .uninitialized, !isRefreshing {
+                    ContentUnavailableView {
+                        Label("Ready for chat", systemImage: "bubble.left.and.text.bubble.right")
+                    } description: {
+                        Text("This repository does not have a Hypervibe spec yet. Restart your connected coding agent and ask it to inspect or initialize the project.")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 40)
                 } else if !isRefreshing {
                     ContentUnavailableView(
                         "No snapshot yet",
@@ -113,13 +121,13 @@ struct ProjectDashboardView: View {
 
                     if github != nil && !githubConnected {
                         connectionPrompt(
-                            "Connect GitHub to plan and apply this section.",
+                            "GitHub access is not connected on this Mac. Use credentials you control, or ask chat for an owner handoff.",
                             provider: "github"
                         )
                     }
                     if needsOpenAI && !openAIConnected {
                         connectionPrompt(
-                            "Connect OpenAI for AI automations. Checks and other Hypervibe features remain available.",
+                            "OpenAI access is not connected on this Mac. Use credentials you control, or ask chat for an owner handoff.",
                             provider: "openai"
                         )
                     }
@@ -154,7 +162,7 @@ struct ProjectDashboardView: View {
                 .font(.caption)
                 .foregroundStyle(.orange)
             Spacer()
-            Button("Set Up…") { showConnections(provider: provider) }
+            Button("Connection Options…") { showConnections(provider: provider) }
                 .controlSize(.small)
                 .clickTargetCursor()
         }
@@ -191,7 +199,7 @@ struct ProjectDashboardView: View {
                 .padding(.top, 9)
                 if connections.isEmpty {
                     HStack {
-                        Text("No provider connections yet.")
+                        Text("No provider connections on this Mac. Add credentials you control, or use chat to prepare an owner handoff.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -283,6 +291,22 @@ struct ProjectDashboardView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                        if let checks = environment.publicEndpointHealth,
+                            !checks.isEmpty {
+                            let failed = checks.filter { !$0.ok }
+                            Label(
+                                failed.isEmpty
+                                    ? "\(checks.count) public \(checks.count == 1 ? "endpoint responded" : "endpoints responded")"
+                                    : "\(failed.count) public \(failed.count == 1 ? "endpoint check failed" : "endpoint checks failed")",
+                                systemImage: failed.isEmpty
+                                    ? "heart.fill"
+                                    : "heart.slash.fill"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(failed.isEmpty ? .green : .red)
+                            .help(endpointHealthSummary(checks))
+                        }
+
                         if !observation.blockedProviders.isEmpty {
                             Text("Blocked: \(observation.blockedProviders.joined(separator: ", "))")
                                 .font(.caption)
@@ -342,6 +366,14 @@ struct ProjectDashboardView: View {
         return drifted
             .map { "\($0.name): \($0.actionType) pending on \($0.provider)" }
             .joined(separator: "\n")
+    }
+
+    private func endpointHealthSummary(_ checks: [PublicEndpointHealth]) -> String {
+        checks.map { check in
+            let status = check.status.map(String.init) ?? (check.ok ? "healthy" : "failed")
+            let checked = check.checkedAt.formatted(.relative(presentation: .named))
+            return "\(check.service): \(status) · \(check.latencyMs) ms · checked \(checked) · \(check.url.host() ?? check.url.absoluteString)"
+        }.joined(separator: "\n")
     }
 
     private func showVariables(environment: String, service: String? = nil) {

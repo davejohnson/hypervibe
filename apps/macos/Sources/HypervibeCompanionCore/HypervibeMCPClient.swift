@@ -53,13 +53,46 @@ public actor HypervibeMCPClient {
         self.clientVersion = normalized.isEmpty ? "development" : normalized
     }
 
+    public func probe(project: CompanionProject) async throws -> CompanionProjectReadiness {
+        let specURL = URL(fileURLWithPath: project.repositoryPath)
+            .standardizedFileURL
+            .appendingPathComponent(".hypervibe/spec.json", isDirectory: false)
+        return try await withSession(
+            project: project,
+            requiredTools: ["hv_spec_get", "hv_spec_set"]
+        ) { client -> CompanionProjectReadiness in
+            // A legacy single-project local cache must not make an unrelated
+            // repository look initialized. The repo-backed spec is the shared
+            // project identity; chat can create it with hv_spec_set.
+            guard FileManager.default.fileExists(atPath: specURL.path) else {
+                return CompanionProjectReadiness.uninitialized
+            }
+            do {
+                _ = try await self.call(
+                    client: client,
+                    tool: "hv_spec_get",
+                    arguments: [:]
+                )
+                return CompanionProjectReadiness.initialized
+            } catch HypervibeClientError.tool(let code, _, _) where code == "NOT_FOUND" {
+                return CompanionProjectReadiness.uninitialized
+            }
+        }
+    }
+
     public func refresh(
         project: CompanionProject,
         previous: ProjectSnapshot? = nil
     ) async throws -> CompanionRefresh {
         try await withSession(
             project: project,
-            requiredTools: ["hv_spec_get", "hv_status", "hv_runs", "hv_connections_list"]
+            requiredTools: [
+                "hv_spec_get",
+                "hv_status",
+                "hv_health",
+                "hv_runs",
+                "hv_connections_list",
+            ]
         ) { client in
             let specData = try await self.call(
                 client: client,
@@ -99,13 +132,41 @@ public actor HypervibeMCPClient {
                         previous: previousObservation
                     )
                 }
+                var endpointHealth: [PublicEndpointHealth] = []
+                for resource in environment.resources where
+                    resource.kind == .service
+                    && resource.isPublic == true
+                    && resource.boundURL != nil {
+                    do {
+                        let healthData = try await self.call(
+                            client: client,
+                            tool: "hv_health",
+                            arguments: [
+                                "project": .string(topology.projectName),
+                                "env": .string(environment.name),
+                                "service": .string(resource.name),
+                            ]
+                        )
+                        endpointHealth.append(
+                            try HypervibeResponseMapper.decodePublicEndpointHealth(
+                                healthData,
+                                fallbackService: resource.name,
+                                checkedAt: attemptedAt
+                            )
+                        )
+                    } catch {
+                        // A missing/private endpoint is not provider drift. The
+                        // live observation remains independently unverified.
+                    }
+                }
 
                 environments.append(
                     EnvironmentSnapshot(
                         name: environment.name,
                         specRevision: topology.specRevision,
                         resources: environment.resources,
-                        observation: observation
+                        observation: observation,
+                        publicEndpointHealth: endpointHealth
                     )
                 )
             }

@@ -385,7 +385,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         });
       }
 
-      const discoveryHint = 'hv_connections_list is credential discovery only. If desired-state convergence is blocked by a missing connection and no usable credentialsRef is already available, stop and ask the user to add/export the token or provide a credentialsRef; do not run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
+      const discoveryHint = 'hv_connections_list is credential discovery only. If a concrete task is blocked by a missing connection, use hv_connect only when a safe credentialsRef is already available. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
       return toolSuccess(
         { connections, availableProviders },
         {

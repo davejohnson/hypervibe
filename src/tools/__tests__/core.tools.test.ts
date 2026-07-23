@@ -149,9 +149,38 @@ describe('hv_spec_set / hv_spec_get', () => {
     });
     expect(merge.data.revision).toBe(2);
 
+    const project = new ProjectRepository().findByName('core-spec-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        services: {
+          web: {
+            serviceId: 'svc-web',
+            url: 'https://user:password@unsafe.example.com/private?token=secret',
+            customDomains: ['app.example.com/path?ignored=1'],
+          },
+        },
+      },
+    });
+
     const get = await t.call('hv_spec_get', { project: 'core-spec-app' });
     expect(get.ok).toBe(true);
     expect(get.data.environments.staging.services).toEqual(['web', 'worker']);
+    expect(get.data.environments.staging.serviceDetails).toEqual([
+      expect.objectContaining({
+        name: 'web',
+        workloadKind: 'web',
+        public: true,
+        boundUrl: 'https://app.example.com',
+      }),
+      expect.objectContaining({
+        name: 'worker',
+        workloadKind: 'worker',
+        public: false,
+      }),
+    ]);
     await t.close();
   });
 
@@ -312,7 +341,8 @@ describe('hv_spec_set / hv_spec_get', () => {
       scope: 'connection-check-app.com',
       hint: expect.stringContaining('connection-check-app.com'),
     });
-    expect(set.hint).toContain('Hypervibe can store and verify the missing provider connections with hv_connect');
+    expect(set.hint).toContain('This task needs provider access that is not connected on this Mac');
+    expect(set.hint).toContain('prepare a value-free handoff');
     expect(set.hint).toContain('Cloudflare Account API Token');
     expect(set.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
     expect(set.hint).toContain('Cloudflare User API Token');
@@ -1495,7 +1525,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(status.hint).toContain('Cloudflare Account API Token');
     expect(status.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
     expect(status.hint).toContain('Zone -> DNS -> Edit');
-    expect(status.hint).toContain('stop and ask the user');
+    expect(status.hint).toContain('stop and offer two concrete paths');
+    expect(status.hint).toContain('prepare a value-free handoff');
     expect(status.hint).toContain('do not run hv_plan');
     expect(status.next).toEqual(['hv_connect']);
     await t.close();

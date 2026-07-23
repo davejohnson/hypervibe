@@ -34,6 +34,18 @@ public actor ProjectRegistryStore {
             .appendingPathComponent("projects.json", isDirectory: false)
     }
 
+    public static func hasStoredProjects(
+        fileURL: URL = ProjectRegistryStore.defaultFileURL(),
+        fileManager: FileManager = .default
+    ) -> Bool {
+        guard fileManager.fileExists(atPath: fileURL.path),
+            let data = try? Data(contentsOf: fileURL),
+            let document = try? decoder.decode(ProjectRegistryDocument.self, from: data) else {
+            return false
+        }
+        return !document.projects.isEmpty
+    }
+
     public func load() throws -> [CompanionProject] {
         guard fileManager.fileExists(atPath: fileURL.path) else {
             return []

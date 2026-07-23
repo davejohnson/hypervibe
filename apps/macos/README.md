@@ -15,9 +15,14 @@ The current v0 slice contains:
   and Codex / ChatGPT desktop clients;
 - update checks against the latest published GitHub release, with a verified
   in-place **Restart and Update** flow for the matching Mac architecture;
-- desired resource topology from `hv_spec_get`;
+- first-run onboarding that registers any git repository, connects Claude
+  and/or Codex, and hands the user into chat even before a spec exists;
+- desired resource topology and safe public endpoint bindings from
+  `hv_spec_get`;
 - live environment health, drift identity, and service endpoints from
   `hv_status`;
+- public endpoint health from `hv_health`, displayed independently from
+  credentialed provider drift;
 - recent plan/apply activity from `hv_runs`;
 - memory-only connected-app summaries and provider form metadata from
   `hv_connections_list`;
@@ -54,10 +59,18 @@ configuration is not silently deleted outside Hypervibe's reconciliation loop.
 
 1. Open the architecture-specific Hypervibe DMG.
 2. Drag `Hypervibe.app` to Applications and launch it.
-3. Add the repository that contains the project's `.hypervibe/spec.json`.
-4. Open Hypervibe Settings and select **Connect** for Claude Desktop and/or
-   Codex / ChatGPT.
-5. Fully quit and restart the desktop client.
+3. Choose a git repository. It does not need a `.hypervibe/spec.json` yet.
+4. Select Claude Desktop and/or Codex / ChatGPT. Hypervibe configures the
+   selected coding agent during the same flow.
+5. Fully quit and restart the selected client, then use the starter prompt.
+   Chat inspects the repository, determines the user's task, and creates the
+   first desired-state spec when appropriate.
+
+There is no operator/contributor mode to choose. A solo user keeps the full
+dashboard and variable controls. A collaborator without provider credentials
+can still read the committed desired topology and check public bound
+endpoints. Exact provider drift, private logs, and apply remain unverified
+until someone with the required provider access performs that task.
 
 On its first launch from Applications, Hypervibe registers itself as a macOS
 login item so the menu bar companion starts after future sign-ins. This can be
@@ -116,7 +129,7 @@ swift run --package-path apps/macos HypervibeCompanion
 Development builds do not contain the server bundle. When adding a project to
 a development build, configure:
 
-- the repository that contains its `.hypervibe/spec.json`;
+- the git repository, with or without `.hypervibe/spec.json`;
 - an absolute Hypervibe executable path;
 - one process argument per line when the executable is a runtime such as
   `node` (for example, the absolute path to this repo's `dist/index.js`);
