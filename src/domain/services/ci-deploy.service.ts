@@ -16,6 +16,7 @@ import {
   resolveBranchDeployTargets,
   type BranchDeployWorkflow,
 } from './github-ops.service.js';
+import { proposeGitHubInfrastructureFiles } from './github-infrastructure.service.js';
 import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
 import {
@@ -357,7 +358,7 @@ export async function applyGitHubActionsDeploy(params: {
   project: Project;
   environmentName: string;
   environmentSpec: EnvironmentSpec;
-}): Promise<{ success: boolean; message: string; error?: string; data?: Record<string, unknown> }> {
+}): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
   const { project, environmentName, environmentSpec } = params;
   const repo = parseGitHubRepoFromRemote(project.gitRemoteUrl);
   if (!repo) {
@@ -413,13 +414,34 @@ export async function applyGitHubActionsDeploy(params: {
   const availableSecretNames = availableSecrets.map((secret) => secret.name);
   const missingProviderSecrets = requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name));
 
-  const fileResult = await adapter.createOrUpdateFile(
-    owner,
-    repoName,
-    workflow.path,
-    workflow.content,
-    `Add ${workflow.templateName} workflow`
-  );
+  let currentWorkflowContent: string | null;
+  try {
+    currentWorkflowContent = await adapter.getFileContent(owner, repoName, workflow.path);
+  } catch (error) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: `Cannot verify GitHub Actions deploy workflow ${workflow.path}`,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (currentWorkflowContent !== workflow.content) {
+    const proposal = await proposeGitHubInfrastructureFiles({
+      repository: repo,
+      desiredFiles: [{
+        path: workflow.path,
+        content: workflow.content,
+        hash: sha256(workflow.content),
+      }],
+    });
+    return {
+      ...proposal,
+      data: {
+        workflow: workflow.path,
+        ...(proposal.data ?? {}),
+      },
+    };
+  }
 
   const syncedSecrets: ProviderSecret[] = [];
   const secretErrors: Array<{ name: string; error: string }> = [];
@@ -439,7 +461,7 @@ export async function applyGitHubActionsDeploy(params: {
       success: false,
       message: `Synced ${workflow.path}, but required provider secrets are missing`,
       error: missingProviderSecretsMessage(environmentSpec.hosting.provider, missingProviderSecrets),
-      data: { workflow: workflow.path, file: fileResult, syncedSecrets: syncedSecretNames, missingProviderSecrets },
+      data: { workflow: workflow.path, syncedSecrets: syncedSecretNames, missingProviderSecrets },
     };
   }
   if (secretErrors.length > 0) {
@@ -447,16 +469,13 @@ export async function applyGitHubActionsDeploy(params: {
       success: false,
       message: `Synced ${workflow.path}, but some GitHub secrets failed`,
       error: secretErrors.map((entry) => `${entry.name}: ${entry.error}`).join('; '),
-      data: { workflow: workflow.path, file: fileResult, syncedSecrets: syncedSecretNames, secretErrors },
+      data: { workflow: workflow.path, syncedSecrets: syncedSecretNames, secretErrors },
     };
   }
   return {
     success: true,
-    message: `Synced GitHub Actions deploy workflow ${workflow.path}`
-      + (fileResult.created || fileResult.updated
-        ? ' (committed directly to the GitHub repository — local checkouts need git pull)'
-        : ''),
-    data: { workflow: workflow.path, file: fileResult, syncedSecrets: syncedSecretNames },
+    message: `Synced GitHub Actions deploy workflow secrets for reviewed file ${workflow.path}`,
+    data: { workflow: workflow.path, syncedSecrets: syncedSecretNames },
   };
 }
 

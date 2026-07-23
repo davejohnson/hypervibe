@@ -490,7 +490,7 @@ describe('ci-deploy.service', () => {
   });
 
   describe('applyGitHubActionsDeploy', () => {
-    it('rebuilds the workflow from provider bindings recorded after worker creation', async () => {
+    it('proposes a rebuilt workflow through the infrastructure pull request and defers secrets', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
       const environmentSpec = environmentSpecSchema.parse({
@@ -514,9 +514,65 @@ describe('ci-deploy.service', () => {
         login: 'davejohnson',
         scopes: ['repo', 'workflow'],
       });
+      vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+      vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+      vi.spyOn(GitHubAdapter.prototype, 'getRef')
+        .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          ref: 'refs/heads/hypervibe/github-infrastructure',
+          object: { sha: 'base-sha' },
+        });
+      vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
+      vi.spyOn(GitHubAdapter.prototype, 'createRef').mockResolvedValue();
       const createOrUpdateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
         .mockResolvedValue({ created: false, updated: true });
-      vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+      vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
+      vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
+        number: 42,
+        html_url: 'https://github.com/davejohnson/billforge/pull/42',
+      });
+      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+
+      const result = await applyGitHubActionsDeploy({
+        project,
+        environmentName: 'production',
+        environmentSpec,
+      });
+
+      expect(result).toMatchObject({
+        success: false,
+        status: 'pending',
+        data: {
+          pullRequestNumber: 42,
+          pullRequestUrl: 'https://github.com/davejohnson/billforge/pull/42',
+        },
+      });
+      expect(createOrUpdateFile).toHaveBeenCalledWith(
+        'davejohnson',
+        'billforge',
+        '.github/workflows/deploy-railway-production.yml',
+        expect.stringContaining("RAILWAY_SERVICE_IDS: 'rail-web,rail-worker'"),
+        expect.any(String),
+        'hypervibe/github-infrastructure'
+      );
+      expect(setRepositorySecret).not.toHaveBeenCalled();
+      expect(envRepo.findById(environmentId)?.platformBindings.ci).toBeUndefined();
+    });
+
+    it('syncs secrets only after the reviewed workflow is present on the default branch', async () => {
+      const { project } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const environmentSpec = environmentSpecSchema.parse(CI_ENVIRONMENT_SPEC);
+      const workflow = expectedWorkflow(project);
+      vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+        success: true,
+        login: 'davejohnson',
+        scopes: ['repo', 'workflow'],
+      });
+      vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+      const createOrUpdateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
+      const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
 
       const result = await applyGitHubActionsDeploy({
         project,
@@ -525,13 +581,8 @@ describe('ci-deploy.service', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(createOrUpdateFile).toHaveBeenCalledWith(
-        'davejohnson',
-        'billforge',
-        '.github/workflows/deploy-railway-production.yml',
-        expect.stringContaining("RAILWAY_SERVICE_IDS: 'rail-web,rail-worker'"),
-        expect.any(String)
-      );
+      expect(createOrUpdateFile).not.toHaveBeenCalled();
+      expect(setRepositorySecret).toHaveBeenCalledTimes(3);
     });
   });
 

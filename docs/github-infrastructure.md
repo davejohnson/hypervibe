@@ -22,6 +22,29 @@ creates commits containing those files rather than creating fileless workflows.
 Hypervibe also owns `.github/hypervibe/manifest.json`, which limits cleanup to
 files that Hypervibe previously managed.
 
+Generated environment deployment workflows use the same deterministic branch
+and pull-request flow. Hypervibe does not sync their provider secrets or record
+the workflow binding until the reviewed workflow is present on the repository's
+default branch.
+
+When a repository already owns its pull-request template, keep it outside
+Hypervibe's manifest while still requiring pull requests:
+
+```json
+{
+  "github": {
+    "collaboration": {
+      "pullRequests": {
+        "requirePr": true,
+        "manageTemplate": false
+      }
+    }
+  }
+}
+```
+
+`manageTemplate` defaults to `true` for compatibility with existing specs.
+
 ## A practical starting spec
 
 Automation ids are your own lowercase slugs. `kind` selects a typed behavior;
