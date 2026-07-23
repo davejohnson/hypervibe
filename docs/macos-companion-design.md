@@ -85,6 +85,13 @@ repository as `cwd` and its configured `HYPERVIBE_DATA_DIR`, if any. The
 launcher and repo arguments are absolute paths; nothing is resolved through a
 GUI process's assumed shell `PATH`, and the app never runs `@latest`.
 
+The bundled MCP reports the version from its copied `package.json` in both the
+MCP initialize handshake and `hv_upgrade`. The Companion's MCP client identity
+comes from the app bundle's `CFBundleShortVersionString`. The current combined
+release pipeline intentionally assigns both artifacts the same `vX.Y.Z`
+release number, but neither runtime identity is hardcoded or borrowed from the
+other process.
+
 Source-tree development builds retain the explicit executable and argument
 fields for local testing. A distributed build automatically migrates existing
 companion project entries to its bundled launcher.

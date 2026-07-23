@@ -14,17 +14,9 @@ import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { generateVisualizationHtml } from './visualize.template.js';
 import { findRepoRoot, readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
 import { readRepoBindingsFile } from '../domain/spec/repo-bindings-file.js';
+import { HYPERVIBE_VERSION } from '../version.js';
 
 const componentTypeField = z.enum(['postgres']);
-
-function readPackageVersion(): string {
-  try {
-    const packageJson = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version?: unknown };
-    return typeof packageJson.version === 'string' ? packageJson.version : 'unknown';
-  } catch {
-    return 'unknown';
-  }
-}
 
 function repoUpgradeState(): Record<string, unknown> {
   const root = findRepoRoot();
@@ -129,7 +121,7 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
       return toolSuccess(
         {
           hypervibe: {
-            version: readPackageVersion(),
+            version: HYPERVIBE_VERSION,
             upgradeAction: action,
           },
           storage: {

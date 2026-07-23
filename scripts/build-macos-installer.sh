@@ -6,7 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MACOS_ROOT="$ROOT/apps/macos"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/build/macos}"
 NODE_VERSION="${NODE_VERSION:-22.17.1}"
-VERSION="${VERSION:-$(node -p "require('$ROOT/package.json').version")}"
+MCP_VERSION="$(node -p "require('$ROOT/package.json').version")"
+COMPANION_VERSION="${COMPANION_VERSION:-$MCP_VERSION}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 HOST_ARCH="$(uname -m)"
@@ -40,7 +41,7 @@ SERVER_STAGE="$WORK_DIR/server"
 NODE_ARCHIVE="$WORK_DIR/node-v$NODE_VERSION-darwin-$NODE_ARCH.tar.gz"
 NODE_DIR="$WORK_DIR/node-v$NODE_VERSION-darwin-$NODE_ARCH"
 DMG_STAGE="$WORK_DIR/dmg"
-DMG="$OUTPUT_DIR/Hypervibe-$VERSION-$ARCH.dmg"
+DMG="$OUTPUT_DIR/Hypervibe-$COMPANION_VERSION-$ARCH.dmg"
 
 rm -rf "$WORK_DIR"
 mkdir -p \
@@ -54,10 +55,10 @@ export CLANG_MODULE_CACHE_PATH="$WORK_DIR/module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$WORK_DIR/module-cache"
 mkdir -p "$CLANG_MODULE_CACHE_PATH"
 
-echo "Building Hypervibe server"
+echo "Building Hypervibe MCP $MCP_VERSION"
 npm run build --prefix "$ROOT"
 
-echo "Building macOS companion"
+echo "Building macOS Companion $COMPANION_VERSION ($BUILD_NUMBER)"
 swift build --package-path "$MACOS_ROOT" -c release --product HypervibeCompanion
 swift build --package-path "$MACOS_ROOT" -c release --product HypervibeMCPLauncher
 swift build --package-path "$MACOS_ROOT" -c release --product HypervibeCompanionUpdater
@@ -89,7 +90,7 @@ cp "$SERVER_STAGE/package.json" "$SERVER_STAGE/package-lock.json" "$RESOURCES/se
 cp "$ROOT/LICENSE" "$RESOURCES/licenses/Hypervibe-LICENSE"
 cp "$MACOS_ROOT/Distribution/Info.plist" "$CONTENTS/Info.plist"
 
-plutil -replace CFBundleShortVersionString -string "$VERSION" "$CONTENTS/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$COMPANION_VERSION" "$CONTENTS/Info.plist"
 plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$CONTENTS/Info.plist"
 
 ICONSET="$WORK_DIR/AppIcon.iconset"

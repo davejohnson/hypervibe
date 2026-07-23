@@ -140,6 +140,12 @@ Build an ad-hoc-signed DMG for the current Mac architecture:
 ./scripts/build-macos-installer.sh
 ```
 
+`package.json` owns the bundled Hypervibe MCP version. The Companion app owns
+its `CFBundleShortVersionString`; pass `COMPANION_VERSION=X.Y.Z` to set it and
+`BUILD_NUMBER=N` for `CFBundleVersion`. The combined `vX.Y.Z` release workflow
+currently leaves `COMPANION_VERSION` unset so the app, DMG, tag, and bundled MCP
+share one release number, while each process still reports its own identity.
+
 The artifact is written to `build/macos/`. The build downloads a pinned
 Node.js 22.17.1 archive from nodejs.org, verifies its SHA-256 checksum, installs
 production dependencies with that runtime, builds the Swift executables, and
