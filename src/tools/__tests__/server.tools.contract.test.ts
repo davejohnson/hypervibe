@@ -6,6 +6,7 @@ import path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { HYPERVIBE_VERSION } from '../../version.js';
 
 let tempDir: string;
 
@@ -55,6 +56,16 @@ async function makeClient() {
 }
 
 describe('server tool surface', () => {
+  it('identifies the MCP server with the package version', async () => {
+    const { client, server } = await makeClient();
+    expect(client.getServerVersion()).toEqual({
+      name: 'hypervibe',
+      version: HYPERVIBE_VERSION,
+    });
+    await client.close();
+    await server.close();
+  });
+
   it('registers exactly the 42 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();

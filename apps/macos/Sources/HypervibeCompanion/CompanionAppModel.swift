@@ -43,7 +43,9 @@ final class CompanionAppModel: ObservableObject {
     private let cache = SnapshotCache(
         fileURL: SnapshotCache.defaultFileURL()
     )
-    private let mcpClient = HypervibeMCPClient()
+    private let mcpClient = HypervibeMCPClient(
+        clientVersion: CompanionDistribution.currentVersion ?? "development"
+    )
     private let mcpHostConfigurator = MCPHostConfigurator()
     private let releaseClient = GitHubReleaseClient()
     private let updateInstaller = CompanionUpdateInstaller()

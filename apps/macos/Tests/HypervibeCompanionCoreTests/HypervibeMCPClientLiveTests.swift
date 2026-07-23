@@ -23,7 +23,7 @@ struct HypervibeMCPClientLiveTests {
             hypervibeDataDirectory: environment["HYPERVIBE_COMPANION_TEST_DATA_DIR"]
         )
 
-        let client = HypervibeMCPClient()
+        let client = HypervibeMCPClient(clientVersion: "integration-test")
         let refresh = try await client.refresh(project: project)
         let snapshot = refresh.snapshot
 

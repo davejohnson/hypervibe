@@ -14,6 +14,7 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { tunnelManager } from '../../adapters/providers/tunnel/tunnel.manager.js';
 import { createToolContext } from '../context.js';
 import { registerHvDevxTools } from '../hv-devx.tools.js';
+import { HYPERVIBE_VERSION } from '../../version.js';
 
 let tempDir: string;
 
@@ -67,7 +68,7 @@ describe('hv_upgrade', () => {
 
     const status = await t.call('hv_upgrade');
     expect(status.ok).toBe(true);
-    expect(status.data.hypervibe.version).toBeTypeOf('string');
+    expect(status.data.hypervibe.version).toBe(HYPERVIBE_VERSION);
     expect(status.data.storage.databasePath).toContain('test.db');
     expect(status.data.sqlite.needsMigration).toBe(false);
     expect(status.data.sqlite.currentVersion).toBe(status.data.sqlite.latestVersion);

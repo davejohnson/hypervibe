@@ -46,8 +46,12 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
 
 public actor HypervibeMCPClient {
     private let encoder = JSONEncoder()
+    public nonisolated let clientVersion: String
 
-    public init() {}
+    public init(clientVersion: String) {
+        let normalized = clientVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.clientVersion = normalized.isEmpty ? "development" : normalized
+    }
 
     public func refresh(
         project: CompanionProject,
@@ -316,7 +320,7 @@ public actor HypervibeMCPClient {
         )
         let client = Client(
             name: "hypervibe-companion",
-            version: "0.1.0",
+            version: clientVersion,
             title: "Hypervibe Companion",
             configuration: .strict
         )

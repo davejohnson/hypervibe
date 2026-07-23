@@ -43,6 +43,7 @@ import { registerHvPaymentsTools } from './tools/hv-payments.tools.js';
 import { registerHvCiTools } from './tools/hv-ci.tools.js';
 import { registerHvAppstoreTools } from './tools/hv-appstore.tools.js';
 import { registerHvDevxTools } from './tools/hv-devx.tools.js';
+import { HYPERVIBE_VERSION } from './version.js';
 
 export const HYPERVIBE_SERVER_INSTRUCTIONS = [
   'Hypervibe manages deployment infrastructure (hosting, databases, DNS, email, secrets, CI) through its hv_* tools.',
@@ -58,7 +59,7 @@ export function createServer(): McpServer {
   const server = new McpServer(
     {
       name: 'hypervibe',
-      version: '0.1.0',
+      version: HYPERVIBE_VERSION,
     },
     {
       instructions: HYPERVIBE_SERVER_INSTRUCTIONS,
