@@ -110,6 +110,14 @@ The companion holds a user-scoped advisory process lock for its lifetime.
 Launching another packaged or development copy activates the existing process
 and exits before showing a second menu bar item.
 
+On its first launch from a stable Applications path, the packaged companion
+registers the main app with `SMAppService` so it opens after future user
+sign-ins. The actual registration and approval status remains owned by macOS;
+Hypervibe stores only whether it has performed the one-time default setup. A
+Settings toggle can unregister or restore the login item, surfaces denied or
+approval-required states honestly, and opens the system Login Items panel when
+approval is needed. Development builds never register themselves.
+
 The companion compares its bundle version with the latest published release
 from `davejohnson/hypervibe` on GitHub. A newer stable release is eligible only
 when it contains the exact DMG name for the running architecture and GitHub
@@ -429,6 +437,8 @@ scope.
 - Removing the companion's Application Support directory loses no infrastructure state.
 - Existing MCP tool names and lifecycle behavior remain unchanged for v0.
 - A clean Mac does not require a separate Node.js or Hypervibe installation.
+- The first packaged launch enables start-at-login once, user opt-out persists,
+  and development builds never create a login item.
 - The companion offers an update only for a strictly newer GitHub release with
   a matching architecture asset and SHA-256 digest.
 - A failed update before replacement leaves the installed app untouched; a

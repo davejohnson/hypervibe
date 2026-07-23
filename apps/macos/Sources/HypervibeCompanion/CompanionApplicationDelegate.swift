@@ -20,6 +20,10 @@ final class CompanionApplicationDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        CompanionLoginItemSystem.controller.configureOnFirstLaunch()
+    }
+
     private func activateExistingInstance(processIdentifier: Int32?) {
         let existing = processIdentifier.flatMap {
             NSRunningApplication(processIdentifier: $0)

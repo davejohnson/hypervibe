@@ -52,6 +52,12 @@ enum CompanionDistribution {
         includesBundledServer && hasStableInstallationPath
     }
 
+    static var canRegisterForLogin: Bool {
+        launcherOverride == nil
+            && Bundle.main.bundleURL.pathExtension.lowercased() == "app"
+            && hasStableInstallationPath
+    }
+
     static let installationGuidance =
         "Move Hypervibe to Applications, reopen it there, then connect your coding agent."
 
