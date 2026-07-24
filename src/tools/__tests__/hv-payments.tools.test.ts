@@ -129,6 +129,64 @@ describe('hv_payments_setup', () => {
     expect(res.error.code).toBe('VALIDATION');
     await t.close();
   });
+
+  it('rejects a mode that conflicts with the scoped environment key', async () => {
+    const t = await makeClient();
+    const res = await t.call('hv_payments_setup', {
+      env: 'staging',
+      mode: 'live',
+      action: 'webhooks-list',
+    });
+    expect(res.ok).toBe(false);
+    expect(res.error.code).toBe('VALIDATION');
+    expect(res.error.message).toContain('uses sandbox keys');
+    await t.close();
+  });
+
+  it('never exposes a newly created signing secret when hosting sync fails', async () => {
+    const project = new ProjectRepository().create({ name: 'pay-app', defaultPlatform: 'railway' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { api: { serviceId: 'rs-1' } },
+      },
+    });
+    new ServiceRepository().create({ projectId: project.id, name: 'api' });
+    vi.spyOn(StripeAdapter.prototype, 'upsertWebhookEndpoint').mockResolvedValue({
+      endpoint: {
+        id: 'we_new',
+        url: 'https://pay-app.example.com/webhooks/stripe',
+        status: 'enabled',
+        enabled_events: ['checkout.session.completed'],
+        created: 1700000000,
+      } as any,
+      action: 'created',
+      secret: 'whsec_must_not_leak',
+    });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'railway',
+        setEnvVars: vi.fn(async () => ({ success: false, message: 'provider rejected update' })),
+      } as any,
+    });
+    const t = await makeClient();
+
+    const res = await t.call('hv_payments_setup', {
+      project: 'pay-app',
+      env: 'staging',
+      url: 'https://pay-app.example.com/webhooks/stripe',
+    });
+    expect(res.ok).toBe(true);
+    expect(res.data.secretSynced).toBe(false);
+    expect(JSON.stringify(res)).not.toContain('whsec_must_not_leak');
+    expect(res.hint).toContain('delete Stripe webhook we_new');
+    await t.close();
+  });
 });
 
 describe('hv_stripe_sync', () => {

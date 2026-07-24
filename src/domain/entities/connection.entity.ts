@@ -30,8 +30,14 @@ export interface LocalCredentials {
 }
 
 export interface StripeCredentials {
+  /** Preferred shape for a connection scoped to one named Stripe environment. */
+  secretKey?: string;
+  publishableKey?: string;
+  /** Legacy global connection fields. */
   sandboxSecretKey?: string;
+  sandboxPublishableKey?: string;
   liveSecretKey?: string;
+  livePublishableKey?: string;
 }
 
 export interface CloudflareCredentials {

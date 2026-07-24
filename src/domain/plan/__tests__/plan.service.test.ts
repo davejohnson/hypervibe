@@ -23,6 +23,7 @@ import { hashEnvValue, type ObservedState } from '../../ports/observe.port.js';
 import type { Project } from '../../entities/project.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
 import { buildBranchDeployWorkflow } from '../../services/github-ops.service.js';
+import { StripeAdapter } from '../../../adapters/providers/stripe/stripe.adapter.js';
 
 let project: Project;
 
@@ -171,6 +172,116 @@ describe('PlanService.plan', () => {
     expect(doc.kind).toBe('hv_plan');
     expect(doc.specRevision).toBe(plan.specRevision);
     expect(doc.observedFingerprint).toBeTruthy();
+  });
+
+  it('persists hash-only Stripe environment drift with service dependencies', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          payments: {
+            stripe: {
+              prices: {
+                STRIPE_STARTER_MONTHLY_PRICE_ID: {
+                  product: 'Starter',
+                  match: 'contains',
+                  interval: 'month',
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { web: { serviceId: 's-1' } },
+      },
+    });
+    new ServiceRepository().create({ projectId: project.id, name: 'web' });
+    const connectionRepo = new ConnectionRepository();
+    for (const input of [
+      {
+        provider: 'railway',
+        credentials: { apiToken: 'railway-token' },
+        scope: undefined,
+      },
+      {
+        provider: 'stripe',
+        credentials: { secretKey: 'sk_test_staging' },
+        scope: 'staging',
+      },
+    ]) {
+      const connection = connectionRepo.create({
+        provider: input.provider,
+        scope: input.scope,
+        credentialsEncrypted: getSecretStore().encryptObject(input.credentials),
+      });
+      connectionRepo.updateStatus(connection.id, 'verified');
+    }
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 're-1',
+      services: [{
+        name: 'web',
+        externalId: 's-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'node old.js' },
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(StripeAdapter.prototype, 'listProducts').mockResolvedValue([{
+      id: 'prod_starter',
+      name: 'Invoice Perfect Starter',
+      description: null,
+      active: true,
+      metadata: {},
+      created: 1,
+      updated: 1,
+    }]);
+    vi.spyOn(StripeAdapter.prototype, 'listPrices').mockResolvedValue([{
+      id: 'price_starter_month',
+      product: 'prod_starter',
+      active: true,
+      currency: 'cad',
+      unit_amount: 4900,
+      recurring: { interval: 'month', interval_count: 1 },
+      type: 'recurring',
+      metadata: {},
+      nickname: null,
+      created: 1,
+    }]);
+
+    const result = await new PlanService().plan(project, 'staging');
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const payment = plan.actions.find((action) => action.resource.kind === 'payment')!;
+    expect(payment).toMatchObject({
+      type: 'update',
+      dependsOn: ['service:web'],
+      diff: [{ field: 'env:STRIPE_STARTER_MONTHLY_PRICE_ID' }],
+    });
+    const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+    expect(document.integrationFingerprints).toMatchObject({ stripe: expect.any(String) });
+    expect(JSON.stringify(document)).not.toContain('price_starter_month');
+    expect(JSON.stringify(document)).not.toContain('sk_test_staging');
   });
 
   it('requires env-var retirement to be a separate release after service config converges', async () => {

@@ -398,15 +398,17 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   stripe: {
     provider: 'stripe',
     displayName: 'Stripe',
-    tokenType: 'Stripe secret key(s): sandboxSecretKey (sk_test_...) and/or liveSecretKey (sk_live_...). Restricted keys (rk_...) are not accepted by the credential schema',
+    tokenType: 'Stripe environment key pair: secretKey (sk_test_... for a named sandbox, sk_live_... for production) and optional publishableKey (pk_test_.../pk_live_...). Legacy global sandboxSecretKey/liveSecretKey fields remain supported. Restricted keys (rk_...) are not accepted',
     setupUrl: 'https://dashboard.stripe.com/apikeys',
     permissions: [
       'The key must be able to read the account, read/write Products and Prices, read/write Customers, and read/write Webhook Endpoints. A standard secret key covers all of these.',
+      'Create a separate scoped connection for each isolated Stripe sandbox and for production; the scope should match payments.stripe.environment (normally development, staging, or production).',
     ],
-    credentialExample: 'hv_connect provider="stripe" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"sandboxSecretKey":"STRIPE_SANDBOX_SECRET_KEY","liveSecretKey":"STRIPE_LIVE_SECRET_KEY"}',
+    credentialExample: 'hv_connect provider="stripe" scope="staging" credentialsRef="file:/absolute/path/stripe-staging.json" where the JSON is {"secretKey":"<sk_test_...>","publishableKey":"<pk_test_...>"}',
     notes: [
-      'Sandbox keys come from the sandbox dashboard (https://dashboard.stripe.com/test/apikeys) and start with sk_test_; live keys start with sk_live_. Either or both can be connected; hv_stripe_sync between sandbox and live requires both.',
-      'Verification uses the live key when both are configured, otherwise the sandbox key.',
+      'Open the intended named sandbox first, then create/reveal its keys in the Stripe Dashboard (https://dashboard.stripe.com/test/apikeys). Stripe sandbox access/key guidance: https://docs.stripe.com/sandboxes/dashboard/manage-access. Keys are isolated to that sandbox.',
+      'For an existing dotenv file, use credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}; omit publishableKey from both the spec credential projection and credentialsMap if it is unavailable.',
+      'A global legacy connection can still carry sandboxSecretKey/sandboxPublishableKey plus liveSecretKey/livePublishableKey, but separate scoped connections are required when development and staging use different Stripe sandboxes.',
     ],
   },
   supabase: {

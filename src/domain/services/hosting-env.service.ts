@@ -51,6 +51,8 @@ export async function syncHostingEnvVars(params: {
   environment: Environment;
   service: Service;
   vars: Record<string, string>;
+  /** Keep exact-SHA CI as the next code release boundary when supported. */
+  deferDeployment?: boolean;
 }): Promise<Receipt & { provider?: string }> {
   const provider = hostingProviderForEnvironment(params.project, params.environment);
   const displayName = providerDisplayName(provider);
@@ -84,7 +86,20 @@ export async function syncHostingEnvVars(params: {
     };
   }
 
-  const receipt = await adapter.setEnvVars(params.environment, params.service, params.vars);
+  const deferDeployment = params.deferDeployment === true
+    && adapter.capabilities?.supportsDeferredDeploy === true;
+  const receipt = deferDeployment
+    ? await adapter.setEnvVars(
+      params.environment,
+      params.service,
+      params.vars,
+      { deferDeployment: true }
+    )
+    : await adapter.setEnvVars(
+      params.environment,
+      params.service,
+      params.vars
+    );
   return {
     ...receipt,
     provider,
@@ -93,6 +108,7 @@ export async function syncHostingEnvVars(params: {
       provider,
       service: params.service.name,
       variableCount: Object.keys(params.vars).length,
+      ...(deferDeployment ? { deploymentDeferred: true } : {}),
     },
   };
 }

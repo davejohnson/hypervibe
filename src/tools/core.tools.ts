@@ -36,6 +36,7 @@ import {
 import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.js';
 import { githubSpecNeedsOpenAI } from '../domain/services/github-infrastructure.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from './apply-plan.js';
@@ -643,7 +644,18 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         observed,
       });
       const delegatedSecretDrift = delegatedSecrets.actions.filter((action) => action.type !== 'noop');
-      const blocked = planService.preflight(envSpec);
+      const stripeSync = await planStripeEnvironmentSync({
+        environmentName: envName,
+        environmentSpec: envSpec,
+        observed,
+      });
+      const stripeDrift = stripeSync.actions.filter((action) => action.type !== 'noop');
+      const blocked = planService.preflight(envSpec, envName);
+      for (const stripeBlock of stripeSync.blocked) {
+        if (!blocked.some((entry) => entry.provider === 'stripe' && entry.scope === stripeBlock.scope)) {
+          blocked.push(stripeBlock);
+        }
+      }
       const iosGroupActions = ios.actions.filter((action) => action.id.startsWith('ios:group:'));
       const iosStatus = envSpec.ios
         ? {
@@ -688,9 +700,9 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
               }),
             }
             : {}),
-          inSync: drift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0,
-          summary: summarizeActions([...diff.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions]),
-          drift: [...drift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift],
+          inSync: drift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0,
+          summary: summarizeActions([...diff.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions]),
+          drift: [...drift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift],
           unmanaged: [...diff.unmanaged, ...storage.unmanaged],
           inputRequired: delegatedSecrets.inputRequired.length > 0 ? delegatedSecrets.inputRequired : undefined,
           blocked,
@@ -708,7 +720,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           },
         },
         {
-          warnings: [...warnings, ...diff.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings],
+          warnings: [...warnings, ...diff.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings],
           hint: blocked.length > 0
             ? connectionRecoveryHint(blocked, {
               after: 'After the connection verifies, rerun hv_status or hv_plan. Do not ask to run hv_plan for DNS/domain drift until the required connection is verified.',
@@ -719,7 +731,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
                 ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
               : delegatedSecrets.inputRequired.length > 0
                 ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
-              : drift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
+              : drift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
           next: blocked.length > 0 ? ['hv_connect'] : undefined,
         }
       );

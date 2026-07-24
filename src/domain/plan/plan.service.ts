@@ -54,6 +54,11 @@ import {
   githubInfrastructureConnectionBlock,
   planGitHubInfrastructure,
 } from '../services/github-infrastructure.service.js';
+import {
+  planStripeEnvironmentSync,
+  stripeEnvironmentName,
+  stripeManagedEnvKeys,
+} from '../services/stripe-env.service.js';
 
 export interface PlanOptions {
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
@@ -297,7 +302,7 @@ export class PlanService {
   }
 
   /** Connections that must exist+verify before apply can run. */
-  preflight(environmentSpec: EnvironmentSpec): Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }> {
+  preflight(environmentSpec: EnvironmentSpec, environmentName?: string): Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }> {
     const blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }> = [];
     const required: Array<{ provider: string; scopeHints?: string[] }> = [
       { provider: environmentSpec.hosting.provider },
@@ -309,6 +314,17 @@ export class PlanService {
     }
     if (environmentSpec.email.enabled) required.push({ provider: 'sendgrid' });
     if (environmentUsesGitHubActionsDeploy(environmentSpec)) required.push({ provider: 'github' });
+    if (environmentSpec.payments?.stripe) {
+      required.push({
+        provider: 'stripe',
+        scopeHints: [
+          stripeEnvironmentName(
+            environmentName ?? environmentSpec.payments.stripe.environment ?? 'sandbox',
+            environmentSpec.payments.stripe
+          ),
+        ],
+      });
+    }
 
     const seen = new Set<string>();
     for (const requirement of required) {
@@ -476,6 +492,13 @@ export class PlanService {
         error: `envVars cannot supply explicitly retired keys: ${retiredOverrideCollisions.join(', ')}. Remove the override or remove the key from removeEnvVars.`,
       };
     }
+    const stripeOverrideCollisions = Object.keys(envVarOverrides ?? {})
+      .filter((key) => stripeManagedEnvKeys(environmentSpec).includes(key));
+    if (stripeOverrideCollisions.length > 0) {
+      return {
+        error: `Stripe-managed keys cannot be passed through envVars: ${stripeOverrideCollisions.join(', ')}. Configure environments.${environmentName}.payments.stripe instead.`,
+      };
+    }
     const delegatedOverrideCollisions = Object.keys(envVarOverrides ?? {}).filter((key) => delegatedSecretSlots.has(key));
     if (delegatedOverrideCollisions.length > 0) {
       return {
@@ -590,6 +613,7 @@ export class PlanService {
       ...Object.keys(managedDatabaseEnvVars ?? {}),
       ...Object.keys(managedQueueEnvVars ?? {}),
       ...delegatedSecretSlots.keys(),
+      ...stripeManagedEnvKeys(environmentSpec),
       ...(environmentSpec.database ? DATABASE_ENV_KEYS : []),
       ...(environmentSpec.queues && Object.keys(environmentSpec.queues).length > 0
         ? [
@@ -645,7 +669,7 @@ export class PlanService {
       managedQueueEnvVars,
     });
     const blocked = [
-      ...this.preflight(environmentSpec),
+      ...this.preflight(environmentSpec, environmentName),
       ...this.projectPreflight(projectForPlan, specResult.spec, environmentName),
     ];
     const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
@@ -689,6 +713,30 @@ export class PlanService {
       else actions.splice(firstServiceIndex, 0, ...followupActions);
     }
     actions.push(...delegatedSecrets.actions);
+    const stripeSync = serviceFilter
+      ? { actions: [], warnings: [], blocked: [], fingerprint: undefined }
+      : await planStripeEnvironmentSync({
+        environmentName,
+        environmentSpec,
+        observed,
+      });
+    for (const stripeAction of stripeSync.actions) {
+      const serviceAction = actions.find((action) =>
+        action.id === `service:${stripeAction.resource.name}`
+      );
+      if (serviceAction && serviceAction.type !== 'noop') {
+        stripeAction.dependsOn = [
+          ...(stripeAction.dependsOn ?? []),
+          serviceAction.id,
+        ];
+      }
+    }
+    actions.push(...stripeSync.actions);
+    for (const stripeBlock of stripeSync.blocked) {
+      if (!blocked.some((entry) => entry.provider === 'stripe' && entry.scope === stripeBlock.scope)) {
+        blocked.push(stripeBlock);
+      }
+    }
 
     const removalRolloutConflicts = actions.some((action) =>
       action.metadata?.operation === 'hostingEnvRemove'
@@ -696,7 +744,7 @@ export class PlanService {
       ? actions.filter((action) =>
         action.type !== 'noop'
         && action.metadata?.operation !== 'hostingEnvRemove'
-        && ['project', 'environment', 'service', 'database', 'storage', 'queue', 'secret']
+        && ['project', 'environment', 'service', 'database', 'storage', 'queue', 'secret', 'payment']
           .includes(action.resource.kind)
       )
       : [];
@@ -710,7 +758,7 @@ export class PlanService {
     // prerequisites for CI setup — an unconfirmed destroy must not block the
     // workflow sync.
     const ciDependsOn = actions
-      .filter((action) => action.type !== 'noop' && action.type !== 'destroy' && ['project', 'environment', 'service'].includes(action.resource.kind))
+      .filter((action) => action.type !== 'noop' && action.type !== 'destroy' && ['project', 'environment', 'service', 'payment'].includes(action.resource.kind))
       .map((action) => action.id);
     const ciBindingsWillChange = actions.some((action) =>
       action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace')
@@ -861,9 +909,12 @@ export class PlanService {
       environmentName,
       specRevision: specResult.revision,
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
+      ...(stripeSync.fingerprint
+        ? { integrationFingerprints: { stripe: stripeSync.fingerprint } }
+        : {}),
       actions,
       unmanaged: [...diff.unmanaged, ...storage.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...filterWarnings],
       ...(delegatedSecrets.inputRequired.length > 0 ? { inputRequired: delegatedSecrets.inputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };

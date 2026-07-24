@@ -56,6 +56,12 @@ import {
   isHostingEnvRemovalAction,
   removeHostingEnvVars,
 } from '../domain/services/hosting-env.service.js';
+import {
+  applyStripeHostingEnvSync,
+  isStripeHostingEnvSyncAction,
+  resolveStripeEnvironmentValues,
+  stripeResolutionFingerprint,
+} from '../domain/services/stripe-env.service.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
@@ -321,7 +327,7 @@ export async function executePlanApply(ctx: ToolContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const blocked = [
-    ...planService.preflight(envSpec),
+    ...planService.preflight(envSpec, envName),
     ...planService.projectPreflight(projectForPreflight, spec, envName),
   ];
   const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions);
@@ -329,6 +335,28 @@ export async function executePlanApply(ctx: ToolContext, params: {
   const applyBlocked = [...hardBlocked, ...connectBeforeApply];
   if (applyBlocked.length > 0) {
     return { kind: 'blocked', applyBlocked };
+  }
+  let freshIntegrationFingerprints: Record<string, string> | undefined;
+  if (envSpec.payments?.stripe) {
+    const stripeResolution = await resolveStripeEnvironmentValues({
+      environmentName: envName,
+      spec: envSpec.payments.stripe,
+      verifiedConnection: true,
+    });
+    if (!stripeResolution.success) {
+      return {
+        kind: 'blocked',
+        applyBlocked: [{
+          provider: 'stripe',
+          scope: stripeResolution.stripeEnvironment,
+          reason: stripeResolution.error,
+          policy: 'hard',
+        }],
+      };
+    }
+    freshIntegrationFingerprints = {
+      stripe: stripeResolutionFingerprint(stripeResolution),
+    };
   }
   const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
   const actionScopedWarnings = softActionScopedBlocked.map((entry) =>
@@ -473,6 +501,26 @@ export async function executePlanApply(ctx: ToolContext, params: {
       const result = await ensureBootstrap();
       return bootstrapActionResultFromSummary(action, result);
     }
+    if (isStripeHostingEnvSyncAction(action)) {
+      const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      const service = ctx.repos.services.findByProjectAndName(project.id, action.resource.name);
+      if (!latestEnvironment || !service) {
+        return {
+          success: false,
+          message: `Cannot sync Stripe runtime variables to ${action.resource.name}`,
+          error: !latestEnvironment
+            ? `Environment "${envName}" is not tracked locally`
+            : `Service "${action.resource.name}" is not tracked locally`,
+        };
+      }
+      return applyStripeHostingEnvSync({
+        project: applyProject,
+        environment: latestEnvironment,
+        environmentSpec: envSpec,
+        service,
+        action,
+      });
+    }
     if (isHostingEnvRemovalAction(action)) {
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
       const service = ctx.repos.services.findByProjectAndName(project.id, action.resource.name);
@@ -522,6 +570,7 @@ export async function executePlanApply(ctx: ToolContext, params: {
     confirmActions: params.confirmActions,
     currentSpecRevision: params.specRevision,
     freshObservedFingerprint: freshFingerprint,
+    freshIntegrationFingerprints,
     handler,
   });
 
