@@ -19,6 +19,8 @@ export interface PlanRunDocument {
   specRevision: number;
   /** Fingerprint of observed state at plan time; null when provider is unobservable. */
   observedFingerprint: string | null;
+  /** Hash-only fingerprints for additional live integrations observed by the plan. */
+  integrationFingerprints?: Record<string, string>;
   actions: PlanAction[];
   unmanaged?: Array<{ kind: string; name: string; detail?: string }>;
   warnings?: string[];
@@ -64,6 +66,8 @@ export interface ConvergeParams {
    * Pass null when the provider is unobservable; undefined skips the check.
    */
   freshObservedFingerprint?: string | null;
+  /** Fresh hash-only integration observations used in the same stale-plan gate. */
+  freshIntegrationFingerprints?: Record<string, string>;
   /** Executes a single non-noop action. */
   handler: ActionHandler;
   /** Maximum plan age before it must be regenerated. Default 24h. */
@@ -206,6 +210,18 @@ export class ConvergeExecutor {
         error: 'Live infrastructure changed since this plan was created. Re-run hv_plan.',
         receipts: [],
       };
+    }
+    if (document.integrationFingerprints) {
+      const fresh = params.freshIntegrationFingerprints ?? {};
+      const staleIntegration = Object.entries(document.integrationFingerprints)
+        .find(([name, fingerprint]) => fresh[name] !== fingerprint);
+      if (staleIntegration) {
+        return {
+          success: false,
+          error: `${staleIntegration[0]} changed since this plan was created. Re-run hv_plan.`,
+          receipts: [],
+        };
+      }
     }
 
     // Reject double-apply of the same plan.

@@ -69,14 +69,21 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
       service: z.string().optional().describe('Service to set STRIPE_WEBHOOK_SECRET on (setup). Defaults to the first service in the project.'),
     },
     wrapHandler(async ({ project: projectRef, env, action = 'setup', webhookId, url, mode, service: serviceName }) => {
-      const stripeResult = getStripeAdapter();
+      const stripeResult = getStripeAdapter(env);
       if ('error' in stripeResult) {
         return toolError('MISSING_CONNECTION', stripeResult.error, {
           details: { connectionSetup: connectionSetupDetails('stripe') },
         });
       }
       const { adapter } = stripeResult;
-      const stripeMode = resolveMode(mode, env);
+      if (env && mode && mode !== stripeResult.mode) {
+        return toolError(
+          'VALIDATION',
+          `Stripe connection scope "${env}" uses ${stripeResult.mode} keys, so mode="${mode}" would target the wrong environment.`,
+          { hint: `Omit mode to use the scoped connection, or connect the intended Stripe environment under a different scope. ${connectionSetupDetails('stripe', { scope: env }).credentialExample}` }
+        );
+      }
+      const stripeMode = mode ?? (env ? stripeResult.mode : resolveMode(undefined, undefined));
 
       switch (action) {
         case 'webhooks-list': {
@@ -154,9 +161,8 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
               data.secretSynced = true;
               hint = `Webhook created and STRIPE_WEBHOOK_SECRET synced to ${service.name} in ${environment.name}${sync.provider ? ` on ${providerDisplayName(sync.provider)}` : ''}.`;
             } else {
-              data.signingSecret = upsert.secret;
               warnings.push(`Failed to sync the signing secret: ${sync.error || sync.message}`);
-              hint = 'The signing secret is included in the response — set STRIPE_WEBHOOK_SECRET on the service manually.';
+              hint = `The signing secret was not exposed. Fix the hosting connection/binding, delete Stripe webhook ${upsert.endpoint.id}, and re-run setup to create a new endpoint and sync its new secret.`;
             }
           } else {
             hint = 'Webhook already existed; the signing secret is unchanged. Delete it (action="webhook-delete") and re-run setup to rotate the secret.';

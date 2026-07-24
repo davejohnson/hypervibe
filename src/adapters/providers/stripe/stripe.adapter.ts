@@ -29,6 +29,7 @@ export interface StripePrice {
   type: 'one_time' | 'recurring';
   metadata: Record<string, string>;
   nickname: string | null;
+  lookup_key?: string | null;
   created: number;
 }
 
@@ -79,6 +80,19 @@ export const STRIPE_COMMON_WEBHOOK_EVENTS = [
 
 // Credentials schema for self-registration
 export const StripeCredentialsSchema = z.object({
+  /**
+   * Preferred shape for an environment-scoped Stripe connection
+   * (hv_connect provider="stripe" scope="staging" ...).
+   */
+  secretKey: z.string().optional().refine(
+    (key) => !key || key.startsWith('sk_test_') || key.startsWith('sk_live_'),
+    'Secret key must start with sk_test_ or sk_live_'
+  ),
+  publishableKey: z.string().optional().refine(
+    (key) => !key || key.startsWith('pk_test_') || key.startsWith('pk_live_'),
+    'Publishable key must start with pk_test_ or pk_live_'
+  ),
+  /** Legacy global connection fields retained for compatibility. */
   sandboxSecretKey: z.string().optional().refine(
     (key) => !key || key.startsWith('sk_test_'),
     'Sandbox secret key must start with sk_test_'
@@ -95,10 +109,45 @@ export const StripeCredentialsSchema = z.object({
     (key) => !key || key.startsWith('pk_live_'),
     'Live publishable key must start with pk_live_'
   ),
-}).refine(
-  (data) => data.sandboxSecretKey || data.liveSecretKey,
-  'At least one of sandboxSecretKey or liveSecretKey is required'
-);
+}).superRefine((data, ctx) => {
+  if (!data.secretKey && !data.sandboxSecretKey && !data.liveSecretKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'secretKey, sandboxSecretKey, or liveSecretKey is required',
+    });
+  }
+  if (data.publishableKey && data.secretKey) {
+    const secretIsLive = data.secretKey.startsWith('sk_live_');
+    const publishableIsLive = data.publishableKey.startsWith('pk_live_');
+    if (secretIsLive !== publishableIsLive) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'secretKey and publishableKey must belong to the same Stripe mode',
+        path: ['publishableKey'],
+      });
+    }
+  }
+  const hasScopedShape = Boolean(data.secretKey || data.publishableKey);
+  const hasLegacyShape = Boolean(
+    data.sandboxSecretKey
+    || data.sandboxPublishableKey
+    || data.liveSecretKey
+    || data.livePublishableKey
+  );
+  if (hasScopedShape && hasLegacyShape) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Do not mix environment-scoped secretKey/publishableKey with legacy global sandbox/live fields',
+    });
+  }
+  if (data.publishableKey && !data.secretKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'publishableKey requires the matching environment-scoped secretKey',
+      path: ['publishableKey'],
+    });
+  }
+});
 
 export type StripeCredentials = z.infer<typeof StripeCredentialsSchema>;
 
@@ -115,11 +164,33 @@ export class StripeAdapter {
       throw new Error('Not connected. Call connect() first.');
     }
 
-    const key = mode === 'sandbox' ? this.credentials.sandboxSecretKey : this.credentials.liveSecretKey;
+    const key = this.credentials.secretKey
+      ?? (mode === 'sandbox' ? this.credentials.sandboxSecretKey : this.credentials.liveSecretKey);
     if (!key) {
-      throw new Error(`No ${mode} Stripe secret key configured. Connect with sandboxSecretKey (sk_test_...) and/or liveSecretKey (sk_live_...).`);
+      throw new Error(`No ${mode} Stripe secret key configured. Use an environment-scoped secretKey, or a legacy global sandboxSecretKey/liveSecretKey.`);
     }
     return key;
+  }
+
+  /**
+   * Runtime key material for the selected Stripe mode. Callers must keep these
+   * values inside provider mutation boundaries and never include them in
+   * plans, logs, warnings, bindings, or receipts.
+   */
+  getRuntimeCredentials(mode: StripeMode): { secretKey: string; publishableKey?: string; mode: StripeMode } {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const secretKey = this.getApiKey(mode);
+    const publishableKey = this.credentials.publishableKey
+      ?? (mode === 'sandbox'
+        ? this.credentials.sandboxPublishableKey
+        : this.credentials.livePublishableKey);
+    return {
+      secretKey,
+      ...(publishableKey ? { publishableKey } : {}),
+      mode: secretKey.startsWith('sk_live_') ? 'live' : 'sandbox',
+    };
   }
 
   private async request<T>(
@@ -182,12 +253,13 @@ export class StripeAdapter {
     return pairs.filter(Boolean).join('&');
   }
 
-  async verify(mode?: StripeMode): Promise<{ success: boolean; error?: string; accountId?: string }> {
+  async verify(modeOrScope?: StripeMode | string): Promise<{ success: boolean; error?: string; accountId?: string }> {
     // The generic connection-verify path passes no mode; default to whichever
     // key is configured (live wins when both are) instead of failing a
     // sandbox-only connection by always reaching for the live key.
-    const resolvedMode: StripeMode = mode
-      ?? (this.credentials?.liveSecretKey ? 'live' : 'sandbox');
+    const resolvedMode: StripeMode = modeOrScope === 'live' || modeOrScope === 'sandbox'
+      ? modeOrScope
+      : (this.credentials?.secretKey?.startsWith('sk_live_') || this.credentials?.liveSecretKey ? 'live' : 'sandbox');
     try {
       const result = await this.request<{ id: string }>(resolvedMode, 'GET', '/account');
       return { success: true, accountId: result.id };
@@ -439,7 +511,7 @@ export class StripeAdapter {
   }
 
   async clearCustomers(mode: StripeMode): Promise<{ deleted: number; errors: Array<{ id: string; error: string }> }> {
-    if (mode === 'live') {
+    if (this.getRuntimeCredentials(mode).mode === 'live') {
       throw new Error('Refusing to clear customers in live mode. This operation is only allowed in sandbox.');
     }
 
