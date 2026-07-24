@@ -447,6 +447,82 @@ export const storageSpecSchema = z.object({
   injectInto: z.array(z.string().min(1)).min(1),
 }).strict();
 
+const runtimeEnvVarNameSchema = z.string().regex(
+  /^[A-Za-z_][A-Za-z0-9_]*$/,
+  'runtime environment variable names must start with a letter or underscore and contain only letters, numbers, and underscores'
+);
+
+export const stripePriceEnvBindingSpecSchema = z.object({
+  /**
+   * Stripe product id (prod_...) or product name. Name matching is exact
+   * unless match="contains" is explicitly selected for legacy catalogs.
+   */
+  product: z.string().min(1),
+  match: z.enum(['exact', 'contains']).default('exact'),
+  interval: z.enum(['day', 'week', 'month', 'year']),
+  currency: z.string().regex(/^[A-Za-z]{3}$/, 'currency must be a three-letter code').transform((value) => value.toLowerCase()).optional(),
+  nickname: z.string().min(1).optional(),
+  lookupKey: z.string().min(1).optional(),
+}).strict();
+
+export const stripeEnvironmentSyncSpecSchema = z.object({
+  /**
+   * Stripe connection scope. Defaults to this Hypervibe environment name,
+   * allowing development/staging/production to use isolated Stripe sandboxes.
+   */
+  environment: z.string().min(1).optional(),
+  /** Services receiving the managed Stripe variables. Defaults to every service. */
+  services: z.array(z.string().min(1)).min(1).optional(),
+  /**
+   * Opt-in runtime credential projection. Values come from the encrypted
+   * scoped Stripe connection and never enter the committed spec or plan.
+   */
+  credentials: z.object({
+    secretKeyEnvVar: runtimeEnvVarNameSchema.default('STRIPE_SECRET_KEY'),
+    publishableKeyEnvVar: runtimeEnvVarNameSchema.optional(),
+  }).strict().optional(),
+  /**
+   * Hosting env var -> active Stripe price selector. Selectors must resolve to
+   * exactly one active price in the configured Stripe environment.
+   */
+  prices: z.record(runtimeEnvVarNameSchema, stripePriceEnvBindingSpecSchema).default({}),
+}).strict().superRefine((stripe, ctx) => {
+  if (!stripe.credentials && Object.keys(stripe.prices).length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Stripe environment sync requires credentials and/or at least one price binding',
+    });
+  }
+  if (
+    stripe.credentials?.publishableKeyEnvVar
+    && stripe.credentials.publishableKeyEnvVar === stripe.credentials.secretKeyEnvVar
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Stripe secret and publishable keys must use different runtime environment variable names',
+      path: ['credentials'],
+    });
+  }
+  if (stripe.credentials) {
+    for (const key of [
+      stripe.credentials.secretKeyEnvVar,
+      ...(stripe.credentials.publishableKeyEnvVar ? [stripe.credentials.publishableKeyEnvVar] : []),
+    ]) {
+      if (key in stripe.prices) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe runtime credential variable "${key}" cannot also be a price binding`,
+          path: ['prices', key],
+        });
+      }
+    }
+  }
+});
+
+export const paymentsSpecSchema = z.object({
+  stripe: stripeEnvironmentSyncSpecSchema.optional(),
+}).strict();
+
 export const environmentSpecSchema = z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
@@ -478,6 +554,7 @@ export const environmentSpecSchema = z.object({
     z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'storage names: lowercase alphanumeric and dashes, starting with a letter'),
     storageSpecSchema
   ).optional(),
+  payments: paymentsSpecSchema.optional(),
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
 }).superRefine((environment, ctx) => {
@@ -547,6 +624,68 @@ export const environmentSpecSchema = z.object({
         });
       } else {
         storageByService.set(serviceName, storageName);
+      }
+    }
+  }
+  const stripe = environment.payments?.stripe;
+  if (stripe) {
+    const targetServices = stripe.services ?? Object.keys(environment.services);
+    if (targetServices.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Stripe environment sync requires at least one target service',
+        path: ['payments', 'stripe', 'services'],
+      });
+    }
+    const seenServices = new Set<string>();
+    for (const serviceName of targetServices) {
+      if (seenServices.has(serviceName)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe environment sync service "${serviceName}" is listed more than once`,
+          path: ['payments', 'stripe', 'services'],
+        });
+      }
+      seenServices.add(serviceName);
+      if (!environment.services[serviceName]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe environment sync targets unknown service "${serviceName}"`,
+          path: ['payments', 'stripe', 'services'],
+        });
+      }
+    }
+
+    const managedKeys = new Set([
+      ...Object.keys(stripe.prices),
+      ...(stripe.credentials
+        ? [
+          stripe.credentials.secretKeyEnvVar,
+          ...(stripe.credentials.publishableKeyEnvVar ? [stripe.credentials.publishableKeyEnvVar] : []),
+        ]
+        : []),
+    ]);
+    for (const key of managedKeys) {
+      if (key in environment.envVars) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe-managed environment variable "${key}" cannot also be declared in envVars`,
+          path: ['envVars', key],
+        });
+      }
+      if (environment.envFile?.include.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe-managed environment variable "${key}" cannot also be selected through envFile.include`,
+          path: ['envFile', 'include'],
+        });
+      }
+      if (environment.removeEnvVars?.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe-managed environment variable "${key}" cannot also be retired`,
+          path: ['removeEnvVars'],
+        });
       }
     }
   }
@@ -629,6 +768,23 @@ export const projectSpecSchema = z.object({
           path: ['environments', environmentName, 'removeEnvVars'],
         });
       }
+      const stripe = environment.payments?.stripe;
+      const stripeManagedKeys = new Set([
+        ...Object.keys(stripe?.prices ?? {}),
+        ...(stripe?.credentials
+          ? [
+            stripe.credentials.secretKeyEnvVar,
+            ...(stripe.credentials.publishableKeyEnvVar ? [stripe.credentials.publishableKeyEnvVar] : []),
+          ]
+          : []),
+      ]);
+      if (stripeManagedKeys.has(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" cannot also be managed by Stripe environment sync in "${environmentName}"`,
+          path: ['secrets', key],
+        });
+      }
     }
   }
 });
@@ -638,6 +794,9 @@ export type DatabaseSpec = z.infer<typeof databaseSpecSchema>;
 export type IosSpec = z.infer<typeof iosSpecSchema>;
 export type QueueSpec = z.infer<typeof queueSpecSchema>;
 export type StorageSpec = z.infer<typeof storageSpecSchema>;
+export type StripePriceEnvBindingSpec = z.infer<typeof stripePriceEnvBindingSpecSchema>;
+export type StripeEnvironmentSyncSpec = z.infer<typeof stripeEnvironmentSyncSpecSchema>;
+export type PaymentsSpec = z.infer<typeof paymentsSpecSchema>;
 export type IosTestflightGroupSpec = z.infer<typeof iosTestflightGroupSpecSchema>;
 export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema>;
 export type EnvFileSpec = z.infer<typeof envFileSpecSchema>;

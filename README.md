@@ -303,6 +303,106 @@ Tune this per environment in `.hypervibe/spec.json`:
 
 Modes are `runtime` (default), `all`, `explicit`, and `off`. Values loaded from the env file are encrypted into the plan and never printed. The plan warning names the env file path and selected keys so the agent can show the user exactly what source is being applied. Generated infrastructure values such as `DATABASE_URL` still win over stale local `.env` values.
 
+### Stripe environments and hosting env sync
+
+Use a separate scoped Stripe connection for each named Stripe sandbox and for
+production. The connection scope is the stable mapping between a Hypervibe
+environment and Stripe; it defaults to the Hypervibe environment name.
+
+For an existing Stripe dotenv file:
+
+```text
+hv_connect provider="stripe" scope="staging" credentialsRef="dotenv:/absolute/path/.env.stripe-sync.staging" credentialsMap={"secretKey":"STRIPE_SECRET_KEY"}
+```
+
+If the file also contains a publishable key:
+
+```text
+hv_connect provider="stripe" scope="staging" credentialsRef="dotenv:/absolute/path/.env.stripe-sync.staging" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}
+```
+
+Repeat with `scope="development"` for a development sandbox and
+`scope="production"` for Stripe live mode. Sandbox keys begin with `sk_test_`
+and `pk_test_`; production keys begin with `sk_live_` and `pk_live_`. Open the
+intended sandbox before revealing its API keys because each Stripe sandbox has
+its own isolated key pair and objects. See [Stripe sandbox management](https://docs.stripe.com/sandboxes/dashboard/manage)
+and [sandbox API-key access](https://docs.stripe.com/sandboxes/dashboard/manage-access).
+
+Then declare which Stripe-derived values Hypervibe owns on the hosting
+services. This replaces scripts that scrape price ids and call Railway
+directly:
+
+```json
+{
+  "payments": {
+    "stripe": {
+      "environment": "staging",
+      "services": ["web", "cron"],
+      "credentials": {
+        "secretKeyEnvVar": "STRIPE_SECRET_KEY",
+        "publishableKeyEnvVar": "STRIPE_PUBLISHABLE_KEY"
+      },
+      "prices": {
+        "STRIPE_STARTER_MONTHLY_PRICE_ID": {
+          "product": "Starter",
+          "match": "contains",
+          "interval": "month"
+        },
+        "STRIPE_STARTER_YEARLY_PRICE_ID": {
+          "product": "Starter",
+          "match": "contains",
+          "interval": "year"
+        },
+        "STRIPE_SMART_MONTHLY_PRICE_ID": {
+          "product": "Smart",
+          "match": "contains",
+          "interval": "month"
+        },
+        "STRIPE_SMART_YEARLY_PRICE_ID": {
+          "product": "Smart",
+          "match": "contains",
+          "interval": "year"
+        },
+        "STRIPE_CONNECTED_MONTHLY_PRICE_ID": {
+          "product": "Connected",
+          "match": "contains",
+          "interval": "month"
+        },
+        "STRIPE_CONNECTED_YEARLY_PRICE_ID": {
+          "product": "Connected",
+          "match": "contains",
+          "interval": "year"
+        },
+        "STRIPE_COMPLETE_MONTHLY_PRICE_ID": {
+          "product": "Complete",
+          "match": "contains",
+          "interval": "month"
+        },
+        "STRIPE_COMPLETE_YEARLY_PRICE_ID": {
+          "product": "Complete",
+          "match": "contains",
+          "interval": "year"
+        }
+      }
+    }
+  }
+}
+```
+
+`product` can be an exact product name or a `prod_...` id. Set
+`match: "contains"` only for catalogs whose display names contain the tier
+name, as in the Invoice Express script. If more than one active price matches,
+add `currency`, `nickname`, or `lookupKey`; Hypervibe blocks an ambiguous plan
+instead of choosing whichever Stripe happens to return last.
+
+`hv_plan` reads Stripe and hosting state, but persists only managed key names
+and hashes. `hv_apply` resolves the encrypted Stripe connection again and
+writes the values through the hosting adapter. With CI-triggered branch
+deploys, the env update is staged without an independent Railway deploy; the
+approved exact-SHA workflow remains the next code release. Stripe-managed keys
+cannot also be supplied through `envVars`, `.env` includes, delegated secrets,
+one-off overrides, or `removeEnvVars`.
+
 ### Retiring or renaming runtime variables
 
 Omitting a key from `envVars`, an env file, or a local secret input means

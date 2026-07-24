@@ -220,6 +220,38 @@ the later CI run and `hv_health` own that verification. New resources with no
 existing image may still require provider bootstrap before CI can target them,
 and receipts must report that honestly.
 
+## Stripe Environment Sync
+
+Stripe sandboxes are isolated environments with their own API keys and object
+ids. Model the relationship explicitly through
+`environments.<name>.payments.stripe`:
+
+- `payments.stripe.environment` selects a Stripe connection scope and defaults
+  to the Hypervibe environment name, so development, staging, and production
+  can use distinct Stripe sandboxes/live mode.
+- Scoped Stripe connections use `secretKey` plus optional `publishableKey`.
+  Legacy global sandbox/live credentials remain a compatibility fallback, but
+  cannot represent distinct development and staging sandboxes.
+- Runtime credential projection is explicit through
+  `payments.stripe.credentials`; Stripe price ids are selected declaratively
+  through `payments.stripe.prices`.
+- Price selectors must resolve to exactly one active product and one active
+  price. Ambiguity is blocked instead of silently choosing an id.
+- `hv_plan` observes Stripe values internally and compares only hashes against
+  hosting observation. Plans, warnings, bindings, receipts, and tool output
+  contain managed key names and selector diagnostics, never Stripe key values
+  or resolved runtime values.
+- `hv_apply` resolves the Stripe connection again and routes runtime changes
+  through the hosting adapter. For CI-triggered branch deploys, supported
+  adapters defer code deployment so the exact-SHA workflow remains the release
+  boundary.
+
+Stripe-managed runtime keys cannot also come from ordinary `envVars`, env-file
+includes, delegated secret slots, overrides, or removal tombstones. Removing
+or renaming a managed key requires changing the Stripe sync declaration first,
+then using the ordinary two-release retirement process if the old provider key
+must be deleted.
+
 ## CI And Push Deploys
 
 For push deploys, `deploy.trigger: "ci"` is the portable default. It means Hypervibe manages generated GitHub Actions workflows that call provider APIs directly.

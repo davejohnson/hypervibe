@@ -103,6 +103,23 @@ describe('ConvergeExecutor staleness', () => {
     expect(result.error).toContain('changed since this plan');
   });
 
+  it('rejects when an observed integration changed since planning', async () => {
+    const handler = vi.fn();
+    const planId = storePlan(
+      [action({ id: 'payment:stripe:staging', type: 'noop' })],
+      { integrationFingerprints: { stripe: 'planned-hash' } }
+    );
+    const result = await new ConvergeExecutor().execute({
+      planRunId: planId,
+      currentSpecRevision: 1,
+      freshIntegrationFingerprints: { stripe: 'fresh-hash' },
+      handler,
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('stripe changed since this plan');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('rejects double-apply of the same plan', async () => {
     const planId = storePlan([action({ id: 'service:web' })]);
     const handler = vi.fn().mockResolvedValue({ success: true, message: 'ok' });
