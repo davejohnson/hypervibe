@@ -43,6 +43,10 @@ public struct ResourceSummary: Codable, Equatable, Identifiable, Sendable {
     public let desiredProvider: String
     public let observedProvider: String?
     public let relationships: [ResourceRelationship]
+    public let workloadKind: String?
+    public let isPublic: Bool?
+    public let healthCheckPath: String?
+    public let boundURL: URL?
 
     public init(
         id: String,
@@ -50,7 +54,11 @@ public struct ResourceSummary: Codable, Equatable, Identifiable, Sendable {
         name: String,
         desiredProvider: String,
         observedProvider: String? = nil,
-        relationships: [ResourceRelationship] = []
+        relationships: [ResourceRelationship] = [],
+        workloadKind: String? = nil,
+        isPublic: Bool? = nil,
+        healthCheckPath: String? = nil,
+        boundURL: URL? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -58,6 +66,37 @@ public struct ResourceSummary: Codable, Equatable, Identifiable, Sendable {
         self.desiredProvider = desiredProvider
         self.observedProvider = observedProvider
         self.relationships = relationships
+        self.workloadKind = workloadKind
+        self.isPublic = isPublic
+        self.healthCheckPath = healthCheckPath
+        self.boundURL = boundURL
+    }
+}
+
+public struct PublicEndpointHealth: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { service }
+
+    public let service: String
+    public let url: URL
+    public let ok: Bool
+    public let status: Int?
+    public let latencyMs: Int
+    public let checkedAt: Date
+
+    public init(
+        service: String,
+        url: URL,
+        ok: Bool,
+        status: Int?,
+        latencyMs: Int,
+        checkedAt: Date
+    ) {
+        self.service = service
+        self.url = url
+        self.ok = ok
+        self.status = status
+        self.latencyMs = latencyMs
+        self.checkedAt = checkedAt
     }
 }
 
@@ -174,6 +213,9 @@ public enum AggregateHealth {
         if hasRefreshFailure { return true }
         return snapshots.contains { snapshot in
             snapshot.environments.contains { environment in
+                if environment.publicEndpointHealth?.contains(where: { !$0.ok }) == true {
+                    return true
+                }
                 switch environment.observation?.health {
                 case .drifted, .blocked, .failed:
                     return true
@@ -192,17 +234,20 @@ public struct EnvironmentSnapshot: Codable, Equatable, Identifiable, Sendable {
     public let specRevision: Int
     public let resources: [ResourceSummary]
     public let observation: ObservationSummary?
+    public let publicEndpointHealth: [PublicEndpointHealth]?
 
     public init(
         name: String,
         specRevision: Int,
         resources: [ResourceSummary],
-        observation: ObservationSummary?
+        observation: ObservationSummary?,
+        publicEndpointHealth: [PublicEndpointHealth]? = nil
     ) {
         self.name = name
         self.specRevision = specRevision
         self.resources = resources
         self.observation = observation
+        self.publicEndpointHealth = publicEndpointHealth
     }
 }
 
@@ -331,7 +376,8 @@ public struct ProjectSnapshot: Codable, Equatable, Sendable {
                         latestSuccessfulAt: observation.latestSuccessfulAt,
                         services: observation.services,
                         driftedResources: observation.driftedResources
-                    )
+                    ),
+                    publicEndpointHealth: environment.publicEndpointHealth
                 )
             },
             recentRuns: recentRuns,

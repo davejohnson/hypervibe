@@ -1,6 +1,6 @@
 # Hypervibe macOS Companion
 
-**Status:** Rev 5, v0 status, self-contained onboarding, and provider connection management implemented
+**Status:** Rev 6, agent-first onboarding and credential-independent public health implemented
 **Shape:** A menu bar app in `apps/macos/`. Chat remains the control plane. The app provides ambient status, resource topology, notifications, and plan review.
 
 Rev 4 deliberately removes the companion read-model database. Hypervibe already has authoritative repo specs, local history, bindings, and live provider observation. The app should ask Hypervibe for those views through its existing local MCP process, retain only a small disposable cache, and never become another infrastructure state owner.
@@ -13,6 +13,8 @@ The companion answers:
 - What services and resources does each environment intend to have?
 - Which provider is each resource on?
 - Which external apps and providers are connected locally?
+- Which public bound endpoints respond, even when this Mac has no provider
+  credentials?
 - Is the last live observation current, in sync, drifted, blocked, partial, or failed?
 - What recent plan or apply needs attention?
 - How do I make this project's Hypervibe MCP available to Claude or Codex
@@ -34,6 +36,7 @@ It does not:
 | Desired infrastructure | `.hypervibe/spec.json`, with SQLite as local cache/history | Read through Hypervibe |
 | Provider identity bindings | `.hypervibe/bindings.json` and current local state | Read through Hypervibe |
 | Live infrastructure | Provider APIs observed by `hv_status` / `hv_plan` | Display the latest response with freshness |
+| Public endpoint reachability | The bound public URL plus `hv_health` | Check directly and display separately from provider drift |
 | Plans, runs, receipts | Hypervibe SQLite | Read through `hv_runs` |
 | Credentials and encrypted plan inputs | Hypervibe secret/plan storage | Accept only in an in-memory form, send once to `hv_connect`, then discard |
 | Repositories watched on this Mac | Companion app | Store repo bookmarks/paths |
@@ -134,7 +137,19 @@ anything beside the installed app. A separate native helper waits for the
 companion to exit, swaps the staged bundle using a rollback copy, and reopens
 the app. It restores the previous bundle if replacement or relaunch fails.
 
-From Settings, a user can connect all registered projects to:
+On first launch with no registered projects, the companion opens onboarding
+automatically. The user chooses a repository and Claude and/or Codex in one
+flow. Hypervibe registers the repo even when no spec exists, updates the
+selected host configuration, and ends with a restart instruction and starter
+prompt. The first chat determines the user's actual task; it may inspect an
+existing spec or initialize one with `hv_spec_set`.
+
+There is no operator/contributor role picker. Provider access is
+operation-scoped, not a permanent UI identity. Solo users retain the complete
+dashboard and variable controls, while a collaborator without provider
+credentials can still see repository-backed intent and public endpoint health.
+
+From onboarding or Settings, a user can connect all registered projects to:
 
 - Claude Desktop via
   `~/Library/Application Support/Claude/claude_desktop_config.json`;
@@ -182,8 +197,13 @@ Adding a project validates:
 
 1. the directory exists;
 2. it is a git worktree root or can resolve to one;
-3. `.hypervibe/spec.json` is present and valid, or Hypervibe can resolve the named local project;
-4. the configured executable completes the compatibility handshake.
+3. the configured executable completes the compatibility handshake;
+4. when `.hypervibe/spec.json` exists, Hypervibe can parse it.
+
+The registry records readiness as unknown, uninitialized, or initialized.
+Missing `.hypervibe/spec.json` is a valid uninitialized project, not a setup
+failure. A legacy single-project SQLite cache must not make an unrelated
+repository appear initialized.
 
 ### Snapshot cache
 
@@ -222,9 +242,12 @@ On launch and after executable changes:
 
 1. Start Hypervibe in the configured repo and data-directory context.
 2. Complete the MCP initialize handshake.
-3. Call `hv_upgrade action="status"` to confirm package/schema readiness and project resolution.
-4. Call `hv_connections_list` and retain its safe connection summaries in memory only.
-5. Disable refresh actions if the executable or local schema is incompatible.
+3. Call `hv_upgrade action="status"` to confirm package/schema readiness.
+4. If no repo spec exists, mark the project ready for chat and stop the status
+   refresh without treating it as an error.
+5. Otherwise call `hv_spec_get`, `hv_status`, `hv_health`, `hv_runs`, and
+   `hv_connections_list`.
+6. Disable refresh actions if the executable or local schema is incompatible.
 
 ### Provider connection management
 
@@ -259,7 +282,8 @@ Call `hv_spec_get` and map only its summary fields:
 
 - environment;
 - hosting provider;
-- services;
+- services, workload kind, public/private intent, health path, and sanitized
+  bound public origin;
 - database provider;
 - storage names;
 - domain;
@@ -279,6 +303,18 @@ staging
 ```
 
 The first version may infer conventional relationships from the desired spec summary. If users need exact dependency edges, Hypervibe can later expose additional sanitized summary fields from `hv_spec_get`; that is preferable to reading internal bindings.
+
+### Public endpoint health
+
+For every public service with a repo-backed URL binding, call `hv_health` and
+retain only service name, sanitized URL, success, status, latency, and check
+time. Discard response bodies, headers, cookies, and arbitrary error payloads.
+
+This is deliberately separate from `hv_status`. A successful HTTP check proves
+that a public endpoint responded; it does not prove provider identity,
+configuration convergence, or absence of drift. Without the provider
+connection, exact drift remains blocked or unverified and must be handled by
+the person who controls that provider.
 
 ### Live status
 
@@ -404,7 +440,10 @@ v0/v1 use a copy-to-chat handoff for apply. Native Apply is out of scope until t
 - Repo moved: keep the registry entry, disable refresh, and prompt to locate it.
 - Missing data directory: do not silently fall back to another Hypervibe database.
 - MCP/tool incompatibility: keep cached review visible and disable live actions.
-- Provider auth failure: show the safe Hypervibe guidance; never request a token in an app text field.
+- Provider auth failure: explain the blocked task and offer either the existing
+  in-memory connection form for credentials the user already controls or a
+  value-free owner handoff. Do not imply that the collaborator should be added
+  to the provider.
 - Refresh timeout: preserve last-known status and show the failed attempt time.
 - Cache corruption: delete and rebuild it.
 
@@ -417,7 +456,10 @@ v0/v1 use a copy-to-chat handoff for apply. Native Apply is out of scope until t
 - The app does not open `hypervibe.db` or `.secret-key`.
 - MCP responses are decoded into allowlisted app models; raw responses are not persisted.
 - Notifications and pasteboard content contain names, plan IDs, and confirmation IDs only.
-- The app never handles provider tokens or delegated-secret values.
+- Provider tokens and hosting-variable values exist only in explicit in-memory
+  forms and one local MCP call; they are cleared and never cached or logged.
+- Delegated-secret values stay in local references resolved by Hypervibe and
+  are not entered in the companion.
 - Logs exclude raw MCP payloads by default.
 - The spawned process has the same local privileges as the configured Hypervibe command.
 - MCP host configuration edits are scoped, backed up once, atomic, and never
@@ -435,9 +477,9 @@ v0/v1 use a copy-to-chat handoff for apply. Native Apply is out of scope until t
 | **Later, only if needed** | One derived snapshot operation or native Apply | Separate reviewed decision |
 
 The implemented v0 slice now includes Foundation, Status through manual
-refresh and recent runs, and self-contained Distribution/onboarding.
-Scheduling, notifications, plan review, and all mutating actions remain out of
-scope.
+refresh and recent runs, self-contained Distribution/onboarding, provider
+connection management, and explicit hosting-variable add/replace. Scheduling,
+notifications, plan review, and lifecycle mutations remain out of scope.
 
 ## Acceptance criteria
 
@@ -452,6 +494,10 @@ scope.
   failed replacement or relaunch restores the previous app bundle.
 - Claude and Codex configuration preserves unrelated content and can be
   disconnected per managed project.
+- A first launch with no projects opens repository-and-agent onboarding;
+  repositories without a spec finish in a chat-ready state.
+- Public endpoint health can be rebuilt from committed spec/bindings without
+  provider credentials and is never presented as provider drift verification.
 - No companion database migration or trigger exists in Hypervibe.
 - `hv_plan`, `hv_apply`, startup, and provider adapters have no companion-specific code.
 - Every subprocess uses an explicit repo root, executable, and data-directory context.
@@ -465,6 +511,9 @@ scope.
 - Keep the current MCP architecture intact.
 - Bundle that MCP and its Node runtime in the distributable app.
 - Configure supported desktop MCP hosts per project through a native launcher.
+- Connect the coding agent first and let chat determine the user's task.
+- Treat missing provider access as a task boundary, not a user role or an
+  automatic invitation.
 - No direct SQLite reads and no server-owned companion read model.
 - App-owned storage tracks projects and UI state only.
 - Resource topology is derived from Hypervibe's existing spec/status views.

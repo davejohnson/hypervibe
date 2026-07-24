@@ -34,6 +34,41 @@ struct AggregateHealthTests {
     }
 
     @Test
+    func failedPublicEndpointCheckNeedsAttentionIndependentlyFromDrift() {
+        let snapshot = ProjectSnapshot(
+            projectID: UUID(),
+            projectName: "test",
+            generatedAt: Date(timeIntervalSince1970: 1),
+            environments: [
+                EnvironmentSnapshot(
+                    name: "production",
+                    specRevision: 1,
+                    resources: [],
+                    observation: makeObservation(health: .inSync),
+                    publicEndpointHealth: [
+                        PublicEndpointHealth(
+                            service: "web",
+                            url: URL(string: "https://app.example.com")!,
+                            ok: false,
+                            status: 503,
+                            latencyMs: 42,
+                            checkedAt: Date(timeIntervalSince1970: 1)
+                        ),
+                    ]
+                ),
+            ],
+            recentRuns: []
+        )
+
+        #expect(
+            AggregateHealth.needsAttention(
+                snapshots: [snapshot],
+                hasRefreshFailure: false
+            )
+        )
+    }
+
+    @Test
     func singletonResourcesMatchProviderSpecificDriftNames() {
         let observation = makeObservation(
             health: .drifted,

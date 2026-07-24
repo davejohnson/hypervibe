@@ -269,7 +269,7 @@ struct VariablesView: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
-            Text("Keys appear across every environment. Values stay per environment and service unless you explicitly share them. Values are masked and never cached.")
+            Text("Keys appear across every environment. Values stay scoped unless explicitly shared. If this Mac lacks provider access, ask your connected coding agent to prepare the next step or an owner handoff.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

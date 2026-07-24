@@ -210,6 +210,22 @@ Hypervibe also maintains non-secret provider identity bindings in:
 
 This file lets teammates observe and converge the same provider resources instead of planning duplicate projects/services. It is for non-secret IDs such as provider project IDs, environment IDs, service IDs, custom domain bindings, and CI workflow sync metadata. Credentials, tokens, passwords, database URLs, and secret values stay out of the repo and remain local/provider-side.
 
+No Hypervibe user role is required. The current chat task determines which
+access is needed:
+
+- anyone with the checkout can read the committed desired topology;
+- public service URLs in committed bindings can be checked without a hosting
+  provider account;
+- exact provider drift, private logs, plans, and applies require a verified
+  provider connection on the machine doing that work.
+
+When a collaborator lacks that connection, Hypervibe should offer two paths:
+connect credentials they already control, or prepare a value-free handoff
+naming the provider, scope, environment, and blocked task for the
+infrastructure owner. It should not assume that every coder belongs in the
+Railway, GCP, or other provider project. This stays local and repo-backed; it
+does not require a new Hypervibe web service or shared drift database.
+
 ### Delegated runtime secrets
 
 Use a delegated secret slot when a collaborator, customer, or app owner should supply and rotate a runtime credential without giving it to the repository owner. The spec records the environment-variable name, responsible principal, and target environments, but never the value:
@@ -228,7 +244,19 @@ Use a delegated secret slot when a collaborator, customer, or app owner should s
 }
 ```
 
-The principal is a non-secret ownership label, not an authenticated Hypervibe identity. Provider membership is still the enforcement boundary: invite Alice to only the Railway/GCP project she needs, keep GitHub review and branch protection enabled, and have her connect her own provider credentials locally. Changing `principal` or a collaborator list in a local checkout does not grant a provider role. Without a hosted control plane, Hypervibe cannot prove that the person supplying a key is `github:alice`; do not auto-apply unreviewed spec changes with an owner/admin credential.
+The principal is a non-secret ownership label, not an authenticated Hypervibe
+identity. Provider credentials remain the enforcement boundary, but Alice does
+not need provider membership merely to own the API key. She can send the key
+to the infrastructure owner through an agreed out-of-band channel; the owner
+stores it in a local safe reference such as 1Password, a private env file, or
+another supported manager and runs the plan/apply. A shared secret-manager
+item is the natural repeatable handoff when both people already use one. Give
+Alice narrowly scoped provider membership and have her connect her own
+credentials only if she needs to apply independently. Changing `principal` or
+a collaborator list in a checkout does not grant a provider role. Without a
+hosted control plane, Hypervibe cannot prove that the person supplying a key is
+`github:alice`; do not auto-apply unreviewed spec changes with an owner/admin
+credential.
 
 For Anthropic, Alice creates a standard workspace-scoped API key at [Claude Platform API keys](https://platform.claude.com/settings/keys). Claude subscription billing and Claude API billing are separate, so the Platform account/workspace must have API billing configured. She saves the value locally, outside the repository:
 
@@ -237,7 +265,10 @@ For Anthropic, Alice creates a standard workspace-scoped API key at [Claude Plat
 ANTHROPIC_API_KEY=...
 ```
 
-For Railway, she creates her own **Account API token** at [Railway account tokens](https://railway.com/account/tokens), selects **No workspace**, and uses the access granted to her Railway account:
+If Alice will apply independently, for Railway she creates her own **Account
+API token** at [Railway account tokens](https://railway.com/account/tokens),
+selects **No workspace**, and uses only the access granted to her Railway
+account:
 
 ```text
 hv_connect provider="railway" credentialsRef="dotenv:/Users/alice/.config/hypervibe/railway.env#HYPERVIBE_RAILWAY_TOKEN"

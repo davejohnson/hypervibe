@@ -47,6 +47,27 @@ Repository collaboration setup is lifecycle development infrastructure. GitHub i
 
 Collaborator invitations are guidance-only by default. If Hypervibe ever mutates repository access, that must be confirm-gated, permission-audited, and represented as desired state rather than hidden inside a helper tool.
 
+Do not model collaborators as permanent Hypervibe operator/contributor roles.
+The current chat task determines the required capability. Any checkout can
+read committed desired topology and non-secret bindings, and may check public
+bound endpoints without provider credentials. Exact drift, private logs, and
+provider mutations require a verified connection on the machine performing
+that operation.
+
+Missing provider access is a task boundary, not a reason to grant membership
+automatically. Offer either to connect credentials the user already controls
+or to prepare a value-free handoff naming the provider, scope, environment,
+and blocked task for the person who manages that access. A project owner can
+keep provider control and execute the resulting plan; add a collaborator to a
+provider only when they truly need independent mutation authority.
+
+This access model does not require a hosted Hypervibe control plane, shared
+drift service, or secret relay. API-key transfer is initially an external human
+workflow: the key owner may supply it out of band for the infrastructure owner
+to store through a safe local reference, or both may use an existing shared
+secret manager such as 1Password. Hypervibe records only the delegated slot
+and value-free handoff metadata.
+
 ## Provider Boundary
 
 Keep provider behavior behind the provider boundary. Generic orchestration code in `src/domain/plan`, shared `src/domain/services`, and shared `src/tools` must not grow provider-name branches or direct imports from `src/adapters/providers/<provider>` just to express hosting behavior.

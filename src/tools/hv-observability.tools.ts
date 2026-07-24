@@ -24,6 +24,7 @@ import {
 import type { ToolContext } from './context.js';
 import { projectField, envField } from './schemas.js';
 import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
 
 function resolveEnvOrThrow(ctx: ToolContext, projectRef: string | undefined, envName: string | undefined) {
   const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -128,7 +129,7 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
 
   server.tool(
     'hv_health',
-    'HTTP health-check a deployed service (uses the stored healthCheckPath by default) or an explicit URL.',
+    'HTTP health-check a deployed service or an explicit URL. Service resolution uses repo-backed spec/bindings when present, so public endpoint checks do not require provider credentials; this proves reachability, not provider drift or convergence.',
     {
       project: projectField,
       env: envField,
@@ -152,19 +153,31 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
         if (!environment) {
           throw new HvError('NOT_FOUND', 'No environment found to check.', { hint: 'Pass env explicitly.' });
         }
-        const svc = resolveHealthService(project.id, service);
-        if (!svc) {
+        const storedService = resolveHealthService(project.id, service);
+        const environmentSpec = new SpecStore().get(project)?.spec.environments[environment.name];
+        const desiredServiceName = service
+          ?? Object.entries(environmentSpec?.services ?? {}).find(([, value]) => value.workloadKind === 'web')?.[0]
+          ?? Object.keys(environmentSpec?.services ?? {})[0];
+        const resolvedName = storedService?.name ?? desiredServiceName;
+        if (!resolvedName) {
           throw new HvError('NOT_FOUND', service ? `Service not found: ${service}` : 'No services found.');
         }
-        resolvedService = svc.name;
-        const resolved = resolveServiceBaseUrl(environment, svc.name);
+        const desiredService = environmentSpec?.services[resolvedName];
+        if (!storedService && !desiredService) {
+          throw new HvError('NOT_FOUND', `Service not found: ${resolvedName}`);
+        }
+        resolvedService = resolvedName;
+        const resolved = resolveServiceBaseUrl(environment, resolvedName);
         if (!resolved) {
-          throw new HvError('NOT_FOUND', `Service "${svc.name}" has no URL binding in ${environment.name}.`, {
+          throw new HvError('NOT_FOUND', `Service "${resolvedName}" has no URL binding in ${environment.name}.`, {
             hint: 'Deploy it first with hv_apply or hv_deploy.',
           });
         }
         baseUrl = resolved;
-        healthPath = healthPath ?? svc.buildConfig.healthCheckPath ?? '/';
+        healthPath = healthPath
+          ?? storedService?.buildConfig.healthCheckPath
+          ?? desiredService?.healthCheckPath
+          ?? '/';
       }
 
       const check = await runHttpCheck({

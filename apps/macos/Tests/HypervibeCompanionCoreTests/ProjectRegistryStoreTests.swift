@@ -54,6 +54,36 @@ struct ProjectRegistryStoreTests {
     }
 
     @Test
+    func legacyRegistryDefaultsReadinessToUnknown() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("projects.json")
+        let id = UUID()
+        try Data(
+            """
+            {
+              "schemaVersion": 1,
+              "projects": [{
+                "id": "\(id.uuidString)",
+                "displayName": "Legacy",
+                "repositoryPath": "/repos/legacy",
+                "hypervibeExecutablePath": "/Applications/Hypervibe.app/Contents/MacOS/hypervibe-mcp",
+                "scheduledRefreshEnabled": false,
+                "refreshIntervalMinutes": 30,
+                "createdAt": "2026-07-23T00:00:00Z",
+                "updatedAt": "2026-07-23T00:00:00Z"
+              }]
+            }
+            """.utf8
+        ).write(to: file)
+
+        let projects = try await ProjectRegistryStore(fileURL: file).load()
+
+        #expect(projects.first?.readiness == .unknown)
+        #expect(ProjectRegistryStore.hasStoredProjects(fileURL: file))
+    }
+
+    @Test
     func removingAProjectDoesNotTouchItsRepository() async throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

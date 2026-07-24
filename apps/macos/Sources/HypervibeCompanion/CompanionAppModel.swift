@@ -127,7 +127,7 @@ final class CompanionAppModel: ObservableObject {
     }
 
     func refresh(projectID: UUID) async {
-        guard let project = projects.first(where: { $0.id == projectID }),
+        guard var project = projects.first(where: { $0.id == projectID }),
             !refreshingProjectIDs.contains(projectID) else {
             return
         }
@@ -136,10 +136,37 @@ final class CompanionAppModel: ObservableObject {
         defer { refreshingProjectIDs.remove(projectID) }
 
         do {
+            if project.readiness == .initialized,
+                !Self.hasRepositorySpec(project) {
+                project.readiness = .uninitialized
+                project.updatedAt = Date()
+                projects = try await registry.upsert(project)
+                snapshots.removeValue(forKey: projectID)
+                connections.removeValue(forKey: projectID)
+                try await cache.remove(projectID: projectID)
+                refreshErrors.removeValue(forKey: projectID)
+                return
+            }
+            if project.readiness != .initialized {
+                project.readiness = try await mcpClient.probe(project: project)
+                project.updatedAt = Date()
+                projects = try await registry.upsert(project)
+                if project.readiness == .uninitialized {
+                    snapshots.removeValue(forKey: projectID)
+                    connections.removeValue(forKey: projectID)
+                    try await cache.remove(projectID: projectID)
+                    refreshErrors.removeValue(forKey: projectID)
+                    return
+                }
+            }
             let refresh = try await mcpClient.refresh(
                 project: project,
                 previous: snapshots[projectID]
             )
+            project.displayName = refresh.snapshot.projectName
+            project.readiness = .initialized
+            project.updatedAt = Date()
+            projects = try await registry.upsert(project)
             snapshots[projectID] = refresh.snapshot
             connections[projectID] = refresh.connections
             try await cache.replace(refresh.snapshot)
@@ -266,36 +293,62 @@ final class CompanionAppModel: ObservableObject {
         )
     }
 
-    func addProject(_ draft: ProjectDraft) async throws {
+    func addProject(
+        _ draft: ProjectDraft,
+        connectHosts: Set<MCPHost> = []
+    ) async throws {
+        let repositoryPath = draft.repositoryPath.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let normalizedRepositoryPath = URL(fileURLWithPath: repositoryPath)
+            .standardizedFileURL.path
+        let existingProject = projects.first {
+            URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path
+                == normalizedRepositoryPath
+        }
         var project = CompanionProject(
+            id: existingProject?.id ?? UUID(),
             displayName: draft.displayName.trimmingCharacters(
                 in: .whitespacesAndNewlines
             ),
-            repositoryPath: draft.repositoryPath.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            ),
+            repositoryPath: normalizedRepositoryPath,
             hypervibeExecutablePath: draft.executablePath.trimmingCharacters(
                 in: .whitespacesAndNewlines
             ),
             hypervibeArguments: draft.arguments,
-            hypervibeDataDirectory: draft.dataDirectory.nilIfBlank
+            hypervibeDataDirectory: draft.dataDirectory.nilIfBlank,
+            enabledEnvironments: existingProject?.enabledEnvironments,
+            scheduledRefreshEnabled: existingProject?.scheduledRefreshEnabled ?? false,
+            refreshIntervalMinutes: existingProject?.refreshIntervalMinutes ?? 30,
+            lastSelectedEnvironment: existingProject?.lastSelectedEnvironment,
+            createdAt: existingProject?.createdAt ?? Date()
         )
 
-        let refresh: CompanionRefresh
         do {
-            refresh = try await mcpClient.refresh(project: project)
+            project.readiness = try await mcpClient.probe(project: project)
         } catch {
             throw ProjectSetupError.validation(userFacingMessage(for: error))
         }
-
-        project.displayName = refresh.snapshot.projectName
         project.updatedAt = Date()
         projects = try await registry.upsert(project)
-        try await cache.replace(refresh.snapshot)
-        snapshots[project.id] = refresh.snapshot
-        connections[project.id] = refresh.connections
         selectedProjectID = project.id
         refreshErrors.removeValue(forKey: project.id)
+        if project.readiness == .initialized {
+            await refresh(projectID: project.id)
+        }
+        for host in connectHosts {
+            do {
+                try await mcpHostConfigurator.connect(
+                    host,
+                    projects: projects,
+                    launcherURL: CompanionDistribution.launcherURL
+                )
+                mcpHostErrors.removeValue(forKey: host)
+            } catch {
+                mcpHostErrors[host] = userFacingMessage(for: error)
+                throw ProjectSetupError.validation(userFacingMessage(for: error))
+            }
+        }
         await refreshMCPHostStatuses()
     }
 
@@ -423,6 +476,15 @@ final class CompanionAppModel: ObservableObject {
             return description
         }
         return "Hypervibe refresh failed."
+    }
+
+    private static func hasRepositorySpec(_ project: CompanionProject) -> Bool {
+        FileManager.default.fileExists(
+            atPath: URL(fileURLWithPath: project.repositoryPath)
+                .standardizedFileURL
+                .appendingPathComponent(".hypervibe/spec.json")
+                .path
+        )
     }
 
     func connectionMessage(for error: Error) -> String {

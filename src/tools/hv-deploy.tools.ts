@@ -139,11 +139,11 @@ export function registerHvDeployTools(server: McpServer, ctx: ToolContext): void
       if (outcome.kind === 'input_required') {
         return toolError('VALIDATION', 'Deployment needs delegated secret inputs before it can apply.', {
           details: { environment: outcome.envName, inputRequired: outcome.requirements },
-          hint: 'Ask each declared principal to save the value locally, then rerun hv_deploy with secretRefs. Do not paste raw secrets into chat.',
+          hint: 'Use safe local secretRefs for values available on this Mac. Otherwise prepare a value-free handoff naming each delegated key, environment, and principal for the project owner. Do not paste raw secrets into chat.',
           next: ['hv_deploy'],
           agentInstruction: {
             action: 'ask_user',
-            message: 'Stop before deploy and request safe local secret references for the declared delegated-secret slots.',
+            message: 'Stop before deploy. Use safe local secret references when available, or prepare a value-free owner handoff for the delegated-secret slots.',
           },
         });
       }

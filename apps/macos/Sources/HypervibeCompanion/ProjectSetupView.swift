@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import HypervibeCompanionCore
 import SwiftUI
 
 struct ProjectDraft {
@@ -74,16 +75,26 @@ struct ProjectSetupView: View {
     @State private var draft = ProjectDraft.suggested()
     @State private var isSaving = false
     @State private var errorMessage: String?
+    @State private var selectedHosts: Set<MCPHost> = [.codex]
+    @State private var completed = false
 
-    let onSave: (ProjectDraft) async throws -> Void
+    let onSave: (ProjectDraft, Set<MCPHost>) async throws -> Void
 
     var body: some View {
+        if completed {
+            completionView
+        } else {
+            setupView
+        }
+    }
+
+    private var setupView: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Add a Hypervibe project")
                         .font(.title2.weight(.semibold))
-                    Text("The repository and command are stored only on this Mac.")
+                    Text("Choose a repository and coding agent. A Hypervibe spec is optional; chat can initialize it.")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -145,6 +156,21 @@ struct ProjectSetupView: View {
                 }
             }
 
+            VStack(alignment: .leading, spacing: 9) {
+                Text("Connect a coding agent")
+                    .font(.headline)
+                Text("Choose where you want to chat with Hypervibe. You can change this later in Settings.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(MCPHost.allCases, id: \.self) { host in
+                    Toggle(host.displayName, isOn: hostSelection(host))
+                        .toggleStyle(.checkbox)
+                        .clickTargetCursor()
+                }
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+
             Text(setupHelp)
                 .font(.caption)
                 .foregroundStyle(
@@ -174,7 +200,7 @@ struct ProjectSetupView: View {
                     ProgressView()
                         .controlSize(.small)
                 }
-                Button("Add and Refresh") {
+                Button("Add and Connect") {
                     save()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -186,6 +212,7 @@ struct ProjectSetupView: View {
                         ).isEmpty
                         || draft.repositoryPath.isEmpty
                         || draft.executablePath.isEmpty
+                        || selectedHosts.isEmpty
                         || (CompanionDistribution.includesBundledServer
                             && !CompanionDistribution.hasStableInstallationPath)
                 )
@@ -194,6 +221,51 @@ struct ProjectSetupView: View {
         .padding(22)
         .frame(width: 650)
         .background(WindowFocusBridge())
+    }
+
+    private var completionView: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Label("Hypervibe is connected", systemImage: "checkmark.circle.fill")
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.green)
+
+            Text("Fully quit and reopen \(selectedHosts.map(\.displayName).sorted().joined(separator: " or ")), then continue in chat.")
+                .foregroundStyle(.secondary)
+
+            Text("Tell your coding agent what you are trying to do. Chat determines the task first and asks for provider access only when that task actually needs it.")
+                .font(.callout)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Try this first")
+                    .font(.headline)
+                Text(starterPrompt)
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+            }
+
+            HStack {
+                Button("Copy Prompt") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(starterPrompt, forType: .string)
+                }
+                .clickTargetCursor()
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .clickTargetCursor()
+            }
+        }
+        .padding(22)
+        .frame(width: 650)
+        .background(WindowFocusBridge())
+    }
+
+    private var starterPrompt: String {
+        "Use Hypervibe to inspect this repository. Tell me what is configured, what you can verify from this Mac, and what I should do next."
     }
 
     private var setupHelp: String {
@@ -251,8 +323,8 @@ struct ProjectSetupView: View {
         errorMessage = nil
         Task {
             do {
-                try await onSave(draft)
-                dismiss()
+                try await onSave(draft, selectedHosts)
+                completed = true
             } catch {
                 errorMessage = (error as? LocalizedError)?.errorDescription
                     ?? "Could not add this project."
@@ -261,4 +333,16 @@ struct ProjectSetupView: View {
         }
     }
 
+    private func hostSelection(_ host: MCPHost) -> Binding<Bool> {
+        Binding(
+            get: { selectedHosts.contains(host) },
+            set: { selected in
+                if selected {
+                    selectedHosts.insert(host)
+                } else {
+                    selectedHosts.remove(host)
+                }
+            }
+        )
+    }
 }

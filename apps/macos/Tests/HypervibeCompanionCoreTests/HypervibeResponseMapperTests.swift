@@ -37,6 +37,24 @@ struct HypervibeResponseMapperTests {
                       "ios": { "bundleId": "com.example.invoice" }
                     }
                   }
+                },
+                "environments": {
+                  "staging": {
+                    "serviceDetails": [
+                      {
+                        "name": "api",
+                        "workloadKind": "web",
+                        "public": true,
+                        "healthCheckPath": "/healthz",
+                        "boundUrl": "https://api.example.com/private?token=sentinel"
+                      },
+                      {
+                        "name": "worker",
+                        "workloadKind": "worker",
+                        "public": false
+                      }
+                    ]
+                  }
                 }
               }
             }
@@ -76,9 +94,58 @@ struct HypervibeResponseMapperTests {
                     ),
                 ]
         )
+        let api = try #require(
+            environment.resources.first { $0.id == "service:api" }
+        )
+        #expect(api.workloadKind == "web")
+        #expect(api.isPublic == true)
+        #expect(api.healthCheckPath == "/healthz")
+        #expect(api.boundURL?.absoluteString == "https://api.example.com")
+        #expect(
+            environment.resources.first { $0.id == "service:worker" }?
+                .isPublic == false
+        )
 
         let encoded = try JSONEncoder().encode(environment)
         #expect(!String(decoding: encoded, as: UTF8.self).contains("sentinel-secret-value"))
+    }
+
+    @Test
+    func publicHealthDropsHeadersAndBodies() throws {
+        let checkedAt = Date(timeIntervalSince1970: 800)
+        let data = Data(
+            """
+            {
+              "ok": true,
+              "data": {
+                "service": "web",
+                "baseUrl": "https://web.example.com",
+                "check": {
+                  "url": "https://web.example.com/health?secret=sentinel",
+                  "ok": true,
+                  "status": 204,
+                  "latencyMs": 42,
+                  "headers": { "authorization": "sentinel-secret-value" },
+                  "bodyPreview": "sentinel-secret-value"
+                }
+              }
+            }
+            """.utf8
+        )
+
+        let health = try HypervibeResponseMapper.decodePublicEndpointHealth(
+            data,
+            fallbackService: "fallback",
+            checkedAt: checkedAt
+        )
+
+        #expect(health.service == "web")
+        #expect(health.url.absoluteString == "https://web.example.com")
+        #expect(health.ok)
+        #expect(health.status == 204)
+        #expect(health.latencyMs == 42)
+        let encoded = try JSONEncoder().encode(health)
+        #expect(!String(decoding: encoded, as: UTF8.self).contains("sentinel"))
     }
 
     @Test
