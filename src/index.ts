@@ -1,24 +1,17 @@
 #!/usr/bin/env node
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { createServer } from './server.js';
-import { initializeDatabase } from './adapters/db/sqlite.adapter.js';
+import { runCli } from './interfaces/cli/run.js';
+import { runMcpServer } from './interfaces/mcp/run.js';
+import { dispatchEntrypoint } from './entrypoint.js';
 
 async function main() {
-  // Initialize database with migrations
-  initializeDatabase();
-
-  // Create MCP server
-  const server = createServer();
-
-  // Create stdio transport
-  const transport = new StdioServerTransport();
-
-  // Connect server to transport
-  await server.connect(transport);
-
-  // Log to stderr (stdout is for MCP communication)
-  console.error('Hypervibe MCP server running on stdio');
+  const exitCode = await dispatchEntrypoint(process.argv.slice(2), {
+    runMcp: runMcpServer,
+    runCli,
+  });
+  if (exitCode !== undefined) {
+    process.exitCode = exitCode;
+  }
 }
 
 main().catch((error) => {

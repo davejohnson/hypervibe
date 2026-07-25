@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { readFileSync } from 'fs';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
@@ -12,12 +12,12 @@ import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
 import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import { parseEnvFile } from '../utils/env-parser.js';
-import type { ToolContext } from './context.js';
+import type { CommandContext } from '../application/context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Service } from '../domain/entities/service.entity.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { projectField, envField } from './schemas.js';
-import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { splitFragment } from '../utils/split-fragment.js';
 import { resolveSecretValueRef } from '../domain/services/secret-value-ref.js';
 
@@ -29,7 +29,7 @@ function maskValue(value: string): string {
   return `${value.slice(0, 2)}${'*'.repeat(Math.min(value.length - 4, 12))}${value.slice(-2)}`;
 }
 
-async function managerAdapter(ctx: ToolContext, provider: (typeof SECRET_MANAGERS)[number]) {
+async function managerAdapter(ctx: CommandContext, provider: (typeof SECRET_MANAGERS)[number]) {
   const connection = ctx.repos.connections.findByProvider(provider);
   if (!connection || connection.status !== 'verified') {
     throw new HvError('MISSING_CONNECTION', `No verified connection for ${provider}.`, {
@@ -75,7 +75,7 @@ function generateSecretValue(length: number): string {
 }
 
 function resolveHostingService(
-  ctx: ToolContext,
+  ctx: CommandContext,
   project: Project,
   environmentName: string,
   requestedService?: string
@@ -112,8 +112,8 @@ function resolveHostingService(
 }
 
 
-export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): void {
-  server.tool(
+export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandContext): void {
+  commands.register(
     'hv_secrets_set',
     'Set secrets and environment variables. NEVER pass sensitive values via value/vars — they appear in the chat transcript; use secretRef (env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref — read locally, never enters chat) or generate=true for a new server-side random secret. target="hosting" (default) sets env vars on the deployed environment; destinations explicitly shares one resolved/generated value across selected environment/service targets. "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time; "github" sets a GitHub Actions repo secret. remove=true deletes (mapping/github targets).',
     {
@@ -137,7 +137,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       repo: z.string().optional().describe('target=github: "owner/name" (defaults to project git remote)'),
       remove: z.boolean().optional().describe('Delete instead of set (mapping/github)'),
     },
-    wrapHandler(async ({ project: projectRef, env, service, destinations, target = 'hosting', key, value, generate, generateLength, vars, provider, path, secretRef, environments, repo, remove }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, service, destinations, target = 'hosting', key, value, generate, generateLength, vars, provider, path, secretRef, environments, repo, remove }) => {
       if (destinations && target !== 'hosting') {
         throw new HvError('VALIDATION', 'destinations is supported only for target="hosting".');
       }
@@ -193,7 +193,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const adapter = await managerAdapter(ctx, provider);
         const receipt = await adapter.setSecret(path, kv);
         accessLogRepo.create({ action: 'write', provider: provider as SecretManagerProvider, secretPath: path, success: true });
-        return toolSuccess(
+        return commandSuccess(
           { provider, path: receipt.path, keysStored: Object.keys(kv), valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw' },
           {
             hint: `Map to env vars with hv_secrets_set target="mapping" secretRef="${provider}://${path}#<KEY>".`,
@@ -208,7 +208,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         if (!key) throw new HvError('VALIDATION', 'key is required for target="github".');
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
         if ('error' in gh) {
-          return toolError('MISSING_CONNECTION', gh.error, {
+          return commandError('MISSING_CONNECTION', gh.error, {
             details: { connectionSetup: connectionSetupDetails('github', { scope: `${owner}/${repoName}` }) },
             hint: formatConnectionGuidance('github', { scope: `${owner}/${repoName}` }),
           });
@@ -216,7 +216,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         if (remove) {
           await gh.adapter.deleteSecret(owner, repoName, key);
           ctx.repos.audit.create({ action: 'github.secret_deleted', resourceType: 'github_secret', resourceId: `${owner}/${repoName}/${key}`, details: { secretName: key } });
-          return toolSuccess({ repository: `${owner}/${repoName}`, secretName: key, action: 'deleted' });
+          return commandSuccess({ repository: `${owner}/${repoName}`, secretName: key, action: 'deleted' });
         }
         if (value !== undefined && secretRef) {
           throw new HvError('VALIDATION', 'Pass either value or secretRef for target="github", not both.');
@@ -229,7 +229,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const secretValue = value ?? await resolveSecretValueRef(secretRef!, { projectId: project.id, ...(env ? { environmentName: env } : {}) });
         await gh.adapter.setRepositorySecret(owner, repoName, key, secretValue);
         ctx.repos.audit.create({ action: 'github.secret_set', resourceType: 'github_secret', resourceId: `${owner}/${repoName}/${key}`, details: { secretName: key } });
-        return toolSuccess(
+        return commandSuccess(
           { repository: `${owner}/${repoName}`, secretName: key, action: 'set', valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw' },
           exposureWarning ? { warnings: [exposureWarning] } : undefined
         );
@@ -240,8 +240,8 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         if (!key) throw new HvError('VALIDATION', 'key (the env var name) is required for target="mapping".');
         if (remove) {
           const deleted = ctx.repos.secretMappings.deleteByProjectAndEnvVar(project.id, key, service ?? null);
-          if (!deleted) return toolError('NOT_FOUND', `No mapping found for ${key}.`);
-          return toolSuccess({ removed: { envVar: key } });
+          if (!deleted) return commandError('NOT_FOUND', `No mapping found for ${key}.`);
+          return commandSuccess({ removed: { envVar: key } });
         }
         if (!secretRef) throw new HvError('VALIDATION', 'secretRef is required to create a mapping.');
         if (!parseSecretRef(secretRef)) {
@@ -256,7 +256,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
           environments: environments ?? [],
           serviceName: service,
         });
-        return toolSuccess(
+        return commandSuccess(
           { mapping: { envVar: mapping.envVar, secretRef: mapping.secretRef, environments: mapping.environments, service: mapping.serviceName } },
           { next: ['hv_secrets_sync'] }
         );
@@ -290,7 +290,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
           const progress = applied.length > 0
             ? ` Applied ${Object.keys(kv).join(', ')} to ${applied.map((entry) => `${entry.environment}/${entry.service}`).join(', ')} before the failure; no later destinations were attempted.`
             : ' No destinations were changed.';
-          return toolError(
+          return commandError(
             'PROVIDER_ERROR',
             `Could not apply ${Object.keys(kv).join(', ')} to ${failed}: ${result.error || result.message}.${progress}`,
             {
@@ -310,7 +310,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         });
       }
       const first = applied[0];
-      return toolSuccess(
+      return commandSuccess(
         {
           environment: first.environment,
           service: first.service,
@@ -323,9 +323,9 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_secrets_get',
-    'Read a secret (from a secret manager) or a hosting env var. Values are always masked in tool output to avoid leaking credentials into chat transcripts.',
+    'Read a secret (from a secret manager) or a hosting env var. Values are always masked in command output to avoid leaking credentials into transcripts or terminals.',
     {
       project: projectField,
       env: envField,
@@ -334,16 +334,16 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       path: z.string().optional().describe('Secret path (with provider)'),
       version: z.string().optional().describe('Secret version (manager reads)'),
       service: z.string().optional().describe('Service to read hosting vars from'),
-      reveal: z.boolean().optional().describe('Deprecated: raw secret values are not returned in tool output'),
+      reveal: z.boolean().optional().describe('Deprecated: raw secret values are not returned in command output'),
     },
-    wrapHandler(async ({ project: projectRef, env, key, provider, path, version, service, reveal }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, key, provider, path, version, service, reveal }) => {
       if (provider && path) {
         const adapter = await managerAdapter(ctx, provider);
         const secret = await adapter.getSecret(path, key, version);
         accessLogRepo.create({ action: 'read', provider: provider as SecretManagerProvider, secretPath: path, success: true });
         let secretRef = `${provider}://${path}`;
         if (key) secretRef += `#${key}`;
-        return toolSuccess(
+        return commandSuccess(
           {
             secretRef,
             value: maskValue(secret.value),
@@ -352,7 +352,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
             version: secret.version,
           },
           reveal ? {
-            hint: 'Raw secret values are not returned in chat/tool output. Use hv_secrets_sync or provider-native secret tooling for workflows that need the value.',
+            hint: 'Raw secret values are not returned in command output. Use hv_secrets_sync or retrieve the value directly from its secret manager when a human needs it.',
           } : undefined
         );
       }
@@ -362,11 +362,11 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       const targetService = resolveHostingService(ctx, project, environment.name, service);
       const result = await readHostingEnvVars({ project, environment, service: targetService });
       if (!result.success) {
-        return toolError('PROVIDER_ERROR', result.error, {});
+        return commandError('PROVIDER_ERROR', result.error, {});
       }
       const all = result.variables;
       if (key && !(key in all)) {
-        return toolError('NOT_FOUND', `Variable ${key} not set in ${environment.name}.`, {
+        return commandError('NOT_FOUND', `Variable ${key} not set in ${environment.name}.`, {
           details: { available: Object.keys(all) },
         });
       }
@@ -374,7 +374,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       const varsOut = Object.fromEntries(
         Object.entries(selected).map(([k, v]) => [k, maskValue(v)])
       );
-      return toolSuccess(
+      return commandSuccess(
         {
           environment: environment.name,
           service: targetService.name,
@@ -383,13 +383,13 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
           vars: varsOut,
         },
         reveal ? {
-          hint: 'Raw environment variable values are not returned in chat/tool output. Use hv_secrets_sync or provider-native secret tooling for workflows that need the value.',
+          hint: 'Raw environment variable values are not returned in command output. Use hv_secrets_sync or retrieve the value directly from its provider when a human needs it.',
         } : undefined
       );
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_secrets_list',
     'List secrets and secret plumbing: secret-manager paths, project mappings, access audit log, and GitHub repo secret names.',
     {
@@ -401,7 +401,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
       repo: z.string().optional().describe('GitHub "owner/name" (defaults to project git remote)'),
       limit: z.number().int().min(1).max(200).optional().describe('Audit entries limit (default 50)'),
     },
-    wrapHandler(async ({ project: projectRef, provider, pathPrefix, include, repo, limit = 50 }) => {
+    wrapCommandHandler(async ({ project: projectRef, provider, pathPrefix, include, repo, limit = 50 }) => {
       const sections: Record<string, unknown> = {};
 
       if (provider) {
@@ -428,7 +428,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         const { owner, repo: repoName } = githubRepoForProject(project, repo);
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
         if ('error' in gh) {
-          return toolError('MISSING_CONNECTION', gh.error, {
+          return commandError('MISSING_CONNECTION', gh.error, {
             details: { connectionSetup: connectionSetupDetails('github', { scope: `${owner}/${repoName}` }) },
             hint: formatConnectionGuidance('github', { scope: `${owner}/${repoName}` }),
           });
@@ -437,11 +437,11 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         sections.github = { repository: `${owner}/${repoName}`, secrets: ghSecrets.secrets.map((s) => s.name) };
       }
 
-      return toolSuccess(sections);
+      return commandSuccess(sections);
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_secrets_sync',
     'Resolve secret mappings and sync them to hosting environment(s). Optionally rotate a secret first (providers that support rotation) and propagate the new value.',
     {
@@ -454,19 +454,19 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         path: z.string(),
       }).optional().describe('Rotate this secret first, then sync mapped environments'),
     },
-    wrapHandler(async ({ project: projectRef, env, service, dryRun, rotate }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, service, dryRun, rotate }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
 
       if (rotate) {
         const capabilities = secretManagerRegistry.getCapabilities(rotate.provider);
         if (!capabilities?.supportsRotation) {
-          return toolError('UNSUPPORTED', `Provider '${rotate.provider}' does not support rotation.`, {
+          return commandError('UNSUPPORTED', `Provider '${rotate.provider}' does not support rotation.`, {
             hint: 'Update the secret value manually, then run hv_secrets_sync.',
           });
         }
         const rotator = new SecretRotator();
         const result = await rotator.rotateAndSync(rotate.provider as SecretManagerProvider, rotate.path);
-        return toolSuccess({
+        return commandSuccess({
           rotation: {
             path: result.rotation.path,
             oldVersion: result.rotation.oldVersion,
@@ -533,7 +533,7 @@ export function registerHvSecretsTools(server: McpServer, ctx: ToolContext): voi
         results.push(entry);
       }
 
-      return toolSuccess({
+      return commandSuccess({
         dryRun: dryRun ?? false,
         environments: results,
         totalResolved: results.reduce((sum, r) => sum + r.resolved, 0),

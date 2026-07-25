@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import {
   connectRailwayForImport,
@@ -13,12 +13,12 @@ import {
 } from '../domain/services/spec.service.js';
 import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import { parseQueueBindings } from '../domain/services/queue-plan.service.js';
-import type { ToolContext } from './context.js';
+import type { CommandContext } from '../application/context.js';
 import { projectField, envField, confirmField } from './schemas.js';
-import { toolSuccess, toolError, wrapHandler } from './respond.js';
+import { commandSuccess, commandError, wrapCommandHandler } from '../application/results.js';
 
-export function registerLifecycleTools(server: McpServer, ctx: ToolContext): void {
-  server.tool(
+export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandContext): void {
+  commands.register(
     'hv_inspect',
     'Read-only provider inspection for forensics/adoption planning. Currently Railway only. Omit name/railwayProjectId to list projects; pass name or railwayProjectId to inspect environments, services, components, storage buckets, and env var names. Never writes Hypervibe local state or provider resources.',
     {
@@ -26,10 +26,10 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
       name: z.string().optional().describe('Existing provider project name to inspect. Omit name and railwayProjectId to list projects.'),
       railwayProjectId: z.string().optional().describe('Exact Railway project id to inspect. Use this when multiple Railway projects have the same display name.'),
     },
-    wrapHandler(async ({ name, railwayProjectId }) => {
+    wrapCommandHandler(async ({ name, railwayProjectId }) => {
       const adapter = await connectRailwayForImport();
       if (!adapter) {
-        return toolError('MISSING_CONNECTION', 'No Railway connection configured.', {
+        return commandError('MISSING_CONNECTION', 'No Railway connection configured.', {
           details: { connectionSetup: connectionSetupDetails('railway') },
           hint: formatConnectionGuidance('railway'),
           next: ['hv_connect'],
@@ -39,7 +39,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
       try {
         if (!name && !railwayProjectId) {
           const projects = await listRailwayImportCandidates(adapter);
-          return toolSuccess(
+          return commandSuccess(
             { projects },
             {
               hint: projects.length > 0
@@ -54,12 +54,12 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
         if (!selectedProjectId) {
           const matches = await adapter.findProjectsByName(name!);
           if (matches.length === 0) {
-            return toolError('NOT_FOUND', `Railway project "${name}" not found.`, {
+            return commandError('NOT_FOUND', `Railway project "${name}" not found.`, {
               hint: 'Use hv_inspect to inspect existing provider infrastructure. For new infrastructure use hv_spec_set, hv_plan, and hv_apply.',
             });
           }
           if (matches.length > 1) {
-            return toolError('VALIDATION', `Multiple Railway projects named "${name}" are visible.`, {
+            return commandError('VALIDATION', `Multiple Railway projects named "${name}" are visible.`, {
               details: {
                 projects: matches.map((project) => ({ name: project.name, railwayId: project.id })),
               },
@@ -73,13 +73,13 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
 
         const inspection = await inspectRailwayProject(adapter, selectedProjectId);
         if (!inspection) {
-          return toolError('PROVIDER_ERROR', `Could not fetch details for Railway project "${selectedProjectName ?? selectedProjectId}".`, {
+          return commandError('PROVIDER_ERROR', `Could not fetch details for Railway project "${selectedProjectName ?? selectedProjectId}".`, {
             hint: 'Use hv_inspect to inspect existing provider infrastructure. For new infrastructure use hv_spec_set, hv_plan, and hv_apply.',
           });
         }
 
         const { details, environments, services, components, storage, envVarNames, autoDetected, needsMapping } = inspection;
-        return toolSuccess(
+        return commandSuccess(
           {
             inspected: true,
             imported: false,
@@ -105,7 +105,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_import',
     'Adopt already-deployed provider infrastructure into Hypervibe local/repo state (currently Railway). Adoption writes explicit Hypervibe project/environment/service/component/storage bindings. For read-only provider data, use hv_inspect. Not for creating new infrastructure (use hv_spec_set + hv_apply).',
     {
@@ -121,16 +121,16 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
       databaseMappings: z.record(z.string(), z.enum(['postgres'])).optional().describe('Explicitly adopt service-backed Railway databases by service id (e.g. {"service-id":"postgres"}). Datastore candidates are shown by hv_inspect.'),
       confirm: confirmField,
     },
-    wrapHandler(async ({ name, railwayProjectId, force = false, environmentMappings, storageMappings, databaseMappings, confirm }) => {
+    wrapCommandHandler(async ({ name, railwayProjectId, force = false, environmentMappings, storageMappings, databaseMappings, confirm }) => {
       if (!name && !railwayProjectId) {
-        return toolError('VALIDATION', 'hv_import is adoption-only and requires name or railwayProjectId.', {
+        return commandError('VALIDATION', 'hv_import is adoption-only and requires name or railwayProjectId.', {
           hint: 'Use hv_inspect provider="railway" to list/read provider projects. Use hv_import only when adopting a selected provider project into Hypervibe.',
           next: ['hv_inspect'],
         });
       }
 
       if (!environmentMappings) {
-        return toolError('VALIDATION', 'hv_import requires environmentMappings because it writes Hypervibe adoption bindings.', {
+        return commandError('VALIDATION', 'hv_import requires environmentMappings because it writes Hypervibe adoption bindings.', {
           hint: 'Use hv_inspect first to read environments/services/components, then call hv_import with environmentMappings and confirm=true when you want to adopt.',
           next: ['hv_inspect'],
         });
@@ -138,7 +138,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
 
       const adapter = await connectRailwayForImport();
       if (!adapter) {
-        return toolError('MISSING_CONNECTION', 'No Railway connection configured.', {
+        return commandError('MISSING_CONNECTION', 'No Railway connection configured.', {
           details: { connectionSetup: connectionSetupDetails('railway') },
           hint: formatConnectionGuidance('railway'),
           next: ['hv_connect'],
@@ -151,12 +151,12 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
         if (!selectedProjectId) {
           const matches = await adapter.findProjectsByName(name!);
           if (matches.length === 0) {
-            return toolError('NOT_FOUND', `Railway project "${name}" not found.`, {
+            return commandError('NOT_FOUND', `Railway project "${name}" not found.`, {
               hint: 'Use hv_inspect to inspect existing provider infrastructure. For new infrastructure use hv_spec_set, hv_plan, and hv_apply.',
             });
           }
           if (matches.length > 1) {
-            return toolError('VALIDATION', `Multiple Railway projects named "${name}" are visible.`, {
+            return commandError('VALIDATION', `Multiple Railway projects named "${name}" are visible.`, {
               details: {
                 projects: matches.map((project) => ({ name: project.name, railwayId: project.id })),
               },
@@ -170,7 +170,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
 
         const inspection = await inspectRailwayProject(adapter, selectedProjectId);
         if (!inspection) {
-          return toolError('PROVIDER_ERROR', `Could not fetch details for Railway project "${selectedProjectName ?? selectedProjectId}".`, {
+          return commandError('PROVIDER_ERROR', `Could not fetch details for Railway project "${selectedProjectName ?? selectedProjectId}".`, {
             hint: 'Use hv_inspect to inspect existing provider infrastructure. For new infrastructure use hv_spec_set, hv_plan, and hv_apply.',
           });
         }
@@ -179,13 +179,13 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
         const unknownDatabaseMappings = Object.keys(databaseMappings ?? {})
           .filter((serviceId) => !services.some((service) => service.railwayId === serviceId));
         if (unknownDatabaseMappings.length > 0) {
-          return toolError('VALIDATION', `databaseMappings references unknown Railway service id(s): ${unknownDatabaseMappings.join(', ')}`, {
+          return commandError('VALIDATION', `databaseMappings references unknown Railway service id(s): ${unknownDatabaseMappings.join(', ')}`, {
             hint: 'Use the datastore candidates returned by hv_inspect and map the exact Railway service id.',
             next: ['hv_inspect', 'hv_import'],
           });
         }
         if (Object.keys(databaseMappings ?? {}).length > 1) {
-          return toolError('VALIDATION', 'Only one Railway service can be adopted as the PostgreSQL component for an environment.', {
+          return commandError('VALIDATION', 'Only one Railway service can be adopted as the PostgreSQL component for an environment.', {
             hint: 'Select the intended datastore explicitly. Leave additional PostgreSQL services unmanaged until they are deliberately cleaned up.',
             next: ['hv_inspect', 'hv_import'],
           });
@@ -195,13 +195,13 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
         // with the same name already exists unless force=true.
         const existing = ctx.repos.projects.findByName(details.name);
         if (existing && !force && environmentMappings) {
-          return toolError('VALIDATION', `Hypervibe project "${details.name}" already exists. hv_import is adoption-only.`, {
+          return commandError('VALIDATION', `Hypervibe project "${details.name}" already exists. hv_import is adoption-only.`, {
             hint: 'Use hv_plan/hv_apply for setup or retries. Re-run hv_import with force=true only to intentionally re-adopt this live Railway project and update local bindings.',
           });
         }
 
         if (!confirm) {
-          return toolError('CONFIRM_REQUIRED', `This will adopt Railway project "${details.name}" into Hypervibe local state. Provider resources are not changed.`, {
+          return commandError('CONFIRM_REQUIRED', `This will adopt Railway project "${details.name}" into Hypervibe local state. Provider resources are not changed.`, {
             details: {
               project: { name: details.name, railwayId: details.id },
               environmentMappings,
@@ -223,10 +223,10 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
           databaseMappings,
         });
         if (result.status === 'already_exists') {
-          return toolError('VALIDATION', `Project "${details.name}" already exists in Hypervibe.`);
+          return commandError('VALIDATION', `Project "${details.name}" already exists in Hypervibe.`);
         }
 
-        return toolSuccess(
+        return commandSuccess(
           {
             imported: true,
             project: result.project,
@@ -246,7 +246,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_destroy',
     'Delete LOCAL Hypervibe records only: a project (cascade), an environment, or a service (including its platform binding). Never touches provider resources — to destroy live infrastructure, remove it from the spec with hv_spec_set, then run hv_plan and hv_apply. Data-bearing destroys are confirm-gated with confirmDestroy. Without confirm=true this returns CONFIRM_REQUIRED listing exactly what local records would be deleted.',
     {
@@ -256,7 +256,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
       name: z.string().optional().describe('Service name (required when scope="service")'),
       confirm: confirmField,
     },
-    wrapHandler(async ({ project: projectRef, env, scope, name, confirm }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, scope, name, confirm }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const providerNote = 'Provider resources were not touched — destroy live infrastructure via hv_spec_set + hv_plan + hv_apply. Data-bearing destroys require confirmDestroy.';
 
@@ -270,7 +270,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
         };
 
         if (!confirm) {
-          return toolError('CONFIRM_REQUIRED', `This would delete the local project "${project.name}" with ${environments.length} environment(s) and ${services.length} service(s). No provider resources are affected.`, {
+          return commandError('CONFIRM_REQUIRED', `This would delete the local project "${project.name}" with ${environments.length} environment(s) and ${services.length} service(s). No provider resources are affected.`, {
             details: summary,
             hint: 'Re-run hv_destroy with confirm=true to delete these local records.',
           });
@@ -284,14 +284,14 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
           details: { name: project.name },
         });
 
-        return toolSuccess({ deleted: { scope: 'project', ...summary } }, { hint: providerNote });
+        return commandSuccess({ deleted: { scope: 'project', ...summary } }, { hint: providerNote });
       }
 
       if (scope === 'environment') {
         const environment = ctx.resolveEnvironmentOrThrow(project, env);
 
         if (!confirm) {
-          return toolError('CONFIRM_REQUIRED', `This would delete the local environment "${environment.name}" of project "${project.name}" (including its platform bindings). No provider resources are affected.`, {
+          return commandError('CONFIRM_REQUIRED', `This would delete the local environment "${environment.name}" of project "${project.name}" (including its platform bindings). No provider resources are affected.`, {
             details: { environment: { id: environment.id, name: environment.name } },
             hint: 'Re-run hv_destroy with confirm=true to delete this local record.',
           });
@@ -309,7 +309,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
           details: { project: project.name, name: environment.name },
         });
 
-        return toolSuccess(
+        return commandSuccess(
           { deleted: { scope: 'environment', project: project.name, environment: environment.name } },
           {
             hint: providerNote,
@@ -322,7 +322,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
 
       // scope === 'service'
       if (!name?.trim()) {
-        return toolError('VALIDATION', 'name is required when scope="service".', {
+        return commandError('VALIDATION', 'name is required when scope="service".', {
           hint: 'Pass the service name to delete, e.g. name="web".',
         });
       }
@@ -330,7 +330,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
       const service = ctx.repos.services.findByProjectAndName(project.id, name.trim());
       if (!service) {
         const available = ctx.repos.services.findByProjectId(project.id).map((s) => s.name);
-        return toolError('NOT_FOUND', `Service "${name}" not found in project "${project.name}".`, {
+        return commandError('NOT_FOUND', `Service "${name}" not found in project "${project.name}".`, {
           details: { available },
         });
       }
@@ -340,7 +340,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
         .filter((environment) => serviceBindingFor(environment, service.name));
 
       if (!confirm) {
-        return toolError('CONFIRM_REQUIRED', `This would delete the local service "${service.name}" from project "${project.name}" and remove its binding from ${boundEnvironments.length} environment(s). No provider resources are affected.`, {
+        return commandError('CONFIRM_REQUIRED', `This would delete the local service "${service.name}" from project "${project.name}" and remove its binding from ${boundEnvironments.length} environment(s). No provider resources are affected.`, {
           details: {
             service: { id: service.id, name: service.name },
             bindingsRemovedFrom: boundEnvironments.map((e) => e.name),
@@ -373,7 +373,7 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
         details: { project: project.name, name: service.name },
       });
 
-      return toolSuccess(
+      return commandSuccess(
         {
           deleted: {
             scope: 'service',

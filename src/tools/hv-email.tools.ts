@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import {
   assessSendGridScopes,
@@ -27,9 +27,9 @@ import {
   catchAllPayload,
   ensureDestination,
 } from '../domain/services/email-routing.service.js';
-import type { ToolContext } from './context.js';
+import type { CommandContext } from '../application/context.js';
 import { projectField } from './schemas.js';
-import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { connectionSetupDetails } from '../domain/services/connection-guidance.js';
 
 interface SendGridDnsEntry {
@@ -56,8 +56,8 @@ async function findDomainAuth(adapter: SendGridAdapter, domain: string): Promise
   return domains.find((d) => d.domain.toLowerCase() === domain.toLowerCase()) ?? null;
 }
 
-export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void {
-  server.tool(
+export function registerHvEmailTools(commands: CommandRegistrar, ctx: CommandContext): void {
+  commands.register(
     'hv_email_setup',
     'Set up and manage transactional email (SendGrid). Default action "setup" runs the full flow for a domain: permission check, domain authentication, Cloudflare DNS records, then validation. Other actions: validate, dns-records, status, webhook-set, webhook-disable, webhook-test, sender-verify.',
     {
@@ -68,7 +68,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
       fromEmail: z.string().optional().describe('Sender email to verify (sender-verify)'),
       fromName: z.string().optional().describe('Sender display name (sender-verify)'),
     },
-    wrapHandler(async ({ project: projectRef, domain, action = 'setup', url, fromEmail, fromName }) => {
+    wrapCommandHandler(async ({ project: projectRef, domain, action = 'setup', url, fromEmail, fromName }) => {
       const project = ctx.resolveProject({ project: projectRef });
       const scopeHints = [
         ...(domain ? [normalizeDomain(domain)] : []),
@@ -76,7 +76,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
       ];
       const sgResult = getSendGridAdapter(scopeHints.length ? scopeHints : undefined);
       if ('error' in sgResult) {
-        return toolError('MISSING_CONNECTION', sgResult.error, {
+        return commandError('MISSING_CONNECTION', sgResult.error, {
           details: { connectionSetup: connectionSetupDetails('sendgrid') },
         });
       }
@@ -95,7 +95,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
           const dom = requireDomain();
           const permissions = assessSendGridScopes(await adapter.getScopes());
           if (!sendGridSetupReady(permissions)) {
-            return toolError('PROVIDER_ERROR', sendGridPermissionError(permissions), {
+            return commandError('PROVIDER_ERROR', sendGridPermissionError(permissions), {
               details: sendGridPermissionPayload(permissions),
             });
           }
@@ -131,7 +131,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
             details: { domain: dom, dnsConfigured: dns.configured, valid: validation.valid },
           });
 
-          return toolSuccess(
+          return commandSuccess(
             {
               domain: dom,
               domainId: auth.id,
@@ -152,12 +152,12 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
           const dom = requireDomain();
           const auth = await findDomainAuth(adapter, dom);
           if (!auth) {
-            return toolError('NOT_FOUND', `No SendGrid domain authentication found for ${dom}.`, {
+            return commandError('NOT_FOUND', `No SendGrid domain authentication found for ${dom}.`, {
               hint: 'Run hv_email_setup with action="setup" first.',
             });
           }
           const validation = await adapter.validateDomainAuthentication(auth.id);
-          return toolSuccess({
+          return commandSuccess({
             domain: dom,
             domainId: auth.id,
             valid: validation.valid,
@@ -168,11 +168,11 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
           const dom = requireDomain();
           const auth = await findDomainAuth(adapter, dom);
           if (!auth) {
-            return toolError('NOT_FOUND', `No SendGrid domain authentication found for ${dom}.`, {
+            return commandError('NOT_FOUND', `No SendGrid domain authentication found for ${dom}.`, {
               hint: 'Run hv_email_setup with action="setup" first.',
             });
           }
-          return toolSuccess({ domain: dom, domainId: auth.id, valid: auth.valid, records: sendgridDnsEntries(auth) });
+          return commandSuccess({ domain: dom, domainId: auth.id, valid: auth.valid, records: sendgridDnsEntries(auth) });
         }
         case 'status': {
           const permissions = assessSendGridScopes(await adapter.getScopes());
@@ -184,7 +184,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
           } catch (error) {
             webhook = { error: error instanceof Error ? error.message : String(error) };
           }
-          return toolSuccess({
+          return commandSuccess({
             permissions: sendGridPermissionPayload(permissions),
             domains: domains.map((d) => ({ id: d.id, domain: d.domain, valid: d.valid, default: d.default })),
             webhook,
@@ -199,7 +199,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
             resourceId: 'event_webhook',
             details: { url },
           });
-          return toolSuccess({ webhook: { enabled: settings.enabled, url: settings.url } });
+          return commandSuccess({ webhook: { enabled: settings.enabled, url: settings.url } });
         }
         case 'webhook-disable': {
           await adapter.disableEventWebhook();
@@ -209,20 +209,20 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
             resourceId: 'event_webhook',
             details: {},
           });
-          return toolSuccess({ webhook: { enabled: false } });
+          return commandSuccess({ webhook: { enabled: false } });
         }
         case 'webhook-test': {
           if (!url) throw new HvError('VALIDATION', 'url is required for action "webhook-test".');
           const test = await adapter.testEventWebhook(url);
           return test.success
-            ? toolSuccess({ url, delivered: true })
-            : toolError('PROVIDER_ERROR', `Webhook test failed: ${test.error}`);
+            ? commandSuccess({ url, delivered: true })
+            : commandError('PROVIDER_ERROR', `Webhook test failed: ${test.error}`);
         }
         case 'sender-verify': {
           if (!fromEmail) throw new HvError('VALIDATION', 'fromEmail is required for action "sender-verify".');
           const permissions = assessSendGridScopes(await adapter.getScopes());
           if (!permissions.canManageSenderVerification) {
-            return toolError('PROVIDER_ERROR', `SendGrid API key cannot create sender verification requests. Missing: ${permissions.missingScopes.senderVerification.join(', ')}.`, {
+            return commandError('PROVIDER_ERROR', `SendGrid API key cannot create sender verification requests. Missing: ${permissions.missingScopes.senderVerification.join(', ')}.`, {
               details: sendGridPermissionPayload(permissions),
             });
           }
@@ -238,7 +238,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
             resourceId: String(sender.id ?? fromEmail),
             details: { fromEmail },
           });
-          return toolSuccess({ sender }, {
+          return commandSuccess({ sender }, {
             hint: `SendGrid sent a verification email to ${fromEmail}; it must be accepted before sending.`,
           });
         }
@@ -246,7 +246,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_email_forwarding',
     'Manage email forwarding for a domain via Cloudflare Email Routing: list addresses, create or delete a forwarding address, or configure the catch-all route.',
     {
@@ -255,7 +255,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
       address: z.string().optional().describe('Alias, e.g. "support" or support@example.com (create, delete)'),
       forwardTo: z.string().optional().describe('Destination mailbox (create, catchall)'),
     },
-    wrapHandler(async ({ domain, action, address, forwardTo }) => {
+    wrapCommandHandler(async ({ domain, action, address, forwardTo }) => {
       if (!domain) {
         throw new HvError('VALIDATION', 'domain is required.', { hint: 'Pass domain=example.com.' });
       }
@@ -263,7 +263,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
       const context = await resolveCloudflareEmailContext(dom);
       if ('error' in context) {
         const code = context.error.includes('connection') ? 'MISSING_CONNECTION' : 'NOT_FOUND';
-        return toolError(code, context.error, code === 'MISSING_CONNECTION'
+        return commandError(code, context.error, code === 'MISSING_CONNECTION'
           ? { details: { connectionSetup: connectionSetupDetails('cloudflare', { scope: dom }) } }
           : undefined);
       }
@@ -275,7 +275,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
             context.adapter.getEmailRoutingCatchAll(context.zone.id).catch(() => undefined),
             context.adapter.listEmailRoutingAddresses(context.accountId),
           ]);
-          return toolSuccess({
+          return commandSuccess({
             domain: dom,
             count: rules.length,
             addresses: rules.map((rule) => ({
@@ -315,7 +315,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
           });
 
           const verificationRequired = destination.destination ? !isVerifiedDestination(destination.destination) : true;
-          return toolSuccess(
+          return commandSuccess(
             {
               domain: dom,
               address: alias,
@@ -338,7 +338,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
           const rules = await context.adapter.listEmailRoutingRules(context.zone.id);
           const rule = rules.find((candidate) => routingRuleForAddress(candidate, alias));
           if (!rule) {
-            return toolSuccess({ domain: dom, address: alias, deleted: false }, {
+            return commandSuccess({ domain: dom, address: alias, deleted: false }, {
               hint: `No routing rule exists for ${alias}; nothing to do.`,
             });
           }
@@ -349,7 +349,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
             resourceId: alias,
             details: { domain: dom, routeId: rule.id },
           });
-          return toolSuccess({ domain: dom, address: alias, deleted: true, deletedRouteId: rule.id });
+          return commandSuccess({ domain: dom, address: alias, deleted: true, deletedRouteId: rule.id });
         }
         case 'catchall': {
           const destinationEmail = forwardTo ? normalizeEmail(forwardTo) : undefined;
@@ -367,7 +367,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
             resourceId: dom,
             details: { domain: dom, action: destinationEmail ? 'forward' : 'drop', forwardTo: destinationEmail },
           });
-          return toolSuccess({ domain: dom, catchAll: summarizeRule(catchAll) }, {
+          return commandSuccess({ domain: dom, catchAll: summarizeRule(catchAll) }, {
             hint: destinationEmail
               ? `Catch-all for ${dom} now forwards to ${destinationEmail}.`
               : `Catch-all for ${dom} now drops unmatched email.`,
@@ -377,7 +377,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_email_send',
     'Send an email via SendGrid.',
     {
@@ -386,7 +386,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
       body: z.string().describe('Plain-text email body'),
       from: z.string().optional().describe('Sender address — must belong to an authenticated domain or a verified single sender.'),
     },
-    wrapHandler(async ({ to, subject, body, from }) => {
+    wrapCommandHandler(async ({ to, subject, body, from }) => {
       if (!from) {
         throw new HvError('VALIDATION', 'from is required.', {
           hint: 'Pass a sender on an authenticated domain (hv_email_setup) or a verified single sender (action="sender-verify").',
@@ -394,13 +394,13 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
       }
       const sgResult = getSendGridAdapter();
       if ('error' in sgResult) {
-        return toolError('MISSING_CONNECTION', sgResult.error, {
+        return commandError('MISSING_CONNECTION', sgResult.error, {
           details: { connectionSetup: connectionSetupDetails('sendgrid') },
         });
       }
       const result = await sgResult.adapter.sendEmail({ to, from, subject, text: body });
       if (!result.success) {
-        return toolError('PROVIDER_ERROR', result.error ?? 'SendGrid send failed');
+        return commandError('PROVIDER_ERROR', result.error ?? 'SendGrid send failed');
       }
       ctx.repos.audit.create({
         action: 'sendgrid.email_sent',
@@ -408,7 +408,7 @@ export function registerHvEmailTools(server: McpServer, ctx: ToolContext): void 
         resourceId: to,
         details: { to, from, subject },
       });
-      return toolSuccess({ sent: true, to, from, messageId: result.messageId });
+      return commandSuccess({ sent: true, to, from, messageId: result.messageId });
     })
   );
 }

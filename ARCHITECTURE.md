@@ -31,14 +31,34 @@ Do not treat cached local state as proof of convergence when live observation is
 
 ## Code Map
 
-- `src/tools/`: the pinned `hv_*` MCP tool surface, registered in `src/server.ts` through `ToolContext`; all responses use the `toolSuccess`/`toolError` envelope from `src/tools/respond.ts`.
+- `src/application/`: the transport-neutral command registry, command context, result envelope, provider bootstrap, and shared orchestration entrypoint.
+- `src/interfaces/mcp/`: the MCP registration/response adapter. It exposes the canonical `hv_*` ids without owning command behavior.
+- `src/interfaces/cli/`: the human and JSON CLI adapter. It parses friendly command paths into the same registry used by MCP.
+- `src/tools/`: transport-neutral command group declarations retained under their historical filenames while they are moved incrementally; they must not import MCP.
 - `src/domain/spec/`: the desired-state document (`ProjectSpec`), revisioned in the `project_specs` table through `SpecStore`.
 - `src/domain/plan/`: the reconciliation engine: observe live state, pure `diffEnvironment`, `ConvergeExecutor`, and the planId handshake.
 - `src/adapters/providers/`: provider-owned API integrations and provider-specific lifecycle behavior.
 - `src/domain/services/`: orchestration services that sequence capabilities without owning provider API quirks.
 - `src/adapters/db/repositories/`: SQLite data access; JSON columns should be validated through `parseJsonColumn`.
 
-Legacy `*.tools.ts` files that still exist but are not registered in `server.ts` are internal helper libraries pending extraction. Do not register them or add new tools there.
+Legacy `*.tools.ts` files that are not included by `createCommandRegistry` are internal helper libraries pending extraction. Do not expose them through an interface.
+
+## Interface Boundary
+
+MCP and CLI are adapters over one command application layer:
+
+```text
+CLI ─┐
+     ├─ command registry/context/results ─ domain plan/services ─ providers
+MCP ─┘
+```
+
+- Define a command once with its canonical id, CLI path, description, Zod input schema, safety metadata, and handler.
+- Interface code may parse, render, prompt, and translate protocol envelopes. It must not contain provider calls or infrastructure orchestration.
+- The command runner owns validation, error conversion, redaction, and the structured result envelope. Secrets must be redacted before any interface sees a result.
+- MCP `structuredContent` and CLI `--json` expose the same redacted command envelope.
+- The `hypervibe` no-argument entrypoint remains MCP-compatible. Human CLI commands use explicit arguments; `hypervibe mcp` and `hypervibe-mcp` are explicit MCP entrypoints.
+- A future HTTP adapter may use this boundary, but remote auth, locking, state ownership, and secret custody are separate product decisions. Do not introduce an unauthenticated remote interface.
 
 
 ## Repository Collaboration
@@ -70,7 +90,7 @@ and value-free handoff metadata.
 
 ## Provider Boundary
 
-Keep provider behavior behind the provider boundary. Generic orchestration code in `src/domain/plan`, shared `src/domain/services`, and shared `src/tools` must not grow provider-name branches or direct imports from `src/adapters/providers/<provider>` just to express hosting behavior.
+Keep provider behavior behind the provider boundary. Generic orchestration code in `src/domain/plan`, shared `src/domain/services`, and shared command modules must not grow provider-name branches or direct imports from `src/adapters/providers/<provider>` just to express hosting behavior.
 
 Provider-specific logic belongs under `src/adapters/providers/<provider>/...` and should be exposed through:
 
@@ -382,4 +402,6 @@ New provider support needs a full contract, not a name in an enum. Add or confir
 
 ## Tool And CLI Policy
 
-Do not introduce dependencies on provider CLIs for infrastructure operations. Hypervibe should use its provider adapters and recorded connections so state, audit history, and drift detection stay coherent.
+The Hypervibe CLI is a supported interface to the same command registry, state store, plan/apply engine, provider adapters, and audit history as MCP. It is not a provider-CLI bypass.
+
+Do not introduce dependencies on provider CLIs for infrastructure operations. Hypervibe should use its provider adapters and recorded connections so state, audit history, and drift detection stay coherent. When an MCP client already has Hypervibe tools, agents should call them directly rather than spawning the Hypervibe CLI.

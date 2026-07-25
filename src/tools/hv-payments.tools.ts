@@ -1,12 +1,12 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { STRIPE_COMMON_WEBHOOK_EVENTS } from '../adapters/providers/stripe/stripe.adapter.js';
 import type { StripeAdapter, StripeMode } from '../adapters/providers/stripe/stripe.adapter.js';
 import { providerDisplayName, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { getStripeAdapter } from '../domain/services/stripe-ops.service.js';
-import type { ToolContext } from './context.js';
+import type { CommandContext } from '../application/context.js';
 import { projectField, envField, confirmField } from './schemas.js';
-import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { connectionSetupDetails } from '../domain/services/connection-guidance.js';
 
 const modeField = z
@@ -55,8 +55,8 @@ async function computeStripeDiff(adapter: StripeAdapter, sourceMode: StripeMode,
   };
 }
 
-export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): void {
-  server.tool(
+export function registerHvPaymentsTools(commands: CommandRegistrar, ctx: CommandContext): void {
+  commands.register(
     'hv_payments_setup',
     'Set up and manage Stripe webhooks. Default action "setup" creates (or updates) a webhook endpoint and syncs the signing secret to the hosting provider as STRIPE_WEBHOOK_SECRET. Other actions: webhooks-list, webhook-delete.',
     {
@@ -68,16 +68,16 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
       mode: modeField,
       service: z.string().optional().describe('Service to set STRIPE_WEBHOOK_SECRET on (setup). Defaults to the first service in the project.'),
     },
-    wrapHandler(async ({ project: projectRef, env, action = 'setup', webhookId, url, mode, service: serviceName }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, action = 'setup', webhookId, url, mode, service: serviceName }) => {
       const stripeResult = getStripeAdapter(env);
       if ('error' in stripeResult) {
-        return toolError('MISSING_CONNECTION', stripeResult.error, {
+        return commandError('MISSING_CONNECTION', stripeResult.error, {
           details: { connectionSetup: connectionSetupDetails('stripe') },
         });
       }
       const { adapter } = stripeResult;
       if (env && mode && mode !== stripeResult.mode) {
-        return toolError(
+        return commandError(
           'VALIDATION',
           `Stripe connection scope "${env}" uses ${stripeResult.mode} keys, so mode="${mode}" would target the wrong environment.`,
           { hint: `Omit mode to use the scoped connection, or connect the intended Stripe environment under a different scope. ${connectionSetupDetails('stripe', { scope: env }).credentialExample}` }
@@ -88,7 +88,7 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
       switch (action) {
         case 'webhooks-list': {
           const webhooks = await adapter.listWebhookEndpoints(stripeMode);
-          return toolSuccess({ mode: stripeMode, count: webhooks.length, webhooks: webhooks.map(summarizeWebhook) });
+          return commandSuccess({ mode: stripeMode, count: webhooks.length, webhooks: webhooks.map(summarizeWebhook) });
         }
         case 'webhook-delete': {
           if (!webhookId && !url) {
@@ -98,7 +98,7 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
           if (!idToDelete && url) {
             const found = await adapter.findWebhookByUrl(stripeMode, url);
             if (!found) {
-              return toolError('NOT_FOUND', `No webhook found with URL ${url} in ${stripeMode}.`);
+              return commandError('NOT_FOUND', `No webhook found with URL ${url} in ${stripeMode}.`);
             }
             idToDelete = found.id;
           }
@@ -109,7 +109,7 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
             resourceId: idToDelete!,
             details: { mode: stripeMode, url },
           });
-          return toolSuccess({ mode: stripeMode, webhookId: deleted.id, deleted: deleted.deleted });
+          return commandSuccess({ mode: stripeMode, webhookId: deleted.id, deleted: deleted.deleted });
         }
         case 'setup': {
           if (!url) {
@@ -122,7 +122,7 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
           const services = ctx.repos.services.findByProjectId(project.id);
           const service = serviceName ? services.find((s) => s.name === serviceName) : services[0];
           if (!service) {
-            return toolError(
+            return commandError(
               'NOT_FOUND',
               serviceName
                 ? `Service "${serviceName}" not found in project "${project.name}".`
@@ -182,13 +182,13 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
             },
           });
 
-          return toolSuccess(data, { warnings, hint });
+          return commandSuccess(data, { warnings, hint });
         }
       }
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_stripe_sync',
     'Sync or compare Stripe data between modes, list products, or clear sandbox customers. Actions: sync (sandbox→live by default; dryRun previews the diff), diff, products, clear-sandbox (requires confirm=true).',
     {
@@ -199,10 +199,10 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
       dryRun: z.boolean().optional().describe('For sync: preview the diff without writing anything.'),
       confirm: confirmField,
     },
-    wrapHandler(async ({ project: projectRef, action = 'sync', sourceMode = 'sandbox', targetMode = 'live', dryRun, confirm }) => {
+    wrapCommandHandler(async ({ project: projectRef, action = 'sync', sourceMode = 'sandbox', targetMode = 'live', dryRun, confirm }) => {
       const stripeResult = getStripeAdapter();
       if ('error' in stripeResult) {
-        return toolError('MISSING_CONNECTION', stripeResult.error, {
+        return commandError('MISSING_CONNECTION', stripeResult.error, {
           details: { connectionSetup: connectionSetupDetails('stripe') },
         });
       }
@@ -217,7 +217,7 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
           }
           if (action === 'diff' || dryRun) {
             const diff = await computeStripeDiff(adapter, sourceMode, targetMode);
-            return toolSuccess(
+            return commandSuccess(
               { sourceMode, targetMode, dryRun: action === 'sync' ? true : undefined, diff },
               {
                 hint: diff.summary.productsToSync === 0 && diff.summary.pricesToSync === 0
@@ -251,9 +251,9 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
           };
           const hasErrors = result.products.errors.length > 0 || result.prices.errors.length > 0;
           if (hasErrors) {
-            return toolError('PROVIDER_ERROR', 'Sync completed with errors.', { details: data });
+            return commandError('PROVIDER_ERROR', 'Sync completed with errors.', { details: data });
           }
-          return toolSuccess(data, {
+          return commandSuccess(data, {
             hint: `Synced ${result.products.created.length} product(s) and ${result.prices.created.length} price(s) from ${sourceMode} to ${targetMode}.`,
           });
         }
@@ -266,7 +266,7 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
           for (const price of prices) {
             pricesByProduct.set(price.product, [...(pricesByProduct.get(price.product) ?? []), price]);
           }
-          return toolSuccess({
+          return commandSuccess({
             mode: sourceMode,
             count: products.length,
             products: products.map((product) => ({
@@ -288,7 +288,7 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
         case 'clear-sandbox': {
           if (!confirm) {
             const customers = await adapter.listCustomers('sandbox');
-            return toolError('CONFIRM_REQUIRED', `This deletes all ${customers.length} customer(s) from the Stripe sandbox.`, {
+            return commandError('CONFIRM_REQUIRED', `This deletes all ${customers.length} customer(s) from the Stripe sandbox.`, {
               details: {
                 count: customers.length,
                 customers: customers.map((c) => ({ id: c.id, name: c.name, email: c.email })),
@@ -307,11 +307,11 @@ export function registerHvPaymentsTools(server: McpServer, ctx: ToolContext): vo
             details: { project: project?.name, deleted: result.deleted, errors: result.errors.length },
           });
           if (result.errors.length > 0) {
-            return toolError('PROVIDER_ERROR', `Deleted ${result.deleted} customer(s) with ${result.errors.length} error(s).`, {
+            return commandError('PROVIDER_ERROR', `Deleted ${result.deleted} customer(s) with ${result.errors.length} error(s).`, {
               details: { deleted: result.deleted, errors: result.errors },
             });
           }
-          return toolSuccess({ deleted: result.deleted }, { hint: `Deleted ${result.deleted} customer(s) from sandbox.` });
+          return commandSuccess({ deleted: result.deleted }, { hint: `Deleted ${result.deleted} customer(s) from sandbox.` });
         }
       }
     })

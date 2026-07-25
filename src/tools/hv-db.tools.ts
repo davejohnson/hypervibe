@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { createHash } from 'crypto';
 import { z } from 'zod';
 import {
@@ -29,11 +29,11 @@ import {
   type DatabaseAccessLease,
 } from '../domain/services/database-access.service.js';
 import { resolveSecretValueRef } from '../domain/services/secret-value-ref.js';
-import type { ToolContext } from './context.js';
+import type { CommandContext } from '../application/context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import { projectField, envField, confirmField } from './schemas.js';
-import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 
 type ResolvedDatabaseTarget = {
   url: string;
@@ -69,7 +69,7 @@ function assertPostgresTarget(url: string, source: string): void {
 }
 
 async function resolveConfiguredTarget(
-  ctx: ToolContext,
+  ctx: CommandContext,
   opts: { connectionUrl?: string; connectionName?: string; project?: string; env?: string; service?: string }
 ): Promise<ResolvedDatabaseTarget | null> {
   if (opts.connectionUrl) {
@@ -111,7 +111,7 @@ function unavailableExternalDatabaseTarget(project: Project, environment: { name
  * ${{Postgres.DATABASE_URL}} or private hosts such as *.railway.internal.
  */
 async function resolveExternalTarget(
-  ctx: ToolContext,
+  ctx: CommandContext,
   opts: { connectionUrl?: string; connectionName?: string; project?: string; env?: string; service?: string }
 ): Promise<ResolvedDatabaseTarget> {
   const configured = await resolveConfiguredTarget(ctx, opts);
@@ -127,7 +127,7 @@ async function resolveExternalTarget(
 }
 
 async function resolveConfirmedExternalTarget(
-  ctx: ToolContext,
+  ctx: CommandContext,
   opts: { connectionUrl?: string; connectionName?: string; project?: string; env?: string; service?: string }
 ): Promise<ResolvedDatabaseTarget> {
   const configured = await resolveConfiguredTarget(ctx, opts);
@@ -150,7 +150,7 @@ async function resolveConfirmedExternalTarget(
 }
 
 async function resolveTemporaryExternalTarget(
-  ctx: ToolContext,
+  ctx: CommandContext,
   opts: { connectionUrl?: string; connectionName?: string; project?: string; env?: string; service?: string }
 ): Promise<ResolvedDatabaseAccessTarget> {
   const configured = await resolveConfiguredTarget(ctx, opts);
@@ -184,8 +184,8 @@ async function resolveTemporaryExternalTarget(
   };
 }
 
-export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
-  server.tool(
+export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContext): void {
+  commands.register(
     'hv_db_query',
     'Run one bounded SQL statement against a database. Hypervibe uses an existing reachable endpoint or acquires provider-owned operation-scoped access (such as a connector, TCP proxy, or temporary firewall rule), then releases only access it created and reports cleanup status. SELECT is database-enforced read-only by default; allowMutations=true enables INSERT/UPDATE/DELETE/DDL. Multi-statement SQL is always rejected.',
     {
@@ -198,12 +198,12 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
       connectionName: z.string().optional().describe('Named database connection (overrides project/env)'),
       service: z.string().optional().describe('Service name when resolving from project bindings'),
     },
-    wrapHandler(async ({ project, env, sql, params, allowMutations, connectionUrl, connectionName, service }) => {
+    wrapCommandHandler(async ({ project, env, sql, params, allowMutations, connectionUrl, connectionName, service }) => {
       const dbAdapter = new DatabaseAdapter();
       const analysis = dbAdapter.analyzeQuery(sql);
 
       if (analysis.multiStatement) {
-        return toolError('VALIDATION', 'Multi-statement SQL is not allowed.', {
+        return commandError('VALIDATION', 'Multi-statement SQL is not allowed.', {
           hint: 'Run one statement per hv_db_query call.',
         });
       }
@@ -213,7 +213,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
           : connectionUrl
             ? 'direct URL'
             : `${project ?? 'auto-detected project'}/${env ?? 'staging'}${service ? `/${service}` : ''}`;
-        return toolError('CONFIRM_REQUIRED', 'Mutation query blocked for safety.', {
+        return commandError('CONFIRM_REQUIRED', 'Mutation query blocked for safety.', {
           details: { source: requestedSource, warnings: analysis.warnings },
           hint: 'Re-run with allowMutations=true to execute INSERT/UPDATE/DELETE/DDL.',
         });
@@ -281,7 +281,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
 
       const responseWarnings = [cleanup.warning, auditWarning].filter((value): value is string => Boolean(value));
       if (queryError) {
-        return toolError('PROVIDER_ERROR', queryError instanceof Error ? queryError.message : String(queryError), {
+        return commandError('PROVIDER_ERROR', queryError instanceof Error ? queryError.message : String(queryError), {
           details: { source: target.source, durationMs, access },
           warnings: responseWarnings,
           hint: cleanup.status === 'failed'
@@ -293,7 +293,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
         throw new Error('Database query returned no result.');
       }
       if (!result.success) {
-        return toolError('PROVIDER_ERROR', result.error ?? 'Query failed', {
+        return commandError('PROVIDER_ERROR', result.error ?? 'Query failed', {
           details: { source: target.source, durationMs, access },
           warnings: responseWarnings,
           hint: cleanup.status === 'failed'
@@ -302,7 +302,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
         });
       }
 
-      return toolSuccess(
+      return commandSuccess(
         {
           source: target.source,
           queryType: analysis.isMutation ? 'mutation' : 'select',
@@ -329,7 +329,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_db_migrate',
     'Database operations for a deployed environment. mode="up" runs schema migrations; mode="seed" explicitly re-runs a one-off seed/bootstrap command (fresh-environment seed/bootstrap data should be declared as database.seedCommand and applied through hv_plan/hv_apply); mode="reset" drops all tables; mode="move" copies data from the previous provider into the current database during staged provider migration (pg_dump | pg_restore snapshot plus row-count verification). up/seed default to runIn="environment": the command runs INSIDE the hosting environment (Cloud Run job / temporary Railway service) using the deployed image and its env vars — no database exposure, no local .env. runIn="local" spawns the command locally against an externally reachable database URL instead. Mutating modes are confirm-gated.',
     {
@@ -347,7 +347,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
       criticalTables: z.array(z.string()).optional().describe('mode=move: tables to verify with exact row counts (default: the 8 largest)'),
       confirm: confirmField,
     },
-    wrapHandler(async ({ project: projectRef, env, mode = 'up', command, preset, service, runIn, dryRun, sourceConnectionUrl, targetConnectionUrl, criticalTables, confirm }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, mode = 'up', command, preset, service, runIn, dryRun, sourceConnectionUrl, targetConnectionUrl, criticalTables, confirm }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
 
@@ -368,11 +368,11 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
         // creates a public TCP proxy so the target becomes reachable.
         if (!resolved.ok && resolved.code !== 'target_unreachable') {
           const code = resolved.code === 'tooling' ? 'UNSUPPORTED' : 'NOT_FOUND';
-          return toolError(code, resolved.error, { hint: resolved.hint });
+          return commandError(code, resolved.error, { hint: resolved.hint });
         }
         if (!confirm) {
           if (!resolved.ok) {
-            return toolError('CONFIRM_REQUIRED', 'Managed database move copies data with pg_dump | pg_restore (pg_restore --clean replaces existing objects in the target). The target Railway database is internal-only: confirming will also create a public TCP proxy for it.', {
+            return commandError('CONFIRM_REQUIRED', 'Managed database move copies data with pg_dump | pg_restore (pg_restore --clean replaces existing objects in the target). The target Railway database is internal-only: confirming will also create a public TCP proxy for it.', {
               details: {
                 target: {
                   provider: 'railway',
@@ -384,7 +384,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
               hint: 'Freeze writes to the source (or plan a final re-run) and re-run with confirm=true. After the move, re-run hv_plan to repoint services, verify the app, then confirm the old database destroy.',
             });
           }
-          return toolError('CONFIRM_REQUIRED', 'Managed database move copies data with pg_dump | pg_restore (pg_restore --clean replaces existing objects in the target).', {
+          return commandError('CONFIRM_REQUIRED', 'Managed database move copies data with pg_dump | pg_restore (pg_restore --clean replaces existing objects in the target).', {
             details: {
               source: { provider: resolved.sourceProvider ?? 'unknown', url: maskDatabaseUrl(resolved.sourceUrl) },
               target: { provider: resolved.targetProvider ?? 'unknown', url: maskDatabaseUrl(resolved.targetUrl) },
@@ -397,9 +397,9 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
         const result = await executeManagedDatabaseMove({ project, environment, sourceConnectionUrl: sourceOverride, targetConnectionUrl: targetOverride, criticalTables });
         if (!result.ok) {
           const code = result.code === 'tooling' ? 'UNSUPPORTED' : 'PROVIDER_ERROR';
-          return toolError(code, result.error, { hint: result.hint });
+          return commandError(code, result.error, { hint: result.hint });
         }
-        return toolSuccess(
+        return commandSuccess(
           {
             moved: true,
             source: { provider: result.sourceProvider ?? 'unknown' },
@@ -427,7 +427,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
           : targetConnectionUrl;
         const resolvedTarget = resolvedTargetRaw?.trim();
         if (!command?.trim()) {
-          return toolError('VALIDATION', 'mode="seed" requires command, for example command="npm run db:seed".', {
+          return commandError('VALIDATION', 'mode="seed" requires command, for example command="npm run db:seed".', {
             hint: 'Seed data is a one-off database operation; do not set a temporary releaseCommand for it.',
           });
         }
@@ -440,10 +440,10 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
           dryRun: true,
         });
         if (dryRun) {
-          return toolSuccess(preview);
+          return commandSuccess(preview);
         }
         if (!confirm) {
-          return toolError('CONFIRM_REQUIRED', 'Seed commands mutate the target database and must be confirmed.', {
+          return commandError('CONFIRM_REQUIRED', 'Seed commands mutate the target database and must be confirmed.', {
             details: preview,
             hint: 'Review the target and command, then re-run with confirm=true. This does not change service releaseCommand.',
           });
@@ -456,7 +456,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
           runIn,
         });
         if (result.success === false) {
-          return toolError('PROVIDER_ERROR', String(result.error ?? 'Seed command failed'), {
+          return commandError('PROVIDER_ERROR', String(result.error ?? 'Seed command failed'), {
             details: result,
             hint: typeof result.hint === 'string'
               ? result.hint
@@ -465,7 +465,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
                 : 'Check the command output. The command runs locally with DATABASE_URL and DIRECT_URL pinned to the target database.',
           });
         }
-        return toolSuccess(result, {
+        return commandSuccess(result, {
           hint: 'Seed complete. Run hv_db_query or app-level health checks to verify the seeded data.',
         });
       }
@@ -477,7 +477,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
           const environment = ctx.resolveEnvironmentOrThrow(project, env);
           const previewUrl = configured?.url ?? await resolveExternalDatabaseUrl(project, environment, service);
           const canCreateTcpProxy = canCreateRailwayDatabaseTcpProxy(environment);
-          return toolError('CONFIRM_REQUIRED', 'Database reset drops ALL tables and data.', {
+          return commandError('CONFIRM_REQUIRED', 'Database reset drops ALL tables and data.', {
             details: previewUrl
               ? {
                 source: configured?.source ?? `${project.name}/${environment.name}${service ? `/${service}` : ''}`,
@@ -497,7 +497,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
         }
         const target = await resolveConfirmedExternalTarget(ctx, { project: projectRef, env, service });
         const payload = await executeDatabaseReset(target.url, target.source);
-        return toolSuccess({
+        return commandSuccess({
           ...payload,
           ...(target.tcpProxyCreated !== undefined
             ? { tcpProxyCreated: target.tcpProxyCreated, proxyDomain: target.proxyDomain }
@@ -515,27 +515,27 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
         dryRun,
       });
       if (payload.success === false) {
-        return toolError('PROVIDER_ERROR', String(payload.error ?? 'Migration failed'), {
+        return commandError('PROVIDER_ERROR', String(payload.error ?? 'Migration failed'), {
           details: payload,
           hint: typeof payload.hint === 'string' ? payload.hint : undefined,
         });
       }
-      return toolSuccess(payload);
+      return commandSuccess(payload);
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_db_url',
-    'Get the database connection URL for an environment. Values are always masked in tool output to avoid leaking credentials into chat transcripts.',
+    'Get the database connection URL for an environment. Values are always masked in command output to avoid leaking credentials into transcripts or terminals.',
     {
       project: projectField,
       env: envField,
       service: z.string().optional().describe('Service name when resolving from bindings'),
-      reveal: z.boolean().optional().describe('Deprecated: raw URLs are not returned in tool output'),
+      reveal: z.boolean().optional().describe('Deprecated: raw URLs are not returned in command output'),
     },
-    wrapHandler(async ({ project, env, service, reveal }) => {
+    wrapCommandHandler(async ({ project, env, service, reveal }) => {
       const target = await resolveExternalTarget(ctx, { project, env, service });
-      return toolSuccess(
+      return commandSuccess(
         {
           source: target.source,
           databaseUrl: maskDatabaseUrl(target.url),
@@ -544,7 +544,7 @@ export function registerHvDbTools(server: McpServer, ctx: ToolContext): void {
         },
         {
           hint: reveal
-            ? 'Raw database URLs are not returned in chat/tool output. Prefer hv_db_query/hv_db_migrate for managed workflows, or retrieve the credential directly from the provider/secret manager when a human must use it.'
+            ? 'Raw database URLs are not returned in command output. Prefer hv_db_query/hv_db_migrate for managed workflows, or retrieve the credential directly from the provider/secret manager when a human must use it.'
             : 'Use hv_db_query/hv_db_migrate for managed database work without exposing the connection URL.',
         }
       );

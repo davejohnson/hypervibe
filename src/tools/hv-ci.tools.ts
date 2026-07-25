@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import type { GitHubAdapter } from '../adapters/providers/github/github.adapter.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
@@ -11,9 +11,9 @@ import {
 } from '../domain/services/connection-guidance.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import type { CiWorkflowDiagnostic } from '../domain/ports/ci-deploy.port.js';
-import type { ToolContext } from './context.js';
+import type { CommandContext } from '../application/context.js';
 import { projectField } from './schemas.js';
-import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { canonicalizeLegacyGitHubSpec, deepMergeSpec, SpecStore } from '../domain/spec/spec.store.js';
 import { projectSpecSchema } from '../domain/spec/spec.schema.js';
 
@@ -55,7 +55,7 @@ interface WorkflowJobSummary {
   }>;
 }
 
-function resolveRepoOrThrow(ctx: ToolContext, projectRef: string | undefined, repoOverride: string | undefined) {
+function resolveRepoOrThrow(ctx: CommandContext, projectRef: string | undefined, repoOverride: string | undefined) {
   const project = ctx.resolveProjectOrThrow({ project: projectRef });
   const slug = repoOverride?.trim() || parseGitHubRepoFromRemote(project.gitRemoteUrl);
   const parts = slug?.split('/') ?? [];
@@ -275,8 +275,8 @@ export function deprecatedCiSetupPatch(
   };
 }
 
-export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
-  server.tool(
+export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContext): void {
+  commands.register(
     'hv_ci_setup',
     'Deprecated one-release compatibility bridge. Converts old setup requests into spec.github desired state and returns the revision to plan; it never mutates GitHub. Prefer hv_spec_set followed by hv_plan/hv_apply. deploy-branch maps environment deploy state; ai-review maps to an OpenAI pull-request-review and ignores legacy raw apiKey input; branch-protection maps github.collaboration; workflow maps known templates to typed checks.',
     {
@@ -284,7 +284,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
       kind: z.enum(['deploy-branch', 'ai-review', 'branch-protection', 'workflow']).describe('What to set up'),
       config: z.record(z.unknown()).optional().describe('Kind-specific configuration (see tool description)'),
     },
-    wrapHandler(async ({ project: projectRef, kind, config }) => {
+    wrapCommandHandler(async ({ project: projectRef, kind, config }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specStore = new SpecStore();
       const stored = specStore.get(project);
@@ -303,7 +303,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
         resourceId: project.id,
         details: { kind, revision: result.revision },
       });
-      const bridgeResult = toolSuccess({
+      const bridgeResult = commandSuccess({
         project: project.name,
         revision: result.revision,
         spec: result.spec,
@@ -322,7 +322,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_ci_status',
     'Authoritative inspection path for Hypervibe-managed GitHub Actions deploys. Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls. Returns workflows, recent runs, run jobs/steps, bounded job log tails, GitHub Pages status, and branch protection rules through Hypervibe\'s stored GitHub connection. For deploy.strategy="branch" with trigger="ci", use it to check push-deploy workflow runs and diagnose failed job logs.',
     {
@@ -335,7 +335,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
       logLines: z.number().int().positive().max(500).optional().describe('Number of log lines to return per job for include=["logs"] (default 120, max 500).'),
       branch: z.string().optional().describe('Branch for branch-protection (default "main")'),
     },
-    wrapHandler(async ({ project: projectRef, repo: repoOverride, include, workflow, runId, jobId, logLines, branch }) => {
+    wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, include, workflow, runId, jobId, logLines, branch }) => {
       const { owner, repo } = resolveRepoOrThrow(ctx, projectRef, repoOverride);
       const adapter = githubAdapterOrThrow({ owner, repo });
       const sections = include?.length ? include : ['workflows' as const];
@@ -470,11 +470,11 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
         }
       }
 
-      return toolSuccess(data);
+      return commandSuccess(data);
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_ci_trigger',
     'Manually trigger a GitHub Actions workflow (requires a workflow_dispatch trigger in the workflow). For production promotion, trigger the deploy-<provider>-production.yml workflow on ref="main" and pass inputs.commit_sha when promoting a specific SHA that already passed staging.',
     {
@@ -484,7 +484,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
       ref: z.string().optional().describe('Git ref to run on (default "main")'),
       inputs: z.record(z.string()).optional().describe('Workflow inputs as key-value pairs'),
     },
-    wrapHandler(async ({ project: projectRef, repo: repoOverride, workflow, ref, inputs }) => {
+    wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, workflow, ref, inputs }) => {
       const { owner, repo } = resolveRepoOrThrow(ctx, projectRef, repoOverride);
       const adapter = githubAdapterOrThrow({ owner, repo });
 
@@ -496,7 +496,7 @@ export function registerHvCiTools(server: McpServer, ctx: ToolContext): void {
         details: { workflow, ref: ref ?? 'main', inputs },
       });
 
-      return toolSuccess(
+      return commandSuccess(
         { repository: `${owner}/${repo}`, workflow, ref: ref ?? 'main' },
         { hint: 'Workflow dispatched. Check progress with hv_ci_status include=["runs"].', next: ['hv_ci_status'] }
       );

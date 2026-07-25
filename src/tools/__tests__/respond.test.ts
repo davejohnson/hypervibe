@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { toolSuccess, toolError, wrapHandler, HvError, type ToolEnvelope } from '../respond.js';
-import { parseToolEnvelope } from './tool-result.js';
+import { toMcpToolResponse } from '../../interfaces/mcp/adapter.js';
 
-function parse(response: { content: Array<{ type: 'text'; text: string }> }): ToolEnvelope {
-  return parseToolEnvelope(response);
+function parse(response: ToolEnvelope): ToolEnvelope {
+  return response;
+}
+
+function rendered(response: ToolEnvelope): string {
+  return toMcpToolResponse(response).content[0].text;
 }
 
 describe('toolSuccess', () => {
@@ -11,10 +15,10 @@ describe('toolSuccess', () => {
     const response = toolSuccess({ id: '1' });
     const body = parse(response);
     expect(body).toEqual({ ok: true, data: { id: '1' } });
-    expect(response.content[0].text).toContain('🟢 Hypervibe OK');
-    expect(response.content[0].text).toContain('▸ Id: 1');
-    expect(response.content[0].text).not.toContain('**');
-    expect(response.content[0].text.trim().startsWith('{')).toBe(false);
+    expect(rendered(response)).toContain('🟢 Hypervibe OK');
+    expect(rendered(response)).toContain('▸ Id: 1');
+    expect(rendered(response)).not.toContain('**');
+    expect(rendered(response).trim().startsWith('{')).toBe(false);
   });
 
   it('redacts sensitive fields and credential-looking strings', () => {
@@ -58,8 +62,8 @@ describe('toolSuccess', () => {
     expect(body.agentInstruction).toMatchObject({
       action: 'stop_and_report',
     });
-    expect(response.content[0].text).toContain('🛑 Agent Instruction');
-    expect(response.content[0].text).toContain('Report which stage receipts succeeded');
+    expect(rendered(response)).toContain('🛑 Agent Instruction');
+    expect(rendered(response)).toContain('Report which stage receipts succeeded');
   });
 
   it('tells agents to ask the user when output contains blockers', () => {
@@ -80,9 +84,9 @@ describe('toolSuccess', () => {
         reason: 'Missing',
       }],
     });
-    expect(response.content[0].text).toContain('➕ `service:web` create on railway - Missing');
-    expect(response.content[0].text).not.toContain('**➕ `service**');
-    expect(response.content[0].text).not.toContain('**');
+    expect(rendered(response)).toContain('➕ `service:web` create on railway - Missing');
+    expect(rendered(response)).not.toContain('**➕ `service**');
+    expect(rendered(response)).not.toContain('**');
   });
 
   it('omits empty fields', () => {
@@ -98,10 +102,10 @@ describe('toolError', () => {
     expect(body.ok).toBe(false);
     expect(body.error).toEqual({ code: 'NOT_FOUND', message: 'no such project' });
     expect(body.hint).toBe('list projects with hv_spec_get');
-    expect(response.isError).toBe(true);
-    expect(response.content[0].text).toContain('🔴 NOT_FOUND');
-    expect(response.content[0].text).toContain('no such project');
-    expect(response.content[0].text).not.toContain('**');
+    expect(toMcpToolResponse(response).isError).toBe(true);
+    expect(rendered(response)).toContain('🔴 NOT_FOUND');
+    expect(rendered(response)).toContain('no such project');
+    expect(rendered(response)).not.toContain('**');
   });
 
   it('defaults missing connection errors to stop-and-ask guidance', () => {
@@ -110,7 +114,7 @@ describe('toolError', () => {
     expect(body.agentInstruction).toMatchObject({
       action: 'ask_user',
     });
-    expect(response.content[0].text).toContain('ask the user for an exported token');
+    expect(rendered(response)).toContain('ask the user for an exported token');
   });
 
   it('includes details when provided', () => {
@@ -138,7 +142,7 @@ describe('toolError', () => {
       },
     });
 
-    const text = response.content[0].text;
+    const text = rendered(response);
     expect(text).toContain('Connection Setup: 1');
     expect(text).toContain('Token Type: Cloudflare Account API Token for DNS');
     expect(text).toContain('Setup URL: Account API Tokens: https://dash.cloudflare.com/?to=/:account/api-tokens');

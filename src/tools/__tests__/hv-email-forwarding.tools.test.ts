@@ -3,6 +3,7 @@ import { parseToolEnvelope } from './tool-result.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -49,7 +50,7 @@ describe('hv_email_forwarding (Cloudflare email routing)', () => {
 
   async function createClient() {
     const server = new McpServer({ name: 'hv-email-forwarding-test', version: '1.0.0' });
-    registerHvEmailTools(server, createToolContext());
+    registerHvEmailTools(createMcpCommandRegistrar(server), createToolContext());
     const client = new Client({ name: 'email-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

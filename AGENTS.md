@@ -6,6 +6,10 @@ Hypervibe is an infrastructure creation, migration, and destruction orchestrator
 
 Core rules for coding agents:
 
+- Keep MCP and CLI as thin adapters over `src/application`. Define command ids, schemas, descriptions, safety metadata, handlers, redaction, and structured results once; never put provider calls or lifecycle orchestration in an interface.
+- Every supported command must be reachable through both adapters unless architecture documentation explicitly declares it interface-specific. Contract tests must pin registry/MCP parity and CLI routing.
+- Redact command results before they reach any interface. MCP `structuredContent` and CLI `--json` must expose the same safe envelope; prompts, human output, stderr, and validation errors must follow the same secret boundary.
+- The `hypervibe` CLI is safe to use because it shares Hypervibe state and reconciliation. Direct provider CLIs remain prohibited for infrastructure operations, and MCP agents should use available `hv_*` tools instead of spawning the CLI.
 - Keep the desired-state loop central: `hv_spec_set` defines intent, `hv_plan` computes drift and blocked work, `hv_apply` converges a specific plan, and `hv_status` verifies convergence.
 - Lifecycle infrastructure changes belong in spec/plan/apply. Do not hide creates, attaches, purchases, migrations, deploy-source changes, DNS changes, schedules, or destroys inside CI, diagnostics, or helper tools.
 - Treat the persisted plan as an authorization boundary. An apply handler may mutate only the resource and operation named by its current non-noop action; dependencies must be explicit plan edges. Never let a service, environment-variable, secret, deploy, or diagnostic action implicitly create, repair, attach, or destroy a database or another unrelated resource.

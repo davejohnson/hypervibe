@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { canonicalizeLegacyGitHubSpec, deepMergeSpec, SpecStore } from '../domain/spec/spec.store.js';
@@ -19,9 +19,9 @@ import {
 } from '../domain/services/ci-deploy.service.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
-import type { ToolContext } from './context.js';
+import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
-import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import {
   actionScopedBlocksAllowedDuringApply,
@@ -32,7 +32,7 @@ import {
   executePlanApply,
   splitActionScopedConnectionBlocks,
   syncProjectGitRemoteUrl,
-} from './apply-plan.js';
+} from '../application/apply-plan.js';
 import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.js';
 import { githubSpecNeedsOpenAI } from '../domain/services/github-infrastructure.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
@@ -40,7 +40,7 @@ import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service
 import { planEmailSetup } from '../domain/services/email-plan.service.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
-export { bootstrapActionResultFromSummary } from './apply-plan.js';
+export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
 
 function deploymentProviders(): string[] {
   return providerRegistry.getByCategory('deployment').map((p) => p.metadata.name);
@@ -188,7 +188,7 @@ function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Proje
     : project;
 }
 
-function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
+function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
   const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string> }>();
   const add = (provider: string, environment: string, reason: string, scopeHints: string[] = []) => {
     const key = `${provider}:${scopeHints.length > 0 ? scopeHints.join('|') : '*'}`;
@@ -277,11 +277,11 @@ function requiredConnectionChecklist(ctx: ToolContext, spec: ProjectSpec) {
   };
 }
 
-export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
+export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContext): void {
   const specStore = new SpecStore();
   const planService = new PlanService();
 
-  server.tool(
+  commands.register(
     'hv_spec_set',
     'Create or update the desired-state spec for a project (services, databases, storage buckets, queues, domains, and deploy infrastructure). This is the source of truth that hv_plan diffs against live infrastructure. When run inside a git worktree, Hypervibe writes .hypervibe/spec.json. Merges by default; pass replace=true to overwrite or null to delete a key.',
     {
@@ -290,7 +290,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external app access such as the Railway GitHub App.'),
     },
-    wrapHandler(async ({ project: projectRef, spec, replace, confirmNativeDeploy }) => {
+    wrapCommandHandler(async ({ project: projectRef, spec, replace, confirmNativeDeploy }) => {
       let project = ctx.resolveProject({ project: projectRef });
       if (!project) {
         const name = (typeof spec.project === 'string' && spec.project.trim())
@@ -344,7 +344,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         ? [nativeDeployConfirmationHint(nativeDeploys)]
         : [];
 
-      return toolSuccess(
+      return commandSuccess(
         {
           project: { id: project.id, name: project.name, gitRemoteUrl: project.gitRemoteUrl ?? null },
           revision: result.revision,
@@ -363,15 +363,15 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_spec_get',
     'Read the current desired-state spec and revision for a project. If .hypervibe/spec.json exists in the current git worktree, it is treated as the shared desired state and synced into the local cache.',
     { project: projectField },
-    wrapHandler(async ({ project: projectRef }) => {
+    wrapCommandHandler(async ({ project: projectRef }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const result = specStore.get(project);
       if (!result) {
-        return toolError('NOT_FOUND', `Project "${project.name}" has no spec yet.`, {
+        return commandError('NOT_FOUND', `Project "${project.name}" has no spec yet.`, {
           hint: 'Define one with hv_spec_set.',
         });
       }
@@ -380,7 +380,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       const extras = result.adopted && result.source?.kind === 'repo'
         ? { warnings: [`${result.source.path} changed outside hypervibe; recorded as revision ${result.revision}.`] }
         : undefined;
-      return toolSuccess({
+      return commandSuccess({
         project: { id: project.id, name: project.name, gitRemoteUrl },
         projectMeta: { gitRemoteUrl },
         revision: result.revision,
@@ -424,7 +424,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_plan',
     'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Do not call hv_plan as a workaround after hv_status/hv_connections_list reports a missing required connection. Use hv_connect only when a safe credentialsRef is already available; otherwise explain the blocked task and offer to connect credentials the user already controls or prepare a value-free owner handoff. Do not assume provider membership. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply. Delegated secret slots declared by the spec accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally, encrypted into that plan, and never returned. Ordinary envVars and env files cannot override delegated keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If repo .env exists and .env.<env> is missing, hv_plan creates it while omitting envFile.exclude and delegated-secret keys. Optional services=[...] produces a partial deploy plan restricted to those spec services; delegated secret inputs require a full plan.',
     {
@@ -436,7 +436,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
       secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
     },
-    wrapHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const result = await planService.plan(project, env?.trim() || 'staging', {
         ...(services?.length ? { serviceFilter: services } : {}),
@@ -446,7 +446,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         ...(secretRefs && Object.keys(secretRefs).length > 0 ? { secretRefs } : {}),
       });
       if ('error' in result) {
-        return toolError('VALIDATION', result.error, { next: ['hv_spec_set'] });
+        return commandError('VALIDATION', result.error, { next: ['hv_spec_set'] });
       }
 
       const confirmIds = result.actions.filter((a) => a.requiresConfirm).map((a) => a.id);
@@ -496,7 +496,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
             : ['hv_apply'];
       }
 
-      return toolSuccess(
+      return commandSuccess(
         {
           planId: result.planRunId,
           environment: result.environmentName,
@@ -530,20 +530,20 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_status',
     'Show desired vs observed state for an environment: drift, unmanaged resources, blocked connections, and observed service endpoints (name, live status, URL, custom domains). Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
     { project: projectField, env: envField },
-    wrapHandler(async ({ project: projectRef, env }) => {
+    wrapCommandHandler(async ({ project: projectRef, env }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = specStore.get(project);
       if (!specResult) {
-        return toolError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'Define one with hv_spec_set.' });
+        return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'Define one with hv_spec_set.' });
       }
       const envName = env?.trim() || 'staging';
       const envSpec = specResult.spec.environments[envName];
       if (!envSpec) {
-        return toolError('NOT_FOUND', `Spec has no environment "${envName}".`, {
+        return commandError('NOT_FOUND', `Spec has no environment "${envName}".`, {
           details: { available: Object.keys(specResult.spec.environments) },
         });
       }
@@ -691,7 +691,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         && sourceWarnings.length === 0
       );
 
-      return toolSuccess(
+      return commandSuccess(
         {
           environment: envName,
           specRevision: specResult.revision,
@@ -750,7 +750,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_apply',
     'Apply a plan produced by hv_plan. Rejects stale plans (spec changed, infrastructure changed, plan expired, or already applied). Confirm-gated billable/destructive actions run only when their action ids are passed in confirmActions. Legacy confirmDestroy is still accepted for database destroys.',
     {
@@ -759,11 +759,11 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       confirmActions: z.array(z.string()).optional().describe('Action ids for confirm-gated billable or destructive actions (e.g. ["domain:example.com:register", "database:railway:destroy"])'),
       confirmDestroy: z.array(z.string()).optional().describe('Action ids of confirm-gated destroys to execute (e.g. ["database:railway:destroy"])'),
     },
-    wrapHandler(async ({ project: projectRef, planId, confirmActions, confirmDestroy }) => {
+    wrapCommandHandler(async ({ project: projectRef, planId, confirmActions, confirmDestroy }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = specStore.get(project);
       if (!specResult) {
-        return toolError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'hv_spec_set, then hv_plan.' });
+        return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'hv_spec_set, then hv_plan.' });
       }
 
       const outcome = await executePlanApply(ctx, {
@@ -775,13 +775,13 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       });
 
       if (outcome.kind === 'plan_not_found') {
-        return toolError('NOT_FOUND', outcome.error, { next: ['hv_plan'] });
+        return commandError('NOT_FOUND', outcome.error, { next: ['hv_plan'] });
       }
       if (outcome.kind === 'env_missing') {
-        return toolError('VALIDATION', `Spec no longer has environment "${outcome.envName}".`, { next: ['hv_plan'] });
+        return commandError('VALIDATION', `Spec no longer has environment "${outcome.envName}".`, { next: ['hv_plan'] });
       }
       if (outcome.kind === 'input_required') {
-        return toolError('VALIDATION', 'This plan is missing required delegated secret inputs.', {
+        return commandError('VALIDATION', 'This plan is missing required delegated secret inputs.', {
           details: { environment: outcome.envName, inputRequired: outcome.requirements },
           hint: 'Use safe local secretRefs for values available on this Mac. Otherwise prepare a value-free handoff naming each delegated key, environment, and principal for the project owner. Do not paste raw secrets into chat.',
           next: ['hv_plan'],
@@ -792,7 +792,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         });
       }
       if (outcome.kind === 'blocked') {
-        return toolError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {
+        return commandError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {
           details: {
             blocked: outcome.applyBlocked,
             ...connectionRecoveryDetails(outcome.applyBlocked),
@@ -808,10 +808,10 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
       const blockedReceipts = result.receipts.filter((r) => r.status === 'blocked');
       if (!result.success && !result.applyRunId) {
         // Rejected before execution (stale plan, superseded spec, etc.)
-        return toolError('VALIDATION', result.error ?? 'Apply rejected', { next: ['hv_plan'] });
+        return commandError('VALIDATION', result.error ?? 'Apply rejected', { next: ['hv_plan'] });
       }
 
-      return toolSuccess(
+      return commandSuccess(
         {
           applied: result.success,
           applyRunId: result.applyRunId,

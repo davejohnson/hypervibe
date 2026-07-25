@@ -6,7 +6,7 @@
     <title>Hypervibe</title>
     <meta
       name="description"
-      content="Hypervibe is an MCP server for deploying apps, databases, DNS, and email in one conversational workflow."
+      content="Hypervibe is a desired-state infrastructure orchestrator with CLI and MCP interfaces."
     />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -434,12 +434,12 @@
         <section class="fadeUp delay1">
           <h1>Ship infrastructure at the speed of a sentence.</h1>
           <p>
-            Hypervibe is an MCP server that turns app delivery into a single conversational workflow:
-            deploy, provision a database, set DNS, wire email, manage secrets, and keep it auditable.
+            Hypervibe gives people and AI agents one desired-state workflow through CLI and MCP:
+            plan, deploy, provision databases, set DNS, wire email, manage secrets, and keep it auditable.
           </p>
 
           <div class="ctaRow">
-            <a class="btn btnPrimary" href="#install">Install as MCP</a>
+            <a class="btn btnPrimary" href="#install">Install Hypervibe</a>
             <a class="btn" href="#workflow">See the flow</a>
             <span class="chip">Railway + Supabase + Cloudflare + SendGrid</span>
           </div>
@@ -451,7 +451,7 @@
             <pre><code>codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest
 codex mcp list</code></pre>
             <p style="margin: 10px 2px 0; font-family: var(--mono); color: var(--muted); font-size: 12.5px;">
-              Hypervibe runs as an MCP server via <code>npx -y @davejohnson/hypervibe@latest</code>.
+              The same package also provides the <code>hypervibe</code> CLI and explicit <code>hypervibe-mcp</code> entrypoint.
             </p>
           </div>
         </aside>
@@ -493,8 +493,11 @@ codex mcp list</code></pre>
 
       <section id="install" class="section fadeUp delay1">
         <h2>Install</h2>
-        <p class="sub">Register the MCP server with your client.</p>
-        <pre><code>codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest
+        <p class="sub">Install the CLI or register the MCP server with your client.</p>
+        <pre><code>npm install -g @davejohnson/hypervibe@latest
+hypervibe --help
+
+codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest
 codex mcp list</code></pre>
       </section>
 
@@ -534,7 +537,7 @@ codex mcp list</code></pre>
       </section>
 
       <footer class="fadeUp delay3">
-        <div>Hypervibe, an MCP server for web app infrastructure.</div>
+        <div>Hypervibe, desired-state infrastructure through CLI and MCP.</div>
         <div>
           <a style="color: rgba(246,243,255,.7);" href="https://github.com/davejohnson/hypervibe">Source</a>
         </div>
