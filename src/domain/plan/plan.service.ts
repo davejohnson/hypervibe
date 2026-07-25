@@ -12,6 +12,7 @@ import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
+import { parseHostingBindings } from '../ports/hosting.port.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { classifyDeployEnvironment, resolveGitDeploySource } from '../services/deploy-source.js';
@@ -59,6 +60,7 @@ import {
   stripeEnvironmentName,
   stripeManagedEnvKeys,
 } from '../services/stripe-env.service.js';
+import { planEmailSetup } from '../services/email-plan.service.js';
 
 export interface PlanOptions {
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
@@ -147,37 +149,89 @@ export class PlanService {
     }
 
     const provider = environmentSpec.hosting.provider;
+    const unknownObservation = (message: string): { observed: ObservedState; warnings: string[] } => {
+      const bindings = parseHostingBindings(environment);
+      return {
+        observed: {
+          provider,
+          observedAt: new Date().toISOString(),
+          projectExists: Boolean(bindings.projectId),
+          ...(bindings.projectId ? { projectId: bindings.projectId } : {}),
+          ...(bindings.environmentId ? { environmentId: bindings.environmentId } : {}),
+          services: [],
+          databases: [],
+          storage: [],
+          completeness: {
+            project: 'unknown',
+            services: 'unknown',
+            databases: 'unknown',
+            storage: 'unknown',
+          },
+          partial: true,
+          warnings: [message],
+        },
+        warnings: [message],
+      };
+    };
     const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
     if (!adapterResult.success || !adapterResult.adapter) {
-      warnings.push(`Cannot observe ${provider}: ${adapterResult.error ?? 'no adapter'}`);
-      return { observed: null, warnings };
+      return unknownObservation(
+        `Cannot observe ${provider}: ${adapterResult.error ?? 'no adapter'}. Mutations that require live state are blocked.`
+      );
     }
 
     const adapter = adapterResult.adapter as IProviderAdapter;
     if (!adapter.capabilities.supportsObserve || typeof adapter.observe !== 'function') {
-      warnings.push(`${provider} does not support live observation; plan is based on local state only.`);
-      return { observed: null, warnings };
+      return unknownObservation(
+        `${provider} does not support live observation. Existing local bindings are preserved and mutations that require proof of absence are blocked.`
+      );
     }
 
     try {
       const observed = await adapter.observe(environment);
+      observed.completeness = {
+        project: observed.completeness?.project ?? 'complete',
+        services: observed.completeness?.services ?? (observed.partial ? 'unknown' : 'complete'),
+        databases: observed.completeness?.databases ?? 'complete',
+        storage: observed.completeness?.storage ?? 'complete',
+      };
 
       // Augment with database observation when the database lives on a
       // different provider that supports it (e.g. Cloud SQL).
       const dbProvider = environmentSpec.database?.provider;
-      if (dbProvider && dbProvider !== provider && !observed.databases.length) {
+      if (dbProvider && dbProvider !== provider) {
+        observed.completeness.databases = 'unknown';
         const dbResult = await adapterFactory.getDatabaseAdapter(dbProvider, project);
         const dbAdapter = dbResult.adapter as unknown as {
-          observeDatabase?: (env: Environment) => Promise<import('../ports/observe.port.js').ObservedDatabase | null>;
+          observeDatabase?: (
+            env: Environment,
+            component?: import('../entities/component.entity.js').Component | null,
+            options?: { resourceName?: string }
+          ) => Promise<import('../ports/observe.port.js').ObservedDatabase | null>;
         } | undefined;
         if (dbResult.success && dbAdapter && typeof dbAdapter.observeDatabase === 'function') {
           try {
-            const db = await dbAdapter.observeDatabase(environment);
-            if (db) observed.databases.push(db);
+            const component = this.componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
+            const db = await dbAdapter.observeDatabase(environment, component, {
+              resourceName: `${project.name}-${environment.name}-postgres`,
+            });
+            observed.databases = [
+              ...observed.databases.filter((item) =>
+                item.provider !== dbProvider
+                && (!db || item.externalId !== db.externalId)
+              ),
+              ...(db ? [db] : []),
+            ];
+            observed.completeness.databases = 'complete';
           } catch (error) {
             observed.partial = true;
             observed.warnings.push(`Database observation failed: ${error instanceof Error ? error.message : String(error)}`);
           }
+        } else {
+          observed.partial = true;
+          observed.warnings.push(
+            `Database observation unavailable (${dbProvider}): ${dbResult.error ?? 'adapter does not implement observeDatabase'}`
+          );
         }
       }
 
@@ -186,10 +240,16 @@ export class PlanService {
       for (const storageProvider of storageProviders) {
         if (storageProvider === provider && (observed.storage?.length ?? 0) > 0) continue;
         const context = contexts[storageProvider];
-        if (!context) continue;
+        if (!context) {
+          observed.completeness.storage = 'unknown';
+          observed.partial = true;
+          observed.warnings.push(`Storage observation unavailable (${storageProvider}): provider context is missing`);
+          continue;
+        }
         const storageResult = await adapterFactory.getStorageAdapter(storageProvider, project);
         if (!storageResult.success || !storageResult.adapter) {
           observed.partial = true;
+          observed.completeness.storage = 'unknown';
           observed.warnings.push(`Storage observation failed (${storageProvider}): ${storageResult.error ?? 'adapter unavailable'}`);
           continue;
         }
@@ -198,14 +258,15 @@ export class PlanService {
           observed.storage = [...(observed.storage ?? []), ...items.filter((item) => !(observed.storage ?? []).some((existing) => existing.externalId === item.externalId))];
         } catch (error) {
           observed.partial = true;
+          observed.completeness.storage = 'unknown';
           observed.warnings.push(`Storage observation failed (${storageProvider}): ${error instanceof Error ? error.message : String(error)}`);
         }
       }
 
       return { observed, warnings };
     } catch (error) {
-      warnings.push(`Observation failed (${provider}): ${error instanceof Error ? error.message : String(error)}; falling back to local state.`);
-      return { observed: null, warnings };
+      const message = `Observation failed (${provider}): ${error instanceof Error ? error.message : String(error)}. Mutations that require proof of absence are blocked.`;
+      return unknownObservation(message);
     }
   }
 
@@ -325,7 +386,6 @@ export class PlanService {
         ],
       });
     }
-
     const seen = new Set<string>();
     for (const requirement of required) {
       const key = `${requirement.provider}:${requirement.scopeHints?.join('|') ?? '*'}`;
@@ -689,11 +749,24 @@ export class PlanService {
         id: `environment:${environmentName}`,
         type: 'create',
         resource: { kind: 'environment', name: environmentName, provider: environmentSpec.hosting.provider },
-        verified: observed !== null,
+        verified: observed !== null && !observed.partial,
         reason: `Environment "${environmentName}" is not tracked locally`,
         ...(domainRegistration.action ? { dependsOn: [domainRegistration.action.id] } : {}),
       });
     }
+    const emailAction = planEmailSetup({
+      environmentName,
+      environmentSpec,
+      environment,
+      observed,
+      dependsOn: [
+        ...actions
+          .filter((action) => action.resource.kind === 'service' && action.type !== 'noop' && action.type !== 'destroy')
+          .map((action) => action.id),
+        ...(domainRegistration.action ? [domainRegistration.action.id] : []),
+      ],
+    });
+    if (emailAction) actions.push(emailAction);
     const queues = await planQueues({ project: projectForPlan, environmentSpec, environment });
     if (queues.actions.length > 0) {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
@@ -744,7 +817,7 @@ export class PlanService {
       ? actions.filter((action) =>
         action.type !== 'noop'
         && action.metadata?.operation !== 'hostingEnvRemove'
-        && ['project', 'environment', 'service', 'database', 'storage', 'queue', 'secret', 'payment']
+        && ['project', 'environment', 'service', 'database', 'storage', 'queue', 'secret', 'payment', 'email']
           .includes(action.resource.kind)
       )
       : [];
@@ -758,7 +831,7 @@ export class PlanService {
     // prerequisites for CI setup — an unconfirmed destroy must not block the
     // workflow sync.
     const ciDependsOn = actions
-      .filter((action) => action.type !== 'noop' && action.type !== 'destroy' && ['project', 'environment', 'service', 'payment'].includes(action.resource.kind))
+      .filter((action) => action.type !== 'noop' && action.type !== 'destroy' && ['project', 'environment', 'service', 'payment', 'email'].includes(action.resource.kind))
       .map((action) => action.id);
     const ciBindingsWillChange = actions.some((action) =>
       action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace')
@@ -937,7 +1010,7 @@ export class PlanService {
       specRevision: specResult.revision,
       specSource: specResult.source ?? { kind: 'local' },
       environmentName,
-      verified: observed !== null,
+      verified: observed !== null && !observed.partial,
       observed,
       actions,
       unmanaged: [...diff.unmanaged, ...storage.unmanaged],

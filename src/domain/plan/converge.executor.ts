@@ -136,6 +136,7 @@ export function fingerprintObservedState(observed: ObservedState): string {
         objectCount: item.objectCount ?? null,
         sizeBytes: item.sizeBytes ?? null,
       })),
+    completeness: observed.completeness ?? null,
   };
   return createHash('sha256').update(JSON.stringify(essence), 'utf8').digest('hex');
 }
@@ -255,6 +256,36 @@ export class ConvergeExecutor {
     this.runRepo.updateStatus(applyRun.id, 'running');
 
     const receipts: ActionReceipt[] = [];
+    const unconfirmed = ordered.find((action) =>
+      action.type !== 'noop'
+      && (action.requiresConfirm === true || action.billable === true || action.dataBearing === true)
+      && !confirmed.has(action.id)
+    );
+    if (unconfirmed) {
+      const message = `Requires explicit confirmation: pass confirmActions: ["${unconfirmed.id}"]`;
+      for (const action of ordered) {
+        if (action.type === 'noop') {
+          receipts.push({ actionId: action.id, status: 'skipped_noop' });
+        } else if (action.id === unconfirmed.id) {
+          receipts.push({ actionId: action.id, status: 'skipped_requires_confirm', message });
+        } else {
+          receipts.push({
+            actionId: action.id,
+            status: 'aborted',
+            message: `Apply did not start because "${unconfirmed.id}" requires confirmation`,
+          });
+        }
+      }
+      this.runRepo.addReceipt(applyRun.id, {
+        step: unconfirmed.id,
+        status: 'blocked',
+        result: { message },
+        timestamp: new Date().toISOString(),
+      } as RunReceipt);
+      this.runRepo.updateStatus(applyRun.id, 'blocked', message);
+      return { success: false, applyRunId: applyRun.id, receipts };
+    }
+
     const completed = new Set<string>();
     let failed = false;
     let pending = false;
@@ -270,22 +301,6 @@ export class ConvergeExecutor {
       if (action.type === 'noop') {
         receipts.push({ actionId: action.id, status: 'skipped_noop' });
         completed.add(action.id);
-        continue;
-      }
-      if (action.requiresConfirm && !confirmed.has(action.id)) {
-        const receipt: ActionReceipt = {
-          actionId: action.id,
-          status: 'skipped_requires_confirm',
-          message: `Requires explicit confirmation: pass confirmActions: ["${action.id}"]`,
-        };
-        receipts.push(receipt);
-        this.runRepo.addReceipt(applyRun.id, {
-          step: action.id,
-          status: 'blocked',
-          result: { message: receipt.message },
-          timestamp: new Date().toISOString(),
-        } as RunReceipt);
-        blocked = true;
         continue;
       }
       // A dependency that was skipped (not completed) blocks dependents.

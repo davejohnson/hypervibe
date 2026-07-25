@@ -1580,9 +1580,12 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(status.data.inSync).toBe(false);
     expect(status.data.drift).toContainEqual(expect.objectContaining({
       id: 'queue:email-jobs',
-      type: 'create',
+      type: 'update',
       verified: false,
-      metadata: expect.objectContaining({ unsupported: true }),
+      metadata: expect.objectContaining({
+        unsupported: true,
+        blockedReason: 'queue_observation_unavailable',
+      }),
     }));
     expect(status.warnings).toContainEqual(expect.stringContaining('does not support queues'));
     await t.close();
@@ -1885,10 +1888,15 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.data.actions).toContainEqual(expect.objectContaining({
       id: 'service:daily:destroy',
       type: 'destroy',
+      requiresConfirm: true,
     }));
     expect(plan.data.unmanaged).not.toContainEqual(expect.objectContaining({ kind: 'service', name: 'daily' }));
 
-    const apply = await t.call('hv_apply', { project: 'core-spec-app', planId: plan.data.planId });
+    const apply = await t.call('hv_apply', {
+      project: 'core-spec-app',
+      planId: plan.data.planId,
+      confirmActions: ['service:daily:destroy'],
+    });
     expect(apply.ok).toBe(true);
     expect(deleteService).toHaveBeenCalledWith('s-daily');
     expect(apply.data.receipts).toContainEqual(expect.objectContaining({
@@ -2109,6 +2117,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         },
         connect: async () => {}, verify: async () => ({ success: true }),
         provision,
+        observeDatabase: async () => null,
         getConnectionUrl: async () => 'postgres://new-supabase',
         destroy,
       },
@@ -2120,7 +2129,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.data.actions).toContainEqual(expect.objectContaining({ id: 'database:supabase', type: 'create' }));
     expect(plan.data.actions.find((action: { id: string }) => action.id === 'database:cloudsql:destroy')).toBeUndefined();
 
-    const apply = await t.call('hv_apply', { project: 'core-spec-app', planId: plan.data.planId });
+    const apply = await t.call('hv_apply', {
+      project: 'core-spec-app',
+      planId: plan.data.planId,
+      confirmActions: ['database:supabase'],
+    });
     expect(apply.ok).toBe(true);
     expect(apply.data.receipts).toContainEqual(expect.objectContaining({
       actionId: 'database:supabase',

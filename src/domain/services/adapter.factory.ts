@@ -6,9 +6,6 @@ import type { IProviderAdapter } from '../ports/provider.port.js';
 import type { IHostingAdapter } from '../ports/hosting.port.js';
 import type { IDatabaseAdapter } from '../ports/database.port.js';
 import type { IStorageAdapter } from '../ports/storage.port.js';
-import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
-import { createRailwayDatabaseAdapter } from '../../adapters/providers/railway/railway-database.factory.js';
-import { createRailwayStorageAdapter } from '../../adapters/providers/railway/railway-storage.factory.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 
@@ -28,7 +25,6 @@ export interface AdapterResult<T> {
 export class AdapterFactory {
   private connectionRepo = new ConnectionRepository();
   private secretStore = getSecretStore();
-  private envRepo = new EnvironmentRepository();
 
   /**
    * Get a hosting adapter for a project based on its defaultPlatform.
@@ -47,8 +43,9 @@ export class AdapterFactory {
     providerName: string,
     project?: Project
   ): Promise<AdapterResult<IDatabaseAdapter>> {
-    if (providerName === 'railway') {
-      return this.getRailwayDatabaseAdapter(project);
+    const provider = providerRegistry.get(providerName);
+    if (provider?.derivedAdapters?.database) {
+      return this.getDerivedAdapter<IDatabaseAdapter>(providerName, 'database', project);
     }
     return this.getAdapter<IDatabaseAdapter>(
       providerName,
@@ -58,10 +55,9 @@ export class AdapterFactory {
   }
 
   async getStorageAdapter(providerName: string, project?: Project): Promise<AdapterResult<IStorageAdapter>> {
-    if (providerName === 'railway') {
-      const result = await this.getProviderAdapter('railway', project);
-      if (!result.success || !result.adapter) return { success: false, error: result.error };
-      return { success: true, adapter: createRailwayStorageAdapter(result.adapter as import('../../adapters/providers/railway/railway.adapter.js').RailwayAdapter) };
+    const provider = providerRegistry.get(providerName);
+    if (provider?.derivedAdapters?.storage) {
+      return this.getDerivedAdapter<IStorageAdapter>(providerName, 'storage', project);
     }
     return this.getAdapter<IStorageAdapter>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined);
   }
@@ -107,8 +103,12 @@ export class AdapterFactory {
     const available = dbProviders
       .filter((p) => this.hasVerifiedConnection(p.metadata.name))
       .map((p) => p.metadata.name);
-    if (this.hasVerifiedConnection('railway') && !available.includes('railway')) {
-      available.push('railway');
+    for (const provider of providerRegistry.all()) {
+      if (provider.derivedAdapters?.database
+        && this.hasVerifiedConnection(provider.metadata.name)
+        && !available.includes(provider.metadata.name)) {
+        available.push(provider.metadata.name);
+      }
     }
     return available;
   }
@@ -174,24 +174,32 @@ export class AdapterFactory {
     }
   }
 
-  private async getRailwayDatabaseAdapter(project?: Project): Promise<AdapterResult<IDatabaseAdapter>> {
-    const hostingResult = await this.getAdapter<IProviderAdapter>(
-      'railway',
-      'deployment',
+  private async getDerivedAdapter<T>(
+    providerName: string,
+    capability: 'database' | 'storage',
+    project?: Project
+  ): Promise<AdapterResult<T>> {
+    const provider = providerRegistry.get(providerName);
+    const derive = provider?.derivedAdapters?.[capability];
+    if (!provider || !derive) {
+      return { success: false, error: `${providerName} does not expose a ${capability} adapter capability` };
+    }
+    const base = await this.getAdapter<IProviderAdapter>(
+      providerName,
+      provider.metadata.category,
       project ? getProjectScopeHints(project) : undefined
     );
-    if (!hostingResult.success || !hostingResult.adapter) {
-      return { success: false, error: hostingResult.error || 'No Railway adapter available' };
+    if (!base.success || !base.adapter) {
+      return { success: false, error: base.error || `No ${providerName} adapter available` };
     }
-
-    return {
-      success: true,
-      adapter: createRailwayDatabaseAdapter({
-        hostingAdapter: hostingResult.adapter,
-        envRepo: this.envRepo,
-        project,
-      }),
-    };
+    try {
+      return { success: true, adapter: await derive(base.adapter, { project }) as T };
+    } catch (error) {
+      return {
+        success: false,
+        error: `Failed to create ${providerName} ${capability} adapter: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
   }
 }
 

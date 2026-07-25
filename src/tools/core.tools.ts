@@ -37,6 +37,7 @@ import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.j
 import { githubSpecNeedsOpenAI } from '../domain/services/github-infrastructure.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service.js';
+import { planEmailSetup } from '../domain/services/email-plan.service.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from './apply-plan.js';
@@ -650,6 +651,17 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
         observed,
       });
       const stripeDrift = stripeSync.actions.filter((action) => action.type !== 'noop');
+      const emailAction = planEmailSetup({
+        environmentName: envName,
+        environmentSpec: envSpec,
+        environment,
+        observed,
+      });
+      const emailDrift = emailAction && emailAction.type !== 'noop' ? [emailAction] : [];
+      const observationIncomplete = observed !== null && (
+        observed.partial
+        || Object.values(observed.completeness ?? {}).includes('unknown')
+      );
       const blocked = planService.preflight(envSpec, envName);
       for (const stripeBlock of stripeSync.blocked) {
         if (!blocked.some((entry) => entry.provider === 'stripe' && entry.scope === stripeBlock.scope)) {
@@ -684,7 +696,7 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
           environment: envName,
           specRevision: specResult.revision,
           specSource: specResult.source ?? { kind: 'local' },
-          verified: observed !== null,
+          verified: observed !== null && !observed.partial,
           ...(observed
             ? {
               observedAt: observed.observedAt,
@@ -700,9 +712,9 @@ export function registerCoreTools(server: McpServer, ctx: ToolContext): void {
               }),
             }
             : {}),
-          inSync: drift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0,
-          summary: summarizeActions([...diff.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions]),
-          drift: [...drift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift],
+          inSync: !observationIncomplete && drift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0,
+          summary: summarizeActions([...diff.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...(emailAction ? [emailAction] : [])]),
+          drift: [...drift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift],
           unmanaged: [...diff.unmanaged, ...storage.unmanaged],
           inputRequired: delegatedSecrets.inputRequired.length > 0 ? delegatedSecrets.inputRequired : undefined,
           blocked,

@@ -25,6 +25,8 @@ export interface DeployOptions {
    * code. Used when CI will deploy the exact commit after hv_apply succeeds.
    */
   deferProviderDeployment?: boolean;
+  /** Project creation is a separate reviewed plan action during hv_apply. */
+  ensureProject?: boolean;
   /** The hosting adapter to use for deployment (can be IProviderAdapter or IHostingAdapter) */
   adapter: IProviderAdapter | IHostingAdapter;
 }
@@ -66,13 +68,16 @@ export class DeployOrchestrator {
   buildPlan(options: DeployOptions): RunPlan {
     const steps: RunStep[] = [];
 
-    // Step 1: Ensure project exists on provider
-    steps.push({
-      name: 'ensure_project',
-      action: 'ensureProject',
-      target: options.project.name,
-      params: { projectId: options.project.id },
-    });
+    // Project creation is explicit in plan/apply. Direct deploy callers retain
+    // the historical default so their existing contract remains intact.
+    if (options.ensureProject !== false) {
+      steps.push({
+        name: 'ensure_project',
+        action: 'ensureProject',
+        target: options.project.name,
+        params: { projectId: options.project.id },
+      });
+    }
 
     // Step 2: Resolve secrets from secret managers
     // Check if there are any secret mappings for this project/environment
@@ -178,7 +183,7 @@ export class DeployOrchestrator {
 
         if (receipt.status === 'failure') {
           errors.push(receipt.error ?? `Step ${step.name} failed`);
-          // Continue with other steps even if one fails
+          break;
         }
 
         if (receipt.result?.url) {
@@ -337,8 +342,7 @@ export class DeployOrchestrator {
             environmentName: step.params?.environmentName as string,
           });
 
-          if (resolved.failed > 0 && resolved.resolved === 0) {
-            // All secrets failed - this is a deployment blocker
+          if (resolved.failed > 0) {
             return {
               step: step.name,
               status: 'failure',
@@ -356,7 +360,6 @@ export class DeployOrchestrator {
 
           return {
             step: step.name,
-            // Mark as success even with partial failures - individual errors are logged
             status: 'success',
             result: {
               resolved: resolved.resolved,

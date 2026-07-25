@@ -43,6 +43,15 @@ const RAILWAY_API_URL = 'https://backboard.railway.app/graphql/v2';
 export const TASK_EXIT_SENTINEL = /__HYPERVIBE_TASK_EXIT:(\d+)__/;
 export const TASK_EXIT_SENTINEL_PREFIX = '__HYPERVIBE_TASK_EXIT:';
 
+type ResourceExistence =
+  | { state: 'present' }
+  | { state: 'absent' }
+  | { state: 'unknown'; error: string };
+
+type DeletionVerification =
+  | { deleted: true }
+  | { deleted: false; error: string };
+
 function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -1250,7 +1259,10 @@ export class RailwayAdapter implements IProviderAdapter {
     ];
 
     for (const serviceId of candidates) {
-      const hasInstance = await this.serviceHasEnvironmentInstance(serviceId, environmentId).catch(() => false);
+      // A failed instance read is not evidence that this project-level
+      // service is absent from the target environment. Propagate the failure
+      // so callers cannot create a duplicate service from an unknown read.
+      const hasInstance = await this.serviceHasEnvironmentInstance(serviceId, environmentId);
       if (hasInstance) {
         const serviceName = services.find((s) => s.id === serviceId)?.name;
         return { serviceId, serviceName, verifiedInEnvironment: true };
@@ -1432,13 +1444,20 @@ export class RailwayAdapter implements IProviderAdapter {
           errors.push(`${attempt.label}: delete mutation returned unsuccessful payload`);
           continue;
         }
-        const deleted = await this.waitUntilProjectDeleted(projectId);
-        if (deleted) {
+        const verification = await this.waitUntilProjectDeleted(projectId);
+        if (verification.deleted) {
           return { success: true };
         }
-        errors.push(`${attempt.label}: delete acknowledged but project still exists (${projectId})`);
+        return {
+          success: false,
+          error: `${attempt.label}: delete acknowledged but could not be verified: ${verification.error}`,
+        };
       } catch (error) {
-        errors.push(`${attempt.label}: ${this.describeError(error)}`);
+        const message = this.describeError(error);
+        if (message.toLowerCase().includes('not found')) {
+          return { success: true };
+        }
+        errors.push(`${attempt.label}: ${message}`);
       }
     }
     return { success: false, error: errors.join(' | ') };
@@ -1460,12 +1479,18 @@ export class RailwayAdapter implements IProviderAdapter {
       if (!accepted) {
         return { success: false, error: 'serviceDelete.id: delete mutation returned unsuccessful payload' };
       }
-      const deleted = await this.waitUntilServiceDeleted(serviceId);
-      if (deleted) {
+      const verification = await this.waitUntilServiceDeleted(serviceId);
+      if (verification.deleted) {
         return { success: true };
       }
-      return { success: false, error: `serviceDelete.id: delete acknowledged but service still exists (${serviceId})` };
+      return {
+        success: false,
+        error: `serviceDelete.id: delete acknowledged but could not be verified: ${verification.error}`,
+      };
     } catch (error) {
+      if (this.describeError(error).toLowerCase().includes('not found')) {
+        return { success: true };
+      }
       return { success: false, error: `serviceDelete.id: ${this.describeError(error)}` };
     }
   }
@@ -1484,26 +1509,54 @@ export class RailwayAdapter implements IProviderAdapter {
     return false;
   }
 
-  private async waitUntilProjectDeleted(projectId: string): Promise<boolean> {
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const exists = await this.projectExists(projectId);
-      if (!exists) return true;
-      await this.sleep(500);
+  private async waitUntilProjectDeleted(projectId: string): Promise<DeletionVerification> {
+    const attempts = Number(process.env.HYPERVIBE_RAILWAY_DELETE_ATTEMPTS ?? 20);
+    const delayMs = Number(process.env.HYPERVIBE_RAILWAY_DELETE_DELAY_MS ?? 500);
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const existence = await this.projectExists(projectId);
+      if (existence.state === 'absent') return { deleted: true };
+      if (existence.state === 'unknown') {
+        return {
+          deleted: false,
+          error: `project absence is unknown (${projectId}): ${existence.error}`,
+        };
+      }
+      if (attempt < attempts - 1) {
+        await this.sleep(Math.min(delayMs * (2 ** attempt), 2000));
+      }
     }
-    return false;
+    return {
+      deleted: false,
+      error: `project still exists after ${attempts} observation attempts (${projectId})`,
+    };
   }
 
-  private async waitUntilServiceDeleted(serviceId: string): Promise<boolean> {
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const exists = await this.serviceExists(serviceId);
-      if (!exists) return true;
-      await this.sleep(500);
+  private async waitUntilServiceDeleted(serviceId: string): Promise<DeletionVerification> {
+    const attempts = Number(process.env.HYPERVIBE_RAILWAY_DELETE_ATTEMPTS ?? 20);
+    const delayMs = Number(process.env.HYPERVIBE_RAILWAY_DELETE_DELAY_MS ?? 500);
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const existence = await this.serviceExists(serviceId);
+      if (existence.state === 'absent') return { deleted: true };
+      if (existence.state === 'unknown') {
+        return {
+          deleted: false,
+          error: `service absence is unknown (${serviceId}): ${existence.error}`,
+        };
+      }
+      if (attempt < attempts - 1) {
+        await this.sleep(Math.min(delayMs * (2 ** attempt), 2000));
+      }
     }
-    return false;
+    return {
+      deleted: false,
+      error: `service still exists after ${attempts} observation attempts (${serviceId})`,
+    };
   }
 
-  private async projectExists(projectId: string): Promise<boolean> {
-    if (!this.client) return true;
+  private async projectExists(projectId: string): Promise<ResourceExistence> {
+    if (!this.client) {
+      return { state: 'unknown', error: 'Not connected. Call connect() first.' };
+    }
     try {
       const query = gql`
         query GetProject($id: String!) {
@@ -1513,16 +1566,18 @@ export class RailwayAdapter implements IProviderAdapter {
         }
       `;
       const result = await this.client.request<{ project: { id: string } | null }>(query, { id: projectId });
-      return Boolean(result.project?.id);
+      return result.project?.id ? { state: 'present' } : { state: 'absent' };
     } catch (error) {
-      const message = this.describeError(error).toLowerCase();
-      if (message.includes('not found')) return false;
-      return true;
+      const message = this.describeError(error);
+      if (message.toLowerCase().includes('not found')) return { state: 'absent' };
+      return { state: 'unknown', error: message };
     }
   }
 
-  private async serviceExists(serviceId: string): Promise<boolean> {
-    if (!this.client) return true;
+  private async serviceExists(serviceId: string): Promise<ResourceExistence> {
+    if (!this.client) {
+      return { state: 'unknown', error: 'Not connected. Call connect() first.' };
+    }
     try {
       const query = gql`
         query GetService($id: String!) {
@@ -1532,11 +1587,11 @@ export class RailwayAdapter implements IProviderAdapter {
         }
       `;
       const result = await this.client.request<{ service: { id: string } | null }>(query, { id: serviceId });
-      return Boolean(result.service?.id);
+      return result.service?.id ? { state: 'present' } : { state: 'absent' };
     } catch (error) {
-      const message = this.describeError(error).toLowerCase();
-      if (message.includes('not found')) return false;
-      return true;
+      const message = this.describeError(error);
+      if (message.toLowerCase().includes('not found')) return { state: 'absent' };
+      return { state: 'unknown', error: message };
     }
   }
 
@@ -2670,8 +2725,11 @@ export class RailwayAdapter implements IProviderAdapter {
 
       const result = await this.client.request<{ project: RailwayProjectDetails }>(query, { id: projectId });
       return result.project;
-    } catch {
-      return null;
+    } catch (error) {
+      if (this.describeError(error).toLowerCase().includes('not found')) {
+        return null;
+      }
+      throw error;
     }
   }
 
@@ -2684,11 +2742,7 @@ export class RailwayAdapter implements IProviderAdapter {
       throw new Error('Not connected. Call connect() first.');
     }
 
-    try {
-      return await this.fetchServiceVariables(projectId, serviceId, environmentId);
-    } catch {
-      return {};
-    }
+    return this.fetchServiceVariables(projectId, serviceId, environmentId);
   }
 
   private async fetchServiceVariables(
@@ -4216,5 +4270,22 @@ providerRegistry.register({
     // The adapter handles this by checking client state in each method
     adapter.connect(credentials);
     return adapter;
+  },
+  derivedAdapters: {
+    database: async (adapter, context) => {
+      const [{ createRailwayDatabaseAdapter }, { EnvironmentRepository }] = await Promise.all([
+        import('./railway-database.factory.js'),
+        import('../../db/repositories/environment.repository.js'),
+      ]);
+      return createRailwayDatabaseAdapter({
+        hostingAdapter: adapter as IProviderAdapter,
+        envRepo: new EnvironmentRepository(),
+        project: context.project,
+      });
+    },
+    storage: async (adapter) => {
+      const { createRailwayStorageAdapter } = await import('./railway-storage.factory.js');
+      return createRailwayStorageAdapter(adapter as RailwayAdapter);
+    },
   },
 });

@@ -2976,11 +2976,18 @@ export class CloudRunAdapter implements IProviderAdapter {
     const headers = { Authorization: `Bearer ${token}` };
     const serviceUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services/${serviceName}`;
     const existing = await fetch(serviceUrl, { headers });
-    if (existing.status === 404 || !existing.ok) {
+    if (existing.status === 404) {
       return undefined;
+    }
+    if (!existing.ok) {
+      const text = await existing.text();
+      return `Could not verify whether Cloud Run service ${serviceName} exists: ${existing.status} ${text}`;
     }
 
     const deleted = await fetch(serviceUrl, { method: 'DELETE', headers });
+    if (deleted.status === 404) {
+      return undefined;
+    }
     if (!deleted.ok) {
       const text = await deleted.text();
       return `Skipped stale Cloud Run service cleanup for ${serviceName}: ${deleted.status} ${text}`;
@@ -2993,7 +3000,7 @@ export class CloudRunAdapter implements IProviderAdapter {
       return `Stale Cloud Run service cleanup for ${serviceName} may still be in progress: ${error instanceof Error ? error.message : String(error)}`;
     }
 
-    return undefined;
+    return this.verifyCloudRunResourceDeleted(serviceUrl, headers, `Cloud Run service ${serviceName}`);
   }
 
   private async deleteCloudRunJobIfExists(jobName: string, token: string): Promise<string | undefined> {
@@ -3005,11 +3012,18 @@ export class CloudRunAdapter implements IProviderAdapter {
     const headers = { Authorization: `Bearer ${token}` };
     const jobUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/${jobName}`;
     const existing = await fetch(jobUrl, { headers });
-    if (existing.status === 404 || !existing.ok) {
+    if (existing.status === 404) {
       return undefined;
+    }
+    if (!existing.ok) {
+      const text = await existing.text();
+      return `Could not verify whether Cloud Run job ${jobName} exists: ${existing.status} ${text}`;
     }
 
     const deleted = await fetch(jobUrl, { method: 'DELETE', headers });
+    if (deleted.status === 404) {
+      return undefined;
+    }
     if (!deleted.ok) {
       const text = await deleted.text();
       return `Skipped Cloud Run job cleanup for ${jobName}: ${deleted.status} ${text}`;
@@ -3022,7 +3036,28 @@ export class CloudRunAdapter implements IProviderAdapter {
       return `Cloud Run job cleanup for ${jobName} may still be in progress: ${error instanceof Error ? error.message : String(error)}`;
     }
 
-    return undefined;
+    return this.verifyCloudRunResourceDeleted(jobUrl, headers, `Cloud Run job ${jobName}`);
+  }
+
+  private async verifyCloudRunResourceDeleted(
+    url: string,
+    headers: Record<string, string>,
+    label: string
+  ): Promise<string | undefined> {
+    const attempts = Number(process.env.HYPERVIBE_CLOUDRUN_DELETE_ATTEMPTS ?? 20);
+    const delayMs = Number(process.env.HYPERVIBE_CLOUDRUN_DELETE_DELAY_MS ?? 500);
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const response = await fetch(url, { headers });
+      if (response.status === 404) return undefined;
+      if (!response.ok) {
+        const text = await response.text();
+        return `Could not verify deletion of ${label}: ${response.status} ${text}`;
+      }
+      if (attempt < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return `${label} is still present after ${attempts} deletion checks`;
   }
 
   private async deleteCloudSchedulerJobIfExists(schedulerJobName: string, token: string): Promise<string | undefined> {

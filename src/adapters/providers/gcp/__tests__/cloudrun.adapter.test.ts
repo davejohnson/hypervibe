@@ -1878,6 +1878,7 @@ describe('CloudRunAdapter', () => {
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
 
+    let jobDeleted = false;
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
@@ -1885,6 +1886,7 @@ describe('CloudRunAdapter', () => {
         return Response.json({});
       }
       if (url.includes('run.googleapis.com') && url.includes('/jobs/gcp-project-cron') && method === 'GET') {
+        if (jobDeleted) return Response.json({}, { status: 404 });
         return Response.json({
           name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron',
           template: { template: { containers: [{ image: 'image' }] } },
@@ -1892,6 +1894,7 @@ describe('CloudRunAdapter', () => {
         });
       }
       if (url.includes('run.googleapis.com') && url.includes('/jobs/gcp-project-cron') && method === 'DELETE') {
+        jobDeleted = true;
         return Response.json({ name: 'projects/gcp-project/locations/us-central1/operations/delete-job', done: true });
       }
       if (url.includes('run.googleapis.com') && url.includes('/services/gcp-project-cron-schedule') && method === 'GET') {
@@ -1915,4 +1918,45 @@ describe('CloudRunAdapter', () => {
       'https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/jobs/gcp-project-cron',
       expect.objectContaining({ method: 'DELETE' })
     );
+  });
+
+  it('does not treat a failed service existence read as successful deletion', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.includes('cloudscheduler.googleapis.com') && method === 'DELETE') {
+        return Response.json({}, { status: 404 });
+      }
+      if (url.includes('/jobs/gcp-project-web') && method === 'GET') {
+        return Response.json({}, { status: 404 });
+      }
+      if (url.includes('/services/gcp-project-web') && method === 'GET') {
+        return new Response('backend unavailable', { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await adapter.deleteService('gcp-project-web');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Could not verify whether Cloud Run service');
+    expect(result.error).toContain('503 backend unavailable');
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes('/services/') && init?.method === 'DELETE'
+    )).toBe(false);
   });

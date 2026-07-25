@@ -170,7 +170,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
   async provision(
     type: ProvisionableType,
     environment: Environment,
-    options?: { size?: string; region?: string; databaseName?: string }
+    options?: { size?: string; region?: string; databaseName?: string; resourceName?: string }
   ): Promise<ProvisionResult> {
     if (!this.rds || !this.ec2 || !this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -179,7 +179,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       return this.failedProvision(environment, type, `Amazon RDS adapter supports postgres. Requested type: ${type}`);
     }
 
-    const identifier = this.sanitizeIdentifier(`${environment.name}-postgres`);
+    const identifier = this.sanitizeIdentifier(options?.resourceName || `${environment.name}-postgres`);
     const database = this.sanitizeDatabaseName(options?.databaseName ?? 'app');
     const username = 'hypervibe_admin';
     const password = this.generatePassword();
@@ -255,15 +255,30 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
         },
       };
     } catch (error) {
-      const live = await this.describeInstance(identifier).catch(() => null);
-      if (!live && securityGroupCreated && securityGroupId) {
+      let live: DBInstance | null | undefined;
+      let liveObservationError: string | undefined;
+      try {
+        live = await this.describeInstance(identifier);
+      } catch (observationError) {
+        liveObservationError = observationError instanceof Error
+          ? observationError.message
+          : String(observationError);
+      }
+      // Delete the network resource only after RDS positively confirms that
+      // no database exists. An unreadable instance is unknown, not absent.
+      if (live === null && securityGroupCreated && securityGroupId) {
         await this.ec2.send(new DeleteSecurityGroupCommand({ GroupId: securityGroupId })).catch(() => {});
       }
       return this.failedProvision(
         environment,
         type,
         `Failed to provision Amazon RDS PostgreSQL: ${error instanceof Error ? error.message : String(error)}`,
-        { instanceId: identifier, resourceCreated: Boolean(live), securityGroupId }
+        {
+          instanceId: identifier,
+          resourceCreated: live === undefined ? 'unknown' : Boolean(live),
+          securityGroupId,
+          ...(liveObservationError ? { liveObservationError } : {}),
+        }
       );
     }
   }
@@ -271,7 +286,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
   async getConnectionUrl(component: Component): Promise<string | null> {
     if (!this.rds || !component.externalId) return null;
     const bindings = component.bindings as Record<string, unknown>;
-    const instance = await this.describeInstance(component.externalId).catch(() => null);
+    const instance = await this.describeInstance(component.externalId);
     if (!instance?.Endpoint?.Address || !instance.Endpoint.Port) return null;
     const username = typeof bindings.username === 'string' ? bindings.username : undefined;
     const password = typeof bindings.password === 'string' ? bindings.password : undefined;
@@ -370,19 +385,33 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       return { success: false, message: 'Amazon RDS adapter is not connected or the component has no instance ID' };
     }
     try {
+      const existing = await this.describeInstance(component.externalId);
+      if (!existing) {
+        await this.deleteManagedSecurityGroup(component);
+        return { success: true, message: `Amazon RDS instance is already absent: ${component.externalId}` };
+      }
       await this.rds.send(new DeleteDBInstanceCommand({
         DBInstanceIdentifier: component.externalId,
         SkipFinalSnapshot: true,
         DeleteAutomatedBackups: true,
       }));
       await this.waitForInstance(component.externalId, 'deleted');
-      const bindings = component.bindings as Record<string, unknown>;
-      const groupId = typeof bindings.securityGroupId === 'string' ? bindings.securityGroupId : undefined;
-      if (groupId && bindings.securityGroupManagedByHypervibe === true) {
-        await this.ec2.send(new DeleteSecurityGroupCommand({ GroupId: groupId }));
-      }
+      await this.deleteManagedSecurityGroup(component);
       return { success: true, message: `Deleted Amazon RDS instance ${component.externalId}` };
     } catch (error) {
+      const name = (error as { name?: string }).name;
+      if (name === 'DBInstanceNotFound' || name === 'DBInstanceNotFoundFault') {
+        try {
+          await this.deleteManagedSecurityGroup(component);
+          return { success: true, message: `Amazon RDS instance is already absent: ${component.externalId}` };
+        } catch (cleanupError) {
+          return {
+            success: false,
+            message: `Amazon RDS instance is absent but managed network cleanup failed`,
+            error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+          };
+        }
+      }
       return {
         success: false,
         message: `Failed to delete Amazon RDS instance ${component.externalId}`,
@@ -396,14 +425,27 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     message?: string;
   }> {
     if (!component.externalId) return { status: 'unknown' };
-    const instance = await this.describeInstance(component.externalId).catch(() => null);
+    let instance: DBInstance | null;
+    try {
+      instance = await this.describeInstance(component.externalId);
+    } catch (error) {
+      return {
+        status: 'unknown',
+        message: `Failed to observe instance: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
     if (!instance) return { status: 'unknown', message: 'Instance not found' };
     return { status: this.normalizedStatus(instance.DBInstanceStatus), message: instance.DBInstanceStatus };
   }
 
-  async observeDatabase(environment: Environment): Promise<ObservedDatabase | null> {
-    const identifier = this.sanitizeIdentifier(`${environment.name}-postgres`);
-    const instance = await this.describeInstance(identifier).catch(() => null);
+  async observeDatabase(
+    environment: Environment,
+    component?: Component | null,
+    options?: { resourceName?: string }
+  ): Promise<ObservedDatabase | null> {
+    const identifier = component?.externalId
+      ?? this.sanitizeIdentifier(options?.resourceName || `${environment.name}-postgres`);
+    const instance = await this.describeInstance(identifier);
     if (!instance) return null;
     return {
       provider: 'rds',
@@ -438,6 +480,23 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     }));
     if (!created.GroupId) throw new Error('AWS did not return an ID for the RDS security group.');
     return { id: created.GroupId, created: true };
+  }
+
+  private async deleteManagedSecurityGroup(component: Component): Promise<void> {
+    if (!this.ec2) throw new Error('Amazon EC2 adapter is not connected.');
+    const bindings = component.bindings as Record<string, unknown>;
+    const groupId = typeof bindings.securityGroupId === 'string' ? bindings.securityGroupId : undefined;
+    if (groupId && bindings.securityGroupManagedByHypervibe === true) {
+      try {
+        await this.ec2.send(new DeleteSecurityGroupCommand({ GroupId: groupId }));
+      } catch (error) {
+        const name = (error as { name?: string }).name;
+        const code = (error as { code?: string }).code;
+        if (name !== 'InvalidGroup.NotFound' && code !== 'InvalidGroup.NotFound') {
+          throw error;
+        }
+      }
+    }
   }
 
   private async defaultVpcId(): Promise<string> {

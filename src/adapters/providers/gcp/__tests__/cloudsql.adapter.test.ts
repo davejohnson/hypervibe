@@ -7,6 +7,8 @@ import type { Environment } from '../../../../domain/entities/environment.entity
 describe('CloudSqlAdapter', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   async function connectedAdapter(): Promise<CloudSqlAdapter> {
@@ -295,6 +297,23 @@ describe('CloudSqlAdapter', () => {
     await expect(adapter.observeDatabase(environment)).resolves.toBeNull();
   });
 
+  it('propagates Cloud SQL observation errors instead of treating them as absence', async () => {
+    const adapter = await connectedAdapter();
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('backend unavailable', { status: 503 })
+    ));
+    const environment: Environment = {
+      id: 'env-1',
+      projectId: 'project-1',
+      name: 'production',
+      platformBindings: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    await expect(adapter.observeDatabase(environment)).rejects.toThrow(/503.*backend unavailable/);
+  });
+
   it('opens and releases a local authenticated connector for one database operation', async () => {
     const adapter = await connectedAdapter();
     const startLocalProxy = vi.spyOn(Connector.prototype, 'startLocalProxy').mockResolvedValue();
@@ -364,5 +383,91 @@ describe('CloudSqlAdapter', () => {
     await expect(adapter.acquireTemporaryDatabaseAccess(environment, component, 5432))
       .rejects.toThrow('connector denied');
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for terminal absence after Cloud SQL accepts deletion', async () => {
+    vi.stubEnv('HYPERVIBE_CLOUDSQL_DELETE_ATTEMPTS', '4');
+    vi.stubEnv('HYPERVIBE_CLOUDSQL_DELETE_DELAY_MS', '0');
+    const adapter = await connectedAdapter();
+    let instanceRead = 0;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/instances/production-postgres') && method === 'GET') {
+        instanceRead += 1;
+        return instanceRead < 3
+          ? Response.json({
+              name: 'production-postgres',
+              state: instanceRead === 1 ? 'RUNNABLE' : 'PENDING_DELETE',
+            })
+          : new Response('not found', { status: 404 });
+      }
+      if (url.endsWith('/instances/production-postgres') && method === 'DELETE') {
+        return Response.json({ name: 'delete-instance-op' });
+      }
+      if (url.endsWith('/operations/delete-instance-op') && method === 'GET') {
+        return Response.json({ name: 'delete-instance-op', status: 'DONE' });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const component = {
+      id: 'component-1',
+      environmentId: 'env-1',
+      type: 'postgres',
+      externalId: 'production-postgres',
+      bindings: { provider: 'cloudsql' },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as Component;
+
+    const result = await adapter.destroy(component);
+
+    expect(result.success).toBe(true);
+    expect(result.message).toContain('Deleted Cloud SQL instance');
+    expect(instanceRead).toBe(3);
+  });
+
+  it('treats an already-absent Cloud SQL instance as idempotent success', async () => {
+    const adapter = await connectedAdapter();
+    const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'GET') return new Response('not found', { status: 404 });
+      throw new Error(`Unexpected request: ${init?.method}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const component = {
+      id: 'component-1',
+      environmentId: 'env-1',
+      type: 'postgres',
+      externalId: 'production-postgres',
+      bindings: { provider: 'cloudsql' },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as Component;
+
+    const result = await adapter.destroy(component);
+
+    expect(result.success).toBe(true);
+    expect(result.message).toContain('already absent');
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
+  });
+
+  it('does not mistake a failed Cloud SQL deletion preflight for absence', async () => {
+    const adapter = await connectedAdapter();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('backend unavailable', { status: 503 })));
+    const component = {
+      id: 'component-1',
+      environmentId: 'env-1',
+      type: 'postgres',
+      externalId: 'production-postgres',
+      bindings: { provider: 'cloudsql' },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as Component;
+
+    const result = await adapter.destroy(component);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('503 backend unavailable');
   });
 });

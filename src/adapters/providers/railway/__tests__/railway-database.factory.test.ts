@@ -58,4 +58,50 @@ describe('Railway database adapter cleanup', () => {
     expect(deleteService).toHaveBeenCalledWith('svc-db-1');
     expect(deleteVolume).toHaveBeenCalledWith('vol-1');
   });
+
+  it('preserves the volume when database service deletion is not confirmed', async () => {
+    const deleteService = vi.fn(async () => ({
+      success: false,
+      error: 'service absence is unknown',
+    }));
+    const deleteVolume = vi.fn(async () => ({ success: true }));
+    const hostingAdapter = {
+      name: 'railway',
+      capabilities: {
+        supportedBuilders: [],
+        supportedComponents: ['postgres'],
+        supportsAutoWiring: true,
+        supportsHealthChecks: false,
+      },
+      deleteService,
+      deleteVolume,
+    };
+    const envRepo = {
+      findById: vi.fn(),
+    };
+    const adapter = createRailwayDatabaseAdapter({
+      hostingAdapter: hostingAdapter as never,
+      envRepo: envRepo as never,
+    });
+    const component = {
+      id: 'component-1',
+      environmentId: 'environment-1',
+      type: 'postgres',
+      externalId: 'svc-db-1',
+      bindings: {
+        provider: 'railway',
+        resourceKind: 'service',
+        volumeId: 'vol-db-1',
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as Component;
+
+    const result = await adapter.destroy(component);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('persistent volume was preserved');
+    expect(deleteService).toHaveBeenCalledWith('svc-db-1');
+    expect(deleteVolume).not.toHaveBeenCalled();
+  });
 });

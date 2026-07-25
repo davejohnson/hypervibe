@@ -43,6 +43,9 @@ export function diffEnvironment(input: {
   const providerBehavior = input.providerBehavior ?? {};
   const spec = withMigrationReleaseCommand(input.spec);
   const verified = observed !== null;
+  const projectObservationKnown = observed === null || observed.completeness?.project !== 'unknown';
+  const serviceObservationKnown = observed === null || observed.completeness?.services !== 'unknown';
+  const databaseObservationKnown = observed === null || observed.completeness?.databases !== 'unknown';
   const actions: PlanAction[] = [];
   const unmanaged: DiffResult['unmanaged'] = [];
   const warnings: string[] = [...(observed?.warnings ?? [])];
@@ -75,24 +78,40 @@ export function diffEnvironment(input: {
   const boundProvider = local.bindings?.provider;
   const providerChanged = Boolean(boundProvider && boundProvider !== provider);
 
-  const projectExists = observed ? observed.projectExists : Boolean(local.bindings?.projectId);
+  const projectExists = observed && projectObservationKnown
+    ? observed.projectExists
+    : Boolean(local.bindings?.projectId);
   const projectActionId = `project:${provider}`;
   if (!projectExists || providerChanged) {
     actions.push({
       id: projectActionId,
-      type: 'create',
+      type: !projectObservationKnown && !providerChanged ? 'update' : 'create',
       resource: { kind: 'project', name: envName, provider },
-      verified,
-      reason: providerChanged
+      verified: verified && projectObservationKnown,
+      reason: !projectObservationKnown && !providerChanged
+        ? `Cannot verify whether the ${provider} project exists`
+        : providerChanged
         ? `Hosting provider changes from ${boundProvider} to ${provider}`
         : `No ${provider} project exists for this environment`,
+      ...(!projectObservationKnown && !providerChanged
+        ? { metadata: { blockedReason: 'project_observation_unknown' } }
+        : {}),
     });
   }
   const projectDep = actions.some((a) => a.id === projectActionId) ? [projectActionId] : undefined;
 
   // ---- services -------------------------------------------------------------
+  const observedServiceGroups = new Map<string, ObservedService[]>();
+  for (const service of observed?.services ?? []) {
+    observedServiceGroups.set(service.name, [
+      ...(observedServiceGroups.get(service.name) ?? []),
+      service,
+    ]);
+  }
   const observedServices = new Map<string, ObservedService>(
-    (observed?.services ?? []).map((s) => [s.name, s])
+    [...observedServiceGroups.entries()]
+      .filter(([, candidates]) => candidates.length === 1)
+      .map(([name, candidates]) => [name, candidates[0]!])
   );
   const localServices = new Map(local.services.map((s) => [s.name, s]));
   const localServiceBindings = local.bindings?.services ?? {};
@@ -113,7 +132,26 @@ export function diffEnvironment(input: {
       continue;
     }
 
-    if (observed) {
+    const duplicateCandidates = observedServiceGroups.get(name) ?? [];
+    if (duplicateCandidates.length > 1) {
+      actions.push({
+        id,
+        type: 'update',
+        resource,
+        verified: true,
+        reason: `Multiple live services map to logical service "${name}"; explicit adoption or cleanup is required`,
+        metadata: {
+          blockedReason: 'ambiguous_service_identity',
+          externalIds: duplicateCandidates.map((candidate) => candidate.externalId).sort(),
+        },
+      });
+      warnings.push(
+        `Ambiguous service identity for "${name}": ${duplicateCandidates.map((candidate) => candidate.externalId).join(', ')}. Hypervibe will not mutate any candidate.`
+      );
+      continue;
+    }
+
+    if (observed && serviceObservationKnown) {
       const live = observedServices.get(name);
       if (!live) {
         actions.push({
@@ -188,7 +226,9 @@ export function diffEnvironment(input: {
       continue;
     }
 
-    // Local fallback (unverified)
+    // Local fallback (unverified). Unknown observation can preserve a proven
+    // binding, but it cannot prove absence and therefore cannot authorize a
+    // create.
     const known = localServices.has(name);
     const bound = Boolean(localServiceBindings[name]?.serviceId);
     if (known && bound) {
@@ -202,13 +242,18 @@ export function diffEnvironment(input: {
     } else {
       actions.push({
         id,
-        type: 'create',
+        type: observed && !serviceObservationKnown ? 'update' : 'create',
         resource,
         verified: false,
-        reason: known
+        reason: observed && !serviceObservationKnown
+          ? `Cannot verify whether service "${name}" exists on ${provider}`
+          : known
           ? `Service "${name}" has no provider binding in local state`
           : `Service "${name}" is not tracked locally`,
         dependsOn: projectDep,
+        ...(observed && !serviceObservationKnown
+          ? { metadata: { blockedReason: 'service_observation_unknown' } }
+          : {}),
       });
     }
   }
@@ -249,20 +294,22 @@ export function diffEnvironment(input: {
     name: string,
     verifiedDestroy: boolean,
     reason: string,
-    metadata?: Record<string, unknown>
+    metadata?: Record<string, unknown>,
+    requiresConfirm = true
   ): PlanAction => ({
     id: `service:${name}:destroy`,
     type: 'destroy',
     resource: { kind: 'service', name, provider },
     verified: verifiedDestroy,
     reason,
+    ...(requiresConfirm ? { requiresConfirm: true } : {}),
     ...(metadata ? { metadata } : {}),
   });
 
   // Services absent from the spec: destroy previously managed bindings, but
   // only report truly unknown live resources as unmanaged.
   const plannedServiceDestroys = new Set<string>();
-  for (const live of observed?.services ?? []) {
+  for (const live of serviceObservationKnown ? observed?.services ?? [] : []) {
     if (spec.services[live.name]) continue;
     const bound = Boolean(localServiceBindings[live.name]?.serviceId);
     if (live.name.startsWith('hv-task-')) {
@@ -270,7 +317,8 @@ export function diffEnvironment(input: {
         live.name,
         true,
         'Leftover Hypervibe one-off task service',
-        { operation: 'taskServiceCleanup', externalId: live.externalId }
+        { operation: 'taskServiceCleanup', externalId: live.externalId },
+        false
       ));
       plannedServiceDestroys.add(live.name);
     } else if (bound) {
@@ -335,22 +383,68 @@ export function diffEnvironment(input: {
   const previousDbProvider = localDb
     ? String(localDbBindings?.previousProvider ?? '') || undefined
     : undefined;
-  const observedDb = observed?.databases.find((d) => d.engine === 'postgres');
-  const currentDbProvider = observed ? observedDb?.provider : localDbProvider;
-  const dbVerified = observed ? true : false;
+  const observedDatabases = databaseObservationKnown
+    ? (observed?.databases ?? []).filter((d) => d.engine === 'postgres')
+    : [];
+  const observedDb = observedDatabases.length === 1 ? observedDatabases[0] : undefined;
+  const databaseAmbiguous = observedDatabases.length > 1;
+  const currentDbProvider = observed && databaseObservationKnown ? observedDb?.provider : localDbProvider;
+  const dbVerified = Boolean(observed && databaseObservationKnown);
   let activeDatabaseActionId: string | undefined;
 
   if (spec.database) {
     const wanted = spec.database.provider;
     const createId = `database:${wanted}`;
     activeDatabaseActionId = createId;
-    if (!currentDbProvider) {
+    if (databaseAmbiguous) {
+      const candidateIds = observedDatabases.map((database) => database.externalId).sort();
+      actions.push({
+        id: createId,
+        type: 'update',
+        resource: { kind: 'database', name: spec.database.engine, provider: wanted },
+        verified: true,
+        reason: `Multiple PostgreSQL datastores were observed; Hypervibe cannot safely select one`,
+        metadata: {
+          blockedReason: 'ambiguous_database_identity',
+          externalIds: candidateIds,
+        },
+      });
+      warnings.push(`Multiple PostgreSQL datastores were observed (${candidateIds.join(', ')}). Database mutations are blocked until one identity is explicitly adopted.`);
+      for (const database of observedDatabases) {
+        if (database.externalId === localDb?.externalId) continue;
+        unmanaged.push({
+          kind: 'database',
+          name: database.name ?? database.engine,
+          detail: `${database.provider} datastore ${database.externalId} is an additional PostgreSQL candidate`,
+        });
+      }
+    } else if (observed && !databaseObservationKnown) {
+      if (localDbProvider === wanted) {
+        actions.push({
+          id: createId,
+          type: 'noop',
+          resource: { kind: 'database', name: spec.database.engine, provider: wanted },
+          verified: false,
+          reason: 'Preserving the locally bound database because live database observation is unknown',
+        });
+      } else {
+        actions.push({
+          id: createId,
+          type: 'update',
+          resource: { kind: 'database', name: spec.database.engine, provider: wanted },
+          verified: false,
+          reason: `Cannot verify whether the desired ${wanted} database exists`,
+          metadata: { blockedReason: 'database_observation_unknown' },
+        });
+      }
+    } else if (!currentDbProvider) {
       actions.push({
         id: createId,
         type: 'create',
         resource: { kind: 'database', name: spec.database.engine, provider: wanted },
         verified,
         reason: `No ${spec.database.engine} database exists`,
+        billable: true,
         dependsOn: wanted === provider ? projectDep : undefined,
       });
     } else if (currentDbProvider !== wanted) {
@@ -363,7 +457,26 @@ export function diffEnvironment(input: {
         resource: { kind: 'database', name: spec.database.engine, provider: wanted },
         verified: dbVerified,
         reason: `Database provider changes from ${currentDbProvider} to ${wanted}. Create the new database first; services and old database deletion are planned after the new database is recorded locally.`,
+        billable: true,
         dependsOn: wanted === provider ? projectDep : undefined,
+      });
+    } else if (observedDb && !localDb) {
+      actions.push({
+        id: createId,
+        type: 'update',
+        resource: { kind: 'database', name: spec.database.engine, provider: wanted },
+        verified: true,
+        reason: `A live ${wanted} PostgreSQL datastore exists but is not adopted into Hypervibe state`,
+        metadata: {
+          blockedReason: 'database_adoption_required',
+          externalId: observedDb.externalId,
+          observedName: observedDb.name,
+        },
+      });
+      unmanaged.push({
+        kind: 'database',
+        name: observedDb.name ?? observedDb.engine,
+        detail: `${observedDb.provider} datastore ${observedDb.externalId} requires explicit hv_import adoption`,
       });
     } else {
       actions.push({
@@ -419,6 +532,15 @@ export function diffEnvironment(input: {
         },
       });
     }
+  } else if (observed && !databaseObservationKnown && localDb) {
+    actions.push({
+      id: `database:${localDbProvider ?? 'postgres'}:observation-blocked`,
+      type: 'update',
+      resource: { kind: 'database', name: localDb.type, provider: localDbProvider ?? 'unknown' },
+      verified: false,
+      reason: 'Database was removed from the spec, but live observation is unknown; refusing to destroy it',
+      metadata: { blockedReason: 'database_observation_unknown' },
+    });
   } else if (localDb && currentDbProvider) {
     // Spec no longer declares a database but we manage one: confirm-gated destroy.
     actions.push({
@@ -436,6 +558,26 @@ export function diffEnvironment(input: {
       name: observedDb.engine,
       detail: `${observedDb.provider} database exists but is not managed by the spec`,
     });
+  }
+
+  const activeDatabaseAction = activeDatabaseActionId
+    ? actions.find((action) => action.id === activeDatabaseActionId)
+    : undefined;
+  if (activeDatabaseAction && activeDatabaseAction.type !== 'noop' && !currentDbProvider) {
+    for (const serviceAction of actions.filter((action) =>
+      action.resource.kind === 'service'
+      && action.type !== 'destroy'
+      && !action.id.includes(':env-remove')
+    )) {
+      if (serviceAction.type === 'noop') {
+        serviceAction.type = 'update';
+        serviceAction.reason = `${serviceAction.reason}; wire the newly created ${activeDatabaseAction.resource.provider} database`;
+      }
+      serviceAction.dependsOn = Array.from(new Set([
+        ...(serviceAction.dependsOn ?? []),
+        activeDatabaseAction.id,
+      ]));
+    }
   }
 
   // ---- domain ---------------------------------------------------------------

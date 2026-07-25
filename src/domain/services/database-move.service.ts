@@ -43,6 +43,7 @@ export async function provisionTargetDatabaseUrl(params: {
   const envSnapshot = captureEnvironmentSnapshot(env);
   const provision = await dbAdapterResult.adapter.provision('postgres', env, {
     databaseName: params.databaseName,
+    resourceName: `${params.projectName}-${params.envName}-postgres`,
     region: params.region,
     size: params.size,
   });

@@ -345,4 +345,31 @@ describe('RailwayAdapter datastore bootstrap vars', () => {
     });
     expect(String(request.mock.calls[4]?.[0])).not.toContain('serviceCreate');
   });
+
+  it('does not create a duplicate datastore when environment-instance observation fails', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        project: {
+          environments: {
+            edges: [{ node: { id: 'rail-env-staging', name: 'staging' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        project: {
+          services: {
+            edges: [{ node: { id: 'rail-svc-db-existing', name: 'postgres-db-staging' } }],
+          },
+        },
+      })
+      .mockRejectedValueOnce(new Error('Railway service-instance read unavailable'));
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.ensureComponent('postgres', makeEnv({ projectId: 'rail-proj-1' })))
+      .rejects.toThrow('Railway service-instance read unavailable');
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request.mock.calls.some(([query]) => String(query).includes('serviceCreate'))).toBe(false);
+  });
 });

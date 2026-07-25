@@ -80,7 +80,7 @@ function local(overrides: Partial<LocalSnapshot> = {}): LocalSnapshot {
     projectExists: true,
     environmentExists: true,
     services: [localService('web')],
-    components: [],
+    components: [localComponent({ provider: 'railway' })],
     bindings: {
       provider: 'railway',
       projectId: 'rail-proj-1',
@@ -111,7 +111,7 @@ describe('diffEnvironment — creates', () => {
     const byId = new Map(result.actions.map((a) => [a.id, a]));
     expect(byId.get('project:railway')?.type).toBe('create');
     expect(byId.get('service:web')?.type).toBe('create');
-    expect(byId.get('service:web')?.dependsOn).toEqual(['project:railway']);
+    expect(byId.get('service:web')?.dependsOn).toEqual(['project:railway', 'database:railway']);
     expect(byId.get('database:railway')?.type).toBe('create');
   });
 
@@ -491,7 +491,7 @@ describe('diffEnvironment — unverified fallback', () => {
   it('marks all actions unverified when observe is unavailable', () => {
     const result = diffEnvironment({ spec: spec(), envName: 'staging', observed: null, local: local() });
     expect(result.actions.every((a) => a.verified === false)).toBe(true);
-    expect(result.actions.find((a) => a.id === 'service:web')!.type).toBe('noop');
+    expect(result.actions.find((a) => a.id === 'service:web')?.type).toBe('noop');
   });
 
   it('creates unbound services from local state', () => {
@@ -514,7 +514,7 @@ describe('diffEnvironment — unmanaged resources', () => {
       spec: spec({ database: undefined }),
       envName: 'production',
       observed: observed({ services: [observedWeb(), rogue] }),
-      local: local(),
+      local: local({ components: [] }),
     });
     expect(result.unmanaged).toContainEqual(
       expect.objectContaining({ kind: 'service', name: 'legacy-worker' })
@@ -592,6 +592,92 @@ describe('diffEnvironment — unmanaged resources', () => {
         externalId: 'task-svc-1',
       },
     }));
+  });
+});
+
+describe('diffEnvironment — reconciliation safety', () => {
+  it('blocks database creation when live database observation is unknown', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({
+        databases: [],
+        partial: true,
+        completeness: { databases: 'unknown' },
+      }),
+      local: local({ components: [] }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'database:railway')).toMatchObject({
+      type: 'update',
+      verified: false,
+      metadata: { blockedReason: 'database_observation_unknown' },
+    });
+    expect(result.actions.some((action) => action.resource.kind === 'database' && action.type === 'create')).toBe(false);
+  });
+
+  it('blocks and reports every candidate when multiple PostgreSQL datastores exist', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({
+        databases: [
+          { provider: 'railway', engine: 'postgres', externalId: 'db-original', name: 'Postgres', status: 'running' },
+          { provider: 'railway', engine: 'postgres', externalId: 'db-duplicate', name: 'postgres-db-production', status: 'running' },
+        ],
+      }),
+      local: local({
+        components: [localComponent({ provider: 'railway' })],
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'database:railway')).toMatchObject({
+      type: 'update',
+      metadata: {
+        blockedReason: 'ambiguous_database_identity',
+        externalIds: ['db-duplicate', 'db-original'],
+      },
+    });
+    expect(result.unmanaged).toContainEqual(expect.objectContaining({
+      kind: 'database',
+      detail: expect.stringContaining('additional PostgreSQL candidate'),
+    }));
+  });
+
+  it('blocks ambiguous logical service identities instead of choosing the last one', () => {
+    const duplicate = observedWeb({ externalId: 'svc-duplicate' });
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({ services: [observedWeb(), duplicate] }),
+      local: local(),
+    });
+
+    expect(result.actions.find((action) => action.id === 'service:web')).toMatchObject({
+      type: 'update',
+      metadata: {
+        blockedReason: 'ambiguous_service_identity',
+        externalIds: ['svc-1', 'svc-duplicate'],
+      },
+    });
+  });
+
+  it('requires explicit adoption for an observed database missing from component state', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed(),
+      local: local({ components: [] }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'database:railway')).toMatchObject({
+      type: 'update',
+      metadata: {
+        blockedReason: 'database_adoption_required',
+        externalId: 'db-1',
+      },
+    });
+    expect(result.actions.some((action) => action.resource.kind === 'database' && action.type === 'create')).toBe(false);
   });
 });
 

@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  CreateDBInstanceCommand,
+  DeleteDBInstanceCommand,
   DescribeDBInstancesCommand,
 } from '@aws-sdk/client-rds';
 import {
   AuthorizeSecurityGroupIngressCommand,
+  CreateSecurityGroupCommand,
+  DeleteSecurityGroupCommand,
+  DescribeSecurityGroupsCommand,
   DescribeSecurityGroupRulesCommand,
   RevokeSecurityGroupIngressCommand,
 } from '@aws-sdk/client-ec2';
@@ -168,5 +173,216 @@ describe('RdsAdapter temporary database access', () => {
       .rejects.toThrow('durable VPC/SSM network path');
     expect(fetchMock).not.toHaveBeenCalled();
     expect(ec2Send).not.toHaveBeenCalled();
+  });
+});
+
+describe('RdsAdapter lifecycle reconciliation', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  async function lifecycleAdapter(params: {
+    rdsSend: (command: unknown) => Promise<unknown>;
+    ec2Send?: (command: unknown) => Promise<unknown>;
+  }) {
+    const adapter = new RdsAdapter();
+    await adapter.connect({
+      accessKeyId: 'AKIAEXAMPLE',
+      secretAccessKey: 'secret',
+      region: 'us-west-2',
+      vpcId: 'vpc-1',
+    });
+    const rdsSend = vi.fn(params.rdsSend);
+    const ec2Send = vi.fn(params.ec2Send ?? (async (command: unknown) => {
+      throw new Error(`Unexpected EC2 command: ${(command as { constructor?: { name?: string } }).constructor?.name}`);
+    }));
+    (adapter as unknown as { rds: { send: typeof rdsSend } }).rds = { send: rdsSend };
+    (adapter as unknown as { ec2: { send: typeof ec2Send } }).ec2 = { send: ec2Send };
+    return { adapter, rdsSend, ec2Send };
+  }
+
+  it('provisions with the provider resource identity instead of the logical database name', async () => {
+    const instance = {
+      DBInstanceIdentifier: 'invoice-perfect-production-postgres',
+      DBInstanceArn: 'arn:aws:rds:us-west-2:123:db:invoice-perfect-production-postgres',
+      DBInstanceStatus: 'available',
+      PubliclyAccessible: true,
+      Endpoint: { Address: 'invoice-perfect.example.rds.amazonaws.com', Port: 5432 },
+    };
+    const { adapter, rdsSend } = await lifecycleAdapter({
+      rdsSend: async (command) => {
+        if (command instanceof CreateDBInstanceCommand) return { DBInstance: instance };
+        if (command instanceof DescribeDBInstancesCommand) return { DBInstances: [instance] };
+        throw new Error(`Unexpected RDS command: ${(command as { constructor?: { name?: string } }).constructor?.name}`);
+      },
+      ec2Send: async (command) => {
+        if (command instanceof DescribeSecurityGroupsCommand) {
+          return { SecurityGroups: [{ GroupId: 'sg-existing' }] };
+        }
+        throw new Error(`Unexpected EC2 command: ${(command as { constructor?: { name?: string } }).constructor?.name}`);
+      },
+    });
+
+    const result = await adapter.provision('postgres', environment, {
+      resourceName: 'invoice-perfect-production-postgres',
+      databaseName: 'invoice_perfect',
+    });
+
+    expect(result.receipt.success).toBe(true);
+    expect(result.component.externalId).toBe('invoice-perfect-production-postgres');
+    const create = rdsSend.mock.calls
+      .map(([command]) => command)
+      .find((command) => command instanceof CreateDBInstanceCommand) as CreateDBInstanceCommand;
+    expect(create.input).toMatchObject({
+      DBInstanceIdentifier: 'invoice-perfect-production-postgres',
+      DBName: 'invoice_perfect',
+      VpcSecurityGroupIds: ['sg-existing'],
+    });
+  });
+
+  it('propagates an observation failure instead of reporting the database absent', async () => {
+    const { adapter } = await lifecycleAdapter({
+      rdsSend: async () => {
+        const error = new Error('AWS throttled the observation');
+        Object.assign(error, { name: 'ThrottlingException' });
+        throw error;
+      },
+    });
+
+    await expect(adapter.observeDatabase(environment, component))
+      .rejects.toThrow('AWS throttled the observation');
+  });
+
+  it('does not tear down networking when failed provisioning leaves database existence unknown', async () => {
+    const { adapter, ec2Send } = await lifecycleAdapter({
+      rdsSend: async (command) => {
+        if (command instanceof CreateDBInstanceCommand) return {};
+        if (command instanceof DescribeDBInstancesCommand) {
+          const error = new Error('RDS observation unavailable');
+          Object.assign(error, { name: 'ServiceUnavailable' });
+          throw error;
+        }
+        throw new Error('Unexpected RDS command');
+      },
+      ec2Send: async (command) => {
+        if (command instanceof DescribeSecurityGroupsCommand) return { SecurityGroups: [] };
+        if (command instanceof CreateSecurityGroupCommand) return { GroupId: 'sg-new' };
+        throw new Error(`Unexpected EC2 command: ${(command as { constructor?: { name?: string } }).constructor?.name}`);
+      },
+    });
+
+    const result = await adapter.provision('postgres', environment, {
+      resourceName: 'invoice-perfect-production-postgres',
+    });
+
+    expect(result.receipt.success).toBe(false);
+    expect(result.receipt.data).toMatchObject({
+      resourceCreated: 'unknown',
+      securityGroupId: 'sg-new',
+      liveObservationError: 'RDS observation unavailable',
+    });
+    expect(ec2Send.mock.calls.some(([command]) => command instanceof DeleteSecurityGroupCommand)).toBe(false);
+  });
+
+  it('observes an adopted external id before considering a deterministic fallback name', async () => {
+    const observedIdentifiers: Array<string | undefined> = [];
+    const { adapter } = await lifecycleAdapter({
+      rdsSend: async (command) => {
+        if (!(command instanceof DescribeDBInstancesCommand)) throw new Error('Unexpected RDS command');
+        observedIdentifiers.push(command.input.DBInstanceIdentifier);
+        return {
+          DBInstances: [{
+            DBInstanceIdentifier: 'adopted-rds-id',
+            DBInstanceStatus: 'available',
+          }],
+        };
+      },
+    });
+    const adopted = { ...component, externalId: 'adopted-rds-id' } as Component;
+
+    const observed = await adapter.observeDatabase(environment, adopted, {
+      resourceName: 'invoice-perfect-production-postgres',
+    });
+
+    expect(observedIdentifiers).toEqual(['adopted-rds-id']);
+    expect(observed?.externalId).toBe('adopted-rds-id');
+  });
+
+  it('waits for terminal absence before deleting its managed security group', async () => {
+    vi.stubEnv('HYPERVIBE_RDS_READY_ATTEMPTS', '4');
+    vi.stubEnv('HYPERVIBE_RDS_READY_DELAY_MS', '0');
+    let describeCount = 0;
+    const { adapter, rdsSend, ec2Send } = await lifecycleAdapter({
+      rdsSend: async (command) => {
+        if (command instanceof DeleteDBInstanceCommand) return {};
+        if (command instanceof DescribeDBInstancesCommand) {
+          describeCount += 1;
+          if (describeCount < 3) {
+            return {
+              DBInstances: [{
+                DBInstanceIdentifier: component.externalId!,
+                DBInstanceStatus: describeCount === 1 ? 'available' : 'deleting',
+              }],
+            };
+          }
+          return { DBInstances: [] };
+        }
+        throw new Error('Unexpected RDS command');
+      },
+      ec2Send: async (command) => {
+        if (command instanceof DeleteSecurityGroupCommand) return {};
+        throw new Error('Unexpected EC2 command');
+      },
+    });
+    const managed = {
+      ...component,
+      bindings: {
+        ...component.bindings,
+        securityGroupManagedByHypervibe: true,
+      },
+    } as Component;
+
+    const result = await adapter.destroy(managed);
+
+    expect(result.success).toBe(true);
+    expect(describeCount).toBe(3);
+    expect(rdsSend.mock.calls.some(([command]) => command instanceof DeleteDBInstanceCommand)).toBe(true);
+    expect(ec2Send.mock.calls.some(([command]) => command instanceof DeleteSecurityGroupCommand)).toBe(true);
+  });
+
+  it('treats an already-absent instance and security group as idempotent success', async () => {
+    const { adapter, rdsSend, ec2Send } = await lifecycleAdapter({
+      rdsSend: async (command) => {
+        if (command instanceof DescribeDBInstancesCommand) {
+          const error = new Error('DB instance not found');
+          Object.assign(error, { name: 'DBInstanceNotFoundFault' });
+          throw error;
+        }
+        throw new Error('Unexpected RDS command');
+      },
+      ec2Send: async (command) => {
+        if (command instanceof DeleteSecurityGroupCommand) {
+          const error = new Error('Security group not found');
+          Object.assign(error, { name: 'InvalidGroup.NotFound' });
+          throw error;
+        }
+        throw new Error('Unexpected EC2 command');
+      },
+    });
+    const managed = {
+      ...component,
+      bindings: {
+        ...component.bindings,
+        securityGroupManagedByHypervibe: true,
+      },
+    } as Component;
+
+    const result = await adapter.destroy(managed);
+
+    expect(result.success).toBe(true);
+    expect(result.message).toContain('already absent');
+    expect(rdsSend.mock.calls.some(([command]) => command instanceof DeleteDBInstanceCommand)).toBe(false);
+    expect(ec2Send.mock.calls.some(([command]) => command instanceof DeleteSecurityGroupCommand)).toBe(true);
   });
 });

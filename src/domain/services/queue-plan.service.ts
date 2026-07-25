@@ -98,28 +98,26 @@ function unconvergeableQueueActions(params: {
   for (const name of Object.keys(params.declared)) {
     actions.push(queueAction({
       id: `queue:${name}`,
-      type: 'create',
+      type: 'update',
       name,
       provider: params.provider,
       operation: QUEUE_OPERATIONS.ensure,
       reason: `${params.reason}; queue "${name}" cannot be converged`,
       verified: false,
-      metadata: { queueName: name, unsupported: true },
+      metadata: { queueName: name, unsupported: true, blockedReason: 'queue_observation_unavailable' },
     }));
   }
   for (const [name, binding] of Object.entries(params.bindings)) {
     if (params.declared[name]) continue;
     actions.push(queueAction({
       id: `queue:${name}:destroy`,
-      type: 'destroy',
+      type: 'update',
       name,
       provider: params.provider,
       operation: QUEUE_OPERATIONS.destroy,
       reason: `${params.reason}; queue binding "${name}" cannot be reconciled`,
       verified: false,
-      dataBearing: binding.backend === 'pubsub',
-      requiresConfirm: binding.backend === 'pubsub',
-      metadata: { queueName: name, unsupported: true },
+      metadata: { queueName: name, unsupported: true, blockedReason: 'queue_observation_unavailable' },
     }));
   }
   return actions;
@@ -243,9 +241,19 @@ export async function planQueues(params: {
     const message = error instanceof Error ? error.message : String(error);
     warnings.push(`Could not observe Pub/Sub for queues: ${message}. Queue actions are unverified.`);
     const fallback = Object.entries(declared).map(([name, spec]) =>
-      pubsubEnsureAction(name, spec, provider, {
+      queueAction({
+        id: `queue:${name}`,
+        type: 'update',
+        name,
+        provider,
+        operation: QUEUE_OPERATIONS.ensure,
         verified: false,
         reason: `Queue "${name}" state could not be observed`,
+        metadata: {
+          queueName: name,
+          ...(spec.ackDeadlineSeconds !== undefined ? { ackDeadlineSeconds: spec.ackDeadlineSeconds } : {}),
+          blockedReason: 'queue_observation_unknown',
+        },
       }));
     return { actions: fallback, warnings };
   }

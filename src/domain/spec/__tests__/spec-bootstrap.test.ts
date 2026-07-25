@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyEnvFileVarsToBootstrapParams,
   applyOverridesToBootstrapParams,
+  scopeBootstrapParamsToService,
   specToBootstrapParams,
 } from '../spec-bootstrap.js';
 
@@ -41,3 +42,36 @@ describe('spec bootstrap env vars', () => {
   });
 });
 
+describe('service action bootstrap authority', () => {
+  it('cannot provision databases, attach domains, configure email, or deploy sibling workloads', () => {
+    const scoped = scopeBootstrapParamsToService({
+      projectName: 'safe-app',
+      environmentName: 'staging',
+      services: ['web', 'worker'],
+      crons: { cleanup: { schedule: '0 * * * *' } },
+      serviceConfig: {
+        web: { workloadKind: 'web' },
+        worker: { workloadKind: 'worker' },
+        cleanup: { workloadKind: 'cron', cronSchedule: '0 * * * *' },
+      },
+      databaseProvider: 'railway',
+      domain: 'example.com',
+      setupEmail: true,
+      storageServiceEnvVars: {
+        web: { BUCKET: 'web' },
+        worker: { BUCKET: 'worker' },
+      },
+    }, 'worker');
+
+    expect(scoped).toMatchObject({
+      services: ['worker'],
+      setupEmail: false,
+      ensureHostingProject: false,
+      serviceConfig: { worker: { workloadKind: 'worker' } },
+      storageServiceEnvVars: { worker: { BUCKET: 'worker' } },
+    });
+    expect(scoped.databaseProvider).toBeUndefined();
+    expect(scoped.domain).toBeUndefined();
+    expect(scoped.crons).toBeUndefined();
+  });
+});

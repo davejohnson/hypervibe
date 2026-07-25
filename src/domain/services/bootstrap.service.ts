@@ -96,6 +96,7 @@ export async function executeBootstrap(params: {
   verifyHttpHealth?: boolean;
   queueEnvVars?: Record<string, string>;
   storageServiceEnvVars?: Record<string, Record<string, string>>;
+  ensureHostingProject?: boolean;
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
   const tx = new InfraTransaction();
   let project = resolveProject({ projectName: params.projectName });
@@ -343,6 +344,7 @@ export async function executeBootstrap(params: {
     ...(params.storageServiceEnvVars ? { envVarsByService: params.storageServiceEnvVars } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
     ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),
+    ensureProject: params.ensureHostingProject !== false,
     adapter: hostingAdapter,
   });
 

@@ -143,6 +143,7 @@ export async function provisionBootstrapDatabase(args: {
   });
   dbProvision = await dbAdapterResult.adapter.provision('postgres', environment, {
     databaseName: 'app',
+    resourceName: `${projectName}-${environment.name}-postgres`,
   });
   if (!dbProvision.receipt.success) {
     const cleanup = await tx.rollback();

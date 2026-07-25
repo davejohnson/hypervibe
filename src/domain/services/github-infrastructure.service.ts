@@ -720,6 +720,7 @@ function infrastructureAction(params: {
   type: 'update' | 'noop';
   verified: boolean;
   drift: string[];
+  blockedReason?: string;
 }): PlanAction {
   return {
     id: GITHUB_INFRASTRUCTURE_ACTION_ID,
@@ -738,6 +739,7 @@ function infrastructureAction(params: {
       branch: GITHUB_INFRASTRUCTURE_BRANCH,
       pullRequestTitle: GITHUB_INFRASTRUCTURE_PR_TITLE,
       desiredFiles: desiredFileMetadata(params.files),
+      ...(params.blockedReason ? { blockedReason: params.blockedReason } : {}),
     },
   };
 }
@@ -788,6 +790,7 @@ export async function planGitHubInfrastructure(params: {
         type: 'update',
         verified: false,
         drift: [],
+        blockedReason: 'github_observation_unavailable',
       })],
       warnings: [`Cannot observe GitHub infrastructure for ${repository}: ${adapterResult.error}`],
       blocked: [],
@@ -1043,7 +1046,21 @@ export async function planGitHubInfrastructure(params: {
     return 10;
   };
   actions.sort((a, b) => actionPriority(a) - actionPriority(b));
-  return { actions, warnings, blocked };
+  return {
+    actions: verified
+      ? actions
+      : actions.map((action) => action.type === 'noop'
+        ? action
+        : {
+            ...action,
+            metadata: {
+              ...(action.metadata ?? {}),
+              blockedReason: 'github_observation_unknown',
+            },
+          }),
+    warnings,
+    blocked,
+  };
 }
 
 function parseManifest(content: string | null): string[] {

@@ -416,6 +416,16 @@ describe('RailwayAdapter observe', () => {
     expect(result.services).toEqual([]);
   });
 
+  it('propagates project observation errors that are not confirmed not-found responses', async () => {
+    const request = vi.fn().mockRejectedValueOnce(new Error('Railway API unavailable'));
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.observe(makeEnvironment({ projectId: 'rail-project-unknown' })))
+      .rejects.toThrow('Railway API unavailable');
+  });
+
   it('does not observe production services when the target Railway environment is missing', async () => {
     const request = vi.fn().mockResolvedValueOnce(projectDetailsResponse);
 

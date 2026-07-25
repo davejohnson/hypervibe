@@ -17,6 +17,11 @@ export interface BootstrapParams {
   /** Managed queue env vars resolved by the caller (see queue-env.ts). */
   queueEnvVars?: Record<string, string>;
   storageServiceEnvVars?: Record<string, Record<string, string>>;
+  /**
+   * Service actions depend on an explicit project action, so they must not
+   * silently re-run project creation while deploying one workload.
+   */
+  ensureHostingProject?: boolean;
 }
 
 function classifyEnvName(name: string): 'staging' | 'production' | null {
@@ -172,5 +177,32 @@ export function applyEnvFileVarsToBootstrapParams(
       ...envFileVars,
       ...(params.envVars ?? {}),
     },
+  };
+}
+
+/**
+ * Restrict legacy bootstrap execution to the authority of one reviewed
+ * service action. Infrastructure owned by separate plan resources is removed
+ * even if it is present in the environment spec.
+ */
+export function scopeBootstrapParamsToService(
+  params: BootstrapParams,
+  serviceName: string
+): BootstrapParams {
+  const cron = params.crons?.[serviceName];
+  const serviceConfig = params.serviceConfig?.[serviceName];
+  const storageEnvVars = params.storageServiceEnvVars?.[serviceName];
+  return {
+    ...params,
+    services: params.services.includes(serviceName) ? [serviceName] : [],
+    ...(cron ? { crons: { [serviceName]: cron } } : { crons: undefined }),
+    ...(serviceConfig ? { serviceConfig: { [serviceName]: serviceConfig } } : { serviceConfig: undefined }),
+    ...(storageEnvVars
+      ? { storageServiceEnvVars: { [serviceName]: storageEnvVars } }
+      : { storageServiceEnvVars: undefined }),
+    databaseProvider: undefined,
+    domain: undefined,
+    setupEmail: false,
+    ensureHostingProject: false,
   };
 }

@@ -118,9 +118,10 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
         .optional()
         .describe('Map provider environment names to Hypervibe environments (e.g., {"prod-us-east": "production", "blue": "staging"})'),
       storageMappings: z.record(z.string(), z.string()).optional().describe('Explicitly adopt Railway buckets by id, mapping bucket id to desired storage name (e.g. {"bucket-id":"uploads"}).'),
+      databaseMappings: z.record(z.string(), z.enum(['postgres'])).optional().describe('Explicitly adopt service-backed Railway databases by service id (e.g. {"service-id":"postgres"}). Datastore candidates are shown by hv_inspect.'),
       confirm: confirmField,
     },
-    wrapHandler(async ({ name, railwayProjectId, force = false, environmentMappings, storageMappings, confirm }) => {
+    wrapHandler(async ({ name, railwayProjectId, force = false, environmentMappings, storageMappings, databaseMappings, confirm }) => {
       if (!name && !railwayProjectId) {
         return toolError('VALIDATION', 'hv_import is adoption-only and requires name or railwayProjectId.', {
           hint: 'Use hv_inspect provider="railway" to list/read provider projects. Use hv_import only when adopting a selected provider project into Hypervibe.',
@@ -175,6 +176,20 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
         }
 
         const { details, environments, services, components } = inspection;
+        const unknownDatabaseMappings = Object.keys(databaseMappings ?? {})
+          .filter((serviceId) => !services.some((service) => service.railwayId === serviceId));
+        if (unknownDatabaseMappings.length > 0) {
+          return toolError('VALIDATION', `databaseMappings references unknown Railway service id(s): ${unknownDatabaseMappings.join(', ')}`, {
+            hint: 'Use the datastore candidates returned by hv_inspect and map the exact Railway service id.',
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
+        if (Object.keys(databaseMappings ?? {}).length > 1) {
+          return toolError('VALIDATION', 'Only one Railway service can be adopted as the PostgreSQL component for an environment.', {
+            hint: 'Select the intended datastore explicitly. Leave additional PostgreSQL services unmanaged until they are deliberately cleaned up.',
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
 
         // Guardrail: import is adoption-only. Block when a Hypervibe project
         // with the same name already exists unless force=true.
@@ -195,13 +210,18 @@ export function registerLifecycleTools(server: McpServer, ctx: ToolContext): voi
               components,
               storage: inspection.storage,
               storageMappings: storageMappings ?? {},
+              databaseMappings: databaseMappings ?? {},
             },
             hint: 'Re-run hv_import with the same name/railwayProjectId, environmentMappings, and confirm=true to write local Hypervibe adoption bindings.',
             next: ['hv_import'],
           });
         }
 
-        const result = await importRailwayProject(details, environmentMappings, services, components, { force, storageMappings });
+        const result = await importRailwayProject(details, environmentMappings, services, components, {
+          force,
+          storageMappings,
+          databaseMappings,
+        });
         if (result.status === 'already_exists') {
           return toolError('VALIDATION', `Project "${details.name}" already exists in Hypervibe.`);
         }

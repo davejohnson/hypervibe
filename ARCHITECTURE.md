@@ -132,6 +132,59 @@ Hypervibe should be stage-gated by default. A failed, blocked, pending, or confi
 
 The shared tool response envelope supports this with `agentInstruction`. Use it to tell agents when to `stop_and_report` or `ask_user`, especially for missing connections, failed receipts, provider errors, pending seed/deploy steps, and confirm-gated actions.
 
+## Reconciliation Safety Invariants
+
+A persisted plan is an authorization boundary, not just a progress preview.
+Every provider mutation during `hv_apply` must be attributable to one reviewed,
+non-noop action:
+
+- An action handler may mutate only the resource and operation named by that
+  action. Shared helpers must not create, repair, attach, deploy, or destroy
+  unrelated resources from the wider spec.
+- A noop action must cause zero provider mutations. If live state exists but
+  Hypervibe lacks its local identity binding, plan an explicit adoption or
+  binding-reconciliation action; do not call it noop and do not create a
+  replacement during another action.
+- Dependencies must be explicit plan edges. If service configuration requires a
+  database, queue, storage bucket, domain, or secret first, plan that action and
+  make the service action depend on it instead of ensuring the prerequisite
+  imperatively.
+- Receipts are action-scoped evidence. Do not reuse a whole-environment
+  bootstrap result as proof that several distinct actions succeeded.
+
+Observation is tri-state: present, absent, or unknown. Only provider-confirmed
+absence may authorize a create based on observed state:
+
+- Permission errors, timeouts, rate limits, server failures, unsupported reads,
+  and partial observation are unknown, not absent.
+- Never swallow a non-not-found provider error and return `null`, an empty list,
+  or `false` that the diff engine will interpret as absence.
+- Track observation completeness per capability. Successful hosting observation
+  does not prove database, storage, queue, App Store, DNS, or repository-setting
+  observation succeeded.
+- Match existing resources by durable provider id first. Name matching may
+  produce adoption candidates, but multiple matches are ambiguity that must be
+  reported and blocked.
+
+Creates, updates, and destroys must be retry-safe:
+
+- Billable and data-bearing actions require exact action-id confirmation.
+- Provider deletes must treat already-absent resources as converged, wait for
+  realistic asynchronous deletion, and verify terminal absence before removing
+  local bindings.
+- Multi-resource destruction follows dependency order and stops on failed or
+  unknown deletion. Do not delete dependent data, storage, networking, or
+  credentials until the owning resource is confirmed absent.
+- A failed prerequisite is a stop point inside an orchestration stage. Do not
+  keep issuing dependent provider mutations and hope rollback will reconstruct
+  the prior state.
+
+Lifecycle changes require contract tests for noop mutation freedom,
+action-scoped mutation authority, observation-error preservation, duplicate
+identity handling, import round trips, confirmation gating, and idempotent
+delete retry. The current audit and repair queue is tracked in
+[`docs/reconciliation-safety-backlog.md`](docs/reconciliation-safety-backlog.md).
+
 ## Connections And Secrets
 
 Provider credentials and required external connections should be discovered as early as possible from the spec and reported before apply. Prefer `credentialsRef` with exported environment variables, `dotenv:` references, local JSON files, or secret-manager refs; raw credentials in chat are still accepted when the user intentionally chooses that path.
