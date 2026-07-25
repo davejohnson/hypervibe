@@ -10,6 +10,7 @@ import type {
   ProvisionResult,
   ProvisionableType,
 } from '../../../domain/ports/database.port.js';
+import type { ObservedDatabase } from '../../../domain/ports/observe.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 
 // Credentials schema for self-registration
@@ -84,6 +85,7 @@ export class SupabaseAdapter implements IDatabaseAdapter {
       size?: string;
       region?: string;
       databaseName?: string;
+      resourceName?: string;
     }
   ): Promise<ProvisionResult> {
     if (!this.credentials) {
@@ -121,7 +123,7 @@ export class SupabaseAdapter implements IDatabaseAdapter {
       }
 
       // Create project name from environment
-      const projectName = options?.databaseName || `${environment.name}-db`;
+      const projectName = options?.resourceName || `${environment.name}-db`;
       const dbPassword = this.generatePassword();
 
       let existingByName: SupabaseProject[];
@@ -273,10 +275,41 @@ export class SupabaseAdapter implements IDatabaseAdapter {
     }
 
     try {
-      await this.request('DELETE', `/projects/${component.externalId}`);
+      const existing = await this.getProject(component.externalId);
+      if (!existing) {
+        return {
+          success: true,
+          message: `Supabase project is already absent: ${component.externalId}`,
+        };
+      }
+      try {
+        await this.request('DELETE', `/projects/${component.externalId}`);
+      } catch (error) {
+        if (error instanceof Error && /Supabase API error: 404\b/.test(error.message)) {
+          return {
+            success: true,
+            message: `Supabase project is already absent: ${component.externalId}`,
+          };
+        }
+        throw error;
+      }
+      const attempts = Number(process.env.HYPERVIBE_SUPABASE_DELETE_ATTEMPTS ?? 60);
+      const delayMs = Number(process.env.HYPERVIBE_SUPABASE_DELETE_DELAY_MS ?? 1000);
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (!await this.getProject(component.externalId)) {
+          return {
+            success: true,
+            message: `Deleted Supabase project: ${component.externalId}`,
+          };
+        }
+        if (attempt < attempts - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
       return {
-        success: true,
-        message: `Deleted Supabase project: ${component.externalId}`,
+        success: false,
+        message: 'Supabase accepted deletion but the project is still present',
+        error: `Project ${component.externalId} was still observable after ${attempts} checks.`,
       };
     } catch (error) {
       return {
@@ -324,10 +357,54 @@ export class SupabaseAdapter implements IDatabaseAdapter {
     }
   }
 
+  async observeDatabase(
+    environment: Environment,
+    component?: Component | null,
+    options?: { resourceName?: string }
+  ): Promise<ObservedDatabase | null> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    let project: SupabaseProject | null;
+    if (component?.externalId) {
+      project = await this.getProject(component.externalId);
+    } else {
+      const orgId = this.credentials.organizationId;
+      const expectedName = options?.resourceName ?? `${environment.name}-db`;
+      const candidates = (await this.listProjects()).filter((item) =>
+        (!orgId || item.organization_id === orgId)
+        && item.name.toLowerCase() === expectedName.toLowerCase()
+      );
+      if (candidates.length > 1) {
+        throw new Error(`Multiple Supabase projects match ${expectedName}: ${candidates.map((item) => item.id).join(', ')}`);
+      }
+      project = candidates[0] ?? null;
+    }
+    if (!project) return null;
+    return {
+      provider: 'supabase',
+      engine: 'postgres',
+      externalId: project.id,
+      name: project.name,
+      status: project.status.toLowerCase(),
+    };
+  }
+
   // Helper methods
 
   private async listProjects(): Promise<SupabaseProject[]> {
     return this.request<SupabaseProject[]>('GET', '/projects');
+  }
+
+  private async getProject(projectId: string): Promise<SupabaseProject | null> {
+    try {
+      return await this.request<SupabaseProject>('GET', `/projects/${projectId}`);
+    } catch (error) {
+      if (error instanceof Error && /Supabase API error: 404\b/.test(error.message)) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   private async findProjectsByName(organizationId: string, name: string): Promise<SupabaseProject[]> {

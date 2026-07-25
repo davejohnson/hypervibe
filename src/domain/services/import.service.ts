@@ -32,6 +32,7 @@ export interface ImportServiceSummary {
   repo: string | null;
   branch: string | null;
   hasGitHubDeploy: boolean;
+  datastoreEngine?: 'postgres';
   instancesByEnv: Record<string, {
     domains: string[];
     customDomains: string[];
@@ -45,6 +46,7 @@ export interface ImportServiceSummary {
 export interface ImportComponentSummary {
   type: ComponentType;
   railwayId: string;
+  name: string;
 }
 
 export interface RailwayProjectInspection {
@@ -72,12 +74,18 @@ export type ImportResult =
 export interface ImportRailwayProjectOptions {
   force?: boolean;
   storageMappings?: Record<string, string>;
+  /** Explicit service-backed datastore adoption: Railway service id -> engine. */
+  databaseMappings?: Record<string, 'postgres'>;
 }
 
 export function mapPluginToComponentType(pluginName: string): ComponentType {
   const normalized = pluginName.toLowerCase();
   if (normalized.includes('postgres')) return 'postgres';
   return pluginName;
+}
+
+export function classifyRailwayDatastoreEngine(name: string): 'postgres' | undefined {
+  return name.toLowerCase().includes('postgres') ? 'postgres' : undefined;
 }
 
 /**
@@ -152,6 +160,9 @@ export async function inspectRailwayProject(
       repo: e.node.repoTriggers.edges[0]?.node.repository ?? null,
       branch: e.node.repoTriggers.edges[0]?.node.branch ?? null,
       hasGitHubDeploy: e.node.repoTriggers.edges.length > 0,
+      ...(classifyRailwayDatastoreEngine(e.node.name)
+        ? { datastoreEngine: classifyRailwayDatastoreEngine(e.node.name) }
+        : {}),
       instancesByEnv,
     };
   });
@@ -159,6 +170,7 @@ export async function inspectRailwayProject(
   const components: ImportComponentSummary[] = details.plugins.edges.map((e) => ({
     type: mapPluginToComponentType(e.node.name),
     railwayId: e.node.id,
+    name: e.node.name,
   }));
   const storage = (details.buckets?.edges ?? []).map((edge) => ({
     name: edge.node.name,
@@ -286,7 +298,9 @@ export async function importRailwayProject(
   // Create services
   const createdServices: Array<{ name: string; id: string; railwayId: string }> = [];
 
+  const adoptedDatabaseServiceIds = new Set(Object.keys(options.databaseMappings ?? {}));
   for (const svc of services) {
+    if (adoptedDatabaseServiceIds.has(svc.railwayId)) continue;
     const firstInstance = Object.values(svc.instancesByEnv)[0];
     const buildConfig = {
       ...(svc.repo ? { builder: 'nixpacks' as const } : {}),
@@ -314,6 +328,7 @@ export async function importRailwayProject(
 
     // Update environment bindings with service info
     for (const env of createdEnvironments) {
+      if (!svc.instancesByEnv[env.railwayId]) continue;
       const existingEnv = envRepo.findById(env.id);
       if (existingEnv) {
         const bindings = existingEnv.platformBindings as {
@@ -339,14 +354,27 @@ export async function importRailwayProject(
         componentRepo.update(existingComponent.id, {
           type: comp.type,
           externalId: comp.railwayId,
-          bindings: existingComponent.bindings,
+          bindings: {
+            ...existingComponent.bindings,
+            provider: 'railway',
+            projectId: details.id,
+            environmentId: env.railwayId,
+            resourceKind: 'plugin',
+            pluginName: comp.name,
+          },
         });
       } else {
         componentRepo.create({
           environmentId: env.id,
           type: comp.type,
           externalId: comp.railwayId,
-          bindings: {},
+          bindings: {
+            provider: 'railway',
+            projectId: details.id,
+            environmentId: env.railwayId,
+            resourceKind: 'plugin',
+            pluginName: comp.name,
+          },
         });
       }
 
@@ -355,6 +383,37 @@ export async function importRailwayProject(
         environmentId: env.id,
         railwayId: comp.railwayId,
       });
+    }
+  }
+
+  // Current Railway databases are ordinary services. Adoption must be
+  // explicit because a name alone is not enough evidence that a service is a
+  // datastore; mapped services are components, never application services.
+  for (const [serviceId, type] of Object.entries(options.databaseMappings ?? {})) {
+    const service = services.find((candidate) => candidate.railwayId === serviceId);
+    if (!service) continue;
+    for (const env of createdEnvironments) {
+      if (!service.instancesByEnv[env.railwayId]) continue;
+      const bindings = {
+        provider: 'railway',
+        projectId: details.id,
+        environmentId: env.railwayId,
+        resourceKind: 'service',
+        serviceId,
+        pluginName: service.name,
+      };
+      const existing = componentRepo.findByEnvironmentAndType(env.id, type);
+      if (existing) {
+        componentRepo.update(existing.id, { type, externalId: serviceId, bindings });
+      } else {
+        componentRepo.create({ environmentId: env.id, type, externalId: serviceId, bindings });
+      }
+      const prior = createdComponents.findIndex((component) =>
+        component.environmentId === env.id && component.type === type
+      );
+      const adopted = { type, environmentId: env.id, railwayId: serviceId };
+      if (prior >= 0) createdComponents[prior] = adopted;
+      else createdComponents.push(adopted);
     }
   }
 

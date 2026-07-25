@@ -10,6 +10,7 @@ import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js
 import {
   applyEnvFileVarsToBootstrapParams,
   applyOverridesToBootstrapParams,
+  scopeBootstrapParamsToService,
   specToBootstrapParams,
 } from '../domain/spec/spec-bootstrap.js';
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
@@ -55,6 +56,7 @@ import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec
 import {
   isHostingEnvRemovalAction,
   removeHostingEnvVars,
+  syncHostingEnvVars,
 } from '../domain/services/hosting-env.service.js';
 import {
   applyStripeHostingEnvSync,
@@ -68,6 +70,9 @@ import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
 import { runEnvironmentTask } from '../domain/services/environment-task.service.js';
+import { buildDatabaseEnvVarsFromComponent } from '../domain/services/database-env.js';
+import { setupBootstrapEmail } from '../domain/services/bootstrap-email.js';
+import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import type { ToolContext } from './context.js';
 
 /**
@@ -376,8 +381,9 @@ export async function executePlanApply(ctx: ToolContext, params: {
     applyProject = ctx.repos.projects.update(projectForApply.id, { defaultPlatform: envSpec.hosting.provider }) ?? projectForApply;
   }
 
-  // Converge: bootstrap handles create/update/replace as one idempotent
-  // pass; confirm-gated database destroys run individually afterward.
+  // Each handler below is constrained to the exact authority of one reviewed
+  // action. The legacy bootstrap remains an implementation detail for a
+  // service deployment, never a whole-environment fallback.
   const overrides = loaded.document.overrides;
   const envFileEnvVars = overrides?.envFileVarsEncrypted
     ? getSecretStore().decryptObject<Record<string, string>>(overrides.envFileVarsEncrypted)
@@ -388,68 +394,78 @@ export async function executePlanApply(ctx: ToolContext, params: {
   const delegatedSecretEnvVars = overrides?.delegatedSecretVarsEncrypted
     ? getSecretStore().decryptObject<Record<string, string>>(overrides.delegatedSecretVarsEncrypted)
     : undefined;
-  let bootstrap: { success: boolean; summary: Record<string, unknown> } | null = null;
-  const ensureBootstrap = async () => {
-    if (!bootstrap) {
-      // Provider switch: stash the abandoned provider's bindings for later
-      // confirm-gated teardown (mirrors the database previousProvider
-      // pattern), then reset the active bindings to the new provider —
-      // executeBootstrap derives its target from bindings.provider, so
-      // leaving the old provider there would deploy to the wrong host.
-      // Runs here (not pre-converge) so stale plans never mutate bindings.
-      const bootstrapEnv = ctx.repos.environments.findByProjectAndName(project.id, envName);
-      if (bootstrapEnv) {
-        const currentBindings = parseHostingBindings(bootstrapEnv);
-        const hasPreviousHosting = Boolean((bootstrapEnv.platformBindings as Record<string, unknown>).previousHosting);
-        if (currentBindings.provider && currentBindings.provider !== envSpec.hosting.provider) {
-          ctx.repos.environments.updatePlatformBindings(bootstrapEnv.id, {
-            ...(!hasPreviousHosting && Object.keys(currentBindings.services ?? {}).length > 0
-              ? {
-                previousHosting: {
-                  provider: currentBindings.provider,
-                  ...(currentBindings.projectId ? { projectId: currentBindings.projectId } : {}),
-                  ...(currentBindings.environmentId ? { environmentId: currentBindings.environmentId } : {}),
-                  services: currentBindings.services ?? {},
-                },
-              }
-              : {}),
-            provider: envSpec.hosting.provider,
-            projectId: undefined,
-            environmentId: undefined,
-            services: {},
-          });
-        }
-      }
-
-      let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec);
-      bootstrapParams = applyEnvFileVarsToBootstrapParams(bootstrapParams, envFileEnvVars);
-      if (overrides) {
-        bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
-          services: overrides.services,
-          envVars: {
-            ...(overrideEnvVars ?? {}),
-            ...(delegatedSecretEnvVars ?? {}),
-          },
-        });
-      }
-      if (params.verifyHttpHealth) {
-        bootstrapParams = { ...bootstrapParams, verifyHttpHealth: true };
-      }
-      const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-      const queueEnvVars = await resolveQueueEnvVars(applyProject, envSpec, latestEnvironment);
-      if (queueEnvVars) {
-        bootstrapParams = { ...bootstrapParams, queueEnvVars };
-      }
-      const storageServiceEnvVars = await resolveStorageServiceEnvVars(applyProject, envSpec, latestEnvironment);
-      if (storageServiceEnvVars) {
-        bootstrapParams = { ...bootstrapParams, storageServiceEnvVars };
-      }
-      bootstrap = await executeBootstrap(bootstrapParams);
+  const buildDeployBootstrapParams = async () => {
+    let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec);
+    bootstrapParams = applyEnvFileVarsToBootstrapParams(bootstrapParams, envFileEnvVars);
+    bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
+      envVars: overrideEnvVars,
+    });
+    if (params.verifyHttpHealth) {
+      bootstrapParams = { ...bootstrapParams, verifyHttpHealth: true };
     }
-    return bootstrap;
+    const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    const queueEnvVars = await resolveQueueEnvVars(applyProject, envSpec, latestEnvironment);
+    if (queueEnvVars) {
+      bootstrapParams = { ...bootstrapParams, queueEnvVars };
+    }
+    const storageServiceEnvVars = await resolveStorageServiceEnvVars(applyProject, envSpec, latestEnvironment);
+    if (storageServiceEnvVars) {
+      bootstrapParams = { ...bootstrapParams, storageServiceEnvVars };
+    }
+    const database = latestEnvironment
+      ? ctx.repos.components.findByEnvironmentAndType(latestEnvironment.id, 'postgres')
+      : null;
+    if (database) {
+      bootstrapParams = {
+        ...bootstrapParams,
+        envVars: {
+          ...buildDatabaseEnvVarsFromComponent(database).envVars,
+          ...(bootstrapParams.envVars ?? {}),
+        },
+      };
+    }
+    return bootstrapParams;
+  };
+
+  let deployBootstrap: { success: boolean; summary: Record<string, unknown> } | null = null;
+  const serviceBootstraps = new Map<string, { success: boolean; summary: Record<string, unknown> }>();
+
+  const ensureServiceBootstrap = async (serviceName: string) => {
+    const existing = serviceBootstraps.get(serviceName);
+    if (existing) return existing;
+    const base = await buildDeployBootstrapParams();
+    const result = await executeBootstrap(scopeBootstrapParamsToService(base, serviceName));
+    serviceBootstraps.set(serviceName, result);
+    return result;
+  };
+
+  const ensureDeployBootstrap = async () => {
+    if (!deployBootstrap) {
+      let bootstrapParams = await buildDeployBootstrapParams();
+      bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
+        services: overrides?.services,
+      });
+      deployBootstrap = await executeBootstrap({
+        ...bootstrapParams,
+        databaseProvider: undefined,
+        domain: undefined,
+        setupEmail: false,
+        ensureHostingProject: false,
+      });
+    }
+    return deployBootstrap;
   };
 
   const handler = async (action: PlanAction): Promise<ActionResult> => {
+    const blockedReason = stringField(asRecord(action.metadata), 'blockedReason');
+    if (blockedReason) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: action.reason,
+        error: blockedReason,
+      };
+    }
     if (isCloudflareDomainRegistrationAction(action)) {
       return applyCloudflareDomainRegistration({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
@@ -498,8 +514,45 @@ export async function executePlanApply(ctx: ToolContext, params: {
       return applyStorageAction({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
     if (isDelegatedSecretAction(action)) {
-      const result = await ensureBootstrap();
-      return bootstrapActionResultFromSummary(action, result);
+      const value = delegatedSecretEnvVars?.[action.resource.name];
+      const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      if (value === undefined || !latestEnvironment) {
+        return {
+          success: false,
+          message: `Cannot sync delegated secret ${action.resource.name}`,
+          error: value === undefined
+            ? 'The reviewed plan does not contain the delegated secret value.'
+            : `Environment "${envName}" is not tracked locally.`,
+        };
+      }
+      const failures: string[] = [];
+      for (const serviceName of Object.keys(envSpec.services)) {
+        const service = ctx.repos.services.findByProjectAndName(project.id, serviceName);
+        if (!service) {
+          failures.push(`${serviceName}: service is not tracked locally`);
+          continue;
+        }
+        const receipt = await syncHostingEnvVars({
+          project: applyProject,
+          environment: latestEnvironment,
+          service,
+          vars: { [action.resource.name]: value },
+          deferDeployment: envSpec.deploy?.strategy === 'branch' && envSpec.deploy.trigger !== 'native',
+        });
+        if (!receipt.success) {
+          failures.push(`${serviceName}: ${receipt.error ?? receipt.message}`);
+        }
+      }
+      return failures.length > 0
+        ? {
+            success: false,
+            message: `Failed to sync delegated secret ${action.resource.name}`,
+            error: failures.join('; '),
+          }
+        : {
+            success: true,
+            message: `Synced delegated secret ${action.resource.name} to ${Object.keys(envSpec.services).length} service(s)`,
+          };
     }
     if (isStripeHostingEnvSyncAction(action)) {
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
@@ -561,8 +614,32 @@ export async function executePlanApply(ctx: ToolContext, params: {
     if (action.resource.kind === 'domain') {
       return applyDomain(ctx, applyProject, envName, action);
     }
-    const result = await ensureBootstrap();
-    return bootstrapActionResultFromSummary(action, result);
+    if (action.resource.kind === 'email' && action.metadata?.operation === 'emailSetup') {
+      return applyEmailSetup(ctx, applyProject, envName, envSpec);
+    }
+    if (action.resource.kind === 'environment') {
+      const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      return latestEnvironment
+        ? { success: true, message: `Environment "${envName}" is recorded locally` }
+        : {
+            success: false,
+            message: `Environment "${envName}" is not recorded locally`,
+            error: 'Re-run hv_plan to create the local environment record.',
+          };
+    }
+    if (action.resource.kind === 'project') {
+      return ensureHostingProject(ctx, applyProject, envName, envSpec.hosting.provider);
+    }
+    if (action.resource.kind === 'service') {
+      const result = await ensureServiceBootstrap(action.resource.name);
+      return bootstrapActionResultFromSummary(action, result);
+    }
+    return {
+      success: false,
+      status: 'blocked',
+      message: `No action-scoped handler exists for ${action.id}`,
+      error: 'Refusing to route an unrecognized plan action through a broader mutation path.',
+    };
   };
 
   let result = await executor.execute({
@@ -576,8 +653,8 @@ export async function executePlanApply(ctx: ToolContext, params: {
 
   // An all-noop plan never reaches the bootstrap fallback; hv_deploy still
   // means "deploy current code now", so force the pass when asked.
-  if (params.alwaysRunBootstrap && !bootstrap && result.success && result.applyRunId) {
-    const forced = await ensureBootstrap();
+  if (params.alwaysRunBootstrap && !deployBootstrap && result.success && result.applyRunId) {
+    const forced = await ensureDeployBootstrap();
     if (!forced.success) {
       result = {
         ...result,
@@ -605,8 +682,80 @@ export async function executePlanApply(ctx: ToolContext, params: {
     kind: 'executed',
     envName,
     result,
-    ...(bootstrap ? { bootstrapSummary: (bootstrap as { summary: Record<string, unknown> }).summary } : {}),
+    ...(deployBootstrap
+      ? { bootstrapSummary: (deployBootstrap as { summary: Record<string, unknown> }).summary }
+      : {}),
     actionScopedWarnings,
+  };
+}
+
+async function applyEmailSetup(
+  ctx: ToolContext,
+  project: Project,
+  envName: string,
+  environmentSpec: EnvironmentSpec
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return { success: false, message: 'Environment not found locally', error: `No local environment "${envName}"` };
+  }
+  const workloads = Object.keys(environmentSpec.services)
+    .map((name) => ctx.repos.services.findByProjectAndName(project.id, name))
+    .filter((service): service is NonNullable<typeof service> => Boolean(service));
+  if (workloads.length !== Object.keys(environmentSpec.services).length) {
+    return {
+      success: false,
+      message: 'Cannot configure email before every service is tracked locally',
+      error: 'Apply the service actions first, then re-run hv_plan.',
+    };
+  }
+  const hosting = await adapterFactory.getHostingAdapter(project);
+  if (!hosting.success || !hosting.adapter) {
+    return { success: false, message: 'Hosting adapter unavailable for email setup', error: hosting.error };
+  }
+  const summary: Record<string, unknown> = {};
+  const setup = await setupBootstrapEmail({
+    domain: environmentSpec.domain,
+    workloads,
+    environment,
+    hostingAdapter: hosting.adapter,
+    scopeHints: getProjectScopeHints(project),
+    summary,
+  });
+  if (setup.failure) {
+    return {
+      success: false,
+      message: 'SendGrid setup failed',
+      error: bootstrapGeneralError(setup.failure.summary),
+      data: setup.failure.summary,
+    };
+  }
+  const apiKeySynced = summary.sendgridApiKeySynced === true;
+  const dnsSynced = !environmentSpec.domain || summary.sendgridDnsSynced === true;
+  if (!apiKeySynced || !dnsSynced) {
+    return {
+      success: false,
+      message: 'SendGrid setup was incomplete',
+      error: bootstrapGeneralError(summary),
+      data: summary,
+    };
+  }
+  ctx.repos.environments.updatePlatformBindings(environment.id, {
+    email: {
+      enabled: true,
+      provider: 'sendgrid',
+      domain: environmentSpec.domain ?? null,
+      services: workloads.map((service) => service.name).sort(),
+      configuredAt: new Date().toISOString(),
+    },
+  });
+  return {
+    success: true,
+    message: `Configured SendGrid for ${workloads.length} service(s)`,
+    data: {
+      services: workloads.map((service) => service.name).sort(),
+      domainAuthenticationConfigured: Boolean(environmentSpec.domain),
+    },
   };
 }
 
@@ -616,6 +765,92 @@ function projectSpecReferencesService(spec: ProjectSpec, serviceName: string): b
 
 function environmentHasBinding(environment: Environment, serviceName: string): boolean {
   return Boolean(serviceBindingFor(environment, serviceName));
+}
+
+async function ensureHostingProject(
+  ctx: ToolContext,
+  project: Project,
+  envName: string,
+  provider: string
+): Promise<ActionResult> {
+  let environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return {
+      success: false,
+      message: 'Environment not found locally',
+      error: `No local environment "${envName}"`,
+    };
+  }
+
+  const currentBindings = parseHostingBindings(environment);
+  const rawBindings = environment.platformBindings as Record<string, unknown>;
+  if (currentBindings.provider && currentBindings.provider !== provider) {
+    ctx.repos.environments.updatePlatformBindings(environment.id, {
+      ...(!rawBindings.previousHosting && Object.keys(currentBindings.services ?? {}).length > 0
+        ? {
+            previousHosting: {
+              provider: currentBindings.provider,
+              ...(currentBindings.projectId ? { projectId: currentBindings.projectId } : {}),
+              ...(currentBindings.environmentId ? { environmentId: currentBindings.environmentId } : {}),
+              services: currentBindings.services ?? {},
+            },
+          }
+        : {}),
+      provider,
+      projectId: undefined,
+      environmentId: undefined,
+      services: {},
+    });
+    environment = ctx.repos.environments.findById(environment.id) ?? environment;
+  }
+
+  const adapterResult = await adapterFactory.getHostingAdapter(project);
+  if (!adapterResult.success || !adapterResult.adapter) {
+    return {
+      success: false,
+      message: `Cannot ensure ${provider} project`,
+      error: adapterResult.error ?? `${provider} hosting adapter is unavailable`,
+    };
+  }
+  const receipt = await adapterResult.adapter.ensureProject(project.name, environment);
+  if (!receipt.success) {
+    return {
+      success: false,
+      message: receipt.message,
+      error: receipt.error,
+      data: receipt.data,
+    };
+  }
+
+  const refreshedBindings = parseHostingBindings(
+    ctx.repos.environments.findById(environment.id) ?? environment
+  );
+  const projectId = stringField(asRecord(receipt.data), 'projectId') ?? refreshedBindings.projectId;
+  const environmentId = stringField(asRecord(receipt.data), 'environmentId') ?? refreshedBindings.environmentId;
+  if (!projectId) {
+    return {
+      success: false,
+      message: receipt.message,
+      error: `${provider} reported success without a project ID and no existing project binding could be verified.`,
+      data: receipt.data,
+    };
+  }
+  ctx.repos.environments.updatePlatformBindings(environment.id, {
+    provider,
+    projectId,
+    ...(environmentId ? { environmentId } : {}),
+    ...(receipt.data?.created === true ? { services: {} } : {}),
+  });
+  return {
+    success: true,
+    message: receipt.message,
+    data: {
+      provider,
+      projectId,
+      ...(environmentId ? { environmentId } : {}),
+      created: receipt.data?.created === true,
+    },
+  };
 }
 
 async function applyDomain(
@@ -907,6 +1142,7 @@ async function createDatabase(
 
   const provisioned = await adapterResult.adapter.provision(action.resource.name as 'postgres', environment, {
     databaseName: 'app',
+    resourceName: `${project.name}-${envName}-postgres`,
   });
   if (!provisioned.receipt.success) {
     return {

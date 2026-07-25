@@ -119,6 +119,8 @@ export interface IDatabaseAdapter {
       region?: string;
       /** Database name to create */
       databaseName?: string;
+      /** Provider resource identity; distinct from the logical database name. */
+      resourceName?: string;
     }
   ): Promise<ProvisionResult>;
 

@@ -58,9 +58,6 @@ export function createRailwayDatabaseAdapter(params: {
     return {};
   };
 
-  const isAuthError = (message?: string): boolean =>
-    typeof message === 'string' && /not authorized|forbidden|permission denied/i.test(message);
-
   return {
     name: 'railway',
     capabilities: {
@@ -99,11 +96,12 @@ export function createRailwayDatabaseAdapter(params: {
         };
       }
 
-      // Railway DB provisioning should target the same Railway project as the app hosting project.
-      // Do not derive names from databaseName or environment.
+      // Project creation is a separate reviewed plan action. A database action
+      // may only provision inside the exact Railway project already bound to
+      // this environment.
       const projectName = project?.name ?? `project-${environment.projectId}`;
-      const ensureProject = await railway.ensureProject(projectName, environment);
-      if (!ensureProject.success) {
+      const projectId = (environment.platformBindings as Record<string, unknown>).projectId as string | undefined;
+      if (!projectId) {
         return {
           component: {
             id: '',
@@ -116,10 +114,10 @@ export function createRailwayDatabaseAdapter(params: {
           },
           receipt: {
             success: false,
-            message: ensureProject.message,
-            error: ensureProject.error,
+            message: 'Railway project binding is missing',
+            error: 'Apply the reviewed project action first, then re-run hv_plan. Database provisioning will not create or rebind a hosting project implicitly.',
             data: {
-              phase: 'ensureProject',
+              phase: 'requireProjectBinding',
               provider: 'railway',
               requestedProjectName: projectName,
             },
@@ -127,52 +125,8 @@ export function createRailwayDatabaseAdapter(params: {
         };
       }
 
-      const projectId =
-        (ensureProject.data?.projectId as string | undefined) ||
-        ((environment.platformBindings as Record<string, unknown>).projectId as string | undefined);
-      const createdByProvision = Boolean(ensureProject.data?.created);
-      let retriedAfterAuthRecover = false;
-
-      if (projectId) {
-        envRepo.updatePlatformBindings(environment.id, {
-          provider: 'railway',
-          projectId,
-        });
-      }
-
       const refreshedEnvironment = envRepo.findById(environment.id) ?? environment;
-      let componentResult = await railway.ensureComponent(type, refreshedEnvironment);
-      if (!componentResult.receipt.success && projectId && !createdByProvision && isAuthError(componentResult.receipt.error)) {
-        retriedAfterAuthRecover = true;
-        // Recover from stale/non-writable Railway bindings by clearing project/service linkage and retrying once.
-        envRepo.updatePlatformBindings(environment.id, {
-          projectId: undefined,
-          environmentId: undefined,
-          services: undefined,
-        });
-
-        const reboundEnv = envRepo.findById(environment.id) ?? refreshedEnvironment;
-        const retryEnsureProject = await railway.ensureProject(projectName, reboundEnv);
-        const retryProjectId =
-          (retryEnsureProject.data?.projectId as string | undefined) ||
-          ((reboundEnv.platformBindings as Record<string, unknown>).projectId as string | undefined);
-
-        if (retryEnsureProject.success && retryProjectId) {
-          envRepo.updatePlatformBindings(environment.id, {
-            provider: 'railway',
-            projectId: retryProjectId,
-          });
-          const retryEnv = envRepo.findById(environment.id) ?? reboundEnv;
-          componentResult = await railway.ensureComponent(type, retryEnv);
-
-          if (!componentResult.receipt.success && retryEnsureProject.data?.created === true && typeof railway.deleteProject === 'function') {
-            const retryCleanup = await railway.deleteProject(retryProjectId);
-            if (!retryCleanup.success) {
-              componentResult.receipt.error = `${componentResult.receipt.error ?? componentResult.receipt.message} Cleanup failed for Railway project ${retryProjectId}: ${retryCleanup.error ?? 'unknown error'}`;
-            }
-          }
-        }
-      }
+      const componentResult = await railway.ensureComponent(type, refreshedEnvironment);
 
       if (!componentResult.receipt.success) {
         componentResult.receipt.data = {
@@ -181,20 +135,9 @@ export function createRailwayDatabaseAdapter(params: {
           provider: 'railway',
           providerProjectId: projectId,
           requestedProjectName: projectName,
-          ensureProjectCreated: createdByProvision,
-          authRecoveryRetried: retriedAfterAuthRecover,
+          ensureProjectCreated: false,
+          authRecoveryRetried: false,
         };
-        if (projectId && createdByProvision && typeof railway.deleteProject === 'function') {
-          const cleanup = await railway.deleteProject(projectId);
-          if (cleanup.success) {
-            envRepo.updatePlatformBindings(environment.id, {
-              provider: undefined,
-              projectId: undefined,
-            });
-          } else {
-            componentResult.receipt.error = `${componentResult.receipt.error ?? componentResult.receipt.message} Cleanup failed for Railway project ${projectId}: ${cleanup.error ?? 'unknown error'}`;
-          }
-        }
         return {
           component: componentResult.component,
           receipt: componentResult.receipt,
@@ -237,8 +180,8 @@ export function createRailwayDatabaseAdapter(params: {
             provider: 'railway',
             providerProjectId: projectId,
             requestedProjectName: projectName,
-            ensureProjectCreated: createdByProvision,
-            authRecoveryRetried: retriedAfterAuthRecover,
+            ensureProjectCreated: false,
+            authRecoveryRetried: false,
           },
         },
         connectionUrl,
@@ -270,7 +213,11 @@ export function createRailwayDatabaseAdapter(params: {
       if (component.externalId && typeof railway.deleteService === 'function') {
         const deletedService = await railway.deleteService(component.externalId);
         if (!deletedService.success) {
-          cleanupErrors.push(`service ${component.externalId}: ${deletedService.error ?? 'unknown error'}`);
+          return {
+            success: false,
+            message: `Failed to delete Railway database service ${component.externalId}; persistent volume was preserved`,
+            error: `service ${component.externalId}: ${deletedService.error ?? 'unknown error'}`,
+          };
         }
         if (volumeId && typeof railway.deleteVolume === 'function') {
           const deletedVolume = await railway.deleteVolume(volumeId);

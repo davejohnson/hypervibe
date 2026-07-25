@@ -1,7 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RailwayAdapter } from '../railway.adapter.js';
 
 describe('RailwayAdapter delete verification', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
   it('treats falsy projectDelete payload as failure', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce({ projectDelete: false })
@@ -29,6 +32,57 @@ describe('RailwayAdapter delete verification', () => {
     expect(request).toHaveBeenCalledTimes(2);
     expect(String(request.mock.calls[0]?.[0])).toContain('serviceDelete(id: $id)');
     expect(String(request.mock.calls[0]?.[0])).not.toContain('serviceDelete(input:');
+  });
+
+  it('treats deletion of an already absent service as idempotent success', async () => {
+    const request = vi.fn().mockRejectedValueOnce(new Error('Service not found'));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.deleteService('svc-missing')).resolves.toEqual({ success: true });
+  });
+
+  it('treats deletion of an already absent project as idempotent success', async () => {
+    const request = vi.fn().mockRejectedValueOnce(new Error('Project not found'));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.deleteProject('project-missing')).resolves.toEqual({ success: true });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps polling beyond the old three-second verification window', async () => {
+    vi.stubEnv('HYPERVIBE_RAILWAY_DELETE_ATTEMPTS', '12');
+    vi.stubEnv('HYPERVIBE_RAILWAY_DELETE_DELAY_MS', '0');
+    const request = vi.fn()
+      .mockResolvedValueOnce({ serviceDelete: true })
+      .mockResolvedValueOnce({ service: { id: 'svc-slow-delete' } })
+      .mockResolvedValueOnce({ service: { id: 'svc-slow-delete' } })
+      .mockResolvedValueOnce({ service: { id: 'svc-slow-delete' } })
+      .mockResolvedValueOnce({ service: { id: 'svc-slow-delete' } })
+      .mockResolvedValueOnce({ service: { id: 'svc-slow-delete' } })
+      .mockResolvedValueOnce({ service: { id: 'svc-slow-delete' } })
+      .mockResolvedValueOnce({ service: null });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.deleteService('svc-slow-delete')).resolves.toEqual({ success: true });
+    expect(request).toHaveBeenCalledTimes(8);
+  });
+
+  it('does not mistake an observation failure for successful deletion', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({ serviceDelete: true })
+      .mockRejectedValueOnce(new Error('Railway API unavailable'));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.deleteService('svc-unknown');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('absence is unknown');
+    expect(result.error).toContain('Railway API unavailable');
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it('deletes volumes by id', async () => {

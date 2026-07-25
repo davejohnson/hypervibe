@@ -210,7 +210,7 @@ describe('queue-plan.service', () => {
       expect(destroy.reason).toContain('undelivered messages');
     });
 
-    it('degrades to unverified creates with a warning when observation throws', async () => {
+    it('blocks queue mutations with a warning when observation throws', async () => {
       const { project, environment } = seedProject();
       const adapter = stubAdapter({ queues: { backend: 'pubsub' } });
       adapter.getQueueSubscription.mockRejectedValue(new Error('pubsub 500'));
@@ -218,7 +218,12 @@ describe('queue-plan.service', () => {
       const { actions, warnings } = await planQueues({ project, environmentSpec: pubsubSpec(), environment });
       expect(warnings.some((warning) => warning.includes('Could not observe Pub/Sub') && warning.includes('pubsub 500'))).toBe(true);
       expect(actions).toHaveLength(1);
-      expect(actions[0]).toMatchObject({ id: 'queue:email-jobs', type: 'create', verified: false });
+      expect(actions[0]).toMatchObject({
+        id: 'queue:email-jobs',
+        type: 'update',
+        verified: false,
+        metadata: { blockedReason: 'queue_observation_unknown' },
+      });
     });
 
     it('warns and fails apply when the project is not queue-prepared', async () => {
@@ -385,9 +390,14 @@ describe('queue-plan.service', () => {
       expect(actions).toHaveLength(1);
       expect(actions[0]).toMatchObject({
         id: 'queue:email-jobs',
-        type: 'create',
+        type: 'update',
         verified: false,
-        metadata: { operation: QUEUE_OPERATIONS.ensure, queueName: 'email-jobs', unsupported: true },
+        metadata: {
+          operation: QUEUE_OPERATIONS.ensure,
+          queueName: 'email-jobs',
+          unsupported: true,
+          blockedReason: 'queue_observation_unavailable',
+        },
       });
       expect(actions[0].reason).toContain('cannot be converged');
       expect(warnings.some((warning) => warning.includes('does not support queues'))).toBe(true);
@@ -401,9 +411,14 @@ describe('queue-plan.service', () => {
       expect(actions).toHaveLength(1);
       expect(actions[0]).toMatchObject({
         id: 'queue:email-jobs',
-        type: 'create',
+        type: 'update',
         verified: false,
-        metadata: { operation: QUEUE_OPERATIONS.ensure, queueName: 'email-jobs', unsupported: true },
+        metadata: {
+          operation: QUEUE_OPERATIONS.ensure,
+          queueName: 'email-jobs',
+          unsupported: true,
+          blockedReason: 'queue_observation_unavailable',
+        },
       });
       expect(warnings).toEqual(['Cannot plan queues: missing cloudrun connection']);
     });

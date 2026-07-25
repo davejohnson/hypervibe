@@ -87,12 +87,46 @@ export function planStorage(params: {
   const desired = params.environmentSpec.storage ?? {};
   const bindings = parseStorageBindings(params.environment);
   const live = params.observed?.storage ?? [];
+  const observationKnown = params.observed === null
+    || params.observed.completeness?.storage !== 'unknown';
   const actions: PlanAction[] = [];
   const warnings: string[] = [];
   const unmanaged: Array<{ kind: 'storage'; name: string; detail?: string }> = [];
 
   for (const [name, spec] of Object.entries(desired)) {
     const binding = bindings[name];
+    if (params.observed && !observationKnown) {
+      const ensureId = `storage:${name}`;
+      actions.push(action({
+        id: ensureId,
+        type: binding ? 'noop' : 'update',
+        name,
+        provider: spec.provider,
+        operation: STORAGE_OPERATIONS.ensure,
+        verified: false,
+        reason: binding
+          ? `Preserving locally bound storage "${name}" because live observation is unknown`
+          : `Cannot verify whether storage "${name}" exists`,
+        ...(!binding ? { metadata: { blockedReason: 'storage_observation_unknown' } } : {}),
+      }));
+      for (const serviceName of spec.injectInto) {
+        const wired = binding?.services.includes(serviceName) === true;
+        actions.push(action({
+          id: `storage:${name}:wiring:${serviceName}`,
+          type: wired ? 'noop' : 'update',
+          name,
+          provider: spec.provider,
+          operation: STORAGE_OPERATIONS.wire,
+          verified: false,
+          reason: wired
+            ? `Preserving local storage wiring for "${serviceName}" because live observation is unknown`
+            : `Cannot verify storage wiring for "${serviceName}"`,
+          dependsOn: [ensureId, `service:${serviceName}`],
+          ...(!wired ? { metadata: { serviceName, blockedReason: 'storage_observation_unknown' } } : {}),
+        }));
+      }
+      continue;
+    }
     const observed = binding
       ? live.find((item) => item.externalId === binding.externalId)
       : live.find((item) => item.name.toLowerCase() === name.toLowerCase());
@@ -151,6 +185,19 @@ export function planStorage(params: {
 
   for (const [name, binding] of Object.entries(bindings)) {
     if (desired[name]) continue;
+    if (params.observed && !observationKnown) {
+      actions.push(action({
+        id: `storage:${name}:observation-blocked`,
+        type: 'update',
+        name,
+        provider: binding.provider,
+        operation: STORAGE_OPERATIONS.destroy,
+        verified: false,
+        reason: `Storage "${name}" was removed from the spec, but observation is unknown; refusing to unwire or destroy it`,
+        metadata: { blockedReason: 'storage_observation_unknown', externalId: binding.externalId },
+      }));
+      continue;
+    }
     for (const serviceName of binding.services) {
       actions.push(action({
         id: `storage:${name}:unwiring:${serviceName}`,
@@ -174,7 +221,7 @@ export function planStorage(params: {
     }));
   }
 
-  for (const item of live) {
+  for (const item of observationKnown ? live : []) {
     if (Object.values(bindings).some((binding) => binding.externalId === item.externalId) || desired[item.name]) continue;
     unmanaged.push({ kind: 'storage', name: item.name, detail: `${item.provider} object bucket exists but is not managed by Hypervibe` });
   }

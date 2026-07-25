@@ -11,6 +11,7 @@ import { ProjectRepository } from '../../adapters/db/repositories/project.reposi
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter, type RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
 import { registerLifecycleTools } from '../lifecycle.tools.js';
@@ -218,7 +219,7 @@ describe('hv_inspect / hv_import', () => {
     expect(result.data.autoDetected).toEqual({ production: 'production' });
     expect(result.data.needsMapping).toEqual([]);
     expect(result.data.envVarNames).toEqual(['DATABASE_URL']);
-    expect(result.data.components).toEqual([{ type: 'postgres', railwayId: 'plug-1' }]);
+    expect(result.data.components).toEqual([{ type: 'postgres', railwayId: 'plug-1', name: 'Postgres' }]);
     expect(result.next).toContain('hv_import');
     expect(new ProjectRepository().findByName('demo-app')).toBeNull();
     await t.close();
@@ -278,6 +279,69 @@ describe('hv_inspect / hv_import', () => {
     expect(bindings.services?.web?.serviceId).toBe('svc-web');
 
     expect(new ServiceRepository().findByProjectAndName(project!.id, 'web')).not.toBeNull();
+    const component = new ComponentRepository().findByEnvironmentAndType(env!.id, 'postgres');
+    expect(component?.bindings).toMatchObject({
+      provider: 'railway',
+      projectId: 'rp-1',
+      environmentId: 'env-prod',
+      resourceKind: 'plugin',
+      pluginName: 'Postgres',
+    });
+    await t.close();
+  });
+
+  it('explicitly adopts a service-backed Railway Postgres as a component, not an app service', async () => {
+    createRailwayConnection();
+    mockAdapter();
+    const serviceBackedDetails: RailwayProjectDetails = {
+      ...details,
+      plugins: { edges: [] },
+      services: {
+        edges: [
+          ...details.services.edges,
+          {
+            node: {
+              id: 'svc-postgres',
+              name: 'Postgres',
+              repoTriggers: { edges: [] },
+              serviceInstances: {
+                edges: [{
+                  node: {
+                    environmentId: 'env-prod',
+                    domains: { serviceDomains: [], customDomains: [] },
+                  },
+                }],
+              },
+            },
+          },
+        ],
+      },
+    };
+    vi.spyOn(RailwayAdapter.prototype, 'getProjectDetails').mockResolvedValue(serviceBackedDetails);
+    const t = await makeClient();
+
+    const result = await t.call('hv_import', {
+      name: 'demo-app',
+      environmentMappings: { production: 'production' },
+      databaseMappings: { 'svc-postgres': 'postgres' },
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(true);
+    const project = new ProjectRepository().findByName('demo-app')!;
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    expect(new ServiceRepository().findByProjectAndName(project.id, 'Postgres')).toBeNull();
+    expect(new ComponentRepository().findByEnvironmentAndType(environment.id, 'postgres')).toMatchObject({
+      externalId: 'svc-postgres',
+      bindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'env-prod',
+        resourceKind: 'service',
+        serviceId: 'svc-postgres',
+        pluginName: 'Postgres',
+      },
+    });
     await t.close();
   });
 

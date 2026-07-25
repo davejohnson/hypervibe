@@ -130,6 +130,37 @@ The core workflow is terraform-style:
 
 There is no approval workflow: the human gate is MCP client tool-call approval plus explicit `confirm` flags.
 
+### Reconciliation safety
+
+The persisted plan is an authorization boundary:
+
+- An apply handler may mutate only the resource and operation named by its
+  current non-noop action. A service/env/secret action must not implicitly
+  provision a database, attach a domain, configure email, or deploy unrelated
+  services through a shared bootstrap.
+- A noop action must perform zero provider mutations. Missing local bookkeeping
+  for an observed live resource requires explicit adoption/binding
+  reconciliation or a blocked result, never replacement creation.
+- Observation is present, absent, or unknown. Only provider-confirmed not-found
+  proves absence; permission errors, unsupported reads, partial results,
+  timeouts, rate limits, and 5xx responses must not become executable creates or
+  destroys.
+- Match durable provider ids before names, and block multiple matches instead of
+  selecting the first.
+- Billable and data-bearing actions require exact action-id confirmation.
+  Deletes must be idempotent, wait for provider completion, verify absence, and
+  remove local bindings only afterward.
+- Multi-resource destroys stop at the first failed or unknown deletion. Preserve
+  dependent data and network/credential resources until the owning resource's
+  terminal absence is confirmed.
+- Lifecycle work must add contract tests for noop mutation freedom,
+  action-scoped mutation authority, observation errors, duplicate identities,
+  import round trips, confirmation gates, and delete retry. Run database
+  lifecycle contracts across Railway, Supabase, Cloud SQL, and RDS.
+
+See `ARCHITECTURE.md` for the normative invariants and
+`docs/reconciliation-safety-backlog.md` for the current repair queue.
+
 ## Platform Bindings
 
 Environments store provider bindings in `platformBindings` using generic keys only (legacy `railwayProjectId`/`railwayEnvironmentId` were migrated away in sqlite migration 7):

@@ -191,6 +191,24 @@ describe('ConvergeExecutor execution', () => {
     expect(handler).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { flag: 'billable', action: action({ id: 'database:railway', billable: true }) },
+    { flag: 'data-bearing', action: action({ id: 'database:railway:destroy', type: 'destroy', dataBearing: true }) },
+  ])('centrally confirmation-gates $flag actions even when requiresConfirm was omitted', async ({ action: guardedAction }) => {
+    const handler = vi.fn().mockResolvedValue({ success: true, message: 'ok' });
+    const planId = storePlan([guardedAction]);
+
+    const result = await new ConvergeExecutor().execute({
+      planRunId: planId,
+      currentSpecRevision: 1,
+      handler,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.receipts[0]?.status).toBe('skipped_requires_confirm');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('returns and persists handler data on action receipts', async () => {
     const handlerData = {
       appDeploymentPending: true,

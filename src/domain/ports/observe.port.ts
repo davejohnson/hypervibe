@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import type { Environment } from '../entities/environment.entity.js';
+import type { Component } from '../entities/component.entity.js';
 
 /**
  * Live infrastructure state read back from a provider — the "observe" half of
@@ -72,6 +73,13 @@ export interface ObservedState {
   services: ObservedService[];
   databases: ObservedDatabase[];
   storage?: ObservedStorage[];
+  /** Completeness is per resource class; unknown must never be treated as absent. */
+  completeness?: {
+    project?: 'complete' | 'unknown';
+    services?: 'complete' | 'unknown';
+    databases?: 'complete' | 'unknown';
+    storage?: 'complete' | 'unknown';
+  };
   /** True when one or more sub-queries failed; see warnings. */
   partial: boolean;
   warnings: string[];
@@ -82,7 +90,11 @@ export interface IObservableHosting {
 }
 
 export interface IObservableDatabase {
-  observeDatabase(environment: Environment): Promise<ObservedDatabase | null>;
+  observeDatabase(
+    environment: Environment,
+    component?: Component | null,
+    options?: { resourceName?: string }
+  ): Promise<ObservedDatabase | null>;
 }
 
 /** Compute the sha256 hex digest used for env var drift comparison. */

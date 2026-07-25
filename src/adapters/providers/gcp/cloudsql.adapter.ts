@@ -150,6 +150,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
       size?: string;
       region?: string;
       databaseName?: string;
+      resourceName?: string;
     }
   ): Promise<ProvisionResult> {
     if (!this.credentials) {
@@ -179,7 +180,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
       const token = await this.getAccessToken();
       const { projectId, region } = this.credentials;
 
-      const instanceName = this.sanitizeName(`${environment.name}-${type}`);
+      const instanceName = this.sanitizeName(options?.resourceName || `${environment.name}-${type}`);
       const rootPassword = this.generatePassword();
       const dbName = options?.databaseName?.trim() || 'app';
 
@@ -208,12 +209,6 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
               tier: options?.size || 'db-f1-micro',
               ipConfiguration: {
                 ipv4Enabled: true,
-                authorizedNetworks: [
-                  {
-                    name: 'allow-all',
-                    value: '0.0.0.0/0', // For development; production should use VPC
-                  },
-                ],
               },
               backupConfiguration: {
                 enabled: true,
@@ -492,6 +487,12 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
     try {
       const token = await this.getAccessToken();
       const { projectId } = this.credentials;
+      if (!await this.getInstance(component.externalId)) {
+        return {
+          success: true,
+          message: `Cloud SQL instance is already absent: ${component.externalId}`,
+        };
+      }
 
       const response = await fetch(
         `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances/${component.externalId}`,
@@ -501,14 +502,38 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
         }
       );
 
+      if (response.status === 404) {
+        return {
+          success: true,
+          message: `Cloud SQL instance is already absent: ${component.externalId}`,
+        };
+      }
       if (!response.ok) {
         const text = await response.text();
         throw new Error(`Cloud SQL API error: ${response.status} ${text}`);
       }
 
+      const operation = await response.json() as CloudSqlOperation;
+      if (operation.name) {
+        await this.waitForOperation(token, operation.name, 'instance delete');
+      }
+      const attempts = Number(process.env.HYPERVIBE_CLOUDSQL_DELETE_ATTEMPTS ?? 60);
+      const delayMs = Number(process.env.HYPERVIBE_CLOUDSQL_DELETE_DELAY_MS ?? 1000);
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (!await this.getInstance(component.externalId)) {
+          return {
+            success: true,
+            message: `Deleted Cloud SQL instance: ${component.externalId}`,
+          };
+        }
+        if (attempt < attempts - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
       return {
-        success: true,
-        message: `Deleted Cloud SQL instance: ${component.externalId}`,
+        success: false,
+        message: 'Cloud SQL accepted deletion but the instance is still present',
+        error: `Instance ${component.externalId} was still observable after ${attempts} checks.`,
       };
     } catch (error) {
       return {
@@ -552,34 +577,41 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
     }
   }
 
-  async observeDatabase(environment: Environment): Promise<ObservedDatabase | null> {
+  async observeDatabase(
+    environment: Environment,
+    component?: Component | null,
+    options?: { resourceName?: string }
+  ): Promise<ObservedDatabase | null> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
 
-    // provision() names instances `${environment.name}-${type}`.
+    if (component?.externalId) {
+      const instance = await this.getInstance(component.externalId);
+      if (!instance) return null;
+      return {
+        provider: this.name,
+        engine: 'postgres',
+        externalId: instance.name || component.externalId,
+        name: instance.name || component.externalId,
+        status: this.normalizedInstanceStatus(instance.state),
+      };
+    }
+
+    // Backward-compatible discovery for components created before resourceName.
     for (const type of ['postgres'] as const) {
-      const instanceName = this.sanitizeName(`${environment.name}-${type}`);
+      const instanceName = this.sanitizeName(options?.resourceName || `${environment.name}-${type}`);
       const instance = await this.getInstance(instanceName);
       if (!instance) {
         continue;
       }
-
-      const statusMap: Record<string, string> = {
-        RUNNABLE: 'running',
-        PENDING_CREATE: 'provisioning',
-        MAINTENANCE: 'running',
-        FAILED: 'error',
-        SUSPENDED: 'stopped',
-        PENDING_DELETE: 'stopped',
-      };
 
       return {
         provider: this.name,
         engine: type,
         externalId: instance.name || instanceName,
         name: instance.name || instanceName,
-        status: statusMap[instance.state] ?? (instance.state ? instance.state.toLowerCase() : 'unknown'),
+        status: this.normalizedInstanceStatus(instance.state),
       };
     }
 
@@ -678,28 +710,38 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
 
   private async getInstance(instanceName: string): Promise<CloudSqlInstance | null> {
     if (!this.credentials) {
-      return null;
+      throw new Error('Not connected. Call connect() first.');
     }
 
-    try {
-      const token = await this.getAccessToken();
-      const { projectId } = this.credentials;
+    const token = await this.getAccessToken();
+    const { projectId } = this.credentials;
 
-      const response = await fetch(
-        `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances/${instanceName}`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-
-      if (!response.ok) {
-        return null;
+    const response = await fetch(
+      `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances/${instanceName}`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
       }
+    );
 
-      return (await response.json()) as CloudSqlInstance;
-    } catch {
-      return null;
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Cloud SQL API error: ${response.status} ${text}`);
     }
+
+    return (await response.json()) as CloudSqlInstance;
+  }
+
+  private normalizedInstanceStatus(state?: string): string {
+    const statusMap: Record<string, string> = {
+      RUNNABLE: 'running',
+      PENDING_CREATE: 'provisioning',
+      MAINTENANCE: 'running',
+      FAILED: 'error',
+      SUSPENDED: 'stopped',
+      PENDING_DELETE: 'stopped',
+    };
+    return statusMap[state ?? ''] ?? (state ? state.toLowerCase() : 'unknown');
   }
 
   private async ensureDatabaseByName(params: {

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
+import type { Project } from '../entities/project.entity.js';
 
 export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'tunnel' | 'local' | 'security' | 'database' | 'storage' | 'appstore' | 'ai';
 
@@ -55,6 +56,11 @@ export interface RegisteredProvider {
   factory: (credentials: unknown) => unknown;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
+  /** Provider-owned adapters derived from the connected primary adapter. */
+  derivedAdapters?: {
+    database?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
+    storage?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
+  };
 }
 
 /**

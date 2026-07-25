@@ -9,6 +9,7 @@ import { EnvironmentRepository } from '../../../adapters/db/repositories/environ
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
 import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
 import { SpecStore } from '../../spec/spec.store.js';
 import { adapterFactory } from '../../services/adapter.factory.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
@@ -38,7 +39,13 @@ function observed(): ObservedState {
       envVarHashes: {},
       status: 'running',
     }],
-    databases: [],
+    databases: [{
+      provider: 'railway',
+      engine: 'postgres',
+      externalId: 'rail-postgres',
+      name: 'Postgres',
+      status: 'running',
+    }],
     partial: false,
     warnings: [],
   };
@@ -66,6 +73,7 @@ describe('PlanService delegated secret inputs', () => {
         production: {
           hosting: { provider: 'railway' },
           services: { web: {} },
+          database: { provider: 'railway' },
         },
       },
     });
@@ -80,6 +88,13 @@ describe('PlanService delegated secret inputs', () => {
       },
     });
     new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      externalId: 'rail-postgres',
+      bindings: { provider: 'railway', pluginName: 'Postgres', serviceId: 'rail-postgres' },
+    });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: {
@@ -195,6 +210,11 @@ describe('PlanService delegated secret inputs', () => {
     };
     vi.mocked(adapterFactory.getProviderAdapter).mockResolvedValue({ success: true, adapter } as never);
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter } as never);
+    const provision = vi.fn();
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: { provision },
+    } as never);
 
     const planned = await new PlanService().plan(project, 'production', {
       secretRefs: { ANTHROPIC_API_KEY: 'env:FRIEND_ANTHROPIC_API_KEY' },
@@ -219,8 +239,9 @@ describe('PlanService delegated secret inputs', () => {
     expect(deploy).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'web' }),
       expect.anything(),
-      expect.objectContaining({ ANTHROPIC_API_KEY: FRIEND_KEY })
+      expect.not.objectContaining({ ANTHROPIC_API_KEY: FRIEND_KEY })
     );
+    expect(provision).not.toHaveBeenCalled();
     const updatedEnvironment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
     expect(parseDelegatedSecretBindings(updatedEnvironment)).toEqual([
       expect.objectContaining({

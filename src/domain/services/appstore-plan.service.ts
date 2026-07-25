@@ -187,7 +187,14 @@ function unverifiedDesiredActions(spec: IosSpec, appName: string): PlanAction[] 
       }
     }
   }
-  return actions;
+  return actions.map((action) => ({
+    ...action,
+    type: action.type === 'noop' ? 'noop' : 'update',
+    metadata: {
+      ...(action.metadata ?? {}),
+      blockedReason: 'ios_observation_unknown',
+    },
+  }));
 }
 
 export async function planIos(params: {
