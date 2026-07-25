@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { readFileSync } from 'fs';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
@@ -15,9 +15,9 @@ import {
   getConnectionGuidance,
 } from '../domain/services/connection-guidance.js';
 import type { CredentialFieldDescriptor } from '../domain/services/connection-guidance.js';
-import type { ToolContext } from './context.js';
+import type { CommandContext } from '../application/context.js';
 import { projectField, confirmField } from './schemas.js';
-import { toolSuccess, toolError, wrapHandler } from './respond.js';
+import { commandSuccess, commandError, wrapCommandHandler } from '../application/results.js';
 import { splitFragment } from '../utils/split-fragment.js';
 
 function resolveLocalSecretRef(ref: string): string {
@@ -150,13 +150,13 @@ function setupDetails(provider: string, scope?: string) {
   return { connectionSetup: connectionSetupDetails(provider, { scope }) };
 }
 
-export function registerConnectionsTools(server: McpServer, ctx: ToolContext): void {
+export function registerConnectionsTools(commands: CommandRegistrar, ctx: CommandContext): void {
   const providerNames = [...new Set([...providerRegistry.names(), ...secretManagerRegistry.names()])];
   if (providerNames.length === 0) {
     throw new Error('No providers registered. Ensure adapters are imported before registering tools.');
   }
 
-  server.tool(
+  commands.register(
     'hv_connect',
     'Manage provider connections. action="add" (default) stores credentials and immediately verifies them; action="verify" re-verifies an existing connection; action="remove" deletes one; action="prepare" runs one-time cloud account preparation (Cloud Run: enables required GCP APIs and grants deploy IAM roles using one-time admin credentials that are never stored — preview first, then pass confirm=true). Credentials are encrypted at rest and never returned. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if the user intentionally wants to enter credentials in chat.',
     {
@@ -176,7 +176,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
       adminAccessTokenRef: z.string().optional().describe('action="prepare": env:NAME or file:/absolute/path resolving to one-time OAuth admin access token. Not stored.'),
       confirm: confirmField,
     },
-    wrapHandler(async ({
+    wrapCommandHandler(async ({
       provider,
       action = 'add',
       credentials,
@@ -195,7 +195,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
     }) => {
       // Stale connections for unregistered providers must stay removable.
       if (action !== 'remove' && !providerNames.includes(provider)) {
-        return toolError('VALIDATION', `Unknown provider: ${provider}.`, {
+        return commandError('VALIDATION', `Unknown provider: ${provider}.`, {
           hint: `Available providers: ${providerNames.join(', ')}`,
         });
       }
@@ -218,9 +218,9 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
           confirm,
         });
         if (!payload.success) {
-          return toolError('PROVIDER_ERROR', String(payload.error ?? 'Cloud preparation failed'), { details: payload });
+          return commandError('PROVIDER_ERROR', String(payload.error ?? 'Cloud preparation failed'), { details: payload });
         }
-        return toolSuccess(payload, payload.mode === 'preview'
+        return commandSuccess(payload, payload.mode === 'preview'
           ? { hint: 'Recommended: export admin tokens or save service-account JSON to a local file, then re-run with confirm=true plus adminCredentialsJsonRef or adminAccessTokenRef. If the user intentionally wants to enter credentials in chat, adminCredentialsJson/adminAccessToken are still accepted.' }
           : { next: ['hv_plan'] });
       }
@@ -228,17 +228,17 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
       if (action === 'remove') {
         const result = deleteConnection(provider, scope);
         if (!result.success) {
-          return toolError('NOT_FOUND', result.error!);
+          return commandError('NOT_FOUND', result.error!);
         }
-        return toolSuccess({ provider, scope: scope || 'global', removed: true });
+        return commandSuccess({ provider, scope: scope || 'global', removed: true });
       }
 
       if (action === 'add') {
         if (credentials && credentialsRef) {
-          return toolError('VALIDATION', 'Pass either credentials or credentialsRef, not both.');
+          return commandError('VALIDATION', 'Pass either credentials or credentialsRef, not both.');
         }
         if (!credentials && !credentialsRef) {
-          return toolError('VALIDATION', 'credentials are required for action="add".', {
+          return commandError('VALIDATION', 'credentials are required for action="add".', {
             details: setupDetails(provider, scope),
             hint: `Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
@@ -255,7 +255,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
             })
             : credentials!;
         } catch (error) {
-          return toolError('VALIDATION', error instanceof Error ? error.message : String(error), {
+          return commandError('VALIDATION', error instanceof Error ? error.message : String(error), {
             details: setupDetails(provider, scope),
             hint: `Use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
@@ -263,7 +263,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
 
         const saved = await saveConnection(provider, credentialsToSave, scope);
         if (!saved.success) {
-          return toolError('VALIDATION', saved.error!, {
+          return commandError('VALIDATION', saved.error!, {
             details: setupDetails(provider, scope),
             hint: `Fix the credentials object to match the provider schema and retry. ${formatConnectionGuidance(provider, { scope })}`,
           });
@@ -272,7 +272,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
         // Auto-verify so one call does add + verify.
         const verified = await verifyConnection(provider, scope);
         if (verified.kind !== 'verified') {
-          return toolError('PROVIDER_ERROR', verified.error ?? 'Verification failed.', {
+          return commandError('PROVIDER_ERROR', verified.error ?? 'Verification failed.', {
             details: { connection: saved.connection, ...setupDetails(provider, scope) },
             hint: `The connection was saved but failed verification. Confirm the token type and permissions, then re-run hv_connect action="verify" or action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
@@ -288,7 +288,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
           ...(saved.dependenciesInstalled ? { dependenciesInstalled: saved.dependenciesInstalled } : {}),
           ...(saved.dependencyErrors ? { dependencyErrors: saved.dependencyErrors } : {}),
         };
-        return toolSuccess(data, warningExtras(data));
+        return commandSuccess(data, warningExtras(data));
       }
 
       // action === 'verify'
@@ -303,17 +303,17 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
             message: verified.message,
             ...verified.data,
           };
-          return toolSuccess(data, warningExtras(data));
+          return commandSuccess(data, warningExtras(data));
         }
         case 'not_found':
-          return toolError('NOT_FOUND', verified.error, {
+          return commandError('NOT_FOUND', verified.error, {
             details: setupDetails(provider, scope),
             hint: `Add the connection first with hv_connect action="add". ${formatConnectionGuidance(provider, { scope })}`,
           });
         case 'unknown_provider':
-          return toolError('UNSUPPORTED', verified.error);
+          return commandError('UNSUPPORTED', verified.error);
         default:
-          return toolError('PROVIDER_ERROR', verified.error, {
+          return commandError('PROVIDER_ERROR', verified.error, {
             details: setupDetails(provider, scope),
             hint: `Confirm the token type and permissions, then re-run hv_connect action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
@@ -321,11 +321,11 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_connections_list',
     'List stored provider connections (provider, scope, status, last verified — never credentials) plus all connectable providers grouped by category.',
     {},
-    wrapHandler(async () => {
+    wrapCommandHandler(async () => {
       const connections = ctx.repos.connections.findAll().map((c) => ({
         provider: c.provider,
         scope: c.scope ?? 'global',
@@ -386,7 +386,7 @@ export function registerConnectionsTools(server: McpServer, ctx: ToolContext): v
       }
 
       const discoveryHint = 'hv_connections_list is credential discovery only. If a concrete task is blocked by a missing connection, use hv_connect only when a safe credentialsRef is already available. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
-      return toolSuccess(
+      return commandSuccess(
         { connections, availableProviders },
         {
           hint: connections.length === 0

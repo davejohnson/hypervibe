@@ -1,11 +1,11 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { ToolContext } from './context.js';
+import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
-import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { SqliteAdapter } from '../adapters/db/sqlite.adapter.js';
 import { tunnelManager, getTunnelConfig } from '../adapters/providers/tunnel/tunnel.manager.js';
 import { ComposeGenerator } from '../adapters/providers/local/compose.generator.js';
@@ -100,15 +100,15 @@ function redactRunPlan(plan: unknown): unknown {
   return redacted;
 }
 
-export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
-  server.tool(
+export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandContext): void {
+  commands.register(
     'hv_upgrade',
     'Inspect or apply Hypervibe local upgrade tasks after updating the package. action="status" reports package version, SQLite schema migrations, repo-backed spec/bindings files, and local connection/project counts. action="migrate" explicitly applies pending local SQLite migrations; startup normally does this automatically.',
     {
       action: z.enum(['status', 'migrate']).optional().describe('Upgrade operation (default: status)'),
       project: projectField,
     },
-    wrapHandler(async ({ action = 'status', project: projectRef }) => {
+    wrapCommandHandler(async ({ action = 'status', project: projectRef }) => {
       const adapter = SqliteAdapter.getInstance();
       const appliedNow = action === 'migrate' ? adapter.migrate() : [];
       const schema = adapter.getMigrationStatus();
@@ -118,7 +118,7 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
         ? ctx.resolveProjectOrThrow({ project: projectRef })
         : ctx.resolveProject({});
 
-      return toolSuccess(
+      return commandSuccess(
         {
           hypervibe: {
             version: HYPERVIBE_VERSION,
@@ -163,7 +163,7 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_tunnel',
     'Manage webhook tunnels that expose a local port to the internet (for testing webhooks from Stripe, SendGrid, etc.). action="start" needs port; "stop"/"status" need tunnelId (or port, from which the id is derived); "list" shows all active tunnels.',
     {
@@ -172,13 +172,13 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
       tunnelId: z.string().optional().describe('Tunnel id, e.g. "cloudflared-3000" (for stop/status)'),
       provider: z.enum(['cloudflared', 'ngrok']).optional().describe('Tunnel provider (default: cloudflared, or the stored tunnel connection preference)'),
     },
-    wrapHandler(async ({ action, port, tunnelId, provider }) => {
+    wrapCommandHandler(async ({ action, port, tunnelId, provider }) => {
       const config = getTunnelConfig();
       const selectedProvider = provider ?? config.provider;
 
       if (action === 'list') {
         const tunnels = tunnelManager.listTunnels();
-        return toolSuccess({ count: tunnels.length, tunnels });
+        return commandSuccess({ count: tunnels.length, tunnels });
       }
 
       if (action === 'start') {
@@ -189,12 +189,12 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
           const tunnel = await tunnelManager.start(port, selectedProvider, {
             ngrokAuthToken: config.ngrokAuthToken,
           });
-          return toolSuccess(
+          return commandSuccess(
             { tunnel },
             { hint: `Use ${tunnel.publicUrl} as your webhook URL for testing. Stop it with hv_tunnel action="stop" tunnelId="${tunnel.id}".` }
           );
         } catch (error) {
-          return toolError('PROVIDER_ERROR', error instanceof Error ? error.message : String(error), {
+          return commandError('PROVIDER_ERROR', error instanceof Error ? error.message : String(error), {
             hint: selectedProvider === 'ngrok'
               ? 'Make sure ngrok is installed: https://ngrok.com/download'
               : 'Make sure cloudflared is installed: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/',
@@ -210,19 +210,19 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
       if (action === 'stop') {
         const stopped = await tunnelManager.stop(id);
         return stopped
-          ? toolSuccess({ stopped: true, tunnelId: id })
-          : toolError('NOT_FOUND', `Tunnel ${id} not found.`, { hint: 'List active tunnels with hv_tunnel action="list".' });
+          ? commandSuccess({ stopped: true, tunnelId: id })
+          : commandError('NOT_FOUND', `Tunnel ${id} not found.`, { hint: 'List active tunnels with hv_tunnel action="list".' });
       }
 
       // action === 'status'
       const status = tunnelManager.getStatus(id);
       return status
-        ? toolSuccess({ tunnel: status })
-        : toolError('NOT_FOUND', `Tunnel ${id} not found or not running.`, { hint: 'List active tunnels with hv_tunnel action="list".' });
+        ? commandSuccess({ tunnel: status })
+        : commandError('NOT_FOUND', `Tunnel ${id} not found or not running.`, { hint: 'List active tunnels with hv_tunnel action="list".' });
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_local_bootstrap',
     'Local development setup. Default action="bootstrap" generates compose.yaml and .env.local for the project (registering the requested components — postgres — on the local environment). action="components" lists registered components per environment without writing files.',
     {
@@ -232,14 +232,14 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
       outputDir: z.string().optional().describe('Output directory for generated files (default: current directory)'),
       components: z.array(componentTypeField).optional().describe('Components to include (default: postgres)'),
     },
-    wrapHandler(async ({ action = 'bootstrap', project: projectRef, env, outputDir, components }) => {
+    wrapCommandHandler(async ({ action = 'bootstrap', project: projectRef, env, outputDir, components }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
 
       if (action === 'components') {
         const environments = env
           ? [ctx.repos.environments.findByProjectAndName(project.id, env)].filter((e): e is NonNullable<typeof e> => e !== null)
           : ctx.repos.environments.findByProjectId(project.id);
-        return toolSuccess({
+        return commandSuccess({
           project: { id: project.id, name: project.name },
           environments: environments.map((e) => ({
             environment: e.name,
@@ -273,7 +273,7 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
         fs.writeFileSync(composeFilePath, generator.generateCompose(project, componentTypes), 'utf-8');
         fs.writeFileSync(envFilePath, generator.generateEnvLocal(project, componentTypes), 'utf-8');
       } catch (error) {
-        return toolError('INTERNAL', `Failed to write files: ${error}`);
+        return commandError('INTERNAL', `Failed to write files: ${error}`);
       }
 
       ctx.repos.audit.create({
@@ -283,7 +283,7 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
         details: { projectId: project.id, components: componentTypes, files: [composeFilePath, envFilePath] },
       });
 
-      return toolSuccess(
+      return commandSuccess(
         {
           message: `Local development environment bootstrapped for "${project.name}"`,
           files: { compose: composeFilePath, env: envFilePath },
@@ -295,11 +295,11 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_visualize',
     'Generate a 3D infrastructure visualization for a project as a self-contained HTML file (open it in a browser).',
     { project: projectField },
-    wrapHandler(async ({ project: projectRef }) => {
+    wrapCommandHandler(async ({ project: projectRef }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
 
       const environments = ctx.repos.environments.findByProjectId(project.id);
@@ -327,14 +327,14 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
       const filePath = path.join(os.tmpdir(), `hypervibe-viz-${safeName}.html`);
       fs.writeFileSync(filePath, html, 'utf-8');
 
-      return toolSuccess(
+      return commandSuccess(
         { message: `3D visualization generated for "${project.name}"`, filePath },
         { hint: 'Open this HTML file in a browser to view the interactive 3D infrastructure visualization.' }
       );
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_runs',
     'Inspect run history. action="list" (default) shows recent deployment/apply runs (with the latest run\'s status surfaced); action="get" returns full details (plan, receipts) for one run; action="audit" lists recent audit events.',
     {
@@ -347,7 +347,7 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
       resourceId: z.string().optional().describe('Audit filter: resource id (used with resourceType)'),
       auditAction: z.string().optional().describe('Audit filter: action name (e.g. deploy.started)'),
     },
-    wrapHandler(async ({ action = 'list', runId, project: projectRef, env, limit, resourceType, resourceId, auditAction }) => {
+    wrapCommandHandler(async ({ action = 'list', runId, project: projectRef, env, limit, resourceType, resourceId, auditAction }) => {
       if (action === 'audit') {
         const max = limit ?? 50;
         const events = resourceType && resourceId
@@ -355,7 +355,7 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
           : auditAction
             ? ctx.repos.audit.findByAction(auditAction, max)
             : ctx.repos.audit.findRecent(max);
-        return toolSuccess({
+        return commandSuccess({
           count: events.length,
           events: events.map((e) => ({
             id: e.id,
@@ -386,9 +386,9 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
         }
         const run = ctx.repos.runs.findById(runId);
         if (!run) {
-          return toolError('NOT_FOUND', `Run not found: ${runId}`, { hint: 'List runs with hv_runs action="list".' });
+          return commandError('NOT_FOUND', `Run not found: ${runId}`, { hint: 'List runs with hv_runs action="list".' });
         }
-        return toolSuccess({
+        return commandSuccess({
           run: { ...describeRun(run), plan: redactRunPlan(run.plan), receipts: run.receipts, createdAt: run.createdAt },
         });
       }
@@ -410,7 +410,7 @@ export function registerHvDevxTools(server: McpServer, ctx: ToolContext): void {
 
       const enriched = runs.map(describeRun);
       const latest = enriched[0] ?? null;
-      return toolSuccess(
+      return commandSuccess(
         { count: enriched.length, latest, runs: enriched },
         latest ? { hint: `Latest run is ${latest.status} (${latest.type}). Use hv_runs action="get" runId="${latest.id}" for plan and receipts.` } : undefined
       );

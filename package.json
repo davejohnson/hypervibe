@@ -1,13 +1,14 @@
 {
   "name": "@davejohnson/hypervibe",
   "version": "0.1.5",
-  "description": "MCP server for chat-driven infrastructure management",
+  "description": "Desired-state infrastructure orchestration through CLI and MCP",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/davejohnson/hypervibe.git"
   },
   "keywords": [
+    "cli",
     "mcp",
     "model-context-protocol",
     "infrastructure",
@@ -20,7 +21,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "hypervibe": "dist/index.js"
+    "hypervibe": "dist/index.js",
+    "hypervibe-mcp": "dist/mcp.js"
   },
   "publishConfig": {
     "access": "restricted",

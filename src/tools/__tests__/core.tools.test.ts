@@ -19,7 +19,7 @@ import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.port.js';
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../domain/services/github-ops.service.js';
 import { bootstrapActionResultFromSummary } from '../core.tools.js';
-import { applyDatabaseSeed } from '../apply-plan.js';
+import { applyDatabaseSeed } from '../../application/apply-plan.js';
 import { createToolContext } from '../context.js';
 
 let tempDir: string;

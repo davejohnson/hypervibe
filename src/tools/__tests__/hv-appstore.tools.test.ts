@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
@@ -42,7 +43,7 @@ function seedConnection() {
 
 async function makeClient() {
   const server = new McpServer({ name: 'hv-appstore-test', version: '1.0.0' });
-  registerHvAppstoreTools(server, createToolContext());
+  registerHvAppstoreTools(createMcpCommandRegistrar(server), createToolContext());
   const client = new Client({ name: 'hv-appstore-test-client', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

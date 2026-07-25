@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { detectProviderName } from '../domain/services/provider-logs.service.js';
 import {
@@ -21,12 +21,12 @@ import {
   resolveServiceBaseUrl,
   runHttpCheck,
 } from '../domain/services/health.service.js';
-import type { ToolContext } from './context.js';
+import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
-import { toolSuccess, toolError, wrapHandler, HvError } from './respond.js';
+import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 
-function resolveEnvOrThrow(ctx: ToolContext, projectRef: string | undefined, envName: string | undefined) {
+function resolveEnvOrThrow(ctx: CommandContext, projectRef: string | undefined, envName: string | undefined) {
   const project = ctx.resolveProjectOrThrow({ project: projectRef });
   const environment = ctx.resolveEnvironmentOrThrow(project, envName);
   const bindings = environment.platformBindings as { provider?: string; services?: Record<string, { serviceId: string }> };
@@ -34,8 +34,8 @@ function resolveEnvOrThrow(ctx: ToolContext, projectRef: string | undefined, env
   return { project, environment, bindings, provider };
 }
 
-export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext): void {
-  server.tool(
+export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: CommandContext): void {
+  commands.register(
     'hv_logs',
     'Fetch logs and delivery status: runtime service logs, build logs, recent deployments, or Stripe webhook endpoint status.',
     {
@@ -48,10 +48,10 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
       deploymentId: z.string().optional().describe('source=build only: specific deployment (defaults to latest)'),
       mode: z.enum(['sandbox', 'live']).optional().describe('source=stripe-webhooks only (default sandbox)'),
     },
-    wrapHandler(async ({ project: projectRef, env, service, source, limit, errorsOnly, deploymentId, mode }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, service, source, limit, errorsOnly, deploymentId, mode }) => {
       if (source === 'stripe-webhooks') {
         const webhooks = await fetchStripeWebhookStatuses(mode ?? 'sandbox');
-        return toolSuccess({ source, mode: mode ?? 'sandbox', webhooks });
+        return commandSuccess({ source, mode: mode ?? 'sandbox', webhooks });
       }
 
       const { project, environment, bindings, provider } = resolveEnvOrThrow(ctx, projectRef, env);
@@ -63,7 +63,7 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
           throw new HvError('UNSUPPORTED', logsDeploymentsUnsupportedMessage(provider));
         }
         const deployments = await fetchProviderDeployments(provider, project, environment, service, limit ?? 10);
-        return toolSuccess({ source, provider, environment: environment.name, deployments });
+        return commandSuccess({ source, provider, environment: environment.name, deployments });
       }
 
       if (!serviceName) {
@@ -77,7 +77,7 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
           throw new HvError('UNSUPPORTED', logsBuildUnsupportedMessage(provider));
         }
         const result = await fetchProviderBuildLogs(provider, project, environment, serviceName, deploymentId);
-        return toolSuccess({ source, provider, service: serviceName, ...result });
+        return commandSuccess({ source, provider, service: serviceName, ...result });
       }
 
       const { logs, deploymentStatus } = await fetchProviderLogs(
@@ -88,7 +88,7 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
         limit ?? 100,
         { errorsOnly }
       );
-      return toolSuccess({
+      return commandSuccess({
         source,
         provider,
         environment: environment.name,
@@ -100,7 +100,7 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_errors',
     'Surface production errors: list recent error log lines or summarize error and deployment health per service.',
     {
@@ -110,15 +110,15 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
         .describe('list = recent error log lines; summary = per-service error/deploy health. Default list.'),
       limit: z.number().int().min(1).max(200).optional().describe('Max errors for list (default 20)'),
     },
-    wrapHandler(async ({ project: projectRef, env, action = 'list', limit = 20 }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, action = 'list', limit = 20 }) => {
       const { project, environment, provider } = resolveEnvOrThrow(ctx, projectRef, env);
       if (action === 'summary') {
         const summary = await collectErrorsSummary(provider, project, environment);
-        return toolSuccess({ environment: environment.name, provider, ...summary });
+        return commandSuccess({ environment: environment.name, provider, ...summary });
       }
 
       const { errors, totalFound } = await collectRecentErrors(provider, project, environment, limit);
-      return toolSuccess({
+      return commandSuccess({
         environment: environment.name,
         provider,
         totalFound,
@@ -127,7 +127,7 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_health',
     'HTTP health-check a deployed service or an explicit URL. Service resolution uses repo-backed spec/bindings when present, so public endpoint checks do not require provider credentials; this proves reachability, not provider drift or convergence.',
     {
@@ -138,7 +138,7 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
       path: z.string().optional().describe('Path to check (defaults to the service healthCheckPath or /)'),
       timeoutMs: z.number().int().min(1000).max(60000).optional(),
     },
-    wrapHandler(async ({ project: projectRef, env, service, url, path, timeoutMs = 20000 }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, service, url, path, timeoutMs = 20000 }) => {
       let baseUrl: string;
       let healthPath = path;
       let resolvedService: string | undefined;
@@ -191,7 +191,7 @@ export function registerHvObservabilityTools(server: McpServer, ctx: ToolContext
         bodyPreviewBytes: 2048,
       });
 
-      return toolSuccess(
+      return commandSuccess(
         { service: resolvedService, baseUrl, check },
         { hint: check.ok ? undefined : 'Check hv_logs source="service" errorsOnly=true for the failing service.' }
       );

@@ -4,6 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createMcpCommandRegistrar } from '../../../interfaces/mcp/adapter.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -346,7 +347,7 @@ describe('hosting env var tools', () => {
     }));
 
     const server = new McpServer({ name: 'hv-email-test', version: '1.0.0' });
-    registerHvEmailTools(server, createToolContext());
+    registerHvEmailTools(createMcpCommandRegistrar(server), createToolContext());
     const client = new Client({ name: 'sendgrid-sender-client', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

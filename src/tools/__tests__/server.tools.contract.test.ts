@@ -7,6 +7,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { HYPERVIBE_VERSION } from '../../version.js';
+import { createCommandContext } from '../../application/context.js';
+import { createCommandRegistry } from '../../application/commands.js';
 
 let tempDir: string;
 
@@ -75,6 +77,33 @@ describe('server tool surface', () => {
     expect(tools.find((tool) => tool.name === 'hv_ci_status')?.description).toContain(
       'Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls.'
     );
+    await client.close();
+    await server.close();
+  });
+
+  it('keeps registry, MCP ids, and friendly CLI routes in one-to-one parity', async () => {
+    const registry = createCommandRegistry(createCommandContext());
+    const definitions = registry.list();
+    const ids = definitions.map((definition) => definition.id).sort();
+    const cliPaths = definitions.map((definition) => definition.cliPath.join(' '));
+
+    expect(ids).toEqual(EXPECTED_TOOLS);
+    expect(new Set(cliPaths).size).toBe(42);
+    expect(registry.get('hv_spec_set')?.cliPath).toEqual(['spec', 'set']);
+    expect(registry.get('hv_plan')?.cliPath).toEqual(['plan']);
+    expect(registry.get('hv_db_query')?.cliPath).toEqual(['db', 'query']);
+  });
+
+  it('returns the same structured envelope through the registry and MCP', async () => {
+    const registry = createCommandRegistry(createCommandContext());
+    const direct = await registry.execute('hv_spec_get', { project: 'does-not-exist' });
+    const { client, server } = await makeClient();
+    const overMcp = parseToolEnvelope(await client.callTool({
+      name: 'hv_spec_get',
+      arguments: { project: 'does-not-exist' },
+    }));
+
+    expect(overMcp).toEqual(direct);
     await client.close();
     await server.close();
   });

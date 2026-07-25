@@ -4,8 +4,32 @@ import { readFileSync } from 'fs';
 const genericOrchestrationFiles: Array<[string, URL]> = [
   ['src/domain/plan/diff.engine.ts', new URL('../../domain/plan/diff.engine.ts', import.meta.url)],
   ['src/domain/plan/plan.service.ts', new URL('../../domain/plan/plan.service.ts', import.meta.url)],
-  ['src/tools/apply-plan.ts', new URL('../apply-plan.ts', import.meta.url)],
+  ['src/application/apply-plan.ts', new URL('../../application/apply-plan.ts', import.meta.url)],
   ['src/tools/hv-ci.tools.ts', new URL('../hv-ci.tools.ts', import.meta.url)],
+];
+
+const registeredCommandModules = [
+  'connections',
+  'core',
+  'hv-appstore',
+  'hv-ci',
+  'hv-db',
+  'hv-deploy',
+  'hv-devx',
+  'hv-email',
+  'hv-observability',
+  'hv-payments',
+  'hv-secrets',
+  'lifecycle',
+].map((name) => [
+  `src/tools/${name}.tools.ts`,
+  new URL(`../${name}.tools.ts`, import.meta.url),
+] as const);
+
+const interfaceModules: Array<[string, URL]> = [
+  ['src/interfaces/cli/parser.ts', new URL('../../interfaces/cli/parser.ts', import.meta.url)],
+  ['src/interfaces/cli/run.ts', new URL('../../interfaces/cli/run.ts', import.meta.url)],
+  ['src/interfaces/mcp/adapter.ts', new URL('../../interfaces/mcp/adapter.ts', import.meta.url)],
 ];
 
 const providerApiMarkers = [
@@ -25,6 +49,22 @@ const hostingProviderBranches = [
 ];
 
 describe('provider boundary architecture', () => {
+  it('keeps command declarations transport-neutral', () => {
+    for (const [label, url] of registeredCommandModules) {
+      const source = readFileSync(url, 'utf8');
+      expect(source, `${label} must not import MCP`).not.toContain('@modelcontextprotocol');
+      expect(source, `${label} must register commands, not MCP-shaped tools`).not.toContain('server.tool(');
+    }
+  });
+
+  it('keeps interface adapters free of provider implementations and command orchestration', () => {
+    for (const [label, url] of interfaceModules) {
+      const source = readFileSync(url, 'utf8');
+      expect(source, `${label} must not import provider implementations`).not.toContain('/adapters/providers/');
+      expect(source, `${label} must not import historical command modules`).not.toContain('/tools/');
+    }
+  });
+
   it('keeps provider API details out of generic orchestration files', () => {
     for (const [label, url] of genericOrchestrationFiles) {
       const source = readFileSync(url, 'utf8');

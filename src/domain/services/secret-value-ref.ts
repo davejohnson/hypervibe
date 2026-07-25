@@ -3,7 +3,7 @@ import { parseEnvFile } from '../../utils/env-parser.js';
 import { splitFragment } from '../../utils/split-fragment.js';
 import { parseSecretRef } from '../ports/secretmanager.port.js';
 import { SecretResolver } from './secret.resolver.js';
-import { HvError } from '../../tools/respond.js';
+import { HvError } from '../../application/results.js';
 
 /**
  * Resolve a chat-safe value reference locally: env:NAME,

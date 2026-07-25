@@ -1,12 +1,12 @@
 # hypervibe
 
-> AI-native infrastructure management. Tell Claude what you need, watch it deploy.
+> Desired-state infrastructure management from your terminal or an AI agent.
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Node.js](https://img.shields.io/badge/Node.js-20+-green.svg)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io/)
 
-Hypervibe is an [MCP server](https://modelcontextprotocol.io/) that gives Codex/Claude the ability to manage your infrastructure through natural conversation. Connect your providers once, then deploy, configure, and manage everything by just asking.
+Hypervibe is a desired-state infrastructure orchestrator with two interfaces over one engine: a human/automation-friendly CLI and an [MCP server](https://modelcontextprotocol.io/) for Codex and Claude. Both use the same specs, reviewed plans, provider adapters, connections, receipts, and audit history.
 
 ```
 You: "Deploy my app to staging with a postgres database"
@@ -51,6 +51,8 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
   `region` is physical Railway placement (`sjc`, `iad`, `ams`, or `sin`). Railway's S3 credentials still expose signing region `auto`, which Hypervibe passes through as `AWS_DEFAULT_REGION`.
 
 **Developer Experience**
+- **CLI and MCP parity** - Every supported command is available through both interfaces
+- **Human and JSON output** - Readable terminal output by default, stable redacted envelopes with `--json`
 - **Natural language** - No YAML, no clicking through dashboards
 - **Auto-wiring** - DATABASE_URL connected automatically
 - **Environment management** - Staging, production, PR previews
@@ -86,14 +88,34 @@ Use your GitHub username, the classic token as the password, and your GitHub
 email address when prompted. Keep the token in your local npm configuration;
 never commit it to this repository.
 
-### 2. Install As Codex MCP
+### 2. Install the CLI
+
+```bash
+npm install -g @davejohnson/hypervibe@latest
+hypervibe --help
+```
+
+The core desired-state workflow is:
+
+```bash
+hypervibe spec set --file .hypervibe/spec.json
+hypervibe plan --env staging
+hypervibe apply --plan-id <plan-id>
+hypervibe status --env staging
+```
+
+Human-readable output is the default. Add `--json` for automation, or
+`--input <file|->` to supply the complete command input as JSON. Confirmation
+prompts are TTY-only; scripts must pass explicit confirmation flags.
+
+### 3. Install As Codex MCP
 
 ```bash
 codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest
 codex mcp list
 ```
 
-### 3. Install As Claude Code MCP
+### 4. Install As Claude Code MCP
 
 Add to `~/.claude/settings.json`:
 
@@ -108,7 +130,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-### 4. Connect Providers
+### 5. Connect Providers
 
 Restart Claude Code, then:
 
@@ -120,7 +142,7 @@ You: "Connect Cloudflare with API token xyz..."
 Claude: Validates and stores the connection.
 ```
 
-### 5. Deploy
+### 6. Deploy
 
 ```
 You: "Create a new project called my-app with staging and production environments"
@@ -129,7 +151,7 @@ You: "Add a custom domain api.myapp.com"
 You: "Run database migrations"
 ```
 
-### 6. Manage Secrets (Optional)
+### 7. Manage Secrets (Optional)
 
 Connect a secret manager and let hypervibe inject secrets at deploy time:
 
@@ -148,33 +170,23 @@ Secret references use the format: `provider://path[#key][@version]`
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Claude Code                             │
-│                          ▼                                   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              Hypervibe MCP Server                    │   │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐          │   │
-│  │  │ Project  │  │  Deploy  │  │ Secrets  │  ...     │   │
-│  │  │  Tools   │  │  Tools   │  │  Tools   │          │   │
-│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘          │   │
-│  │       └──────────────┼──────────────┘               │   │
-│  │                      ▼                               │   │
-│  │  ┌──────────────────────┐  ┌────────────────────┐  │   │
-│  │  │  Provider Registry   │  │ Secret Mgr Registry│  │   │
-│  │  │ Railway │ Cloudflare │  │ Vault│AWS│Doppler  │  │   │
-│  │  └──────────────────────┘  └────────────────────┘  │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                          ▼                                   │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │ Railway  │  │Cloudflare│  │  Vault   │  │   AWS    │   │
-│  │   API    │  │   API    │  │   API    │  │ Secrets  │   │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
-└─────────────────────────────────────────────────────────────┘
+               ┌───────────────┐
+               │ Hypervibe CLI │
+               └───────┬───────┘
+                       │
+┌───────────────┐      ▼
+│ MCP clients   ├──► Command registry/context/results
+└───────────────┘      │
+                       ▼
+               Spec → Plan → Apply → Status
+                       │
+                       ▼
+              Provider and secret adapters
 ```
 
-## Available Tools
+## Available Commands
 
-Hypervibe exposes a focused surface of intent-level `hv_*` tools. The core is a terraform-style loop:
+Hypervibe exposes the same focused operations as canonical `hv_*` MCP tools and friendly CLI commands. The core is a Terraform-style loop:
 
 1. `hv_spec_set` — declare the desired state (services, database, storage, domain, email, env vars) as a revisioned spec
 2. `hv_plan` — observe live infrastructure, diff against the spec, and get an executable plan
@@ -183,7 +195,7 @@ Hypervibe exposes a focused surface of intent-level `hv_*` tools. The core is a 
 
 Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/health, database query/migrate, secrets, domains/DNS, email, payments, CI, App Store/TestFlight, and local dev tools.
 
-- Full generated catalog: `docs/TOOLS.md`
+- Full generated MCP/CLI catalog: `docs/TOOLS.md`
 - Regenerate after tool changes: `npm run build && npm run docs:tools`
 
 ### Database diagnostics

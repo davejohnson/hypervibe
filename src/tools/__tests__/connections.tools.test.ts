@@ -5,6 +5,7 @@ import { tmpdir } from 'os';
 import path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
@@ -34,7 +35,7 @@ afterEach(() => {
 
 async function makeClient() {
   const server = new McpServer({ name: 'connections-tools-test', version: '0.0.0' });
-  registerConnectionsTools(server, createToolContext());
+  registerConnectionsTools(createMcpCommandRegistrar(server), createToolContext());
   const client = new Client({ name: 'connections-tools-test', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

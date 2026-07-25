@@ -1,0 +1,77 @@
+import { initializeDatabase } from '../../adapters/db/sqlite.adapter.js';
+import { createCommandContext } from '../../application/context.js';
+import { createCommandRegistry, type CommandRegistry } from '../../application/commands.js';
+import { formatCommandEnvelope, type CommandEnvelope } from '../../application/results.js';
+import { HYPERVIBE_VERSION } from '../../version.js';
+import { createProcessCliIo, type CliIo } from './io.js';
+import { commandHelp, parseCliInvocation, rootHelp } from './parser.js';
+
+export interface CliRunOptions {
+  io?: CliIo;
+  registry?: CommandRegistry;
+  initialize?: boolean;
+}
+
+function renderResult(result: CommandEnvelope, json: boolean): string {
+  return json
+    ? `${JSON.stringify(result, null, 2)}\n`
+    : `${formatCommandEnvelope(result)}\n`;
+}
+
+export async function runCli(
+  argv: string[],
+  options: CliRunOptions = {}
+): Promise<number> {
+  const io = options.io ?? createProcessCliIo();
+  if (options.initialize !== false) {
+    initializeDatabase();
+  }
+  const registry = options.registry ?? createCommandRegistry(createCommandContext());
+
+  let invocation;
+  try {
+    invocation = await parseCliInvocation(registry, argv, io.readStdin);
+  } catch (error) {
+    io.writeErr(`Hypervibe CLI error: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+
+  if (invocation.version) {
+    io.writeOut(`${HYPERVIBE_VERSION}\n`);
+    return 0;
+  }
+  if (!invocation.command) {
+    io.writeOut(rootHelp(registry));
+    return invocation.help ? 0 : 2;
+  }
+  if (invocation.help) {
+    io.writeOut(commandHelp(invocation.command));
+    return 0;
+  }
+
+  let result = await registry.execute(invocation.command.id, invocation.input);
+  const canPrompt = (
+    !invocation.json
+    && !invocation.nonInteractive
+    && io.stdinIsTTY
+    && !result.ok
+    && result.error?.code === 'CONFIRM_REQUIRED'
+    && result.confirmation
+  );
+
+  if (canPrompt && result.confirmation) {
+    io.writeOut(renderResult(result, false));
+    const confirmed = await io.confirm(result.confirmation.message);
+    if (!confirmed) {
+      io.writeErr('Confirmation declined; no confirmed action was executed.\n');
+      return 1;
+    }
+    result = await registry.execute(invocation.command.id, {
+      ...invocation.input,
+      ...result.confirmation.retryInput,
+    });
+  }
+
+  io.writeOut(renderResult(result, invocation.json));
+  return result.ok ? 0 : 1;
+}

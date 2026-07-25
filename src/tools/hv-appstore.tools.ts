@@ -1,9 +1,9 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { readdir, stat } from 'fs/promises';
 import path from 'path';
-import type { ToolContext } from './context.js';
-import { toolSuccess, toolError, wrapHandler, HvError, describeError } from './respond.js';
+import type { CommandContext } from '../application/context.js';
+import { commandSuccess, commandError, wrapCommandHandler, HvError, describeError } from '../application/results.js';
 import {
   addTestersToGroup,
   getAppStoreConnectAdapter,
@@ -115,8 +115,8 @@ async function computeReadiness(
 const STATUS_SECTIONS = ['builds', 'groups', 'testers', 'readiness', 'capabilities'] as const;
 type StatusSection = (typeof STATUS_SECTIONS)[number];
 
-export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): void {
-  server.tool(
+export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: CommandContext): void {
+  commands.register(
     'hv_appstore_status',
     'Read-only App Store Connect overview for an app: TestFlight builds, beta groups, testers, App Store submission readiness, and App ID capabilities. Use include to limit scope. Requires an appstoreconnect connection (API key from https://appstoreconnect.apple.com/access/integrations/api).',
     {
@@ -127,7 +127,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
       screenshotDisplayType: z.string().optional().describe('Screenshot display type to inspect for readiness (default: APP_IPHONE_65)'),
       limit: z.number().int().min(1).max(200).optional().describe('Max builds/testers to return (default: 10 builds, 200 testers)'),
     },
-    wrapHandler(async ({ appIdentifier, include, platform, locale = 'en-US', screenshotDisplayType = 'APP_IPHONE_65', limit }) => {
+    wrapCommandHandler(async ({ appIdentifier, include, platform, locale = 'en-US', screenshotDisplayType = 'APP_IPHONE_65', limit }) => {
       const adapter = adapterOrThrow(appIdentifier);
       const sections = new Set<StatusSection>(include?.length ? include : STATUS_SECTIONS);
       const warnings: string[] = [];
@@ -162,11 +162,11 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         return { bundleId, capabilities: await adapter.getBundleIdCapabilities(bundleId.id) };
       });
 
-      return toolSuccess(data, { warnings });
+      return commandSuccess(data, { warnings });
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_testflight_upload',
     'Upload an IPA to TestFlight via xcrun altool, then wait for processing and set export compliance in one flow (required before the build appears in TestFlight). Optionally distribute to beta groups and submit for external beta review. Requires Xcode command line tools (xcode-select --install).',
     {
@@ -179,7 +179,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
       distributeToGroups: z.array(z.string()).optional().describe('Beta group names to distribute to after compliance is set'),
       submitForBetaReview: z.boolean().optional().describe('Submit for external beta review after compliance (default: false)'),
     },
-    wrapHandler(async ({ ipaPath, appIdentifier, appId, buildNumber, usesNonExemptEncryption, skipCompliance, distributeToGroups, submitForBetaReview }) => {
+    wrapCommandHandler(async ({ ipaPath, appIdentifier, appId, buildNumber, usesNonExemptEncryption, skipCompliance, distributeToGroups, submitForBetaReview }) => {
       const adapter = adapterOrThrow(appIdentifier);
 
       const uploadResult = await adapter.uploadViaAltool(ipaPath);
@@ -190,13 +190,13 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         details: { success: uploadResult.success },
       });
       if (!uploadResult.success) {
-        return toolError('PROVIDER_ERROR', uploadResult.error ?? 'Upload failed', {
+        return commandError('PROVIDER_ERROR', uploadResult.error ?? 'Upload failed', {
           details: { output: uploadResult.output?.substring(0, 2000) },
           hint: 'Check that the IPA path is valid and Xcode command line tools are installed (xcode-select --install).',
         });
       }
       if (skipCompliance) {
-        return toolSuccess({ uploaded: true, ipaPath }, {
+        return commandSuccess({ uploaded: true, ipaPath }, {
           hint: 'Re-run with skipCompliance=false (or use hv_testflight_distribute) to set export compliance once processing finishes.',
         });
       }
@@ -207,7 +207,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         usesNonExemptEncryption: usesNonExemptEncryption ?? false,
       });
       if (compliance.error || !compliance.build) {
-        return toolError('PROVIDER_ERROR', compliance.error ?? 'No processed build found after upload', {
+        return commandError('PROVIDER_ERROR', compliance.error ?? 'No processed build found after upload', {
           details: compliance.build ? { build: summarizeBuild(compliance.build) } : undefined,
           hint: 'Processing can take a while. Re-run hv_appstore_status include=["builds"] to check, then hv_testflight_distribute once the build is VALID.',
         });
@@ -246,14 +246,14 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         details: { buildNumber: build.buildNumber, version: build.version, complianceSet: compliance.complianceSet, actions },
       });
 
-      return toolSuccess(
+      return commandSuccess(
         { ipaPath, build: summarizeBuild(build), actions },
         { hint: 'Build is ready for TestFlight. Use hv_testflight_distribute to attach it to a beta group and add testers.', warnings, next: ['hv_testflight_distribute'] }
       );
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_testflight_distribute',
     'Distribute on TestFlight: prepare a build (waits for processing and sets export compliance), attach it to a beta group (created if missing), and add testers. Pass skipBuild=true to only manage the group and testers without touching builds.',
     {
@@ -274,7 +274,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
       publicLinkEnabled: z.boolean().optional().describe('When creating an external group, enable public invite link'),
       publicLinkLimit: z.number().int().min(1).max(10000).optional().describe('When enabling public link, cap testers between 1 and 10000'),
     },
-    wrapHandler(async ({
+    wrapCommandHandler(async ({
       appIdentifier, appId, buildId, buildNumber, skipBuild, groupId, groupName = 'External Testers',
       createGroupIfMissing = true, groupType = 'external', testers = [], usesNonExemptEncryption,
       submitForBetaReview = false, hasAccessToAllBuilds, feedbackEnabled, publicLinkEnabled, publicLinkLimit,
@@ -335,7 +335,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         details: { appId: effectiveAppId, groupId: groupResolution.group.id, testerCount: testerResults.length, submitForBetaReview, skipBuild: !!skipBuild },
       });
 
-      return toolSuccess({
+      return commandSuccess({
         appId: effectiveAppId,
         ...(build ? { build: summarizeBuild(build) } : {}),
         group: groupResolution.group,
@@ -346,19 +346,19 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_appstore_submit',
     'Submit an app version for App Store review. The app must have a version in PREPARE_FOR_SUBMISSION state with a build attached (check with hv_appstore_status include=["readiness"]).',
     {
       appIdentifier: z.string().describe('App bundle identifier (e.g. com.example.myapp)'),
       platform: platformField,
     },
-    wrapHandler(async ({ appIdentifier, platform }) => {
+    wrapCommandHandler(async ({ appIdentifier, platform }) => {
       const adapter = adapterOrThrow(appIdentifier);
 
       const app = await adapter.findAppByBundleId(appIdentifier);
       if (!app) {
-        return toolError('NOT_FOUND', `App not found for bundle ID: ${appIdentifier}.`, {
+        return commandError('NOT_FOUND', `App not found for bundle ID: ${appIdentifier}.`, {
           hint: 'Create the app in App Store Connect first.',
         });
       }
@@ -366,14 +366,14 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
       const version = await adapter.getEditableAppStoreVersion(app.id, platform as AscPlatform);
       if (!version) {
         const versions = await adapter.listAppStoreVersions(app.id, { platform: platform as AscPlatform, limit: 5 });
-        return toolError('VALIDATION', 'No version ready for submission. Create a new version in App Store Connect with state PREPARE_FOR_SUBMISSION.', {
+        return commandError('VALIDATION', 'No version ready for submission. Create a new version in App Store Connect with state PREPARE_FOR_SUBMISSION.', {
           details: { currentVersions: versions.map((v) => ({ version: v.versionString, state: v.appStoreState, platform: v.platform })) },
         });
       }
 
       const build = await adapter.getAppStoreVersionBuild(version.id);
       if (!build) {
-        return toolError('VALIDATION', `Version ${version.versionString} has no build attached. Select a build in App Store Connect first.`, {
+        return commandError('VALIDATION', `Version ${version.versionString} has no build attached. Select a build in App Store Connect first.`, {
           details: { version: { versionString: version.versionString, state: version.appStoreState } },
           hint: 'Upload one with hv_testflight_upload, then attach it to the version.',
         });
@@ -391,7 +391,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         details: { appIdentifier, version: version.versionString, buildNumber: build.version, reviewSubmissionId: reviewSubmission.id },
       });
 
-      return toolSuccess({
+      return commandSuccess({
         message: 'App submitted for App Store review',
         app,
         version: { id: version.id, versionString: version.versionString, previousState: version.appStoreState },
@@ -401,7 +401,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_appstore_assets',
     'Prepare App Store submission assets: create/update localization metadata (description, keywords, what\'s new, URLs) and upload screenshots for the editable app version.',
     {
@@ -418,7 +418,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
       supportUrl: z.string().optional().describe('Localized support URL'),
       whatsNew: z.string().optional().describe('Localized what\'s new text'),
     },
-    wrapHandler(async ({
+    wrapCommandHandler(async ({
       appIdentifier, platform, locale = 'en-US', screenshotDisplayType = 'APP_IPHONE_65',
       screenshotDir, replaceScreenshots, description, keywords, promotionalText, marketingUrl, supportUrl, whatsNew,
     }) => {
@@ -426,11 +426,11 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
 
       const app = await adapter.findAppByBundleId(appIdentifier);
       if (!app) {
-        return toolError('NOT_FOUND', `App not found for bundle ID: ${appIdentifier}.`, { hint: 'Create the app in App Store Connect first.' });
+        return commandError('NOT_FOUND', `App not found for bundle ID: ${appIdentifier}.`, { hint: 'Create the app in App Store Connect first.' });
       }
       const version = await adapter.getEditableAppStoreVersion(app.id, platform as AscPlatform);
       if (!version) {
-        return toolError('VALIDATION', 'No editable App Store version found (expected PREPARE_FOR_SUBMISSION or similar state).', {
+        return commandError('VALIDATION', 'No editable App Store version found (expected PREPARE_FOR_SUBMISSION or similar state).', {
           hint: 'Create a new version in App Store Connect, then retry.',
         });
       }
@@ -450,12 +450,12 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
           .filter((name) => IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase()))
           .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
         if (files.length === 0) {
-          return toolError('VALIDATION', `No screenshot files found in ${screenshotDir}. Expected .png/.jpg/.jpeg files.`);
+          return commandError('VALIDATION', `No screenshot files found in ${screenshotDir}. Expected .png/.jpg/.jpeg files.`);
         }
         for (const file of files) {
           const info = await stat(path.join(screenshotDir, file));
           if (!info.isFile()) {
-            return toolError('VALIDATION', `Path is not a file: ${path.join(screenshotDir, file)}`);
+            return commandError('VALIDATION', `Path is not a file: ${path.join(screenshotDir, file)}`);
           }
         }
 
@@ -494,7 +494,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         },
       });
 
-      return toolSuccess(
+      return commandSuccess(
         {
           message: 'App Store submission assets prepared',
           app,
@@ -509,7 +509,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_appid_register',
     'Register a new App ID (Bundle ID) on App Store Connect and optionally enable capabilities (e.g. PUSH_NOTIFICATIONS, ICLOUD, SIGN_IN_WITH_APPLE). Use hv_appstore_status include=["capabilities"] to inspect existing capabilities.',
     {
@@ -519,7 +519,7 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
       capabilities: z.array(z.string()).optional().describe('Capability types to enable (e.g. PUSH_NOTIFICATIONS, ICLOUD, SIGN_IN_WITH_APPLE)'),
       appIdentifier: z.string().optional().describe('Scope hint for connection lookup'),
     },
-    wrapHandler(async ({ identifier, name, platform, capabilities, appIdentifier }) => {
+    wrapCommandHandler(async ({ identifier, name, platform, capabilities, appIdentifier }) => {
       const adapter = adapterOrThrow(appIdentifier);
 
       const bundleId = await adapter.registerBundleId(identifier, name, platform ?? 'IOS');
@@ -535,14 +535,14 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         details: { identifier, name, platform: platform ?? 'IOS', capabilities: capabilityResults },
       });
 
-      return toolSuccess({
+      return commandSuccess({
         bundleId,
         ...(capabilityResults ? { capabilities: capabilityResults } : {}),
       });
     })
   );
 
-  server.tool(
+  commands.register(
     'hv_xcode_deploy',
     'Xcode device workflow. action="devices" lists devices available on network/USB; action="discover" finds the workspace/project and schemes in a directory; action="deploy" (default) builds a scheme and installs it on a connected device. Deploy without deviceId returns the device list; without scheme it auto-discovers the project.',
     {
@@ -554,22 +554,22 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
       configuration: z.string().optional().describe('Build configuration (Debug or Release, default: Debug)'),
       cwd: z.string().optional().describe('Working directory containing the Xcode project'),
     },
-    wrapHandler(async ({ action = 'deploy', scheme, deviceId, workspace, project, configuration, cwd }) => {
+    wrapCommandHandler(async ({ action = 'deploy', scheme, deviceId, workspace, project, configuration, cwd }) => {
       const adapter = new XcodeAdapter();
 
       if (action === 'devices') {
         const devices = await adapter.listDevices();
-        return toolSuccess({ count: devices.length, devices });
+        return commandSuccess({ count: devices.length, devices });
       }
       if (action === 'discover') {
         const discovered = await adapter.discoverProject(cwd);
-        return toolSuccess(discovered);
+        return commandSuccess(discovered);
       }
 
       // action === 'deploy'
       if (!deviceId) {
         const devices = await adapter.listDevices();
-        return toolSuccess(
+        return commandSuccess(
           { devices },
           { hint: 'No deviceId provided. Re-run hv_xcode_deploy with deviceId set to one of the listed devices.' }
         );
@@ -583,10 +583,10 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         resolvedWorkspace = resolvedWorkspace ?? projectInfo.workspace;
         resolvedProject = resolvedProject ?? projectInfo.project;
         if (projectInfo.schemes.length === 0) {
-          return toolError('VALIDATION', 'No schemes found in project. Specify a scheme explicitly.');
+          return commandError('VALIDATION', 'No schemes found in project. Specify a scheme explicitly.');
         }
         if (projectInfo.schemes.length > 1) {
-          return toolSuccess(
+          return commandSuccess(
             { schemes: projectInfo.schemes, workspace: projectInfo.workspace, project: projectInfo.project },
             { hint: 'Multiple schemes found. Re-run hv_xcode_deploy with scheme set to one of them.' }
           );
@@ -603,24 +603,24 @@ export function registerHvAppstoreTools(server: McpServer, ctx: ToolContext): vo
         cwd,
       });
       if (!buildResult.success) {
-        return toolError('PROVIDER_ERROR', buildResult.error ?? 'Build failed', {
+        return commandError('PROVIDER_ERROR', buildResult.error ?? 'Build failed', {
           details: { phase: 'build', output: buildResult.output?.substring(0, 3000) },
         });
       }
       if (!buildResult.appPath) {
-        return toolError('PROVIDER_ERROR', 'Build succeeded but .app path not found in DerivedData', {
+        return commandError('PROVIDER_ERROR', 'Build succeeded but .app path not found in DerivedData', {
           details: { phase: 'build', output: buildResult.output?.substring(0, 3000) },
         });
       }
 
       const installResult = await adapter.install(deviceId, buildResult.appPath);
       if (!installResult.success) {
-        return toolError('PROVIDER_ERROR', installResult.error ?? 'Install failed', {
+        return commandError('PROVIDER_ERROR', installResult.error ?? 'Install failed', {
           details: { phase: 'install', appPath: buildResult.appPath, output: installResult.output?.substring(0, 3000) },
         });
       }
 
-      return toolSuccess({
+      return commandSuccess({
         message: `Built and installed ${resolvedScheme} on device`,
         scheme: resolvedScheme,
         deviceId,
