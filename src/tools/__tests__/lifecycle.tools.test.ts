@@ -145,7 +145,10 @@ describe('hv_inspect / hv_import', () => {
             edges: [{
               node: {
                 environmentId: 'env-prod',
-                domains: { serviceDomains: [], customDomains: [] },
+                domains: {
+                  serviceDomains: [{ domain: 'web-production.up.railway.app' }],
+                  customDomains: [{ domain: 'demo-app.example.com' }],
+                },
                 startCommand: 'npm start',
                 healthcheckPath: undefined,
                 numReplicas: 1,
@@ -275,9 +278,16 @@ describe('hv_inspect / hv_import', () => {
 
     const env = new EnvironmentRepository().findByProjectAndName(project!.id, 'production');
     expect(env).not.toBeNull();
-    const bindings = env!.platformBindings as { projectId?: string; services?: Record<string, { serviceId: string }> };
+    const bindings = env!.platformBindings as {
+      projectId?: string;
+      services?: Record<string, { serviceId: string; url?: string; customDomains?: string[] }>;
+    };
     expect(bindings.projectId).toBe('rp-1');
-    expect(bindings.services?.web?.serviceId).toBe('svc-web');
+    expect(bindings.services?.web).toEqual({
+      serviceId: 'svc-web',
+      url: 'https://web-production.up.railway.app',
+      customDomains: ['demo-app.example.com'],
+    });
 
     expect(new ServiceRepository().findByProjectAndName(project!.id, 'web')).not.toBeNull();
     const component = new ComponentRepository().findByEnvironmentAndType(env!.id, 'postgres');

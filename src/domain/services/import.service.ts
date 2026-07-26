@@ -9,6 +9,7 @@ import type { RailwayProjectDetails } from '../../adapters/providers/railway/rai
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import type { RailwayCredentials } from '../entities/connection.entity.js';
 import type { ComponentType } from '../entities/component.entity.js';
+import type { HostingBindings } from '../ports/hosting.port.js';
 import { detectGitRemoteUrl } from '../../lib/git-remote.js';
 import { syncProjectIntent } from './intent.service.js';
 
@@ -335,10 +336,15 @@ export async function importRailwayProject(
           provider?: string;
           projectId?: string;
           environmentId?: string;
-          services?: Record<string, { serviceId: string }>;
+          services?: HostingBindings['services'];
         };
+        const instance = svc.instancesByEnv[env.railwayId];
         bindings.services = bindings.services || {};
-        bindings.services[svc.name] = { serviceId: svc.railwayId };
+        bindings.services[svc.name] = {
+          serviceId: svc.railwayId,
+          ...(instance.domains[0] ? { url: `https://${instance.domains[0]}` } : {}),
+          ...(instance.customDomains.length > 0 ? { customDomains: instance.customDomains } : {}),
+        };
         envRepo.update(env.id, { platformBindings: bindings });
       }
     }
