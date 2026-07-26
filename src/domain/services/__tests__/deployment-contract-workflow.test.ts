@@ -86,6 +86,21 @@ function extractGateScript(content: string): string {
     .trimEnd();
 }
 
+function extractFailureEvidenceScript(content: string): string {
+  const stepStart = content.indexOf('      - name: Capture sanitized deployment failure evidence\n');
+  expect(stepStart).toBeGreaterThan(-1);
+  const marker = '          script: |\n';
+  const scriptStart = content.indexOf(marker, stepStart) + marker.length;
+  const nextStep = content.indexOf('\n      - ', scriptStart);
+  const scriptEnd = nextStep === -1 ? content.length : nextStep;
+  return content
+    .slice(scriptStart, scriptEnd)
+    .split('\n')
+    .map((line) => line.startsWith('            ') ? line.slice(12) : line)
+    .join('\n')
+    .trimEnd();
+}
+
 type GateResult = {
   core: {
     error: ReturnType<typeof vi.fn>;
@@ -223,5 +238,81 @@ describe('generated deployment-contract safety gate', () => {
         expect(() => new AsyncFunction(extractGateScript(generated.content))).not.toThrow();
       }
     }
+  });
+});
+
+describe('generated deployment failure evidence', () => {
+  it('adds a bounded sanitized failure artifact job for every provider and environment', () => {
+    for (const provider of ['railway', 'cloudrun'] as const) {
+      for (const environmentName of ['staging', 'production'] as const) {
+        const generated = workflow(provider, environmentName);
+
+        expect(generated.content).toContain('  failure_evidence:\n    needs: deploy');
+        expect(generated.content).toContain("    if: ${{ needs.deploy.result == 'failure' }}");
+        expect(generated.content).toContain('      actions: read');
+        expect(generated.content).toContain('      - name: Capture sanitized deployment failure evidence');
+        expect(generated.content).toContain('      - name: Upload deployment failure evidence');
+        expect(generated.content).toContain('          path: hypervibe-deploy-failure.log');
+        expect(generated.content).toContain(`          name: deploy-${environmentName}-failure-evidence`);
+        expect(() => new AsyncFunction(extractFailureEvidenceScript(generated.content))).not.toThrow();
+      }
+    }
+  });
+
+  it('keeps the failed deploy diagnosis while redacting credential-shaped log values', async () => {
+    const generated = workflow('railway', 'staging');
+    const script = extractFailureEvidenceScript(generated.content);
+    const writeFileSync = vi.fn();
+    const listJobsForWorkflowRun = vi.fn();
+    const github = {
+      paginate: vi.fn(async () => [
+        { id: 41, name: 'unrelated', conclusion: 'success' },
+        { id: 42, name: 'deploy', conclusion: 'failure' },
+      ]),
+      request: vi.fn(async () => ({
+        data: Buffer.from([
+          'ordinary build output',
+          'Authorization: Bearer extremely-sensitive-token',
+          'RAILWAY_API_TOKEN=railway-sensitive-token',
+          'DATABASE_URL=postgresql://postgres:database-password@example.test/app',
+          'request=https://example.test/deploy?token=query-sensitive-token',
+          'Railway deployment dep-123 failed with status CRASHED',
+        ].join('\n')),
+      })),
+      rest: { actions: { listJobsForWorkflowRun } },
+    };
+    const requireModule = (moduleName: string) => {
+      if (moduleName === 'fs') return { writeFileSync };
+      throw new Error(`Unexpected module request: ${moduleName}`);
+    };
+    const execute = new AsyncFunction('require', 'github', 'context', 'process', 'core', script);
+
+    await execute(
+      requireModule,
+      github,
+      { repo: { owner: 'dave', repo: 'contract-app' } },
+      { env: { HYPERVIBE_RUN_ID: '1234' } },
+      { info: vi.fn() }
+    );
+
+    expect(github.paginate).toHaveBeenCalledWith(listJobsForWorkflowRun, {
+      owner: 'dave',
+      repo: 'contract-app',
+      run_id: 1234,
+      filter: 'latest',
+      per_page: 100,
+    });
+    expect(github.request).toHaveBeenCalledWith(
+      'GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs',
+      { owner: 'dave', repo: 'contract-app', job_id: 42 }
+    );
+    expect(writeFileSync).toHaveBeenCalledOnce();
+    const evidence = String(writeFileSync.mock.calls[0]?.[1]);
+    expect(evidence).toContain('Railway deployment dep-123 failed with status CRASHED');
+    expect(evidence).toContain('RAILWAY_API_TOKEN=***');
+    expect(evidence).not.toContain('extremely-sensitive-token');
+    expect(evidence).not.toContain('railway-sensitive-token');
+    expect(evidence).not.toContain('database-password');
+    expect(evidence).not.toContain('query-sensitive-token');
   });
 });

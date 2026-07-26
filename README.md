@@ -644,6 +644,19 @@ The marker is environment-specific: production-only desired-state changes do
 not block staging. Production workflows remain manual and enforce the same
 reconciliation check for the promoted SHA.
 
+After a deploy job fails, the generated workflow runs a separate evidence job
+with read-only Actions access. It reads the completed deploy job's last 400 log
+lines, applies credential-pattern redaction in addition to GitHub's normal
+secret masking, bounds the result to 64 KiB, and retains
+`hypervibe-deploy-failure.log` as an artifact for 14 days. Declare that path on
+an external workflow source when a Hypervibe autofix should consume deploy
+evidence. The artifact remains untrusted diagnostic input: generated autofix
+workflows cannot change `.github/`, `.hypervibe/`, secrets, deployment, auth,
+billing, or database schema, and they only open draft pull requests for human
+review. A reconciliation-gate failure explicitly identifies itself as
+infrastructure work, so the agent produces no source patch and the operator
+continues through `hv_plan` and `hv_apply`.
+
 During a CI-managed `hv_apply`, supported hosting adapters keep GitHub Actions
 as the application-code release boundary. Railway applies variable changes
 with deploys skipped and does not call its service redeploy mutation. For an
