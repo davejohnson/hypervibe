@@ -190,4 +190,48 @@ describe('hv_health', () => {
     expect(result.data.check.ok).toBe(true);
     await t.close();
   });
+
+  it('checks a declared domain without a provider-specific URL binding', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('ok', { status: 200 })));
+    const project = new ProjectRepository().create({ name: 'domain-health' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'cloudrun',
+        services: {
+          web: { serviceId: 'cloudrun-web' },
+        },
+      },
+    });
+    new SpecStore().replace(project, projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'cloudrun' },
+          services: {
+            web: {
+              workloadKind: 'web',
+              public: true,
+              healthCheckPath: '/healthz',
+            },
+          },
+          domain: 'staging.example.com',
+        },
+      },
+    }));
+
+    const t = await makeClient();
+    const result = await t.call('hv_health', {
+      project: project.name,
+      env: 'staging',
+      service: 'web',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.baseUrl).toBe('https://staging.example.com');
+    expect(result.data.check.url).toBe('https://staging.example.com/healthz');
+    await t.close();
+  });
 });

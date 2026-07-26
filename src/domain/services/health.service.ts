@@ -3,20 +3,10 @@ import { ServiceRepository } from '../../adapters/db/repositories/service.reposi
 import { serviceWorkloadKind } from '../entities/service.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
+import { parseHostingBindings } from '../ports/hosting.port.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
-
-type ServiceBinding = {
-  url?: string;
-  customDomains?: string[];
-};
-
-type PlatformBindings = {
-  provider?: string;
-  services?: Record<string, ServiceBinding>;
-  domains?: Record<string, { service?: string }>;
-};
 
 type HealthCheckResult = {
   name: string;
@@ -80,18 +70,32 @@ export function joinUrl(baseUrl: string, path: string): string {
   return `${normalizeBaseUrl(baseUrl)}${normalizedPath}`;
 }
 
-export function resolveServiceBaseUrl(environment: Environment, serviceName: string): string | null {
-  const bindings = environment.platformBindings as PlatformBindings;
+export function resolveServiceBaseUrl(
+  environment: Environment,
+  serviceName: string,
+  declaredDomain?: string
+): string | null {
+  const bindings = parseHostingBindings(environment);
   const serviceBinding = bindings.services?.[serviceName];
   const candidate = serviceBinding?.url ?? serviceBinding?.customDomains?.[0];
   if (candidate) {
     return normalizeBaseUrl(candidate);
   }
 
-  for (const [domain, domainBinding] of Object.entries(bindings.domains ?? {})) {
+  const domainBindings = environment.platformBindings.domains;
+  for (const [domain, domainBinding] of Object.entries(
+    domainBindings && typeof domainBindings === 'object' && !Array.isArray(domainBindings)
+      ? domainBindings
+      : {}
+  )) {
+    if (!domainBinding || typeof domainBinding !== 'object' || Array.isArray(domainBinding)) continue;
     if (domainBinding?.service === serviceName) {
       return normalizeBaseUrl(domain);
     }
+  }
+
+  if (declaredDomain) {
+    return normalizeBaseUrl(declaredDomain);
   }
 
   return null;

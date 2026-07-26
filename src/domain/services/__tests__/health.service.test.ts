@@ -161,6 +161,18 @@ describe('health.service', () => {
     expect(resolveServiceBaseUrl(environment!, service!.name)).toBeNull();
   });
 
+  it('uses a declared domain when a provider URL binding is unavailable', () => {
+    const project = createCloudRunProject('');
+    const environment = resolveHealthEnvironment(project.id);
+    const service = resolveHealthService(project.id);
+
+    expect(resolveServiceBaseUrl(
+      environment!,
+      service!.name,
+      'app.example.com'
+    )).toBe('https://app.example.com');
+  });
+
   it('normalizes hosts and joins paths', () => {
     expect(normalizeBaseUrl('web.example.run.app/')).toBe('https://web.example.run.app');
     expect(joinUrl('https://web.example.run.app', 'api/health')).toBe('https://web.example.run.app/api/health');

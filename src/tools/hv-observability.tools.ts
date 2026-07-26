@@ -167,7 +167,10 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
           throw new HvError('NOT_FOUND', `Service not found: ${resolvedName}`);
         }
         resolvedService = resolvedName;
-        const resolved = resolveServiceBaseUrl(environment, resolvedName);
+        const declaredDomain = desiredService?.workloadKind === 'web'
+          ? environmentSpec?.domain
+          : undefined;
+        const resolved = resolveServiceBaseUrl(environment, resolvedName, declaredDomain);
         if (!resolved) {
           throw new HvError('NOT_FOUND', `Service "${resolvedName}" has no URL binding in ${environment.name}.`, {
             hint: 'Deploy it first with hv_apply or hv_deploy.',
