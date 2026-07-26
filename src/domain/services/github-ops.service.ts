@@ -448,6 +448,75 @@ function buildDeploymentContractStep(environmentName: string): string {
 `;
 }
 
+function buildDeploymentFailureEvidenceJob(environmentName: string): string {
+  return `
+  failure_evidence:
+    needs: deploy
+    if: \${{ needs.deploy.result == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Capture sanitized deployment failure evidence
+        uses: actions/github-script@v8
+        env:
+          HYPERVIBE_RUN_ID: \${{ github.run_id }}
+        with:
+          script: |
+            const { writeFileSync } = require('fs');
+            const runId = Number(process.env.HYPERVIBE_RUN_ID);
+            if (!Number.isSafeInteger(runId) || runId <= 0) {
+              throw new Error('GITHUB_RUN_ID must be a positive integer.');
+            }
+
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+              filter: 'latest',
+              per_page: 100,
+            });
+            const deployJob = jobs.find((job) => job.name === 'deploy' && job.conclusion === 'failure');
+            if (!deployJob) {
+              throw new Error('Could not find the failed deploy job for workflow run ' + runId + '.');
+            }
+
+            const response = await github.request(
+              'GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs',
+              { owner: context.repo.owner, repo: context.repo.repo, job_id: deployJob.id }
+            );
+            const raw = typeof response.data === 'string'
+              ? response.data
+              : Buffer.from(response.data).toString('utf8');
+            const redacted = raw
+              .replace(/([a-z][a-z0-9+.-]*:\\/\\/)[^\\s\\/:@]+:[^\\s@\\/]+@/gi, '$1***:***@')
+              .replace(/([?&](?:token|password|secret|credential|api_key)=)[^&\\s]+/gi, '$1***')
+              .split(/\\r?\\n/)
+              .slice(-400)
+              .map((line) => line
+                .replace(/(Authorization:\\s*(?:Bearer|Basic)\\s+)\\S+/gi, '$1***')
+                .replace(/\\b([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|CREDENTIAL|PRIVATE_KEY|API_KEY)[A-Z0-9_]*)\\s*([=:]\\s*)(?:"[^"]*"|'[^']*'|\\S+)/gi, '$1$2***')
+                .replace(/\\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\\b/g, '***'))
+              .join('\\n')
+              .slice(-65536);
+
+            writeFileSync(
+              'hypervibe-deploy-failure.log',
+              (redacted || 'Deploy job failed without readable log output.') + '\\n',
+              { encoding: 'utf8', mode: 0o600 }
+            );
+            core.info('Captured sanitized evidence from failed deploy job ' + deployJob.id + '.');
+      - name: Upload deployment failure evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-${environmentName}-failure-evidence
+          path: hypervibe-deploy-failure.log
+          if-no-files-found: error
+          retention-days: 14
+`;
+}
+
 export function buildBranchDeployWorkflow(
   provider: BranchDeployProvider,
   target: BranchDeployTarget,
@@ -496,7 +565,7 @@ ${permissionsBlock.trimEnd()}
       - uses: actions/checkout@v4
         with:
           ref: \${{ steps.deploy.outputs.sha }}
-${buildDeploymentContractStep(target.environmentName)}${migrationStep}${deployBlock.steps}`;
+${buildDeploymentContractStep(target.environmentName)}${migrationStep}${deployBlock.steps}${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
 
   return {
     template,
