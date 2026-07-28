@@ -653,9 +653,19 @@ an external workflow source when a Hypervibe autofix should consume deploy
 evidence. The artifact remains untrusted diagnostic input: generated autofix
 workflows cannot change `.github/`, `.hypervibe/`, secrets, deployment, auth,
 billing, or database schema, and they only open draft pull requests for human
-review. A reconciliation-gate failure explicitly identifies itself as
-infrastructure work, so the agent produces no source patch and the operator
-continues through `hv_plan` and `hv_apply`.
+review. Evidence collection runs even though the deploy dependency failed, and
+autofix stops before model invocation unless every declared evidence path was
+downloaded. Draft pull requests include the configured agent's diagnosis and
+verification summary instead of model-specific boilerplate. A
+reconciliation-gate failure explicitly identifies itself as infrastructure
+work, so the agent produces no source patch and the operator continues through
+`hv_plan` and `hv_apply`.
+
+Railway deploy polling retries idempotent reads after bounded network, 429, and
+5xx failures. Image updates and deploy-triggering mutations are never replayed
+by that retry path. If the read retry budget is exhausted, `hv_ci_status`
+reports a transient Railway API diagnostic rather than inferring an
+infrastructure defect from the generated workflow source printed in the log.
 
 During a CI-managed `hv_apply`, supported hosting adapters keep GitHub Actions
 as the application-code release boundary. Railway applies variable changes

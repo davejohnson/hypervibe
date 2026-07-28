@@ -10,6 +10,10 @@ export const RAILWAY_CI_REQUIRED_SECRETS = ['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY
 
 export function diagnoseRailwayWorkflowLog(text: string): CiWorkflowDiagnostic[] {
   const diagnostics: CiWorkflowDiagnostic[] = [];
+  const runtimeErrors = text
+    .split(/\r?\n/)
+    .filter((line) => /##\[error\]|\b(?:Error|ERROR):/.test(line))
+    .join('\n');
 
   if (
     /docker buildx imagetools inspect/i.test(text)
@@ -30,7 +34,10 @@ export function diagnoseRailwayWorkflowLog(text: string): CiWorkflowDiagnostic[]
     });
   }
 
-  if (/Service Instance not found/i.test(text) || /has no service instance in environment/i.test(text)) {
+  if (
+    /Service Instance not found/i.test(runtimeErrors)
+    || /has no service instance in environment/i.test(runtimeErrors)
+  ) {
     diagnostics.push({
       code: 'RAILWAY_SERVICE_INSTANCE_MISSING',
       severity: 'error',
@@ -45,7 +52,7 @@ export function diagnoseRailwayWorkflowLog(text: string): CiWorkflowDiagnostic[]
   }
 
   if (
-    /Railway API 400/i.test(text)
+    /Railway API 400/i.test(runtimeErrors)
     && /Problem processing request/i.test(text)
     && /waitForDeployment/i.test(text)
   ) {
@@ -58,6 +65,20 @@ export function diagnoseRailwayWorkflowLog(text: string): CiWorkflowDiagnostic[]
         'Re-sync the declarative deploy workflow with hv_plan + hv_apply so it extracts serviceInstanceDeployV2 before polling.',
         'Re-run the workflow with hv_ci_trigger.',
         'If it still fails after re-sync, inspect hv_ci_status include=["logs"]; newer workflows include the Railway GraphQL operation, redacted variables, and traceId.',
+      ],
+    });
+  }
+
+  if (/(?:Railway API (?:429|5\d{2})|Railway network error)\b/i.test(runtimeErrors)) {
+    diagnostics.push({
+      code: 'RAILWAY_API_TRANSIENT_FAILURE',
+      severity: 'error',
+      summary: 'Railway returned a rate-limit or server error while the deploy workflow was reading deployment state.',
+      evidence: 'A runtime error reported a Railway network failure, API 429, or API 5xx; generated script source is excluded from this diagnosis.',
+      next: [
+        'Re-sync the deploy workflow with hv_plan + hv_apply so idempotent Railway reads use bounded retries.',
+        'Re-run the workflow with hv_ci_trigger if the retry budget was exhausted.',
+        'Inspect the retried operation with hv_ci_status include=["logs"] if the provider remains unavailable.',
       ],
     });
   }
@@ -155,39 +176,84 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
               ].filter(Boolean).join(' ');
             }
 
-            async function railway(query, variables) {
+            const retryDelaysMs = [1000, 2000, 4000];
+
+            function isTransientStatus(status) {
+              return status === 429 || (status >= 500 && status <= 599);
+            }
+
+            async function railway(query, variables, options = {}) {
               const operation = operationName(query);
-              const response = await fetch(endpoint, {
-                method: 'POST',
-                headers: {
-                  Authorization: 'Bearer ' + process.env.RAILWAY_API_TOKEN,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ query, variables }),
-              });
-              const body = await response.text();
-              let payload;
-              try {
-                payload = JSON.parse(body);
-              } catch {
-                payload = null;
+              const retryTransient = options.retryTransient === true;
+              const maxAttempts = retryTransient ? retryDelaysMs.length + 1 : 1;
+              for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                let response;
+                try {
+                  response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                      Authorization: 'Bearer ' + process.env.RAILWAY_API_TOKEN,
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ query, variables }),
+                  });
+                } catch (error) {
+                  const detail = error instanceof Error ? error.message : String(error);
+                  if (!retryTransient || attempt === maxAttempts - 1) {
+                    throw new Error(
+                      'Railway network error during ' + operation
+                      + ' variables=' + JSON.stringify(redact(variables))
+                      + ': ' + detail
+                    );
+                  }
+                  const delayMs = retryDelaysMs[attempt];
+                  core.warning(
+                    'Retrying Railway ' + operation + ' after network error'
+                    + ' (attempt ' + (attempt + 2) + '/' + maxAttempts + ', delay ' + delayMs + 'ms): '
+                    + detail
+                  );
+                  await new Promise((resolve) => setTimeout(resolve, delayMs));
+                  continue;
+                }
+
+                const body = await response.text();
+                let payload;
+                try {
+                  payload = JSON.parse(body);
+                } catch {
+                  payload = null;
+                }
+                if (!response.ok) {
+                  if (
+                    retryTransient
+                    && isTransientStatus(response.status)
+                    && attempt < maxAttempts - 1
+                  ) {
+                    const delayMs = retryDelaysMs[attempt];
+                    core.warning(
+                      'Retrying Railway ' + operation + ' after API ' + response.status
+                      + ' (attempt ' + (attempt + 2) + '/' + maxAttempts + ', delay ' + delayMs + 'ms)'
+                    );
+                    await new Promise((resolve) => setTimeout(resolve, delayMs));
+                    continue;
+                  }
+                  throw new Error(
+                    'Railway API ' + response.status + ' during ' + operation
+                    + ' variables=' + JSON.stringify(redact(variables))
+                    + ': ' + errorDetails(payload, body)
+                  );
+                }
+                if (!payload) throw new Error('Railway API returned non-JSON during ' + operation + ': ' + body);
+                if (payload.errors && payload.errors.length > 0) {
+                  throw new Error(
+                    'Railway GraphQL error during ' + operation
+                    + ' variables=' + JSON.stringify(redact(variables))
+                    + ': ' + errorDetails(payload, body)
+                  );
+                }
+                return payload.data;
               }
-              if (!response.ok) {
-                throw new Error(
-                  'Railway API ' + response.status + ' during ' + operation
-                  + ' variables=' + JSON.stringify(redact(variables))
-                  + ': ' + errorDetails(payload, body)
-                );
-              }
-              if (!payload) throw new Error('Railway API returned non-JSON during ' + operation + ': ' + body);
-              if (payload.errors && payload.errors.length > 0) {
-                throw new Error(
-                  'Railway GraphQL error during ' + operation
-                  + ' variables=' + JSON.stringify(redact(variables))
-                  + ': ' + errorDetails(payload, body)
-                );
-              }
-              return payload.data;
+              throw new Error('Railway request exhausted without a result during ' + operation);
             }
 
             function requireString(value, name) {
@@ -240,7 +306,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
                 ['deployment logs', deploymentLogsQuery, 'deploymentLogs', { deploymentId, limit: 100 }],
               ]) {
                 try {
-                  const data = await railway(entry[1], entry[3]);
+                  const data = await railway(entry[1], entry[3], { retryTransient: true });
                   const lines = formatLogs(data[entry[2]]);
                   if (lines) sections.push(entry[0] + ':\\n' + lines);
                 } catch (error) {
@@ -253,7 +319,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
 
             async function ensureServiceInstance(serviceId, environmentId) {
               const hasInstance = async () => {
-                const data = await railway(serviceInstanceQuery, { serviceId });
+                const data = await railway(serviceInstanceQuery, { serviceId }, { retryTransient: true });
                 const edges = (((data.service || {}).serviceInstances || {}).edges || []);
                 return edges.some((edge) => (((edge || {}).node || {}).environmentId) === environmentId);
               };
@@ -266,7 +332,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
 
             async function waitForDeployment(deploymentId, serviceId) {
               for (let attempt = 0; attempt < 90; attempt++) {
-                const data = await railway(deploymentQuery, { id: deploymentId });
+                const data = await railway(deploymentQuery, { id: deploymentId }, { retryTransient: true });
                 const deployment = data.deployment;
                 if (!deployment) {
                   throw new Error('Railway deployment query returned no deployment for id ' + deploymentId + ': ' + shortJson(data));

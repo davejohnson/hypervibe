@@ -5,6 +5,25 @@ import {
   githubSpecNeedsOpenAI,
 } from '../github-infrastructure.service.js';
 
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
+  ...args: string[]
+) => (...args: unknown[]) => Promise<unknown>;
+
+function extractGitHubScript(workflow: string, stepName: string): string {
+  const stepStart = workflow.indexOf(`      - name: ${stepName}\n`);
+  expect(stepStart).toBeGreaterThan(-1);
+  const marker = '          script: |\n';
+  const scriptStart = workflow.indexOf(marker, stepStart) + marker.length;
+  const nextStep = workflow.indexOf('\n      - ', scriptStart);
+  const scriptEnd = nextStep === -1 ? workflow.length : nextStep;
+  return workflow
+    .slice(scriptStart, scriptEnd)
+    .split('\n')
+    .map((line) => line.startsWith('            ') ? line.slice(12) : line)
+    .join('\n')
+    .trimEnd();
+}
+
 function githubSpec() {
   return projectSpecSchema.parse({
     version: 1,
@@ -101,12 +120,21 @@ describe('GitHub infrastructure compiler', () => {
     const workflow = files.find((file) => file.path.endsWith('hypervibe-fix-tests.yml'))!.content;
     expect(workflow).toContain('uses: openai/codex-action@v1');
     expect(workflow).toContain('model: gpt-5.6-sol');
+    expect(workflow).toContain('Ask the configured AI agent for a focused fix');
+    expect(workflow).toContain('AGENT_MODEL: "gpt-5.6-sol"');
+    expect(workflow).not.toContain('GPT-5.6 Sol');
     expect(workflow).toContain('permission-profile: ":workspace"');
     expect(workflow).toContain('safety-strategy: drop-sudo');
     expect(workflow).toContain('persist-credentials: false');
     expect(workflow).toContain('open_pr:');
     expect(workflow).toContain('validate_fix:');
     expect(workflow).toContain('Validate test 1.1');
+    expect(workflow).toContain('Verify required failure evidence');
+    expect(workflow).toContain('hypervibe-failure-evidence/**');
+    expect(workflow).not.toContain('continue-on-error: true');
+    expect(workflow).toContain('output-file: hypervibe-autofix-summary.md');
+    expect(workflow).toContain('git diff --cached --check');
+    expect(workflow).toContain('AUTOFIX_SUMMARY_PATH: hypervibe-autofix-summary.md');
     expect(workflow).toContain('pull-requests: write');
     expect(workflow).toContain('Avoid duplicate autofix pull requests');
     expect(workflow).toContain('head_repository?.full_name !== repository');
@@ -114,6 +142,50 @@ describe('GitHub infrastructure compiler', () => {
     expect(workflow).toContain('^\\.hypervibe/');
     expect(workflow).toContain('(AGENTS|CLAUDE|CODEX)\\.md$');
     expect(workflow).not.toContain('ANTHROPIC');
+  });
+
+  it('fails closed unless an external workflow supplies its declared evidence', async () => {
+    const github = projectSpecSchema.parse({
+      version: 1,
+      project: 'external-check',
+      github: {
+        actions: {
+          'fix-deploy': { kind: 'autofix', sources: ['staging-deploy'] },
+        },
+        externalWorkflows: {
+          'staging-deploy': {
+            workflowName: 'Deploy Railway (staging)',
+            failureArtifacts: ['hypervibe-deploy-failure.log'],
+          },
+        },
+      },
+      environments: { production: { hosting: { provider: 'railway' }, services: {} } },
+    }).github!;
+
+    const workflow = compileManagedGitHubFiles(github)
+      .find((file) => file.path.endsWith('hypervibe-fix-deploy.yml'))!.content;
+
+    expect(workflow).toContain('Verify required failure evidence');
+    expect(workflow).toContain('hypervibe-deploy-failure.log');
+    expect(workflow).toContain('Required failure evidence is missing');
+    expect(workflow).not.toContain('continue-on-error: true');
+
+    const script = extractGitHubScript(workflow, 'Verify required failure evidence');
+    const execute = new AsyncFunction('require', 'context', script);
+    const context = { payload: { workflow_run: { name: 'Deploy Railway (staging)' } } };
+    const fileEntry = {
+      name: 'hypervibe-deploy-failure.log',
+      isDirectory: () => false,
+    };
+
+    await expect(execute(
+      () => ({ existsSync: () => true, readdirSync: () => [fileEntry] }),
+      context
+    )).resolves.toBeUndefined();
+    await expect(execute(
+      () => ({ existsSync: () => true, readdirSync: () => [] }),
+      context
+    )).rejects.toThrow('Required failure evidence is missing');
   });
 
   it('uses stable code-audit identities without line numbers and closes only after a clean completed job', () => {
