@@ -31,3 +31,5 @@ Core rules for coding agents:
 - Automated repair must fail closed when its declared failure evidence is absent or incomplete. Never invoke the repair agent or publish a patch from an empty artifact download; keep runtime labels and pull-request metadata derived from the configured agent instead of hardcoding a model name.
 - Do not use temporary release-command changes for one-off data operations. Use declarative `database.seedCommand` for first seed/bootstrap and `hv_db_migrate` for explicit data operations.
 - Do not introduce dependencies on provider CLIs for infrastructure operations. Use provider adapters and recorded Hypervibe connections so state, audit history, and drift detection stay coherent.
+- When building or releasing Hypervibe, update the configured local MCP runtime first and verify that it reports the new version. Never kill or restart Hypervibe MCP or Codex processes to activate a build; tell the user to restart Codex themselves.
+- After creating a pull request, always provide its URL and explicitly offer to open it in the user's browser. Open it only after the user accepts.
