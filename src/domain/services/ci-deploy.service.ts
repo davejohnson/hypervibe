@@ -553,10 +553,25 @@ export async function applyGitHubActionsDeploy(params: {
       : [];
     const desiredFiles = new Map(repositoryFiles.map((file) => [file.path, file]));
     for (const file of desiredWorkflowFiles) {
+      const isPrimaryDeployWorkflow = file.path === workflow.path;
       desiredFiles.set(file.path, {
         path: file.path,
         content: file.content,
         hash: sha256(file.content),
+        review: isPrimaryDeployWorkflow
+          ? workflow.review
+          : {
+              title: `${environmentName} iOS release`,
+              summary: `Updates the GitHub workflow that releases the iOS app after the ${environmentName} server deployment succeeds.`,
+              details: [
+                'Uses the exact server commit that was successfully deployed.',
+                'Builds and validates the app before sending it to the declared TestFlight groups.',
+                'Does not submit the app to the App Store automatically.',
+              ],
+              mergeEffect: workflow.autoDeployOnPush
+                ? `This release workflow waits for a successful ${environmentName} server deployment; merging it does not bypass that check.`
+                : `Merging this PR only updates the release workflow; the ${environmentName} server deployment still has to be started manually.`,
+            },
       });
     }
     const proposal = await proposeGitHubInfrastructureFiles({

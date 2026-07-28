@@ -44,6 +44,12 @@ export type ManagedGitHubFile = {
   path: string;
   content: string;
   hash: string;
+  review?: {
+    title: string;
+    summary: string;
+    details?: string[];
+    mergeEffect?: string;
+  };
 };
 
 export type GitHubAutomationDescriptor = {
@@ -64,9 +70,72 @@ function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-function managedFile(path: string, content: string): ManagedGitHubFile {
+function managedFile(
+  path: string,
+  content: string,
+  review?: ManagedGitHubFile['review']
+): ManagedGitHubFile {
   const normalized = content.endsWith('\n') ? content : `${content}\n`;
-  return { path, content: normalized, hash: sha256(normalized) };
+  return {
+    path,
+    content: normalized,
+    hash: sha256(normalized),
+    ...(review ? { review } : {}),
+  };
+}
+
+function readableAutomationName(id: string): string {
+  return id
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() ?? ''}${part.slice(1)}`)
+    .join(' ');
+}
+
+function automationReview(
+  id: string,
+  automation: GitHubAutomationSpec
+): NonNullable<ManagedGitHubFile['review']> {
+  const name = readableAutomationName(id);
+  switch (automation.kind) {
+    case 'check':
+      return {
+        title: `${name} check`,
+        summary: `Adds or updates the “${name}” GitHub check.`,
+        details: [
+          `Runs the project's declared ${automation.category} command${automation.commands.length === 1 ? '' : 's'}.`,
+          'Reports pass or fail in GitHub so problems are visible before code is accepted.',
+        ],
+      };
+    case 'autofix':
+      return {
+        title: `${name} automatic fix`,
+        summary: `Adds or updates an automatic fix workflow for failures from ${automation.sources.map(readableAutomationName).join(', ')}.`,
+        details: [
+          `Asks ${automation.agent.model} to propose a focused code change after one of those checks fails.`,
+          'Validates the proposed patch and opens a draft pull request for a person to review.',
+          'Never merges or deploys the proposed fix automatically.',
+        ],
+      };
+    case 'pull-request-review':
+      return {
+        title: `${name} pull request review`,
+        summary: 'Adds or updates an AI review for new pull requests.',
+        details: [
+          `Uses ${automation.agent.model} to leave review feedback.`,
+          'Does not merge the pull request or change repository files.',
+        ],
+      };
+    case 'code-audit':
+      return {
+        title: `${name} code audit`,
+        summary: 'Adds or updates a scheduled AI scan for code problems.',
+        details: [
+          `Uses ${automation.agent.model} to inspect the repository on its declared schedule.`,
+          'Creates GitHub issues for findings instead of changing code automatically.',
+        ],
+      };
+  }
 }
 
 function yamlString(value: string): string {
@@ -716,27 +785,61 @@ export function githubSpecNeedsOpenAI(github: GitHubSpec): boolean {
 export function compileManagedGitHubFiles(github: GitHubSpec): ManagedGitHubFile[] {
   const files: ManagedGitHubFile[] = [];
   if (github.collaboration.issues.enabled && github.collaboration.issues.templates) {
-    files.push(managedFile('.github/ISSUE_TEMPLATE/task.yml', issueTemplateContent()));
+    files.push(managedFile(
+      '.github/ISSUE_TEMPLATE/task.yml',
+      issueTemplateContent(),
+      {
+        title: 'Issue form',
+        summary: 'Adds or updates the guided form people use to report work in this repository.',
+        details: ['Prompts for the goal, expected result, evidence, risks, and ownership in plain language.'],
+      }
+    ));
   }
   if (github.collaboration.pullRequests.requirePr) {
-    files.push(managedFile(GITHUB_PULL_REQUEST_TEMPLATE, canonicalPullRequestTemplateContent()));
+    files.push(managedFile(
+      GITHUB_PULL_REQUEST_TEMPLATE,
+      canonicalPullRequestTemplateContent(),
+      {
+        title: 'Pull request checklist',
+        summary: 'Adds or updates the review checklist shown when someone opens a pull request.',
+        details: ['Prompts the author to explain what changed, how it was checked, deployment impact, and known risks.'],
+      }
+    ));
   }
   for (const [id, automation] of Object.entries(github.actions).sort(([a], [b]) => a.localeCompare(b))) {
     if (!automation.enabled) continue;
     files.push(managedFile(
       `.github/workflows/hypervibe-${id}.yml`,
-      compileGitHubAutomationWorkflow(id, automation, github)
+      compileGitHubAutomationWorkflow(id, automation, github),
+      automationReview(id, automation)
     ));
   }
   const dependabot = dependabotContent(github);
-  if (dependabot) files.push(managedFile('.github/dependabot.yml', dependabot));
+  if (dependabot) {
+    files.push(managedFile(
+      '.github/dependabot.yml',
+      dependabot,
+      {
+        title: 'Dependency updates',
+        summary: 'Adds or updates automatic dependency-update pull requests.',
+        details: ['Uses the package types, folders, and schedule declared in the Hypervibe project setup.'],
+      }
+    ));
+  }
 
   const manifest = {
     version: 1,
     managedBy: 'hypervibe',
     files: files.map((file) => file.path).sort(),
   };
-  files.push(managedFile(GITHUB_INFRASTRUCTURE_MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`));
+  files.push(managedFile(
+    GITHUB_INFRASTRUCTURE_MANIFEST,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    {
+      title: 'Hypervibe tracking file',
+      summary: 'Updates Hypervibe’s list of repository files it is responsible for managing.',
+    }
+  ));
   return files.sort((a, b) => a.path.localeCompare(b.path));
 }
 
@@ -790,8 +893,13 @@ export function githubInfrastructureConnectionBlock(params: {
   };
 }
 
-function desiredFileMetadata(files: ManagedGitHubFile[]): Array<{ path: string; content: string; hash: string }> {
-  return files.map(({ path, content, hash }) => ({ path, content, hash }));
+function desiredFileMetadata(files: ManagedGitHubFile[]): ManagedGitHubFile[] {
+  return files.map(({ path, content, hash, review }) => ({
+    path,
+    content,
+    hash,
+    ...(review ? { review } : {}),
+  }));
 }
 
 function infrastructureAction(params: {
@@ -1155,6 +1263,104 @@ function parseManifest(content: string | null): string[] {
   }
 }
 
+type GitHubInfrastructureFileChange = {
+  operation: 'added' | 'updated' | 'removed';
+  path: string;
+  review?: ManagedGitHubFile['review'];
+};
+
+function fallbackFileReview(
+  change: GitHubInfrastructureFileChange
+): NonNullable<ManagedGitHubFile['review']> {
+  const workflowMatch = /^\.github\/workflows\/deploy-[^-]+-(.+)\.yml$/.exec(change.path);
+  if (workflowMatch) {
+    const environment = readableAutomationName(workflowMatch[1]);
+    return {
+      title: `${environment} deployment`,
+      summary: `${change.operation === 'removed' ? 'Removes' : 'Updates'} the GitHub workflow used to deploy ${environment.toLowerCase()}.`,
+    };
+  }
+  return {
+    title: 'GitHub setup file',
+    summary: `${change.operation === 'removed' ? 'Removes' : 'Updates'} a file managed by Hypervibe.`,
+  };
+}
+
+function changeHeading(operation: GitHubInfrastructureFileChange['operation']): string {
+  if (operation === 'added') return 'Adds';
+  if (operation === 'removed') return 'Removes';
+  return 'Updates';
+}
+
+export function buildGitHubInfrastructurePullRequestBody(
+  changes: GitHubInfrastructureFileChange[]
+): string {
+  const meaningfulChanges = changes.filter((change) => change.path !== GITHUB_INFRASTRUCTURE_MANIFEST);
+  const explainedChanges = meaningfulChanges.length > 0 ? meaningfulChanges : changes;
+  const mergeEffects = Array.from(new Set(
+    explainedChanges
+      .map((change) => change.review?.mergeEffect?.trim())
+      .filter((effect): effect is string => Boolean(effect))
+  ));
+
+  const lines = [
+    GITHUB_INFRASTRUCTURE_PR_BODY_MARKER,
+    '',
+    '## What this PR changes',
+    '',
+    'This updates the project’s GitHub setup to match the setup saved in Hypervibe.',
+    '',
+  ];
+
+  if (explainedChanges.length === 0) {
+    lines.push('No repository file changes were recorded.');
+  } else {
+    for (const change of explainedChanges) {
+      const review = change.review ?? fallbackFileReview(change);
+      lines.push(
+        `### ${changeHeading(change.operation)}: ${review.title}`,
+        '',
+        review.summary,
+        ''
+      );
+      for (const detail of review.details ?? []) {
+        lines.push(`- ${detail}`);
+      }
+      if ((review.details?.length ?? 0) > 0) lines.push('');
+    }
+  }
+
+  lines.push(
+    '## What happens after you merge',
+    ''
+  );
+  if (mergeEffects.length > 0) {
+    lines.push(...mergeEffects.map((effect) => `- ${effect}`));
+  } else {
+    lines.push('- GitHub starts using the updated workflows, templates, and settings files.');
+  }
+  lines.push(
+    '- Hypervibe checks that the merge landed, then shows any remaining setup in the next plan.',
+    '- No passwords, API keys, or other secret values are included in this PR.',
+    '- Hypervibe never merges this PR automatically.',
+    '',
+    '## Before you merge',
+    '',
+    '- Check that the environments, services, and automation described above match what you expect.',
+    '- If merging may start a deployment, merge only when you are ready for that deployment.',
+    '',
+    '<details>',
+    '<summary>Files changed</summary>',
+    ''
+  );
+  for (const change of changes) {
+    lines.push(`- ${changeHeading(change.operation)} \`${change.path}\``);
+  }
+  lines.push('', '</details>');
+
+  return lines.join('\n');
+}
+
 type GitHubInfrastructureProposalResult = {
   success: boolean;
   status?: 'pending' | 'blocked';
@@ -1510,6 +1716,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
   const desiredPaths = new Set(desiredFiles.map((file) => file.path));
   const changed: string[] = [];
   const removed: string[] = [];
+  const fileChanges: GitHubInfrastructureFileChange[] = [];
   const manifestFile = desiredFiles.find((file) => file.path === GITHUB_INFRASTRUCTURE_MANIFEST);
   const contentFiles = desiredFiles.filter((file) => file.path !== GITHUB_INFRASTRUCTURE_MANIFEST);
   for (const file of contentFiles) {
@@ -1524,6 +1731,11 @@ export async function proposeGitHubInfrastructureFiles(params: {
       GITHUB_INFRASTRUCTURE_BRANCH
     );
     changed.push(file.path);
+    fileChanges.push({
+      operation: current ? 'updated' : 'added',
+      path: file.path,
+      ...(file.review ? { review: file.review } : {}),
+    });
   }
   for (const path of previousPaths.filter((path) => !desiredPaths.has(path))) {
     const current = await adapter.getFile(parts.owner, parts.repo, path, GITHUB_INFRASTRUCTURE_BRANCH);
@@ -1537,6 +1749,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
       GITHUB_INFRASTRUCTURE_BRANCH
     );
     removed.push(path);
+    fileChanges.push({ operation: 'removed', path });
   }
   if (manifestFile) {
     const current = await adapter.getFile(parts.owner, parts.repo, manifestFile.path, GITHUB_INFRASTRUCTURE_BRANCH);
@@ -1550,6 +1763,11 @@ export async function proposeGitHubInfrastructureFiles(params: {
         GITHUB_INFRASTRUCTURE_BRANCH
       );
       changed.push(manifestFile.path);
+      fileChanges.push({
+        operation: current ? 'updated' : 'added',
+        path: manifestFile.path,
+        ...(manifestFile.review ? { review: manifestFile.review } : {}),
+      });
     }
   }
 
@@ -1558,13 +1776,7 @@ export async function proposeGitHubInfrastructureFiles(params: {
     head: GITHUB_INFRASTRUCTURE_BRANCH,
     base: baseBranch,
     draft: false,
-    body: [
-      GITHUB_INFRASTRUCTURE_PR_BODY_MARKER,
-      '',
-      'Review and merge it to activate the repository-file portion of the plan.',
-      'Hypervibe will verify the merge and converge dependent secrets/settings in a later plan.',
-      'This pull request is never merged automatically.',
-    ].join('\n'),
+    body: buildGitHubInfrastructurePullRequestBody(fileChanges),
   });
   return {
     success: false,

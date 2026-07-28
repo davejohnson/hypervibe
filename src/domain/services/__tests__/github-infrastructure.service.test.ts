@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import {
+  buildGitHubInfrastructurePullRequestBody,
   compileManagedGitHubFiles,
   githubSpecNeedsOpenAI,
 } from '../github-infrastructure.service.js';
@@ -49,6 +50,44 @@ function githubSpec() {
 }
 
 describe('GitHub infrastructure compiler', () => {
+  it('writes generated pull request copy for non-technical reviewers', () => {
+    const body = buildGitHubInfrastructurePullRequestBody([
+      {
+        operation: 'updated',
+        path: '.github/workflows/deploy-railway-staging.yml',
+        review: {
+          title: 'staging deployment',
+          summary: 'Updates the GitHub workflow that deploys the web and cron services to Railway.',
+          details: [
+            'Requires one exact commit ID.',
+            'Retries short-lived Railway errors.',
+            'Saves proof of the successful deployment.',
+          ],
+          mergeEffect: 'Merging this PR may start a staging deployment.',
+        },
+      },
+      {
+        operation: 'updated',
+        path: '.github/hypervibe/manifest.json',
+        review: {
+          title: 'Hypervibe tracking file',
+          summary: 'Updates Hypervibe’s internal file list.',
+        },
+      },
+    ]);
+
+    expect(body).toContain('## What this PR changes');
+    expect(body).toContain('### Updates: staging deployment');
+    expect(body).toContain('Retries short-lived Railway errors.');
+    expect(body).toContain('## What happens after you merge');
+    expect(body).toContain('Merging this PR may start a staging deployment.');
+    expect(body).toContain('No passwords, API keys, or other secret values are included');
+    expect(body).toContain('<summary>Files changed</summary>');
+    expect(body).toContain('`.github/hypervibe/manifest.json`');
+    expect(body).not.toContain('repository-file portion');
+    expect(body).not.toContain('converge dependent');
+  });
+
   it('compiles stable owned files and a manifest', () => {
     const files = compileManagedGitHubFiles(githubSpec());
     expect(files.map((file) => file.path)).toEqual([
@@ -66,6 +105,11 @@ describe('GitHub infrastructure compiler', () => {
       managedBy: 'hypervibe',
     });
     expect(files.every((file) => file.hash.length === 64)).toBe(true);
+    expect(files.find((file) => file.path.endsWith('hypervibe-fix-tests.yml'))?.review)
+      .toMatchObject({
+        title: 'Fix Tests automatic fix',
+        summary: expect.stringContaining('Tests'),
+      });
   });
 
   it('owns a canonical pull-request template whenever pull requests are required', () => {
