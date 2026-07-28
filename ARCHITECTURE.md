@@ -358,6 +358,15 @@ and reviewable pull request. Applying file drift returns a pending receipt and
 must defer workflow secrets, bindings, and the applied-spec marker until the
 reviewed file is present on the default branch.
 
+The deterministic branch must be reusable after merge commits, squash merges,
+and rebase merges. A retained branch may be reset to the current default-branch
+head only when GitHub proves its exact current SHA was the head of a merged
+Hypervibe infrastructure pull request with the canonical title, body marker,
+head ref, and base ref. Re-observe the branch immediately before resetting it
+and verify the reset before writing files. Closed-unmerged pull requests,
+post-merge commits, duplicate open pull requests, ambiguous provenance, and
+observation failures must block without branch or file mutations.
+
 GitHub desired state uses capability-level opt-in with exclusive ownership.
 Once a capability is enabled, Hypervibe owns and reconciles every generated
 file and setting for that capability; individual managed files cannot be

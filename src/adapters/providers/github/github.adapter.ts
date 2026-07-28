@@ -104,6 +104,23 @@ export interface GitHubActionsVariable {
   updated_at?: string;
 }
 
+export interface GitHubPullRequestSummary {
+  number: number;
+  html_url: string;
+  title: string;
+  body: string | null;
+  state: 'open' | 'closed';
+  merged_at: string | null;
+  head: {
+    ref: string;
+    sha: string;
+  };
+  base: {
+    ref: string;
+    sha: string;
+  };
+}
+
 interface GitHubResponse<T> {
   data: T;
 }
@@ -395,10 +412,16 @@ export class GitHubAdapter {
     await this.request('POST', `/repos/${owner}/${repo}/git/refs`, { ref, sha });
   }
 
-  async updateRef(owner: string, repo: string, ref: string, sha: string): Promise<void> {
+  async updateRef(
+    owner: string,
+    repo: string,
+    ref: string,
+    sha: string,
+    options: { force?: boolean } = {}
+  ): Promise<void> {
     await this.request('PATCH', `/repos/${owner}/${repo}/git/refs/${encodeURIComponent(ref)}`, {
       sha,
-      force: false,
+      force: options.force ?? false,
     });
   }
 
@@ -484,7 +507,7 @@ export class GitHubAdapter {
     owner: string,
     repo: string,
     options: { state?: 'open' | 'closed' | 'all'; head?: string; base?: string } = {}
-  ): Promise<Array<{ number: number; html_url: string; head: { ref: string }; base: { ref: string } }>> {
+  ): Promise<GitHubPullRequestSummary[]> {
     const params = new URLSearchParams({ state: options.state ?? 'open', per_page: '100' });
     if (options.head) params.set('head', options.head);
     if (options.base) params.set('base', options.base);

@@ -25,6 +25,14 @@ those workflows remain read-only inputs to Hypervibe automation.
 5. A new `hv_plan` verifies the files and proposes settings/secrets that depend
    on the reviewed workflows.
 
+You may use GitHub's merge-commit, squash, or rebase option. If GitHub retains
+the deterministic branch after the pull request merges, the next apply reuses
+it. Hypervibe fast-forwards an ordinary merged branch; for squash or rebase
+merges, it resets the branch only after GitHub proves that its exact current
+commit belongs to the merged canonical Hypervibe pull request. Extra commits,
+closed-unmerged work, duplicate pull requests, or incomplete observation block
+instead of being overwritten. Manual branch deletion is not required.
+
 GitHub Actions workflows are files under `.github/workflows/`; GitHub's API
 creates commits containing those files rather than creating fileless workflows.
 Hypervibe also owns `.github/hypervibe/manifest.json`, which limits cleanup to

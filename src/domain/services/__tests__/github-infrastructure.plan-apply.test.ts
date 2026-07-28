@@ -4,7 +4,10 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
-import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
+import {
+  GitHubAdapter,
+  type GitHubPullRequestSummary,
+} from '../../../adapters/providers/github/github.adapter.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import type { Project } from '../../entities/project.entity.js';
 import type { PlanAction } from '../../plan/plan.types.js';
@@ -15,6 +18,8 @@ import {
   GITHUB_INFRASTRUCTURE_ACTION_ID,
   GITHUB_INFRASTRUCTURE_BRANCH,
   GITHUB_INFRASTRUCTURE_MANIFEST,
+  GITHUB_INFRASTRUCTURE_PR_BODY_MARKER,
+  GITHUB_INFRASTRUCTURE_PR_TITLE,
   GITHUB_OPENAI_SECRET_ACTION_ID,
   planGitHubInfrastructure,
 } from '../github-infrastructure.service.js';
@@ -51,6 +56,43 @@ function seedGitHub(): void {
     credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'github-token' }),
   });
   repo.updateStatus(connection.id, 'verified');
+}
+
+function infrastructureAction(): PlanAction {
+  return {
+    id: GITHUB_INFRASTRUCTURE_ACTION_ID,
+    type: 'update',
+    resource: { kind: 'repo', name: REPOSITORY, provider: 'github' },
+    verified: true,
+    reason: 'drift',
+    metadata: {
+      operation: 'githubInfrastructurePullRequest',
+      repository: REPOSITORY,
+      desiredFiles: compileManagedGitHubFiles(spec().github!),
+    },
+  };
+}
+
+function infrastructurePull(
+  overrides: Partial<GitHubPullRequestSummary> = {}
+): GitHubPullRequestSummary {
+  return {
+    number: 56,
+    html_url: 'https://github.com/owner/example/pull/56',
+    title: GITHUB_INFRASTRUCTURE_PR_TITLE,
+    body: `${GITHUB_INFRASTRUCTURE_PR_BODY_MARKER}\n\nReview and merge it.`,
+    state: 'closed',
+    merged_at: '2026-07-28T01:42:56Z',
+    head: {
+      ref: GITHUB_INFRASTRUCTURE_BRANCH,
+      sha: 'merged-head',
+    },
+    base: {
+      ref: 'main',
+      sha: 'base-at-open',
+    },
+    ...overrides,
+  };
 }
 
 describe('GitHub infrastructure plan/apply', () => {
@@ -118,20 +160,7 @@ describe('GitHub infrastructure plan/apply', () => {
   });
 
   it('creates a deterministic infrastructure branch and returns a pending PR receipt', async () => {
-    const github = spec().github!;
-    const files = compileManagedGitHubFiles(github);
-    const action: PlanAction = {
-      id: GITHUB_INFRASTRUCTURE_ACTION_ID,
-      type: 'update',
-      resource: { kind: 'repo', name: REPOSITORY, provider: 'github' },
-      verified: true,
-      reason: 'drift',
-      metadata: {
-        operation: 'githubInfrastructurePullRequest',
-        repository: REPOSITORY,
-        desiredFiles: files,
-      },
-    };
+    const action = infrastructureAction();
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
     vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
     vi.spyOn(GitHubAdapter.prototype, 'getRef')
@@ -155,6 +184,412 @@ describe('GitHub infrastructure plan/apply', () => {
     expect(write).toHaveBeenCalledWith(
       'owner', 'example', expect.any(String), expect.any(String), expect.any(String), GITHUB_INFRASTRUCTURE_BRANCH
     );
+  });
+
+  it('recycles a squash-merged managed branch and proposes the next infrastructure PR', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'base-sha' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests')
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([infrastructurePull()]);
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({
+      status: 'diverged',
+      ahead_by: 1,
+      behind_by: 1,
+    });
+    const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef').mockResolvedValue();
+    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
+      .mockResolvedValue({ created: true, updated: false });
+    vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
+      number: 57,
+      html_url: 'https://github.com/owner/example/pull/57',
+    });
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'pending',
+      data: {
+        pullRequestNumber: 57,
+        branchRecycled: true,
+        recycledPullRequestNumber: 56,
+        recycledPullRequestUrl: 'https://github.com/owner/example/pull/56',
+        recycledFromSha: 'merged-head',
+        recycledToSha: 'base-sha',
+      },
+    });
+    expect(updateRef).toHaveBeenCalledWith(
+      'owner',
+      'example',
+      `heads/${GITHUB_INFRASTRUCTURE_BRANCH}`,
+      'base-sha',
+      { force: true }
+    );
+    expect(write).toHaveBeenCalled();
+  });
+
+  it('keeps merge-commit branch reuse on the non-forced fast-forward path', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'base-sha' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({
+      status: 'behind',
+      ahead_by: 0,
+      behind_by: 1,
+    });
+    const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef').mockResolvedValue();
+    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
+      .mockResolvedValue({ created: true, updated: false });
+    vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
+      number: 57,
+      html_url: 'https://github.com/owner/example/pull/57',
+    });
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({ success: false, status: 'pending' });
+    expect(updateRef).toHaveBeenCalledWith(
+      'owner',
+      'example',
+      `heads/${GITHUB_INFRASTRUCTURE_BRANCH}`,
+      'base-sha'
+    );
+    expect(updateRef).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      { force: true }
+    );
+  });
+
+  it.each([
+    ['closed without merge', infrastructurePull({ merged_at: null })],
+    ['wrong title', infrastructurePull({ title: 'Repository-owned change' })],
+    ['wrong body', infrastructurePull({ body: 'Not generated by Hypervibe' })],
+    ['different head commit', infrastructurePull({
+      head: { ref: GITHUB_INFRASTRUCTURE_BRANCH, sha: 'different-head' },
+    })],
+    ['different base branch', infrastructurePull({
+      base: { ref: 'release', sha: 'base-at-open' },
+    })],
+  ])('blocks a divergent branch with %s provenance without mutations', async (_label, closedPull) => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests')
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([closedPull]);
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({
+      status: 'diverged',
+      ahead_by: 1,
+      behind_by: 1,
+    });
+    const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef');
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
+    const createPullRequest = vi.spyOn(GitHubAdapter.prototype, 'createPullRequest');
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'blocked',
+      message: 'GitHub infrastructure branch has unowned work',
+    });
+    expect(updateRef).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect(createPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('blocks duplicate open managed pull requests without branch mutations', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'managed-head' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([
+      infrastructurePull({ number: 60, state: 'open', merged_at: null }),
+      infrastructurePull({ number: 61, state: 'open', merged_at: null }),
+    ]);
+    const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef');
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'blocked',
+      message: 'Multiple GitHub infrastructure pull requests are open',
+    });
+    expect(updateRef).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('continues the single canonical open infrastructure pull request', async () => {
+    const openPull = infrastructurePull({
+      state: 'open',
+      merged_at: null,
+      head: { ref: GITHUB_INFRASTRUCTURE_BRANCH, sha: 'open-head' },
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'open-head' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([openPull]);
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({
+      status: 'ahead',
+      ahead_by: 1,
+      behind_by: 0,
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
+      .mockResolvedValue({ created: true, updated: false });
+    const createPullRequest = vi.spyOn(GitHubAdapter.prototype, 'createPullRequest');
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'pending',
+      data: {
+        pullRequestNumber: openPull.number,
+        pullRequestUrl: openPull.html_url,
+      },
+    });
+    expect(write).toHaveBeenCalled();
+    expect(createPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('blocks a diverged open pull request without resetting or writing its branch', async () => {
+    const openPull = infrastructurePull({
+      state: 'open',
+      merged_at: null,
+      head: { ref: GITHUB_INFRASTRUCTURE_BRANCH, sha: 'open-head' },
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'open-head' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([openPull]);
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({
+      status: 'diverged',
+      ahead_by: 1,
+      behind_by: 1,
+    });
+    const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef');
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'blocked',
+      message: 'GitHub infrastructure branch diverged from its base',
+      data: { pullRequestUrl: openPull.html_url },
+    });
+    expect(updateRef).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('blocks an open pull request whose canonical provenance was changed', async () => {
+    const openPull = infrastructurePull({
+      state: 'open',
+      merged_at: null,
+      title: 'Renamed infrastructure work',
+      head: { ref: GITHUB_INFRASTRUCTURE_BRANCH, sha: 'open-head' },
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'open-head' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([openPull]);
+    const compareCommits = vi.spyOn(GitHubAdapter.prototype, 'compareCommits');
+    const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef');
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'blocked',
+      message: 'Open GitHub infrastructure pull request has unexpected provenance',
+      data: { pullRequestUrl: openPull.html_url },
+    });
+    expect(compareCommits).not.toHaveBeenCalled();
+    expect(updateRef).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('blocks when the managed branch changes after merged-PR provenance is verified', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'new-head' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests')
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([infrastructurePull()]);
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({
+      status: 'diverged',
+      ahead_by: 1,
+      behind_by: 1,
+    });
+    const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef');
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'blocked',
+      message: 'GitHub infrastructure branch changed during apply',
+    });
+    expect(updateRef).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('stops before file writes when the provider rejects a forced recycle', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests')
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([infrastructurePull()]);
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({
+      status: 'diverged',
+      ahead_by: 1,
+      behind_by: 1,
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'updateRef')
+      .mockRejectedValue(new Error('Protected branch update rejected'));
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'blocked',
+      message: 'GitHub infrastructure branch reconciliation failed',
+      error: 'Protected branch update rejected',
+    });
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('stops before file writes when a forced recycle cannot be verified', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } })
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'new-base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'base-sha' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests')
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([infrastructurePull()]);
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({
+      status: 'diverged',
+      ahead_by: 1,
+      behind_by: 1,
+    });
+    const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef').mockResolvedValue();
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'blocked',
+      message: 'Recycled GitHub infrastructure branch could not be verified',
+    });
+    expect(updateRef).toHaveBeenCalledWith(
+      'owner',
+      'example',
+      `heads/${GITHUB_INFRASTRUCTURE_BRANCH}`,
+      'base-sha',
+      { force: true }
+    );
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('retries safely after a recycle already moved the branch to the base head', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'base-sha' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
+    const compareCommits = vi.spyOn(GitHubAdapter.prototype, 'compareCommits');
+    const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef');
+    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
+      .mockResolvedValue({ created: true, updated: false });
+    vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
+      number: 57,
+      html_url: 'https://github.com/owner/example/pull/57',
+    });
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({ success: false, status: 'pending' });
+    expect(compareCommits).not.toHaveBeenCalled();
+    expect(updateRef).not.toHaveBeenCalled();
+  });
+
+  it('preserves the branch and stops when closed-PR observation fails', async () => {
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } });
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests')
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('GitHub rate limit'));
+    vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({
+      status: 'diverged',
+      ahead_by: 1,
+      behind_by: 1,
+    });
+    const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef');
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile');
+
+    const result = await applyGitHubInfrastructure({ action: infrastructureAction() });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'blocked',
+      message: 'GitHub infrastructure branch reconciliation failed',
+      error: 'GitHub rate limit',
+    });
+    expect(updateRef).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
   });
 
   it('replaces the canonical pull-request template and removes the retired uppercase path', async () => {

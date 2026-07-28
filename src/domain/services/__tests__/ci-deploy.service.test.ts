@@ -26,6 +26,11 @@ import {
   requiredProviderSecretNamesForGitHubActions,
 } from '../ci-deploy.service.js';
 import { environmentDeploymentContractHash } from '../deployment-contract.service.js';
+import {
+  GITHUB_INFRASTRUCTURE_BRANCH,
+  GITHUB_INFRASTRUCTURE_PR_BODY_MARKER,
+  GITHUB_INFRASTRUCTURE_PR_TITLE,
+} from '../github-infrastructure.service.js';
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -490,7 +495,7 @@ describe('ci-deploy.service', () => {
   });
 
   describe('applyGitHubActionsDeploy', () => {
-    it('proposes a rebuilt workflow through the infrastructure pull request and defers secrets', async () => {
+    it('recycles a squash-merged branch, proposes the workflow PR, and defers secrets', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();
       const environmentSpec = environmentSpecSchema.parse({
@@ -525,13 +530,29 @@ describe('ci-deploy.service', () => {
       vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
       vi.spyOn(GitHubAdapter.prototype, 'getRef')
         .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce({
-          ref: 'refs/heads/hypervibe/github-infrastructure',
-          object: { sha: 'base-sha' },
-        });
-      vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
-      vi.spyOn(GitHubAdapter.prototype, 'createRef').mockResolvedValue();
+        .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } })
+        .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+        .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'merged-head' } })
+        .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+        .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'base-sha' } });
+      vi.spyOn(GitHubAdapter.prototype, 'listPullRequests')
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{
+          number: 56,
+          html_url: 'https://github.com/davejohnson/billforge/pull/56',
+          title: GITHUB_INFRASTRUCTURE_PR_TITLE,
+          body: `${GITHUB_INFRASTRUCTURE_PR_BODY_MARKER}\n\nReview and merge it.`,
+          state: 'closed',
+          merged_at: '2026-07-28T01:42:56Z',
+          head: { ref: GITHUB_INFRASTRUCTURE_BRANCH, sha: 'merged-head' },
+          base: { ref: 'main', sha: 'base-at-open' },
+        }]);
+      vi.spyOn(GitHubAdapter.prototype, 'compareCommits').mockResolvedValue({
+        status: 'diverged',
+        ahead_by: 1,
+        behind_by: 1,
+      });
+      const updateRef = vi.spyOn(GitHubAdapter.prototype, 'updateRef').mockResolvedValue();
       const createOrUpdateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
         .mockResolvedValue({ created: false, updated: true });
       vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
@@ -554,8 +575,17 @@ describe('ci-deploy.service', () => {
         data: {
           pullRequestNumber: 42,
           pullRequestUrl: 'https://github.com/davejohnson/billforge/pull/42',
+          branchRecycled: true,
+          recycledPullRequestNumber: 56,
         },
       });
+      expect(updateRef).toHaveBeenCalledWith(
+        'davejohnson',
+        'billforge',
+        `heads/${GITHUB_INFRASTRUCTURE_BRANCH}`,
+        'base-sha',
+        { force: true }
+      );
       expect(createOrUpdateFile).toHaveBeenCalledWith(
         'davejohnson',
         'billforge',
