@@ -133,6 +133,12 @@ export interface IProviderAdapter {
     environment: Environment
   ): Promise<Receipt>;
 
+  /**
+   * Ensure a distinct provider environment exists inside an already-bound
+   * provider project. This method must never create or replace the project.
+   */
+  ensureEnvironment?(environment: Environment): Promise<Receipt>;
+
   ensureComponent(
     type: ComponentType,
     environment: Environment

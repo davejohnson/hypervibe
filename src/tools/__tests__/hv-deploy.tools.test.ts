@@ -142,7 +142,16 @@ describe('hv_deploy', () => {
 
   it('fails when provider status is deployed but the configured web health endpoint is not serving', async () => {
     const project = new ProjectRepository().create({ name: 'rail-health-app', defaultPlatform: 'railway' });
-    new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project',
+        environmentId: 'rail-env',
+        services: { web: { serviceId: 'rail-web' } },
+      },
+    });
     new ServiceRepository().create({
       projectId: project.id,
       name: 'web',
@@ -190,8 +199,43 @@ describe('hv_deploy', () => {
       async getDeployStatus() {
         return { status: 'deployed', url: 'https://web-production-e5e09.up.railway.app' };
       },
+      async observe() {
+        return {
+          provider: 'railway',
+          observedAt: new Date().toISOString(),
+          projectExists: true,
+          projectId: 'rail-project',
+          environmentId: 'rail-env',
+          services: [{
+            name: 'web',
+            externalId: 'rail-web',
+            workloadKind: 'web',
+            customDomains: [],
+            config: { healthCheckPath: '/health' },
+            envVarKeys: [],
+            envVarHashes: {},
+            status: 'running',
+            sourceState: 'disconnected',
+          }],
+          databases: [],
+          storage: [],
+          completeness: {
+            project: 'complete',
+            environment: 'complete',
+            services: 'complete',
+            databases: 'complete',
+            storage: 'complete',
+          },
+          partial: false,
+          warnings: [],
+        };
+      },
     };
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter: fakeAdapter });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeAdapter as never,
+    });
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response('Application not found', { status: 404 }) as any
     );

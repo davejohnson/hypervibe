@@ -24,6 +24,8 @@ import type { Project } from '../../entities/project.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
 import { buildBranchDeployWorkflow } from '../../services/github-ops.service.js';
 import { StripeAdapter } from '../../../adapters/providers/stripe/stripe.adapter.js';
+import { executePlanApply } from '../../../application/apply-plan.js';
+import { createToolContext } from '../../../tools/context.js';
 
 let project: Project;
 
@@ -512,8 +514,14 @@ describe('PlanService.plan', () => {
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.verified).toBe(false);
     expect(plan.actions.every((a) => !a.verified)).toBe(true);
-    // Untracked environment surfaced as a create action and a local record was made.
-    expect(plan.actions.find((a) => a.id === 'environment:staging')?.type).toBe('create');
+    // Unknown provider observation must not authorize environment creation.
+    expect(plan.actions.find((a) => a.id === 'environment:staging')).toMatchObject({
+      type: 'update',
+      metadata: {
+        operation: 'hostingEnvironmentEnsure',
+        blockedReason: 'environment_observation_unknown',
+      },
+    });
     expect(new EnvironmentRepository().findByProjectAndName(project.id, 'staging')).toBeTruthy();
   });
 
@@ -577,6 +585,13 @@ describe('PlanService.plan', () => {
             projectId: 'rail-project-canonical',
             services: [],
             databases: [],
+            completeness: {
+              project: 'complete',
+              environment: 'complete',
+              services: 'complete',
+              databases: 'complete',
+              storage: 'complete',
+            },
             partial: false,
             warnings: ['Could not resolve Railway environment for "staging"'],
           };
@@ -603,6 +618,270 @@ describe('PlanService.plan', () => {
       provider: 'railway',
       projectId: 'rail-project-canonical',
     });
+  });
+
+  it('plans Railway environment scaffolding before storage when a shared project has no target environment', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+        },
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: {}, worker: { workloadKind: 'worker' } },
+          database: { provider: 'railway', engine: 'postgres' },
+          storage: {
+            documents: {
+              provider: 'railway',
+              type: 'bucket',
+              region: 'sjc',
+              injectInto: ['web', 'worker'],
+            },
+          },
+        },
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project-canonical',
+        environmentId: 'rail-env-prod',
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project-canonical',
+        environmentId: 'rail-env-stale',
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rail-project-canonical',
+      services: [],
+      databases: [],
+      storage: [],
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: 'unknown',
+        databases: 'unknown',
+        storage: 'unknown',
+      },
+      partial: true,
+      warnings: ['Railway environment "staging" does not exist'],
+    });
+
+    const result = await new PlanService().plan(project, 'staging');
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const environmentAction = plan.actions.find((action) => action.id === 'environment:staging');
+    expect(environmentAction).toMatchObject({
+      type: 'create',
+      resource: { kind: 'environment', provider: 'railway' },
+      metadata: { operation: 'hostingEnvironmentEnsure' },
+    });
+    expect(plan.actions.find((action) => action.id === 'project:railway')).toBeUndefined();
+    for (const actionId of [
+      'storage:documents',
+      'database:railway',
+      'service:web',
+      'service:worker',
+    ]) {
+      expect(plan.actions.find((action) => action.id === actionId)?.dependsOn)
+        .toContain('environment:staging');
+    }
+  });
+
+  it('creates and binds the Railway environment before returning pending for a fresh plan', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+        },
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          storage: {
+            documents: {
+              provider: 'railway',
+              type: 'bucket',
+              region: 'sjc',
+              injectInto: ['web'],
+            },
+          },
+        },
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project-canonical',
+        environmentId: 'rail-env-prod',
+      },
+    });
+    const railwayConnection = new ConnectionRepository().create({
+      provider: 'railway',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
+    });
+    new ConnectionRepository().updateStatus(railwayConnection.id, 'verified');
+    const missingEnvironmentObservation: ObservedState = {
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rail-project-canonical',
+      services: [],
+      databases: [],
+      storage: [],
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: 'unknown',
+        databases: 'unknown',
+        storage: 'unknown',
+      },
+      partial: true,
+      warnings: ['Railway environment "staging" does not exist'],
+    };
+    mockObservingAdapter(missingEnvironmentObservation);
+    const ensureEnvironment = vi.fn(async () => ({
+      success: true,
+      message: 'Created Railway environment: staging',
+      data: {
+        projectId: 'rail-project-canonical',
+        environmentId: 'rail-env-staging',
+        created: true,
+      },
+    }));
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'railway',
+        capabilities: { supportsObserve: true },
+        ensureEnvironment,
+      },
+    } as never);
+    const storageAdapter = vi.spyOn(adapterFactory, 'getStorageAdapter');
+
+    const planned = await new PlanService().plan(project, 'staging');
+    expect(planned).not.toHaveProperty('error');
+    const plan = planned as Exclude<typeof planned, { error: string }>;
+    const currentSpec = new SpecStore().get(project)!;
+
+    const outcome = await executePlanApply(createToolContext(), {
+      project,
+      spec: currentSpec.spec,
+      specRevision: currentSpec.revision,
+      planId: plan.planRunId,
+      confirmActions: [],
+    });
+
+    expect(outcome).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: false,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({
+            actionId: 'environment:staging',
+            status: 'pending',
+          }),
+          expect.objectContaining({
+            actionId: 'storage:documents',
+            status: 'aborted',
+          }),
+        ]),
+      },
+    });
+    expect(ensureEnvironment).toHaveBeenCalledOnce();
+    expect(storageAdapter).not.toHaveBeenCalled();
+    expect(
+      new EnvironmentRepository()
+        .findByProjectAndName(project.id, 'staging')
+        ?.platformBindings
+    ).toMatchObject({
+      provider: 'railway',
+      projectId: 'rail-project-canonical',
+      environmentId: 'rail-env-staging',
+    });
+  });
+
+  it('plans storage creation after the bound Railway environment confirms an empty storage list', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          storage: {
+            documents: {
+              provider: 'railway',
+              type: 'bucket',
+              region: 'sjc',
+              injectInto: ['web'],
+            },
+          },
+        },
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project-canonical',
+        environmentId: 'rail-env-staging',
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rail-project-canonical',
+      environmentId: 'rail-env-staging',
+      services: [],
+      databases: [],
+      storage: [],
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: 'complete',
+        databases: 'complete',
+        storage: 'complete',
+      },
+      partial: false,
+      warnings: [],
+    });
+    const storageAdapter = vi.spyOn(adapterFactory, 'getStorageAdapter');
+
+    const result = await new PlanService().plan(project, 'staging');
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find((action) => action.id === 'environment:staging')).toBeUndefined();
+    expect(plan.actions.find((action) => action.id === 'storage:documents')).toMatchObject({
+      type: 'create',
+      billable: true,
+      metadata: expect.not.objectContaining({
+        blockedReason: 'storage_observation_unknown',
+      }),
+    });
+    expect(storageAdapter).not.toHaveBeenCalled();
   });
 
   it('does not guess the shared provider project when sibling environment bindings disagree', async () => {

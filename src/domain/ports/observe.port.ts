@@ -81,6 +81,7 @@ export interface ObservedState {
   /** Completeness is per resource class; unknown must never be treated as absent. */
   completeness?: {
     project?: 'complete' | 'unknown';
+    environment?: 'complete' | 'unknown';
     services?: 'complete' | 'unknown';
     databases?: 'complete' | 'unknown';
     storage?: 'complete' | 'unknown';

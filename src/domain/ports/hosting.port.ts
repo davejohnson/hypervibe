@@ -150,6 +150,12 @@ export interface IHostingAdapter {
   ensureProject(projectName: string, environment: Environment): Promise<Receipt>;
 
   /**
+   * Ensure a distinct provider environment exists inside an already-bound
+   * provider project. This method must never create or replace the project.
+   */
+  ensureEnvironment?(environment: Environment): Promise<Receipt>;
+
+  /**
    * Deploy a service to the hosting platform.
    * Includes setting environment variables and triggering the deployment.
    */

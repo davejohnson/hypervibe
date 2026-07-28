@@ -276,6 +276,128 @@ export class RailwayAdapter implements IProviderAdapter {
     }
   }
 
+  async ensureEnvironment(environment: Environment): Promise<Receipt> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const bindings = environment.platformBindings as {
+      projectId?: string;
+      environmentId?: string;
+    };
+    const projectId = bindings.projectId;
+    if (!projectId) {
+      return {
+        success: false,
+        message: `Failed to ensure Railway environment "${environment.name}"`,
+        error: 'Railway project binding is missing. Apply the project action first.',
+      };
+    }
+
+    let details: RailwayProjectDetails | null;
+    try {
+      details = await this.getProjectDetails(projectId);
+    } catch (error) {
+      return {
+        success: false,
+        message: `Failed to ensure Railway environment "${environment.name}"`,
+        error: `Could not observe Railway environments, so Hypervibe refused to create one: ${this.describeError(error)}`,
+      };
+    }
+    if (!details) {
+      return {
+        success: false,
+        message: `Failed to ensure Railway environment "${environment.name}"`,
+        error: `Bound Railway project ${projectId} was not found. Re-run hv_plan before applying.`,
+      };
+    }
+
+    const environments = (details.environments?.edges ?? []).map((edge) => edge.node);
+    const bound = bindings.environmentId
+      ? environments.find((candidate) => candidate.id === bindings.environmentId)
+      : undefined;
+    if (bound) {
+      return {
+        success: true,
+        message: `Using existing Railway environment: ${bound.name}`,
+        data: {
+          projectId,
+          environmentId: bound.id,
+          environmentName: bound.name,
+          created: false,
+        },
+      };
+    }
+
+    const named = environments.filter(
+      (candidate) => candidate.name.toLowerCase() === environment.name.toLowerCase()
+    );
+    if (named.length > 1) {
+      return {
+        success: false,
+        message: `Failed to ensure Railway environment "${environment.name}"`,
+        error: `Multiple Railway environments named "${environment.name}" are visible. Hypervibe will not guess which one to bind.`,
+        data: { duplicateEnvironmentIds: named.map((candidate) => candidate.id).sort() },
+      };
+    }
+    if (named.length === 1) {
+      const existing = named[0]!;
+      return {
+        success: true,
+        message: `Using existing Railway environment: ${existing.name}`,
+        data: {
+          projectId,
+          environmentId: existing.id,
+          environmentName: existing.name,
+          created: false,
+        },
+      };
+    }
+
+    const environmentId = await this.createRailwayEnvironment(projectId, environment.name);
+    if (!environmentId) {
+      return {
+        success: false,
+        message: `Failed to create Railway environment "${environment.name}"`,
+        error: 'Railway returned no environment id. Re-run hv_plan before retrying.',
+      };
+    }
+
+    let verified: RailwayProjectDetails | null;
+    try {
+      verified = await this.getProjectDetails(projectId);
+    } catch (error) {
+      return {
+        success: false,
+        message: `Created Railway environment "${environment.name}" but could not verify it`,
+        error: this.describeError(error),
+        data: { projectId, environmentId, created: true, verification: 'unknown' },
+      };
+    }
+    const verifiedEnvironment = verified?.environments?.edges
+      ?.map((edge) => edge.node)
+      .find((candidate) => candidate.id === environmentId);
+    if (!verifiedEnvironment) {
+      return {
+        success: false,
+        message: `Created Railway environment "${environment.name}" but verification did not find it`,
+        error: 'Provider environment creation is not yet confirmed. Re-run hv_plan before retrying.',
+        data: { projectId, environmentId, created: true, verification: 'absent' },
+      };
+    }
+
+    return {
+      success: true,
+      message: `Created Railway environment: ${verifiedEnvironment.name}`,
+      data: {
+        projectId,
+        environmentId: verifiedEnvironment.id,
+        environmentName: verifiedEnvironment.name,
+        created: true,
+      },
+    };
+  }
+
   private async createProject(projectName: string): Promise<{ id: string; name: string } | null> {
     if (!this.client) return null;
     const workspaceId = await this.resolveWorkspaceId();
@@ -1057,8 +1179,7 @@ export class RailwayAdapter implements IProviderAdapter {
     projectId: string,
     environment: Environment
   ): Promise<string | undefined> {
-    const client = this.client;
-    if (!client) return undefined;
+    if (!this.client) return undefined;
     const bindings = environment.platformBindings as { environmentId?: string };
     let environmentId = bindings.environmentId;
     const projectEnvironments = await this.listProjectEnvironments(projectId);
@@ -1070,44 +1191,7 @@ export class RailwayAdapter implements IProviderAdapter {
     if (byName?.id) {
       return byName.id;
     }
-    const targetIsProduction = environment.name.toLowerCase() === 'production';
-    if (!targetIsProduction) {
-      const createdEnvironmentId = await this.createRailwayEnvironment(projectId, environment.name);
-      if (createdEnvironmentId) {
-        return createdEnvironmentId;
-      }
-      // Never silently send non-production deployments to the default/production env.
-      return undefined;
-    }
-    if (environmentIds.length > 0) {
-      return environmentIds[0];
-    }
-
-    if (environmentId) return environmentId;
-
-    const envQuery = gql`
-      query GetEnvironments($projectId: String!) {
-        project(id: $projectId) {
-          environments {
-            edges {
-              node {
-                id
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    try {
-      const envResult = await client.request<{
-        project: { environments: { edges: Array<{ node: { id: string } }> } };
-      }>(envQuery, { projectId });
-      environmentId = envResult.project.environments.edges[0]?.node.id;
-      return environmentId;
-    } catch {
-      return undefined;
-    }
+    return undefined;
   }
 
   private async listProjectEnvironments(projectId: string): Promise<Array<{ id: string; name: string }>> {
@@ -3716,29 +3800,23 @@ export class RailwayAdapter implements IProviderAdapter {
     environment: Environment,
     context: { projectId?: string; environmentId?: string } = {}
   ): Promise<Receipt> {
-    const virtualEnvironment: Environment = {
-      ...environment,
-      platformBindings: {
-        projectId: context.projectId,
-        environmentId: context.environmentId,
-        services: {},
-      },
+    const bindings = environment.platformBindings as {
+      projectId?: string;
+      environmentId?: string;
     };
-    const projectReceipt = await this.ensureProject(projectName, virtualEnvironment);
-    if (!projectReceipt.success) return projectReceipt;
-    const projectId = typeof projectReceipt.data?.projectId === 'string' ? projectReceipt.data.projectId : context.projectId;
-    if (!projectId) return { success: false, message: 'Failed to resolve Railway storage project id' };
-    const envId = await this.resolveRailwayEnvironmentId(projectId, {
-      ...virtualEnvironment,
-      platformBindings: { projectId, environmentId: context.environmentId, services: {} },
-    });
-    if (!envId) {
-      return { success: false, message: `Failed to ensure Railway environment "${environment.name}" for storage` };
+    const projectId = context.projectId ?? bindings.projectId;
+    const environmentId = context.environmentId ?? bindings.environmentId;
+    if (!projectId || !environmentId) {
+      return {
+        success: false,
+        message: `Failed to resolve Railway storage context for "${environment.name}"`,
+        error: 'Railway project/environment bindings are missing. Apply project/environment scaffolding first.',
+      };
     }
     return {
       success: true,
       message: `Railway storage context is ready for ${projectName}/${environment.name}`,
-      data: { projectId, environmentId: envId },
+      data: { projectId, environmentId },
     };
   }
 
@@ -3876,6 +3954,14 @@ export class RailwayAdapter implements IProviderAdapter {
         projectExists: false,
         services: [],
         databases: [],
+        storage: [],
+        completeness: {
+          project: 'complete',
+          environment: 'complete',
+          services: 'complete',
+          databases: 'complete',
+          storage: 'complete',
+        },
         partial: false,
         warnings: [],
       };
@@ -3890,6 +3976,14 @@ export class RailwayAdapter implements IProviderAdapter {
         projectId,
         services: [],
         databases: [],
+        storage: [],
+        completeness: {
+          project: 'complete',
+          environment: 'complete',
+          services: 'complete',
+          databases: 'complete',
+          storage: 'complete',
+        },
         partial: false,
         warnings: [],
       };
@@ -3911,7 +4005,15 @@ export class RailwayAdapter implements IProviderAdapter {
         projectId,
         services: [],
         databases: [],
-        partial: false,
+        storage: [],
+        completeness: {
+          project: 'complete',
+          environment: 'complete',
+          services: 'unknown',
+          databases: 'unknown',
+          storage: 'unknown',
+        },
+        partial: true,
         warnings,
       };
     }
@@ -4078,6 +4180,13 @@ export class RailwayAdapter implements IProviderAdapter {
       services,
       databases,
       storage,
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: partial ? 'unknown' : 'complete',
+        databases: 'complete',
+        storage: 'complete',
+      },
       partial,
       warnings,
     };
@@ -4286,6 +4395,9 @@ providerRegistry.register({
     orchestration: {
       project: {
         shareAcrossEnvironments: true,
+      },
+      environment: {
+        separateResource: true,
       },
       diff: {
         requiresBranchDeployForCode: true,

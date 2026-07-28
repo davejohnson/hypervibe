@@ -35,6 +35,10 @@ export interface IStorageAdapter {
   connect(credentials: unknown): Promise<void>;
   verify(): Promise<VerifyResult>;
   disconnect?(): Promise<void>;
+  /**
+   * Verify or resolve storage context from already-converged provider
+   * scaffolding. It must never create a project or deploy environment.
+   */
   ensureContext(projectName: string, environment: Environment, context?: Partial<StorageContext>): Promise<StorageEnsureResult>;
   observe(environment: Environment, context: StorageContext): Promise<ObservedStorage[]>;
   ensureBucket(environment: Environment, context: StorageContext, name: string, region: string): Promise<StorageEnsureResult>;
