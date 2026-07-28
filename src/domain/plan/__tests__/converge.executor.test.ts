@@ -372,4 +372,16 @@ describe('fingerprintObservedState', () => {
     };
     expect(fingerprintObservedState(withSource)).not.toBe(fingerprintObservedState(withOtherBranch));
   });
+
+  it('changes when deploy-source observation changes from unknown to disconnected', () => {
+    const unknown: ObservedState = {
+      ...base,
+      services: [{ ...base.services[0], sourceState: 'unknown' }],
+    };
+    const disconnected: ObservedState = {
+      ...base,
+      services: [{ ...base.services[0], sourceState: 'disconnected' }],
+    };
+    expect(fingerprintObservedState(unknown)).not.toBe(fingerprintObservedState(disconnected));
+  });
 });

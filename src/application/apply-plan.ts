@@ -73,6 +73,10 @@ import { runEnvironmentTask } from '../domain/services/environment-task.service.
 import { buildDatabaseEnvVarsFromComponent } from '../domain/services/database-env.js';
 import { setupBootstrapEmail } from '../domain/services/bootstrap-email.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
+import {
+  applyProviderNativeDeploySourceAction,
+  isProviderNativeDeploySourceAction,
+} from '../domain/services/provider-native-deploy-source.service.js';
 import type { CommandContext } from './context.js';
 
 /**
@@ -591,6 +595,22 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environment: latestEnvironment,
         service,
         keys: stringArrayField(asRecord(action.metadata), 'keys'),
+      });
+    }
+    if (isProviderNativeDeploySourceAction(action)) {
+      const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      if (!latestEnvironment) {
+        return {
+          success: false,
+          status: 'blocked',
+          message: `Cannot disconnect the provider-native deploy source for ${action.resource.name}`,
+          error: `Environment "${envName}" is not tracked locally.`,
+        };
+      }
+      return applyProviderNativeDeploySourceAction({
+        project: applyProject,
+        environment: latestEnvironment,
+        action,
       });
     }
     if (action.resource.kind === 'database' && action.type === 'create') {

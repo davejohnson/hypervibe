@@ -37,6 +37,11 @@ export interface ObservedService {
   };
   /** Repo-linked deploy source, when the provider links services to a git repo. */
   source?: { repo?: string; branch?: string };
+  /**
+   * Provider-native repo-link observation is tri-state. `disconnected` is the
+   * only state that proves a CI-owned service cannot also auto-deploy pushes.
+   */
+  sourceState?: 'connected' | 'disconnected' | 'unknown';
   /** Env var names present on the live service. Values are never returned. */
   envVarKeys: string[];
   /** sha256 hex of each env var value, for drift comparison without exposure. */

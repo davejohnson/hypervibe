@@ -3091,6 +3091,47 @@ export class RailwayAdapter implements IProviderAdapter {
     }
   }
 
+  async disconnectDeploySource(params: { serviceId: string }): Promise<Receipt> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+
+    const mutation = gql`
+      mutation ServiceDisconnect($id: String!) {
+        serviceDisconnect(id: $id) {
+          id
+        }
+      }
+    `;
+
+    try {
+      const result = await this.client.request<{
+        serviceDisconnect?: { id?: string } | null;
+      }>(mutation, { id: params.serviceId });
+      const disconnectedId = result.serviceDisconnect?.id;
+      if (!disconnectedId || disconnectedId !== params.serviceId) {
+        return {
+          success: false,
+          message: 'Failed to disconnect Railway service deploy source',
+          error: disconnectedId
+            ? `Railway serviceDisconnect returned unexpected service id ${disconnectedId}.`
+            : 'Railway serviceDisconnect returned no service id.',
+        };
+      }
+      return {
+        success: true,
+        message: 'Railway service deploy source disconnected',
+        data: { serviceId: disconnectedId },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to disconnect Railway service deploy source',
+        error: this.describeError(error),
+      };
+    }
+  }
+
   private normalizeRailwayRecordName(record: RailwayCustomDomainDnsRecord): string | null {
     const fqdn = typeof record.fqdn === 'string' ? record.fqdn.trim().replace(/\.$/, '') : '';
     if (fqdn) {
@@ -3941,12 +3982,14 @@ export class RailwayAdapter implements IProviderAdapter {
       let healthCheckPath = instance?.healthcheckPath ?? undefined;
       let cronSchedule: string | undefined;
       let instanceSourceRepo: string | undefined;
+      let instanceSourceObserved = false;
       let status: ObservedService['status'] = 'unknown';
 
       if (environmentId) {
         try {
           const instanceDetails = await this.getServiceInstanceDetails(node.id, environmentId);
           if (instanceDetails) {
+            instanceSourceObserved = true;
             startCommand = instanceDetails.startCommand ?? startCommand;
             releaseCommand = this.normalizePreDeployCommand(instanceDetails.preDeployCommand);
             healthCheckPath = instanceDetails.healthcheckPath ?? healthCheckPath;
@@ -3983,8 +4026,13 @@ export class RailwayAdapter implements IProviderAdapter {
       // Use the instance source as primary, repoTriggers as fallback.
       const repoTrigger = node.repoTriggers?.edges?.[0]?.node;
       const cachedSource = bindings.services?.[observedServiceName]?.source;
-      const sourceRepo = instanceSourceRepo ?? repoTrigger?.repository ?? cachedSource?.repo;
+      const sourceRepo = instanceSourceRepo ?? repoTrigger?.repository;
       const sourceBranch = repoTrigger?.branch ?? cachedBranchForSource(cachedSource, sourceRepo);
+      const sourceState: ObservedService['sourceState'] = sourceRepo
+        ? 'connected'
+        : instanceSourceObserved
+          ? 'disconnected'
+          : 'unknown';
 
       services.push({
         name: observedServiceName,
@@ -4003,6 +4051,7 @@ export class RailwayAdapter implements IProviderAdapter {
         ...(sourceRepo
           ? { source: { repo: sourceRepo, ...(sourceBranch ? { branch: sourceBranch } : {}) } }
           : {}),
+        sourceState,
         envVarKeys,
         envVarHashes,
         status,
@@ -4261,6 +4310,7 @@ providerRegistry.register({
       nativeBranchDeploy: {
         needsGitHubAppAccess: true,
         githubAppInstallUrl: 'https://github.com/apps/railway-app/installations/new',
+        ciModeSourcePolicy: 'disconnect',
       },
     },
   },

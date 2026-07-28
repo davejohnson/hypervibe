@@ -329,6 +329,15 @@ must be deleted.
 
 For push deploys, `deploy.trigger: "ci"` is the portable default. It means Hypervibe manages generated GitHub Actions workflows that call provider APIs directly.
 
+CI ownership is exclusive. Planning must observe any provider-native repository
+source or push trigger that could deploy the same service outside the managed
+workflow. A confirmed native source is explicit drift: providers that expose a
+safe disconnect capability plan a provider-source disconnect action, while
+providers without one block with manual guidance. Unknown source observation
+also blocks; it must never be interpreted as disconnected. The CI workflow and
+applied-spec marker depend on this reconciliation, and a noop action performs
+no provider mutation.
+
 The standard team workflow is:
 
 1. short-lived feature branches,
