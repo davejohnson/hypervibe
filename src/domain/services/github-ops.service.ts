@@ -452,7 +452,7 @@ function buildDeploymentFailureEvidenceJob(environmentName: string): string {
   return `
   failure_evidence:
     needs: deploy
-    if: \${{ needs.deploy.result == 'failure' }}
+    if: \${{ always() && needs.deploy.result == 'failure' }}
     runs-on: ubuntu-latest
     permissions:
       actions: read

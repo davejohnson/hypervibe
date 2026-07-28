@@ -18,6 +18,26 @@ import { resolveBranchDeployTargets, buildBranchDeployWorkflow } from '../github
 import { SpecStore } from '../../spec/spec.store.js';
 
 type JsonObj = Record<string, unknown>;
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
+  ...args: string[]
+) => (...args: unknown[]) => Promise<unknown>;
+
+function extractGitHubScript(workflow: string, stepName: string): string {
+  const stepStart = workflow.indexOf(`      - name: ${stepName}\n`);
+  expect(stepStart).toBeGreaterThan(-1);
+  const marker = '          script: |\n';
+  const scriptStart = workflow.indexOf(marker, stepStart) + marker.length;
+  const nextStep = workflow.indexOf('\n      - ', scriptStart);
+  const nextJob = workflow.indexOf('\n\n  failure_evidence:', scriptStart);
+  const boundaries = [nextStep, nextJob].filter((index) => index >= 0);
+  const scriptEnd = boundaries.length === 0 ? workflow.length : Math.min(...boundaries);
+  return workflow
+    .slice(scriptStart, scriptEnd)
+    .split('\n')
+    .map((line) => line.startsWith('            ') ? line.slice(12) : line)
+    .join('\n')
+    .trimEnd();
+}
 
 async function callTool(client: Client, name: string, args: Record<string, unknown> = {}): Promise<JsonObj> {
   const result = await client.request(
@@ -43,6 +63,7 @@ describe('github tools', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -146,6 +167,10 @@ describe('github tools', () => {
     expect(workflow.content).toContain('DEPLOY_SHA: ${{ steps.deploy.outputs.sha }}');
     expect(workflow.content).toContain('uses: actions/github-script@v8');
     expect(workflow.content).toContain('Railway API \' + response.status + \' during \' + operation');
+    expect(workflow.content).toContain('return status === 429 || (status >= 500 && status <= 599)');
+    expect(workflow.content).toContain('async function railway(query, variables, options = {})');
+    expect(workflow.content).toContain('Retrying Railway');
+    expect(workflow.content).toContain("railway(deploymentQuery, { id: deploymentId }, { retryTransient: true })");
     expect(workflow.content).toContain('traceId=');
     expect(workflow.content).toContain('const deploymentData = await railway(deployMutation');
     expect(workflow.content).toContain('const deploymentId = requireString(deploymentData.serviceInstanceDeployV2');
@@ -156,6 +181,75 @@ describe('github tools', () => {
     expect(workflow.content).not.toContain('secrets.GHCR_TOKEN');
     expect(workflow.content).not.toContain('railway-github-action');
     expect(workflow.content).not.toContain('vars.MIGRATION_COMMAND');
+  });
+
+  it('retries transient Railway reads without replaying deploy mutations', async () => {
+    vi.useFakeTimers();
+    const target = {
+      environmentName: 'staging',
+      kind: 'staging' as const,
+      branch: 'main',
+      autoDeployOnPush: true,
+      serviceNames: ['web'],
+      providerProjectId: 'rail-project',
+      providerEnvironmentId: 'rail-env',
+      providerServiceIds: ['rail-web'],
+      providerJobNames: [],
+    };
+    const generated = buildBranchDeployWorkflow('railway', target, { includeStep: false });
+    const script = extractGitHubScript(generated.content, 'Deploy image to Railway');
+    const response = (status: number, data: unknown) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      text: async () => JSON.stringify(data),
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(response(200, {
+        data: {
+          service: {
+            id: 'rail-web',
+            serviceInstances: { edges: [{ node: { environmentId: 'rail-env' } }] },
+          },
+        },
+      }))
+      .mockResolvedValueOnce(response(200, { data: { serviceInstanceUpdate: true } }))
+      .mockResolvedValueOnce(response(200, { data: { serviceInstanceDeployV2: 'deployment-1' } }))
+      .mockResolvedValueOnce(response(503, { errors: [{ message: 'upstream connection termination' }] }))
+      .mockResolvedValueOnce(response(200, {
+        data: {
+          deployment: {
+            id: 'deployment-1',
+            status: 'SUCCESS',
+            diagnosis: null,
+            meta: null,
+          },
+        },
+      }));
+    const core = { info: vi.fn(), warning: vi.fn() };
+    const execute = new AsyncFunction('fetch', 'process', 'core', script);
+    const execution = execute(fetch, {
+      env: {
+        RAILWAY_API_TOKEN: 'test-token',
+        RAILWAY_ENVIRONMENT_ID: 'rail-env',
+        RAILWAY_SERVICE_IDS: 'rail-web',
+        IMAGE_REGISTRY_USERNAME: 'test-user',
+        IMAGE_REGISTRY_TOKEN: 'test-registry-token',
+        IMAGE_URI: 'ghcr.io/example/app:sha',
+        DEPLOY_SHA: '0123456789abcdef0123456789abcdef01234567',
+      },
+    }, core);
+
+    await vi.runAllTimersAsync();
+    await expect(execution).resolves.toBeUndefined();
+    const queries = fetch.mock.calls.map(([, request]) =>
+      JSON.parse(String((request as { body: string }).body)).query as string
+    );
+    expect(queries.filter((query) => query.includes('UpdateServiceImage'))).toHaveLength(1);
+    expect(queries.filter((query) => query.includes('DeployServiceImage'))).toHaveLength(1);
+    expect(queries.filter((query) => query.includes('DeploymentStatus'))).toHaveLength(2);
+    expect(core.warning).toHaveBeenCalledWith(
+      expect.stringContaining('Retrying Railway DeploymentStatus after API 503')
+    );
   });
 
   it('defaults to main auto-deploy for staging and manual main promotion for production', () => {

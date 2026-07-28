@@ -248,7 +248,7 @@ describe('generated deployment failure evidence', () => {
         const generated = workflow(provider, environmentName);
 
         expect(generated.content).toContain('  failure_evidence:\n    needs: deploy');
-        expect(generated.content).toContain("    if: ${{ needs.deploy.result == 'failure' }}");
+        expect(generated.content).toContain("    if: ${{ always() && needs.deploy.result == 'failure' }}");
         expect(generated.content).toContain('      actions: read');
         expect(generated.content).toContain('      - name: Capture sanitized deployment failure evidence');
         expect(generated.content).toContain('      - name: Upload deployment failure evidence');

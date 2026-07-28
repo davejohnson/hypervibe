@@ -81,6 +81,23 @@ describe('github desired state', () => {
     ]));
   });
 
+  it('requires declared evidence for external workflows used by autofix', () => {
+    const result = projectSpecSchema.safeParse(baseSpec({
+      actions: {
+        fix: { kind: 'autofix', sources: ['deploy'] },
+      },
+      externalWorkflows: {
+        deploy: { workflowName: 'Deploy staging' },
+      },
+    }));
+
+    expect(result.success).toBe(false);
+    const messages = result.success ? [] : result.error.issues.map((issue) => issue.message);
+    expect(messages).toContain(
+      'external workflow "deploy" must declare at least one failure artifact before autofix can consume it'
+    );
+  });
+
   it('keeps autofix pull requests and code-audit findings review-gated', () => {
     const result = projectSpecSchema.safeParse(baseSpec({
       actions: {

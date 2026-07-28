@@ -113,7 +113,12 @@ target branch. It always opens a draft pull request. The generated patch cannot
 change `.github/`, `.hypervibe/`, agent instruction files, or `.env` files, and
 its validation job receives no OpenAI or live-provider secret. Extra failure
 artifacts must be narrow relative result paths; credential-shaped paths and
-whole-workspace globs are rejected.
+whole-workspace globs are rejected. External workflow sources must declare at
+least one failure artifact. Artifact download and path verification fail closed:
+the repair agent never runs when its declared evidence is absent. When a patch
+is produced, the configured agent's bounded diagnosis and verification summary
+is included in the draft pull request; human-facing labels are not tied to one
+hardcoded model name.
 
 The dependency and security booleans are enable-only controls in this version:
 `true` asks Hypervibe to enable and verify the feature; `false` or omission

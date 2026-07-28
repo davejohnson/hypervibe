@@ -318,8 +318,8 @@ describe('hv_ci_status', () => {
       }],
     });
     vi.spyOn(GitHubAdapter.prototype, 'getWorkflowJobLogs').mockResolvedValue([
-      'Railway GraphQL error during DeployServiceImage variables={"serviceId":"svc-web","environmentId":"env-staging"}: Service Instance not found',
-      'Railway service svc-web has no service instance in environment env-staging. Re-run Hypervibe hv_plan/hv_apply.',
+      '##[error]Unhandled error: Error: Railway GraphQL error during DeployServiceImage variables={"serviceId":"svc-web","environmentId":"env-staging"}: Service Instance not found',
+      '##[error]Railway service svc-web has no service instance in environment env-staging. Re-run Hypervibe hv_plan/hv_apply.',
     ].join('\n'));
     const t = await makeClient();
 
@@ -334,6 +334,44 @@ describe('hv_ci_status', () => {
     const diagnostic = res.data.diagnostics.find((entry: { code: string }) => entry.code === 'RAILWAY_SERVICE_INSTANCE_MISSING');
     expect(diagnostic.summary).toContain('no service instance');
     expect(diagnostic.next).toContainEqual(expect.stringContaining('hv_plan'));
+    await t.close();
+  });
+
+  it('does not mistake generated script text for a missing service instance', async () => {
+    seedProject();
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunJobs').mockResolvedValue({
+      total_count: 1,
+      jobs: [{
+        id: 102,
+        run_id: 457,
+        name: 'deploy',
+        status: 'completed',
+        conclusion: 'failure',
+        started_at: '2026-07-04T18:16:30Z',
+        completed_at: '2026-07-04T18:17:00Z',
+        html_url: 'https://github.com/davejohnson/billforge/actions/runs/457/job/102',
+        steps: [],
+      }],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getWorkflowJobLogs').mockResolvedValue([
+      'script: |',
+      "  throw new Error('Railway service ' + serviceId",
+      "    + ' has no service instance in environment ' + environmentId);",
+      '##[error]Unhandled error: Error: Railway API 503 during DeploymentStatus: upstream connection termination',
+    ].join('\n'));
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', { project: 'billforge', include: ['logs'], runId: 457 });
+
+    expect(res.ok).toBe(true);
+    expect(res.data.diagnostics).not.toContainEqual(expect.objectContaining({
+      code: 'RAILWAY_SERVICE_INSTANCE_MISSING',
+    }));
+    expect(res.data.diagnostics).toContainEqual(expect.objectContaining({
+      code: 'RAILWAY_API_TRANSIENT_FAILURE',
+      jobId: 102,
+      jobName: 'deploy',
+    }));
     await t.close();
   });
 });

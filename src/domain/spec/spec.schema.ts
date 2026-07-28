@@ -306,7 +306,8 @@ export const githubSpecSchema = z.object({
       }
       seen.add(source);
       const managed = github.actions[source];
-      if (!managed && !github.externalWorkflows[source]) {
+      const external = github.externalWorkflows[source];
+      if (!managed && !external) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `autofix source "${source}" is not a managed check or external workflow`,
@@ -323,6 +324,12 @@ export const githubSpecSchema = z.object({
           code: z.ZodIssueCode.custom,
           message: `enabled autofix source "${source}" references a disabled check`,
           path: ['actions', id, 'sources'],
+        });
+      } else if (automation.enabled && external && external.failureArtifacts.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `external workflow "${source}" must declare at least one failure artifact before autofix can consume it`,
+          path: ['externalWorkflows', source, 'failureArtifacts'],
         });
       }
     }
