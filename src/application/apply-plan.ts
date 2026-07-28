@@ -1,4 +1,7 @@
-import { PlanService } from '../domain/plan/plan.service.js';
+import {
+  HOSTING_ENVIRONMENT_ENSURE_OPERATION,
+  PlanService,
+} from '../domain/plan/plan.service.js';
 import {
   ConvergeExecutor,
   fingerprintObservedState,
@@ -476,6 +479,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
         error: blockedReason,
       };
     }
+    if (action.metadata?.operation === HOSTING_ENVIRONMENT_ENSURE_OPERATION) {
+      return ensureHostingEnvironment(ctx, applyProject, envName, action);
+    }
     if (isCloudflareDomainRegistrationAction(action)) {
       return applyCloudflareDomainRegistration({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
@@ -907,6 +913,110 @@ async function ensureHostingProject(
       ...(environmentId ? { environmentId } : {}),
       created: receipt.data?.created === true,
     },
+  };
+}
+
+async function ensureHostingEnvironment(
+  ctx: CommandContext,
+  project: Project,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return {
+      success: false,
+      message: 'Environment not found locally',
+      error: `No local environment "${envName}"`,
+    };
+  }
+
+  const currentBindings = parseHostingBindings(environment);
+  if (!currentBindings.projectId) {
+    return {
+      success: false,
+      message: `Cannot ensure provider environment "${envName}"`,
+      error: 'Provider project binding is missing. The explicit project action must complete first.',
+    };
+  }
+
+  const adapterResult = await adapterFactory.getHostingAdapter(project);
+  if (
+    !adapterResult.success
+    || !adapterResult.adapter
+    || typeof adapterResult.adapter.ensureEnvironment !== 'function'
+  ) {
+    return {
+      success: false,
+      message: `Cannot ensure provider environment "${envName}"`,
+      error: adapterResult.error
+        ?? `${action.resource.provider} does not implement explicit environment lifecycle`,
+    };
+  }
+
+  const receipt = await adapterResult.adapter.ensureEnvironment(environment);
+  if (!receipt.success) {
+    return {
+      success: false,
+      message: receipt.message,
+      error: receipt.error,
+      data: receipt.data,
+    };
+  }
+
+  const receiptData = asRecord(receipt.data);
+  const projectId = stringField(receiptData, 'projectId') ?? currentBindings.projectId;
+  const environmentId = stringField(receiptData, 'environmentId');
+  const expectedEnvironmentId = stringField(asRecord(action.metadata), 'expectedEnvironmentId');
+  if (projectId !== currentBindings.projectId) {
+    return {
+      success: false,
+      message: receipt.message,
+      error: `${action.resource.provider} returned project ${projectId}, but the reviewed action targets bound project ${currentBindings.projectId}.`,
+      data: receipt.data,
+    };
+  }
+  if (!environmentId) {
+    return {
+      success: false,
+      message: receipt.message,
+      error: `${action.resource.provider} reported success without an environment ID.`,
+      data: receipt.data,
+    };
+  }
+  if (expectedEnvironmentId && environmentId !== expectedEnvironmentId) {
+    return {
+      success: false,
+      message: receipt.message,
+      error: `${action.resource.provider} returned environment ${environmentId}, but the reviewed action observed ${expectedEnvironmentId}.`,
+      data: receipt.data,
+    };
+  }
+
+  ctx.repos.environments.updatePlatformBindings(environment.id, {
+    provider: action.resource.provider,
+    projectId,
+    environmentId,
+  });
+  const created = receiptData?.created === true;
+  const data = {
+    provider: action.resource.provider,
+    projectId,
+    environmentId,
+    created,
+  };
+  if (created) {
+    return {
+      success: false,
+      status: 'pending',
+      message: `${receipt.message}. The provider environment is now bound; re-run hv_plan so storage, databases, and services are planned from fresh live observation.`,
+      data,
+    };
+  }
+  return {
+    success: true,
+    message: receipt.message,
+    data,
   };
 }
 

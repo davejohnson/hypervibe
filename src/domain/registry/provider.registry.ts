@@ -30,6 +30,14 @@ export interface ProviderOrchestrationMetadata {
      */
     shareAcrossEnvironments?: boolean;
   };
+  environment?: {
+    /**
+     * The provider models deploy environments as durable resources inside a
+     * shared project. Planning must ensure and bind this resource explicitly
+     * before any service, datastore, storage, or domain mutation can run.
+     */
+    separateResource?: boolean;
+  };
   diff?: {
     /** Source-less services are expected unless branch deploys are configured. */
     requiresBranchDeployForCode?: boolean;

@@ -7,6 +7,22 @@ function environment(): Environment {
 }
 
 describe('Railway storage buckets', () => {
+  it('refuses to create provider scaffolding from a storage action', async () => {
+    const request = vi.fn();
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: typeof request } }).client = { request };
+    const withoutEnvironment = {
+      ...environment(),
+      platformBindings: { projectId: 'rp' },
+    };
+
+    const receipt = await adapter.ensureStorageContext('app', withoutEnvironment);
+
+    expect(receipt.success).toBe(false);
+    expect(receipt.error).toContain('Apply project/environment scaffolding first');
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it('observes only bucket instances attached to the bound environment', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce({ project: {

@@ -677,13 +677,19 @@ describe('hv_plan / hv_status / hv_apply', () => {
     new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
-      platformBindings: { provider: 'railway', projectId: 'rp-1', services: { web: { serviceId: 'svc-1' } } },
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { web: { serviceId: 'svc-1' } },
+      },
     });
     mockObserved({
       provider: 'railway',
       observedAt: new Date().toISOString(),
       projectExists: true,
       projectId: 'rp-1',
+      environmentId: 're-1',
       services: [{
         name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: ['apreskeys.com'],
         config: { startCommand: 'npm start' },
@@ -765,13 +771,19 @@ describe('hv_plan / hv_status / hv_apply', () => {
     new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
-      platformBindings: { provider: 'railway', projectId: 'rp-1', services: { web: { serviceId: 'svc-1' } } },
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { web: { serviceId: 'svc-1' } },
+      },
     });
     mockObserved({
       provider: 'railway',
       observedAt: new Date().toISOString(),
       projectExists: true,
       projectId: 'rp-1',
+      environmentId: 're-1',
       services: [{
         name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
         config: { startCommand: 'npm start' },
@@ -1429,13 +1441,19 @@ describe('hv_plan / hv_status / hv_apply', () => {
     new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
-      platformBindings: { provider: 'railway', projectId: 'rp-1', services: { worker: { serviceId: 's-worker' } } },
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { worker: { serviceId: 's-worker' } },
+      },
     });
     mockObserved({
       provider: 'railway',
       observedAt: new Date().toISOString(),
       projectExists: true,
       projectId: 'rp-1',
+      environmentId: 're-1',
       services: [{
         name: 'worker',
         externalId: 's-worker',

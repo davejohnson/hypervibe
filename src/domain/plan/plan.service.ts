@@ -93,6 +93,8 @@ export interface EnvironmentPlan {
   blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions'; actionIds?: string[] }>;
 }
 
+export const HOSTING_ENVIRONMENT_ENSURE_OPERATION = 'hostingEnvironmentEnsure';
+
 function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Project {
   const gitRemoteUrl = spec.gitRemoteUrl?.trim();
   return gitRemoteUrl && gitRemoteUrl !== project.gitRemoteUrl
@@ -164,6 +166,7 @@ export class PlanService {
           storage: [],
           completeness: {
             project: 'unknown',
+            environment: 'unknown',
             services: 'unknown',
             databases: 'unknown',
             storage: 'unknown',
@@ -190,8 +193,19 @@ export class PlanService {
 
     try {
       const observed = await adapter.observe(environment);
+      const providerHasSeparateEnvironment = providerRegistry
+        .getMetadata(provider)
+        ?.orchestration
+        ?.environment
+        ?.separateResource === true;
       observed.completeness = {
         project: observed.completeness?.project ?? 'complete',
+        environment: observed.completeness?.environment
+          ?? (providerHasSeparateEnvironment
+            ? observed.environmentId
+              ? 'complete'
+              : 'unknown'
+            : 'complete'),
         services: observed.completeness?.services ?? (observed.partial ? 'unknown' : 'complete'),
         databases: observed.completeness?.databases ?? 'complete',
         storage: observed.completeness?.storage ?? 'complete',
@@ -238,9 +252,23 @@ export class PlanService {
 
       const storageProviders = Array.from(new Set(Object.values(environmentSpec.storage ?? {}).map((storage) => storage.provider)));
       const contexts = parseStorageProviderContexts(environment);
+      const hostingBindings = parseHostingBindings(environment);
       for (const storageProvider of storageProviders) {
-        if (storageProvider === provider && (observed.storage?.length ?? 0) > 0) continue;
-        const context = contexts[storageProvider];
+        if (
+          storageProvider === provider
+          && observed.completeness.storage === 'complete'
+        ) {
+          continue;
+        }
+        const context = contexts[storageProvider]
+          ?? (storageProvider === provider
+            && hostingBindings.projectId
+            && hostingBindings.environmentId
+            ? {
+                projectId: hostingBindings.projectId,
+                environmentId: hostingBindings.environmentId,
+              }
+            : undefined);
         if (!context) {
           observed.completeness.storage = 'unknown';
           observed.partial = true;
@@ -749,8 +777,6 @@ export class PlanService {
     const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
     const domainRegistration = await planCloudflareDomainRegistration({ environmentSpec, environment });
 
-    // Environment record creation is implicit in apply; surface it as an action
-    // when the local record is missing so the plan is complete.
     let actions: PlanAction[] = [
       ...(domainRegistration.action ? [domainRegistration.action] : []),
       ...nativeDeploySources.actions,
@@ -759,9 +785,64 @@ export class PlanService {
     if (domainRegistration.action) {
       actions = addDomainRegistrationDependency(actions, domainRegistration.action.id);
     }
-    if (!environment) {
+    const providerHasSeparateEnvironment = hostingMetadata
+      ?.orchestration
+      ?.environment
+      ?.separateResource === true;
+    const environmentActionId = `environment:${environmentName}`;
+    const projectActionId = `project:${environmentSpec.hosting.provider}`;
+    const projectAction = actions.find((action) =>
+      action.id === projectActionId && action.type !== 'noop'
+    );
+    const boundEnvironmentId = recordValue(effectiveBindingRecord, 'environmentId');
+    const observedEnvironmentId = observed?.environmentId;
+    const environmentObservationKnown = observed !== null
+      && observed.completeness?.environment !== 'unknown';
+    if (providerHasSeparateEnvironment) {
+      const needsBindingReconciliation = Boolean(
+        observedEnvironmentId
+        && (
+          !environment
+          || boundEnvironmentId !== observedEnvironmentId
+        )
+      );
+      const needsEnvironmentCreate = !observedEnvironmentId
+        && environmentObservationKnown;
+      const environmentObservationBlocked = !observedEnvironmentId
+        && !environmentObservationKnown
+        && !boundEnvironmentId;
+      if (
+        needsBindingReconciliation
+        || needsEnvironmentCreate
+        || environmentObservationBlocked
+      ) {
+        actions.unshift({
+          id: environmentActionId,
+          type: needsEnvironmentCreate ? 'create' : 'update',
+          resource: {
+            kind: 'environment',
+            name: environmentName,
+            provider: environmentSpec.hosting.provider,
+          },
+          verified: Boolean(observed && environmentObservationKnown),
+          reason: needsBindingReconciliation
+            ? `Bind the existing ${hostingMetadata?.displayName ?? environmentSpec.hosting.provider} environment "${environmentName}"`
+            : needsEnvironmentCreate
+              ? `Create the ${hostingMetadata?.displayName ?? environmentSpec.hosting.provider} environment "${environmentName}" inside the bound project`
+              : `Cannot verify whether the ${hostingMetadata?.displayName ?? environmentSpec.hosting.provider} environment "${environmentName}" exists`,
+          ...(projectAction ? { dependsOn: [projectAction.id] } : {}),
+          metadata: {
+            operation: HOSTING_ENVIRONMENT_ENSURE_OPERATION,
+            ...(observedEnvironmentId ? { expectedEnvironmentId: observedEnvironmentId } : {}),
+            ...(environmentObservationBlocked
+              ? { blockedReason: 'environment_observation_unknown' }
+              : {}),
+          },
+        });
+      }
+    } else if (!environment) {
       actions.unshift({
-        id: `environment:${environmentName}`,
+        id: environmentActionId,
         type: 'create',
         resource: { kind: 'environment', name: environmentName, provider: environmentSpec.hosting.provider },
         verified: observed !== null && !observed.partial,
@@ -799,6 +880,29 @@ export class PlanService {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
       if (firstServiceIndex === -1) actions.push(...followupActions);
       else actions.splice(firstServiceIndex, 0, ...followupActions);
+    }
+    const providerEnvironmentAction = actions.find((action) =>
+      action.id === environmentActionId
+      && action.metadata?.operation === HOSTING_ENVIRONMENT_ENSURE_OPERATION
+      && action.type !== 'noop'
+    );
+    if (providerEnvironmentAction) {
+      for (const action of actions) {
+        if (
+          action.id === providerEnvironmentAction.id
+          || action.type === 'noop'
+          || action.type === 'destroy'
+          || action.resource.provider !== environmentSpec.hosting.provider
+          || action.resource.kind === 'project'
+          || action.resource.kind === 'environment'
+        ) {
+          continue;
+        }
+        action.dependsOn = Array.from(new Set([
+          ...(action.dependsOn ?? []),
+          providerEnvironmentAction.id,
+        ]));
+      }
     }
     actions.push(...delegatedSecrets.actions);
     const stripeSync = serviceFilter

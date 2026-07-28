@@ -85,3 +85,87 @@ describe('RailwayAdapter.ensureProject', () => {
     expect(request).toHaveBeenCalledTimes(3);
   });
 });
+
+describe('RailwayAdapter.ensureEnvironment', () => {
+  it('binds an existing environment by name without creating one', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      project: {
+        id: 'railway-1',
+        name: 'billforge',
+        environments: {
+          edges: [{ node: { id: 'rail-env-staging', name: 'staging' } }],
+        },
+        buckets: { edges: [] },
+        services: { edges: [] },
+        plugins: { edges: [] },
+      },
+    });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: typeof request } }).client = { request };
+
+    const receipt = await adapter.ensureEnvironment(makeEnv({ projectId: 'railway-1' }));
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: {
+        projectId: 'railway-1',
+        environmentId: 'rail-env-staging',
+        created: false,
+      },
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates and verifies a missing environment in an already-bound project', async () => {
+    const projectWithoutStaging = {
+      id: 'railway-1',
+      name: 'billforge',
+      environments: { edges: [{ node: { id: 'rail-env-production', name: 'production' } }] },
+      buckets: { edges: [] },
+      services: { edges: [] },
+      plugins: { edges: [] },
+    };
+    const request = vi.fn()
+      .mockResolvedValueOnce({ project: projectWithoutStaging })
+      .mockResolvedValueOnce({
+        environmentCreate: { id: 'rail-env-staging', name: 'staging' },
+      })
+      .mockResolvedValueOnce({
+        project: {
+          ...projectWithoutStaging,
+          environments: {
+            edges: [
+              ...projectWithoutStaging.environments.edges,
+              { node: { id: 'rail-env-staging', name: 'staging' } },
+            ],
+          },
+        },
+      });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: typeof request } }).client = { request };
+
+    const receipt = await adapter.ensureEnvironment(makeEnv({ projectId: 'railway-1' }));
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: {
+        projectId: 'railway-1',
+        environmentId: 'rail-env-staging',
+        created: true,
+      },
+    });
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not create when environment observation fails', async () => {
+    const request = vi.fn().mockRejectedValueOnce(new Error('Railway unavailable'));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: typeof request } }).client = { request };
+
+    const receipt = await adapter.ensureEnvironment(makeEnv({ projectId: 'railway-1' }));
+
+    expect(receipt.success).toBe(false);
+    expect(receipt.error).toContain('Railway unavailable');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+});
