@@ -153,6 +153,51 @@ describe('GitHub repository infrastructure', () => {
     );
   });
 
+  it('force-updates a managed ref only when explicitly requested', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response(undefined, 204));
+
+    await connectedAdapter().updateRef(
+      'dave',
+      'app',
+      'heads/hypervibe/github-infrastructure',
+      'base123',
+      { force: true }
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.github.com/repos/dave/app/git/refs/heads%2Fhypervibe%2Fgithub-infrastructure',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ sha: 'base123', force: true }),
+      })
+    );
+  });
+
+  it('returns pull request provenance for an exact managed head and base', async () => {
+    const pull = {
+      number: 56,
+      html_url: 'https://github.com/dave/app/pull/56',
+      title: '[Hypervibe] Sync GitHub infrastructure',
+      body: 'Hypervibe generated this pull request.',
+      state: 'closed',
+      merged_at: '2026-07-28T01:42:56Z',
+      head: { ref: 'hypervibe/github-infrastructure', sha: 'head123' },
+      base: { ref: 'main', sha: 'base-at-open' },
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response([pull]));
+
+    await expect(connectedAdapter().listPullRequests('dave', 'app', {
+      state: 'closed',
+      head: 'dave:hypervibe/github-infrastructure',
+      base: 'main',
+    })).resolves.toEqual([pull]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.github.com/repos/dave/app/pulls?state=closed&per_page=100&head=dave%3Ahypervibe%2Fgithub-infrastructure&base=main',
+      expect.objectContaining({ method: 'GET' })
+    );
+  });
+
   it('sends branch-scoped file deletion metadata', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response(undefined, 204));
 
