@@ -86,6 +86,31 @@ describe('RailwayAdapter service instance updates', () => {
     });
   });
 
+  it('disconnects a provider-native repo source via serviceDisconnect', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      serviceDisconnect: {
+        id: 'svc-web',
+      },
+    });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.disconnectDeploySource({
+      serviceId: 'svc-web',
+    });
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: { serviceId: 'svc-web' },
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(String(request.mock.calls[0]?.[0])).toContain('serviceDisconnect(id: $id)');
+    expect(request.mock.calls[0]?.[1]).toEqual({
+      id: 'svc-web',
+    });
+  });
+
   it('attaches a custom domain and returns Railway-required DNS records', async () => {
     const request = vi.fn()
       // ensureServiceInstanceForEnvironment

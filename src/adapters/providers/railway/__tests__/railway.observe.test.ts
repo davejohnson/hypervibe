@@ -288,6 +288,7 @@ describe('RailwayAdapter observe', () => {
     );
 
     expect(result.services[0]?.source).toEqual({ repo: 'dave/seq-planner', branch: 'main' });
+    expect(result.services[0]?.sourceState).toBe('connected');
   });
 
   it('uses ServiceInstance.source as primary and cached binding branch when repoTriggers are absent', async () => {
@@ -318,6 +319,56 @@ describe('RailwayAdapter observe', () => {
     );
 
     expect(result.services[0]?.source).toEqual({ repo: 'dave/seq-planner', branch: 'main' });
+    expect(result.services[0]?.sourceState).toBe('connected');
+  });
+
+  it('does not let a cached source binding mask a live disconnected source', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(projectDetailsResponse)
+      .mockResolvedValueOnce({
+        serviceInstance: {
+          source: null,
+          latestDeployment: { status: 'SUCCESS' },
+        },
+      })
+      .mockResolvedValueOnce({ variables: {} });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({
+        projectId: 'rail-project-1',
+        environmentId: 'env-prod',
+        services: {
+          web: {
+            serviceId: 'svc-web',
+            source: { repo: 'dave/old-source', branch: 'main' },
+          },
+        },
+      })
+    );
+
+    expect(result.services[0]?.source).toBeUndefined();
+    expect(result.services[0]?.sourceState).toBe('disconnected');
+  });
+
+  it('preserves unknown deploy-source observation when the service-instance read fails', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(projectDetailsResponse)
+      .mockRejectedValueOnce(new Error('service instance read denied'))
+      .mockResolvedValueOnce({ variables: {} });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
+    );
+
+    expect(result.partial).toBe(true);
+    expect(result.services[0]?.source).toBeUndefined();
+    expect(result.services[0]?.sourceState).toBe('unknown');
   });
 
   it('marks a service with no deployments as status empty', async () => {

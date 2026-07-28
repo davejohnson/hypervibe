@@ -54,6 +54,13 @@ afterEach(() => {
 });
 
 function mockObservingAdapter(observed: ObservedState, extra: Record<string, unknown> = {}) {
+  const normalizedObserved: ObservedState = {
+    ...observed,
+    services: observed.services.map((service) => ({
+      ...service,
+      sourceState: service.sourceState ?? (service.source ? 'connected' : 'disconnected'),
+    })),
+  };
   vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
     success: true,
     adapter: {
@@ -76,7 +83,7 @@ function mockObservingAdapter(observed: ObservedState, extra: Record<string, unk
       ensureComponent: async () => { throw new Error('unused'); },
       deploy: async () => { throw new Error('unused'); },
       setEnvVars: async () => ({ success: true, message: 'ok' }),
-      observe: async () => observed,
+      observe: async () => normalizedObserved,
     },
   });
 }
@@ -828,6 +835,88 @@ describe('PlanService.plan', () => {
     expect(ids.indexOf('ci:github-actions:production:deploy-branch')).toBeGreaterThanOrEqual(0);
     expect(ids.indexOf('domain:apreskeys.com')).toBeGreaterThanOrEqual(0);
     expect(ids.indexOf('ci:github-actions:production:deploy-branch')).toBeLessThan(ids.indexOf('domain:apreskeys.com'));
+  });
+
+  it('makes CI workflow convergence depend on disconnecting a live Railway native deploy source', async () => {
+    project = new ProjectRepository().update(project.id, {
+      gitRemoteUrl: 'git@github.com:dave/invoice-perfect.git',
+    })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          envVars: {},
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-production',
+        services: {
+          web: {
+            serviceId: 'svc-web',
+            source: { repo: 'dave/invoice-perfect', branch: 'main' },
+          },
+        },
+      },
+    });
+    new ServiceRepository().create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { startCommand: 'npm start' },
+      envVarSpec: {},
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-production',
+      services: [{
+        name: 'web',
+        externalId: 'svc-web',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        source: { repo: 'dave/invoice-perfect', branch: 'main' },
+        sourceState: 'connected',
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const result = await new PlanService().plan(project, 'production');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const sourceAction = plan.actions.find((action) => action.id === 'service:web:deploy-source');
+    const ciAction = plan.actions.find((action) => action.id === 'ci:github-actions:production:deploy-branch');
+    const markerAction = plan.actions.find((action) => action.id === 'ci:github-actions:production:applied-spec-hash');
+
+    expect(sourceAction).toMatchObject({
+      type: 'update',
+      verified: true,
+      metadata: {
+        operation: 'providerNativeDeploySourceDisconnect',
+        serviceId: 'svc-web',
+      },
+    });
+    expect(ciAction?.dependsOn).toContain('service:web:deploy-source');
+    expect(markerAction?.dependsOn).toContain('service:web:deploy-source');
+    expect(plan.warnings).toContain(
+      'Railway provider-native deploy-source reconciliation is required before this environment can be considered CI-only.'
+    );
   });
 
   it('updates the CI workflow after creating a newly declared worker', async () => {

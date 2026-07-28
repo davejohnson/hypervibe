@@ -48,6 +48,11 @@ export interface ProviderOrchestrationMetadata {
   nativeBranchDeploy?: {
     needsGitHubAppAccess?: boolean;
     githubAppInstallUrl?: string;
+    /**
+     * Reconciliation policy when the desired trigger is CI but a live
+     * provider-native repository source is still connected.
+     */
+    ciModeSourcePolicy?: 'disconnect' | 'block';
   };
 }
 

@@ -159,6 +159,12 @@ export interface IProviderAdapter {
     keys: string[]
   ): Promise<Receipt>;
 
+  /**
+   * Disconnect a provider-native repository source so pushes cannot bypass a
+   * CI-owned deployment workflow.
+   */
+  disconnectDeploySource?(params: { serviceId: string }): Promise<Receipt>;
+
   getDeployStatus?(
     environment: Environment,
     deploymentId: string

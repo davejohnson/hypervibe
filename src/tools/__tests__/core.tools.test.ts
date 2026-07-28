@@ -1055,6 +1055,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
         config: { startCommand: 'npm start' },
         envVarKeys: [], envVarHashes: {},
+        sourceState: 'disconnected',
         status: 'running',
       }],
       databases: [],

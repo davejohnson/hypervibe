@@ -61,6 +61,7 @@ import {
   stripeManagedEnvKeys,
 } from '../services/stripe-env.service.js';
 import { planEmailSetup } from '../services/email-plan.service.js';
+import { planProviderNativeDeploySources } from '../services/provider-native-deploy-source.service.js';
 
 export interface PlanOptions {
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
@@ -718,15 +719,22 @@ export class PlanService {
       }
       : environmentSpec;
 
+    const hostingMetadata = providerRegistry.getMetadata(environmentSpec.hosting.provider);
     const diff = diffEnvironment({
       spec: specForDiff,
       envName: environmentName,
       observed,
       local,
-      providerBehavior: providerRegistry.getMetadata(environmentSpec.hosting.provider)?.orchestration?.diff,
+      providerBehavior: hostingMetadata?.orchestration?.diff,
       expectedSource: this.expectedDeploySource(projectForPlan, environmentName, environmentSpec),
       managedDatabaseEnvVars,
       managedQueueEnvVars,
+    });
+    const nativeDeploySources = planProviderNativeDeploySources({
+      environmentSpec,
+      observed,
+      providerDisplayName: hostingMetadata?.displayName ?? environmentSpec.hosting.provider,
+      ciModeSourcePolicy: hostingMetadata?.orchestration?.nativeBranchDeploy?.ciModeSourcePolicy,
     });
     const blocked = [
       ...this.preflight(environmentSpec, environmentName),
@@ -739,6 +747,7 @@ export class PlanService {
     // when the local record is missing so the plan is complete.
     let actions: PlanAction[] = [
       ...(domainRegistration.action ? [domainRegistration.action] : []),
+      ...nativeDeploySources.actions,
       ...diff.actions,
     ];
     if (domainRegistration.action) {
@@ -987,7 +996,7 @@ export class PlanService {
         : {}),
       actions,
       unmanaged: [...diff.unmanaged, ...storage.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...filterWarnings],
       ...(delegatedSecrets.inputRequired.length > 0 ? { inputRequired: delegatedSecrets.inputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };
