@@ -97,6 +97,10 @@ export function buildRailwayGitHubActionsSteps(target: BranchDeployTarget): Bran
   ];
   return {
     displayName: 'Railway',
+    reviewDetails: [
+      'Retries short-lived Railway network, rate-limit, and server errors while checking deployment progress.',
+      'Waits for every Railway service to finish and includes recent provider logs when a deployment fails.',
+    ],
     permissions: `    permissions:
       contents: read
       packages: write

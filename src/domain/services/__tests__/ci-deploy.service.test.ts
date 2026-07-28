@@ -616,7 +616,7 @@ describe('ci-deploy.service', () => {
       const createOrUpdateFile = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
         .mockResolvedValue({ created: false, updated: true });
       vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
-      vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
+      const createPullRequest = vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
         number: 42,
         html_url: 'https://github.com/davejohnson/billforge/pull/42',
       });
@@ -670,6 +670,19 @@ describe('ci-deploy.service', () => {
         expect.any(String),
         'hypervibe/github-infrastructure'
       );
+      expect(createPullRequest).toHaveBeenCalledWith(
+        'davejohnson',
+        'billforge',
+        expect.objectContaining({
+          body: expect.stringContaining('### Adds: production deployment'),
+        })
+      );
+      const pullRequestBody = createPullRequest.mock.calls[0]?.[2].body ?? '';
+      expect(pullRequestBody).toContain('deploys the web and worker services to Railway');
+      expect(pullRequestBody).toContain('full 40-character commit ID');
+      expect(pullRequestBody).toContain('Retries short-lived Railway');
+      expect(pullRequestBody).toContain('does not deploy production by itself');
+      expect(pullRequestBody).toContain('No passwords, API keys, or other secret values');
       expect(setRepositorySecret).not.toHaveBeenCalled();
       expect(envRepo.findById(environmentId)?.platformBindings.ci).toBeUndefined();
     });

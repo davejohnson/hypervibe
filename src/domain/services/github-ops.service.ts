@@ -762,6 +762,22 @@ ${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
     })
     : null;
   if (iosRelease) requiredSecrets = [...requiredSecrets, ...iosRelease.requiredSecrets];
+  const readableServiceNames = target.serviceNames.length <= 1
+    ? target.serviceNames.join('')
+    : `${target.serviceNames.slice(0, -1).join(', ')} and ${target.serviceNames.at(-1)}`;
+  const serviceLabel = target.serviceNames.length === 0
+    ? 'the configured services'
+    : target.serviceNames.length === 1
+      ? `the ${target.serviceNames[0]} service`
+      : `the ${readableServiceNames} services`;
+  const reviewDetails = [
+    'Requires a full 40-character commit ID so the deployment always points to one exact version of the code.',
+    `Builds and deploys ${serviceLabel}, then waits for ${providerName} to confirm the result.`,
+    ...(migrationStep ? ['Runs the declared database migration before deploying the services.'] : []),
+    ...(deployBlock.reviewDetails ?? []),
+    'Saves a release record showing the environment, commit, and services that were successfully deployed.',
+    'Uploads safe failure details when the deployment does not complete.',
+  ];
   return {
     template,
     templateName: `Deploy ${providerName} (${target.environmentName})`,
@@ -772,6 +788,14 @@ ${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
     path: `.github/workflows/${filename}`,
     content,
     ...(iosRelease ? { companionFiles: iosRelease.files } : {}),
+    review: {
+      title: `${target.environmentName} deployment`,
+      summary: `Updates the GitHub workflow that deploys ${serviceLabel} to ${providerName}.`,
+      details: reviewDetails,
+      mergeEffect: target.autoDeployOnPush
+        ? `Merging this PR may start a ${target.environmentName} deployment because pushes to ${target.branch} deploy automatically.`
+        : `Merging this PR does not deploy ${target.environmentName} by itself; that deployment still has to be started manually.`,
+    },
     requiredSecrets: Array.from(new Set(requiredSecrets)),
     requiredVariables: Array.from(new Set(requiredVariables)),
   };

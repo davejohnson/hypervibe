@@ -27,6 +27,12 @@ export interface BranchDeployWorkflow {
   path: string;
   content: string;
   companionFiles?: Array<{ path: string; content: string }>;
+  review: {
+    title: string;
+    summary: string;
+    details: string[];
+    mergeEffect: string;
+  };
   requiredSecrets: string[];
   requiredVariables: string[];
 }
@@ -37,6 +43,7 @@ export interface BranchDeployStepResult {
   requiredVariables: string[];
   permissions?: string;
   displayName?: string;
+  reviewDetails?: string[];
 }
 
 export interface CiWorkflowDiagnostic {

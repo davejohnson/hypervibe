@@ -127,6 +127,17 @@ describe('github tools', () => {
     expect(workflow.environment).toBe('production');
     expect(workflow.requiredSecrets).toEqual(['RAILWAY_API_TOKEN', 'IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN', 'DATABASE_URL']);
     expect(workflow.requiredVariables).toEqual(['RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_IDS']);
+    expect(workflow.review).toMatchObject({
+      title: 'production deployment',
+      summary: expect.stringContaining('Railway'),
+      mergeEffect: expect.stringContaining('started manually'),
+    });
+    expect(workflow.review.details).toEqual(expect.arrayContaining([
+      expect.stringContaining('full 40-character commit ID'),
+      expect.stringContaining('Retries short-lived Railway'),
+      expect.stringContaining('release record'),
+      expect.stringContaining('failure details'),
+    ]));
     expect(workflow.content).not.toContain('  push:\n    branches:');
     expect(workflow.content).toContain('workflow_dispatch:');
     expect(workflow.content).toContain('commit_sha:');
