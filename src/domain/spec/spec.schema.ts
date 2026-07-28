@@ -394,11 +394,60 @@ export const iosTestflightGroupSpecSchema = z.object({
   testers: z.array(z.string().email()).default([]),
 });
 
+const runtimeEnvVarNameSchema = z.string().regex(
+  /^[A-Za-z_][A-Za-z0-9_]*$/,
+  'runtime environment variable names must start with a letter or underscore and contain only letters, numbers, and underscores'
+);
+
+const repositoryRelativePathSchema = z.string().min(1).refine(
+  (value) => (
+    !value.startsWith('/')
+    && !value.startsWith('\\')
+    && !value.split(/[\\/]/).includes('..')
+  ),
+  'must be a repository-relative path without parent-directory traversal'
+);
+
+export const iosReleaseSpecSchema = z.object({
+  /** Server services whose successful deployment evidence gates this mobile release. */
+  services: z.array(z.string().min(1)).min(1),
+  trigger: z.enum(['manual', 'after-server-deploy']).default('after-server-deploy'),
+  build: z.object({
+    workingDirectory: repositoryRelativePathSchema.default('.'),
+    command: z.string().min(1).refine(
+      (value) => !value.includes('${{'),
+      'build command cannot contain GitHub expression interpolation'
+    ),
+    ipaPath: repositoryRelativePathSchema.refine(
+      (value) => value.toLowerCase().endsWith('.ipa'),
+      'ipaPath must end in .ipa'
+    ),
+    /** Existing GitHub environment secret names needed for signing/building. */
+    requiredSecrets: z.array(runtimeEnvVarNameSchema).default([]),
+  }).strict(),
+  testflight: z.object({
+    /** Names declared under ios.testflight.groups. */
+    groups: z.array(z.string().min(1)).min(1),
+    usesNonExemptEncryption: z.boolean().default(false),
+    submitForBetaReview: z.boolean().default(false),
+    /**
+     * Project-owned release implementation invoked only after the managed
+     * server/mobile provenance gate passes.
+     */
+    scriptPath: repositoryRelativePathSchema.refine(
+      (value) => /\.(?:mjs|js)$/.test(value),
+      'scriptPath must point to a repository-owned JavaScript module'
+    ).default('scripts/hypervibe-ios-release.mjs'),
+  }).strict(),
+}).strict();
+
 /**
  * iOS identity + TestFlight desired state. Capabilities and tester
  * membership converge additively (never disabled/removed); extras on the
- * live side are reported as unmanaged. Build upload, review submission,
- * and App Store metadata stay imperative (hv_testflight_*, hv_appstore_*).
+ * live side are reported as unmanaged. Release builds/uploads/distribution
+ * run in a managed GitHub Actions workflow tied to server deploy evidence.
+ * App Store metadata lives in project-owned Fastlane files. Final review
+ * submission remains an explicit, release-gated Hypervibe command.
  */
 export const iosSpecSchema = z.object({
   bundleId: z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9.-]*$/, 'bundleId must be a reverse-DNS identifier'),
@@ -410,6 +459,7 @@ export const iosSpecSchema = z.object({
   testflight: z.object({
     groups: z.record(z.string().min(1), iosTestflightGroupSpecSchema).default({}),
   }).optional(),
+  release: iosReleaseSpecSchema.optional(),
 }).superRefine((ios, ctx) => {
   for (const [name, group] of Object.entries(ios.testflight?.groups ?? {})) {
     if (group.publicLinkLimit !== undefined && !group.publicLinkEnabled) {
@@ -424,6 +474,15 @@ export const iosSpecSchema = z.object({
         code: z.ZodIssueCode.custom,
         message: 'internal groups cannot have a public link',
         path: ['testflight', 'groups', name, 'publicLinkEnabled'],
+      });
+    }
+  }
+  for (const [index, groupName] of (ios.release?.testflight.groups ?? []).entries()) {
+    if (!ios.testflight?.groups[groupName]) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `release TestFlight group "${groupName}" is not declared under ios.testflight.groups`,
+        path: ['release', 'testflight', 'groups', index],
       });
     }
   }
@@ -454,11 +513,6 @@ export const storageSpecSchema = z.object({
   injectInto: z.array(z.string().min(1)).min(1),
 }).strict();
 
-const runtimeEnvVarNameSchema = z.string().regex(
-  /^[A-Za-z_][A-Za-z0-9_]*$/,
-  'runtime environment variable names must start with a letter or underscore and contain only letters, numbers, and underscores'
-);
-
 export const stripePriceEnvBindingSpecSchema = z.object({
   /**
    * Stripe product id (prod_...) or product name. Name matching is exact
@@ -471,6 +525,104 @@ export const stripePriceEnvBindingSpecSchema = z.object({
   nickname: z.string().min(1).optional(),
   lookupKey: z.string().min(1).optional(),
 }).strict();
+
+const stripeCatalogIdSchema = z.string().regex(
+  /^[a-z][a-z0-9-]{0,62}$/,
+  'Stripe catalog ids must be lowercase slugs starting with a letter'
+);
+
+export const stripeCatalogPriceSpecSchema = z.object({
+  /** Integer amount in the currency's minor unit (for example cents). */
+  unitAmount: z.number().int().nonnegative(),
+  currency: z.string()
+    .regex(/^[A-Za-z]{3}$/, 'currency must be a three-letter code')
+    .transform((value) => value.toLowerCase())
+    .default('usd'),
+  interval: z.enum(['month', 'year']),
+  /** Hosting variable receiving this environment's provider price id. */
+  envVar: runtimeEnvVarNameSchema,
+}).strict();
+
+export const stripeCatalogProductSpecSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().min(1).optional(),
+  prices: z.record(stripeCatalogIdSchema, stripeCatalogPriceSpecSchema),
+}).strict().superRefine((product, ctx) => {
+  if (Object.keys(product.prices).length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Stripe catalog products require at least one recurring price',
+      path: ['prices'],
+    });
+  }
+});
+
+export const stripeCatalogSpecSchema = z.object({
+  products: z.record(stripeCatalogIdSchema, stripeCatalogProductSpecSchema),
+}).strict().superRefine((catalog, ctx) => {
+  if (Object.keys(catalog.products).length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Stripe catalog requires at least one product',
+      path: ['products'],
+    });
+  }
+  const envVars = new Map<string, string>();
+  for (const [productId, product] of Object.entries(catalog.products)) {
+    for (const [priceId, price] of Object.entries(product.prices)) {
+      const owner = `${productId}.${priceId}`;
+      const existing = envVars.get(price.envVar);
+      if (existing) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe catalog prices "${existing}" and "${owner}" both manage ${price.envVar}`,
+          path: ['products', productId, 'prices', priceId, 'envVar'],
+        });
+      } else {
+        envVars.set(price.envVar, owner);
+      }
+    }
+  }
+});
+
+export const STRIPE_DEFAULT_WEBHOOK_EVENTS = [
+  'checkout.session.completed',
+  'customer.subscription.created',
+  'customer.subscription.updated',
+  'customer.subscription.deleted',
+  'invoice.paid',
+  'invoice.payment_failed',
+  'customer.created',
+  'customer.updated',
+  'payment_intent.succeeded',
+  'payment_intent.payment_failed',
+] as const;
+
+export const stripeWebhookSpecSchema = z.object({
+  /** Public HTTPS endpoint that receives Stripe events. */
+  url: z.string().url().refine(
+    (value) => value.toLowerCase().startsWith('https://'),
+    'Stripe webhook URLs must use HTTPS'
+  ),
+  /** Exactly one service receives this endpoint's signing value. */
+  service: z.string().min(1),
+  /** Hosting variable that receives the signing value returned at endpoint creation. */
+  envVar: runtimeEnvVarNameSchema.default('STRIPE_WEBHOOK_SECRET'),
+  /** Stripe events delivered to this endpoint. */
+  events: z.array(z.string().min(1)).min(1).default([...STRIPE_DEFAULT_WEBHOOK_EVENTS]),
+}).strict().superRefine((webhook, ctx) => {
+  const seen = new Set<string>();
+  for (const [index, event] of webhook.events.entries()) {
+    if (seen.has(event)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Stripe webhook event "${event}" is listed more than once`,
+        path: ['events', index],
+      });
+    }
+    seen.add(event);
+  }
+});
 
 export const stripeEnvironmentSyncSpecSchema = z.object({
   /**
@@ -488,16 +640,35 @@ export const stripeEnvironmentSyncSpecSchema = z.object({
     secretKeyEnvVar: runtimeEnvVarNameSchema.default('STRIPE_SECRET_KEY'),
     publishableKeyEnvVar: runtimeEnvVarNameSchema.optional(),
   }).strict().optional(),
+  /** Hypervibe-owned SaaS product and recurring-price catalog for this environment. */
+  catalog: stripeCatalogSpecSchema.optional(),
   /**
-   * Hosting env var -> active Stripe price selector. Selectors must resolve to
-   * exactly one active price in the configured Stripe environment.
+   * Removed compatibility field. It remains in the parser only so old specs
+   * receive an actionable migration error instead of an unknown-key message.
    */
-  prices: z.record(runtimeEnvVarNameSchema, stripePriceEnvBindingSpecSchema).default({}),
+  prices: z.record(runtimeEnvVarNameSchema, stripePriceEnvBindingSpecSchema).optional(),
+  /**
+   * Named Stripe webhook endpoints. Hypervibe owns each endpoint lifecycle,
+   * projects its creation-only signing value to one service, and records only
+   * provider identity plus a value hash in bindings.
+   */
+  webhooks: z.record(z.string().min(1), stripeWebhookSpecSchema).default({}),
 }).strict().superRefine((stripe, ctx) => {
-  if (!stripe.credentials && Object.keys(stripe.prices).length === 0) {
+  if (
+    !stripe.credentials
+    && !stripe.catalog
+    && Object.keys(stripe.webhooks).length === 0
+  ) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: 'Stripe environment sync requires credentials and/or at least one price binding',
+      message: 'Stripe environment sync requires credentials, a price binding, and/or a webhook',
+    });
+  }
+  if (stripe.prices !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'payments.stripe.prices selectors have been removed. Declare owned recurring prices under payments.stripe.catalog.products and put envVar on each price.',
+      path: ['prices'],
     });
   }
   if (
@@ -515,13 +686,44 @@ export const stripeEnvironmentSyncSpecSchema = z.object({
       stripe.credentials.secretKeyEnvVar,
       ...(stripe.credentials.publishableKeyEnvVar ? [stripe.credentials.publishableKeyEnvVar] : []),
     ]) {
-      if (key in stripe.prices) {
+      const catalogEnvVars = new Set(
+        Object.values(stripe.catalog?.products ?? {})
+          .flatMap((product) => Object.values(product.prices).map((price) => price.envVar))
+      );
+      if (catalogEnvVars.has(key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `Stripe runtime credential variable "${key}" cannot also be a price binding`,
-          path: ['prices', key],
+          message: `Stripe runtime credential variable "${key}" cannot also be a catalog price binding`,
+          path: ['catalog'],
         });
       }
+    }
+  }
+
+  const webhookUrls = new Map<string, string>();
+  const webhookSlots = new Map<string, string>();
+  for (const [name, webhook] of Object.entries(stripe.webhooks)) {
+    const existingUrl = webhookUrls.get(webhook.url);
+    if (existingUrl) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Stripe webhooks "${existingUrl}" and "${name}" use the same URL`,
+        path: ['webhooks', name, 'url'],
+      });
+    } else {
+      webhookUrls.set(webhook.url, name);
+    }
+
+    const slot = `${webhook.service}\0${webhook.envVar}`;
+    const existingSlot = webhookSlots.get(slot);
+    if (existingSlot) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Stripe webhooks "${existingSlot}" and "${name}" both manage ${webhook.envVar} on service "${webhook.service}"`,
+        path: ['webhooks', name, 'envVar'],
+      });
+    } else {
+      webhookSlots.set(slot, name);
     }
   }
 });
@@ -578,6 +780,27 @@ export const environmentSpecSchema = z.object({
       message: 'domainRegistration requires domain',
       path: ['domainRegistration'],
     });
+  }
+  if (environment.ios?.release) {
+    for (const [index, serviceName] of environment.ios.release.services.entries()) {
+      if (!environment.services[serviceName]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `iOS release gate targets unknown service "${serviceName}"`,
+          path: ['ios', 'release', 'services', index],
+        });
+      }
+    }
+    if (
+      environment.deploy?.strategy !== 'branch'
+      || (environment.deploy.trigger ?? 'ci') !== 'ci'
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'ios.release requires deploy.strategy="branch" and deploy.trigger="ci" so mobile releases can consume server deploy evidence',
+        path: ['ios', 'release'],
+      });
+    }
   }
   if (environment.queues && Object.keys(environment.queues).length > 0
     && environment.hosting.provider === 'railway' && !environment.database) {
@@ -636,11 +859,15 @@ export const environmentSpecSchema = z.object({
   }
   const stripe = environment.payments?.stripe;
   if (stripe) {
-    const targetServices = stripe.services ?? Object.keys(environment.services);
-    if (targetServices.length === 0) {
+    const catalogEnvVars = Object.values(stripe.catalog?.products ?? {})
+      .flatMap((product) => Object.values(product.prices).map((price) => price.envVar));
+    const hasRuntimeProjection = Boolean(stripe.credentials) || catalogEnvVars.length > 0;
+    const targetServices = stripe.services
+      ?? (hasRuntimeProjection ? Object.keys(environment.services) : []);
+    if (hasRuntimeProjection && targetServices.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'Stripe environment sync requires at least one target service',
+        message: 'Stripe runtime environment sync requires at least one target service',
         path: ['payments', 'stripe', 'services'],
       });
     }
@@ -663,14 +890,39 @@ export const environmentSpecSchema = z.object({
       }
     }
 
+    for (const [webhookName, webhook] of Object.entries(stripe.webhooks)) {
+      if (!environment.services[webhook.service]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe webhook "${webhookName}" targets unknown service "${webhook.service}"`,
+          path: ['payments', 'stripe', 'webhooks', webhookName, 'service'],
+        });
+      }
+      if (
+        targetServices.includes(webhook.service)
+        && (
+          catalogEnvVars.includes(webhook.envVar)
+          || stripe.credentials?.secretKeyEnvVar === webhook.envVar
+          || stripe.credentials?.publishableKeyEnvVar === webhook.envVar
+        )
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe webhook "${webhookName}" cannot manage ${webhook.envVar} on service "${webhook.service}" because Stripe runtime sync also manages that variable`,
+          path: ['payments', 'stripe', 'webhooks', webhookName, 'envVar'],
+        });
+      }
+    }
+
     const managedKeys = new Set([
-      ...Object.keys(stripe.prices),
+      ...catalogEnvVars,
       ...(stripe.credentials
         ? [
           stripe.credentials.secretKeyEnvVar,
           ...(stripe.credentials.publishableKeyEnvVar ? [stripe.credentials.publishableKeyEnvVar] : []),
         ]
         : []),
+      ...Object.values(stripe.webhooks).map((webhook) => webhook.envVar),
     ]);
     for (const key of managedKeys) {
       if (key in environment.envVars) {
@@ -776,14 +1028,17 @@ export const projectSpecSchema = z.object({
         });
       }
       const stripe = environment.payments?.stripe;
+      const catalogEnvVars = Object.values(stripe?.catalog?.products ?? {})
+        .flatMap((product) => Object.values(product.prices).map((price) => price.envVar));
       const stripeManagedKeys = new Set([
-        ...Object.keys(stripe?.prices ?? {}),
+        ...catalogEnvVars,
         ...(stripe?.credentials
           ? [
             stripe.credentials.secretKeyEnvVar,
             ...(stripe.credentials.publishableKeyEnvVar ? [stripe.credentials.publishableKeyEnvVar] : []),
           ]
           : []),
+        ...Object.values(stripe?.webhooks ?? {}).map((webhook) => webhook.envVar),
       ]);
       if (stripeManagedKeys.has(key)) {
         ctx.addIssue({
@@ -799,9 +1054,14 @@ export const projectSpecSchema = z.object({
 export type ServiceSpec = z.infer<typeof serviceSpecSchema>;
 export type DatabaseSpec = z.infer<typeof databaseSpecSchema>;
 export type IosSpec = z.infer<typeof iosSpecSchema>;
+export type IosReleaseSpec = z.infer<typeof iosReleaseSpecSchema>;
 export type QueueSpec = z.infer<typeof queueSpecSchema>;
 export type StorageSpec = z.infer<typeof storageSpecSchema>;
 export type StripePriceEnvBindingSpec = z.infer<typeof stripePriceEnvBindingSpecSchema>;
+export type StripeCatalogPriceSpec = z.infer<typeof stripeCatalogPriceSpecSchema>;
+export type StripeCatalogProductSpec = z.infer<typeof stripeCatalogProductSpecSchema>;
+export type StripeCatalogSpec = z.infer<typeof stripeCatalogSpecSchema>;
+export type StripeWebhookSpec = z.infer<typeof stripeWebhookSpecSchema>;
 export type StripeEnvironmentSyncSpec = z.infer<typeof stripeEnvironmentSyncSpecSchema>;
 export type PaymentsSpec = z.infer<typeof paymentsSpecSchema>;
 export type IosTestflightGroupSpec = z.infer<typeof iosTestflightGroupSpecSchema>;

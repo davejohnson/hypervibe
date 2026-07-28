@@ -167,7 +167,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     permissions: [
       'Create a Team Key under Users and Access -> Integrations (only Account Holder or Admin can generate one).',
       'App Manager role covers TestFlight groups/testers, builds, metadata, and App Store submissions.',
-      'Use Admin role if Hypervibe should also register bundle IDs and enable capabilities (hv_appid_register and the ios spec section) — Certificates, Identifiers & Profiles access requires it.',
+      'Use Admin role if Hypervibe should register bundle IDs and enable capabilities declared in the ios spec — Certificates, Identifiers & Profiles access requires it.',
     ],
     credentialExample: 'hv_connect provider="appstoreconnect" credentialsRef="file:/absolute/path/appstoreconnect.json"',
     notes: [
@@ -290,9 +290,10 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   github: {
     provider: 'github',
     displayName: 'GitHub',
-    tokenType: 'fine-grained GitHub personal access token scoped to the selected repository; optional classic PAT with read:packages for private GHCR pulls',
-    setupUrl: 'https://github.com/settings/personal-access-tokens/new',
+    tokenType: 'classic GitHub personal access token with repo, workflow, and read:packages for the one-token setup; or a fine-grained repository token plus a separate classic package-read PAT for least privilege',
+    setupUrl: GITHUB_TOKEN_URLS.combined,
     setupUrls: [
+      { label: 'Create recommended combined classic token', url: GITHUB_TOKEN_URLS.combined },
       { label: 'Create recommended fine-grained repository token', url: 'https://github.com/settings/personal-access-tokens/new' },
       { label: 'Create optional classic GHCR package token', url: GITHUB_TOKEN_URLS.packageRead },
       { label: 'GitHub fine-grained permission reference', url: 'https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens' },
@@ -300,10 +301,13 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     permissions: [
       'Select the repository owner and only the repositories Hypervibe should manage. Grant Metadata read; Administration read/write; Actions read/write; Contents read/write; Issues read/write; Pull requests read/write; Secrets read/write; and Workflows read/write.',
       'When enabled in desired state, also grant Dependabot alerts read/write, Code scanning alerts read/write, and Secret scanning alerts read/write. Organization policy and product entitlement can still block these settings; Hypervibe reports that without claiming success.',
+      'For the one-token classic PAT setup, grant repo, workflow, and read:packages. Hypervibe uses it for API management and package/image reads.',
       `For private GHCR image pulls, packageReadToken must have read:packages — create it here: ${GITHUB_TOKEN_URLS.packageRead}. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.`,
     ],
-    credentialExample: 'hv_connect provider="github" scope="owner/repository" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}',
+    credentialExample: 'export NODE_AUTH_TOKEN="<classic PAT with repo, workflow, read:packages>"; hv_connect provider="github" scope="owner/repository" credentialsRef="env:NODE_AUTH_TOKEN"',
     notes: [
+      'NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN are accepted as aliases when resolving GitHub credentials. Use NODE_AUTH_TOKEN when npm also needs the token.',
+      'An explicitly referenced variable wins. If it is absent and multiple aliases contain different values, Hypervibe blocks instead of guessing.',
       'A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.',
       'Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.',
       `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
@@ -441,13 +445,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       "auth/token/lookup-self is used for verification; it is included in Vault's default policy.",
     ],
     credentialExample: 'hv_connect provider="vault" credentialsRef="file:/absolute/path/vault.json"',
-  },
-  xcode: {
-    provider: 'xcode',
-    displayName: 'Xcode',
-    tokenType: 'local Xcode installation and Apple signing credentials in Keychain',
-    permissions: ['Install Xcode command line tools and ensure the local Apple account/certificates/provisioning profiles can build/sign the app.'],
-    credentialExample: 'hv_connect provider="xcode" credentials={}',
   },
 };
 

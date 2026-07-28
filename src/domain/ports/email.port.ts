@@ -15,15 +15,6 @@ export interface EmailDomainAuth {
   }>;
 }
 
-export interface SendEmailInput {
-  to: string | string[];
-  from: string;
-  subject: string;
-  text?: string;
-  html?: string;
-  replyTo?: string;
-}
-
 export interface IEmailProvider {
   readonly name: string;
 
@@ -53,9 +44,4 @@ export interface IEmailProvider {
   validateDomainAuthentication(
     id: string | number
   ): Promise<{ valid: boolean; results: Record<string, { valid: boolean; reason?: string }> }>;
-
-  /**
-   * Send an email
-   */
-  sendEmail(input: SendEmailInput): Promise<{ success: boolean; messageId?: string; error?: string }>;
 }

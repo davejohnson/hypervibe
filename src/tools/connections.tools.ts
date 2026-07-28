@@ -20,14 +20,49 @@ import { projectField, confirmField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler } from '../application/results.js';
 import { splitFragment } from '../utils/split-fragment.js';
 
-function resolveLocalSecretRef(ref: string): string {
+function resolveEnvironmentCredential(
+  provider: string,
+  requestedName: string,
+  values: Record<string, string | undefined>
+): string | undefined {
+  if (values[requestedName] !== undefined) {
+    return values[requestedName];
+  }
+
+  const aliasGroup = providerRegistry
+    .getMetadata(provider)
+    ?.credentials
+    ?.environmentVariableAliases
+    ?.find((aliases) => aliases.includes(requestedName));
+  if (!aliasGroup) {
+    return undefined;
+  }
+
+  const candidates = aliasGroup
+    .filter((name) => values[name] !== undefined)
+    .map((name) => ({ name, value: values[name]! }));
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  if (new Set(candidates.map((candidate) => candidate.value)).size > 1) {
+    throw new Error(
+      `Environment variable ${requestedName} is not set and its accepted aliases `
+      + `(${aliasGroup.join(', ')}) contain different values. Set ${requestedName} explicitly.`
+    );
+  }
+  return candidates[0].value;
+}
+
+function resolveLocalSecretRef(ref: string, provider?: string): string {
   const trimmed = ref.trim();
   if (trimmed.startsWith('env:')) {
     const name = trimmed.slice('env:'.length).trim();
     if (!name) {
       throw new Error('credentialsRef env: reference is missing the environment variable name.');
     }
-    const value = process.env[name];
+    const value = provider
+      ? resolveEnvironmentCredential(provider, name, process.env)
+      : process.env[name];
     if (value === undefined) {
       throw new Error(`Environment variable ${name} is not set.`);
     }
@@ -87,10 +122,11 @@ function parseDotenvCredentialRef(
   if (credentialsMap) {
     const output: Record<string, unknown> = {};
     for (const [providerKey, envKey] of Object.entries(credentialsMap)) {
-      if (!(envKey in values)) {
+      const value = resolveEnvironmentCredential(provider, envKey, values);
+      if (value === undefined) {
         throw new Error(`credentialsMap key "${providerKey}" references missing .env variable "${envKey}".`);
       }
-      output[providerKey] = values[envKey];
+      output[providerKey] = value;
     }
     return output;
   }
@@ -98,10 +134,11 @@ function parseDotenvCredentialRef(
   if (!fragment) {
     throw new Error('credentialsRef dotenv: references must include #ENV_VAR, or pass credentialsMap for multiple values.');
   }
-  if (!(fragment in values)) {
+  const value = resolveEnvironmentCredential(provider, fragment, values);
+  if (value === undefined) {
     throw new Error(`.env variable "${fragment}" was not found.`);
   }
-  return scalarCredentialObject(provider, values[fragment], credentialsKey, `dotenv:${filePath}#${fragment}`);
+  return scalarCredentialObject(provider, value, credentialsKey, `dotenv:${filePath}#${fragment}`);
 }
 
 async function parseCredentialRef(
@@ -127,7 +164,7 @@ async function parseCredentialRef(
     return parseRawCredentialValue(provider, resolved.value, credentialsKey, 'credentialsRef secret');
   }
 
-  const raw = resolveLocalSecretRef(ref);
+  const raw = resolveLocalSecretRef(ref, provider);
   return parseRawCredentialValue(provider, raw, credentialsKey, 'credentialsRef');
 }
 
@@ -158,7 +195,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
   commands.register(
     'hv_connect',
-    'Manage provider connections. action="add" (default) stores credentials and immediately verifies them; action="verify" re-verifies an existing connection; action="remove" deletes one; action="prepare" runs one-time cloud account preparation (Cloud Run: enables required GCP APIs and grants deploy IAM roles using one-time admin credentials that are never stored — preview first, then pass confirm=true). Credentials are encrypted at rest and never returned. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if the user intentionally wants to enter credentials in chat.',
+    'Manage provider connections. action="add" (default) stores credentials and immediately verifies them; action="verify" re-verifies an existing connection; action="remove" deletes one; action="prepare" runs one-time cloud account preparation (Cloud Run: enables required GCP APIs and grants deploy IAM roles using one-time admin credentials that are never stored — preview first, then pass confirm=true). Credentials are encrypted at rest and never returned. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. For GitHub, NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN are aliases when only one distinct value is available. Raw credentials={...} is still accepted if the user intentionally wants to enter credentials in chat.',
     {
       provider: z.string().describe(`Provider name (available: ${providerNames.join(', ')}). action="remove" also accepts providers that are no longer registered so stale connections can be deleted.`),
       action: z.enum(['add', 'verify', 'remove', 'prepare']).optional().describe('What to do (default: "add")'),
@@ -344,6 +381,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         notes?: string[];
         credentialFields?: CredentialFieldDescriptor[];
         defaultScalarKey?: string;
+        environmentVariableAliases?: string[][];
       }>> = {};
       for (const p of providerRegistry.all()) {
         const category = p.metadata.category;
@@ -355,6 +393,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           displayName: p.metadata.displayName,
           ...(credentialFields !== undefined ? { credentialFields } : {}),
           ...(p.metadata.credentials?.defaultScalarKey ? { defaultScalarKey: p.metadata.credentials.defaultScalarKey } : {}),
+          ...(p.metadata.credentials?.environmentVariableAliases?.length
+            ? { environmentVariableAliases: p.metadata.credentials.environmentVariableAliases }
+            : {}),
           ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
           ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
           ...(guidance ? {

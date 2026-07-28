@@ -352,7 +352,8 @@ describe('hv_spec_set / hv_spec_get', () => {
     expect(set.hint).toContain('Zone -> Zone Settings -> Read or Edit');
     expect(set.hint).toContain('Zone -> DNS -> Edit.');
     expect(set.hint).toContain('scope="connection-check-app.com"');
-    expect(set.hint).toContain('fine-grained GitHub personal access token');
+    expect(set.hint).toContain('classic GitHub personal access token');
+    expect(set.hint).toContain('NODE_AUTH_TOKEN');
     expect(set.hint).toContain('https://github.com/settings/personal-access-tokens/new');
     expect(set.hint).toContain('Railway Account API token');
     expect(set.hint).toContain('https://railway.com/account/tokens');
@@ -1222,14 +1223,16 @@ describe('hv_plan / hv_status / hv_apply', () => {
         expect.stringContaining('packageReadToken must have read:packages'),
       ]),
     }));
-    expect(apply.hint).toContain('fine-grained GitHub personal access token');
+    expect(apply.hint).toContain('classic GitHub personal access token');
     expect(apply.hint).toContain('https://github.com/settings/personal-access-tokens/new');
     expect(apply.hint).toContain('https://github.com/settings/tokens/new?scopes=read:packages');
     expect(apply.hint).toContain('apiToken needs repo + workflow');
     expect(apply.hint).toContain('read:packages');
     expect(apply.hint).toContain('packageReadToken');
+    expect(apply.hint).toContain('credentialsRef="env:NODE_AUTH_TOKEN"');
+    expect(apply.hint).toContain('HYPERVIBE_GITHUB_TOKEN');
+    expect(apply.hint).toContain('HYPERVIBE_GITHUB_PACKAGES_TOKEN');
     expect(apply.hint).toContain('credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}');
-    expect(apply.hint).toContain('map both keys to the same classic PAT');
     expect(apply.hint).toContain('credentialsRef="file:/absolute/path/github.json"');
     expect(apply.next).toEqual(['hv_connect', 'hv_plan', 'hv_apply']);
     expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'RAILWAY_API_TOKEN', 'railway-token');

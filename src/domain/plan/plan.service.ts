@@ -376,6 +376,12 @@ export class PlanService {
     }
     if (environmentSpec.email.enabled) required.push({ provider: 'sendgrid' });
     if (environmentUsesGitHubActionsDeploy(environmentSpec)) required.push({ provider: 'github' });
+    if (environmentSpec.ios) {
+      required.push({
+        provider: 'appstoreconnect',
+        scopeHints: [environmentSpec.ios.bundleId],
+      });
+    }
     if (environmentSpec.payments?.stripe) {
       required.push({
         provider: 'stripe',
@@ -798,8 +804,10 @@ export class PlanService {
     const stripeSync = serviceFilter
       ? { actions: [], warnings: [], blocked: [], fingerprint: undefined }
       : await planStripeEnvironmentSync({
+        projectName: projectForPlan.name,
         environmentName,
         environmentSpec,
+        environment,
         observed,
       });
     for (const stripeAction of stripeSync.actions) {
@@ -810,6 +818,26 @@ export class PlanService {
         stripeAction.dependsOn = [
           ...(stripeAction.dependsOn ?? []),
           serviceAction.id,
+        ];
+      }
+    }
+    for (const stripeAction of stripeSync.actions) {
+      if (
+        stripeAction.type !== 'destroy'
+        || stripeAction.metadata?.operation !== 'stripeWebhookDestroy'
+        || typeof stripeAction.metadata.service !== 'string'
+      ) {
+        continue;
+      }
+      const serviceDestroy = actions.find((action) =>
+        action.resource.kind === 'service'
+        && action.resource.name === stripeAction.metadata?.service
+        && action.type === 'destroy'
+      );
+      if (serviceDestroy) {
+        serviceDestroy.dependsOn = [
+          ...(serviceDestroy.dependsOn ?? []),
+          stripeAction.id,
         ];
       }
     }

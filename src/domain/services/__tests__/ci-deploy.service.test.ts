@@ -315,6 +315,66 @@ describe('ci-deploy.service', () => {
       expect((result.action?.metadata?.workflow as { contentHash: string }).contentHash).toBe(sha256(workflow.content));
     });
 
+    it('plans managed iOS companion files and reports user-owned environment secrets', async () => {
+      const { project, envRepo, environmentId } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const environmentSpec = environmentSpecSchema.parse({
+        ...CI_ENVIRONMENT_SPEC,
+        ios: {
+          bundleId: 'com.example.billforge',
+          testflight: { groups: { beta: {} } },
+          release: {
+            services: ['web'],
+            build: {
+              workingDirectory: 'apps/ios',
+              command: 'make ipa',
+              ipaPath: 'build/Billforge.ipa',
+              requiredSecrets: ['MATCH_PASSWORD'],
+            },
+            testflight: { groups: ['beta'] },
+          },
+        },
+      });
+      new SpecStore().replace(project, {
+        version: 1,
+        project: project.name,
+        environments: { production: environmentSpec },
+      });
+      const appStore = new ConnectionRepository().create({
+        provider: 'appstoreconnect',
+        scope: 'com.example.billforge',
+        credentialsEncrypted: getSecretStore().encryptObject({
+          keyId: 'KEY1',
+          issuerId: 'ISSUER1',
+          privateKey: 'private-material-super-secret',
+        }),
+      });
+      new ConnectionRepository().updateStatus(appStore.id, 'verified');
+      vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+      vi.spyOn(GitHubAdapter.prototype, 'listEnvironmentSecrets').mockResolvedValue([]);
+
+      const result = await planGitHubActionsDeploy({
+        project,
+        environmentName: 'production',
+        environmentSpec,
+        environment: envRepo.findById(environmentId),
+      });
+
+      expect(result.action).toMatchObject({
+        type: 'create',
+        metadata: {
+          missingEnvironmentSecrets: ['MATCH_PASSWORD'],
+          workflow: {
+            companionPaths: [
+              '.github/workflows/hypervibe-ios-release-production.yml',
+            ],
+          },
+        },
+      });
+      expect(result.action?.reason).toContain('managed GitHub Actions release files');
+      expect(JSON.stringify(result.action)).not.toContain('private-material-super-secret');
+    });
+
     it('plans a noop when workflow content and synced secret hashes match the stored ci binding', async () => {
       const { project, envRepo, environmentId } = seedProjectWithSpec();
       seedVerifiedConnections();

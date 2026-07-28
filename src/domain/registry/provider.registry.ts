@@ -12,6 +12,11 @@ export interface ProviderMetadata {
   setupHelpUrl?: string;
   credentials?: {
     defaultScalarKey?: string;
+    /**
+     * Environment-variable names which may resolve the same credential value.
+     * Exact requested names win; aliases are only fallbacks.
+     */
+    environmentVariableAliases?: string[][];
   };
   orchestration?: ProviderOrchestrationMetadata;
 }

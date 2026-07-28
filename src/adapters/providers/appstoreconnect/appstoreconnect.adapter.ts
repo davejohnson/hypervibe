@@ -1,9 +1,5 @@
 import { z } from 'zod';
-import { spawn } from 'child_process';
-import { createSign, createPrivateKey, createHash } from 'crypto';
-import { writeFile, unlink, mkdir, readFile } from 'fs/promises';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { createSign, createPrivateKey } from 'crypto';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 
 // Credentials schema for App Store Connect API
@@ -264,53 +260,6 @@ export class AppStoreConnectAdapter {
   }
 
   /**
-   * Set export compliance on a build.
-   * Most apps should set usesNonExemptEncryption=false (standard HTTPS only).
-   */
-  async setExportCompliance(
-    buildId: string,
-    usesNonExemptEncryption: boolean,
-  ): Promise<void> {
-    await this.apiRequest('PATCH', `/builds/${buildId}`, {
-      data: {
-        type: 'builds',
-        id: buildId,
-        attributes: {
-          usesNonExemptEncryption,
-        },
-      },
-    });
-  }
-
-  /**
-   * Submit a build for beta app review (required for external TestFlight testers).
-   */
-  async submitForBetaReview(buildId: string): Promise<void> {
-    await this.apiRequest('POST', '/betaAppReviewSubmissions', {
-      data: {
-        type: 'betaAppReviewSubmissions',
-        relationships: {
-          build: {
-            data: {
-              type: 'builds',
-              id: buildId,
-            },
-          },
-        },
-      },
-    });
-  }
-
-  /**
-   * Add a build to a beta group for distribution.
-   */
-  async addBuildToBetaGroup(buildId: string, groupId: string): Promise<void> {
-    await this.apiRequest('POST', `/betaGroups/${groupId}/relationships/builds`, {
-      data: [{ type: 'builds', id: buildId }],
-    });
-  }
-
-  /**
    * List beta groups for an app.
    */
   async listBetaGroups(appId: string): Promise<AppStoreBetaGroup[]> {
@@ -527,7 +476,6 @@ export class AppStoreConnectAdapter {
     lastName?: string;
     appIds?: string[];
     groupIds?: string[];
-    buildIds?: string[];
   }): Promise<AppStoreBetaTester> {
     const relationships: Record<string, unknown> = {};
     if (input.appIds?.length) {
@@ -538,11 +486,6 @@ export class AppStoreConnectAdapter {
     if (input.groupIds?.length) {
       relationships.betaGroups = {
         data: input.groupIds.map((id) => ({ type: 'betaGroups', id })),
-      };
-    }
-    if (input.buildIds?.length) {
-      relationships.builds = {
-        data: input.buildIds.map((id) => ({ type: 'builds', id })),
       };
     }
 
@@ -585,7 +528,6 @@ export class AppStoreConnectAdapter {
     lastName?: string;
     appIds?: string[];
     groupIds?: string[];
-    buildIds?: string[];
   }): Promise<{ tester: AppStoreBetaTester; created: boolean }> {
     const existing = await this.findBetaTesterByEmail(input.email);
     if (existing) {
@@ -600,86 +542,6 @@ export class AppStoreConnectAdapter {
     await this.apiRequest('POST', `/betaTesters/${testerId}/relationships/betaGroups`, {
       data: groupIds.map((id) => ({ type: 'betaGroups', id })),
     });
-  }
-
-  async assignBetaTesterToBuilds(testerId: string, buildIds: string[]): Promise<void> {
-    if (buildIds.length === 0) return;
-    await this.apiRequest('POST', `/betaTesters/${testerId}/relationships/builds`, {
-      data: buildIds.map((id) => ({ type: 'builds', id })),
-    });
-  }
-
-  /**
-   * Wait for a build to finish processing, then set compliance.
-   * Returns the build once it's ready.
-   */
-  async waitForProcessingAndSetCompliance(options: {
-    appId?: string;
-    buildNumber?: string;
-    usesNonExemptEncryption?: boolean;
-    maxWaitMs?: number;
-    pollIntervalMs?: number;
-  }): Promise<{
-    build: AppStoreConnectBuild | null;
-    complianceSet: boolean;
-    error?: string;
-  }> {
-    const maxWait = options.maxWaitMs ?? 600000; // 10 minutes
-    const pollInterval = options.pollIntervalMs ?? 15000; // 15 seconds
-    const usesEncryption = options.usesNonExemptEncryption ?? false;
-    const startTime = Date.now();
-
-    while (Date.now() - startTime < maxWait) {
-      const builds = await this.listBuilds({ appId: options.appId, limit: 5 });
-
-      // Find the target build
-      let build: AppStoreConnectBuild | undefined;
-      if (options.buildNumber) {
-        build = builds.find(b => b.buildNumber === options.buildNumber);
-      } else {
-        // Most recent build
-        build = builds[0];
-      }
-
-      if (!build) {
-        // Build might not have appeared yet
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
-        continue;
-      }
-
-      if (build.processingState === 'PROCESSING') {
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
-        continue;
-      }
-
-      if (build.processingState === 'FAILED') {
-        return { build, complianceSet: false, error: 'Build processing failed' };
-      }
-
-      if (build.processingState === 'INVALID') {
-        return { build, complianceSet: false, error: 'Build is invalid' };
-      }
-
-      // Build is VALID - set compliance if not already set
-      if (build.usesNonExemptEncryption === null) {
-        try {
-          await this.setExportCompliance(build.id, usesEncryption);
-          build.usesNonExemptEncryption = usesEncryption;
-          return { build, complianceSet: true };
-        } catch (error) {
-          return {
-            build,
-            complianceSet: false,
-            error: error instanceof Error ? error.message : String(error),
-          };
-        }
-      }
-
-      // Compliance already set
-      return { build, complianceSet: false };
-    }
-
-    return { build: null, complianceSet: false, error: 'Timeout waiting for build processing' };
   }
 
   // ---------------------------------------------------------------------------
@@ -1105,86 +967,6 @@ export class AppStoreConnectAdapter {
   }
 
   /**
-   * Get a localization by locale, creating it if needed.
-   */
-  async getOrCreateAppStoreVersionLocalization(
-    appStoreVersionId: string,
-    locale: string
-  ): Promise<AppStoreVersionLocalization> {
-    const existing = await this.listAppStoreVersionLocalizations(appStoreVersionId);
-    const found = existing.find((l) => l.locale.toLowerCase() === locale.toLowerCase());
-    if (found) return found;
-
-    const created = await this.apiRequest<{
-      data: {
-        id: string;
-        attributes: {
-          locale: string;
-          description?: string;
-          keywords?: string;
-          promotionalText?: string;
-          marketingUrl?: string;
-          supportUrl?: string;
-          whatsNew?: string;
-        };
-      };
-    }>('POST', '/appStoreVersionLocalizations', {
-      data: {
-        type: 'appStoreVersionLocalizations',
-        attributes: { locale },
-        relationships: {
-          appStoreVersion: {
-            data: {
-              type: 'appStoreVersions',
-              id: appStoreVersionId,
-            },
-          },
-        },
-      },
-    });
-
-    return {
-      id: created.data.id,
-      locale: created.data.attributes.locale,
-      description: created.data.attributes.description,
-      keywords: created.data.attributes.keywords,
-      promotionalText: created.data.attributes.promotionalText,
-      marketingUrl: created.data.attributes.marketingUrl,
-      supportUrl: created.data.attributes.supportUrl,
-      whatsNew: created.data.attributes.whatsNew,
-    };
-  }
-
-  /**
-   * Update version localization metadata.
-   */
-  async updateAppStoreVersionLocalization(
-    localizationId: string,
-    fields: {
-      description?: string;
-      keywords?: string;
-      promotionalText?: string;
-      marketingUrl?: string;
-      supportUrl?: string;
-      whatsNew?: string;
-    }
-  ): Promise<void> {
-    const attributes = Object.fromEntries(
-      Object.entries(fields).filter(([, value]) => value !== undefined)
-    );
-
-    if (Object.keys(attributes).length === 0) return;
-
-    await this.apiRequest('PATCH', `/appStoreVersionLocalizations/${localizationId}`, {
-      data: {
-        type: 'appStoreVersionLocalizations',
-        id: localizationId,
-        attributes,
-      },
-    });
-  }
-
-  /**
    * List screenshot sets for a localization.
    */
   async listAppScreenshotSets(localizationId: string): Promise<AppScreenshotSet[]> {
@@ -1202,43 +984,6 @@ export class AppStoreConnectAdapter {
       id: set.id,
       screenshotDisplayType: set.attributes.screenshotDisplayType,
     }));
-  }
-
-  /**
-   * Get or create screenshot set for a display type.
-   */
-  async getOrCreateAppScreenshotSet(
-    localizationId: string,
-    screenshotDisplayType: string
-  ): Promise<AppScreenshotSet> {
-    const sets = await this.listAppScreenshotSets(localizationId);
-    const found = sets.find((s) => s.screenshotDisplayType === screenshotDisplayType);
-    if (found) return found;
-
-    const created = await this.apiRequest<{
-      data: {
-        id: string;
-        attributes: { screenshotDisplayType: string };
-      };
-    }>('POST', '/appScreenshotSets', {
-      data: {
-        type: 'appScreenshotSets',
-        attributes: { screenshotDisplayType },
-        relationships: {
-          appStoreVersionLocalization: {
-            data: {
-              type: 'appStoreVersionLocalizations',
-              id: localizationId,
-            },
-          },
-        },
-      },
-    });
-
-    return {
-      id: created.data.id,
-      screenshotDisplayType: created.data.attributes.screenshotDisplayType,
-    };
   }
 
   /**
@@ -1262,249 +1007,6 @@ export class AppStoreConnectAdapter {
     }));
   }
 
-  /**
-   * Delete a screenshot from a screenshot set.
-   */
-  async deleteAppScreenshot(appScreenshotId: string): Promise<void> {
-    await this.apiRequest('DELETE', `/appScreenshots/${appScreenshotId}`);
-  }
-
-  /**
-   * Upload a screenshot file to a screenshot set.
-   */
-  async uploadAppScreenshot(
-    appScreenshotSetId: string,
-    filePath: string,
-    fileName: string
-  ): Promise<{ screenshotId: string }> {
-    const file = await readFile(filePath);
-    const fileSize = file.length;
-
-    const reservation = await this.apiRequest<{
-      data: {
-        id: string;
-        attributes?: {
-          uploadOperations?: Array<{
-            method?: string;
-            url: string;
-            offset?: number;
-            length?: number;
-            requestHeaders?: Array<{ name: string; value: string }>;
-          }>;
-        };
-      };
-    }>('POST', '/appScreenshots', {
-      data: {
-        type: 'appScreenshots',
-        attributes: {
-          fileName,
-          fileSize,
-        },
-        relationships: {
-          appScreenshotSet: {
-            data: {
-              type: 'appScreenshotSets',
-              id: appScreenshotSetId,
-            },
-          },
-        },
-      },
-    });
-
-    const screenshotId = reservation.data.id;
-    const uploadOperations = reservation.data.attributes?.uploadOperations ?? [];
-    if (uploadOperations.length === 0) {
-      throw new Error('No upload operations returned by App Store Connect');
-    }
-
-    for (const op of uploadOperations) {
-      const offset = op.offset ?? 0;
-      const length = op.length ?? file.length;
-      const chunk = file.subarray(offset, offset + length);
-      const headers: Record<string, string> = {};
-      for (const h of op.requestHeaders ?? []) {
-        headers[h.name] = h.value;
-      }
-      const method = (op.method ?? 'PUT').toUpperCase();
-      const response = await fetch(op.url, {
-        method,
-        headers,
-        body: chunk,
-      });
-      if (!response.ok) {
-        throw new Error(`Screenshot upload failed (${response.status})`);
-      }
-    }
-
-    // Commit upload. Include checksum first; retry without checksum for ASC compatibility edge cases.
-    const checksum = createHash('md5').update(file).digest('hex');
-    try {
-      await this.apiRequest('PATCH', `/appScreenshots/${screenshotId}`, {
-        data: {
-          type: 'appScreenshots',
-          id: screenshotId,
-          attributes: {
-            uploaded: true,
-            sourceFileChecksum: checksum,
-          },
-        },
-      });
-    } catch {
-      await this.apiRequest('PATCH', `/appScreenshots/${screenshotId}`, {
-        data: {
-          type: 'appScreenshots',
-          id: screenshotId,
-          attributes: {
-            uploaded: true,
-          },
-        },
-      });
-    }
-
-    return { screenshotId };
-  }
-
-  // ---------------------------------------------------------------------------
-  // Native Upload via xcrun altool
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Upload an IPA to App Store Connect using xcrun altool.
-   */
-  async uploadViaAltool(ipaPath: string): Promise<{ success: boolean; output?: string; error?: string }> {
-    if (!this.credentials) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-
-    // altool requires the private key as a file path
-    const apiKeyPath = await this.writeApiKeyToTempFile();
-
-    try {
-      return await new Promise((resolve) => {
-        const args = [
-          'altool',
-          '--upload-app',
-          '-t', 'ios',
-          '-f', ipaPath,
-          '--apiKey', this.credentials!.keyId,
-          '--apiIssuer', this.credentials!.issuerId,
-        ];
-
-        const child = spawn('xcrun', args, {
-          env: {
-            ...process.env,
-          },
-        });
-
-        let stdout = '';
-        let stderr = '';
-
-        child.stdout?.on('data', (data) => {
-          stdout += data.toString();
-        });
-
-        child.stderr?.on('data', (data) => {
-          stderr += data.toString();
-        });
-
-        child.on('error', (error) => {
-          this.cleanupApiKeyFile(apiKeyPath).catch(() => {});
-          resolve({
-            success: false,
-            error: `Failed to run xcrun altool: ${error.message}. Ensure Xcode Command Line Tools are installed.`,
-          });
-        });
-
-        child.on('close', (code) => {
-          this.cleanupApiKeyFile(apiKeyPath).catch(() => {});
-
-          const combinedOutput = stdout + stderr;
-
-          if (code === 0) {
-            resolve({
-              success: true,
-              output: combinedOutput,
-            });
-          } else {
-            // Parse altool error messages
-            const errorMessage = this.parseAltoolError(combinedOutput) || stderr || stdout;
-            resolve({
-              success: false,
-              output: combinedOutput,
-              error: errorMessage,
-            });
-          }
-        });
-      });
-    } catch (error) {
-      await this.cleanupApiKeyFile(apiKeyPath).catch(() => {});
-      throw error;
-    }
-  }
-
-  /**
-   * Write the API key to a temp file in the format altool expects.
-   * altool looks for AuthKey_<keyId>.p8 in ~/.appstoreconnect/private_keys/ or ~/.private_keys/
-   */
-  private async writeApiKeyToTempFile(): Promise<string> {
-    if (!this.credentials) {
-      throw new Error('Not connected');
-    }
-
-    // altool expects keys in specific directories
-    const keyDir = join(process.env.HOME || tmpdir(), '.appstoreconnect', 'private_keys');
-    await mkdir(keyDir, { recursive: true });
-
-    const keyFileName = `AuthKey_${this.credentials.keyId}.p8`;
-    const keyPath = join(keyDir, keyFileName);
-
-    // Normalize the key format
-    let keyContent = this.credentials.privateKey;
-    if (!keyContent.includes('-----BEGIN')) {
-      keyContent = `-----BEGIN PRIVATE KEY-----\n${keyContent}\n-----END PRIVATE KEY-----`;
-    }
-
-    await writeFile(keyPath, keyContent, { mode: 0o600 });
-    return keyPath;
-  }
-
-  /**
-   * Clean up the temporary API key file.
-   */
-  private async cleanupApiKeyFile(keyPath: string): Promise<void> {
-    try {
-      await unlink(keyPath);
-    } catch {
-      // Ignore errors - file might not exist
-    }
-  }
-
-  /**
-   * Parse altool error output to provide helpful error messages.
-   */
-  private parseAltoolError(output: string): string | null {
-    // Common altool error patterns
-    if (output.includes('Unable to authenticate')) {
-      return 'API key authentication failed. Verify keyId, issuerId, and privateKey are correct.';
-    }
-    if (output.includes('Could not find the API key')) {
-      return 'API key file not found. The private key may be malformed.';
-    }
-    if (output.includes('ERROR ITMS-')) {
-      // Extract ITMS error
-      const match = output.match(/ERROR ITMS-\d+:\s*"([^"]+)"/);
-      if (match) {
-        return `App Store Connect: ${match[1]}`;
-      }
-    }
-    if (output.includes('The app is invalid')) {
-      return 'The IPA is invalid. Check that it was built for distribution (not development).';
-    }
-    if (output.includes('No suitable application records were found')) {
-      return 'App not found on App Store Connect. Create the app record first in App Store Connect.';
-    }
-    return null;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1543,17 +1045,6 @@ function derToRaw(derSig: Buffer): Buffer {
   return raw;
 }
 
-/**
- * Check if a command exists on the system
- */
-async function commandExists(cmd: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const child = spawn('which', [cmd], { shell: true });
-    child.on('close', (code) => resolve(code === 0));
-    child.on('error', () => resolve(false));
-  });
-}
-
 // Self-register with provider registry
 providerRegistry.register({
   metadata: {
@@ -1567,15 +1058,5 @@ providerRegistry.register({
     const adapter = new AppStoreConnectAdapter();
     adapter.connect(credentials as AppStoreConnectCredentials);
     return adapter;
-  },
-  ensureDependencies: async () => {
-    const errors: string[] = [];
-
-    // xcrun (Xcode Command Line Tools) is required for native altool uploads
-    if (!(await commandExists('xcrun'))) {
-      errors.push('Xcode Command Line Tools not found. Install with: xcode-select --install');
-    }
-
-    return { installed: [], errors };
   },
 });

@@ -12,7 +12,9 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { AppStoreConnectAdapter } from '../../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
-import { XcodeAdapter } from '../../adapters/providers/xcode/xcode.adapter.js';
+import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
+import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { SpecStore } from '../../domain/spec/spec.store.js';
 import { createToolContext } from '../context.js';
 import { registerHvAppstoreTools } from '../hv-appstore.tools.js';
 
@@ -31,13 +33,94 @@ afterEach(() => {
 });
 
 function seedConnection() {
-  new ConnectionRepository().create({
+  const appStore = new ConnectionRepository().create({
     provider: 'appstoreconnect',
     credentialsEncrypted: getSecretStore().encryptObject({
       keyId: 'KEY1',
       issuerId: 'ISSUER1',
       privateKey: '-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----',
     }),
+  });
+  new ConnectionRepository().updateStatus(appStore.id, 'verified');
+  const github = new ConnectionRepository().create({
+    provider: 'github',
+    scope: 'davejohnson/example',
+    credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'github-token' }),
+  });
+  new ConnectionRepository().updateStatus(github.id, 'verified');
+  const project = new ProjectRepository().create({
+    name: 'example',
+    defaultPlatform: 'railway',
+    gitRemoteUrl: 'https://github.com/davejohnson/example',
+  });
+  new SpecStore().replace(project, {
+    version: 1,
+    project: 'example',
+    gitRemoteUrl: 'https://github.com/davejohnson/example',
+    environments: {
+      production: {
+        hosting: { provider: 'railway' },
+        services: { web: {} },
+        deploy: { strategy: 'branch', trigger: 'ci' },
+        ios: {
+          bundleId: 'com.example.app',
+          testflight: { groups: { beta: {} } },
+          release: {
+            services: ['web'],
+            build: { command: 'make ipa', ipaPath: 'Example.ipa' },
+            testflight: { groups: ['beta'] },
+          },
+        },
+      },
+    },
+  } as never);
+  vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+    total_count: 1,
+    workflow_runs: [{
+      id: 101,
+      name: 'release',
+      status: 'completed',
+      conclusion: 'success',
+      created_at: '2026-07-01T00:00:00Z',
+      updated_at: '2026-07-01T00:10:00Z',
+      head_sha: 'a'.repeat(40),
+      head_branch: 'main',
+      event: 'workflow_run',
+      html_url: 'https://github.com/davejohnson/example/actions/runs/101',
+    }],
+  });
+  vi.spyOn(GitHubAdapter.prototype, 'listArtifacts').mockResolvedValue({
+    total_count: 2,
+    artifacts: [
+      {
+        id: 201,
+        name: `hypervibe-server-release-production-${'a'.repeat(40)}`,
+        expired: false,
+        created_at: '2026-07-01T00:05:00Z',
+        updated_at: '2026-07-01T00:05:00Z',
+        workflow_run: {
+          id: 101,
+          repository_id: 1,
+          head_repository_id: 1,
+          head_branch: 'main',
+          head_sha: 'b'.repeat(40),
+        },
+      },
+      {
+        id: 202,
+        name: `hypervibe-ios-release-production-${'a'.repeat(40)}`,
+        expired: false,
+        created_at: '2026-07-01T00:10:00Z',
+        updated_at: '2026-07-01T00:10:00Z',
+        workflow_run: {
+          id: 101,
+          repository_id: 1,
+          head_repository_id: 1,
+          head_branch: 'main',
+          head_sha: 'c'.repeat(40),
+        },
+      },
+    ],
   });
 }
 
@@ -103,43 +186,12 @@ describe('hv_appstore_status', () => {
   });
 });
 
-describe('hv_testflight_distribute', () => {
-  it('attaches the resolved build to a group and adds testers', async () => {
-    seedConnection();
-    vi.spyOn(AppStoreConnectAdapter.prototype, 'findAppByBundleId').mockResolvedValue(APP);
-    vi.spyOn(AppStoreConnectAdapter.prototype, 'waitForProcessingAndSetCompliance').mockResolvedValue({
-      build: BUILD,
-      complianceSet: true,
-    });
-    vi.spyOn(AppStoreConnectAdapter.prototype, 'getOrCreateBetaGroup').mockResolvedValue({ group: GROUP, created: true });
-    const addBuild = vi.spyOn(AppStoreConnectAdapter.prototype, 'addBuildToBetaGroup').mockResolvedValue(undefined);
-    vi.spyOn(AppStoreConnectAdapter.prototype, 'listBetaTesters').mockResolvedValue([]);
-    vi.spyOn(AppStoreConnectAdapter.prototype, 'getOrCreateBetaTester').mockResolvedValue({
-      tester: { id: 'tester-1', email: 'tester@example.com' },
-      created: true,
-    });
-    const t = await makeClient();
-
-    const res = await t.call('hv_testflight_distribute', {
-      appIdentifier: 'com.example.app',
-      testers: [{ email: 'tester@example.com' }],
-    });
-    expect(res.ok).toBe(true);
-    expect(res.data.build.id).toBe('build-1');
-    expect(res.data.group).toEqual(GROUP);
-    expect(res.data.groupCreated).toBe(true);
-    expect(res.data.testers).toHaveLength(1);
-    expect(res.data.actions).toContain('Added build 42 to beta group: External Testers');
-    expect(addBuild).toHaveBeenCalledWith('build-1', 'group-1');
-
-    const audit = new AuditRepository().findByAction('testflight.distribute');
-    expect(audit).toHaveLength(1);
-    expect(audit[0].resourceId).toBe('build-1');
-    await t.close();
-  });
-});
-
 const VERSION = { id: 'ver-1', versionString: '1.2.0', appStoreState: 'PREPARE_FOR_SUBMISSION', platform: 'IOS' };
+const SUBMIT_INPUT = {
+  project: 'example',
+  environment: 'production',
+  appIdentifier: 'com.example.app',
+};
 
 describe('hv_appstore_submit', () => {
   function stubSubmittableVersion() {
@@ -159,7 +211,7 @@ describe('hv_appstore_submit', () => {
       .mockResolvedValue({ id: 'rs-1', state: 'WAITING_FOR_REVIEW', platform: 'IOS' });
     const t = await makeClient();
 
-    const res = await t.call('hv_appstore_submit', { appIdentifier: 'com.example.app' });
+    const res = await t.call('hv_appstore_submit', SUBMIT_INPUT);
     expect(res.ok).toBe(true);
     expect(create).toHaveBeenCalledWith('app-1', 'IOS');
     expect(addItem).toHaveBeenCalledWith('rs-1', 'ver-1');
@@ -184,7 +236,7 @@ describe('hv_appstore_submit', () => {
       .mockResolvedValue({ id: 'rs-9', state: 'WAITING_FOR_REVIEW', platform: 'IOS' });
     const t = await makeClient();
 
-    const res = await t.call('hv_appstore_submit', { appIdentifier: 'com.example.app' });
+    const res = await t.call('hv_appstore_submit', SUBMIT_INPUT);
     expect(res.ok).toBe(true);
     expect(create).not.toHaveBeenCalled();
     expect(addItem).toHaveBeenCalledWith('rs-9', 'ver-1');
@@ -200,7 +252,7 @@ describe('hv_appstore_submit', () => {
     const addItem = vi.spyOn(AppStoreConnectAdapter.prototype, 'addReviewSubmissionItem');
     const t = await makeClient();
 
-    const res = await t.call('hv_appstore_submit', { appIdentifier: 'com.example.app' });
+    const res = await t.call('hv_appstore_submit', SUBMIT_INPUT);
     expect(res.ok).toBe(false);
     expect(res.error.message).toContain('already WAITING_FOR_REVIEW');
     expect(res.error.message).toContain('rs-9');
@@ -218,7 +270,7 @@ describe('hv_appstore_submit', () => {
     const submit = vi.spyOn(AppStoreConnectAdapter.prototype, 'submitReviewSubmission');
     const t = await makeClient();
 
-    const res = await t.call('hv_appstore_submit', { appIdentifier: 'com.example.app' });
+    const res = await t.call('hv_appstore_submit', SUBMIT_INPUT);
     expect(res.ok).toBe(false);
     expect(res.error.message).toContain('Could not add version ver-1 to review submission rs-9');
     expect(res.error.message).toContain('already added to another submission');
@@ -234,26 +286,11 @@ describe('hv_appstore_submit', () => {
       .mockResolvedValue([{ id: 'ver-0', versionString: '1.1.0', appStoreState: 'READY_FOR_SALE', platform: 'IOS' }]);
     const t = await makeClient();
 
-    const res = await t.call('hv_appstore_submit', { appIdentifier: 'com.example.app' });
+    const res = await t.call('hv_appstore_submit', SUBMIT_INPUT);
     expect(res.ok).toBe(false);
     expect(res.error.code).toBe('VALIDATION');
     expect(res.error.message).toContain('No version ready for submission');
     expect(res.error.details.currentVersions).toEqual([{ version: '1.1.0', state: 'READY_FOR_SALE', platform: 'IOS' }]);
-    await t.close();
-  });
-});
-
-describe('hv_xcode_deploy', () => {
-  it('dispatches action="devices" to the Xcode adapter', async () => {
-    vi.spyOn(XcodeAdapter.prototype, 'listDevices').mockResolvedValue([
-      { id: 'device-1', name: 'My iPhone', platform: 'iOS', osVersion: '19.0', available: true } as any,
-    ]);
-    const t = await makeClient();
-
-    const res = await t.call('hv_xcode_deploy', { action: 'devices' });
-    expect(res.ok).toBe(true);
-    expect(res.data.count).toBe(1);
-    expect(res.data.devices[0].id).toBe('device-1');
     await t.close();
   });
 });

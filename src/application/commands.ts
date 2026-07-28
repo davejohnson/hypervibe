@@ -15,7 +15,6 @@ import { registerHvObservabilityTools } from '../tools/hv-observability.tools.js
 import { registerHvDbTools } from '../tools/hv-db.tools.js';
 import { registerHvSecretsTools } from '../tools/hv-secrets.tools.js';
 import { registerHvEmailTools } from '../tools/hv-email.tools.js';
-import { registerHvPaymentsTools } from '../tools/hv-payments.tools.js';
 import { registerHvCiTools } from '../tools/hv-ci.tools.js';
 import { registerHvAppstoreTools } from '../tools/hv-appstore.tools.js';
 import { registerHvDevxTools } from '../tools/hv-devx.tools.js';
@@ -205,7 +204,6 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registerHvDbTools(registry, ctx);
   registerHvSecretsTools(registry, ctx);
   registerHvEmailTools(registry, ctx);
-  registerHvPaymentsTools(registry, ctx);
   registerHvCiTools(registry, ctx);
   registerHvAppstoreTools(registry, ctx);
   registerHvDevxTools(registry, ctx);

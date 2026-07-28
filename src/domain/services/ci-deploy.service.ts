@@ -13,15 +13,16 @@ import type { PlanAction } from '../plan/plan.types.js';
 import {
   buildBranchDeployWorkflow,
   getGitHubAdapter,
+  IOS_RELEASE_REQUIRED_SECRETS,
   resolveBranchDeployTargets,
   type BranchDeployWorkflow,
 } from './github-ops.service.js';
+import { getVerifiedAppStoreConnectCredentials } from './appstore-ops.service.js';
 import {
   compileManagedGitHubFiles,
   proposeGitHubInfrastructureFiles,
   resolveGitHubInfrastructureRepository,
   shouldPlanGitHubInfrastructure,
-  type ManagedGitHubFile,
 } from './github-infrastructure.service.js';
 import { formatConnectionGuidance, GITHUB_TOKEN_URLS } from './connection-guidance.js';
 import { resolveExternalDatabaseUrl } from './database-ops.service.js';
@@ -92,6 +93,8 @@ type WorkflowCiBinding = {
   contentHash?: string;
   syncedSecrets?: string[];
   syncedSecretHashes?: Record<string, string>;
+  syncedEnvironmentSecrets?: string[];
+  syncedEnvironmentSecretHashes?: Record<string, string>;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -171,6 +174,36 @@ function secretHashes(secrets: ProviderSecret[]): Record<string, string> {
   return Object.fromEntries(secrets.map((secret) => [secret.name, sha256(secret.value)]));
 }
 
+function workflowFiles(workflow: BranchDeployWorkflow): Array<{ path: string; content: string }> {
+  return [
+    { path: workflow.path, content: workflow.content },
+    ...(workflow.companionFiles ?? []),
+  ].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function workflowContentHash(workflow: BranchDeployWorkflow): string {
+  if (!workflow.companionFiles?.length) return sha256(workflow.content);
+  return sha256(JSON.stringify(
+    workflowFiles(workflow).map((file) => ({ path: file.path, hash: sha256(file.content) }))
+  ));
+}
+
+function appStoreSecretsForGitHubActions(environmentSpec: EnvironmentSpec): {
+  secrets: ProviderSecret[];
+  error?: string;
+} {
+  if (!environmentSpec.ios?.release) return { secrets: [] };
+  const resolved = getVerifiedAppStoreConnectCredentials(environmentSpec.ios.bundleId);
+  if ('error' in resolved) return { secrets: [], error: resolved.error };
+  return {
+    secrets: [
+      { name: 'APP_STORE_CONNECT_KEY_ID', value: resolved.credentials.keyId },
+      { name: 'APP_STORE_CONNECT_ISSUER_ID', value: resolved.credentials.issuerId },
+      { name: 'APP_STORE_CONNECT_PRIVATE_KEY', value: resolved.credentials.privateKey },
+    ],
+  };
+}
+
 function buildAction(params: {
   type: 'create' | 'update' | 'noop';
   provider: string;
@@ -181,6 +214,8 @@ function buildAction(params: {
   availableSecretNames: string[];
   missingProviderSecrets?: string[];
   staleProviderSecrets?: string[];
+  missingEnvironmentSecrets?: string[];
+  staleEnvironmentSecrets?: string[];
   dependsOn?: string[];
 }): PlanAction {
   return {
@@ -204,10 +239,18 @@ function buildAction(params: {
         requiredSecrets: params.workflow.requiredSecrets,
         requiredVariables: params.workflow.requiredVariables,
         contentHash: sha256(params.workflow.content),
+        aggregateContentHash: workflowContentHash(params.workflow),
+        companionPaths: (params.workflow.companionFiles ?? []).map((file) => file.path),
       },
       availableProviderSecrets: params.availableSecretNames,
       ...(params.missingProviderSecrets?.length ? { missingProviderSecrets: params.missingProviderSecrets } : {}),
       ...(params.staleProviderSecrets?.length ? { staleProviderSecrets: params.staleProviderSecrets } : {}),
+      ...(params.missingEnvironmentSecrets?.length
+        ? { missingEnvironmentSecrets: params.missingEnvironmentSecrets }
+        : {}),
+      ...(params.staleEnvironmentSecrets?.length
+        ? { staleEnvironmentSecrets: params.staleEnvironmentSecrets }
+        : {}),
     },
   };
 }
@@ -249,7 +292,12 @@ export async function planGitHubActionsDeploy(params: {
     return { warnings };
   }
 
-  const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider, target, migration);
+  const workflow = buildBranchDeployWorkflow(
+    environmentSpec.hosting.provider,
+    target,
+    migration,
+    environmentSpec.ios
+  );
   const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(environmentSpec.hosting.provider)
     .filter((name) => workflow.requiredSecrets.includes(name));
   const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider, { githubRepo: repo })
@@ -279,7 +327,12 @@ export async function planGitHubActionsDeploy(params: {
       + missingProviderSecretsMessage(environmentSpec.hosting.provider, missingProviderSecrets)
     );
   }
-  const contentHash = sha256(workflow.content);
+  const appStoreSecretResolution = appStoreSecretsForGitHubActions(environmentSpec);
+  if (appStoreSecretResolution.error) warnings.push(appStoreSecretResolution.error);
+  const appStoreSecrets = appStoreSecretResolution.secrets;
+  const appStoreSecretHashes = secretHashes(appStoreSecrets);
+  const requiredBuildSecrets = environmentSpec.ios?.release?.build.requiredSecrets ?? [];
+  const contentHash = workflowContentHash(workflow);
   const binding = ciBindings(environment)[workflow.path];
 
   const adapterResult = getGitHubAdapter(repo);
@@ -300,6 +353,9 @@ export async function planGitHubActionsDeploy(params: {
         verified: false,
         availableSecretNames,
         missingProviderSecrets,
+        missingEnvironmentSecrets: appStoreSecretResolution.error
+          ? [...IOS_RELEASE_REQUIRED_SECRETS]
+          : undefined,
         dependsOn: params.dependsOn,
       }),
       warnings,
@@ -307,9 +363,17 @@ export async function planGitHubActionsDeploy(params: {
   }
 
   let currentContent: string | null = null;
+  let anyWorkflowFileMissing = false;
   let workflowReadVerified = false;
   try {
-    currentContent = await adapterResult.adapter.getFileContent(owner, repoName, workflow.path);
+    const currentFiles = await Promise.all(workflowFiles(workflow).map(async (file) => ({
+      desired: file,
+      current: await adapterResult.adapter.getFileContent(owner, repoName, file.path),
+    })));
+    anyWorkflowFileMissing = currentFiles.some((file) => file.current === null);
+    currentContent = currentFiles.every((file) => file.current === file.desired.content)
+      ? workflow.content
+      : '__drift__';
     workflowReadVerified = true;
   } catch (error) {
     warnings.push(`Cannot read GitHub Actions workflow ${workflow.path}: ${error instanceof Error ? error.message : String(error)}`);
@@ -322,19 +386,52 @@ export async function planGitHubActionsDeploy(params: {
     && availableSecretHashes[name] !== undefined
     && syncedSecretHashes[name] !== availableSecretHashes[name]
   );
+  let environmentSecretNames: string[] = [];
+  if (environmentSpec.ios?.release) {
+    try {
+      environmentSecretNames = await adapterResult.adapter.listEnvironmentSecrets(
+        owner,
+        repoName,
+        environmentName
+      );
+    } catch (error) {
+      workflowReadVerified = false;
+      warnings.push(`Cannot observe GitHub environment secret names for ${environmentName}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const syncedEnvironmentSecrets = new Set(binding?.syncedEnvironmentSecrets ?? []);
+  const syncedEnvironmentSecretHashes = asRecord(binding?.syncedEnvironmentSecretHashes) ?? {};
+  const staleEnvironmentSecrets = appStoreSecrets
+    .filter((secret) =>
+      syncedEnvironmentSecrets.has(secret.name)
+      && syncedEnvironmentSecretHashes[secret.name] !== appStoreSecretHashes[secret.name]
+    )
+    .map((secret) => secret.name);
+  const missingEnvironmentSecrets = [
+    ...requiredBuildSecrets.filter((name) => !environmentSecretNames.includes(name)),
+    ...(appStoreSecretResolution.error ? [...IOS_RELEASE_REQUIRED_SECRETS] : []),
+  ];
+  const missingManagedEnvironmentSecretSync = appStoreSecrets.some((secret) =>
+    !environmentSecretNames.includes(secret.name)
+    || !syncedEnvironmentSecrets.has(secret.name)
+  ) || staleEnvironmentSecrets.length > 0;
   const missingSecretSync =
     missingProviderSecrets.length > 0
     || requiredProviderSecrets.some((name) => !syncedSecrets.has(name))
-    || staleProviderSecrets.length > 0;
-  const type = currentContent === null
+    || staleProviderSecrets.length > 0
+    || missingManagedEnvironmentSecretSync
+    || missingEnvironmentSecrets.length > 0;
+  const type = anyWorkflowFileMissing
     ? 'create'
     : params.bindingsWillChange
       ? 'update'
       : currentContent === workflow.content && !missingSecretSync
         ? 'noop'
         : 'update';
-  const reason = currentContent === null
-    ? `GitHub Actions deploy workflow ${workflow.path} is missing`
+  const reason = anyWorkflowFileMissing
+    ? workflow.companionFiles?.length
+      ? `One or more managed GitHub Actions release files are missing for ${environmentName}`
+      : `GitHub Actions deploy workflow ${workflow.path} is missing`
     : params.bindingsWillChange
       ? 'Service bindings will change during apply; regenerate the GitHub Actions deploy workflow after service convergence'
       : type === 'noop'
@@ -354,6 +451,8 @@ export async function planGitHubActionsDeploy(params: {
       availableSecretNames,
       missingProviderSecrets,
       staleProviderSecrets,
+      missingEnvironmentSecrets,
+      staleEnvironmentSecrets,
       dependsOn: type === 'noop' ? undefined : params.dependsOn,
     }),
     warnings,
@@ -407,7 +506,12 @@ export async function applyGitHubActionsDeploy(params: {
   if (!target) {
     return { success: false, message: 'No GitHub Actions deploy target', error: `No deploy target found for ${environmentName}.` };
   }
-  const workflow = buildBranchDeployWorkflow(environmentSpec.hosting.provider, target, migration);
+  const workflow = buildBranchDeployWorkflow(
+    environmentSpec.hosting.provider,
+    target,
+    migration,
+    environmentSpec.ios
+  );
   const requiredProviderSecrets = requiredProviderSecretNamesForGitHubActions(environmentSpec.hosting.provider)
     .filter((name) => workflow.requiredSecrets.includes(name));
   const availableSecrets = providerSecretsForGitHubActions(environmentSpec.hosting.provider, { githubRepo: repo })
@@ -420,10 +524,15 @@ export async function applyGitHubActionsDeploy(params: {
   }
   const availableSecretNames = availableSecrets.map((secret) => secret.name);
   const missingProviderSecrets = requiredProviderSecrets.filter((name) => !availableSecretNames.includes(name));
+  const appStoreSecretResolution = appStoreSecretsForGitHubActions(environmentSpec);
+  const appStoreSecrets = appStoreSecretResolution.secrets;
 
-  let currentWorkflowContent: string | null;
+  let currentWorkflowFiles: Array<{ path: string; content: string | null }>;
   try {
-    currentWorkflowContent = await adapter.getFileContent(owner, repoName, workflow.path);
+    currentWorkflowFiles = await Promise.all(workflowFiles(workflow).map(async (file) => ({
+      path: file.path,
+      content: await adapter.getFileContent(owner, repoName, file.path),
+    })));
   } catch (error) {
     return {
       success: false,
@@ -432,12 +541,10 @@ export async function applyGitHubActionsDeploy(params: {
       error: error instanceof Error ? error.message : String(error),
     };
   }
-  if (currentWorkflowContent !== workflow.content) {
-    const workflowFile: ManagedGitHubFile = {
-      path: workflow.path,
-      content: workflow.content,
-      hash: sha256(workflow.content),
-    };
+  const desiredWorkflowFiles = workflowFiles(workflow);
+  if (desiredWorkflowFiles.some((file) =>
+    currentWorkflowFiles.find((current) => current.path === file.path)?.content !== file.content
+  )) {
     const canBatchGitHubInfrastructure = shouldPlanGitHubInfrastructure(spec, environmentName)
       && spec.github
       && resolveGitHubInfrastructureRepository(project, spec) === repo;
@@ -445,7 +552,13 @@ export async function applyGitHubActionsDeploy(params: {
       ? compileManagedGitHubFiles(spec.github!)
       : [];
     const desiredFiles = new Map(repositoryFiles.map((file) => [file.path, file]));
-    desiredFiles.set(workflowFile.path, workflowFile);
+    for (const file of desiredWorkflowFiles) {
+      desiredFiles.set(file.path, {
+        path: file.path,
+        content: file.content,
+        hash: sha256(file.content),
+      });
+    }
     const proposal = await proposeGitHubInfrastructureFiles({
       repository: repo,
       desiredFiles: [...desiredFiles.values()].sort((left, right) => left.path.localeCompare(right.path)),
@@ -455,9 +568,43 @@ export async function applyGitHubActionsDeploy(params: {
       ...proposal,
       data: {
         workflow: workflow.path,
+        companionFiles: (workflow.companionFiles ?? []).map((file) => file.path),
         ...(proposal.data ?? {}),
       },
     };
+  }
+
+  if (environmentSpec.ios?.release) {
+    let environmentSecretNames: string[];
+    try {
+      environmentSecretNames = await adapter.listEnvironmentSecrets(owner, repoName, environmentName);
+    } catch (error) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Cannot observe GitHub environment secrets for ${environmentName}`,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    const missingBuildSecrets = environmentSpec.ios.release.build.requiredSecrets
+      .filter((name) => !environmentSecretNames.includes(name));
+    if (missingBuildSecrets.length > 0) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `The iOS release workflow is missing signing/build secrets for ${environmentName}`,
+        error: `Create these GitHub environment secrets, then re-run hv_plan: ${missingBuildSecrets.join(', ')}.`,
+        data: { workflow: workflow.path, environmentName, missingEnvironmentSecrets: missingBuildSecrets },
+      };
+    }
+    if (appStoreSecretResolution.error) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Cannot sync App Store Connect credentials to ${environmentName}`,
+        error: appStoreSecretResolution.error,
+      };
+    }
   }
 
   const syncedSecrets: ProviderSecret[] = [];
@@ -471,7 +618,27 @@ export async function applyGitHubActionsDeploy(params: {
     }
   }
 
-  persistWorkflowBinding(project, environmentName, workflow, syncedSecrets);
+  const syncedEnvironmentSecrets: ProviderSecret[] = [];
+  const environmentSecretErrors: Array<{ name: string; error: string }> = [];
+  for (const secret of appStoreSecrets) {
+    try {
+      await adapter.setEnvironmentSecret(owner, repoName, environmentName, secret.name, secret.value);
+      syncedEnvironmentSecrets.push(secret);
+    } catch (error) {
+      environmentSecretErrors.push({
+        name: secret.name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  persistWorkflowBinding(
+    project,
+    environmentName,
+    workflow,
+    syncedSecrets,
+    syncedEnvironmentSecrets
+  );
   const syncedSecretNames = syncedSecrets.map((secret) => secret.name);
   if (missingProviderSecrets.length > 0) {
     return {
@@ -489,10 +656,27 @@ export async function applyGitHubActionsDeploy(params: {
       data: { workflow: workflow.path, syncedSecrets: syncedSecretNames, secretErrors },
     };
   }
+  if (environmentSecretErrors.length > 0) {
+    return {
+      success: false,
+      message: `Synced ${workflow.path}, but some GitHub environment secrets failed`,
+      error: environmentSecretErrors.map((entry) => `${entry.name}: ${entry.error}`).join('; '),
+      data: {
+        workflow: workflow.path,
+        syncedEnvironmentSecrets: syncedEnvironmentSecrets.map((secret) => secret.name),
+        environmentSecretErrors,
+      },
+    };
+  }
   return {
     success: true,
-    message: `Synced GitHub Actions deploy workflow secrets for reviewed file ${workflow.path}`,
-    data: { workflow: workflow.path, syncedSecrets: syncedSecretNames },
+    message: `Synced GitHub Actions deploy and iOS release secrets for reviewed files`,
+    data: {
+      workflow: workflow.path,
+      companionFiles: (workflow.companionFiles ?? []).map((file) => file.path),
+      syncedSecrets: syncedSecretNames,
+      syncedEnvironmentSecrets: syncedEnvironmentSecrets.map((secret) => secret.name),
+    },
   };
 }
 
@@ -663,7 +847,8 @@ function persistWorkflowBinding(
   project: Project,
   environmentName: string,
   workflow: BranchDeployWorkflow,
-  syncedSecrets: ProviderSecret[]
+  syncedSecrets: ProviderSecret[],
+  syncedEnvironmentSecrets: ProviderSecret[] = []
 ): void {
   const envRepo = new EnvironmentRepository();
   const environment = envRepo.findByProjectAndName(project.id, environmentName)
@@ -676,9 +861,11 @@ function persistWorkflowBinding(
       deployBranch: {
         ...deployBranch,
         [workflow.path]: {
-          contentHash: sha256(workflow.content),
+          contentHash: workflowContentHash(workflow),
           syncedSecrets: syncedSecrets.map((secret) => secret.name),
           syncedSecretHashes: secretHashes(syncedSecrets),
+          syncedEnvironmentSecrets: syncedEnvironmentSecrets.map((secret) => secret.name),
+          syncedEnvironmentSecretHashes: secretHashes(syncedEnvironmentSecrets),
           updatedAt: new Date().toISOString(),
         },
       },

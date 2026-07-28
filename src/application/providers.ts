@@ -23,7 +23,6 @@ import '../adapters/providers/github/github.adapter.js';
 import '../adapters/providers/openai/openai.adapter.js';
 import '../adapters/providers/database/database.adapter.js';
 import '../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
-import '../adapters/providers/xcode/xcode.adapter.js';
 
 // Secret manager providers
 import '../adapters/providers/secretmanagers/vault.adapter.js';

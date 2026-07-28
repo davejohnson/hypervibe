@@ -37,49 +37,6 @@ describe('AppStoreConnectAdapter TestFlight management', () => {
     }]);
   });
 
-  it('sets export compliance when the target build has no preReleaseVersion relationship', async () => {
-    const { adapter, apiRequest } = adapterWithApiMock();
-    apiRequest
-      .mockResolvedValueOnce({
-        data: [{
-          id: 'build-7',
-          attributes: {
-            version: '7',
-            uploadedDate: '2026-06-03T18:00:00Z',
-            processingState: 'VALID',
-            usesNonExemptEncryption: null,
-          },
-        }],
-      })
-      .mockResolvedValueOnce({});
-
-    const result = await adapter.waitForProcessingAndSetCompliance({
-      appId: 'app-1',
-      buildNumber: '7',
-      usesNonExemptEncryption: false,
-      maxWaitMs: 1000,
-      pollIntervalMs: 1,
-    });
-
-    expect(result).toMatchObject({
-      complianceSet: true,
-      build: {
-        id: 'build-7',
-        buildNumber: '7',
-        usesNonExemptEncryption: false,
-      },
-    });
-    expect(apiRequest).toHaveBeenNthCalledWith(2, 'PATCH', '/builds/build-7', {
-      data: {
-        type: 'builds',
-        id: 'build-7',
-        attributes: {
-          usesNonExemptEncryption: false,
-        },
-      },
-    });
-  });
-
   it('creates beta groups linked to an app', async () => {
     const { adapter, apiRequest } = adapterWithApiMock();
     apiRequest.mockResolvedValueOnce({
@@ -150,7 +107,6 @@ describe('AppStoreConnectAdapter TestFlight management', () => {
       lastName: 'User',
       appIds: ['app-1'],
       groupIds: ['group-1'],
-      buildIds: ['build-1'],
     });
 
     expect(tester).toMatchObject({
@@ -174,29 +130,22 @@ describe('AppStoreConnectAdapter TestFlight management', () => {
           betaGroups: {
             data: [{ type: 'betaGroups', id: 'group-1' }],
           },
-          builds: {
-            data: [{ type: 'builds', id: 'build-1' }],
-          },
         },
       },
     });
   });
 
-  it('links existing testers to groups and builds', async () => {
+  it('links existing testers to groups', async () => {
     const { adapter, apiRequest } = adapterWithApiMock();
     apiRequest.mockResolvedValue({});
 
     await adapter.addBetaTesterToBetaGroups('tester-1', ['group-1', 'group-2']);
-    await adapter.assignBetaTesterToBuilds('tester-1', ['build-1']);
 
-    expect(apiRequest).toHaveBeenNthCalledWith(1, 'POST', '/betaTesters/tester-1/relationships/betaGroups', {
+    expect(apiRequest).toHaveBeenCalledWith('POST', '/betaTesters/tester-1/relationships/betaGroups', {
       data: [
         { type: 'betaGroups', id: 'group-1' },
         { type: 'betaGroups', id: 'group-2' },
       ],
-    });
-    expect(apiRequest).toHaveBeenNthCalledWith(2, 'POST', '/betaTesters/tester-1/relationships/builds', {
-      data: [{ type: 'builds', id: 'build-1' }],
     });
   });
 

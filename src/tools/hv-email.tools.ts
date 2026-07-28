@@ -376,39 +376,4 @@ export function registerHvEmailTools(commands: CommandRegistrar, ctx: CommandCon
       }
     })
   );
-
-  commands.register(
-    'hv_email_send',
-    'Send an email via SendGrid.',
-    {
-      to: z.string().describe('Recipient email address'),
-      subject: z.string().describe('Email subject'),
-      body: z.string().describe('Plain-text email body'),
-      from: z.string().optional().describe('Sender address — must belong to an authenticated domain or a verified single sender.'),
-    },
-    wrapCommandHandler(async ({ to, subject, body, from }) => {
-      if (!from) {
-        throw new HvError('VALIDATION', 'from is required.', {
-          hint: 'Pass a sender on an authenticated domain (hv_email_setup) or a verified single sender (action="sender-verify").',
-        });
-      }
-      const sgResult = getSendGridAdapter();
-      if ('error' in sgResult) {
-        return commandError('MISSING_CONNECTION', sgResult.error, {
-          details: { connectionSetup: connectionSetupDetails('sendgrid') },
-        });
-      }
-      const result = await sgResult.adapter.sendEmail({ to, from, subject, text: body });
-      if (!result.success) {
-        return commandError('PROVIDER_ERROR', result.error ?? 'SendGrid send failed');
-      }
-      ctx.repos.audit.create({
-        action: 'sendgrid.email_sent',
-        resourceType: 'email',
-        resourceId: to,
-        details: { to, from, subject },
-      });
-      return commandSuccess({ sent: true, to, from, messageId: result.messageId });
-    })
-  );
 }

@@ -211,6 +211,15 @@ Provider credentials and required external connections should be discovered as e
 
 Secrets never cross output boundaries. Secret values may be accepted through `credentialsRef`, encrypted into plans, or stored as verified connections, but they must not be printed in tool output, committed specs, warnings, logs, receipts, or test snapshots.
 
+Provider-declared environment-variable aliases may simplify local credential
+references without duplicating secret values. Exact requested names win. When
+an exact name is absent, all populated aliases must contain one distinct value
+or resolution blocks without returning any value. GitHub declares
+`NODE_AUTH_TOKEN`, `HYPERVIBE_GITHUB_TOKEN`, and
+`HYPERVIBE_GITHUB_PACKAGES_TOKEN` as one alias group; `NODE_AUTH_TOKEN` is the
+recommended combined-token name because npm must resolve it before Hypervibe
+starts.
+
 Connection guidance is part of the product contract, not incidental copy. Every provider or secret-manager connection should have a `ConnectionGuidance` entry in `src/domain/services/connection-guidance.ts`, and token/permission errors should route through `formatConnectionGuidance(...)` whenever possible.
 
 When adding or changing token guidance, include all of these details:
@@ -293,7 +302,7 @@ the later CI run and `hv_health` own that verification. New resources with no
 existing image may still require provider bootstrap before CI can target them,
 and receipts must report that honestly.
 
-## Stripe Environment Sync
+## Stripe Desired State
 
 Stripe sandboxes are isolated environments with their own API keys and object
 ids. Model the relationship explicitly through
@@ -306,24 +315,79 @@ ids. Model the relationship explicitly through
   Legacy global sandbox/live credentials remain a compatibility fallback, but
   cannot represent distinct development and staging sandboxes.
 - Runtime credential projection is explicit through
-  `payments.stripe.credentials`; Stripe price ids are selected declaratively
-  through `payments.stripe.prices`.
-- Price selectors must resolve to exactly one active product and one active
-  price. Ambiguity is blocked instead of silently choosing an id.
-- `hv_plan` observes Stripe values internally and compares only hashes against
-  hosting observation. Plans, warnings, bindings, receipts, and tool output
-  contain managed key names and selector diagnostics, never Stripe key values
-  or resolved runtime values.
+  `payments.stripe.credentials`. Hypervibe-owned products and recurring prices
+  are declared under `payments.stripe.catalog.products`; each price declares
+  the hosting env key that receives its provider id.
+- Named webhook endpoints are declared through `payments.stripe.webhooks`.
+  Each webhook owns one HTTPS URL, event set, target service, and hosting env
+  key. The Stripe endpoint and its creation-only signing value projection are
+  one plan/apply lifecycle action; there is no imperative webhook setup tool.
+- Catalog identity resolves by durable provider id first. An unbound exact
+  metadata/name/config match is an explicit confirm-gated adoption candidate;
+  multiple candidates block instead of choosing one. Unmanaged products and
+  prices are untouched.
+- Product display fields are mutable. Recurring price amount, currency, and
+  interval are immutable: changing them plans a replacement, makes hosting
+  consume the replacement, and only then permits confirm-gated archival of the
+  previous price. Removal follows the same hosting-before-archive order.
+- `hv_plan` observes Stripe catalog values and webhook endpoints internally and
+  compares only hashes against hosting observation. Webhook identity resolves
+  by a durable bound endpoint id first. URL matches are adoption candidates;
+  zero, one, and multiple matches remain distinct plan outcomes.
+- Plans, warnings, bindings, receipts, and tool output contain managed key
+  names, provider ids, catalog diagnostics, and one-way hashes, never Stripe
+  keys, webhook signing values, or resolved runtime values.
 - `hv_apply` resolves the Stripe connection again and routes runtime changes
-  through the hosting adapter. For CI-triggered branch deploys, supported
-  adapters defer code deployment so the exact-SHA workflow remains the release
-  boundary.
+  through the hosting adapter. Webhook creation syncs the returned signing
+  value before recording the binding. A failed hosting sync deletes and
+  verifies the new endpoint; if rollback cannot be verified, the provider id
+  is recorded so the next plan cannot orphan or duplicate it.
+- Webhook adoption, replacement/rotation, and deletion require exact action-id
+  confirmation. Deletion verifies provider absence before removing the hosting
+  variable and local binding. Noop actions make no Stripe or hosting calls.
+- For CI-triggered branch deploys, supported adapters defer code deployment so
+  the exact-SHA workflow remains the release boundary.
 
 Stripe-managed runtime keys cannot also come from ordinary `envVars`, env-file
 includes, delegated secret slots, overrides, or removal tombstones. Removing
-or renaming a managed key requires changing the Stripe sync declaration first,
-then using the ordinary two-release retirement process if the old provider key
-must be deleted.
+or renaming a catalog key is part of its reviewed catalog lifecycle; ordinary
+unrelated runtime variables continue to use the two-release retirement process.
+
+## iOS Release Desired State
+
+Bundle IDs, capabilities, TestFlight groups/testers, and release workflows live
+under each environment's `ios` desired state. There are no imperative bundle-ID,
+TestFlight upload, or TestFlight distribution commands.
+
+- `ios.release` requires a CI-triggered branch deploy. It names the server
+  services that gate the mobile release, the repository-relative build command
+  and IPA path, required GitHub environment secret names, TestFlight groups,
+  export-compliance answer, and optional beta-review submission.
+- Hypervibe manages the server deploy workflow, iOS release workflow, and App
+  Store Connect credentials through plan/apply. The app repository owns the
+  release implementation named by `ios.release.testflight.scriptPath`; the
+  managed workflow invokes it only after the provenance gate passes. User-owned
+  signing secrets are observed by name and block apply when missing; their
+  values never enter Hypervibe state or output.
+- A successful server deploy writes an artifact whose name and JSON body carry
+  the environment, repository, exact full Git SHA, and deployed service set.
+  The artifact is emitted only after provider deployment steps succeed.
+- The macOS iOS workflow shares the server deploy concurrency key, consumes a
+  specific successful server run, validates its evidence, checks out that exact
+  SHA, validates the IPA archive and bundle/version/build metadata, and invokes
+  the reviewed project release script with the validated IPA and declared
+  TestFlight policy. App Store credentials are scoped to that step and are not
+  exposed to the project-defined build command.
+- The iOS artifact records separate `mobile.repository`/`mobile.sha` and
+  `server.repository`/`server.sha` fields. V1 is monorepo-first and therefore
+  requires those repositories and SHAs to match at the workflow gate, while the
+  evidence shape leaves a future explicit multi-repo policy possible.
+- `hv_ci_status` is the read-only path for workflows, runs, logs, and release
+  artifact provenance. `hv_appstore_submit` requires successful managed server
+  and iOS evidence artifacts for the same SHA before final review submission.
+- App Store metadata/screenshots and local Xcode device operations are
+  project-owned release/development files (for example Fastlane `deliver` and
+  a reviewed device script), not Hypervibe commands.
 
 ## CI And Push Deploys
 

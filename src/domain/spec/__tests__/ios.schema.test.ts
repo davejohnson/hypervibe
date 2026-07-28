@@ -70,4 +70,94 @@ describe('iosSpecSchema', () => {
     });
     expect(withIos.ios?.bundleId).toBe('com.example.app');
   });
+
+  it('parses a gated managed iOS release and rejects unsafe release input', () => {
+    const env = environmentSpecSchema.parse({
+      hosting: { provider: 'railway' },
+      services: { web: {} },
+      deploy: { strategy: 'branch', trigger: 'ci' },
+      ios: {
+        bundleId: 'com.example.app',
+        testflight: { groups: { beta: {} } },
+        release: {
+          services: ['web'],
+          build: {
+            workingDirectory: 'apps/ios',
+            command: 'bundle exec fastlane build',
+            ipaPath: 'build/Example.ipa',
+            requiredSecrets: ['MATCH_PASSWORD'],
+          },
+          testflight: { groups: ['beta'] },
+        },
+      },
+    });
+    expect(env.ios?.release).toMatchObject({
+      trigger: 'after-server-deploy',
+      services: ['web'],
+      build: { workingDirectory: 'apps/ios', ipaPath: 'build/Example.ipa' },
+      testflight: {
+        groups: ['beta'],
+        usesNonExemptEncryption: false,
+        scriptPath: 'scripts/hypervibe-ios-release.mjs',
+      },
+    });
+
+    const unsafe = environmentSpecSchema.safeParse({
+      hosting: { provider: 'railway' },
+      services: { web: {} },
+      deploy: { strategy: 'branch', trigger: 'ci' },
+      ios: {
+        bundleId: 'com.example.app',
+        testflight: { groups: { beta: {} } },
+        release: {
+          services: ['web'],
+          build: {
+            command: 'echo ${{ secrets.BAD }}',
+            ipaPath: '../Example.ipa',
+          },
+          testflight: { groups: ['missing'] },
+        },
+      },
+    });
+    expect(unsafe.success).toBe(false);
+    expect(unsafe.success ? '' : unsafe.error.message).toContain('cannot contain GitHub expression');
+    expect(unsafe.success ? '' : unsafe.error.message).toContain('repository-relative');
+    expect(unsafe.success ? '' : unsafe.error.message).toContain('not declared');
+
+    const unsafeScript = environmentSpecSchema.safeParse({
+      hosting: { provider: 'railway' },
+      services: { web: {} },
+      deploy: { strategy: 'branch', trigger: 'ci' },
+      ios: {
+        bundleId: 'com.example.app',
+        testflight: { groups: { beta: {} } },
+        release: {
+          services: ['web'],
+          build: { command: 'make ipa', ipaPath: 'Example.ipa' },
+          testflight: { groups: ['beta'], scriptPath: '../release.sh' },
+        },
+      },
+    });
+    expect(unsafeScript.success).toBe(false);
+    expect(unsafeScript.success ? '' : unsafeScript.error.message).toContain('scriptPath');
+  });
+
+  it('requires CI branch deploys and known server services for release gates', () => {
+    const result = environmentSpecSchema.safeParse({
+      hosting: { provider: 'railway' },
+      services: { web: {} },
+      ios: {
+        bundleId: 'com.example.app',
+        testflight: { groups: { beta: {} } },
+        release: {
+          services: ['api'],
+          build: { command: 'make ipa', ipaPath: 'Example.ipa' },
+          testflight: { groups: ['beta'] },
+        },
+      },
+    });
+    expect(result.success).toBe(false);
+    expect(result.success ? '' : result.error.message).toContain('unknown service');
+    expect(result.success ? '' : result.error.message).toContain('deploy.strategy');
+  });
 });

@@ -5,7 +5,7 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import type { GitHubCredentials } from '../../adapters/providers/github/github.adapter.js';
 import type { Project } from '../entities/project.entity.js';
-import { projectSpecSchema } from '../spec/spec.schema.js';
+import { projectSpecSchema, type IosSpec } from '../spec/spec.schema.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import type {
@@ -77,7 +77,9 @@ function classifyEnvironmentName(name: string): BranchDeployEnvironmentKind | nu
   if (!normalized || normalized === 'local') return null;
   if (normalized === 'production' || normalized === 'prod' || normalized.includes('prod')) return 'production';
   if (normalized === 'staging' || normalized === 'stage' || normalized.includes('stag')) return 'staging';
-  return null;
+  if (normalized === 'development' || normalized === 'dev' || normalized.includes('develop')) return 'development';
+  if (normalized === 'test' || normalized.includes('test')) return 'test';
+  return 'custom';
 }
 
 function environmentBindings(projectId: string, environmentName: string, desiredServiceNames?: Set<string>): {
@@ -141,16 +143,16 @@ function legacyServiceNames(desiredState: Record<string, unknown> | null): strin
 
 export function resolveBranchDeployTargets(project: Project): {
   targets: BranchDeployTarget[];
-  desiredBranches: { staging?: string; production?: string };
+  desiredBranches: Record<string, string | undefined>;
   migration: { includeStep: boolean; command?: string; note?: string };
   skippedEnvironments: string[];
 } {
   const specRow = projectSpecRepo.findLatest(project.id);
   const parsedSpec = specRow ? projectSpecSchema.safeParse(specRow.document) : null;
   if (parsedSpec?.success) {
-    const targetsByKind = new Map<BranchDeployEnvironmentKind, BranchDeployTarget>();
+    const targetsByEnvironment = new Map<string, BranchDeployTarget>();
     const skippedEnvironments: string[] = [];
-    const desiredBranches: { staging?: string; production?: string } = {};
+    const desiredBranches: Record<string, string | undefined> = {};
     let migration: { includeStep: boolean; command?: string; note?: string } = { includeStep: false };
 
     for (const [environmentName, envSpec] of Object.entries(parsedSpec.data.environments)) {
@@ -167,14 +169,9 @@ export function resolveBranchDeployTargets(project: Project): {
         skippedEnvironments.push(environmentName);
         continue;
       }
-      if (targetsByKind.has(kind)) {
-        skippedEnvironments.push(environmentName);
-        continue;
-      }
-
       const branch = envSpec.deploy.branch ?? 'main';
       const autoDeployOnPush = envSpec.deploy.autoDeploy ?? kind !== 'production';
-      desiredBranches[kind] = branch;
+      desiredBranches[environmentName] = branch;
       const serviceNames = Object.keys(envSpec.services);
       const bindings = environmentBindings(project.id, environmentName, new Set(serviceNames));
       const runtimeServiceNames = Object.entries(envSpec.services)
@@ -184,7 +181,7 @@ export function resolveBranchDeployTargets(project: Project): {
         .filter(([, service]) => service.workloadKind === 'cron')
         .map(([name]) => name);
       const webService = Object.values(envSpec.services).find((service) => service.workloadKind === 'web');
-      targetsByKind.set(kind, {
+      targetsByEnvironment.set(environmentName, {
         environmentName,
         kind,
         branch,
@@ -212,10 +209,11 @@ export function resolveBranchDeployTargets(project: Project): {
       }
     }
 
-    const targets = Array.from(targetsByKind.values()).sort((a, b) => {
-      if (a.kind === b.kind) return a.environmentName.localeCompare(b.environmentName);
-      return a.kind === 'staging' ? -1 : 1;
-    });
+    const order: BranchDeployEnvironmentKind[] = ['development', 'test', 'staging', 'production', 'custom'];
+    const targets = Array.from(targetsByEnvironment.values()).sort((a, b) =>
+      order.indexOf(a.kind) - order.indexOf(b.kind)
+      || a.environmentName.localeCompare(b.environmentName)
+    );
 
     return { targets, desiredBranches, migration, skippedEnvironments };
   }
@@ -517,17 +515,191 @@ function buildDeploymentFailureEvidenceJob(environmentName: string): string {
 `;
 }
 
+export const IOS_RELEASE_REQUIRED_SECRETS = [
+  'APP_STORE_CONNECT_KEY_ID',
+  'APP_STORE_CONNECT_ISSUER_ID',
+  'APP_STORE_CONNECT_PRIVATE_KEY',
+] as const;
+
+function buildIosReleaseWorkflow(params: {
+  provider: BranchDeployProvider;
+  providerName: string;
+  target: BranchDeployTarget;
+  ios: IosSpec;
+  serverWorkflowPath: string;
+}): { files: Array<{ path: string; content: string }>; requiredSecrets: string[] } | null {
+  const release = params.ios.release;
+  if (!release) return null;
+  const environmentName = params.target.environmentName;
+  const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+  const workflowPath = `.github/workflows/hypervibe-ios-release-${safeEnvironment}.yml`;
+  const automaticTrigger = release.trigger === 'after-server-deploy'
+    ? `  workflow_run:
+    workflows: [${JSON.stringify(`Deploy ${params.providerName} (${environmentName})`)}]
+    types: [completed]
+`
+    : '';
+  const content = `name: iOS release (${environmentName})
+
+on:
+${automaticTrigger}  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact monorepo commit already deployed to ${environmentName}
+        required: true
+        type: string
+      server_run_id:
+        description: Successful server deploy workflow run containing matching release evidence
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: hypervibe-deploy-${environmentName}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: \${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: macos-14
+    timeout-minutes: 60
+    environment: ${environmentName}
+    env:
+      HYPERVIBE_ENVIRONMENT: ${JSON.stringify(environmentName)}
+      HYPERVIBE_BUNDLE_ID: ${JSON.stringify(params.ios.bundleId)}
+      HYPERVIBE_TESTFLIGHT_GROUPS: ${JSON.stringify(JSON.stringify(release.testflight.groups))}
+      HYPERVIBE_USES_NON_EXEMPT_ENCRYPTION: ${JSON.stringify(String(release.testflight.usesNonExemptEncryption))}
+      HYPERVIBE_SUBMIT_BETA_REVIEW: ${JSON.stringify(String(release.testflight.submitForBetaReview))}
+      HYPERVIBE_WORKING_DIRECTORY: ${JSON.stringify(release.build.workingDirectory)}
+      HYPERVIBE_IPA_PATH: ${JSON.stringify(release.build.ipaPath)}
+      HYPERVIBE_RELEASE_SCRIPT: ${JSON.stringify(release.testflight.scriptPath)}
+    steps:
+      - name: Resolve release provenance
+        id: release
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const automatic = context.eventName === 'workflow_run';
+            const requestedSha = automatic
+              ? ''
+              : String(context.payload.inputs.commit_sha || '').trim();
+            const serverRunId = automatic
+              ? String(context.payload.workflow_run.id)
+              : String(context.payload.inputs.server_run_id || '').trim();
+            if (requestedSha && !/^[0-9a-f]{40}$/i.test(requestedSha)) throw new Error('commit_sha must be a full 40-character Git SHA');
+            if (!/^[0-9]+$/.test(serverRunId)) throw new Error('server_run_id must be a GitHub Actions run id');
+            core.setOutput('requested_sha', requestedSha);
+            core.setOutput('server_run_id', serverRunId);
+      - name: Download verified server release evidence
+        uses: actions/download-artifact@v4
+        with:
+          path: .
+          merge-multiple: true
+          github-token: \${{ github.token }}
+          run-id: \${{ steps.release.outputs.server_run_id }}
+      - name: Verify server release gate
+        id: gate
+        shell: bash
+        env:
+          HYPERVIBE_REQUESTED_SHA: \${{ steps.release.outputs.requested_sha }}
+          HYPERVIBE_REQUIRED_SERVICES: ${JSON.stringify(JSON.stringify(release.services))}
+        run: |
+          node -e 'const fs=require("fs"); const evidence=JSON.parse(fs.readFileSync("hypervibe-server-release.json","utf8")); const required=JSON.parse(process.env.HYPERVIBE_REQUIRED_SERVICES); if(evidence.version!==1||evidence.environment!==process.env.HYPERVIBE_ENVIRONMENT) throw new Error("server evidence environment mismatch"); if(evidence.server.repository!==process.env.GITHUB_REPOSITORY||!/^[0-9a-f]{40}$/i.test(evidence.server.sha)) throw new Error("server evidence repository/SHA mismatch"); if(process.env.HYPERVIBE_REQUESTED_SHA&&evidence.server.sha!==process.env.HYPERVIBE_REQUESTED_SHA) throw new Error("server evidence does not match requested SHA"); for(const service of required) if(!evidence.services.includes(service)) throw new Error("server evidence is missing service "+service); fs.appendFileSync(process.env.GITHUB_OUTPUT, "sha="+evidence.server.sha+"\\n");'
+      - uses: actions/checkout@v4
+        with:
+          ref: \${{ steps.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify project-owned release script
+        shell: bash
+        run: |
+          if [ ! -f "$HYPERVIBE_RELEASE_SCRIPT" ]; then
+            echo "::error::Missing project-owned iOS release script: $HYPERVIBE_RELEASE_SCRIPT"
+            exit 1
+          fi
+      - name: Build signed IPA
+        working-directory: ${JSON.stringify(release.build.workingDirectory)}
+        env:
+${release.build.requiredSecrets.map((name) => `          ${name}: \${{ secrets.${name} }}`).join('\n') || '          HYPERVIBE_NO_ADDITIONAL_BUILD_SECRETS: "true"'}
+        run: |
+${release.build.command.split('\n').map((line) => `          ${line}`).join('\n')}
+      - name: Validate IPA identity
+        id: ipa
+        shell: bash
+        env:
+          HYPERVIBE_RELEASE_SHA: \${{ steps.gate.outputs.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, plistlib, zipfile
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          ipa = (root / os.environ["HYPERVIBE_WORKING_DIRECTORY"] / os.environ["HYPERVIBE_IPA_PATH"]).resolve()
+          if root not in ipa.parents or not ipa.is_file():
+              raise SystemExit("IPA is missing or outside the checked-out repository")
+          with zipfile.ZipFile(ipa) as archive:
+              for info in archive.infolist():
+                  path = pathlib.PurePosixPath(info.filename)
+                  if path.is_absolute() or ".." in path.parts or (info.external_attr >> 16) & 0o170000 == 0o120000:
+                      raise SystemExit("unsafe IPA archive entry: " + info.filename)
+              plists = [name for name in archive.namelist() if name.startswith("Payload/") and name.count("/") == 2 and name.endswith(".app/Info.plist")]
+              if len(plists) != 1:
+                  raise SystemExit("expected exactly one Payload/*.app/Info.plist")
+              info = plistlib.loads(archive.read(plists[0]))
+          if info.get("CFBundleIdentifier") != os.environ["HYPERVIBE_BUNDLE_ID"]:
+              raise SystemExit("IPA bundle identifier does not match desired ios.bundleId")
+          version = str(info.get("CFBundleShortVersionString", ""))
+          build = str(info.get("CFBundleVersion", ""))
+          if not version or not build:
+              raise SystemExit("IPA is missing marketing version or build number")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("path=" + str(ipa) + "\\n")
+              output.write("version=" + version + "\\n")
+              output.write("build=" + build + "\\n")
+          PY
+      - name: Run project-owned TestFlight release script
+        env:
+          APP_STORE_CONNECT_KEY_ID: \${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: \${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: \${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          HYPERVIBE_IPA_PATH: \${{ steps.ipa.outputs.path }}
+          HYPERVIBE_RELEASE_SHA: \${{ steps.gate.outputs.sha }}
+          HYPERVIBE_MARKETING_VERSION: \${{ steps.ipa.outputs.version }}
+          HYPERVIBE_BUILD_NUMBER: \${{ steps.ipa.outputs.build }}
+        run: node "$HYPERVIBE_RELEASE_SCRIPT"
+      - name: Upload iOS release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypervibe-ios-release-${safeEnvironment}-\${{ steps.gate.outputs.sha }}
+          path: hypervibe-ios-release.json
+          if-no-files-found: error
+          retention-days: 90
+`;
+  return {
+    files: [{ path: workflowPath, content }],
+    requiredSecrets: [
+      ...IOS_RELEASE_REQUIRED_SECRETS,
+      ...release.build.requiredSecrets,
+    ],
+  };
+}
+
 export function buildBranchDeployWorkflow(
   provider: BranchDeployProvider,
   target: BranchDeployTarget,
-  migration: { includeStep: boolean; command?: string }
+  migration: { includeStep: boolean; command?: string },
+  ios?: IosSpec
 ): BranchDeployWorkflow {
-  const template = `deploy-${provider}-${target.kind}`;
+  const safeEnvironment = target.environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+  const template = `deploy-${provider}-${safeEnvironment}`;
   const filename = `${template}.yml`;
   const migrationStep = migration.includeStep && migration.command ? buildMigrationStep(migration.command) : '';
   const deployBlock = buildProviderDeploySteps(provider, target);
   const providerName = deployBlock.displayName ?? providerRegistry.getMetadata(provider)?.displayName ?? provider;
-  const requiredSecrets = migrationStep
+  let requiredSecrets = migrationStep
     ? [...deployBlock.requiredSecrets, 'DATABASE_URL']
     : [...deployBlock.requiredSecrets];
   const requiredVariables = [...deployBlock.requiredVariables];
@@ -557,16 +729,39 @@ ${permissionsBlock.trimEnd()}
           script: |
             const inputSha = ((context.payload.inputs || {}).commit_sha || '').trim();
             const sha = inputSha || process.env.GITHUB_SHA;
-            if (!/^[0-9a-f]{7,40}$/i.test(sha)) {
-              throw new Error('commit_sha must be a Git commit SHA, got: ' + JSON.stringify(inputSha || sha));
+            if (!/^[0-9a-f]{40}$/i.test(sha)) {
+              throw new Error('commit_sha must be a full 40-character Git commit SHA, got: ' + JSON.stringify(inputSha || sha));
             }
             core.setOutput('sha', sha);
             core.info('Deploying commit ' + sha);
       - uses: actions/checkout@v4
         with:
           ref: \${{ steps.deploy.outputs.sha }}
-${buildDeploymentContractStep(target.environmentName)}${migrationStep}${deployBlock.steps}${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
+${buildDeploymentContractStep(target.environmentName)}${migrationStep}${deployBlock.steps}      - name: Write server release evidence
+        shell: bash
+        env:
+          HYPERVIBE_RELEASE_SHA: \${{ steps.deploy.outputs.sha }}
+        run: |
+          node -e 'const fs=require("fs"); fs.writeFileSync("hypervibe-server-release.json", JSON.stringify({version:1,environment:${JSON.stringify(target.environmentName)},server:{repository:process.env.GITHUB_REPOSITORY,sha:process.env.HYPERVIBE_RELEASE_SHA},services:${JSON.stringify(target.serviceNames)},verifiedAt:new Date().toISOString()}, null, 2)+"\\n")'
+      - name: Upload server release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypervibe-server-release-${safeEnvironment}-\${{ steps.deploy.outputs.sha }}
+          path: hypervibe-server-release.json
+          if-no-files-found: error
+          retention-days: 30
+${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
 
+  const iosRelease = ios
+    ? buildIosReleaseWorkflow({
+      provider,
+      providerName,
+      target,
+      ios,
+      serverWorkflowPath: `.github/workflows/${filename}`,
+    })
+    : null;
+  if (iosRelease) requiredSecrets = [...requiredSecrets, ...iosRelease.requiredSecrets];
   return {
     template,
     templateName: `Deploy ${providerName} (${target.environmentName})`,
@@ -576,6 +771,7 @@ ${buildDeploymentContractStep(target.environmentName)}${migrationStep}${deployBl
     environment: target.environmentName,
     path: `.github/workflows/${filename}`,
     content,
+    ...(iosRelease ? { companionFiles: iosRelease.files } : {}),
     requiredSecrets: Array.from(new Set(requiredSecrets)),
     requiredVariables: Array.from(new Set(requiredVariables)),
   };

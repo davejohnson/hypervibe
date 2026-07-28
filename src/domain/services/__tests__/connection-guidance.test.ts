@@ -92,18 +92,22 @@ describe('connection guidance', () => {
       intro: 'Confirm the GitHub token type and package permissions.',
     });
 
-    expect(guidance).toContain('fine-grained GitHub personal access token');
+    expect(guidance).toContain('classic GitHub personal access token');
+    expect(guidance).toContain('fine-grained repository token');
     expect(guidance).toContain('https://github.com/settings/personal-access-tokens/new');
     expect(guidance).toContain('Contents read/write');
     expect(guidance).toContain('Workflows read/write');
     expect(guidance).toContain('read:packages');
     expect(guidance).toContain('read:packages-only token cannot manage repository infrastructure');
     // Every token role carries its own pre-filled creation URL.
+    expect(guidance).toContain('https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys');
     expect(guidance).toContain('https://github.com/settings/tokens/new?scopes=repo,workflow&description=Hypervibe%20GitHub%20API');
     expect(guidance).toContain('https://github.com/settings/tokens/new?scopes=read:packages&description=Hypervibe%20GHCR%20pull');
     expect(guidance).toContain('apiToken');
     expect(guidance).toContain('packageReadToken');
-    expect(guidance).toContain('fine-grained GitHub personal access token');
+    expect(guidance).toContain('NODE_AUTH_TOKEN');
+    expect(guidance).toContain('HYPERVIBE_GITHUB_TOKEN');
+    expect(guidance).toContain('HYPERVIBE_GITHUB_PACKAGES_TOKEN');
   });
 
   it('keeps provider-specific token guidance actionable', () => {

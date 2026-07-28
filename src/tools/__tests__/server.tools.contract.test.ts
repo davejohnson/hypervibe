@@ -36,14 +36,11 @@ const EXPECTED_TOOLS = [
   // Secrets
   'hv_secrets_set', 'hv_secrets_get', 'hv_secrets_list', 'hv_secrets_sync',
   // Email
-  'hv_email_setup', 'hv_email_forwarding', 'hv_email_send',
-  // Payments
-  'hv_payments_setup', 'hv_stripe_sync',
+  'hv_email_setup', 'hv_email_forwarding',
   // CI
-  'hv_ci_setup', 'hv_ci_status', 'hv_ci_trigger',
+  'hv_ci_status', 'hv_ci_trigger',
   // App Store / iOS
-  'hv_appstore_status', 'hv_testflight_upload', 'hv_testflight_distribute',
-  'hv_appstore_submit', 'hv_appstore_assets', 'hv_appid_register', 'hv_xcode_deploy',
+  'hv_appstore_status', 'hv_appstore_submit',
   // DevX
   'hv_upgrade', 'hv_tunnel', 'hv_local_bootstrap', 'hv_visualize', 'hv_runs',
 ].sort();
@@ -68,12 +65,12 @@ describe('server tool surface', () => {
     await server.close();
   });
 
-  it('registers exactly the 42 pinned hv_* tools', async () => {
+  it('registers exactly the 33 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
-    expect(names).toHaveLength(42);
+    expect(names).toHaveLength(33);
     expect(tools.find((tool) => tool.name === 'hv_ci_status')?.description).toContain(
       'Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls.'
     );
@@ -88,7 +85,7 @@ describe('server tool surface', () => {
     const cliPaths = definitions.map((definition) => definition.cliPath.join(' '));
 
     expect(ids).toEqual(EXPECTED_TOOLS);
-    expect(new Set(cliPaths).size).toBe(42);
+    expect(new Set(cliPaths).size).toBe(33);
     expect(registry.get('hv_spec_set')?.cliPath).toEqual(['spec', 'set']);
     expect(registry.get('hv_plan')?.cliPath).toEqual(['plan']);
     expect(registry.get('hv_db_query')?.cliPath).toEqual(['db', 'query']);

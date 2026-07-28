@@ -127,10 +127,15 @@ repository security features.
 
 ## Connect GitHub
 
-Credential type: a fine-grained GitHub personal access token is recommended.
-Create it at [GitHub fine-grained personal access tokens](https://github.com/settings/personal-access-tokens/new).
-Choose the repository owner and select only the repositories Hypervibe should
-manage. For the full `github` feature set, grant:
+Credential type for the simplest one-token setup: a classic GitHub personal
+access token with `repo`, `workflow`, and `read:packages`. Create it with the
+[combined Hypervibe scopes](https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys).
+
+For least privilege, use a
+[fine-grained GitHub personal access token](https://github.com/settings/personal-access-tokens/new)
+for repository management and a separate classic `read:packages` token. Choose
+the repository owner and select only the repositories Hypervibe should manage.
+For the full `github` feature set, grant the fine-grained token:
 
 - Metadata: read (GitHub adds this automatically)
 - Administration: read/write
@@ -150,22 +155,27 @@ than claiming success. GitHub Advanced Security/code scanning can also require
 an eligible paid plan for private repositories; enabling it is confirmation-
 gated. See [GitHub's fine-grained permission reference](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens).
 
-Store the token in an exported environment variable or local `.env` file—not
-in chat or the repository:
+Store the combined classic token in an exported environment variable or local
+`.env` file—not in chat or the repository:
 
 ```bash
-export HYPERVIBE_GITHUB_TOKEN='github_pat_...'
+export NODE_AUTH_TOKEN='ghp_...'
 ```
 
 Then connect it for exactly one repository:
 
 ```text
-hv_connect provider="github" scope="OWNER/REPOSITORY" credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"
+hv_connect provider="github" scope="OWNER/REPOSITORY" credentialsRef="env:NODE_AUTH_TOKEN"
 ```
 
-A classic PAT remains useful for legacy/package operations. Private GHCR image
-pulls require a classic PAT with `read:packages`; it can be supplied separately
-as `packageReadToken`. See [GitHub's PAT guide](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
+`NODE_AUTH_TOKEN`, `HYPERVIBE_GITHUB_TOKEN`, and
+`HYPERVIBE_GITHUB_PACKAGES_TOKEN` are accepted as aliases by Hypervibe; exact
+references win and conflicting fallback values block. `NODE_AUTH_TOKEN` is the
+recommended single name because npm requires it directly.
+
+For least privilege, a fine-grained repository token can still be supplied as
+`apiToken`, with a separate classic `read:packages` PAT as
+`packageReadToken`. See [GitHub's PAT guide](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
 
 ## Connect OpenAI (only for AI automations)
 
@@ -215,8 +225,13 @@ Add an IANA timezone such as `America/Vancouver`; omitted timezones default to
 - `hv_ci_status` lists workflows, runs, jobs, and bounded log tails through the
   recorded GitHub connection.
 - `hv_ci_trigger` performs an explicit manual workflow dispatch.
-- `hv_ci_setup` is only a one-release compatibility bridge. It updates desired
-  state and tells you to run `hv_plan`; it no longer writes GitHub directly.
+- CI workflows, collaboration rules, security settings, and iOS release
+  workflows are declared in the project spec and reconciled with
+  `hv_plan`/`hv_apply`.
+- Gated iOS workflows call the repository-owned script declared by
+  `ios.release.testflight.scriptPath`; upload/distribution, App Store asset,
+  and local Xcode convenience commands are intentionally absent from the
+  Hypervibe command surface.
 
 Use `hv_status` after a successful deploy workflow to verify the actual service.
 

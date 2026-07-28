@@ -65,7 +65,7 @@ async function makeClient() {
   };
 }
 
-describe('hv_ci_setup desired-state migration', () => {
+describe('generic CI diagnostics', () => {
   it('keeps provider-specific workflow diagnostics outside the generic CI tool', () => {
     const source = readFileSync(new URL('../hv-ci.tools.ts', import.meta.url), 'utf8');
 
@@ -90,6 +90,40 @@ describe('hv_ci_status', () => {
     expect(res.ok).toBe(true);
     expect(res.data.workflows).toEqual([{ id: 7, name: 'Tests', path: '.github/workflows/test.yml', state: 'active' }]);
     expect(res.data.branchProtection).toEqual({ branch: 'main', protected: false });
+    await t.close();
+  });
+
+  it('reports release artifact provenance without downloading contents', async () => {
+    seedProject();
+    vi.spyOn(GitHubAdapter.prototype, 'listArtifacts').mockResolvedValue({
+      total_count: 1,
+      artifacts: [{
+        id: 9,
+        name: `hypervibe-ios-release-production-${'a'.repeat(40)}`,
+        expired: false,
+        created_at: '2026-07-01T00:00:00Z',
+        updated_at: '2026-07-01T00:00:00Z',
+        workflow_run: {
+          id: 7,
+          repository_id: 1,
+          head_repository_id: 1,
+          head_branch: 'main',
+          head_sha: 'b'.repeat(40),
+        },
+      }],
+    });
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', { project: 'billforge', include: ['artifacts'] });
+
+    expect(res.ok).toBe(true);
+    expect(res.data.artifacts).toEqual([{
+      id: 9,
+      name: `hypervibe-ios-release-production-${'a'.repeat(40)}`,
+      expired: false,
+      createdAt: '2026-07-01T00:00:00Z',
+      workflowRun: { id: 7, headSha: 'b'.repeat(40), headBranch: 'main' },
+    }]);
     await t.close();
   });
 
