@@ -19,8 +19,19 @@ import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../context.js';
 
 let tempDir: string;
+const githubTokenEnvironmentNames = [
+  'NODE_AUTH_TOKEN',
+  'HYPERVIBE_GITHUB_TOKEN',
+  'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
+] as const;
+const originalGitHubTokenEnvironment = Object.fromEntries(
+  githubTokenEnvironmentNames.map((name) => [name, process.env[name]])
+);
 
 beforeEach(() => {
+  for (const name of githubTokenEnvironmentNames) {
+    delete process.env[name];
+  }
   SqliteAdapter.resetInstance();
   tempDir = mkdtempSync(path.join(tmpdir(), 'hypervibe-connections-tools-'));
   SqliteAdapter.getInstance(path.join(tempDir, 'test.db')).migrate();
@@ -29,6 +40,14 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   delete process.env.HV_TEST_RAILWAY_TOKEN;
+  for (const name of githubTokenEnvironmentNames) {
+    const original = originalGitHubTokenEnvironment[name];
+    if (original === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = original;
+    }
+  }
   SqliteAdapter.resetInstance();
   rmSync(tempDir, { recursive: true, force: true });
 });
@@ -154,6 +173,82 @@ describe('hv_connect', () => {
     const decrypted = getSecretStore().decryptObject<{ apiToken: string; packageReadToken?: string }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('gh-api-token');
     expect(decrypted.packageReadToken).toBe('gh-package-token');
+    await t.close();
+  });
+
+  it('accepts NODE_AUTH_TOKEN when a GitHub credentials ref names another supported alias', async () => {
+    process.env.NODE_AUTH_TOKEN = 'gh-combined-token';
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+      scopes: ['repo', 'workflow', 'read:packages'],
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'github',
+      credentialsRef: 'env:HYPERVIBE_GITHUB_TOKEN',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('gh-combined-token');
+    const connection = new ConnectionRepository().findByProvider('github')!;
+    const decrypted = getSecretStore().decryptObject<{
+      apiToken: string;
+      packageReadToken?: string;
+    }>(connection.credentialsEncrypted);
+    expect(decrypted.apiToken).toBe('gh-combined-token');
+    expect(decrypted.packageReadToken).toBe('gh-combined-token');
+    await t.close();
+  });
+
+  it('maps both GitHub credential roles from one supported dotenv alias', async () => {
+    const envPath = path.join(tempDir, '.env');
+    writeFileSync(envPath, 'NODE_AUTH_TOKEN=gh-combined-dotenv-token\n');
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      login: 'davejohnson',
+      scopes: ['repo', 'workflow', 'read:packages'],
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'github',
+      credentialsRef: `dotenv:${envPath}`,
+      credentialsMap: {
+        apiToken: 'HYPERVIBE_GITHUB_TOKEN',
+        packageReadToken: 'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('gh-combined-dotenv-token');
+    const connection = new ConnectionRepository().findByProvider('github')!;
+    const decrypted = getSecretStore().decryptObject<{
+      apiToken: string;
+      packageReadToken?: string;
+    }>(connection.credentialsEncrypted);
+    expect(decrypted.apiToken).toBe('gh-combined-dotenv-token');
+    expect(decrypted.packageReadToken).toBe('gh-combined-dotenv-token');
+    await t.close();
+  });
+
+  it('blocks ambiguous GitHub alias fallback without exposing either token', async () => {
+    process.env.HYPERVIBE_GITHUB_TOKEN = 'gh-api-token';
+    process.env.HYPERVIBE_GITHUB_PACKAGES_TOKEN = 'gh-package-token';
+
+    const t = await makeClient();
+    const result = await t.call('hv_connect', {
+      provider: 'github',
+      credentialsRef: 'env:NODE_AUTH_TOKEN',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toContain('accepted aliases');
+    expect(result.error.message).toContain('Set NODE_AUTH_TOKEN explicitly');
+    expect(JSON.stringify(result)).not.toContain('gh-api-token');
+    expect(JSON.stringify(result)).not.toContain('gh-package-token');
+    expect(new ConnectionRepository().findByProvider('github')).toBeNull();
     await t.close();
   });
 

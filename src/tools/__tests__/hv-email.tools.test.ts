@@ -102,22 +102,3 @@ describe('hv_email_forwarding', () => {
     await t.close();
   });
 });
-
-describe('hv_email_send', () => {
-  it('requires a from address', async () => {
-    const t = await makeClient();
-    const result = await t.call('hv_email_send', { to: 'a@example.com', subject: 'hi', body: 'test' });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('VALIDATION');
-    expect(result.hint).toContain('hv_email_setup');
-    await t.close();
-  });
-
-  it('errors without a SendGrid connection', async () => {
-    const t = await makeClient();
-    const result = await t.call('hv_email_send', { to: 'a@example.com', from: 'noreply@example.com', subject: 'hi', body: 'test' });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('MISSING_CONNECTION');
-    await t.close();
-  });
-});

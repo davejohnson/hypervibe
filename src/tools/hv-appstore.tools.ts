@@ -1,33 +1,23 @@
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
-import { readdir, stat } from 'fs/promises';
-import path from 'path';
 import type { CommandContext } from '../application/context.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError, describeError } from '../application/results.js';
 import {
-  addTestersToGroup,
   getAppStoreConnectAdapter,
-  resolveAppId,
-  resolveBuild,
-  resolveBetaGroup,
   summarizeBuild,
-  betaTesterInputSchema,
-  IMAGE_EXTENSIONS,
-  type BetaTesterInput,
 } from '../domain/services/appstore-ops.service.js';
 import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type {
   AppStoreConnectAdapter,
-  AppStoreBetaGroup,
-  AppStoreConnectBuild,
 } from '../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
-import { XcodeAdapter } from '../adapters/providers/xcode/xcode.adapter.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
+import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
+import { projectField } from './schemas.js';
 
 const SETUP_HINT =
   `${formatConnectionGuidance('appstoreconnect')} For multiple apps/teams use a scoped connection (scope="<bundle id>"). Uploads additionally require the Xcode command line tools (xcode-select --install).`;
 
-/** Shared field used by every App Store Connect tool. */
-const appIdentifierField = z.string().optional().describe('App bundle identifier (e.g. com.example.myapp), used for scoped connection lookup and app resolution');
 const platformField = z.enum(['IOS', 'MAC_OS', 'TV_OS']).optional().describe('Platform (default: IOS)');
 type AscPlatform = 'IOS' | 'MAC_OS' | 'TV_OS' | undefined;
 
@@ -40,11 +30,6 @@ function adapterOrThrow(scopeHint?: string): AppStoreConnectAdapter {
     });
   }
   return result.adapter;
-}
-
-function unwrap<T extends object>(result: T | { error: string }): T {
-  if ('error' in result) throw new HvError('PROVIDER_ERROR', result.error);
-  return result;
 }
 
 /**
@@ -135,7 +120,7 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
       const app = await adapter.findAppByBundleId(appIdentifier);
       if (!app && (sections.has('builds') || sections.has('groups') || sections.has('testers') || sections.has('readiness'))) {
         throw new HvError('NOT_FOUND', `App not found for bundle ID: ${appIdentifier}.`, {
-          hint: 'Create the app in App Store Connect first, or check the bundle identifier. App ID capabilities can still be checked once the bundle ID is registered (hv_appid_register).',
+          hint: 'Create the app in App Store Connect first, or check the bundle identifier. App ID capabilities are converged from the environment ios spec through hv_plan/hv_apply.',
         });
       }
 
@@ -158,7 +143,7 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
       await section('readiness', () => computeReadiness(adapter, app!.id, { platform, locale, screenshotDisplayType }));
       await section('capabilities', async () => {
         const bundleId = await adapter.findBundleIdByIdentifier(appIdentifier);
-        if (!bundleId) return { bundleId: null, capabilities: [], note: `Bundle ID not registered: ${appIdentifier}. Register it with hv_appid_register.` };
+        if (!bundleId) return { bundleId: null, capabilities: [], note: `Bundle ID not registered: ${appIdentifier}. Declare it in the environment ios spec and run hv_plan/hv_apply.` };
         return { bundleId, capabilities: await adapter.getBundleIdCapabilities(bundleId.id) };
       });
 
@@ -167,193 +152,101 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
   );
 
   commands.register(
-    'hv_testflight_upload',
-    'Upload an IPA to TestFlight via xcrun altool, then wait for processing and set export compliance in one flow (required before the build appears in TestFlight). Optionally distribute to beta groups and submit for external beta review. Requires Xcode command line tools (xcode-select --install).',
-    {
-      ipaPath: z.string().describe('Path to the IPA file'),
-      appIdentifier: appIdentifierField,
-      appId: z.string().optional().describe('App Store Connect app ID (numeric)'),
-      buildNumber: z.string().optional().describe('Specific build number to set compliance on (default: most recent build)'),
-      usesNonExemptEncryption: z.boolean().optional().describe('Does the app use non-exempt encryption? (default: false - standard HTTPS only)'),
-      skipCompliance: z.boolean().optional().describe('Upload only; skip waiting for processing and setting export compliance (default: false)'),
-      distributeToGroups: z.array(z.string()).optional().describe('Beta group names to distribute to after compliance is set'),
-      submitForBetaReview: z.boolean().optional().describe('Submit for external beta review after compliance (default: false)'),
-    },
-    wrapCommandHandler(async ({ ipaPath, appIdentifier, appId, buildNumber, usesNonExemptEncryption, skipCompliance, distributeToGroups, submitForBetaReview }) => {
-      const adapter = adapterOrThrow(appIdentifier);
-
-      const uploadResult = await adapter.uploadViaAltool(ipaPath);
-      ctx.repos.audit.create({
-        action: 'testflight.upload',
-        resourceType: 'testflight',
-        resourceId: ipaPath,
-        details: { success: uploadResult.success },
-      });
-      if (!uploadResult.success) {
-        return commandError('PROVIDER_ERROR', uploadResult.error ?? 'Upload failed', {
-          details: { output: uploadResult.output?.substring(0, 2000) },
-          hint: 'Check that the IPA path is valid and Xcode command line tools are installed (xcode-select --install).',
-        });
-      }
-      if (skipCompliance) {
-        return commandSuccess({ uploaded: true, ipaPath }, {
-          hint: 'Re-run with skipCompliance=false (or use hv_testflight_distribute) to set export compliance once processing finishes.',
-        });
-      }
-
-      const compliance = await adapter.waitForProcessingAndSetCompliance({
-        appId,
-        buildNumber,
-        usesNonExemptEncryption: usesNonExemptEncryption ?? false,
-      });
-      if (compliance.error || !compliance.build) {
-        return commandError('PROVIDER_ERROR', compliance.error ?? 'No processed build found after upload', {
-          details: compliance.build ? { build: summarizeBuild(compliance.build) } : undefined,
-          hint: 'Processing can take a while. Re-run hv_appstore_status include=["builds"] to check, then hv_testflight_distribute once the build is VALID.',
-        });
-      }
-
-      const build = compliance.build;
-      const actions: string[] = ['Uploaded IPA to App Store Connect'];
-      if (compliance.complianceSet) {
-        actions.push(`Export compliance set (usesNonExemptEncryption: ${usesNonExemptEncryption ?? false})`);
-      } else if (build.usesNonExemptEncryption !== null) {
-        actions.push('Export compliance was already set');
-      }
-
-      const warnings: string[] = [];
-      if (distributeToGroups?.length && build.appId) {
-        const groups = await adapter.listBetaGroups(build.appId);
-        for (const groupName of distributeToGroups) {
-          const group = groups.find((g) => g.name.toLowerCase() === groupName.toLowerCase());
-          if (group) {
-            await adapter.addBuildToBetaGroup(build.id, group.id);
-            actions.push(`Added to beta group: ${group.name}`);
-          } else {
-            warnings.push(`Beta group not found: ${groupName} (available: ${groups.map((g) => g.name).join(', ')})`);
-          }
-        }
-      }
-      if (submitForBetaReview) {
-        await adapter.submitForBetaReview(build.id);
-        actions.push('Submitted for external beta review');
-      }
-
-      ctx.repos.audit.create({
-        action: 'testflight.compliance',
-        resourceType: 'testflight',
-        resourceId: build.id,
-        details: { buildNumber: build.buildNumber, version: build.version, complianceSet: compliance.complianceSet, actions },
-      });
-
-      return commandSuccess(
-        { ipaPath, build: summarizeBuild(build), actions },
-        { hint: 'Build is ready for TestFlight. Use hv_testflight_distribute to attach it to a beta group and add testers.', warnings, next: ['hv_testflight_distribute'] }
-      );
-    })
-  );
-
-  commands.register(
-    'hv_testflight_distribute',
-    'Distribute on TestFlight: prepare a build (waits for processing and sets export compliance), attach it to a beta group (created if missing), and add testers. Pass skipBuild=true to only manage the group and testers without touching builds.',
-    {
-      appIdentifier: appIdentifierField,
-      appId: z.string().optional().describe('App Store Connect app ID (numeric)'),
-      buildId: z.string().optional().describe('Specific App Store Connect build ID'),
-      buildNumber: z.string().optional().describe('Specific build number (default: most recent processed build)'),
-      skipBuild: z.boolean().optional().describe('Only create/find the group and add testers; do not attach a build (default: false)'),
-      groupId: z.string().optional().describe('Existing beta group ID'),
-      groupName: z.string().optional().describe('Beta group name to use or create (default: External Testers)'),
-      createGroupIfMissing: z.boolean().optional().describe('Create groupName if not found (default: true)'),
-      groupType: z.enum(['external', 'internal']).optional().describe('Group type when creating (default: external)'),
-      testers: z.array(betaTesterInputSchema).optional().describe('Testers to create or add to the group'),
-      usesNonExemptEncryption: z.boolean().optional().describe('Does the app use non-exempt encryption? (default: false - standard HTTPS only)'),
-      submitForBetaReview: z.boolean().optional().describe('Submit build for external beta review after distribution (default: false)'),
-      hasAccessToAllBuilds: z.boolean().optional().describe('When creating a group, allow access to all builds'),
-      feedbackEnabled: z.boolean().optional().describe('When creating a group, enable TestFlight feedback'),
-      publicLinkEnabled: z.boolean().optional().describe('When creating an external group, enable public invite link'),
-      publicLinkLimit: z.number().int().min(1).max(10000).optional().describe('When enabling public link, cap testers between 1 and 10000'),
-    },
-    wrapCommandHandler(async ({
-      appIdentifier, appId, buildId, buildNumber, skipBuild, groupId, groupName = 'External Testers',
-      createGroupIfMissing = true, groupType = 'external', testers = [], usesNonExemptEncryption,
-      submitForBetaReview = false, hasAccessToAllBuilds, feedbackEnabled, publicLinkEnabled, publicLinkLimit,
-    }) => {
-      const adapter = adapterOrThrow(appIdentifier);
-      const appResolution = unwrap(await resolveAppId(adapter, appIdentifier, appId));
-      const actions: string[] = [];
-
-      let build: AppStoreConnectBuild | null = null;
-      if (!skipBuild) {
-        const buildResolution = unwrap(await resolveBuild(adapter, {
-          appId: appResolution.appId,
-          buildId,
-          buildNumber,
-          usesNonExemptEncryption,
-        }));
-        build = buildResolution.build;
-        if (buildResolution.complianceSet) {
-          actions.push(`Export compliance set (usesNonExemptEncryption: ${usesNonExemptEncryption ?? false})`);
-        }
-      }
-
-      const effectiveAppId = build?.appId || appResolution.appId;
-      const groupResolution = unwrap(await resolveBetaGroup(adapter, {
-        appId: effectiveAppId,
-        groupId,
-        groupName,
-        createIfMissing: createGroupIfMissing,
-        groupType,
-        hasAccessToAllBuilds,
-        feedbackEnabled,
-        publicLinkEnabled,
-        publicLinkLimit,
-      }));
-      if (groupResolution.created) {
-        actions.push(`Created beta group: ${groupResolution.group.name}`);
-      }
-
-      if (build) {
-        await adapter.addBuildToBetaGroup(build.id, groupResolution.group.id);
-        actions.push(`Added build ${build.buildNumber} to beta group: ${groupResolution.group.name}`);
-      }
-
-      const testerResults = await addTestersToGroup(adapter, effectiveAppId, groupResolution.group, testers as BetaTesterInput[]);
-      if (testerResults.length > 0) {
-        actions.push(`Added ${testerResults.length} tester(s) to ${groupResolution.group.name}`);
-      }
-
-      if (submitForBetaReview && build) {
-        await adapter.submitForBetaReview(build.id);
-        actions.push('Submitted build for external beta review');
-      }
-
-      ctx.repos.audit.create({
-        action: 'testflight.distribute',
-        resourceType: 'testflight',
-        resourceId: build?.id ?? groupResolution.group.id,
-        details: { appId: effectiveAppId, groupId: groupResolution.group.id, testerCount: testerResults.length, submitForBetaReview, skipBuild: !!skipBuild },
-      });
-
-      return commandSuccess({
-        appId: effectiveAppId,
-        ...(build ? { build: summarizeBuild(build) } : {}),
-        group: groupResolution.group,
-        groupCreated: groupResolution.created,
-        testers: testerResults,
-        actions,
-      });
-    })
-  );
-
-  commands.register(
     'hv_appstore_submit',
-    'Submit an app version for App Store review. The app must have a version in PREPARE_FOR_SUBMISSION state with a build attached (check with hv_appstore_status include=["readiness"]).',
+    'Submit an app version for App Store review only after the latest managed server deploy and iOS release workflows succeeded for the same Git commit. The app must have a PREPARE_FOR_SUBMISSION version with a build attached.',
     {
+      project: projectField,
+      environment: z.string().min(1).describe('Desired environment whose server/mobile release evidence gates submission'),
       appIdentifier: z.string().describe('App bundle identifier (e.g. com.example.myapp)'),
       platform: platformField,
     },
-    wrapCommandHandler(async ({ appIdentifier, platform }) => {
+    wrapCommandHandler(async ({ project: projectRef, environment: environmentName, appIdentifier, platform }) => {
+      const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      const stored = new SpecStore().get(project);
+      if (!stored) {
+        return commandError('NOT_FOUND', `Project "${project.name}" has no desired-state spec.`);
+      }
+      const environmentSpec = stored.spec.environments[environmentName];
+      if (!environmentSpec?.ios?.release || environmentSpec.ios.bundleId !== appIdentifier) {
+        return commandError(
+          'VALIDATION',
+          `Environment "${environmentName}" does not declare ios.release for ${appIdentifier}.`,
+          { hint: 'Declare the release under environments.<name>.ios.release and converge it with hv_plan/hv_apply.' }
+        );
+      }
+      const repository = parseGitHubRepoFromRemote(stored.spec.gitRemoteUrl ?? project.gitRemoteUrl);
+      if (!repository) {
+        return commandError('VALIDATION', 'The project has no valid GitHub repository for release evidence.');
+      }
+      const [owner, repo] = repository?.split('/') ?? [];
+      if (!owner || !repo) {
+        return commandError('VALIDATION', 'The project has no valid GitHub repository for release evidence.');
+      }
+      const github = getGitHubAdapter(repository);
+      if ('error' in github) {
+        return commandError('MISSING_CONNECTION', github.error);
+      }
+      const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+      const serverWorkflow = `deploy-${environmentSpec.hosting.provider}-${safeEnvironment}.yml`;
+      const iosWorkflow = `hypervibe-ios-release-${safeEnvironment}.yml`;
+      let serverRuns;
+      let iosRuns;
+      let artifacts;
+      try {
+        [serverRuns, iosRuns, artifacts] = await Promise.all([
+          github.adapter.listWorkflowRuns(owner, repo, serverWorkflow, { status: 'completed', per_page: 20 }),
+          github.adapter.listWorkflowRuns(owner, repo, iosWorkflow, { status: 'completed', per_page: 20 }),
+          github.adapter.listArtifacts(owner, repo, 100),
+        ]);
+      } catch (error) {
+        return commandError('PROVIDER_ERROR', `Could not verify managed release workflows: ${describeError(error)}`, {
+          hint: 'Inspect the workflows through hv_ci_status, then retry after both runs succeed.',
+        });
+      }
+      const successfulServerRuns = new Set(
+        serverRuns.workflow_runs.filter((run) => run.conclusion === 'success').map((run) => run.id)
+      );
+      const successfulIosRuns = new Set(
+        iosRuns.workflow_runs.filter((run) => run.conclusion === 'success').map((run) => run.id)
+      );
+      const serverPrefix = `hypervibe-server-release-${safeEnvironment}-`;
+      const iosPrefix = `hypervibe-ios-release-${safeEnvironment}-`;
+      const matchingArtifacts = (prefix: string, runIds: Set<number>) => artifacts.artifacts
+        .filter((artifact) =>
+          !artifact.expired
+          && artifact.name.startsWith(prefix)
+          && artifact.workflow_run
+          && runIds.has(artifact.workflow_run.id)
+        )
+        .sort((left, right) => right.created_at.localeCompare(left.created_at));
+      const latestServerArtifact = matchingArtifacts(serverPrefix, successfulServerRuns)[0];
+      const latestIosArtifact = matchingArtifacts(iosPrefix, successfulIosRuns)[0];
+      const serverSha = latestServerArtifact?.name.slice(serverPrefix.length);
+      const iosSha = latestIosArtifact?.name.slice(iosPrefix.length);
+      const validSha = (value: string | undefined): value is string =>
+        Boolean(value && /^[0-9a-f]{40}$/i.test(value));
+      if (!validSha(serverSha) || !validSha(iosSha) || serverSha !== iosSha) {
+        return commandError('VALIDATION', 'App Store submission is blocked by mismatched or missing release evidence.', {
+          details: {
+            environment: environmentName,
+            server: latestServerArtifact
+              ? {
+                runId: latestServerArtifact.workflow_run?.id,
+                artifactId: latestServerArtifact.id,
+                sha: serverSha,
+              }
+              : null,
+            mobile: latestIosArtifact
+              ? {
+                runId: latestIosArtifact.workflow_run?.id,
+                artifactId: latestIosArtifact.id,
+                sha: iosSha,
+              }
+              : null,
+          },
+          hint: 'Run the managed server deploy and iOS release workflows for the same commit, verify them with hv_ci_status, then retry.',
+        });
+      }
       const adapter = adapterOrThrow(appIdentifier);
 
       const app = await adapter.findAppByBundleId(appIdentifier);
@@ -375,7 +268,7 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
       if (!build) {
         return commandError('VALIDATION', `Version ${version.versionString} has no build attached. Select a build in App Store Connect first.`, {
           details: { version: { versionString: version.versionString, state: version.appStoreState } },
-          hint: 'Upload one with hv_testflight_upload, then attach it to the version.',
+          hint: 'Run the managed iOS release workflow declared by ios.release, then attach the processed build to the version.',
         });
       }
 
@@ -388,7 +281,16 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
         action: 'appstore.submit',
         resourceType: 'appstore',
         resourceId: app.id,
-        details: { appIdentifier, version: version.versionString, buildNumber: build.version, reviewSubmissionId: reviewSubmission.id },
+        details: {
+          appIdentifier,
+          environment: environmentName,
+          releaseSha: iosSha,
+          serverRunId: latestServerArtifact.workflow_run?.id,
+          iosRunId: latestIosArtifact.workflow_run?.id,
+          version: version.versionString,
+          buildNumber: build.version,
+          reviewSubmissionId: reviewSubmission.id,
+        },
       });
 
       return commandSuccess({
@@ -397,236 +299,16 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
         version: { id: version.id, versionString: version.versionString, previousState: version.appStoreState },
         build: { id: build.id, buildNumber: build.version },
         reviewSubmission: { id: reviewSubmission.id, state: reviewSubmission.state, reusedExistingSubmission },
-      });
-    })
-  );
-
-  commands.register(
-    'hv_appstore_assets',
-    'Prepare App Store submission assets: create/update localization metadata (description, keywords, what\'s new, URLs) and upload screenshots for the editable app version.',
-    {
-      appIdentifier: z.string().describe('App bundle identifier (e.g. com.example.myapp)'),
-      platform: platformField,
-      locale: z.string().optional().describe('Localization locale (default: en-US)'),
-      screenshotDisplayType: z.string().optional().describe('Screenshot display type (default: APP_IPHONE_65)'),
-      screenshotDir: z.string().optional().describe('Directory containing screenshots (.png/.jpg/.jpeg), uploaded in filename sort order'),
-      replaceScreenshots: z.boolean().optional().describe('Delete existing screenshots in the set before uploading (default: false)'),
-      description: z.string().optional().describe('Localized App Store description'),
-      keywords: z.string().optional().describe('Localized keywords (comma-separated)'),
-      promotionalText: z.string().optional().describe('Localized promotional text'),
-      marketingUrl: z.string().optional().describe('Localized marketing URL'),
-      supportUrl: z.string().optional().describe('Localized support URL'),
-      whatsNew: z.string().optional().describe('Localized what\'s new text'),
-    },
-    wrapCommandHandler(async ({
-      appIdentifier, platform, locale = 'en-US', screenshotDisplayType = 'APP_IPHONE_65',
-      screenshotDir, replaceScreenshots, description, keywords, promotionalText, marketingUrl, supportUrl, whatsNew,
-    }) => {
-      const adapter = adapterOrThrow(appIdentifier);
-
-      const app = await adapter.findAppByBundleId(appIdentifier);
-      if (!app) {
-        return commandError('NOT_FOUND', `App not found for bundle ID: ${appIdentifier}.`, { hint: 'Create the app in App Store Connect first.' });
-      }
-      const version = await adapter.getEditableAppStoreVersion(app.id, platform as AscPlatform);
-      if (!version) {
-        return commandError('VALIDATION', 'No editable App Store version found (expected PREPARE_FOR_SUBMISSION or similar state).', {
-          hint: 'Create a new version in App Store Connect, then retry.',
-        });
-      }
-
-      const localization = await adapter.getOrCreateAppStoreVersionLocalization(version.id, locale);
-      await adapter.updateAppStoreVersionLocalization(localization.id, {
-        description, keywords, promotionalText, marketingUrl, supportUrl, whatsNew,
-      });
-
-      const uploadedScreenshots: Array<{ fileName: string; screenshotId: string }> = [];
-      const deletedScreenshotIds: string[] = [];
-      let screenshotSet: { id: string; screenshotDisplayType: string } | null = null;
-
-      if (screenshotDir) {
-        const entries = await readdir(screenshotDir);
-        const files = entries
-          .filter((name) => IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase()))
-          .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-        if (files.length === 0) {
-          return commandError('VALIDATION', `No screenshot files found in ${screenshotDir}. Expected .png/.jpg/.jpeg files.`);
-        }
-        for (const file of files) {
-          const info = await stat(path.join(screenshotDir, file));
-          if (!info.isFile()) {
-            return commandError('VALIDATION', `Path is not a file: ${path.join(screenshotDir, file)}`);
-          }
-        }
-
-        screenshotSet = await adapter.getOrCreateAppScreenshotSet(localization.id, screenshotDisplayType);
-        if (replaceScreenshots) {
-          for (const item of await adapter.listAppScreenshots(screenshotSet.id)) {
-            await adapter.deleteAppScreenshot(item.id);
-            deletedScreenshotIds.push(item.id);
-          }
-        }
-        for (const file of files) {
-          const uploaded = await adapter.uploadAppScreenshot(screenshotSet.id, path.join(screenshotDir, file), file);
-          uploadedScreenshots.push({ fileName: file, screenshotId: uploaded.screenshotId });
-        }
-      }
-
-      ctx.repos.audit.create({
-        action: 'appstore.assets.prepare',
-        resourceType: 'appstore',
-        resourceId: app.id,
-        details: {
-          appIdentifier,
-          version: version.versionString,
-          locale,
-          screenshotDisplayType,
-          metadataUpdated: {
-            description: description !== undefined,
-            keywords: keywords !== undefined,
-            promotionalText: promotionalText !== undefined,
-            marketingUrl: marketingUrl !== undefined,
-            supportUrl: supportUrl !== undefined,
-            whatsNew: whatsNew !== undefined,
-          },
-          screenshotUploads: uploadedScreenshots.length,
-          screenshotReplaced: replaceScreenshots ?? false,
+        releaseGate: {
+          environment: environmentName,
+          sha: iosSha,
+          serverRunId: latestServerArtifact.workflow_run?.id,
+          iosRunId: latestIosArtifact.workflow_run?.id,
+          serverArtifactId: latestServerArtifact.id,
+          iosArtifactId: latestIosArtifact.id,
         },
       });
-
-      return commandSuccess(
-        {
-          message: 'App Store submission assets prepared',
-          app,
-          version: { id: version.id, versionString: version.versionString, state: version.appStoreState },
-          localization: { id: localization.id, locale },
-          screenshotSet,
-          deletedScreenshotIds,
-          uploadedScreenshots,
-        },
-        { next: ['hv_appstore_status', 'hv_appstore_submit'] }
-      );
     })
   );
 
-  commands.register(
-    'hv_appid_register',
-    'Register a new App ID (Bundle ID) on App Store Connect and optionally enable capabilities (e.g. PUSH_NOTIFICATIONS, ICLOUD, SIGN_IN_WITH_APPLE). Use hv_appstore_status include=["capabilities"] to inspect existing capabilities.',
-    {
-      identifier: z.string().describe('Bundle identifier (e.g. com.example.myapp)'),
-      name: z.string().describe('Human-readable name for the App ID'),
-      platform: z.enum(['IOS', 'MAC_OS']).optional().describe('Platform (default: IOS)'),
-      capabilities: z.array(z.string()).optional().describe('Capability types to enable (e.g. PUSH_NOTIFICATIONS, ICLOUD, SIGN_IN_WITH_APPLE)'),
-      appIdentifier: z.string().optional().describe('Scope hint for connection lookup'),
-    },
-    wrapCommandHandler(async ({ identifier, name, platform, capabilities, appIdentifier }) => {
-      const adapter = adapterOrThrow(appIdentifier);
-
-      const bundleId = await adapter.registerBundleId(identifier, name, platform ?? 'IOS');
-      let capabilityResults: { enabled: string[]; alreadyEnabled: string[]; errors: Array<{ type: string; error: string }> } | undefined;
-      if (capabilities?.length) {
-        capabilityResults = await adapter.enableCapabilities(bundleId.id, capabilities);
-      }
-
-      ctx.repos.audit.create({
-        action: 'appid.register',
-        resourceType: 'bundleId',
-        resourceId: bundleId.id,
-        details: { identifier, name, platform: platform ?? 'IOS', capabilities: capabilityResults },
-      });
-
-      return commandSuccess({
-        bundleId,
-        ...(capabilityResults ? { capabilities: capabilityResults } : {}),
-      });
-    })
-  );
-
-  commands.register(
-    'hv_xcode_deploy',
-    'Xcode device workflow. action="devices" lists devices available on network/USB; action="discover" finds the workspace/project and schemes in a directory; action="deploy" (default) builds a scheme and installs it on a connected device. Deploy without deviceId returns the device list; without scheme it auto-discovers the project.',
-    {
-      action: z.enum(['deploy', 'devices', 'discover']).optional().describe('Operation (default: deploy)'),
-      scheme: z.string().optional().describe('Xcode scheme to build'),
-      deviceId: z.string().optional().describe('Device identifier to install on'),
-      workspace: z.string().optional().describe('Workspace file name (e.g. MyApp.xcworkspace)'),
-      project: z.string().optional().describe('Project file name (e.g. MyApp.xcodeproj)'),
-      configuration: z.string().optional().describe('Build configuration (Debug or Release, default: Debug)'),
-      cwd: z.string().optional().describe('Working directory containing the Xcode project'),
-    },
-    wrapCommandHandler(async ({ action = 'deploy', scheme, deviceId, workspace, project, configuration, cwd }) => {
-      const adapter = new XcodeAdapter();
-
-      if (action === 'devices') {
-        const devices = await adapter.listDevices();
-        return commandSuccess({ count: devices.length, devices });
-      }
-      if (action === 'discover') {
-        const discovered = await adapter.discoverProject(cwd);
-        return commandSuccess(discovered);
-      }
-
-      // action === 'deploy'
-      if (!deviceId) {
-        const devices = await adapter.listDevices();
-        return commandSuccess(
-          { devices },
-          { hint: 'No deviceId provided. Re-run hv_xcode_deploy with deviceId set to one of the listed devices.' }
-        );
-      }
-
-      let resolvedScheme = scheme;
-      let resolvedWorkspace = workspace;
-      let resolvedProject = project;
-      if (!resolvedScheme) {
-        const projectInfo = await adapter.discoverProject(cwd);
-        resolvedWorkspace = resolvedWorkspace ?? projectInfo.workspace;
-        resolvedProject = resolvedProject ?? projectInfo.project;
-        if (projectInfo.schemes.length === 0) {
-          return commandError('VALIDATION', 'No schemes found in project. Specify a scheme explicitly.');
-        }
-        if (projectInfo.schemes.length > 1) {
-          return commandSuccess(
-            { schemes: projectInfo.schemes, workspace: projectInfo.workspace, project: projectInfo.project },
-            { hint: 'Multiple schemes found. Re-run hv_xcode_deploy with scheme set to one of them.' }
-          );
-        }
-        resolvedScheme = projectInfo.schemes[0];
-      }
-
-      const buildResult = await adapter.build({
-        scheme: resolvedScheme!,
-        deviceId,
-        workspace: resolvedWorkspace,
-        project: resolvedProject,
-        configuration: configuration ?? 'Debug',
-        cwd,
-      });
-      if (!buildResult.success) {
-        return commandError('PROVIDER_ERROR', buildResult.error ?? 'Build failed', {
-          details: { phase: 'build', output: buildResult.output?.substring(0, 3000) },
-        });
-      }
-      if (!buildResult.appPath) {
-        return commandError('PROVIDER_ERROR', 'Build succeeded but .app path not found in DerivedData', {
-          details: { phase: 'build', output: buildResult.output?.substring(0, 3000) },
-        });
-      }
-
-      const installResult = await adapter.install(deviceId, buildResult.appPath);
-      if (!installResult.success) {
-        return commandError('PROVIDER_ERROR', installResult.error ?? 'Install failed', {
-          details: { phase: 'install', appPath: buildResult.appPath, output: installResult.output?.substring(0, 3000) },
-        });
-      }
-
-      return commandSuccess({
-        message: `Built and installed ${resolvedScheme} on device`,
-        scheme: resolvedScheme,
-        deviceId,
-        appPath: buildResult.appPath,
-        configuration: configuration ?? 'Debug',
-      });
-    })
-  );
 }

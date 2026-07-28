@@ -18,7 +18,6 @@ const registeredCommandModules = [
   'hv-devx',
   'hv-email',
   'hv-observability',
-  'hv-payments',
   'hv-secrets',
   'lifecycle',
 ].map((name) => [

@@ -632,6 +632,62 @@ export class GitHubAdapter {
     });
   }
 
+  /**
+   * List Actions secret names scoped to a GitHub environment. Secret values
+   * are never returned by GitHub or exposed by this adapter.
+   */
+  async listEnvironmentSecrets(
+    owner: string,
+    repo: string,
+    environmentName: string
+  ): Promise<string[]> {
+    const environment = encodeURIComponent(environmentName);
+    try {
+      const response = await this.request<{ secrets: Array<{ name: string }> }>(
+        'GET',
+        `/repos/${owner}/${repo}/environments/${environment}/secrets?per_page=100`
+      );
+      return response.secrets.map((secret) => secret.name);
+    } catch (error) {
+      if (error instanceof Error && /404|not found/i.test(error.message)) return [];
+      throw error;
+    }
+  }
+
+  /**
+   * Create or update an Actions secret scoped to a GitHub environment.
+   */
+  async setEnvironmentSecret(
+    owner: string,
+    repo: string,
+    environmentName: string,
+    secretName: string,
+    secretValue: string
+  ): Promise<void> {
+    const environment = encodeURIComponent(environmentName);
+    try {
+      await this.request<unknown>('GET', `/repos/${owner}/${repo}/environments/${environment}`);
+    } catch (error) {
+      if (!(error instanceof Error) || !/404|not found/i.test(error.message)) throw error;
+      await this.request<unknown>('PUT', `/repos/${owner}/${repo}/environments/${environment}`, {});
+    }
+    const publicKeyResponse = await this.request<{ key_id: string; key: string }>(
+      'GET',
+      `/repos/${owner}/${repo}/environments/${environment}/secrets/public-key`
+    );
+    const sealedBox = require('tweetnacl-sealedbox-js') as {
+      seal: (message: Uint8Array, publicKey: Uint8Array) => Uint8Array;
+    };
+    const encrypted = Buffer.from(
+      sealedBox.seal(Buffer.from(secretValue), Buffer.from(publicKeyResponse.key, 'base64'))
+    ).toString('base64');
+    await this.request<unknown>(
+      'PUT',
+      `/repos/${owner}/${repo}/environments/${environment}/secrets/${encodeURIComponent(secretName)}`,
+      { encrypted_value: encrypted, key_id: publicKeyResponse.key_id }
+    );
+  }
+
   // ============= Repository Secrets =============
 
   /**
@@ -822,6 +878,34 @@ export class GitHubAdapter {
         html_url: string;
       }>;
     }>('GET', `/repos/${owner}/${repo}/actions/workflows/${workflowId}/runs${query}`);
+  }
+
+  /**
+   * List repository Actions artifacts. Names and workflow-run identities are
+   * sufficient for release-gate verification; artifact contents remain in
+   * GitHub and are not exposed through command results.
+   */
+  async listArtifacts(owner: string, repo: string, perPage = 100): Promise<{
+    total_count: number;
+    artifacts: Array<{
+      id: number;
+      name: string;
+      expired: boolean;
+      created_at: string;
+      updated_at: string;
+      workflow_run: {
+        id: number;
+        repository_id: number;
+        head_repository_id: number;
+        head_branch: string;
+        head_sha: string;
+      } | null;
+    }>;
+  }> {
+    return this.request(
+      'GET',
+      `/repos/${owner}/${repo}/actions/artifacts?per_page=${Math.max(1, Math.min(perPage, 100))}`
+    );
   }
 
   /**
@@ -1076,9 +1160,14 @@ providerRegistry.register({
     displayName: 'GitHub',
     category: 'deployment',
     credentialsSchema: GitHubCredentialsSchema,
-    setupHelpUrl: 'https://github.com/settings/personal-access-tokens/new',
+    setupHelpUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
     credentials: {
       defaultScalarKey: 'apiToken',
+      environmentVariableAliases: [[
+        'NODE_AUTH_TOKEN',
+        'HYPERVIBE_GITHUB_TOKEN',
+        'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
+      ]],
     },
   },
   factory: (credentials) => {

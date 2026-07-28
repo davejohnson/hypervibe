@@ -59,10 +59,14 @@ import {
   syncHostingEnvVars,
 } from '../domain/services/hosting-env.service.js';
 import {
+  applyStripeCatalogAction,
   applyStripeHostingEnvSync,
+  applyStripeWebhookAction,
+  isStripeCatalogAction,
   isStripeHostingEnvSyncAction,
-  resolveStripeEnvironmentValues,
-  stripeResolutionFingerprint,
+  isStripeWebhookAction,
+  resolveStripeIntegrationState,
+  stripeIntegrationFingerprint,
 } from '../domain/services/stripe-env.service.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import type { Project } from '../domain/entities/project.entity.js';
@@ -142,7 +146,7 @@ export function connectionRecoveryHint(
   const packageReadNeeded = options.includePackageRead
     || uniqueBlocks.some((block) => /packageReadToken|IMAGE_REGISTRY_|GHCR|GitHub Actions/i.test(block.reason ?? ''));
   const packageReadHint = packageReadNeeded
-    ? ` For GitHub Actions image deploys, the GitHub connection must include both GitHub API access and GHCR package-read access: apiToken needs repo + workflow (create: ${GITHUB_TOKEN_URLS.api}), while packageReadToken needs read:packages for durable image pulls (create: ${GITHUB_TOKEN_URLS.packageRead}). A read:packages-only token is not enough as apiToken. Use credentialsRef="dotenv:/absolute/path/.env" with credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}; for one-token setup, map both keys to the same classic PAT with repo + workflow + read:packages. Or use credentialsRef="file:/absolute/path/github.json" containing apiToken plus packageReadToken.`
+    ? ` For GitHub Actions image deploys, the GitHub connection must include both GitHub API access and GHCR package-read access: apiToken needs repo + workflow (create: ${GITHUB_TOKEN_URLS.api}), while packageReadToken needs read:packages for durable image pulls (create: ${GITHUB_TOKEN_URLS.packageRead}). A read:packages-only token is not enough as apiToken. For a one-token setup, export NODE_AUTH_TOKEN with a classic PAT that has repo + workflow + read:packages, then use credentialsRef="env:NODE_AUTH_TOKEN"; Hypervibe also accepts HYPERVIBE_GITHUB_TOKEN and HYPERVIBE_GITHUB_PACKAGES_TOKEN as aliases when only one distinct value is available. For split credentials, use credentialsRef="dotenv:/absolute/path/.env" with credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}, or credentialsRef="file:/absolute/path/github.json" containing apiToken plus packageReadToken.`
     : '';
   const after = options.after ? ` ${options.after}` : '';
   return `This task needs provider access that is not connected on this Mac (${providers}). Hypervibe can store and verify credentials the user already controls with hv_connect. ${commands}.${packageReadHint} Prefer exported env vars, existing .env files via credentialsRef="dotenv:/absolute/path/.env#KEY", or local JSON for structured credentials; raw credentials={...} is still accepted if the user intentionally wants chat entry. If no usable credential reference is already available, stop and offer two concrete paths: help connect credentials the user already has, or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume the user should be added to the provider, and do not run hv_plan, hv_apply, or hv_deploy as a workaround.${after}`;
@@ -335,6 +339,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const projectForPreflight = spec.gitRemoteUrl
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
   const blocked = [
     ...planService.preflight(envSpec, envName),
     ...planService.projectPreflight(projectForPreflight, spec, envName),
@@ -346,10 +351,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
     return { kind: 'blocked', applyBlocked };
   }
   let freshIntegrationFingerprints: Record<string, string> | undefined;
-  if (envSpec.payments?.stripe) {
-    const stripeResolution = await resolveStripeEnvironmentValues({
+  const stripeSpec = envSpec.payments?.stripe;
+  if (stripeSpec || loaded.document.integrationFingerprints?.stripe) {
+    const stripeResolution = await resolveStripeIntegrationState({
       environmentName: envName,
-      spec: envSpec.payments.stripe,
+      spec: stripeSpec,
+      environment,
       verifiedConnection: true,
     });
     if (!stripeResolution.success) {
@@ -364,7 +371,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       };
     }
     freshIntegrationFingerprints = {
-      stripe: stripeResolutionFingerprint(stripeResolution),
+      stripe: stripeIntegrationFingerprint(stripeResolution),
     };
   }
   const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
@@ -375,7 +382,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const projectForApply = syncProjectGitRemoteUrl(ctx, project, spec);
 
   // Re-observe for the TOCTOU fingerprint check.
-  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
   const { observed } = await planService.observeEnvironment(projectForApply, environment, envSpec);
   const freshFingerprint = observed ? fingerprintObservedState(observed) : null;
 
@@ -575,6 +581,37 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environment: latestEnvironment,
         environmentSpec: envSpec,
         service,
+        action,
+      });
+    }
+    if (isStripeCatalogAction(action)) {
+      const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      if (!latestEnvironment) {
+        return {
+          success: false,
+          message: `Cannot converge Stripe catalog resource ${action.resource.name}`,
+          error: `Environment "${envName}" is not tracked locally`,
+        };
+      }
+      return applyStripeCatalogAction({
+        environment: latestEnvironment,
+        environmentSpec: envSpec,
+        action,
+      });
+    }
+    if (isStripeWebhookAction(action)) {
+      const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      if (!latestEnvironment) {
+        return {
+          success: false,
+          message: `Cannot converge Stripe webhook ${action.resource.name}`,
+          error: `Environment "${envName}" is not tracked locally`,
+        };
+      }
+      return applyStripeWebhookAction({
+        project: applyProject,
+        environment: latestEnvironment,
+        environmentSpec: envSpec,
         action,
       });
     }

@@ -191,11 +191,19 @@ describe('PlanService.plan', () => {
           services: { web: { startCommand: 'npm start' } },
           payments: {
             stripe: {
-              prices: {
-                STRIPE_STARTER_MONTHLY_PRICE_ID: {
-                  product: 'Starter',
-                  match: 'contains',
-                  interval: 'month',
+              catalog: {
+                products: {
+                  starter: {
+                    name: 'Invoice Perfect Starter',
+                    prices: {
+                      monthly: {
+                        unitAmount: 4900,
+                        currency: 'cad',
+                        interval: 'month',
+                        envVar: 'STRIPE_STARTER_MONTHLY_PRICE_ID',
+                      },
+                    },
+                  },
                 },
               },
             },
@@ -211,6 +219,29 @@ describe('PlanService.plan', () => {
         projectId: 'rp-1',
         environmentId: 're-1',
         services: { web: { serviceId: 's-1' } },
+        payments: {
+          stripe: {
+            environment: 'staging',
+            catalog: {
+              products: {
+                starter: {
+                  productId: 'prod_starter',
+                  name: 'Invoice Perfect Starter',
+                  prices: {
+                    monthly: {
+                      priceId: 'price_starter_month',
+                      envVar: 'STRIPE_STARTER_MONTHLY_PRICE_ID',
+                      unitAmount: 4900,
+                      currency: 'cad',
+                      interval: 'month',
+                    },
+                  },
+                },
+              },
+            },
+            webhooks: {},
+          },
+        },
       },
     });
     new ServiceRepository().create({ projectId: project.id, name: 'web' });
@@ -279,7 +310,9 @@ describe('PlanService.plan', () => {
     const result = await new PlanService().plan(project, 'staging');
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
-    const payment = plan.actions.find((action) => action.resource.kind === 'payment')!;
+    const payment = plan.actions.find((action) =>
+      action.metadata?.operation === 'stripeHostingEnvSync'
+    )!;
     expect(payment).toMatchObject({
       type: 'update',
       dependsOn: ['service:web'],
@@ -287,8 +320,109 @@ describe('PlanService.plan', () => {
     });
     const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
     expect(document.integrationFingerprints).toMatchObject({ stripe: expect.any(String) });
-    expect(JSON.stringify(document)).not.toContain('price_starter_month');
     expect(JSON.stringify(document)).not.toContain('sk_test_staging');
+  });
+
+  it('plans bound Stripe webhook deletion before destroying its hosting service', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: {},
+        },
+      },
+    });
+    const endpoint = {
+      id: 'we_billing',
+      url: 'https://billing.example.com/api/webhooks/stripe',
+      status: 'enabled' as const,
+      enabled_events: ['checkout.session.completed'],
+      metadata: {},
+      created: 1,
+    };
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { web: { serviceId: 's-1' } },
+        payments: {
+          stripe: {
+            environment: 'staging',
+            webhooks: {
+              billing: {
+                endpointId: endpoint.id,
+                url: endpoint.url,
+                events: endpoint.enabled_events,
+                service: 'web',
+                envVar: 'STRIPE_WEBHOOK_SECRET',
+                valueHash: hashEnvValue('bound-signing-value'),
+              },
+            },
+          },
+        },
+      },
+    });
+    new ServiceRepository().create({ projectId: project.id, name: 'web' });
+    const connectionRepo = new ConnectionRepository();
+    for (const input of [
+      { provider: 'railway', scope: undefined, credentials: { apiToken: 'railway-token' } },
+      { provider: 'stripe', scope: 'staging', credentials: { secretKey: 'sk_test_staging' } },
+    ]) {
+      const connection = connectionRepo.create({
+        provider: input.provider,
+        scope: input.scope,
+        credentialsEncrypted: getSecretStore().encryptObject(input.credentials),
+      });
+      connectionRepo.updateStatus(connection.id, 'verified');
+    }
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 're-1',
+      services: [{
+        name: 'web',
+        externalId: 's-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: {},
+        envVarKeys: ['STRIPE_WEBHOOK_SECRET'],
+        envVarHashes: { STRIPE_WEBHOOK_SECRET: hashEnvValue('bound-signing-value') },
+        status: 'running',
+      }],
+      databases: [],
+      completeness: { services: 'complete' },
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(StripeAdapter.prototype, 'listWebhookEndpoints').mockResolvedValue([endpoint]);
+
+    const result = await new PlanService().plan(project, 'staging');
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const webhookDestroy = plan.actions.find((action) =>
+      action.metadata?.operation === 'stripeWebhookDestroy'
+    );
+    const serviceDestroy = plan.actions.find((action) =>
+      action.resource.kind === 'service'
+      && action.resource.name === 'web'
+      && action.type === 'destroy'
+    );
+    expect(webhookDestroy).toMatchObject({
+      type: 'destroy',
+      requiresConfirm: true,
+      resource: { kind: 'payment', name: 'billing', provider: 'stripe' },
+      metadata: { endpointId: endpoint.id, service: 'web' },
+    });
+    expect(serviceDestroy?.dependsOn).toContain(webhookDestroy?.id);
+    const document = new RunRepository().findById(plan.planRunId)!.plan;
+    expect(JSON.stringify(document)).not.toContain('bound-signing-value');
   });
 
   it('requires env-var retirement to be a separate release after service config converges', async () => {

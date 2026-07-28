@@ -6,7 +6,6 @@ import type { AppStoreBetaGroup, AppStoreConnectBuild, AppStoreConnectCredential
 import { formatConnectionGuidance } from './connection-guidance.js';
 
 const connectionRepo = new ConnectionRepository();
-export const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg']);
 
 export const betaTesterInputSchema = z.object({
   email: z.string().email().describe('Tester email address'),
@@ -21,10 +20,10 @@ export type BetaTesterInput = z.infer<typeof betaTesterInputSchema>;
  * @param scopeHint - Optional scope hint (e.g., app bundle ID) for finding scoped tokens
  */
 export function getAppStoreConnectAdapter(scopeHint?: string): { adapter: AppStoreConnectAdapter } | { error: string } {
-  const connection = connectionRepo.findBestMatch('appstoreconnect', scopeHint);
+  const connection = connectionRepo.findBestVerifiedMatch('appstoreconnect', scopeHint);
   if (!connection) {
     return {
-      error: `No App Store Connect connection found. ${formatConnectionGuidance('appstoreconnect', { scope: scopeHint })}`,
+      error: `No verified App Store Connect connection found. ${formatConnectionGuidance('appstoreconnect', { scope: scopeHint })}`,
     };
   }
 
@@ -36,105 +35,30 @@ export function getAppStoreConnectAdapter(scopeHint?: string): { adapter: AppSto
   return { adapter };
 }
 
-export async function resolveAppId(
-  adapter: AppStoreConnectAdapter,
-  appIdentifier?: string,
-  appId?: string,
-): Promise<{ appId: string; app?: { id: string; bundleId: string; name: string } } | { error: string }> {
-  if (appId) return { appId };
-  if (!appIdentifier) {
-    return { error: 'Provide appId or appIdentifier so Hypervibe can resolve the App Store Connect app.' };
-  }
-
-  const app = await adapter.findAppByBundleId(appIdentifier);
-  if (!app) {
-    return { error: `App not found for bundle ID: ${appIdentifier}` };
-  }
-
-  return { appId: app.id, app };
-}
-
-export async function resolveBuild(
-  adapter: AppStoreConnectAdapter,
-  params: {
-    appId?: string;
-    buildId?: string;
-    buildNumber?: string;
-    usesNonExemptEncryption?: boolean;
-  },
-): Promise<{ build: AppStoreConnectBuild; complianceSet?: boolean } | { error: string }> {
-  if (params.buildId) {
-    const builds = await adapter.listBuilds({ appId: params.appId, limit: 50 });
-    const build = builds.find((candidate) => candidate.id === params.buildId);
-    if (!build) {
-      return { error: `Build not found by ID: ${params.buildId}` };
-    }
-    return { build };
-  }
-
-  const compliance = await adapter.waitForProcessingAndSetCompliance({
-    appId: params.appId,
-    buildNumber: params.buildNumber,
-    usesNonExemptEncryption: params.usesNonExemptEncryption ?? false,
-  });
-  if (compliance.error || !compliance.build) {
+/**
+ * Resolve verified App Store Connect credentials for projection into a
+ * GitHub environment. Callers must keep the returned values inside provider
+ * mutation boundaries and never place them in plans, bindings, or receipts.
+ */
+export function getVerifiedAppStoreConnectCredentials(
+  scopeHint?: string
+): { credentials: AppStoreConnectCredentials } | { error: string } {
+  const connection = connectionRepo.findBestVerifiedMatch('appstoreconnect', scopeHint);
+  if (!connection) {
     return {
-      error: compliance.error ?? 'No processed build found for TestFlight distribution',
+      error: `No verified App Store Connect connection found. ${formatConnectionGuidance('appstoreconnect', { scope: scopeHint })}`,
     };
   }
-
-  return { build: compliance.build, complianceSet: compliance.complianceSet };
-}
-
-export async function resolveBetaGroup(
-  adapter: AppStoreConnectAdapter,
-  params: {
-    appId: string;
-    groupId?: string;
-    groupName?: string;
-    createIfMissing?: boolean;
-    groupType?: 'internal' | 'external';
-    hasAccessToAllBuilds?: boolean;
-    feedbackEnabled?: boolean;
-    publicLinkEnabled?: boolean;
-    publicLinkLimit?: number;
-  },
-): Promise<{ group: AppStoreBetaGroup; created: boolean } | { error: string }> {
-  if (params.groupId) {
-    const groups = await adapter.listBetaGroups(params.appId);
-    const group = groups.find((candidate) => candidate.id === params.groupId);
-    if (!group) {
-      return { error: `Beta group not found by ID for app: ${params.groupId}` };
-    }
-    return { group, created: false };
-  }
-
-  const groupName = params.groupName?.trim();
-  if (!groupName) {
-    return { error: 'Provide groupName or groupId.' };
-  }
-
-  if (params.createIfMissing === false) {
-    const group = await adapter.findBetaGroupByName(params.appId, groupName);
-    return group
-      ? { group, created: false }
-      : { error: `Beta group not found: ${groupName}` };
-  }
-
-  return adapter.getOrCreateBetaGroup({
-    appId: params.appId,
-    name: groupName,
-    isInternal: params.groupType === 'internal',
-    hasAccessToAllBuilds: params.hasAccessToAllBuilds,
-    feedbackEnabled: params.feedbackEnabled,
-    publicLinkEnabled: params.publicLinkEnabled,
-    publicLinkLimit: params.publicLinkLimit,
-  });
+  return {
+    credentials: getSecretStore().decryptObject<AppStoreConnectCredentials>(
+      connection.credentialsEncrypted
+    ),
+  };
 }
 
 /**
  * Create-or-find testers and ensure they are in the given beta group.
- * Shared by hv_testflight_distribute and the iOS spec converge path.
+ * Shared by the iOS desired-state converge path and managed release workflow support.
  */
 export async function addTestersToGroup(
   adapter: AppStoreConnectAdapter,

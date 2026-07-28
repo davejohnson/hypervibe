@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
-import type { IEmailProvider, EmailDomainAuth, SendEmailInput as EmailInput } from '../../../domain/ports/email.port.js';
+import type { EmailDomainAuth } from '../../../domain/ports/email.port.js';
 
 const SENDGRID_API_URL = 'https://api.sendgrid.com/v3';
 
@@ -38,15 +38,6 @@ export interface SendGridValidationResult {
     dkim1?: { valid: boolean; reason?: string };
     dkim2?: { valid: boolean; reason?: string };
   };
-}
-
-export interface SendEmailInput {
-  to: string | string[];
-  from: string;
-  subject: string;
-  text?: string;
-  html?: string;
-  replyTo?: string;
 }
 
 export interface SendGridEventWebhook {
@@ -237,7 +228,7 @@ export class SendGridAdapter {
 
     const response = await fetch(`${SENDGRID_API_URL}${endpoint}`, options);
 
-    // Handle no-content responses (e.g., successful email send returns 202 with no body)
+    // Handle accepted and no-content responses.
     if (response.status === 202 || response.status === 204) {
       return {} as T;
     }
@@ -322,44 +313,6 @@ export class SendGridAdapter {
       `/whitelabel/domains/${domainId}/validate`
     );
     return result;
-  }
-
-  async sendEmail(input: SendEmailInput): Promise<{ success: boolean; messageId?: string; error?: string }> {
-    try {
-      const toArray = Array.isArray(input.to) ? input.to : [input.to];
-
-      const body: Record<string, unknown> = {
-        personalizations: [
-          {
-            to: toArray.map((email) => ({ email })),
-          },
-        ],
-        from: { email: input.from },
-        subject: input.subject,
-        content: [],
-      };
-
-      if (input.replyTo) {
-        body.reply_to = { email: input.replyTo };
-      }
-
-      const content: Array<{ type: string; value: string }> = [];
-      if (input.text) {
-        content.push({ type: 'text/plain', value: input.text });
-      }
-      if (input.html) {
-        content.push({ type: 'text/html', value: input.html });
-      }
-      if (content.length === 0) {
-        content.push({ type: 'text/plain', value: '' });
-      }
-      body.content = content;
-
-      await this.request('POST', '/mail/send', body);
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
   }
 
   async createDomainAuthentication(

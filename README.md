@@ -340,9 +340,10 @@ intended sandbox before revealing its API keys because each Stripe sandbox has
 its own isolated key pair and objects. See [Stripe sandbox management](https://docs.stripe.com/sandboxes/dashboard/manage)
 and [sandbox API-key access](https://docs.stripe.com/sandboxes/dashboard/manage-access).
 
-Then declare which Stripe-derived values Hypervibe owns on the hosting
-services. This replaces scripts that scrape price ids and call Railway
-directly:
+Then declare the Stripe catalog Hypervibe owns and which hosting services
+receive its runtime values. Products and recurring prices are lifecycle
+resources: `hv_plan` observes them, proposes explicit create/update/adopt/
+replace/archive actions, and `hv_apply` records durable provider IDs:
 
 ```json
 {
@@ -354,46 +355,37 @@ directly:
         "secretKeyEnvVar": "STRIPE_SECRET_KEY",
         "publishableKeyEnvVar": "STRIPE_PUBLISHABLE_KEY"
       },
-      "prices": {
-        "STRIPE_STARTER_MONTHLY_PRICE_ID": {
-          "product": "Starter",
-          "match": "contains",
-          "interval": "month"
-        },
-        "STRIPE_STARTER_YEARLY_PRICE_ID": {
-          "product": "Starter",
-          "match": "contains",
-          "interval": "year"
-        },
-        "STRIPE_SMART_MONTHLY_PRICE_ID": {
-          "product": "Smart",
-          "match": "contains",
-          "interval": "month"
-        },
-        "STRIPE_SMART_YEARLY_PRICE_ID": {
-          "product": "Smart",
-          "match": "contains",
-          "interval": "year"
-        },
-        "STRIPE_CONNECTED_MONTHLY_PRICE_ID": {
-          "product": "Connected",
-          "match": "contains",
-          "interval": "month"
-        },
-        "STRIPE_CONNECTED_YEARLY_PRICE_ID": {
-          "product": "Connected",
-          "match": "contains",
-          "interval": "year"
-        },
-        "STRIPE_COMPLETE_MONTHLY_PRICE_ID": {
-          "product": "Complete",
-          "match": "contains",
-          "interval": "month"
-        },
-        "STRIPE_COMPLETE_YEARLY_PRICE_ID": {
-          "product": "Complete",
-          "match": "contains",
-          "interval": "year"
+      "catalog": {
+        "products": {
+          "starter": {
+            "name": "Starter",
+            "description": "Starter subscription",
+            "prices": {
+              "monthly": {
+                "unitAmount": 1900,
+                "currency": "usd",
+                "interval": "month",
+                "envVar": "STRIPE_STARTER_MONTHLY_PRICE_ID"
+              },
+              "yearly": {
+                "unitAmount": 19000,
+                "currency": "usd",
+                "interval": "year",
+                "envVar": "STRIPE_STARTER_YEARLY_PRICE_ID"
+              }
+            }
+          },
+          "pro": {
+            "name": "Pro",
+            "prices": {
+              "monthly": {
+                "unitAmount": 4900,
+                "currency": "usd",
+                "interval": "month",
+                "envVar": "STRIPE_PRO_MONTHLY_PRICE_ID"
+              }
+            }
+          }
         }
       }
     }
@@ -401,19 +393,134 @@ directly:
 }
 ```
 
-`product` can be an exact product name or a `prod_...` id. Set
-`match: "contains"` only for catalogs whose display names contain the tier
-name, as in the Invoice Express script. If more than one active price matches,
-add `currency`, `nickname`, or `lookupKey`; Hypervibe blocks an ambiguous plan
-instead of choosing whichever Stripe happens to return last.
+Unbound products and prices with exactly matching identity/configuration are
+offered as confirm-gated adoption actions. Multiple candidates block rather
+than choosing one. Recurring price amount, currency, and interval are
+immutable in Stripe; changing one creates a replacement, updates hosting
+variables, and only then offers a confirm-gated archive of the previous price.
+Removing a managed price or product likewise removes its hosting projection
+before archiving it. Unmanaged Stripe objects are untouched.
 
-`hv_plan` reads Stripe and hosting state, but persists only managed key names
-and hashes. `hv_apply` resolves the encrypted Stripe connection again and
-writes the values through the hosting adapter. With CI-triggered branch
+`hv_plan` reads Stripe and hosting state, but persists only provider identities,
+managed key names, and hashes—not credentials or webhook signing values.
+`hv_apply` resolves the encrypted Stripe connection again and writes runtime
+values through the hosting adapter. With CI-triggered branch
 deploys, the env update is staged without an independent Railway deploy; the
 approved exact-SHA workflow remains the next code release. Stripe-managed keys
 cannot also be supplied through `envVars`, `.env` includes, delegated secrets,
 one-off overrides, or `removeEnvVars`.
+
+Declare webhook endpoints in the same desired-state section instead of calling
+an imperative setup command:
+
+```json
+{
+  "payments": {
+    "stripe": {
+      "environment": "staging",
+      "webhooks": {
+        "billing": {
+          "url": "https://billing.example.com/api/webhooks/stripe",
+          "service": "web",
+          "envVar": "STRIPE_WEBHOOK_SECRET",
+          "events": [
+            "checkout.session.completed",
+            "customer.subscription.updated",
+            "customer.subscription.deleted",
+            "invoice.paid",
+            "invoice.payment_failed"
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+`envVar` defaults to `STRIPE_WEBHOOK_SECRET`, and `events` defaults to the
+common SaaS event set when omitted. `hv_plan` observes endpoint identity and
+hosting value hashes. A single existing endpoint with the declared URL and an
+observed hosting value becomes an explicit confirm-gated adoption action;
+multiple matches are blocked. Creation syncs Stripe's creation-only signing
+value to the named service and stores only the endpoint id plus a one-way hash.
+Replacement/rotation and deletion are also confirm-gated. If hosting sync
+fails, apply rolls the new endpoint back and verifies its absence; an
+unverifiable rollback records the endpoint id so a later plan cannot create a
+duplicate.
+
+### Gated iOS releases in GitHub Actions
+
+Keep App Store identity, capabilities, TestFlight groups, and the release
+workflow in each environment's desired state. The server and iOS code may live
+in the same repository (the v1 workflow is monorepo-first), while release
+evidence records mobile and server repository/SHA fields separately:
+
+```json
+{
+  "hosting": { "provider": "railway" },
+  "services": { "api": {} },
+  "deploy": {
+    "strategy": "branch",
+    "trigger": "ci",
+    "branch": "main"
+  },
+  "ios": {
+    "bundleId": "com.example.app",
+    "capabilities": ["PUSH_NOTIFICATIONS"],
+    "testflight": {
+      "groups": {
+        "Internal": {
+          "internal": true,
+          "testers": ["developer@example.com"]
+        }
+      }
+    },
+    "release": {
+      "services": ["api"],
+      "trigger": "after-server-deploy",
+      "build": {
+        "workingDirectory": "apps/ios",
+        "command": "bundle exec fastlane build",
+        "ipaPath": "build/Example.ipa",
+        "requiredSecrets": ["MATCH_PASSWORD"]
+      },
+      "testflight": {
+        "groups": ["Internal"],
+        "usesNonExemptEncryption": false,
+        "submitForBetaReview": false,
+        "scriptPath": "scripts/hypervibe-ios-release.mjs"
+      }
+    }
+  }
+}
+```
+
+`hv_plan`/`hv_apply` reconcile the bundle ID, capabilities, beta groups,
+server deploy workflow, iOS release workflow, and its App Store Connect
+environment secrets. User-managed signing secrets named by `requiredSecrets`
+must already exist in the matching GitHub environment.
+
+The server workflow uploads signed release evidence only after provider deploy
+success. The macOS iOS workflow shares the server deploy concurrency group,
+downloads that evidence, requires the same repository and full Git SHA,
+verifies every gated service, and validates the IPA bundle/version/build
+metadata. It then calls the reviewed project script named by `scriptPath`.
+App Store credentials are available only to that step, not to the arbitrary
+build command.
+
+The reusable project template provides
+`scripts/hypervibe-ios-release.mjs`, which performs the Apple upload,
+processing, compliance, declared-group distribution, optional beta review, and
+release-manifest protocol. Concrete apps can replace the script deliberately,
+but Hypervibe never generates or exposes separate upload/distribution tools for
+an agent to improvise. Versioned App Store metadata/screenshots belong in the
+project's Fastlane files, while local device builds belong in a project script;
+neither is a Hypervibe command.
+
+The iOS artifact records separate mobile and server provenance. Inspect these
+workflows through `hv_ci_status`; final `hv_appstore_submit` also refuses
+submission unless the latest successful server and iOS workflow runs have the
+same SHA.
 
 ### Retiring or renaming runtime variables
 
@@ -548,13 +655,28 @@ pull-request review, code audit, dependency/security controls, exact token
 permissions, beginner-safe connection examples, and the infrastructure PR
 flow—see [GitHub infrastructure for beginners](docs/github-infrastructure.md).
 
-Recommended: connect without pasting the token into chat by exporting it locally:
+Recommended for a one-token setup: create a classic PAT with `repo`,
+`workflow`, and `read:packages`, then export it under npm's required variable
+name:
 
 ```bash
-export HYPERVIBE_GITHUB_TOKEN=ghp_...
+export NODE_AUTH_TOKEN=ghp_...
 ```
 
-Then call `hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"`. For existing `.env` files, use `credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"`. For JSON credentials, save the JSON to a local file and use `credentialsRef="file:/absolute/path/to/credentials.json"`. If the user intentionally wants to enter credentials in chat, `credentials={...}` is still accepted.
+Then call `hv_connect provider=github credentialsRef="env:NODE_AUTH_TOKEN"`.
+For existing `.env` files, use
+`credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN"`. For JSON
+credentials, save the JSON to a local file and use
+`credentialsRef="file:/absolute/path/to/credentials.json"`. If the user
+intentionally wants to enter credentials in chat, `credentials={...}` is still
+accepted.
+
+For GitHub connections, `NODE_AUTH_TOKEN`, `HYPERVIBE_GITHUB_TOKEN`, and
+`HYPERVIBE_GITHUB_PACKAGES_TOKEN` are aliases. An explicitly referenced
+variable wins. If that variable is absent, Hypervibe accepts one distinct value
+from either alias; if different fallback values exist, it blocks instead of
+guessing. Prefer `NODE_AUTH_TOKEN` for the combined token because npm itself
+does not know Hypervibe's aliases.
 
 **Recommended for CI deploys: a classic PAT with `repo`, `workflow`, and `read:packages`**, created by a user with access to the target repositories. Create it from:
 
@@ -570,13 +692,13 @@ That one token can be used for both:
 For an existing `.env` file with one token:
 
 ```text
-HYPERVIBE_GITHUB_TOKEN=ghp_...
+NODE_AUTH_TOKEN=ghp_...
 ```
 
 Connect it like this:
 
 ```text
-hv_connect provider=github scope="owner/repo" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_TOKEN"}
+hv_connect provider=github scope="owner/repo" credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN"
 ```
 
 For least privilege, use two classic PATs:

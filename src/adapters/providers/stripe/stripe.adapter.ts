@@ -33,26 +33,6 @@ export interface StripePrice {
   created: number;
 }
 
-export interface SyncResult {
-  products: {
-    created: string[];
-    skipped: string[];
-    errors: Array<{ id: string; error: string }>;
-  };
-  prices: {
-    created: string[];
-    skipped: string[];
-    errors: Array<{ id: string; error: string }>;
-  };
-}
-
-export interface StripeCustomer {
-  id: string;
-  name: string | null;
-  email: string | null;
-  created: number;
-}
-
 export interface StripeWebhookEndpoint {
   id: string;
   url: string;
@@ -64,19 +44,15 @@ export interface StripeWebhookEndpoint {
   metadata: Record<string, string>;
 }
 
-// Common webhook events for typical SaaS apps
-export const STRIPE_COMMON_WEBHOOK_EVENTS = [
-  'checkout.session.completed',
-  'customer.subscription.created',
-  'customer.subscription.updated',
-  'customer.subscription.deleted',
-  'invoice.paid',
-  'invoice.payment_failed',
-  'customer.created',
-  'customer.updated',
-  'payment_intent.succeeded',
-  'payment_intent.payment_failed',
-];
+export class StripeApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = 'StripeApiError';
+  }
+}
 
 // Credentials schema for self-registration
 export const StripeCredentialsSchema = z.object({
@@ -197,7 +173,8 @@ export class StripeAdapter {
     mode: StripeMode,
     method: 'GET' | 'POST' | 'DELETE',
     endpoint: string,
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    requestOptions: { idempotencyKey?: string } = {}
   ): Promise<T> {
     const apiKey = this.getApiKey(mode);
 
@@ -205,21 +182,27 @@ export class StripeAdapter {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     };
+    if (requestOptions.idempotencyKey) {
+      headers['Idempotency-Key'] = requestOptions.idempotencyKey;
+    }
 
-    const options: RequestInit = {
+    const fetchOptions: RequestInit = {
       method,
       headers,
     };
 
     if (body && method === 'POST') {
-      options.body = this.encodeFormData(body);
+      fetchOptions.body = this.encodeFormData(body);
     }
 
-    const response = await fetch(`${STRIPE_API_URL}${endpoint}`, options);
+    const response = await fetch(`${STRIPE_API_URL}${endpoint}`, fetchOptions);
     const data = (await response.json()) as T & { error?: { message?: string } };
 
     if (!response.ok) {
-      throw new Error(data.error?.message || `Stripe API error: ${response.status}`);
+      throw new StripeApiError(
+        data.error?.message || `Stripe API error: ${response.status}`,
+        response.status
+      );
     }
 
     return data;
@@ -268,15 +251,16 @@ export class StripeAdapter {
     }
   }
 
-  async listProducts(mode: StripeMode, limit = 100): Promise<StripeProduct[]> {
+  async listProducts(mode: StripeMode, limit = 100, includeInactive = false): Promise<StripeProduct[]> {
     const products: StripeProduct[] = [];
     let hasMore = true;
     let startingAfter: string | undefined;
 
     while (hasMore && products.length < limit) {
+      const active = includeInactive ? '' : '&active=true';
       const endpoint = startingAfter
-        ? `/products?limit=100&active=true&starting_after=${startingAfter}`
-        : '/products?limit=100&active=true';
+        ? `/products?limit=100${active}&starting_after=${startingAfter}`
+        : `/products?limit=100${active}`;
 
       const response = await this.request<{ data: StripeProduct[]; has_more: boolean }>(mode, 'GET', endpoint);
       products.push(...response.data);
@@ -290,15 +274,16 @@ export class StripeAdapter {
     return products;
   }
 
-  async listPrices(mode: StripeMode, limit = 100): Promise<StripePrice[]> {
+  async listPrices(mode: StripeMode, limit = 100, includeInactive = false): Promise<StripePrice[]> {
     const prices: StripePrice[] = [];
     let hasMore = true;
     let startingAfter: string | undefined;
 
     while (hasMore && prices.length < limit) {
+      const active = includeInactive ? '' : '&active=true';
       const endpoint = startingAfter
-        ? `/prices?limit=100&active=true&starting_after=${startingAfter}`
-        : '/prices?limit=100&active=true';
+        ? `/prices?limit=100${active}&starting_after=${startingAfter}`
+        : `/prices?limit=100${active}`;
 
       const response = await this.request<{ data: StripePrice[]; has_more: boolean }>(mode, 'GET', endpoint);
       prices.push(...response.data);
@@ -315,20 +300,26 @@ export class StripeAdapter {
   async getProduct(mode: StripeMode, productId: string): Promise<StripeProduct | null> {
     try {
       return await this.request<StripeProduct>(mode, 'GET', `/products/${productId}`);
-    } catch {
-      return null;
+    } catch (error) {
+      if (error instanceof StripeApiError && error.status === 404) return null;
+      throw error;
     }
   }
 
   async getPrice(mode: StripeMode, priceId: string): Promise<StripePrice | null> {
     try {
       return await this.request<StripePrice>(mode, 'GET', `/prices/${priceId}`);
-    } catch {
-      return null;
+    } catch (error) {
+      if (error instanceof StripeApiError && error.status === 404) return null;
+      throw error;
     }
   }
 
-  async createProduct(mode: StripeMode, product: Partial<StripeProduct> & { id?: string }): Promise<StripeProduct> {
+  async createProduct(
+    mode: StripeMode,
+    product: Partial<StripeProduct> & { id?: string },
+    options: { idempotencyKey?: string } = {}
+  ): Promise<StripeProduct> {
     const body: Record<string, unknown> = {
       name: product.name,
       active: product.active ?? true,
@@ -344,10 +335,27 @@ export class StripeAdapter {
       body.metadata = product.metadata;
     }
 
-    return this.request<StripeProduct>(mode, 'POST', '/products', body);
+    return this.request<StripeProduct>(mode, 'POST', '/products', body, options);
   }
 
-  async createPrice(mode: StripeMode, price: Partial<StripePrice> & { product: string }): Promise<StripePrice> {
+  async updateProduct(
+    mode: StripeMode,
+    productId: string,
+    product: Pick<Partial<StripeProduct>, 'name' | 'description' | 'active' | 'metadata'>
+  ): Promise<StripeProduct> {
+    return this.request<StripeProduct>(mode, 'POST', `/products/${productId}`, {
+      ...(product.name !== undefined ? { name: product.name } : {}),
+      ...(product.description !== undefined ? { description: product.description ?? '' } : {}),
+      ...(product.active !== undefined ? { active: product.active } : {}),
+      ...(product.metadata !== undefined ? { metadata: product.metadata } : {}),
+    });
+  }
+
+  async createPrice(
+    mode: StripeMode,
+    price: Partial<StripePrice> & { product: string },
+    options: { idempotencyKey?: string } = {}
+  ): Promise<StripePrice> {
     const body: Record<string, unknown> = {
       product: price.product,
       currency: price.currency || 'usd',
@@ -368,170 +376,27 @@ export class StripeAdapter {
     if (price.nickname) {
       body.nickname = price.nickname;
     }
+    if (price.lookup_key) {
+      body.lookup_key = price.lookup_key;
+    }
 
     if (price.metadata && Object.keys(price.metadata).length > 0) {
       body.metadata = price.metadata;
     }
 
-    return this.request<StripePrice>(mode, 'POST', '/prices', body);
+    return this.request<StripePrice>(mode, 'POST', '/prices', body, options);
   }
 
-  async syncData(
-    sourceMode: StripeMode,
-    targetMode: StripeMode,
-    options: { preserveIds?: boolean; includeInactive?: boolean } = {}
-  ): Promise<SyncResult> {
-    const { preserveIds = true } = options;
-
-    const result: SyncResult = {
-      products: { created: [], skipped: [], errors: [] },
-      prices: { created: [], skipped: [], errors: [] },
-    };
-
-    // Fetch source data
-    const sourceProducts = await this.listProducts(sourceMode);
-    const sourcePrices = await this.listPrices(sourceMode);
-
-    // Fetch existing target products for comparison
-    const targetProducts = await this.listProducts(targetMode);
-    const targetProductIds = new Set(targetProducts.map((p) => p.id));
-
-    // Map source product IDs to target product IDs (for price linking)
-    const productIdMap = new Map<string, string>();
-
-    // Sync products
-    for (const product of sourceProducts) {
-      // Check if product already exists in target
-      if (preserveIds && targetProductIds.has(product.id)) {
-        result.products.skipped.push(product.id);
-        productIdMap.set(product.id, product.id);
-        continue;
-      }
-
-      try {
-        const newProduct = await this.createProduct(targetMode, {
-          id: preserveIds ? product.id : undefined,
-          name: product.name,
-          description: product.description,
-          active: product.active,
-          metadata: {
-            ...product.metadata,
-            _synced_from: sourceMode,
-            _source_id: product.id,
-          },
-        });
-        result.products.created.push(newProduct.id);
-        productIdMap.set(product.id, newProduct.id);
-      } catch (error) {
-        result.products.errors.push({
-          id: product.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-
-    // Fetch existing target prices for comparison
-    const targetPrices = await this.listPrices(targetMode);
-    const targetPricesBySourceId = new Map<string, StripePrice>();
-    for (const price of targetPrices) {
-      if (price.metadata?._source_id) {
-        targetPricesBySourceId.set(price.metadata._source_id, price);
-      }
-    }
-
-    // Sync prices
-    for (const price of sourcePrices) {
-      const targetProductId = productIdMap.get(price.product);
-      if (!targetProductId) {
-        result.prices.errors.push({
-          id: price.id,
-          error: `Product ${price.product} not found in target`,
-        });
-        continue;
-      }
-
-      // Check if price already exists (by source ID metadata)
-      if (targetPricesBySourceId.has(price.id)) {
-        result.prices.skipped.push(price.id);
-        continue;
-      }
-
-      try {
-        const newPrice = await this.createPrice(targetMode, {
-          product: targetProductId,
-          currency: price.currency,
-          unit_amount: price.unit_amount,
-          recurring: price.recurring,
-          nickname: price.nickname,
-          active: price.active,
-          metadata: {
-            ...price.metadata,
-            _synced_from: sourceMode,
-            _source_id: price.id,
-          },
-        });
-        result.prices.created.push(newPrice.id);
-      } catch (error) {
-        result.prices.errors.push({
-          id: price.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-
-    return result;
-  }
-
-  // Customer Management
-
-  async listCustomers(mode: StripeMode, limit = 100): Promise<StripeCustomer[]> {
-    const customers: StripeCustomer[] = [];
-    let hasMore = true;
-    let startingAfter: string | undefined;
-
-    while (hasMore && customers.length < limit) {
-      const endpoint = startingAfter
-        ? `/customers?limit=100&starting_after=${startingAfter}`
-        : '/customers?limit=100';
-
-      const response = await this.request<{ data: StripeCustomer[]; has_more: boolean }>(mode, 'GET', endpoint);
-      customers.push(...response.data);
-      hasMore = response.has_more;
-
-      if (response.data.length > 0) {
-        startingAfter = response.data[response.data.length - 1].id;
-      }
-    }
-
-    return customers;
-  }
-
-  async deleteCustomer(mode: StripeMode, customerId: string): Promise<{ id: string; deleted: boolean }> {
-    return this.request<{ id: string; deleted: boolean }>(mode, 'DELETE', `/customers/${customerId}`);
-  }
-
-  async clearCustomers(mode: StripeMode): Promise<{ deleted: number; errors: Array<{ id: string; error: string }> }> {
-    if (this.getRuntimeCredentials(mode).mode === 'live') {
-      throw new Error('Refusing to clear customers in live mode. This operation is only allowed in sandbox.');
-    }
-
-    const customers = await this.listCustomers(mode, 10000);
-    const errors: Array<{ id: string; error: string }> = [];
-    let deleted = 0;
-
-    for (const customer of customers) {
-      try {
-        await this.deleteCustomer(mode, customer.id);
-        deleted++;
-      } catch (error) {
-        errors.push({
-          id: customer.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-
-    return { deleted, errors };
+  async updatePrice(
+    mode: StripeMode,
+    priceId: string,
+    price: Pick<Partial<StripePrice>, 'active' | 'nickname' | 'metadata'>
+  ): Promise<StripePrice> {
+    return this.request<StripePrice>(mode, 'POST', `/prices/${priceId}`, {
+      ...(price.active !== undefined ? { active: price.active } : {}),
+      ...(price.nickname !== undefined ? { nickname: price.nickname ?? '' } : {}),
+      ...(price.metadata !== undefined ? { metadata: price.metadata } : {}),
+    });
   }
 
   // Webhook Management
@@ -544,8 +409,9 @@ export class StripeAdapter {
   async getWebhookEndpoint(mode: StripeMode, endpointId: string): Promise<StripeWebhookEndpoint | null> {
     try {
       return await this.request<StripeWebhookEndpoint>(mode, 'GET', `/webhook_endpoints/${endpointId}`);
-    } catch {
-      return null;
+    } catch (error) {
+      if (error instanceof StripeApiError && error.status === 404) return null;
+      throw error;
     }
   }
 
@@ -580,31 +446,6 @@ export class StripeAdapter {
 
   async deleteWebhookEndpoint(mode: StripeMode, endpointId: string): Promise<{ id: string; deleted: boolean }> {
     return this.request<{ id: string; deleted: boolean }>(mode, 'DELETE', `/webhook_endpoints/${endpointId}`);
-  }
-
-  async findWebhookByUrl(mode: StripeMode, url: string): Promise<StripeWebhookEndpoint | null> {
-    const endpoints = await this.listWebhookEndpoints(mode);
-    return endpoints.find((e) => e.url === url) ?? null;
-  }
-
-  async upsertWebhookEndpoint(
-    mode: StripeMode,
-    url: string,
-    events: string[],
-    options?: { description?: string; metadata?: Record<string, string> }
-  ): Promise<{ endpoint: StripeWebhookEndpoint; action: 'created' | 'updated'; secret?: string }> {
-    const existing = await this.findWebhookByUrl(mode, url);
-
-    if (existing) {
-      const updated = await this.updateWebhookEndpoint(mode, existing.id, {
-        enabled_events: events,
-        description: options?.description,
-      });
-      return { endpoint: updated, action: 'updated' };
-    } else {
-      const created = await this.createWebhookEndpoint(mode, url, events, options);
-      return { endpoint: created, action: 'created', secret: created.secret };
-    }
   }
 }
 

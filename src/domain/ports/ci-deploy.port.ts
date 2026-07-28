@@ -1,5 +1,5 @@
 export type BranchDeployProvider = string;
-export type BranchDeployEnvironmentKind = 'staging' | 'production';
+export type BranchDeployEnvironmentKind = 'development' | 'test' | 'staging' | 'production' | 'custom';
 
 export interface BranchDeployTarget {
   environmentName: string;
@@ -26,6 +26,7 @@ export interface BranchDeployWorkflow {
   environment: string;
   path: string;
   content: string;
+  companionFiles?: Array<{ path: string; content: string }>;
   requiredSecrets: string[];
   requiredVariables: string[];
 }

@@ -14,8 +14,6 @@ import type { CiWorkflowDiagnostic } from '../domain/ports/ci-deploy.port.js';
 import type { CommandContext } from '../application/context.js';
 import { projectField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
-import { canonicalizeLegacyGitHubSpec, deepMergeSpec, SpecStore } from '../domain/spec/spec.store.js';
-import { projectSpecSchema } from '../domain/spec/spec.schema.js';
 
 const repoField = z
   .string()
@@ -61,7 +59,7 @@ function resolveRepoOrThrow(ctx: CommandContext, projectRef: string | undefined,
   const parts = slug?.split('/') ?? [];
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
     throw new HvError('VALIDATION', 'Could not determine the GitHub repository.', {
-      hint: 'Pass repo="owner/repo" (config.repo for hv_ci_setup), or set the project gitRemoteUrl to a GitHub remote.',
+      hint: 'Pass repo="owner/repo", or set the project gitRemoteUrl to a GitHub remote.',
     });
   }
   return { project, owner: parts[0], repo: parts[1] };
@@ -188,147 +186,14 @@ function diagnoseWorkflowLog(text: string): CiWorkflowDiagnostic[] {
   ];
 }
 
-export function deprecatedCiSetupPatch(
-  kind: 'deploy-branch' | 'ai-review' | 'branch-protection' | 'workflow',
-  rawConfig: Record<string, unknown>,
-  current: ReturnType<typeof projectSpecSchema.parse>
-): Record<string, unknown> {
-  const repository = typeof rawConfig.repo === 'string' ? rawConfig.repo : undefined;
-  const githubBase = repository ? { repository } : {};
-  if (kind === 'ai-review') {
-    return { github: { ...githubBase, actions: { 'pr-review': { kind: 'pull-request-review' } } } };
-  }
-  if (kind === 'workflow') {
-    const template = String(rawConfig.template ?? '');
-    const templates: Record<string, Record<string, unknown>> = {
-      'node-test': { kind: 'check', category: 'test', runtime: { kind: 'node' }, commands: ['npm test'], triggers: { pullRequest: true } },
-      lint: { kind: 'check', category: 'lint', runtime: { kind: 'node' }, commands: ['npm run lint'], triggers: { pullRequest: true } },
-      'python-test': { kind: 'check', category: 'test', runtime: { kind: 'python' }, commands: ['python -m pytest'], triggers: { pullRequest: true } },
-    };
-    const automation = templates[template];
-    if (!automation) {
-      throw new HvError('VALIDATION', `The deprecated workflow template "${template}" cannot be migrated.`, {
-        hint: 'Declare a typed spec.github.actions check with category, runtime, commands, and triggers.',
-      });
-    }
-    return { github: { ...githubBase, actions: { [template]: automation } } };
-  }
-  if (kind === 'branch-protection') {
-    if (rawConfig.allowForcePushes === true || rawConfig.allowDeletions === true) {
-      throw new HvError('VALIDATION', 'Hypervibe GitHub desired state does not enable force-pushes or protected-branch deletion.', {
-        hint: 'Remove allowForcePushes/allowDeletions or manage that exceptional policy outside Hypervibe.',
-      });
-    }
-    return {
-      github: {
-        ...githubBase,
-        collaboration: {
-          pullRequests: {
-            targetBranch: rawConfig.branch,
-            requirePr: true,
-            requireReview: rawConfig.requireReviews ?? true,
-            requiredReviewers: rawConfig.requiredReviewers ?? 1,
-            dismissStaleReviews: rawConfig.dismissStaleReviews ?? false,
-            requireCodeOwnerReviews: rawConfig.requireCodeOwnerReviews ?? false,
-            requireStatusChecks: rawConfig.requireStatusChecks ?? false,
-            statusChecks: rawConfig.statusChecks ?? [],
-            strictStatusChecks: rawConfig.strictStatusChecks ?? true,
-            enforceAdmins: rawConfig.enforceAdmins ?? false,
-          },
-        },
-      },
-    };
-  }
-
-  const provider = String(rawConfig.provider ?? '');
-  const environments = Object.fromEntries(Object.entries(current.environments)
-    .filter(([name, environment]) => /stag|prod/i.test(name) && environment.hosting.provider === provider)
-    .map(([name, environment]) => [name, {
-      deploy: {
-        ...environment.deploy,
-        strategy: 'branch',
-        trigger: 'ci',
-        branch: environment.deploy?.branch ?? 'main',
-      },
-    }]));
-  if (Object.keys(environments).length === 0) {
-    throw new HvError('NOT_FOUND', `No staging/production environments use provider "${provider}".`, {
-      hint: 'Update the desired environment deploy fields directly with hv_spec_set.',
-    });
-  }
-  return {
-    github: {
-      ...githubBase,
-      ...(rawConfig.protectBranches === true ? {
-        collaboration: {
-          pullRequests: {
-            requirePr: true,
-            requireReview: true,
-            requiredReviewers: rawConfig.requiredReviewers ?? 1,
-            requireStatusChecks: Array.isArray(rawConfig.statusChecks) && rawConfig.statusChecks.length > 0,
-            statusChecks: rawConfig.statusChecks ?? [],
-          },
-        },
-      } : {}),
-    },
-    environments,
-  };
-}
-
 export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
-    'hv_ci_setup',
-    'Deprecated one-release compatibility bridge. Converts old setup requests into spec.github desired state and returns the revision to plan; it never mutates GitHub. Prefer hv_spec_set followed by hv_plan/hv_apply. deploy-branch maps environment deploy state; ai-review maps to an OpenAI pull-request-review and ignores legacy raw apiKey input; branch-protection maps github.collaboration; workflow maps known templates to typed checks.',
-    {
-      project: projectField,
-      kind: z.enum(['deploy-branch', 'ai-review', 'branch-protection', 'workflow']).describe('What to set up'),
-      config: z.record(z.unknown()).optional().describe('Kind-specific configuration (see tool description)'),
-    },
-    wrapCommandHandler(async ({ project: projectRef, kind, config }) => {
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const specStore = new SpecStore();
-      const stored = specStore.get(project);
-      if (!stored) {
-        throw new HvError('NOT_FOUND', `Project "${project.name}" has no spec.`, {
-          hint: 'Create desired state with hv_spec_set first.',
-        });
-      }
-      const canonicalCurrent = projectSpecSchema.parse(canonicalizeLegacyGitHubSpec(stored.spec));
-      const patch = deprecatedCiSetupPatch(kind, (config ?? {}) as Record<string, unknown>, canonicalCurrent);
-      const next = projectSpecSchema.parse(deepMergeSpec(canonicalCurrent, patch));
-      const result = specStore.replace(project, next);
-      ctx.repos.audit.create({
-        action: 'hv.ci_setup.deprecated_bridge',
-        resourceType: 'project_spec',
-        resourceId: project.id,
-        details: { kind, revision: result.revision },
-      });
-      const bridgeResult = commandSuccess({
-        project: project.name,
-        revision: result.revision,
-        spec: result.spec,
-        deprecated: true,
-      }, {
-        warnings: [
-          'hv_ci_setup is deprecated. The request was saved as desired state only; GitHub was not mutated.',
-          ...(kind === 'ai-review' && typeof (config as Record<string, unknown> | undefined)?.apiKey === 'string'
-            ? ['The legacy apiKey input was ignored and not stored. Connect OpenAI with hv_connect provider="openai" credentialsRef="env:OPENAI_API_KEY".']
-            : []),
-        ],
-        hint: 'Run hv_plan for the canonical environment, review the infrastructure-PR action, then run hv_apply with that planId.',
-        next: ['hv_plan'],
-      });
-      return bridgeResult;
-    })
-  );
-
-  commands.register(
     'hv_ci_status',
-    'Authoritative inspection path for Hypervibe-managed GitHub Actions deploys. Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls. Returns workflows, recent runs, run jobs/steps, bounded job log tails, GitHub Pages status, and branch protection rules through Hypervibe\'s stored GitHub connection. For deploy.strategy="branch" with trigger="ci", use it to check push-deploy workflow runs and diagnose failed job logs.',
+    'Authoritative inspection path for Hypervibe-managed GitHub Actions deploys and iOS releases. Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls. Returns workflows, recent runs, run jobs/steps, bounded job log tails, release artifact provenance, GitHub Pages status, and branch protection rules through Hypervibe\'s stored GitHub connection.',
     {
       project: projectField,
       repo: repoField,
-      include: z.array(z.enum(['workflows', 'runs', 'jobs', 'logs', 'pages', 'branch-protection'])).optional().describe('Sections to include (default: ["workflows"]). jobs/logs require runId. logs returns a bounded tail, not a full archive.'),
+      include: z.array(z.enum(['workflows', 'runs', 'jobs', 'logs', 'artifacts', 'pages', 'branch-protection'])).optional().describe('Sections to include (default: ["workflows"]). jobs/logs require runId. artifacts exposes names/provenance but never artifact contents. logs returns a bounded tail, not a full archive.'),
       workflow: z.string().optional().describe('Workflow id or filename (required when include contains "runs")'),
       runId: numericIdField.optional().describe('GitHub Actions run id, required when include contains "jobs" or "logs".'),
       jobId: numericIdField.optional().describe('Optional GitHub Actions job id for include=["logs"]. Defaults to failed jobs for the run, or the first job if none failed.'),
@@ -361,6 +226,7 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
                 name: r.name,
                 status: r.status,
                 conclusion: r.conclusion,
+                headSha: r.head_sha,
                 branch: r.head_branch,
                 event: r.event,
                 createdAt: r.created_at,
@@ -429,6 +295,23 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
               if (diagnostics.length > 0) {
                 data.diagnostics = diagnostics;
               }
+              break;
+            }
+            case 'artifacts': {
+              const artifacts = await adapter.listArtifacts(owner, repo, 100);
+              data.artifacts = artifacts.artifacts.map((artifact) => ({
+                id: artifact.id,
+                name: artifact.name,
+                expired: artifact.expired,
+                createdAt: artifact.created_at,
+                workflowRun: artifact.workflow_run
+                  ? {
+                    id: artifact.workflow_run.id,
+                    headSha: artifact.workflow_run.head_sha,
+                    headBranch: artifact.workflow_run.head_branch,
+                  }
+                  : null,
+              }));
               break;
             }
             case 'pages': {
