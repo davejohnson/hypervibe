@@ -174,13 +174,33 @@ describe('provider conformance matrix', () => {
     }
   });
 
-  it('tracks the implemented DigitalOcean slice without claiming live support', () => {
+  it('exposes DigitalOcean hosting to the managed-workflow gate without promoting its datastores', () => {
     const entries = providerContracts.filter(
       (entry) => entry.provider === 'digitalocean'
     );
+    const hosting = entries.find((entry) => entry.kind === 'hosting');
 
     expect(entries).toHaveLength(3);
-    expect(entries.every((entry) => entry.status === 'planned')).toBe(true);
+    expect(hosting).toMatchObject({
+      status: 'ready-for-live',
+      managedWorkflow: {
+        environmentName: 'production',
+        fixtureDirectory: 'test/provider-conformance/fixture',
+        workflow: 'deploy-digitalocean-production.yml',
+        publicUrlProtocols: ['https:'],
+        serviceName: 'web',
+        service: {
+          workloadKind: 'web',
+          startCommand: 'node server.mjs',
+          healthCheckPath: '/health',
+          public: true,
+        },
+      },
+    });
+    expect(
+      entries.filter((entry) => entry.kind !== 'hosting')
+        .every((entry) => entry.status === 'planned')
+    ).toBe(true);
     expect(entries.every((entry) => entry.implementationNote?.includes('implemented'))).toBe(true);
     expect(providerRegistry.supports('digitalocean', 'hosting')).toBe(true);
     expect(
@@ -191,13 +211,33 @@ describe('provider conformance matrix', () => {
     ).toBe(true);
   });
 
-  it('tracks the implemented Render slice without claiming live support', () => {
+  it('exposes Render hosting to the managed-workflow gate without promoting its datastores', () => {
     const entries = providerContracts.filter(
       (entry) => entry.provider === 'render'
     );
+    const hosting = entries.find((entry) => entry.kind === 'hosting');
 
     expect(entries).toHaveLength(3);
-    expect(entries.every((entry) => entry.status === 'planned')).toBe(true);
+    expect(hosting).toMatchObject({
+      status: 'ready-for-live',
+      managedWorkflow: {
+        environmentName: 'production',
+        fixtureDirectory: 'test/provider-conformance/fixture',
+        workflow: 'deploy-render-production.yml',
+        publicUrlProtocols: ['https:'],
+        serviceName: 'web',
+        service: {
+          workloadKind: 'web',
+          startCommand: 'node server.mjs',
+          healthCheckPath: '/health',
+          public: true,
+        },
+      },
+    });
+    expect(
+      entries.filter((entry) => entry.kind !== 'hosting')
+        .every((entry) => entry.status === 'planned')
+    ).toBe(true);
     expect(entries.every((entry) => entry.implementationNote?.includes('implemented'))).toBe(true);
     expect(providerRegistry.supports('render', 'hosting')).toBe(true);
     expect(
@@ -208,14 +248,27 @@ describe('provider conformance matrix', () => {
     ).toBe(true);
   });
 
-  it('tracks the implemented Heroku hosting slice without claiming live support', () => {
+  it('exposes the implemented Heroku hosting slice to the managed-workflow live gate', () => {
     const entry = hostingProviderContracts.find(
       (provider) => provider.provider === 'heroku'
     );
 
     expect(entry).toMatchObject({
-      status: 'planned',
+      status: 'ready-for-live',
       implementationNote: expect.stringContaining('implemented'),
+      managedWorkflow: {
+        environmentName: 'production',
+        fixtureDirectory: 'test/provider-conformance/fixture',
+        workflow: 'deploy-heroku-production.yml',
+        publicUrlProtocols: ['https:'],
+        serviceName: 'web',
+        service: {
+          workloadKind: 'web',
+          startCommand: 'node server.mjs',
+          healthCheckPath: '/health',
+          public: true,
+        },
+      },
     });
     expect(providerRegistry.supports('heroku', 'hosting')).toBe(true);
   });

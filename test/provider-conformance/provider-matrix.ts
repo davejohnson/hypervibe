@@ -176,6 +176,31 @@ export const managedWorkflowGitHubCredentials: ProviderCredentialField[] = [
   { field: 'apiToken', environmentVariable: 'HYPERVIBE_TEST_GITHUB_API_TOKEN' },
 ];
 
+function dockerWebManagedWorkflow(
+  workflow: string,
+  publicUrlProtocols: ManagedWorkflowFixture['publicUrlProtocols'] = ['https:']
+): ManagedWorkflowFixture {
+  return {
+    environmentName: 'production',
+    fixtureDirectory: 'test/provider-conformance/fixture',
+    requiredPaths: [
+      '.hypervibe/spec.json',
+      'Dockerfile',
+      'package.json',
+      'server.mjs',
+    ],
+    workflow,
+    publicUrlProtocols,
+    serviceName: 'web',
+    service: {
+      workloadKind: 'web',
+      startCommand: 'node server.mjs',
+      healthCheckPath: '/health',
+      public: true,
+    },
+  };
+}
+
 const neonCredentials: ProviderCredentialField[] = [
   { field: 'apiKey', environmentVariable: 'HYPERVIBE_TEST_NEON_API_KEY' },
   { field: 'organizationId', environmentVariable: 'HYPERVIBE_TEST_NEON_ORGANIZATION_ID', optional: true },
@@ -204,10 +229,13 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     provider: 'digitalocean',
     vendor: 'DigitalOcean',
     service: 'App Platform',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: digitalOceanCredentials,
+    managedWorkflow: dockerWebManagedWorkflow(
+      'deploy-digitalocean-production.yml'
+    ),
     implementationNote:
-      'The registry, credential schema, App Platform adapter, guidance, mocked lifecycle, and exact-SHA CI workflow are implemented. Promotion requires a live harness that can execute the managed GitHub workflow plus a successful create/deploy/noop/destroy run.',
+      'The registry, credential schema, App Platform adapter, guidance, mocked lifecycle, exact-SHA CI workflow, and review-gated managed-workflow live harness are implemented. Hosting promotion requires a successful opt-in create/deploy/noop/update/destroy run against an isolated DigitalOcean team and existing DOCR registry.',
   },
   {
     kind: 'hosting',
@@ -216,25 +244,10 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     service: 'ECS on Fargate',
     status: 'ready-for-live',
     credentials: awsEcsCredentials,
-    managedWorkflow: {
-      environmentName: 'production',
-      fixtureDirectory: 'test/provider-conformance/fixture',
-      requiredPaths: [
-        '.hypervibe/spec.json',
-        'Dockerfile',
-        'package.json',
-        'server.mjs',
-      ],
-      workflow: 'deploy-ecs-production.yml',
-      publicUrlProtocols: ['http:', 'https:'],
-      serviceName: 'web',
-      service: {
-        workloadKind: 'web',
-        startCommand: 'node server.mjs',
-        healthCheckPath: '/health',
-        public: true,
-      },
-    },
+    managedWorkflow: dockerWebManagedWorkflow(
+      'deploy-ecs-production.yml',
+      ['http:', 'https:']
+    ),
     implementationNote:
       'The cluster/service/task-definition lifecycle adapter, prerequisite guidance, mocked safety contracts, exact-digest ECR workflow, and review-gated managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run in an isolated AWS account.',
   },
@@ -243,24 +256,30 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     provider: 'heroku',
     vendor: 'Heroku',
     service: 'Heroku Platform',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: [
       { field: 'apiKey', environmentVariable: 'HYPERVIBE_TEST_HEROKU_API_KEY' },
       { field: 'region', environmentVariable: 'HYPERVIBE_TEST_HEROKU_REGION', optional: true },
       { field: 'dynoSize', environmentVariable: 'HYPERVIBE_TEST_HEROKU_DYNO_SIZE', optional: true },
     ],
+    managedWorkflow: dockerWebManagedWorkflow(
+      'deploy-heroku-production.yml'
+    ),
     implementationNote:
-      'The account binding, container-app lifecycle adapter, guidance, mocked lifecycle, and exact-image-ID managed workflow are implemented. Promotion requires a complete live create/release/noop/destroy run through the managed GitHub workflow.',
+      'The account binding, container-app lifecycle adapter, guidance, mocked lifecycle, exact-image-ID managed workflow, and review-gated managed-workflow live harness are implemented. Promotion requires a successful opt-in create/release/noop/update/destroy run in an isolated Heroku account.',
   },
   {
     kind: 'hosting',
     provider: 'render',
     vendor: 'Render',
     service: 'Render Services',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: renderCredentials,
+    managedWorkflow: dockerWebManagedWorkflow(
+      'deploy-render-production.yml'
+    ),
     implementationNote:
-      'The workspace/registry binding, image-backed service adapter, guidance, mocked lifecycle, and exact-SHA GHCR workflow are implemented. Promotion requires a live harness that executes the managed GitHub workflow plus a successful create/deploy/noop/destroy run.',
+      'The workspace/registry binding, image-backed service adapter, guidance, mocked lifecycle, exact-SHA GHCR workflow, and review-gated managed-workflow live harness are implemented. Hosting promotion requires a successful opt-in create/deploy/noop/update/destroy run against an isolated Render workspace and existing GHCR credential.',
   },
   {
     kind: 'hosting',
@@ -269,25 +288,9 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     service: 'Azure Container Apps',
     status: 'ready-for-live',
     credentials: azureContainerAppsCredentials,
-    managedWorkflow: {
-      environmentName: 'production',
-      fixtureDirectory: 'test/provider-conformance/fixture',
-      requiredPaths: [
-        '.hypervibe/spec.json',
-        'Dockerfile',
-        'package.json',
-        'server.mjs',
-      ],
-      workflow: 'deploy-azure-container-apps-production.yml',
-      publicUrlProtocols: ['https:'],
-      serviceName: 'web',
-      service: {
-        workloadKind: 'web',
-        startCommand: 'node server.mjs',
-        healthCheckPath: '/health',
-        public: true,
-      },
-    },
+    managedWorkflow: dockerWebManagedWorkflow(
+      'deploy-azure-container-apps-production.yml'
+    ),
     implementationNote:
       'The managed-environment and Container App lifecycle adapter, service-principal guidance, mocked safety contracts, native-source guard, exact-digest ACR workflow, and review-gated managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run in an isolated Azure subscription.',
   },

@@ -63,20 +63,21 @@ provider-confirmed terminal deletion. New Redis-compatible clusters use
 DigitalOcean's current `valkey` engine; observation also recognizes legacy
 `redis` clusters.
 
-All three DigitalOcean entries remain `planned` despite those green unit
-contracts. Hypervibe now generates a provider-owned GitHub Actions workflow
-that publishes one DOCR image tagged with the exact checked-out Git SHA,
-updates only already-bound App Platform components, waits for that exact
-deployment ID to become `ACTIVE`, and verifies the active component image.
-It never creates a container registry, app, or component from CI. A verified
-connection must name an existing registry with `containerRegistry`, supplied to
-the live runner as `HYPERVIBE_TEST_DIGITALOCEAN_REGISTRY`.
+DigitalOcean App Platform hosting is `ready-for-live`; its PostgreSQL and
+Valkey entries remain `planned`. Hypervibe generates a provider-owned GitHub
+Actions workflow that publishes one DOCR image tagged with the exact checked-
+out Git SHA, updates only already-bound App Platform components, waits for that
+exact deployment ID to become `ACTIVE`, and verifies the active component
+image. It never creates a container registry, app, or component from CI. A
+verified connection must name an existing registry with `containerRegistry`,
+supplied to the live runner as
+`HYPERVIBE_TEST_DIGITALOCEAN_REGISTRY`.
 
-The remaining promotion gate is a live harness that can execute the managed
-GitHub workflow (the current temporary local fixture cannot), followed by a
-successful opt-in stack run proving that App Platform can create the app shell,
-deploy the fixture, converge to noop, and tear down the app, PostgreSQL cluster,
-and Valkey cluster through spec/plan/apply.
+The review-gated managed-workflow harness and provider-neutral Docker fixture
+can now prove hosting create/deploy/noop/update/terminal teardown. Promotion of
+App Platform to `supported` still requires one successful opt-in run against
+an isolated DigitalOcean team and existing DOCR registry. PostgreSQL and
+Valkey keep their separate live stack promotion gates.
 
 Render is the second combined hosting/database/cache slice. One registered
 deployment provider binds an existing Render workspace, creates image-backed
@@ -88,12 +89,13 @@ existing GitHub Container Registry credential as `registryCredentialId`.
 Hypervibe verifies that credential but never creates, rotates, or deletes it
 from a service or CI action.
 
-All three Render entries remain `planned`. Their mocked contracts pin
-durable-ID-first observation, complete cursor pagination, unbound-name
-adoption blocking, secret-safe connection handling, partial-create identity,
-and provider-confirmed terminal deletion. Service creates are marked billable
-and exact-action confirmation-gated because Render workers, cron jobs, private
-services, and the default service plan can incur charges.
+Render hosting is `ready-for-live`; its PostgreSQL and Key Value entries remain
+`planned`. Their mocked contracts pin durable-ID-first observation, complete
+cursor pagination, unbound-name adoption blocking, secret-safe connection
+handling, partial-create identity, and provider-confirmed terminal deletion.
+Service creates are marked billable and exact-action confirmation-gated because
+Render workers, cron jobs, private services, and the default service plan can
+incur charges.
 
 The generated Render GitHub Actions workflow publishes one `linux/amd64` GHCR
 image tagged with the full checked-out Git SHA. It targets only already-bound
@@ -107,11 +109,11 @@ become `live` and verify the provider-reported image reference. CI never
 creates a workspace, service, registry credential, database, or Key Value
 instance.
 
-Render promotion requires a live harness that can run that managed workflow,
-then prove create/deploy/noop/update/terminal teardown for the service,
-Postgres, and Key Value resources. The current local fixture cannot publish
-and execute the managed workflow, so mocked green tests do not justify
-`ready-for-live` or `supported`.
+The review-gated managed-workflow harness and provider-neutral Docker fixture
+can now prove hosting create/deploy/noop/update/terminal teardown. Promotion of
+Render hosting to `supported` still requires one successful opt-in run against
+an isolated workspace and existing GHCR credential. Postgres and Key Value
+keep their separate live stack promotion gates.
 
 Heroku is the next hosting-only adapter slice. The provider context is the
 verified Heroku account, which Hypervibe binds but never creates or deletes.
@@ -122,8 +124,8 @@ name matches require explicit `hv_import`, stale UUID bindings block, and
 teardown waits for provider-confirmed `404` absence. Add-ons, Scheduler jobs,
 pipelines, and dashboard GitHub integrations are outside this adapter.
 
-Heroku remains `planned`. Its mocked contracts pin complete Platform API range
-pagination, durable-ID-first observation, unknown-error preservation,
+Heroku is `ready-for-live`. Its mocked contracts pin complete Platform API
+range pagination, durable-ID-first observation, unknown-error preservation,
 secret-safe config handling, partial-create identity, billable confirmation,
 and idempotent terminal deletion. The generated managed workflow builds the
 full checked-out Git SHA for `linux/amd64`, pushes the resulting image to only
@@ -132,11 +134,12 @@ ID through Heroku's container-release Platform API, waits for the new release
 to succeed, verifies its SHA/image markers and formation, and checks configured
 web health paths. CI never creates an app, add-on, database, or pipeline.
 
-Promotion requires an isolated live account and a harness that can execute the
-managed GitHub workflow, then prove create/release/noop/update/terminal teardown.
-The default Basic dyno becomes billable when the workflow scales the process to
-one, so the live run must preserve exact-action confirmation and surface cleanup
-failures with the remaining app UUID.
+The review-gated managed-workflow harness and provider-neutral Docker fixture
+can now prove create/release/noop/update/terminal teardown. Promotion to
+`supported` still requires one successful opt-in run in an isolated Heroku
+account. The default Basic dyno becomes billable when the workflow scales the
+process to one, so the live run must preserve exact-action confirmation and
+surface cleanup failures with the remaining app UUID.
 
 AWS ECS on Fargate is the next hosting-only adapter slice. The AWS account,
 existing private ECR repository, VPC subnets, security groups, IAM execution
@@ -335,12 +338,15 @@ removes its services, databases, and caches through spec/plan/apply, and its
 ## Running a managed-workflow live test
 
 Providers whose first application release must run through a managed GitHub
-Actions workflow use a separate review-gated harness. Vercel, AWS ECS on
-Fargate, and Azure Container Apps have enabled profiles:
+Actions workflow use a separate review-gated harness. These hosting profiles
+are enabled:
 
 | Provider id | Fixture directory | Workflow | Health URL |
 | --- | --- | --- | --- |
 | `vercel` | `test/provider-conformance/fixture-vercel` | `deploy-vercel-production.yml` | HTTPS `/api/health` |
+| `digitalocean` | `test/provider-conformance/fixture` | `deploy-digitalocean-production.yml` | HTTPS `/health` |
+| `render` | `test/provider-conformance/fixture` | `deploy-render-production.yml` | HTTPS `/health` |
+| `heroku` | `test/provider-conformance/fixture` | `deploy-heroku-production.yml` | HTTPS `/health` |
 | `ecs` | `test/provider-conformance/fixture` | `deploy-ecs-production.yml` | HTTP or HTTPS `/health` |
 | `azure-container-apps` | `test/provider-conformance/fixture` | `deploy-azure-container-apps-production.yml` | HTTPS `/health` |
 
@@ -395,8 +401,8 @@ provider:
 ```
 
 For `vercel`, use provider `vercel` and keep the service block above. For
-`ecs` or `azure-container-apps`, use that provider id and replace the service
-block with this exact object:
+`digitalocean`, `render`, `heroku`, `ecs`, or `azure-container-apps`, use that
+provider id and replace the service block with this exact object:
 
 ```json
 {
@@ -433,6 +439,11 @@ HYPERVIBE_LIVE_MANAGED_HOSTING=ecs npm run test:providers:managed-live
 
 # Or, after exporting the Azure variables listed below:
 HYPERVIBE_LIVE_MANAGED_HOSTING=azure-container-apps npm run test:providers:managed-live
+
+# Or, after exporting the provider variables described below:
+HYPERVIBE_LIVE_MANAGED_HOSTING=digitalocean npm run test:providers:managed-live
+HYPERVIBE_LIVE_MANAGED_HOSTING=render npm run test:providers:managed-live
+HYPERVIBE_LIVE_MANAGED_HOSTING=heroku npm run test:providers:managed-live
 ```
 
 The recommended GitHub credential is a
@@ -441,7 +452,9 @@ whose selected repository is only the isolated fixture. Grant Metadata read
 plus Administration, Actions, Contents, Pull requests, Secrets, and Workflows
 read/write. A classic PAT with `repo` and `workflow` also works but cannot be
 restricted to one repository. The credential is stored through a repository-
-scoped `credentialsRef`; no package permission is needed for Vercel. The
+scoped `credentialsRef`; none of these hosting profiles needs package-read
+permission on that repository-management token. Render's separately configured
+GHCR pull credential does need `read:packages`. The
 Vercel credential is a
 [personal access token](https://vercel.com/account/settings/tokens) scoped to
 the intended personal account or Team. It must be able to read that scope and
@@ -450,6 +463,32 @@ create, configure, deploy, and delete Projects there; include the immutable
 mode-`0600` credential files inside the persistent data directory and removes
 them immediately after Hypervibe verifies each connection; values never enter
 command arguments, plans, receipts, or test output.
+
+For DigitalOcean App Platform, create a
+[custom-scope PAT](https://cloud.digitalocean.com/account/api/tokens) for the
+isolated team. Grant `app:read`, `app:create`, `app:update`, `app:delete`,
+`registry:read`, and `registry:update`, plus the region, size, and action read
+scopes described in the DigitalOcean section above. Export
+`HYPERVIBE_TEST_DIGITALOCEAN_TOKEN` and
+`HYPERVIBE_TEST_DIGITALOCEAN_REGISTRY`. The existing DOCR registry remains
+externally owned and is not removed by the test.
+
+For Render, create a personal
+[API key](https://dashboard.render.com/u/settings#api-keys) whose user can
+manage services in the isolated workspace. Export
+`HYPERVIBE_TEST_RENDER_API_KEY`, `HYPERVIBE_TEST_RENDER_OWNER_ID`, and
+`HYPERVIBE_TEST_RENDER_REGISTRY_CREDENTIAL_ID`. The registry credential must
+already exist in that workspace, target GHCR, and contain a narrowly scoped
+GitHub token with `read:packages`; Hypervibe verifies and reuses it but does
+not create, rotate, or delete it.
+
+For Heroku, use an Account Settings API key or preferably a revocable
+[OAuth direct-authorization token](https://devcenter.heroku.com/articles/oauth#direct-authorization)
+whose user can manage apps in the isolated account/team. Export
+`HYPERVIBE_TEST_HEROKU_API_KEY`; optionally set
+`HYPERVIBE_TEST_HEROKU_REGION` and `HYPERVIBE_TEST_HEROKU_DYNO_SIZE`. Heroku
+tokens are not app-scopeable, and the selected dyno becomes billable when the
+managed workflow scales it to one.
 
 For ECS, create a scoped IAM user
 [access key](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)
