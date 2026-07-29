@@ -125,6 +125,13 @@ export function fingerprintObservedState(observed: ObservedState): string {
     databases: [...observed.databases]
       .sort((a, b) => a.externalId.localeCompare(b.externalId))
       .map((d) => ({ provider: d.provider, engine: d.engine, externalId: d.externalId })),
+    caches: [...(observed.caches ?? [])]
+      .sort((a, b) => a.externalId.localeCompare(b.externalId))
+      .map((cache) => ({
+        provider: cache.provider,
+        engine: cache.engine,
+        externalId: cache.externalId,
+      })),
     storage: [...(observed.storage ?? [])]
       .sort((a, b) => a.externalId.localeCompare(b.externalId))
       .map((item) => ({

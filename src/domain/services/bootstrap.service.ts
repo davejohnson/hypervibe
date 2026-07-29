@@ -21,7 +21,6 @@ import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
 import { parseHostingBindings, type IHostingAdapter } from '../ports/hosting.port.js';
 import {
-  DB_PROVIDERS,
   type DesiredState,
   workloadKindForServiceName,
 } from './spec.service.js';
@@ -88,7 +87,7 @@ export async function executeBootstrap(params: {
   crons?: DesiredState['crons'];
   domain?: string;
   /** Omit to skip database provisioning entirely. */
-  databaseProvider?: (typeof DB_PROVIDERS)[number];
+  databaseProvider?: string;
   setupEmail: boolean;
   serviceConfig?: DesiredState['serviceConfig'];
   envVars?: DesiredState['envVars'];

@@ -20,6 +20,8 @@ import { diffEnvironment } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
 import { fingerprintObservedState, type PlanRunDocument } from './converge.executor.js';
 import { buildDatabaseEnvVarsFromComponent, DATABASE_ENV_KEYS } from '../services/database-env.js';
+import { buildCacheEnvVarsFromComponent, CACHE_ENV_KEYS } from '../services/cache-env.js';
+import { planCache } from '../services/cache-plan.service.js';
 import {
   addDomainRegistrationDependency,
   cloudflareRegistrarCredentialProblem,
@@ -163,12 +165,14 @@ export class PlanService {
           ...(bindings.environmentId ? { environmentId: bindings.environmentId } : {}),
           services: [],
           databases: [],
+          caches: [],
           storage: [],
           completeness: {
             project: 'unknown',
             environment: 'unknown',
             services: 'unknown',
             databases: 'unknown',
+            caches: 'unknown',
             storage: 'unknown',
           },
           partial: true,
@@ -208,6 +212,7 @@ export class PlanService {
             : 'complete'),
         services: observed.completeness?.services ?? (observed.partial ? 'unknown' : 'complete'),
         databases: observed.completeness?.databases ?? 'complete',
+        caches: observed.completeness?.caches ?? 'complete',
         storage: observed.completeness?.storage ?? 'complete',
       };
 
@@ -226,9 +231,10 @@ export class PlanService {
         } | undefined;
         if (dbResult.success && dbAdapter && typeof dbAdapter.observeDatabase === 'function') {
           try {
-            const component = this.componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
+            const engine = environmentSpec.database?.engine ?? 'postgres';
+            const component = this.componentRepo.findByEnvironmentAndType(environment.id, engine);
             const db = await dbAdapter.observeDatabase(environment, component, {
-              resourceName: `${project.name}-${environment.name}-postgres`,
+              resourceName: `${project.name}-${environment.name}-${engine}`,
             });
             observed.databases = [
               ...observed.databases.filter((item) =>
@@ -246,6 +252,36 @@ export class PlanService {
           observed.partial = true;
           observed.warnings.push(
             `Database observation unavailable (${dbProvider}): ${dbResult.error ?? 'adapter does not implement observeDatabase'}`
+          );
+        }
+      }
+
+      const cacheProvider = environmentSpec.cache?.provider;
+      if (cacheProvider && cacheProvider !== provider) {
+        observed.completeness.caches = 'unknown';
+        const cacheResult = await adapterFactory.getCacheAdapter(cacheProvider, project);
+        if (cacheResult.success && cacheResult.adapter) {
+          try {
+            const component = this.componentRepo.findByEnvironmentAndType(environment.id, 'redis');
+            const cache = await cacheResult.adapter.observeCache(environment, component, {
+              resourceName: `${project.name}-${environment.name}-redis`,
+            });
+            observed.caches = [
+              ...(observed.caches ?? []).filter((item) =>
+                item.provider !== cacheProvider
+                && (!cache || item.externalId !== cache.externalId)
+              ),
+              ...(cache ? [cache] : []),
+            ];
+            observed.completeness.caches = 'complete';
+          } catch (error) {
+            observed.partial = true;
+            observed.warnings.push(`Cache observation failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        } else {
+          observed.partial = true;
+          observed.warnings.push(
+            `Cache observation unavailable (${cacheProvider}): ${cacheResult.error ?? 'adapter does not implement observeCache'}`
           );
         }
       }
@@ -398,6 +434,7 @@ export class PlanService {
       { provider: environmentSpec.hosting.provider },
     ];
     if (environmentSpec.database) required.push({ provider: environmentSpec.database.provider });
+    if (environmentSpec.cache) required.push({ provider: environmentSpec.cache.provider });
     for (const storage of Object.values(environmentSpec.storage ?? {})) required.push({ provider: storage.provider });
     if (environmentSpec.domain) {
       required.push({ provider: 'cloudflare', scopeHints: cloudflareScopeHintsForDomain(environmentSpec.domain) });
@@ -703,13 +740,22 @@ export class PlanService {
     const managedDatabaseEnvVars = environmentSpec.database && localDb && localDbProvider === environmentSpec.database.provider
       ? buildDatabaseEnvVarsFromComponent(localDb).envVars
       : undefined;
+    const localCache = local.components.find((component) => component.type === 'redis');
+    const localCacheProvider = localCache
+      ? String((localCache.bindings as Record<string, unknown>).provider ?? '') || undefined
+      : undefined;
+    const managedCacheEnvVars = environmentSpec.cache && localCache && localCacheProvider === environmentSpec.cache.provider
+      ? buildCacheEnvVarsFromComponent(localCache).envVars
+      : undefined;
     const managedQueueEnvVars = await resolveQueueEnvVars(projectForPlan, environmentSpec, environment);
     const managedEnvKeys = new Set([
       ...Object.keys(managedDatabaseEnvVars ?? {}),
+      ...Object.keys(managedCacheEnvVars ?? {}),
       ...Object.keys(managedQueueEnvVars ?? {}),
       ...delegatedSecretSlots.keys(),
       ...stripeManagedEnvKeys(environmentSpec),
       ...(environmentSpec.database ? DATABASE_ENV_KEYS : []),
+      ...(environmentSpec.cache ? CACHE_ENV_KEYS : []),
       ...(environmentSpec.queues && Object.keys(environmentSpec.queues).length > 0
         ? [
           'QUEUE_BACKEND',
@@ -731,7 +777,7 @@ export class PlanService {
       .filter((key) => managedEnvKeys.has(key));
     if (retiredManagedKeys.length > 0) {
       return {
-        error: `removeEnvVars cannot retire Hypervibe-managed infrastructure keys: ${retiredManagedKeys.join(', ')}. Remove or reconfigure the owning database, queue, storage, delegated secret, or source integration instead.`,
+        error: `removeEnvVars cannot retire Hypervibe-managed infrastructure keys: ${retiredManagedKeys.join(', ')}. Remove or reconfigure the owning database, cache, queue, storage, delegated secret, or source integration instead.`,
       };
     }
     const envFileVars = envFile && Object.keys(envFile.vars).length > 0
@@ -762,7 +808,18 @@ export class PlanService {
       providerBehavior: hostingMetadata?.orchestration?.diff,
       expectedSource: this.expectedDeploySource(projectForPlan, environmentName, environmentSpec),
       managedDatabaseEnvVars,
+      managedCacheEnvVars,
       managedQueueEnvVars,
+    });
+    const cache = planCache({
+      environmentSpec,
+      observed,
+      local,
+      projectDependency: diff.actions.some((action) =>
+        action.id === `project:${environmentSpec.hosting.provider}`
+      ) && environmentSpec.cache?.provider === environmentSpec.hosting.provider
+        ? [`project:${environmentSpec.hosting.provider}`]
+        : undefined,
     });
     const nativeDeploySources = planProviderNativeDeploySources({
       environmentSpec,
@@ -782,6 +839,27 @@ export class PlanService {
       ...nativeDeploySources.actions,
       ...diff.actions,
     ];
+    if (cache.actions.length > 0) {
+      const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
+      if (firstServiceIndex === -1) actions.push(...cache.actions);
+      else actions.splice(firstServiceIndex, 0, ...cache.actions);
+    }
+    if (cache.serviceDependency) {
+      for (const serviceAction of actions.filter((action) =>
+        action.resource.kind === 'service'
+        && action.type !== 'destroy'
+        && !action.id.includes(':env-remove')
+      )) {
+        if (serviceAction.type === 'noop') {
+          serviceAction.type = 'update';
+          serviceAction.reason = `${serviceAction.reason}; wire the newly created ${environmentSpec.cache?.provider} Redis cache`;
+        }
+        serviceAction.dependsOn = Array.from(new Set([
+          ...(serviceAction.dependsOn ?? []),
+          cache.serviceDependency,
+        ]));
+      }
+    }
     if (domainRegistration.action) {
       actions = addDomainRegistrationDependency(actions, domainRegistration.action.id);
     }
@@ -958,7 +1036,7 @@ export class PlanService {
       ? actions.filter((action) =>
         action.type !== 'noop'
         && action.metadata?.operation !== 'hostingEnvRemove'
-        && ['project', 'environment', 'service', 'database', 'storage', 'queue', 'secret', 'payment', 'email']
+        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'queue', 'secret', 'payment', 'email']
           .includes(action.resource.kind)
       )
       : [];
@@ -1044,7 +1122,9 @@ export class PlanService {
       actions = actions.filter((action) => {
         if (action.type === 'destroy') return false;
         if (action.resource.kind === 'project' || action.resource.kind === 'environment') return true;
-        if (action.resource.kind === 'database') return action.type === 'create' || action.type === 'noop';
+        if (action.resource.kind === 'database' || action.resource.kind === 'cache') {
+          return action.type === 'create' || action.type === 'noop';
+        }
         if (action.resource.kind === 'service') return keep.has(action.resource.name);
         return false;
       });
@@ -1127,8 +1207,8 @@ export class PlanService {
         ? { integrationFingerprints: { stripe: stripeSync.fingerprint } }
         : {}),
       actions,
-      unmanaged: [...diff.unmanaged, ...storage.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...filterWarnings],
+      unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...storage.unmanaged],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...filterWarnings],
       ...(delegatedSecrets.inputRequired.length > 0 ? { inputRequired: delegatedSecrets.inputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };

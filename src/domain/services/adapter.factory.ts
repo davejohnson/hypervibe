@@ -5,6 +5,7 @@ import type { Project } from '../entities/project.entity.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import type { IHostingAdapter } from '../ports/hosting.port.js';
 import type { IDatabaseAdapter } from '../ports/database.port.js';
+import type { ICacheAdapter } from '../ports/cache.port.js';
 import type { IStorageAdapter } from '../ports/storage.port.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
@@ -54,6 +55,21 @@ export class AdapterFactory {
     );
   }
 
+  async getCacheAdapter(
+    providerName: string,
+    project?: Project
+  ): Promise<AdapterResult<ICacheAdapter>> {
+    const provider = providerRegistry.get(providerName);
+    if (provider?.derivedAdapters?.cache) {
+      return this.getDerivedAdapter<ICacheAdapter>(providerName, 'cache', project);
+    }
+    return this.getAdapter<ICacheAdapter>(
+      providerName,
+      'cache',
+      project ? getProjectScopeHints(project) : undefined
+    );
+  }
+
   async getStorageAdapter(providerName: string, project?: Project): Promise<AdapterResult<IStorageAdapter>> {
     const provider = providerRegistry.get(providerName);
     if (provider?.derivedAdapters?.storage) {
@@ -99,18 +115,13 @@ export class AdapterFactory {
    * Get list of available database providers (those with connections).
    */
   getAvailableDatabaseProviders(): string[] {
-    const dbProviders = providerRegistry.getByCategory('database');
-    const available = dbProviders
-      .filter((p) => this.hasVerifiedConnection(p.metadata.name))
-      .map((p) => p.metadata.name);
-    for (const provider of providerRegistry.all()) {
-      if (provider.derivedAdapters?.database
-        && this.hasVerifiedConnection(provider.metadata.name)
-        && !available.includes(provider.metadata.name)) {
-        available.push(provider.metadata.name);
-      }
-    }
-    return available;
+    return providerRegistry.namesFor('database')
+      .filter((providerName) => this.hasVerifiedConnection(providerName));
+  }
+
+  getAvailableCacheProviders(): string[] {
+    return providerRegistry.namesFor('cache')
+      .filter((providerName) => this.hasVerifiedConnection(providerName));
   }
 
   /**
@@ -176,7 +187,7 @@ export class AdapterFactory {
 
   private async getDerivedAdapter<T>(
     providerName: string,
-    capability: 'database' | 'storage',
+    capability: 'database' | 'cache' | 'storage',
     project?: Project
   ): Promise<AdapterResult<T>> {
     const provider = providerRegistry.get(providerName);

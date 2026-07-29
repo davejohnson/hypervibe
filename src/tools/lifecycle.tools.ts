@@ -119,9 +119,10 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
         .describe('Map provider environment names to Hypervibe environments (e.g., {"prod-us-east": "production", "blue": "staging"})'),
       storageMappings: z.record(z.string(), z.string()).optional().describe('Explicitly adopt Railway buckets by id, mapping bucket id to desired storage name (e.g. {"bucket-id":"uploads"}).'),
       databaseMappings: z.record(z.string(), z.enum(['postgres'])).optional().describe('Explicitly adopt service-backed Railway databases by service id (e.g. {"service-id":"postgres"}). Datastore candidates are shown by hv_inspect.'),
+      cacheMappings: z.record(z.string(), z.enum(['redis'])).optional().describe('Explicitly adopt service-backed Railway Redis/Valkey caches by service id (e.g. {"service-id":"redis"}). Datastore candidates are shown by hv_inspect.'),
       confirm: confirmField,
     },
-    wrapCommandHandler(async ({ name, railwayProjectId, force = false, environmentMappings, storageMappings, databaseMappings, confirm }) => {
+    wrapCommandHandler(async ({ name, railwayProjectId, force = false, environmentMappings, storageMappings, databaseMappings, cacheMappings, confirm }) => {
       if (!name && !railwayProjectId) {
         return commandError('VALIDATION', 'hv_import is adoption-only and requires name or railwayProjectId.', {
           hint: 'Use hv_inspect provider="railway" to list/read provider projects. Use hv_import only when adopting a selected provider project into Hypervibe.',
@@ -190,6 +191,27 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
             next: ['hv_inspect', 'hv_import'],
           });
         }
+        const unknownCacheMappings = Object.keys(cacheMappings ?? {})
+          .filter((serviceId) => !services.some((service) => service.railwayId === serviceId));
+        if (unknownCacheMappings.length > 0) {
+          return commandError('VALIDATION', `cacheMappings references unknown Railway service id(s): ${unknownCacheMappings.join(', ')}`, {
+            hint: 'Use the datastore candidates returned by hv_inspect and map the exact Railway service id.',
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
+        if (Object.keys(cacheMappings ?? {}).length > 1) {
+          return commandError('VALIDATION', 'Only one Railway service can be adopted as the Redis cache component for an environment.', {
+            hint: 'Select the intended cache explicitly. Leave additional Redis/Valkey services unmanaged until they are deliberately cleaned up.',
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
+        const overlappingDatastoreMappings = Object.keys(databaseMappings ?? {})
+          .filter((serviceId) => serviceId in (cacheMappings ?? {}));
+        if (overlappingDatastoreMappings.length > 0) {
+          return commandError('VALIDATION', `A Railway service cannot be adopted as both database and cache: ${overlappingDatastoreMappings.join(', ')}`, {
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
 
         // Guardrail: import is adoption-only. Block when a Hypervibe project
         // with the same name already exists unless force=true.
@@ -211,6 +233,7 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
               storage: inspection.storage,
               storageMappings: storageMappings ?? {},
               databaseMappings: databaseMappings ?? {},
+              cacheMappings: cacheMappings ?? {},
             },
             hint: 'Re-run hv_import with the same name/railwayProjectId, environmentMappings, and confirm=true to write local Hypervibe adoption bindings.',
             next: ['hv_import'],
@@ -221,6 +244,7 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
           force,
           storageMappings,
           databaseMappings,
+          cacheMappings,
         });
         if (result.status === 'already_exists') {
           return commandError('VALIDATION', `Project "${details.name}" already exists in Hypervibe.`);

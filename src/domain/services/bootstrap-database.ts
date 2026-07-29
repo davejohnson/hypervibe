@@ -10,7 +10,7 @@ import type { Component } from '../entities/component.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
-import { DB_PROVIDERS, resolveExistingDatabaseState } from './spec.service.js';
+import { resolveExistingDatabaseState } from './spec.service.js';
 
 const envRepo = new EnvironmentRepository();
 const componentRepo = new ComponentRepository();
@@ -51,7 +51,7 @@ export type BootstrapDatabaseResult =
  */
 export async function provisionBootstrapDatabase(args: {
   projectName: string;
-  databaseProvider: (typeof DB_PROVIDERS)[number];
+  databaseProvider: string;
   project: Project;
   environment: Environment;
   tx: InfraTransaction;

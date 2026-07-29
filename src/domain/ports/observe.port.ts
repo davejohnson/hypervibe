@@ -58,6 +58,14 @@ export interface ObservedDatabase {
   status: string;
 }
 
+export interface ObservedCache {
+  provider: string;
+  engine: 'redis';
+  externalId: string;
+  name?: string;
+  status: string;
+}
+
 export interface ObservedStorage {
   provider: string;
   kind: 'object';
@@ -77,6 +85,7 @@ export interface ObservedState {
   environmentId?: string;
   services: ObservedService[];
   databases: ObservedDatabase[];
+  caches?: ObservedCache[];
   storage?: ObservedStorage[];
   /** Completeness is per resource class; unknown must never be treated as absent. */
   completeness?: {
@@ -84,6 +93,7 @@ export interface ObservedState {
     environment?: 'complete' | 'unknown';
     services?: 'complete' | 'unknown';
     databases?: 'complete' | 'unknown';
+    caches?: 'complete' | 'unknown';
     storage?: 'complete' | 'unknown';
   };
   /** True when one or more sub-queries failed; see warnings. */

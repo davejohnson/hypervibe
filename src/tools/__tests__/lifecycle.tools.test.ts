@@ -356,6 +356,62 @@ describe('hv_inspect / hv_import', () => {
     await t.close();
   });
 
+  it('round-trips explicit Railway Redis adoption as a cache component', async () => {
+    createRailwayConnection();
+    mockAdapter();
+    const serviceBackedDetails: RailwayProjectDetails = {
+      ...details,
+      plugins: { edges: [] },
+      services: {
+        edges: [
+          ...details.services.edges,
+          {
+            node: {
+              id: 'svc-redis',
+              name: 'redis-cache',
+              repoTriggers: { edges: [] },
+              serviceInstances: {
+                edges: [{
+                  node: {
+                    environmentId: 'env-prod',
+                    domains: { serviceDomains: [], customDomains: [] },
+                  },
+                }],
+              },
+            },
+          },
+        ],
+      },
+    };
+    vi.spyOn(RailwayAdapter.prototype, 'getProjectDetails').mockResolvedValue(serviceBackedDetails);
+    const t = await makeClient();
+
+    const result = await t.call('hv_import', {
+      name: 'demo-app',
+      environmentMappings: { production: 'production' },
+      cacheMappings: { 'svc-redis': 'redis' },
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(true);
+    const project = new ProjectRepository().findByName('demo-app')!;
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    expect(new ServiceRepository().findByProjectAndName(project.id, 'redis-cache')).toBeNull();
+    expect(new ComponentRepository().findByEnvironmentAndType(environment.id, 'redis')).toMatchObject({
+      externalId: 'svc-redis',
+      bindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'env-prod',
+        resourceKind: 'service',
+        serviceId: 'svc-redis',
+        pluginName: 'redis-cache',
+        connectionUrl: '${{redis-cache.REDIS_URL}}',
+      },
+    });
+    await t.close();
+  });
+
   it('blocks re-import of an existing Hypervibe project without force', async () => {
     createRailwayConnection();
     mockAdapter();

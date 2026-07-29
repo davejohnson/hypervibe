@@ -137,9 +137,11 @@ describe('RailwayAdapter observe', () => {
         name: 'postgres-db',
         status: 'unknown',
       },
+    ]);
+    expect(result.caches).toEqual([
       {
         provider: 'railway',
-        engine: 'unknown',
+        engine: 'redis',
         externalId: 'plugin-redis',
         name: 'Redis',
         status: 'unknown',

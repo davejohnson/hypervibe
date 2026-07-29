@@ -78,6 +78,10 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
 import { runEnvironmentTask } from '../domain/services/environment-task.service.js';
 import { buildDatabaseEnvVarsFromComponent } from '../domain/services/database-env.js';
+import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
+import { CACHE_OPERATIONS, isCacheAction } from '../domain/services/cache-plan.service.js';
+import type { CacheEngine } from '../domain/ports/cache.port.js';
+import type { DatabaseType } from '../domain/ports/database.port.js';
 import { setupBootstrapEmail } from '../domain/services/bootstrap-email.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import {
@@ -425,14 +429,26 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (storageServiceEnvVars) {
       bootstrapParams = { ...bootstrapParams, storageServiceEnvVars };
     }
-    const database = latestEnvironment
-      ? ctx.repos.components.findByEnvironmentAndType(latestEnvironment.id, 'postgres')
+    const database = latestEnvironment && envSpec.database
+      ? ctx.repos.components.findByEnvironmentAndType(latestEnvironment.id, envSpec.database.engine)
       : null;
     if (database) {
       bootstrapParams = {
         ...bootstrapParams,
         envVars: {
           ...buildDatabaseEnvVarsFromComponent(database).envVars,
+          ...(bootstrapParams.envVars ?? {}),
+        },
+      };
+    }
+    const cache = latestEnvironment
+      ? ctx.repos.components.findByEnvironmentAndType(latestEnvironment.id, 'redis')
+      : null;
+    if (cache) {
+      bootstrapParams = {
+        ...bootstrapParams,
+        envVars: {
+          ...buildCacheEnvVarsFromComponent(cache).envVars,
           ...(bootstrapParams.envVars ?? {}),
         },
       };
@@ -655,6 +671,15 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environment: latestEnvironment,
         action,
       });
+    }
+    if (isCacheAction(action) && action.metadata?.operation === CACHE_OPERATIONS.ensure) {
+      return createCache(ctx, applyProject, envName, action);
+    }
+    if (isCacheAction(action) && action.metadata?.operation === CACHE_OPERATIONS.unwire) {
+      return unwireCache(ctx, applyProject, envName, action);
+    }
+    if (isCacheAction(action) && action.metadata?.operation === CACHE_OPERATIONS.destroy) {
+      return destroyCache(ctx, applyProject, envName, action);
     }
     if (action.resource.kind === 'database' && action.type === 'create') {
       return createDatabase(ctx, applyProject, envName, action);
@@ -1307,9 +1332,10 @@ async function createDatabase(
     return { success: false, message: 'Database adapter unavailable', error: adapterResult.error };
   }
 
-  const provisioned = await adapterResult.adapter.provision(action.resource.name as 'postgres', environment, {
+  const engine = action.resource.name as DatabaseType;
+  const provisioned = await adapterResult.adapter.provision(engine, environment, {
     databaseName: 'app',
-    resourceName: `${project.name}-${envName}-postgres`,
+    resourceName: `${project.name}-${envName}-${engine}`,
   });
   if (!provisioned.receipt.success) {
     return {
@@ -1359,6 +1385,168 @@ async function createDatabase(
   };
 }
 
+async function createCache(
+  ctx: CommandContext,
+  project: Project,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return { success: false, message: 'Environment not found locally', error: `No local environment "${envName}"` };
+  }
+
+  const adapterResult = await adapterFactory.getCacheAdapter(action.resource.provider, project);
+  if (!adapterResult.success || !adapterResult.adapter) {
+    return { success: false, message: 'Cache adapter unavailable', error: adapterResult.error };
+  }
+
+  const engine = action.resource.name as CacheEngine;
+  const provisioned = await adapterResult.adapter.provision(engine, environment, {
+    resourceName: `${project.name}-${envName}-${engine}`,
+  });
+  if (!provisioned.receipt.success) {
+    return {
+      success: false,
+      message: provisioned.receipt.message,
+      error: provisioned.receipt.error,
+      data: provisioned.receipt.data,
+    };
+  }
+
+  const existing = ctx.repos.components.findByEnvironmentAndType(environment.id, engine);
+  const newBindings = asRecord(provisioned.component.bindings) ?? {};
+  const existingBindings = asRecord(existing?.bindings);
+  const existingProvider = stringField(existingBindings, 'provider');
+  const bindingsToStore = existing && existingProvider && existingProvider !== action.resource.provider
+    ? {
+        ...newBindings,
+        previousProvider: existingProvider,
+        previousExternalId: existing.externalId ?? undefined,
+        previousBindings: existing.bindings,
+      }
+    : newBindings;
+
+  if (existing) {
+    ctx.repos.components.update(existing.id, {
+      bindings: bindingsToStore,
+      externalId: provisioned.component.externalId ?? undefined,
+    });
+  } else {
+    ctx.repos.components.create({
+      environmentId: environment.id,
+      type: engine,
+      bindings: bindingsToStore,
+      externalId: provisioned.component.externalId ?? undefined,
+    });
+  }
+
+  return {
+    success: true,
+    message: `${provisioned.receipt.message}. Cache recorded locally; run hv_plan again to verify REDIS_URL wiring.`,
+    data: {
+      provider: action.resource.provider,
+      componentId: provisioned.component.externalId ?? provisioned.component.id,
+      previousProvider: existingProvider && existingProvider !== action.resource.provider
+        ? existingProvider
+        : undefined,
+      receiptData: provisioned.receipt.data,
+    },
+  };
+}
+
+async function unwireCache(
+  ctx: CommandContext,
+  project: Project,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  const serviceName = stringField(asRecord(action.metadata), 'serviceName');
+  const service = serviceName
+    ? ctx.repos.services.findByProjectAndName(project.id, serviceName)
+    : null;
+  if (!environment || !service || !serviceName) {
+    return {
+      success: false,
+      message: 'Cannot remove Redis environment variables',
+      error: !environment
+        ? `Environment "${envName}" is not tracked locally`
+        : `Service "${serviceName ?? 'unknown'}" is not tracked locally`,
+    };
+  }
+  return removeHostingEnvVars({
+    project,
+    environment,
+    service,
+    keys: ['REDIS_URL'],
+  });
+}
+
+async function destroyCache(
+  ctx: CommandContext,
+  project: Project,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return { success: false, message: 'Environment not found locally', error: `No local environment "${envName}"` };
+  }
+  const component = ctx.repos.components.findByEnvironmentAndType(environment.id, 'redis');
+  if (!component) {
+    return { success: true, message: 'No local Redis component to destroy — nothing to do' };
+  }
+
+  const bindings = asRecord(component.bindings) ?? {};
+  const componentProvider = stringField(bindings, 'provider');
+  const previousProvider = stringField(bindings, 'previousProvider');
+  const previousBindings = asRecord(bindings.previousBindings);
+  const destroysPrevious = componentProvider !== action.resource.provider
+    && previousProvider === action.resource.provider
+    && previousBindings;
+  let componentToDestroy: Component = component;
+
+  if (componentProvider !== action.resource.provider) {
+    if (!destroysPrevious) {
+      return {
+        success: false,
+        message: 'Cache destroy target does not match the locally tracked component',
+        error: `Refusing to destroy ${action.resource.provider}; local Redis is tracked as ${componentProvider ?? 'unknown'}.`,
+      };
+    }
+    componentToDestroy = {
+      ...component,
+      bindings: previousBindings,
+      externalId: stringField(bindings, 'previousExternalId')
+        ?? stringField(previousBindings, 'instanceId')
+        ?? null,
+    };
+  }
+
+  const adapterResult = await adapterFactory.getCacheAdapter(action.resource.provider, project);
+  if (!adapterResult.success || !adapterResult.adapter) {
+    return { success: false, message: 'Cache adapter unavailable', error: adapterResult.error };
+  }
+  const destroyed = await adapterResult.adapter.destroy(componentToDestroy);
+  if (!destroyed.success) {
+    return { success: false, message: destroyed.message, error: destroyed.error };
+  }
+  if (destroysPrevious) {
+    const nextBindings = { ...bindings };
+    delete nextBindings.previousProvider;
+    delete nextBindings.previousExternalId;
+    delete nextBindings.previousBindings;
+    ctx.repos.components.update(component.id, {
+      bindings: nextBindings,
+      externalId: component.externalId ?? undefined,
+    });
+    return { success: true, message: `Destroyed previous ${action.resource.provider} Redis cache` };
+  }
+  ctx.repos.components.delete(component.id);
+  return { success: true, message: `Destroyed ${action.resource.provider} Redis cache and removed local component` };
+}
+
 export async function applyDatabaseSeed(
   ctx: CommandContext,
   project: Project,
@@ -1379,12 +1567,13 @@ export async function applyDatabaseSeed(
     };
   }
 
-  const component = ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres');
+  const engine = stringField(asRecord(action.metadata), 'engine') ?? 'postgres';
+  const component = ctx.repos.components.findByEnvironmentAndType(environment.id, engine);
   if (!component) {
     return {
       success: false,
       message: 'Database component not found',
-      error: `No postgres component is recorded for ${project.name}/${envName}. Re-run hv_plan/hv_apply to create the database first.`,
+      error: `No ${engine} component is recorded for ${project.name}/${envName}. Re-run hv_plan/hv_apply to create the database first.`,
     };
   }
 

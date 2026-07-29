@@ -862,6 +862,9 @@ providerRegistry.register({
     category: 'database',
     credentialsSchema: CloudSqlCredentialsSchema,
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    lifecycle: {
+      databaseEngines: ['postgres'],
+    },
   },
   factory: (credentials) => {
     const adapter = new CloudSqlAdapter();

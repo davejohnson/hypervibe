@@ -5,6 +5,7 @@ import { adapterFactory } from './adapter.factory.js';
 import { DeployOrchestrator } from './deploy.orchestrator.js';
 import { buildDeploySourceEnvVars } from './deploy-source.js';
 import { buildDatabaseEnvVarsFromComponent } from './database-env.js';
+import { buildCacheEnvVarsFromComponent } from './cache-env.js';
 import { resolveQueueEnvVars } from './queue-env.js';
 import { syncProjectIntent } from './intent.service.js';
 import { SpecStore } from '../spec/spec.store.js';
@@ -175,15 +176,19 @@ export async function executeRollback(params: {
       const orchestrator = new DeployOrchestrator();
       // Include managed database env vars (e.g. DATABASE_URL): Cloud Run scopes
       // env to the revision, so a rollback deploy must carry them too.
-      const dbComponent = componentRepo.findByEnvironmentAndType(environment.id, 'postgres');
       // Queue vars are revision-scoped on Cloud Run too; a rollback deploy
       // that omitted them would strip them. Best-effort: spec-less projects
       // have no queues section and get none.
       const envSpec = new SpecStore().get(project)?.spec.environments[environment.name];
+      const dbComponent = envSpec?.database
+        ? componentRepo.findByEnvironmentAndType(environment.id, envSpec.database.engine)
+        : null;
+      const cacheComponent = componentRepo.findByEnvironmentAndType(environment.id, 'redis');
       const queueEnvVars = envSpec ? await resolveQueueEnvVars(project, envSpec, environment) : undefined;
       const deployEnvVars = {
         ...buildDeploySourceEnvVars(project, adapter.name),
         ...(dbComponent ? buildDatabaseEnvVarsFromComponent(dbComponent).envVars : {}),
+        ...(cacheComponent ? buildCacheEnvVarsFromComponent(cacheComponent).envVars : {}),
         ...(queueEnvVars ?? {}),
       };
       deployResult = await orchestrator.execute({

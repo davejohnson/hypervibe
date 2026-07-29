@@ -619,6 +619,9 @@ providerRegistry.register({
     category: 'database',
     credentialsSchema: RdsCredentialsSchema,
     setupHelpUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+    lifecycle: {
+      databaseEngines: ['postgres'],
+    },
   },
   factory: (credentials) => {
     const adapter = new RdsAdapter();

@@ -29,9 +29,14 @@ export const serviceSpecSchema = z.object({
   }
 });
 
+export const providerIdSchema = z.string().regex(
+  /^[a-z][a-z0-9-]*$/,
+  'provider ids must be lowercase slugs starting with a letter'
+);
+
 export const databaseSpecSchema = z.object({
-  provider: z.enum(['supabase', 'cloudsql', 'railway', 'rds']),
-  engine: z.literal('postgres').default('postgres'),
+  provider: providerIdSchema,
+  engine: z.enum(['postgres', 'mongodb']).default('postgres'),
   /**
    * Optional one-shot bootstrap/seed command. hv_plan emits a visible database
    * seed action. hv_apply runs it inside the deployed service environment and
@@ -39,6 +44,11 @@ export const databaseSpecSchema = z.object({
    * it does not run again unless changed.
    */
   seedCommand: z.string().min(1).optional(),
+});
+
+export const cacheSpecSchema = z.object({
+  provider: providerIdSchema,
+  engine: z.literal('redis').default('redis'),
 });
 
 export const deploySpecSchema = z.object({
@@ -740,6 +750,7 @@ export const environmentSpecSchema = z.object({
   }),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
+  cache: cacheSpecSchema.optional(),
   domain: z.string().min(1).optional(),
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: z.object({ enabled: z.boolean() }).default({ enabled: false }),
@@ -803,11 +814,23 @@ export const environmentSpecSchema = z.object({
     }
   }
   if (environment.queues && Object.keys(environment.queues).length > 0
-    && environment.hosting.provider === 'railway' && !environment.database) {
+    && environment.hosting.provider === 'railway'
+    && (!environment.database || environment.database.engine !== 'postgres')) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: 'railway queues are postgres-backed (pg-boss model): declare spec.database',
+      message: 'railway queues are postgres-backed (pg-boss model): declare a postgres spec.database',
       path: ['queues'],
+    });
+  }
+  if (
+    environment.database?.engine === 'mongodb'
+    && environment.migrations
+    && environment.migrations.mode !== 'none'
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'migrations are PostgreSQL-only; MongoDB data operations require a separate engine-aware command contract',
+      path: ['migrations'],
     });
   }
   const retiredKeys = new Set<string>();

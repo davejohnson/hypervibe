@@ -522,6 +522,9 @@ providerRegistry.register({
     credentials: {
       defaultScalarKey: 'accessToken',
     },
+    lifecycle: {
+      databaseEngines: ['postgres'],
+    },
   },
   factory: (credentials) => {
     const adapter = new SupabaseAdapter();

@@ -33,7 +33,7 @@ export interface ImportServiceSummary {
   repo: string | null;
   branch: string | null;
   hasGitHubDeploy: boolean;
-  datastoreEngine?: 'postgres';
+  datastoreEngine?: 'postgres' | 'redis';
   instancesByEnv: Record<string, {
     domains: string[];
     customDomains: string[];
@@ -77,16 +77,22 @@ export interface ImportRailwayProjectOptions {
   storageMappings?: Record<string, string>;
   /** Explicit service-backed datastore adoption: Railway service id -> engine. */
   databaseMappings?: Record<string, 'postgres'>;
+  /** Explicit service-backed cache adoption: Railway service id -> engine. */
+  cacheMappings?: Record<string, 'redis'>;
 }
 
 export function mapPluginToComponentType(pluginName: string): ComponentType {
   const normalized = pluginName.toLowerCase();
   if (normalized.includes('postgres')) return 'postgres';
+  if (normalized.includes('redis') || normalized.includes('valkey')) return 'redis';
   return pluginName;
 }
 
-export function classifyRailwayDatastoreEngine(name: string): 'postgres' | undefined {
-  return name.toLowerCase().includes('postgres') ? 'postgres' : undefined;
+export function classifyRailwayDatastoreEngine(name: string): 'postgres' | 'redis' | undefined {
+  const normalized = name.toLowerCase();
+  if (normalized.includes('postgres')) return 'postgres';
+  if (normalized.includes('redis') || normalized.includes('valkey')) return 'redis';
+  return undefined;
 }
 
 /**
@@ -299,9 +305,12 @@ export async function importRailwayProject(
   // Create services
   const createdServices: Array<{ name: string; id: string; railwayId: string }> = [];
 
-  const adoptedDatabaseServiceIds = new Set(Object.keys(options.databaseMappings ?? {}));
+  const adoptedDatastoreServiceIds = new Set([
+    ...Object.keys(options.databaseMappings ?? {}),
+    ...Object.keys(options.cacheMappings ?? {}),
+  ]);
   for (const svc of services) {
-    if (adoptedDatabaseServiceIds.has(svc.railwayId)) continue;
+    if (adoptedDatastoreServiceIds.has(svc.railwayId)) continue;
     const firstInstance = Object.values(svc.instancesByEnv)[0];
     const buildConfig = {
       ...(svc.repo ? { builder: 'nixpacks' as const } : {}),
@@ -367,6 +376,9 @@ export async function importRailwayProject(
             environmentId: env.railwayId,
             resourceKind: 'plugin',
             pluginName: comp.name,
+            ...(comp.type === 'redis'
+              ? { connectionUrl: '${{' + comp.name + '.REDIS_URL}}' }
+              : {}),
           },
         });
       } else {
@@ -380,6 +392,9 @@ export async function importRailwayProject(
             environmentId: env.railwayId,
             resourceKind: 'plugin',
             pluginName: comp.name,
+            ...(comp.type === 'redis'
+              ? { connectionUrl: '${{' + comp.name + '.REDIS_URL}}' }
+              : {}),
           },
         });
       }
@@ -392,10 +407,14 @@ export async function importRailwayProject(
     }
   }
 
-  // Current Railway databases are ordinary services. Adoption must be
+  // Current Railway databases and caches are ordinary services. Adoption must be
   // explicit because a name alone is not enough evidence that a service is a
   // datastore; mapped services are components, never application services.
-  for (const [serviceId, type] of Object.entries(options.databaseMappings ?? {})) {
+  const serviceDatastoreMappings: Record<string, 'postgres' | 'redis'> = {
+    ...(options.databaseMappings ?? {}),
+    ...(options.cacheMappings ?? {}),
+  };
+  for (const [serviceId, type] of Object.entries(serviceDatastoreMappings)) {
     const service = services.find((candidate) => candidate.railwayId === serviceId);
     if (!service) continue;
     for (const env of createdEnvironments) {
@@ -407,6 +426,9 @@ export async function importRailwayProject(
         resourceKind: 'service',
         serviceId,
         pluginName: service.name,
+        ...(type === 'redis'
+          ? { connectionUrl: '${{' + service.name + '.REDIS_URL}}' }
+          : {}),
       };
       const existing = componentRepo.findByEnvironmentAndType(env.id, type);
       if (existing) {
