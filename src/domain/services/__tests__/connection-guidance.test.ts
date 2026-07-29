@@ -178,6 +178,15 @@ describe('connection guidance', () => {
         'read:packages',
         'credentialsRef="file:/absolute/path/render.json"',
       ],
+      heroku: [
+        'https://dashboard.heroku.com/account',
+        'https://devcenter.heroku.com/articles/oauth#direct-authorization',
+        'Platform API bearer token',
+        'global scope',
+        'registry.heroku.com',
+        'billable',
+        'credentialsRef="env:HEROKU_API_KEY"',
+      ],
       stripe: [
         'https://dashboard.stripe.com/apikeys',
         'sk_test_',

@@ -113,6 +113,31 @@ Postgres, and Key Value resources. The current local fixture cannot publish
 and execute the managed workflow, so mocked green tests do not justify
 `ready-for-live` or `supported`.
 
+Heroku is the next hosting-only adapter slice. The provider context is the
+verified Heroku account, which Hypervibe binds but never creates or deletes.
+Each Hypervibe web or worker service owns one container-stack Heroku app so
+config-var and process lifecycles remain action-scoped. Apply creates only an
+empty, deterministically named app and records its durable app UUID; existing
+name matches require explicit `hv_import`, stale UUID bindings block, and
+teardown waits for provider-confirmed `404` absence. Add-ons, Scheduler jobs,
+pipelines, and dashboard GitHub integrations are outside this adapter.
+
+Heroku remains `planned`. Its mocked contracts pin complete Platform API range
+pagination, durable-ID-first observation, unknown-error preservation,
+secret-safe config handling, partial-create identity, billable confirmation,
+and idempotent terminal deletion. The generated managed workflow builds the
+full checked-out Git SHA for `linux/amd64`, pushes the resulting image to only
+the already-bound app/process registry paths, releases the exact Docker image
+ID through Heroku's container-release Platform API, waits for the new release
+to succeed, verifies its SHA/image markers and formation, and checks configured
+web health paths. CI never creates an app, add-on, database, or pipeline.
+
+Promotion requires an isolated live account and a harness that can execute the
+managed GitHub workflow, then prove create/release/noop/update/terminal teardown.
+The default Basic dyno becomes billable when the workflow scales the process to
+one, so the live run must preserve exact-action confirmation and surface cleanup
+failures with the remaining app UUID.
+
 The extended matrix also includes:
 
 - [Azure Container Apps](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/container-apps)

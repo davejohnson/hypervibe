@@ -159,4 +159,16 @@ describe('provider conformance matrix', () => {
       providerRegistry.supportsEngine('render', 'cache', 'redis')
     ).toBe(true);
   });
+
+  it('tracks the implemented Heroku hosting slice without claiming live support', () => {
+    const entry = hostingProviderContracts.find(
+      (provider) => provider.provider === 'heroku'
+    );
+
+    expect(entry).toMatchObject({
+      status: 'planned',
+      implementationNote: expect.stringContaining('implemented'),
+    });
+    expect(providerRegistry.supports('heroku', 'hosting')).toBe(true);
+  });
 });
