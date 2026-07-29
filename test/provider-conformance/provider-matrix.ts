@@ -1,4 +1,7 @@
-export type ProviderImplementationStatus = 'supported' | 'planned';
+export type ProviderImplementationStatus =
+  | 'supported'
+  | 'ready-for-live'
+  | 'planned';
 
 export interface ProviderCredentialField {
   /** Key accepted by the provider's Hypervibe credential schema. */
@@ -284,9 +287,11 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     vendor: 'Neon',
     service: 'Neon Postgres',
     engine: 'postgres',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: neonCredentials,
     fixtureHostingProvider: 'railway',
+    implementationNote:
+      'The registry, credential schema, adapter, guidance, and mocked lifecycle contract are implemented; promotion requires a successful opt-in live create/noop/destroy run.',
   },
 ];
 
@@ -327,7 +332,7 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     vendor: 'Railway',
     service: 'Railway Redis',
     engine: 'redis',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: railwayCredentials,
     fixtureHostingProvider: 'railway',
   },

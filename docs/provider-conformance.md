@@ -24,9 +24,19 @@ Hosting, databases, and caches have separate contracts:
   do not apply.
 
 The requested matrix lives in
-`test/provider-conformance/provider-matrix.ts`. A provider moves from
-`planned` to `supported` only after its registry, schema, adapter, connection
-guidance, mocked contract, and live contract are all green.
+`test/provider-conformance/provider-matrix.ts`. A provider moves from `planned`
+to `ready-for-live` after its registry, schema, adapter, connection guidance,
+and mocked contract are green. The opt-in live runner accepts
+`ready-for-live`, but the roadmap remains red and Hypervibe does not advertise
+support. Only a green live contract promotes it to `supported`.
+
+The ordinary `npm test` suite stays green for supported behavior. Run
+`npm run test:providers:roadmap` separately to execute one intentionally red
+acceptance test per provider/resource contract. Each failure reports whether
+the provider is registered, exposes the requested lifecycle and engine,
+accepts the matrix credential shape, and has been promoted to `supported`.
+Those failures are the implementation queue; they must not be added to the
+ordinary CI gate until the corresponding provider is fully supported.
 
 AWS hosting targets ECS on Fargate rather than App Runner because the
 [AWS App Runner API documentation](https://docs.aws.amazon.com/apprunner/latest/api/API_ListServices.html)
@@ -35,8 +45,14 @@ requested database matrix uses RDS independently of that hosting choice.
 
 Redis/Valkey starts with Railway, Memorystore, DigitalOcean, ElastiCache,
 Render, Upstash, and Azure Managed Redis. Railway is the first implemented
-adapter slice, but it stays non-supported in the matrix until the opt-in live
-teardown contract is executable.
+adapter slice. It is `ready-for-live`, not `supported`, until the opt-in live
+teardown contract passes.
+
+Neon is the first newly implemented database slice. Its registry, credential
+schema, provider adapter, connection guidance, and mocked create/observe/destroy
+contract are green. It is `ready-for-live`, not `supported`, until the opt-in
+live contract proves create, noop, and terminal teardown against an isolated
+Neon account.
 
 The extended matrix also includes:
 
@@ -58,10 +74,13 @@ The extended matrix also includes:
   its current Postgres offerings are provider-owned Marketplace integrations.
 - [Neon Postgres](https://api-docs.neon.tech/reference/use-cases) as its own
   database provider. Neon owns the project, branch, endpoint, database, and
-  deletion lifecycle even when a Vercel integration wires it to an app.
+  deletion lifecycle even when a Vercel integration wires it to an app. Its
+  adapter uses the public Neon API directly and does not depend on a provider
+  CLI.
 
-These entries are test-first targets, not current support promises. Each stays
-`planned` until its provider adapter and complete lifecycle contract pass.
+These entries are test-first targets, not current support promises. An entry
+stays `planned` until its provider adapter and mocked lifecycle contract pass,
+then remains `ready-for-live` until its complete live lifecycle contract passes.
 
 ## Required lifecycle phases
 
@@ -100,11 +119,18 @@ then select exactly one contract:
 ```sh
 HYPERVIBE_LIVE_HOSTING=railway npm run test:providers:live
 HYPERVIBE_LIVE_DATABASE=cloudsql npm run test:providers:live
+HYPERVIBE_LIVE_DATABASE=neon npm run test:providers:live
 ```
 
 `HYPERVIBE_LIVE_CACHE=<provider>` becomes available when a cache entry reaches
-`supported`; the runner refuses planned entries before reading credentials or
-creating billable resources.
+`ready-for-live`. The runner refuses `planned` entries before reading
+credentials or creating billable resources.
+
+The Neon contract requires `HYPERVIBE_TEST_NEON_API_KEY` plus the Railway
+fixture-host credentials. Set `HYPERVIBE_TEST_NEON_ORGANIZATION_ID` when a
+personal Neon key should target an organization, and optionally set
+`HYPERVIBE_TEST_NEON_REGION_ID`. Use only an isolated account/workspace because
+the contract creates and destroys real provider resources.
 
 The runner copies a tiny HTTP fixture into a temporary worktree and writes a
 mode-`0600` temporary credential object. Hypervibe consumes it through
