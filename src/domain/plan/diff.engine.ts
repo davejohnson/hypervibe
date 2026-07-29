@@ -37,9 +37,10 @@ export function diffEnvironment(input: {
   expectedSource?: { repo: string; branch: string };
   /** Managed database env vars derived from the currently desired database component. */
   managedDatabaseEnvVars?: Record<string, string>;
+  managedCacheEnvVars?: Record<string, string>;
   managedQueueEnvVars?: Record<string, string>;
 }): DiffResult {
-  const { envName, observed, local, expectedSource, managedDatabaseEnvVars, managedQueueEnvVars } = input;
+  const { envName, observed, local, expectedSource, managedDatabaseEnvVars, managedCacheEnvVars, managedQueueEnvVars } = input;
   const providerBehavior = input.providerBehavior ?? {};
   const spec = withMigrationReleaseCommand(input.spec);
   const verified = observed !== null;
@@ -56,6 +57,7 @@ export function diffEnvironment(input: {
   const provider = spec.hosting.provider;
   const desiredEnvVars = {
     ...(managedDatabaseEnvVars ?? {}),
+    ...(managedCacheEnvVars ?? {}),
     ...(managedQueueEnvVars ?? {}),
     ...spec.envVars,
   };
@@ -183,6 +185,7 @@ export function diffEnvironment(input: {
       const presenceOnlyManagedEnvVars = providerBehavior.presenceOnlyManagedEnvVar
         ? new Set(Object.entries({
           ...(managedDatabaseEnvVars ?? {}),
+          ...(managedCacheEnvVars ?? {}),
           ...(managedQueueEnvVars ?? {}),
         })
           .filter(([key, value]) => providerBehavior.presenceOnlyManagedEnvVar?.({ key, value }))
@@ -375,7 +378,12 @@ export function diffEnvironment(input: {
   }
 
   // ---- database -------------------------------------------------------------
-  const localDb = local.components.find((c) => c.type === 'postgres');
+  const desiredDatabaseEngine = spec.database?.engine;
+  const localDb = local.components.find((component) => (
+    desiredDatabaseEngine
+      ? component.type === desiredDatabaseEngine
+      : component.type === 'postgres' || component.type === 'mongodb'
+  ));
   const localDbBindings = localDb?.bindings as Record<string, unknown> | undefined;
   const localDbProvider = localDb
     ? String(localDbBindings?.provider ?? '') || undefined
@@ -384,7 +392,11 @@ export function diffEnvironment(input: {
     ? String(localDbBindings?.previousProvider ?? '') || undefined
     : undefined;
   const observedDatabases = databaseObservationKnown
-    ? (observed?.databases ?? []).filter((d) => d.engine === 'postgres')
+    ? (observed?.databases ?? []).filter((database) => (
+      desiredDatabaseEngine
+        ? database.engine === desiredDatabaseEngine
+        : database.engine === 'postgres' || database.engine === 'mongodb'
+    ))
     : [];
   const observedDb = observedDatabases.length === 1 ? observedDatabases[0] : undefined;
   const databaseAmbiguous = observedDatabases.length > 1;
@@ -394,6 +406,7 @@ export function diffEnvironment(input: {
 
   if (spec.database) {
     const wanted = spec.database.provider;
+    const databaseEngineLabel = spec.database.engine === 'postgres' ? 'PostgreSQL' : 'MongoDB';
     const createId = `database:${wanted}`;
     activeDatabaseActionId = createId;
     if (databaseAmbiguous) {
@@ -403,19 +416,19 @@ export function diffEnvironment(input: {
         type: 'update',
         resource: { kind: 'database', name: spec.database.engine, provider: wanted },
         verified: true,
-        reason: `Multiple PostgreSQL datastores were observed; Hypervibe cannot safely select one`,
+        reason: `Multiple ${databaseEngineLabel} datastores were observed; Hypervibe cannot safely select one`,
         metadata: {
           blockedReason: 'ambiguous_database_identity',
           externalIds: candidateIds,
         },
       });
-      warnings.push(`Multiple PostgreSQL datastores were observed (${candidateIds.join(', ')}). Database mutations are blocked until one identity is explicitly adopted.`);
+      warnings.push(`Multiple ${databaseEngineLabel} datastores were observed (${candidateIds.join(', ')}). Database mutations are blocked until one identity is explicitly adopted.`);
       for (const database of observedDatabases) {
         if (database.externalId === localDb?.externalId) continue;
         unmanaged.push({
           kind: 'database',
           name: database.name ?? database.engine,
-          detail: `${database.provider} datastore ${database.externalId} is an additional PostgreSQL candidate`,
+          detail: `${database.provider} datastore ${database.externalId} is an additional ${databaseEngineLabel} candidate`,
         });
       }
     } else if (observed && !databaseObservationKnown) {
@@ -466,7 +479,7 @@ export function diffEnvironment(input: {
         type: 'update',
         resource: { kind: 'database', name: spec.database.engine, provider: wanted },
         verified: true,
-        reason: `A live ${wanted} PostgreSQL datastore exists but is not adopted into Hypervibe state`,
+        reason: `A live ${wanted} ${spec.database.engine} datastore exists but is not adopted into Hypervibe state`,
         metadata: {
           blockedReason: 'database_adoption_required',
           externalId: observedDb.externalId,
@@ -526,6 +539,7 @@ export function diffEnvironment(input: {
         dependsOn: [createId, ...serviceDeps],
         metadata: {
           operation: 'databaseSeed',
+          engine: spec.database.engine,
           command: spec.database.seedCommand,
           commandHash,
           mode: 'once',
@@ -551,6 +565,9 @@ export function diffEnvironment(input: {
       reason: 'Database removed from spec. Data will be lost — confirm to destroy.',
       dataBearing: true,
       requiresConfirm: true,
+      dependsOn: actions
+        .filter((action) => action.resource.kind === 'service' && action.type === 'destroy')
+        .map((action) => action.id),
     });
   } else if (observedDb && !localDb) {
     unmanaged.push({

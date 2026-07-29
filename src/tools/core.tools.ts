@@ -38,23 +38,32 @@ import { githubSpecNeedsOpenAI } from '../domain/services/github-infrastructure.
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service.js';
 import { planEmailSetup } from '../domain/services/email-plan.service.js';
+import { validateProjectSpecProviders } from '../domain/services/provider-spec-validation.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
 
-function deploymentProviders(): string[] {
-  return providerRegistry.getByCategory('deployment').map((p) => p.metadata.name);
-}
-
-function validateHostingProviders(spec: ProjectSpec): void {
-  const available = deploymentProviders();
-  for (const [envName, env] of Object.entries(spec.environments)) {
-    if (!available.includes(env.hosting.provider)) {
-      throw new HvError('VALIDATION', `Unknown hosting provider "${env.hosting.provider}" in environment "${envName}".`, {
-        hint: `Available hosting providers: ${available.join(', ')}.`,
-      });
+function validateInstalledProviders(spec: ProjectSpec): void {
+  const issue = validateProjectSpecProviders(spec)[0];
+  if (!issue) return;
+  const label = issue.capability;
+  const engineIssue = issue.field.endsWith('.engine');
+  throw new HvError(
+    'VALIDATION',
+    engineIssue
+      ? `${issue.provider} does not support ${label} engine "${issue.engine}" in environment "${issue.environment}".`
+      : `Unknown ${label} provider "${issue.provider}" in environment "${issue.environment}".`,
+    {
+      hint: engineIssue
+        ? `Supported ${label} engines for ${issue.provider}: ${issue.available.join(', ') || 'none'}.`
+        : `Available ${label} providers: ${issue.available.join(', ')}.`,
+      details: {
+        path: `environments.${issue.environment}.${issue.field}`,
+        capability: issue.capability,
+        ...(issue.engine ? { engine: issue.engine } : {}),
+      },
     }
-  }
+  );
 }
 
 function providerNativeDeployChanges(
@@ -207,6 +216,7 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
   for (const [envName, envSpec] of Object.entries(spec.environments)) {
     add(envSpec.hosting.provider, envName, 'hosting');
     if (envSpec.database) add(envSpec.database.provider, envName, 'database');
+    if (envSpec.cache) add(envSpec.cache.provider, envName, 'cache');
     if (envSpec.domain) {
       add('cloudflare', envName, envSpec.domainRegistration ? 'domain registration and DNS' : 'domain DNS', [
         ...cloudflareScopeHintsForDomain(envSpec.domain),
@@ -283,10 +293,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_spec_set',
-    'Create or update the desired-state spec for a project (services, databases, storage buckets, queues, domains, and deploy infrastructure). This is the source of truth that hv_plan diffs against live infrastructure. When run inside a git worktree, Hypervibe writes .hypervibe/spec.json. Merges by default; pass replace=true to overwrite or null to delete a key.',
+    'Create or update the desired-state spec for a project (services, databases, Redis caches, storage buckets, queues, domains, and deploy infrastructure). This is the source of truth that hv_plan diffs against live infrastructure. When run inside a git worktree, Hypervibe writes .hypervibe/spec.json. Merges by default; pass replace=true to overwrite or null to delete a key.',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Canonical shape: { gitRemoteUrl?, github?: { repository?, canonicalEnvironment?, actions?: { <id>: typed check|autofix|pull-request-review|code-audit }, dependencies?, security?, collaboration? }, secrets?: { <ENV_KEY>: delegated-secret declaration }, environments: { <env>: { hosting, services, database?, storage?, queues?, domain?, email?, envVars?, deploy?, migrations?, ios? } } }. github actions use typed behavior plus triggers/schedules; a schedule is five-field POSIX cron with an optional IANA timezone. GitHub workflow files and repository settings are planned and applied through the desired-state loop, with generated infrastructure delivered through a reviewable PR. GitHub and OpenAI connections are required only for their corresponding GitHub actions and do not block unrelated providers. The deprecated top-level collaboration field remains readable and is moved to github.collaboration on the next write. Delegated secrets declare ownership and targets but never values; pass values to hv_plan with secretRefs. database.seedCommand is a visible, receipt-backed one-shot bootstrap. deploy.trigger="ci" is the portable branch-deploy default; trigger="native" is provider-specific and confirmation-gated. Use hv_db_migrate for explicit data operations; declare iOS builds and TestFlight distribution under ios.release so the managed workflow invokes the reviewed project release script.'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Canonical shape: { gitRemoteUrl?, github?: { repository?, canonicalEnvironment?, actions?: { <id>: typed check|autofix|pull-request-review|code-audit }, dependencies?, security?, collaboration? }, secrets?: { <ENV_KEY>: delegated-secret declaration }, environments: { <env>: { hosting, services, database?, cache?, storage?, queues?, domain?, email?, envVars?, deploy?, migrations?, ios? } } }. database.engine is postgres or mongodb; cache.engine is redis. github actions use typed behavior plus triggers/schedules; a schedule is five-field POSIX cron with an optional IANA timezone. GitHub workflow files and repository settings are planned and applied through the desired-state loop, with generated infrastructure delivered through a reviewable PR. GitHub and OpenAI connections are required only for their corresponding GitHub actions and do not block unrelated providers. The deprecated top-level collaboration field remains readable and is moved to github.collaboration on the next write. Delegated secrets declare ownership and targets but never values; pass values to hv_plan with secretRefs. database.seedCommand is a visible, receipt-backed one-shot bootstrap. deploy.trigger="ci" is the portable branch-deploy default; trigger="native" is provider-specific and confirmation-gated. Use hv_db_migrate for explicit PostgreSQL data operations; declare iOS builds and TestFlight distribution under ios.release so the managed workflow invokes the reviewed project release script.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external app access such as the Railway GitHub App.'),
     },
@@ -326,7 +336,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             hint: nativeDeployConfirmationHint(nativeChanges),
           });
         }
-        validateHostingProviders(candidateSpec);
+        validateInstalledProviders(candidateSpec);
         result = specStore.replace(project, candidateSpec);
       } catch (error) {
         if (error instanceof z.ZodError) {

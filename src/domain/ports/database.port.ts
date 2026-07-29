@@ -5,7 +5,7 @@ import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from './provider.
 /**
  * Supported database types that can be provisioned
  */
-export type DatabaseType = 'postgres';
+export type DatabaseType = 'postgres' | 'mongodb';
 
 /**
  * All provisionable component types
@@ -39,7 +39,7 @@ export interface DatabaseCapabilities {
 }
 
 /**
- * Result of provisioning a database or cache
+ * Result of provisioning a database
  */
 export interface ProvisionResult {
   /** The provisioned component with bindings populated */
@@ -106,7 +106,7 @@ export interface IDatabaseAdapter {
   disconnect?(): Promise<void>;
 
   /**
-   * Provision a new database or cache instance.
+   * Provision a new database instance.
    * Returns the component with connection details ready for use.
    */
   provision(
@@ -131,7 +131,7 @@ export interface IDatabaseAdapter {
   getConnectionUrl(component: Component): Promise<string | null>;
 
   /**
-   * Destroy a provisioned database/cache instance.
+   * Destroy a provisioned database instance.
    * Use with caution - this deletes data permanently.
    */
   destroy(component: Component): Promise<Receipt>;

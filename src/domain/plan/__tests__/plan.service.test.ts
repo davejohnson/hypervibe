@@ -183,6 +183,79 @@ describe('PlanService.plan', () => {
     expect(doc.observedFingerprint).toBeTruthy();
   });
 
+  it('plans Redis before service wiring through the shared provider lifecycle', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          cache: { provider: 'railway', engine: 'redis' },
+          envVars: { NODE_ENV: 'staging' },
+        },
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { web: { serviceId: 's-1' } },
+      },
+    });
+    new ServiceRepository().create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: {},
+      envVarSpec: {},
+    });
+    const connection = new ConnectionRepository().create({
+      provider: 'railway',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 're-1',
+      services: [{
+        name: 'web',
+        externalId: 's-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: ['NODE_ENV'],
+        envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+        status: 'running',
+      }],
+      databases: [],
+      caches: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const result = await new PlanService().plan(project, 'staging');
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find((action) => action.id === 'cache:railway')).toMatchObject({
+      type: 'create',
+      verified: true,
+      billable: true,
+      resource: { kind: 'cache', name: 'redis', provider: 'railway' },
+    });
+    expect(plan.actions.find((action) => action.id === 'service:web')).toMatchObject({
+      type: 'update',
+      dependsOn: expect.arrayContaining(['cache:railway']),
+    });
+    expect(plan.blocked).toEqual([]);
+  });
+
   it('persists hash-only Stripe environment drift with service dependencies', async () => {
     new SpecStore().replace(project, {
       version: 1,

@@ -7,8 +7,6 @@ import type { BuildConfig, WorkloadKind } from '../entities/service.entity.js';
 const envRepo = new EnvironmentRepository();
 const componentRepo = new ComponentRepository();
 
-export const DB_PROVIDERS = ['supabase', 'cloudsql', 'railway', 'rds'] as const;
-
 export interface DesiredState {
   environmentName: string;
   services: string[];
@@ -19,7 +17,7 @@ export interface DesiredState {
     timeZone?: string;
   }>;
   domain?: string;
-  databaseProvider: (typeof DB_PROVIDERS)[number];
+  databaseProvider: string;
   setupEmail: boolean;
   serviceConfig?: Record<string, {
     workloadKind?: WorkloadKind;
@@ -223,7 +221,7 @@ function buildEnvVarsFromComponent(component: Component): { envVars: Record<stri
 
 export function resolveExistingDatabaseState(
   environmentId: string,
-  desiredProvider: (typeof DB_PROVIDERS)[number]
+  desiredProvider: string
 ): ExistingDatabaseState {
   const component = componentRepo.findByEnvironmentAndType(environmentId, 'postgres');
   if (!component) {
@@ -252,7 +250,7 @@ export function resolveExistingDatabaseState(
 export function inferExistingDatabaseProvider(
   projectId: string,
   environmentName: string
-): (typeof DB_PROVIDERS)[number] | undefined {
+): string | undefined {
   const environment = envRepo.findByProjectAndName(projectId, environmentName);
   if (!environment) {
     return undefined;
@@ -264,16 +262,14 @@ export function inferExistingDatabaseProvider(
     return undefined;
   }
 
-  return DB_PROVIDERS.includes(provider as (typeof DB_PROVIDERS)[number])
-    ? (provider as (typeof DB_PROVIDERS)[number])
-    : undefined;
+  return provider;
 }
 
 export function resolveDatabaseProviderForProject(
   project: { id: string },
   policyState: Partial<DesiredState> | undefined,
-  overrides: { environmentName?: string; databaseProvider?: (typeof DB_PROVIDERS)[number] }
-): (typeof DB_PROVIDERS)[number] {
+  overrides: { environmentName?: string; databaseProvider?: string }
+): string {
   return overrides.databaseProvider
     ?? policyState?.databaseProvider
     ?? inferExistingDatabaseProvider(project.id, overrides.environmentName ?? policyState?.environmentName ?? 'staging')

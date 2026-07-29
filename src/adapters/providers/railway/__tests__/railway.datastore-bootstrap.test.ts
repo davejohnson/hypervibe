@@ -14,6 +14,54 @@ function makeEnv(bindings: Record<string, unknown>): Environment {
 }
 
 describe('RailwayAdapter datastore bootstrap vars', () => {
+  it('creates persistent Redis with a generated password and internal REDIS_URL', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        project: {
+          environments: {
+            edges: [{ node: { id: 'rail-env-1', name: 'staging' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({ project: { services: { edges: [] } } })
+      .mockResolvedValueOnce({
+        serviceCreate: { id: 'rail-svc-redis-1', name: 'redis-db' },
+      })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'rail-env-1' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({ variableCollectionUpsert: true })
+      .mockResolvedValueOnce({ volumeCreate: { id: 'redis-volume-1' } })
+      .mockResolvedValueOnce({ serviceInstanceRedeploy: true });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.ensureComponent('redis', makeEnv({ projectId: 'rail-proj-1' }));
+
+    expect(result.receipt.success).toBe(true);
+    expect(request.mock.calls[2]?.[1]).toEqual({
+      input: {
+        projectId: 'rail-proj-1',
+        environmentId: 'rail-env-1',
+        name: 'redis-db-staging',
+        source: { image: 'bitnami/redis:7.4' },
+      },
+    });
+    const variables = request.mock.calls[4]?.[1]?.variables as Record<string, string>;
+    expect(variables.REDIS_PASSWORD).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(variables.ALLOW_EMPTY_PASSWORD).toBe('no');
+    expect(variables.REDIS_URL).toContain('@redis-db-staging.railway.internal:6379');
+    expect(request.mock.calls[5]?.[1]?.input).toMatchObject({
+      serviceId: 'rail-svc-redis-1',
+      mountPath: '/bitnami/redis/data',
+    });
+  });
+
   it('sets bootstrap vars, attaches a volume, and redeploys after datastore creation', async () => {
     const request = vi.fn()
       // resolveRailwayEnvironmentId -> listProjectEnvironments

@@ -2,7 +2,8 @@ import { z } from 'zod';
 import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
 import type { Project } from '../entities/project.entity.js';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'tunnel' | 'local' | 'security' | 'database' | 'storage' | 'appstore' | 'ai';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'tunnel' | 'local' | 'security' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
+export type ProviderLifecycleCapability = 'hosting' | 'database' | 'cache' | 'storage';
 
 export interface ProviderMetadata {
   name: string;
@@ -19,6 +20,12 @@ export interface ProviderMetadata {
     environmentVariableAliases?: string[][];
   };
   orchestration?: ProviderOrchestrationMetadata;
+  lifecycle?: {
+    /** Engines this provider can reconcile through its database adapter. */
+    databaseEngines?: string[];
+    /** Engines this provider can reconcile through its cache adapter. */
+    cacheEngines?: string[];
+  };
 }
 
 export interface ProviderOrchestrationMetadata {
@@ -77,6 +84,7 @@ export interface RegisteredProvider {
   /** Provider-owned adapters derived from the connected primary adapter. */
   derivedAdapters?: {
     database?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
+    cache?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
     storage?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;
   };
 }
@@ -85,13 +93,16 @@ export interface RegisteredProvider {
  * Central registry for all provider adapters.
  * Providers self-register at module load time.
  */
-class ProviderRegistry {
+export class ProviderRegistry {
   private providers = new Map<string, RegisteredProvider>();
 
   /**
    * Register a provider adapter
    */
   register(provider: RegisteredProvider): void {
+    if (this.providers.has(provider.metadata.name)) {
+      throw new Error(`Provider "${provider.metadata.name}" is already registered`);
+    }
     this.providers.set(provider.metadata.name, provider);
   }
 
@@ -128,6 +139,47 @@ class ProviderRegistry {
    */
   has(name: string): boolean {
     return this.providers.has(name);
+  }
+
+  /**
+   * Test whether a provider exposes a lifecycle adapter without teaching
+   * generic orchestration about provider names. A deployment/database primary
+   * adapter satisfies its matching capability; multi-product providers may
+   * expose database or storage through derived adapters.
+   */
+  supports(name: string, capability: ProviderLifecycleCapability): boolean {
+    const provider = this.providers.get(name);
+    if (!provider) return false;
+    if (capability === 'hosting') {
+      return provider.metadata.category === 'deployment';
+    }
+    if (capability === 'database') {
+      const exposesAdapter = provider.metadata.category === 'database'
+        || typeof provider.derivedAdapters?.database === 'function';
+      return exposesAdapter
+        && (provider.metadata.lifecycle?.databaseEngines?.length ?? 0) > 0;
+    }
+    if (capability === 'cache') {
+      const exposesAdapter = provider.metadata.category === 'cache'
+        || typeof provider.derivedAdapters?.cache === 'function';
+      return exposesAdapter
+        && (provider.metadata.lifecycle?.cacheEngines?.length ?? 0) > 0;
+    }
+    return provider.metadata.category === 'storage'
+      || typeof provider.derivedAdapters?.storage === 'function';
+  }
+
+  namesFor(capability: ProviderLifecycleCapability): string[] {
+    return this.names().filter((name) => this.supports(name, capability));
+  }
+
+  supportsEngine(name: string, capability: 'database' | 'cache', engine: string): boolean {
+    const provider = this.providers.get(name);
+    if (!provider || !this.supports(name, capability)) return false;
+    const engines = capability === 'database'
+      ? provider.metadata.lifecycle?.databaseEngines
+      : provider.metadata.lifecycle?.cacheEngines;
+    return Array.isArray(engines) && engines.includes(engine);
   }
 
   /**

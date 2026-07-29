@@ -18,7 +18,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 ## Features
 
 **Infrastructure Providers**
-- **Railway** - Deploy apps, databases, private S3-compatible storage buckets, cron jobs, queues
+- **Railway** - Deploy apps, Postgres databases, Redis caches, private S3-compatible storage buckets, cron jobs, queues
 - **Google Cloud** - Cloud Run hosting and Cloud SQL Postgres
 - **Amazon RDS** - Managed Postgres with operation-scoped diagnostic ingress
 - **Supabase** - Managed Postgres with direct or pooled connectivity
@@ -36,6 +36,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 - Services declare `workloadKind: web | worker | cron`. Workers are always-on background consumers (on Cloud Run: internal-only ingress, minimum one instance; they must still listen on `PORT`).
 - `queues` in the spec declares named message queues: Cloud Run environments get real Pub/Sub topics + subscriptions (apps receive `QUEUE_TOPIC_*` / `QUEUE_SUBSCRIPTION_*`); Railway environments are postgres-backed (pg-boss model — requires a declared database; apps consume via `DATABASE_URL`). Every queue environment gets `QUEUE_BACKEND` and `QUEUE_NAMES`.
 - `storage` declares named private object buckets and an explicit `injectInto` service list. Railway is the first storage provider and works with Railway or cross-provider hosting. Selected services receive the standard `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET_NAME`, `AWS_DEFAULT_REGION`, and `AWS_S3_URL_STYLE` variables; credentials never appear in specs, bindings, plans, or tool output. Bucket deletion is data-bearing and confirmation-gated.
+- `cache: { provider: "railway", engine: "redis" }` declares Redis independently from SQL/document databases. Hypervibe wires `REDIS_URL`; cache deletion is data-bearing and confirmation-gated.
 
   ```json
   "storage": {
@@ -188,7 +189,7 @@ Secret references use the format: `provider://path[#key][@version]`
 
 Hypervibe exposes the same focused operations as canonical `hv_*` MCP tools and friendly CLI commands. The core is a Terraform-style loop:
 
-1. `hv_spec_set` — declare the desired state (services, database, storage, domain, email, env vars) as a revisioned spec
+1. `hv_spec_set` — declare the desired state (services, database, cache, storage, domain, email, env vars) as a revisioned spec
 2. `hv_plan` — observe live infrastructure, diff against the spec, and get an executable plan
 3. `hv_apply planId=...` — converge. Stale plans are rejected; destroying data-bearing resources requires explicit confirmation
 4. `hv_status` — see drift between desired and observed state at any time
@@ -212,7 +213,7 @@ Hypervibe treats infrastructure as a repo-backed definition, not as one user's p
 .hypervibe/spec.json
 ```
 
-Commit that file with the app. It is the shared source of truth for environments, services, cron jobs, databases, delegated secret ownership, domains, email, env vars, deploy strategy, and migrations. When a teammate clones the repo and runs `hv_spec_get`, `hv_plan`, or `hv_status`, Hypervibe reads this file, creates a local project cache if needed, and reports any missing provider connections before apply. The local `project_specs` table is a revision journal behind this file: if `spec.json` is edited outside Hypervibe (or pulled with new changes), the next read adopts it as a new revision and says so in a warning.
+Commit that file with the app. It is the shared source of truth for environments, services, cron jobs, databases, caches, delegated secret ownership, domains, email, env vars, deploy strategy, and migrations. When a teammate clones the repo and runs `hv_spec_get`, `hv_plan`, or `hv_status`, Hypervibe reads this file, creates a local project cache if needed, and reports any missing provider connections before apply. The local `project_specs` table is a revision journal behind this file: if `spec.json` is edited outside Hypervibe (or pulled with new changes), the next read adopts it as a new revision and says so in a warning.
 
 Hypervibe also maintains non-secret provider identity bindings in:
 
@@ -861,9 +862,9 @@ Provider credentials remain local and encrypted. Database component bindings (co
 
 `workloadKind: "job"` was removed from the service spec — it never had run-to-completion deploy semantics. Specs using it fail validation; choose `worker` (always-on, internal-only on Cloud Run with a minimum of one instance — note Cloud Run workers must still listen on `PORT`) or `cron` (scheduled). Railway's observe cannot distinguish `web` from `worker`, so kind drift is not detected there.
 
-Hosting support for Vercel, Render, Heroku, DigitalOcean, and AWS App Runner was removed. Specs that reference those hosting providers no longer validate; move the environment to `railway` or `cloudrun` and re-run `hv_plan`. Supported database providers are `supabase`, `cloudsql`, `railway`, and `rds`. Stored connections for removed providers can still be deleted with `hv_connect action="remove"`.
+Built-in hosting support for Vercel, Render, Heroku, DigitalOcean, and AWS App Runner was removed. Specs that reference those hosting providers do not validate yet; the provider-conformance matrix now tracks replacement adapters for Vercel, Render, Heroku, DigitalOcean, and AWS ECS on Fargate, plus new Azure Container Apps and Fly Machines targets. Supported database providers remain `supabase`, `cloudsql`, `railway`, and `rds`; Azure PostgreSQL, Fly Managed Postgres, and Neon are planned conformance targets. Stored connections for removed providers can still be deleted with `hv_connect action="remove"`.
 
-The `redis`, `mysql`, and `mongodb` component types were removed — `postgres` is the only provisionable datastore. Existing live Redis/MySQL/MongoDB instances are no longer managed and observe as `unknown` engines.
+Redis is now a separate cache lifecycle instead of a database component. Railway Redis is the first adapter slice and wires `REDIS_URL`. MongoDB is modeled as a database engine with `MONGODB_URI`, but no MongoDB provider is marked supported until its full mocked and live lifecycle contracts—including teardown—pass. MySQL remains unsupported.
 
 ## Adding New Providers
 
@@ -883,15 +884,21 @@ providerRegistry.register({
     displayName: 'Example Provider',
     category: 'dns',
     credentialsSchema: ExampleCredentialsSchema,
+    // Lifecycle providers also declare databaseEngines/cacheEngines here and
+    // expose primary or derived lifecycle adapters.
   },
   factory: (credentials) => new ExampleAdapter(credentials),
 });
 ```
 
-Then import in `server.ts`:
+Then import during application provider bootstrap:
 ```typescript
-import './adapters/providers/example/example.adapter.js';
+import '../adapters/providers/example/example.adapter.js';
 ```
+
+See `docs/provider-conformance.md` before adding hosting, database, or cache
+support. Provider IDs are extensible, but support is a tested observe/plan/apply/
+destroy contract rather than a schema enum.
 
 ## Releasing Hypervibe
 

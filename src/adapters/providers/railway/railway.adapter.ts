@@ -16,7 +16,7 @@ import type { Service } from '../../../domain/entities/service.entity.js';
 import { githubPackagePullCredentials } from '../github/package-pull.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { hashEnvValue } from '../../../domain/ports/observe.port.js';
-import type { ObservedDatabase, ObservedService, ObservedState, ObservedStorage } from '../../../domain/ports/observe.port.js';
+import type { ObservedCache, ObservedDatabase, ObservedService, ObservedState, ObservedStorage } from '../../../domain/ports/observe.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import {
   buildRailwayGitHubActionsSteps,
@@ -679,6 +679,7 @@ export class RailwayAdapter implements IProviderAdapter {
 
     const imageMap: Partial<Record<ComponentType, string>> = {
       postgres: 'postgres:16',
+      redis: 'bitnami/redis:7.4',
     };
     const image = imageMap[type];
     if (!image) return null;
@@ -1059,17 +1060,29 @@ export class RailwayAdapter implements IProviderAdapter {
       };
     }
 
+    if (type === 'redis') {
+      const password = randomBytes(18).toString('base64url');
+      const connectionUrl = `redis://default:${password}@${serviceHost}:6379`;
+      return {
+        REDIS_PASSWORD: password,
+        ALLOW_EMPTY_PASSWORD: 'no',
+        REDIS_URL: connectionUrl,
+      };
+    }
+
     return null;
   }
 
   /** Env var that must exist for the datastore image to initialize; null = boots without vars. */
   private datastoreRequiredVar(type: ComponentType): string | null {
     if (type === 'postgres') return 'POSTGRES_PASSWORD';
+    if (type === 'redis') return 'REDIS_PASSWORD';
     return null;
   }
 
   private datastoreVolumeMountPath(type: ComponentType): string | null {
     if (type === 'postgres') return '/var/lib/postgresql/data';
+    if (type === 'redis') return '/bitnami/redis/data';
     return null;
   }
 
@@ -3634,6 +3647,7 @@ export class RailwayAdapter implements IProviderAdapter {
       const name = e.node.name.toLowerCase();
       let type = 'unknown';
       if (name.includes('postgres') || name === 'postgresql') type = 'postgres';
+      if (name.includes('redis') || name.includes('valkey')) type = 'redis';
 
       return { id: e.node.id, name: e.node.name, type };
     });
@@ -3954,12 +3968,14 @@ export class RailwayAdapter implements IProviderAdapter {
         projectExists: false,
         services: [],
         databases: [],
+        caches: [],
         storage: [],
         completeness: {
           project: 'complete',
           environment: 'complete',
           services: 'complete',
           databases: 'complete',
+          caches: 'complete',
           storage: 'complete',
         },
         partial: false,
@@ -3976,12 +3992,14 @@ export class RailwayAdapter implements IProviderAdapter {
         projectId,
         services: [],
         databases: [],
+        caches: [],
         storage: [],
         completeness: {
           project: 'complete',
           environment: 'complete',
           services: 'complete',
           databases: 'complete',
+          caches: 'complete',
           storage: 'complete',
         },
         partial: false,
@@ -4005,12 +4023,14 @@ export class RailwayAdapter implements IProviderAdapter {
         projectId,
         services: [],
         databases: [],
+        caches: [],
         storage: [],
         completeness: {
           project: 'complete',
           environment: 'complete',
           services: 'unknown',
           databases: 'unknown',
+          caches: 'unknown',
           storage: 'unknown',
         },
         partial: true,
@@ -4020,6 +4040,7 @@ export class RailwayAdapter implements IProviderAdapter {
 
     const services: ObservedService[] = [];
     const databases: ObservedDatabase[] = [];
+    const caches: ObservedCache[] = [];
     const storage: ObservedStorage[] = [];
 
     const environmentConfig = projectEnvironments.find((candidate) => candidate.id === environmentId)?.config;
@@ -4048,13 +4069,23 @@ export class RailwayAdapter implements IProviderAdapter {
 
       const engine = this.classifyDatastoreEngine(node.name);
       if (engine) {
-        databases.push({
-          provider: 'railway',
-          engine,
-          externalId: node.id,
-          name: node.name,
-          status: 'unknown',
-        });
+        if (engine === 'redis') {
+          caches.push({
+            provider: 'railway',
+            engine: 'redis',
+            externalId: node.id,
+            name: node.name,
+            status: 'unknown',
+          });
+        } else {
+          databases.push({
+            provider: 'railway',
+            engine,
+            externalId: node.id,
+            name: node.name,
+            status: 'unknown',
+          });
+        }
         continue;
       }
 
@@ -4162,13 +4193,24 @@ export class RailwayAdapter implements IProviderAdapter {
 
     for (const edge of details.plugins?.edges ?? []) {
       const node = edge.node;
-      databases.push({
-        provider: 'railway',
-        engine: this.classifyDatastoreEngine(node.name) ?? 'unknown',
-        externalId: node.id,
-        name: node.name,
-        status: 'unknown',
-      });
+      const engine = this.classifyDatastoreEngine(node.name);
+      if (engine === 'redis') {
+        caches.push({
+          provider: 'railway',
+          engine: 'redis',
+          externalId: node.id,
+          name: node.name,
+          status: 'unknown',
+        });
+      } else {
+        databases.push({
+          provider: 'railway',
+          engine: engine ?? 'unknown',
+          externalId: node.id,
+          name: node.name,
+          status: 'unknown',
+        });
+      }
     }
 
     return {
@@ -4179,12 +4221,14 @@ export class RailwayAdapter implements IProviderAdapter {
       environmentId,
       services,
       databases,
+      caches,
       storage,
       completeness: {
         project: 'complete',
         environment: 'complete',
         services: partial ? 'unknown' : 'complete',
         databases: 'complete',
+        caches: 'complete',
         storage: 'complete',
       },
       partial,
@@ -4255,6 +4299,7 @@ export class RailwayAdapter implements IProviderAdapter {
   private classifyDatastoreEngine(name: string): string | null {
     const normalized = name.toLowerCase();
     if (normalized.includes('postgres')) return 'postgres';
+    if (normalized.includes('redis') || normalized.includes('valkey')) return 'redis';
     return null;
   }
 
@@ -4392,6 +4437,10 @@ providerRegistry.register({
     credentials: {
       defaultScalarKey: 'apiToken',
     },
+    lifecycle: {
+      databaseEngines: ['postgres'],
+      cacheEngines: ['redis'],
+    },
     orchestration: {
       project: {
         shareAcrossEnvironments: true,
@@ -4440,6 +4489,17 @@ providerRegistry.register({
         import('../../db/repositories/environment.repository.js'),
       ]);
       return createRailwayDatabaseAdapter({
+        hostingAdapter: adapter as IProviderAdapter,
+        envRepo: new EnvironmentRepository(),
+        project: context.project,
+      });
+    },
+    cache: async (adapter, context) => {
+      const [{ createRailwayCacheAdapter }, { EnvironmentRepository }] = await Promise.all([
+        import('./railway-cache.factory.js'),
+        import('../../db/repositories/environment.repository.js'),
+      ]);
+      return createRailwayCacheAdapter({
         hostingAdapter: adapter as IProviderAdapter,
         envRepo: new EnvironmentRepository(),
         project: context.project,
