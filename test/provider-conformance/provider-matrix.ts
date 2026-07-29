@@ -149,7 +149,11 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'planned',
     credentials: [
       { field: 'apiKey', environmentVariable: 'HYPERVIBE_TEST_HEROKU_API_KEY' },
+      { field: 'region', environmentVariable: 'HYPERVIBE_TEST_HEROKU_REGION', optional: true },
+      { field: 'dynoSize', environmentVariable: 'HYPERVIBE_TEST_HEROKU_DYNO_SIZE', optional: true },
     ],
+    implementationNote:
+      'The account binding, container-app lifecycle adapter, guidance, mocked lifecycle, and exact-image-ID managed workflow are implemented. Promotion requires a complete live create/release/noop/destroy run through the managed GitHub workflow.',
   },
   {
     kind: 'hosting',

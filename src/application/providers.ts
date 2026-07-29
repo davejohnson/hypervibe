@@ -7,6 +7,7 @@
 import '../adapters/providers/railway/railway.adapter.js';
 import '../adapters/providers/gcp/cloudrun.adapter.js';
 import '../adapters/providers/render/render.adapter.js';
+import '../adapters/providers/heroku/heroku.adapter.js';
 
 // Database providers
 import '../adapters/providers/supabase/supabase.adapter.js';

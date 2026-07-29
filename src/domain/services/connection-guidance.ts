@@ -333,6 +333,35 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
     ],
   },
+  heroku: {
+    provider: 'heroku',
+    displayName: 'Heroku',
+    tokenType: 'Heroku Platform API bearer token (prefer a revocable OAuth direct-authorization token with global scope for durable automation)',
+    setupUrl: 'https://dashboard.heroku.com/account',
+    setupUrls: [
+      {
+        label: 'Heroku Account Settings API key',
+        url: 'https://dashboard.heroku.com/account',
+      },
+      {
+        label: 'Heroku OAuth direct authorization',
+        url: 'https://devcenter.heroku.com/articles/oauth#direct-authorization',
+      },
+    ],
+    permissions: [
+      'Heroku direct authorizations expose the Platform API global scope; Heroku does not offer an app-scoped permission set for this token type.',
+      'The Heroku user behind the token must be allowed to list, create, inspect, configure, release, scale, and delete apps in the intended account/team.',
+      'The same token authenticates the managed GitHub workflow to registry.heroku.com and authorizes exact-image formation releases.',
+    ],
+    credentialExample: 'export HEROKU_API_KEY="<Heroku bearer token>"; hv_connect provider="heroku" credentialsRef="env:HEROKU_API_KEY"',
+    notes: [
+      'The Account Settings API key is available only for non-SSO users, is account-wide, and is invalidated by a password change. Use a separately revocable direct authorization for durable automation when possible.',
+      'Federated/SSO users cannot issue non-expiring direct authorizations. Heroku recommends a separate non-federated automation user invited only to the intended organization when a long-lived integration token is required.',
+      'For JSON credentials, apiKey is required; region defaults to us and dynoSize defaults to basic. HEROKU_API_KEY and HYPERVIBE_HEROKU_API_KEY are accepted aliases.',
+      'The default basic dyno is billable once the managed workflow releases and scales a process to one. Hypervibe marks service creation billable and requires the exact reviewed action id before apply.',
+      'Store the token in an exported variable, dotenv file, or secret manager. It grants broad account access and must never be committed or printed.',
+    ],
+  },
   openai: {
     provider: 'openai',
     displayName: 'OpenAI API',
