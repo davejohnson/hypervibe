@@ -224,6 +224,19 @@ describe('connection guidance', () => {
         'secretsmanager:GetSecretValue',
         'secretsmanager:ListSecrets',
       ],
+      'azure-container-apps': [
+        'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+        'Microsoft Entra application service principal',
+        'Container Apps Contributor',
+        '358470bc-b998-42bd-ab17-a7e34c199c0f',
+        'Container Apps ManagedEnvironments Contributor',
+        '57cc5028-e6a7-4284-868d-0611c5923f8d',
+        'AcrPush',
+        '8311e382-0749-4cb8-b61a-304f252e45ec',
+        'Container Registry Repository Writer',
+        'registryId',
+        'credentialsRef="file:/absolute/path/azure-container-apps.json"',
+      ],
     };
 
     for (const [provider, expectedSnippets] of Object.entries(expectations)) {

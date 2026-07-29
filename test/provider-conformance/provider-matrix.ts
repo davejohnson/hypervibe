@@ -89,6 +89,12 @@ const azureCredentials: ProviderCredentialField[] = [
   { field: 'location', environmentVariable: 'HYPERVIBE_TEST_AZURE_LOCATION' },
 ];
 
+const azureContainerAppsCredentials: ProviderCredentialField[] = [
+  ...azureCredentials,
+  { field: 'registryId', environmentVariable: 'HYPERVIBE_TEST_AZURE_REGISTRY_ID' },
+  { field: 'registryServer', environmentVariable: 'HYPERVIBE_TEST_AZURE_REGISTRY_SERVER' },
+];
+
 const flyCredentials: ProviderCredentialField[] = [
   { field: 'apiToken', environmentVariable: 'HYPERVIBE_TEST_FLY_API_TOKEN' },
   { field: 'organizationSlug', environmentVariable: 'HYPERVIBE_TEST_FLY_ORGANIZATION_SLUG' },
@@ -171,7 +177,9 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'Microsoft Azure',
     service: 'Azure Container Apps',
     status: 'planned',
-    credentials: azureCredentials,
+    credentials: azureContainerAppsCredentials,
+    implementationNote:
+      'The managed-environment and Container App lifecycle adapter, service-principal guidance, mocked safety contracts, native-source guard, and exact-digest ACR workflow are implemented. Promotion requires a live harness that executes the managed GitHub workflow plus a complete create/release/noop/destroy run.',
   },
   {
     kind: 'hosting',

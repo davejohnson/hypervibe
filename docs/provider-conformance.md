@@ -138,14 +138,52 @@ The default Basic dyno becomes billable when the workflow scales the process to
 one, so the live run must preserve exact-action confirmation and surface cleanup
 failures with the remaining app UUID.
 
+Azure Container Apps is the next hosting-only adapter slice. The Azure
+subscription, resource group, Microsoft Entra service principal, and Azure
+Container Registry are externally owned. Hypervibe owns one managed environment
+per Hypervibe environment and one Container App per web or worker service so
+configuration and deletion remain action-scoped. Existing name matches require
+explicit `hv_import`, stale ARM resource-ID bindings block, and teardown removes
+the managed environment only after every owned Container App is
+provider-confirmed absent. Container Apps Jobs and cron workloads remain outside
+this adapter because they have a separate resource lifecycle.
+
+Azure Container Apps remains `planned`. Its mocked contracts pin complete ARM
+pagination, durable-ID-first observation, unknown-error preservation, duplicate
+and unbound identity blocking, secret-safe configuration updates,
+partial-create identity, billable confirmation, native source-control
+disconnection, and idempotent terminal deletion. The generated workflow pushes
+one `linux/amd64` image tagged with the full checked-out Git SHA to an existing
+ACR registry, deploys the registry-reported digest only to already-bound
+Container App ARM IDs, waits for the unique revision to become ready, verifies
+the provider-reported image/SHA markers, and checks web health paths. CI never
+creates a resource group, registry, role assignment, managed environment,
+Container App, or source control.
+
+The connection uses a Microsoft Entra application service principal. At the
+managed resource-group scope it needs Container Apps Contributor and Container
+Apps ManagedEnvironments Contributor. At the exact existing registry scope it
+needs Reader plus AcrPush for classic Registry RBAC, or Container Registry
+Repository Writer for an ABAC-enabled registry. Hypervibe authenticates through
+ARM and ACR directly and never depends on `az`.
+
+Promotion requires an isolated Azure subscription/resource group and existing
+ACR registry plus a live harness that can run the managed workflow and prove
+create/release/noop/update/terminal teardown. Service creation is
+confirmation-gated because Container Apps and supporting managed-environment
+resources can be billable, and cleanup failures must preserve the remaining ARM
+resource IDs.
+
 The extended matrix also includes:
 
-- [Azure Container Apps](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/container-apps)
-  for hosting, [Azure Database for PostgreSQL Flexible Server](https://learn.microsoft.com/en-us/rest/api/postgresql/)
+- [Azure Database for PostgreSQL Flexible Server](https://learn.microsoft.com/en-us/rest/api/postgresql/)
   for PostgreSQL, and [Azure Managed Redis](https://learn.microsoft.com/en-us/azure/redis/overview)
-  for Redis. They are separate provider ids because they have independent
+  for Redis. They use separate provider ids from Azure Container Apps because
+  they have independent
   resource types, durable identities, observation, and deletion lifecycles,
-  while sharing one Azure credential shape.
+  while sharing the core Microsoft Entra, subscription, resource-group, and
+  location fields. Azure Container Apps additionally binds an existing ACR
+  registry by resource ID and login server.
 - [Fly Machines](https://fly.io/docs/machines/api/) for hosting. Fly Managed
   Postgres is also represented as a planned PostgreSQL target, but its promotion
   is gated on a documented, supported provider lifecycle API. The current

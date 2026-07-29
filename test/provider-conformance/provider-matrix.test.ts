@@ -171,4 +171,22 @@ describe('provider conformance matrix', () => {
     });
     expect(providerRegistry.supports('heroku', 'hosting')).toBe(true);
   });
+
+  it('tracks the implemented Azure hosting slice without claiming live support', () => {
+    const entry = hostingProviderContracts.find(
+      (provider) => provider.provider === 'azure-container-apps'
+    );
+
+    expect(entry).toMatchObject({
+      status: 'planned',
+      implementationNote: expect.stringContaining('implemented'),
+      credentials: expect.arrayContaining([
+        expect.objectContaining({ field: 'registryId' }),
+        expect.objectContaining({ field: 'registryServer' }),
+      ]),
+    });
+    expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(
+      true
+    );
+  });
 });
