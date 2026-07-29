@@ -432,16 +432,17 @@ async function verifyHealth(): Promise<void> {
     name: fixture.serviceName,
     status: 'running',
   });
-  expect(service?.url).toMatch(/^https:\/\//);
   if (typeof service?.url !== 'string') {
     throw new Error(
       `hv_status returned no public URL for ${fixture.serviceName}`
     );
   }
+  const publicUrl = new URL(service.url);
+  expect(fixture.publicUrlProtocols).toContain(publicUrl.protocol);
 
   const health = await runHypervibe(['health'], {
     project: projectName,
-    url: service.url,
+    url: publicUrl.toString(),
     path: fixture.service.healthCheckPath,
     timeoutMs: 30_000,
   });

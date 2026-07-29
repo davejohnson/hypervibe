@@ -21,9 +21,12 @@ export interface ManagedWorkflowFixture {
   requiredPaths: string[];
   /** Generated workflow filename, consumed through hv_ci_trigger/hv_ci_status. */
   workflow: string;
+  /** URL schemes the provider may return for its public health endpoint. */
+  publicUrlProtocols: Array<'http:' | 'https:'>;
   serviceName: string;
   service: {
     workloadKind: 'web';
+    startCommand?: string;
     healthCheckPath: string;
     public: true;
   };
@@ -211,10 +214,29 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     provider: 'ecs',
     vendor: 'AWS',
     service: 'ECS on Fargate',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: awsEcsCredentials,
+    managedWorkflow: {
+      environmentName: 'production',
+      fixtureDirectory: 'test/provider-conformance/fixture',
+      requiredPaths: [
+        '.hypervibe/spec.json',
+        'Dockerfile',
+        'package.json',
+        'server.mjs',
+      ],
+      workflow: 'deploy-ecs-production.yml',
+      publicUrlProtocols: ['http:', 'https:'],
+      serviceName: 'web',
+      service: {
+        workloadKind: 'web',
+        startCommand: 'node server.mjs',
+        healthCheckPath: '/health',
+        public: true,
+      },
+    },
     implementationNote:
-      'The cluster/service/task-definition lifecycle adapter, prerequisite guidance, mocked safety contracts, and exact-digest ECR workflow are implemented. Promotion requires an isolated AWS account and a live harness that executes the managed GitHub workflow before proving create/release/noop/update/terminal teardown.',
+      'The cluster/service/task-definition lifecycle adapter, prerequisite guidance, mocked safety contracts, exact-digest ECR workflow, and review-gated managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run in an isolated AWS account.',
   },
   {
     kind: 'hosting',
@@ -245,10 +267,29 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     provider: 'azure-container-apps',
     vendor: 'Microsoft Azure',
     service: 'Azure Container Apps',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: azureContainerAppsCredentials,
+    managedWorkflow: {
+      environmentName: 'production',
+      fixtureDirectory: 'test/provider-conformance/fixture',
+      requiredPaths: [
+        '.hypervibe/spec.json',
+        'Dockerfile',
+        'package.json',
+        'server.mjs',
+      ],
+      workflow: 'deploy-azure-container-apps-production.yml',
+      publicUrlProtocols: ['https:'],
+      serviceName: 'web',
+      service: {
+        workloadKind: 'web',
+        startCommand: 'node server.mjs',
+        healthCheckPath: '/health',
+        public: true,
+      },
+    },
     implementationNote:
-      'The managed-environment and Container App lifecycle adapter, service-principal guidance, mocked safety contracts, native-source guard, and exact-digest ACR workflow are implemented. Promotion requires a live harness that executes the managed GitHub workflow plus a complete create/release/noop/destroy run.',
+      'The managed-environment and Container App lifecycle adapter, service-principal guidance, mocked safety contracts, native-source guard, exact-digest ACR workflow, and review-gated managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run in an isolated Azure subscription.',
   },
   {
     kind: 'hosting',
@@ -275,6 +316,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
         'package.json',
       ],
       workflow: 'deploy-vercel-production.yml',
+      publicUrlProtocols: ['https:'],
       serviceName: 'web',
       service: {
         workloadKind: 'web',

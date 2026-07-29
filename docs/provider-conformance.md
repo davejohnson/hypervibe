@@ -150,14 +150,14 @@ listener on one active internet-facing Application Load Balancer. An explicit
 listeners; without it, Hypervibe accepts only a default HTTP route whose bare
 ALB hostname can be health-checked safely.
 
-AWS ECS remains `planned`. Its mocked contracts pin complete token pagination,
-long-form durable ARN validation, provider-confirmed `MISSING` semantics,
-unknown-error preservation, duplicate and unbound identity blocking, partial
-create identity, immutable task-definition configuration, billable
-confirmation, dependency-ordered terminal deletion, and safe task-definition
-cleanup. Apply creates a zero-task ECS service using a public Alpine bootstrap
-task definition, so it does not deploy application code or start billable
-Fargate tasks before the reviewed CI action.
+AWS ECS is `ready-for-live`. Its mocked contracts pin complete token
+pagination, long-form durable ARN validation, provider-confirmed `MISSING`
+semantics, unknown-error preservation, duplicate and unbound identity
+blocking, partial create identity, immutable task-definition configuration,
+billable confirmation, dependency-ordered terminal deletion, and safe
+task-definition cleanup. Apply creates a zero-task ECS service using a public
+Alpine bootstrap task definition, so it does not deploy application code or
+start billable Fargate tasks before the reviewed CI action.
 
 The generated workflow builds one `linux/amd64` image tagged with the full
 checked-out Git SHA, pushes it to the existing ECR repository, and deploys the
@@ -176,11 +176,10 @@ the configured task roles. The `serviceLongArnFormat` account setting must be
 enabled. This first slice supports the commercial `aws` partition; temporary
 STS and GitHub OIDC credential lifecycles are future work.
 
-Promotion requires an isolated AWS account with the external prerequisites and
-a live harness that can execute the managed workflow before proving
-create/release/noop/update/terminal teardown. The current local fixture can
-exercise spec/plan/apply but cannot publish and run the workflow, so green
-mocked tests do not justify `ready-for-live` or `supported`.
+The review-gated managed-workflow harness and provider-neutral Docker fixture
+can now prove create/release/noop/update/terminal teardown. Promotion to
+`supported` still requires one successful opt-in run in an isolated AWS
+account with all external prerequisites.
 
 Azure Container Apps is the next hosting-only adapter slice. The Azure
 subscription, resource group, Microsoft Entra service principal, and Azure
@@ -192,9 +191,9 @@ the managed environment only after every owned Container App is
 provider-confirmed absent. Container Apps Jobs and cron workloads remain outside
 this adapter because they have a separate resource lifecycle.
 
-Azure Container Apps remains `planned`. Its mocked contracts pin complete ARM
-pagination, durable-ID-first observation, unknown-error preservation, duplicate
-and unbound identity blocking, secret-safe configuration updates,
+Azure Container Apps is `ready-for-live`. Its mocked contracts pin complete
+ARM pagination, durable-ID-first observation, unknown-error preservation,
+duplicate and unbound identity blocking, secret-safe configuration updates,
 partial-create identity, billable confirmation, native source-control
 disconnection, and idempotent terminal deletion. The generated workflow pushes
 one `linux/amd64` image tagged with the full checked-out Git SHA to an existing
@@ -211,12 +210,13 @@ needs Reader plus AcrPush for classic Registry RBAC, or Container Registry
 Repository Writer for an ABAC-enabled registry. Hypervibe authenticates through
 ARM and ACR directly and never depends on `az`.
 
-Promotion requires an isolated Azure subscription/resource group and existing
-ACR registry plus a live harness that can run the managed workflow and prove
-create/release/noop/update/terminal teardown. Service creation is
+The review-gated managed-workflow harness and provider-neutral Docker fixture
+can now prove create/release/noop/update/terminal teardown. Promotion to
+`supported` still requires one successful opt-in run in an isolated Azure
+subscription/resource group with an existing ACR registry. Service creation is
 confirmation-gated because Container Apps and supporting managed-environment
-resources can be billable, and cleanup failures must preserve the remaining ARM
-resource IDs.
+resources can be billable, and cleanup failures must preserve the remaining
+ARM resource IDs.
 
 The extended matrix also includes:
 
@@ -308,7 +308,7 @@ personal Neon key should target an organization, and optionally set
 `HYPERVIBE_TEST_NEON_REGION_ID`. Use only an isolated account/workspace because
 the contract creates and destroys real provider resources.
 
-The planned ECS contract declares its complete future live credential shape:
+The ECS managed-workflow contract declares its complete live credential shape:
 `HYPERVIBE_TEST_AWS_ACCESS_KEY_ID`,
 `HYPERVIBE_TEST_AWS_SECRET_ACCESS_KEY`, optional
 `HYPERVIBE_TEST_AWS_REGION`, `HYPERVIBE_TEST_AWS_ECR_REPOSITORY_ARN`,
@@ -319,9 +319,11 @@ The planned ECS contract declares its complete future live credential shape:
 `HYPERVIBE_TEST_AWS_TASK_ROLE_ARN`, and
 `HYPERVIBE_TEST_AWS_TARGET_GROUP_ARN` for the public web fixture. Optional
 `HYPERVIBE_TEST_AWS_PUBLIC_URL` pins the routed origin when the fixture is not
-served by the default HTTP action. Array values
-are parsed explicitly as JSON by the live runner instead of being passed to the
-provider as strings.
+served by the default HTTP action. Optional
+`HYPERVIBE_TEST_AWS_ASSIGN_PUBLIC_IP` and
+`HYPERVIBE_TEST_AWS_CONTAINER_PORT` override the network defaults. Array
+values are parsed explicitly as JSON by the live runner instead of being
+passed to the provider as strings.
 
 The runner copies a tiny HTTP fixture into a temporary worktree and writes a
 mode-`0600` temporary credential object. Hypervibe consumes it through
@@ -333,31 +335,40 @@ removes its services, databases, and caches through spec/plan/apply, and its
 ## Running a managed-workflow live test
 
 Providers whose first application release must run through a managed GitHub
-Actions workflow use a separate review-gated harness. Vercel is the first
-enabled contract. The harness never merges its own infrastructure pull
-request: it applies the reviewed plan, prints the Hypervibe PR URL, waits for a
-human merge, and then continues through `hv_ci_trigger`, `hv_ci_status`,
-`hv_health`, noop/update checks, and spec-driven teardown. Teardown may produce
-a second infrastructure PR that removes durable service ids from the workflow;
-the harness waits for that review too. Exact-SHA proof comes from the successful
-Hypervibe server-release evidence artifact tied to the observed workflow run,
-not from GitHub's dispatch-ref `head_sha`.
+Actions workflow use a separate review-gated harness. Vercel, AWS ECS on
+Fargate, and Azure Container Apps have enabled profiles:
+
+| Provider id | Fixture directory | Workflow | Health URL |
+| --- | --- | --- | --- |
+| `vercel` | `test/provider-conformance/fixture-vercel` | `deploy-vercel-production.yml` | HTTPS `/api/health` |
+| `ecs` | `test/provider-conformance/fixture` | `deploy-ecs-production.yml` | HTTP or HTTPS `/health` |
+| `azure-container-apps` | `test/provider-conformance/fixture` | `deploy-azure-container-apps-production.yml` | HTTPS `/health` |
+
+The harness never merges its own infrastructure pull request: it applies the
+reviewed plan, prints the Hypervibe PR URL, waits for a human merge, and then
+continues through `hv_ci_trigger`, `hv_ci_status`, `hv_health`, noop/update
+checks, and spec-driven teardown. Teardown may produce a second infrastructure
+PR that removes durable service ids from the workflow; the harness waits for
+that review too. Exact-SHA proof comes from the successful Hypervibe
+server-release evidence artifact tied to the observed workflow run, not from
+GitHub's dispatch-ref `head_sha`.
 
 Use a disposable checkout of a dedicated GitHub repository and an isolated
-Vercel account or Team. Copy the tracked files from
-`test/provider-conformance/fixture-vercel` into the repository. Add this
-canonical `.hypervibe/spec.json`, replacing the project and repository:
+provider account, Team, subscription, or resource group. Copy the tracked
+files from the selected profile's fixture directory into the repository. Add
+this canonical `.hypervibe/spec.json`, replacing the project, repository, and
+provider:
 
 ```json
 {
   "version": 1,
-  "project": "hypervibe-vercel-live",
+  "project": "hypervibe-managed-live",
   "gitRemoteUrl": "https://github.com/OWNER/REPOSITORY.git",
   "secrets": {},
   "environments": {
     "production": {
       "hosting": {
-        "provider": "vercel"
+        "provider": "PROVIDER"
       },
       "services": {
         "web": {
@@ -383,6 +394,19 @@ canonical `.hypervibe/spec.json`, replacing the project and repository:
 }
 ```
 
+For `vercel`, use provider `vercel` and keep the service block above. For
+`ecs` or `azure-container-apps`, use that provider id and replace the service
+block with this exact object:
+
+```json
+{
+  "workloadKind": "web",
+  "startCommand": "node server.mjs",
+  "healthCheckPath": "/health",
+  "public": true
+}
+```
+
 Commit and push those files to `main` before running the harness. The test
 proves the local spec is byte-for-byte committed at `HEAD` and that every
 required fixture path is tracked before it can create a provider resource.
@@ -394,14 +418,21 @@ Export:
 
 ```sh
 export HYPERVIBE_LIVE_REPOSITORY_WORKTREE="/absolute/path/to/disposable-checkout"
-export HYPERVIBE_LIVE_DATA_DIR="/absolute/path/to/hypervibe-vercel-live-state"
+export HYPERVIBE_LIVE_DATA_DIR="/absolute/path/to/persistent-live-state"
 export HYPERVIBE_TEST_GITHUB_REPOSITORY="OWNER/REPOSITORY"
 export HYPERVIBE_TEST_GITHUB_API_TOKEN="<fine-grained repository PAT, or classic PAT with repo + workflow>"
+
+# Select exactly one configured provider:
 export HYPERVIBE_TEST_VERCEL_ACCESS_TOKEN="<Vercel personal or Team token>"
 # Required only when the token should operate in a Team:
 export HYPERVIBE_TEST_VERCEL_TEAM_ID="team_..."
-
 HYPERVIBE_LIVE_MANAGED_HOSTING=vercel npm run test:providers:managed-live
+
+# Or, after exporting the AWS variables listed above:
+HYPERVIBE_LIVE_MANAGED_HOSTING=ecs npm run test:providers:managed-live
+
+# Or, after exporting the Azure variables listed below:
+HYPERVIBE_LIVE_MANAGED_HOSTING=azure-container-apps npm run test:providers:managed-live
 ```
 
 The recommended GitHub credential is a
@@ -419,6 +450,30 @@ create, configure, deploy, and delete Projects there; include the immutable
 mode-`0600` credential files inside the persistent data directory and removes
 them immediately after Hypervibe verifies each connection; values never enter
 command arguments, plans, receipts, or test output.
+
+For ECS, create a scoped IAM user
+[access key](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)
+for the isolated account. It needs the ECS, ECR, EC2/ELB inspection, and
+role-scoped IAM permissions described in the AWS section above; restrict ECR
+pushes to the exact repository and `iam:PassRole` to the configured execution
+and task roles. Export the complete AWS credential shape listed in the
+opt-in-live section. The configured subnets, security groups, target group,
+roles, repository, and ALB routing remain externally owned and are not removed
+by the test.
+
+For Azure Container Apps, create a Microsoft Entra application
+[service principal](https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal)
+for the isolated subscription. Export
+`HYPERVIBE_TEST_AZURE_TENANT_ID`,
+`HYPERVIBE_TEST_AZURE_SUBSCRIPTION_ID`,
+`HYPERVIBE_TEST_AZURE_CLIENT_ID`,
+`HYPERVIBE_TEST_AZURE_CLIENT_SECRET`,
+`HYPERVIBE_TEST_AZURE_RESOURCE_GROUP`,
+`HYPERVIBE_TEST_AZURE_LOCATION`,
+`HYPERVIBE_TEST_AZURE_REGISTRY_ID`, and
+`HYPERVIBE_TEST_AZURE_REGISTRY_SERVER`. Grant the resource-group and exact-ACR
+roles described in the Azure section above. The resource group, registry, and
+role assignments remain externally owned and are not removed by the test.
 
 The default review and workflow timeouts are 30 minutes. Override them with
 positive millisecond values in `HYPERVIBE_LIVE_REVIEW_TIMEOUT_MS` and

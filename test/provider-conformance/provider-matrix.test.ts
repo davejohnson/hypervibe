@@ -110,6 +110,15 @@ describe('provider conformance matrix', () => {
       const managed = entry.managedWorkflow!;
       expect(managed.environmentName).toBe('production');
       expect(managed.workflow).toMatch(/^deploy-[a-z0-9-]+-production\.yml$/);
+      expect(managed.publicUrlProtocols.length).toBeGreaterThan(0);
+      expect(
+        managed.publicUrlProtocols.every((protocol) => (
+          protocol === 'http:' || protocol === 'https:'
+        ))
+      ).toBe(true);
+      expect(new Set(managed.publicUrlProtocols).size).toBe(
+        managed.publicUrlProtocols.length
+      );
       expect(new Set(managed.requiredPaths).size).toBe(
         managed.requiredPaths.length
       );
@@ -211,18 +220,31 @@ describe('provider conformance matrix', () => {
     expect(providerRegistry.supports('heroku', 'hosting')).toBe(true);
   });
 
-  it('tracks the implemented Azure hosting slice without claiming live support', () => {
+  it('exposes the implemented Azure hosting slice to the managed-workflow live gate', () => {
     const entry = hostingProviderContracts.find(
       (provider) => provider.provider === 'azure-container-apps'
     );
 
     expect(entry).toMatchObject({
-      status: 'planned',
+      status: 'ready-for-live',
       implementationNote: expect.stringContaining('implemented'),
       credentials: expect.arrayContaining([
         expect.objectContaining({ field: 'registryId' }),
         expect.objectContaining({ field: 'registryServer' }),
       ]),
+      managedWorkflow: {
+        environmentName: 'production',
+        fixtureDirectory: 'test/provider-conformance/fixture',
+        workflow: 'deploy-azure-container-apps-production.yml',
+        publicUrlProtocols: ['https:'],
+        serviceName: 'web',
+        service: {
+          workloadKind: 'web',
+          startCommand: 'node server.mjs',
+          healthCheckPath: '/health',
+          public: true,
+        },
+      },
     });
     expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(
       true
@@ -244,6 +266,7 @@ describe('provider conformance matrix', () => {
       managedWorkflow: {
         environmentName: 'production',
         workflow: 'deploy-vercel-production.yml',
+        publicUrlProtocols: ['https:'],
         serviceName: 'web',
         service: {
           workloadKind: 'web',
@@ -255,13 +278,13 @@ describe('provider conformance matrix', () => {
     expect(providerRegistry.supports('vercel', 'hosting')).toBe(true);
   });
 
-  it('tracks the implemented AWS ECS hosting slice without claiming live support', () => {
+  it('exposes the implemented AWS ECS hosting slice to the managed-workflow live gate', () => {
     const entry = hostingProviderContracts.find(
       (provider) => provider.provider === 'ecs'
     );
 
     expect(entry).toMatchObject({
-      status: 'planned',
+      status: 'ready-for-live',
       implementationNote: expect.stringContaining('implemented'),
       credentials: expect.arrayContaining([
         expect.objectContaining({ field: 'ecrRepositoryArn' }),
@@ -272,6 +295,19 @@ describe('provider conformance matrix', () => {
         expect.objectContaining({ field: 'targetGroupArn' }),
         expect.objectContaining({ field: 'publicUrl', optional: true }),
       ]),
+      managedWorkflow: {
+        environmentName: 'production',
+        fixtureDirectory: 'test/provider-conformance/fixture',
+        workflow: 'deploy-ecs-production.yml',
+        publicUrlProtocols: ['http:', 'https:'],
+        serviceName: 'web',
+        service: {
+          workloadKind: 'web',
+          startCommand: 'node server.mjs',
+          healthCheckPath: '/health',
+          public: true,
+        },
+      },
     });
     expect(providerRegistry.supports('ecs', 'hosting')).toBe(true);
   });
