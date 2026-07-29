@@ -77,6 +77,7 @@ const railwayCredentials: ProviderCredentialField[] = [
 const renderCredentials: ProviderCredentialField[] = [
   { field: 'apiKey', environmentVariable: 'HYPERVIBE_TEST_RENDER_API_KEY' },
   { field: 'ownerId', environmentVariable: 'HYPERVIBE_TEST_RENDER_OWNER_ID' },
+  { field: 'registryCredentialId', environmentVariable: 'HYPERVIBE_TEST_RENDER_REGISTRY_CREDENTIAL_ID' },
 ];
 
 const azureCredentials: ProviderCredentialField[] = [
@@ -157,6 +158,8 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     service: 'Render Services',
     status: 'planned',
     credentials: renderCredentials,
+    implementationNote:
+      'The workspace/registry binding, image-backed service adapter, guidance, mocked lifecycle, and exact-SHA GHCR workflow are implemented. Promotion requires a live harness that executes the managed GitHub workflow plus a successful create/deploy/noop/destroy run.',
   },
   {
     kind: 'hosting',
@@ -236,6 +239,8 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     status: 'planned',
     credentials: renderCredentials,
     fixtureHostingProvider: 'render',
+    implementationNote:
+      'The derived Render Postgres adapter and mocked lifecycle safety contract are implemented. Promotion remains gated on the complete managed-workflow live stack run.',
   },
   {
     kind: 'database',
@@ -352,6 +357,8 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     status: 'planned',
     credentials: renderCredentials,
     fixtureHostingProvider: 'render',
+    implementationNote:
+      'The derived Render Key Value adapter and mocked lifecycle safety contract are implemented. Promotion remains gated on the complete managed-workflow live stack run.',
   },
   {
     kind: 'cache',

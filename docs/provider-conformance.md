@@ -78,6 +78,41 @@ successful opt-in stack run proving that App Platform can create the app shell,
 deploy the fixture, converge to noop, and tear down the app, PostgreSQL cluster,
 and Valkey cluster through spec/plan/apply.
 
+Render is the second combined hosting/database/cache slice. One registered
+deployment provider binds an existing Render workspace, creates image-backed
+web/private/worker/cron services, and derives Render Postgres and Render Key
+Value adapters. The workspace is a shared provider context, not a resource
+Hypervibe owns or deletes. A verified connection must include `apiKey` and
+`ownerId`; managed exact-SHA hosting also requires the durable ID of an
+existing GitHub Container Registry credential as `registryCredentialId`.
+Hypervibe verifies that credential but never creates, rotates, or deletes it
+from a service or CI action.
+
+All three Render entries remain `planned`. Their mocked contracts pin
+durable-ID-first observation, complete cursor pagination, unbound-name
+adoption blocking, secret-safe connection handling, partial-create identity,
+and provider-confirmed terminal deletion. Service creates are marked billable
+and exact-action confirmation-gated because Render workers, cron jobs, private
+services, and the default service plan can incur charges.
+
+The generated Render GitHub Actions workflow publishes one `linux/amd64` GHCR
+image tagged with the full checked-out Git SHA. It targets only already-bound
+Render service IDs. New services use the public
+`docker.io/library/alpine:3.20` image only as a provider-valid bootstrap (no
+application code is deployed). The first managed workflow changes that
+already-bound service to the exact-SHA GHCR image with the verified registry
+credential; later workflows trigger exact-image deploys without changing the
+repository identity. Both paths wait for the exact provider deploy ID to
+become `live` and verify the provider-reported image reference. CI never
+creates a workspace, service, registry credential, database, or Key Value
+instance.
+
+Render promotion requires a live harness that can run that managed workflow,
+then prove create/deploy/noop/update/terminal teardown for the service,
+Postgres, and Key Value resources. The current local fixture cannot publish
+and execute the managed workflow, so mocked green tests do not justify
+`ready-for-live` or `supported`.
+
 The extended matrix also includes:
 
 - [Azure Container Apps](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/container-apps)

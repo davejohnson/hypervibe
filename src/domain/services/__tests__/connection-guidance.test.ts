@@ -170,6 +170,14 @@ describe('connection guidance', () => {
         'Full Access is a broader fallback',
         'credentialsRef="file:/absolute/path/digitalocean.json"',
       ],
+      render: [
+        'https://dashboard.render.com/u/settings#api-keys',
+        'personal API key',
+        'workspace ID',
+        'registryCredentialId',
+        'read:packages',
+        'credentialsRef="file:/absolute/path/render.json"',
+      ],
       stripe: [
         'https://dashboard.stripe.com/apikeys',
         'sk_test_',

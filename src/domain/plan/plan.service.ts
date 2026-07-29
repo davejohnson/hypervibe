@@ -216,10 +216,28 @@ export class PlanService {
         storage: observed.completeness?.storage ?? 'complete',
       };
 
-      // Augment with database observation when the database lives on a
-      // different provider that supports it (e.g. Cloud SQL).
-      const dbProvider = environmentSpec.database?.provider;
-      if (dbProvider && dbProvider !== provider) {
+      // Observe declared databases through their lifecycle adapter even when
+      // hosting and database share one provider connection. Hosting adapters
+      // must not duplicate provider-owned database lifecycle logic.
+      const localComponents = this.componentRepo.findByEnvironmentId(
+        environment.id
+      );
+      const localDatabase = localComponents.find((component) =>
+        component.type === 'postgres' || component.type === 'mongodb'
+      );
+      const localDatabaseProvider =
+        typeof localDatabase?.bindings.provider === 'string'
+          ? localDatabase.bindings.provider
+          : undefined;
+      const dbProvider =
+        environmentSpec.database?.provider ?? localDatabaseProvider;
+      if (
+        dbProvider
+        && (
+          dbProvider !== provider
+          || observed.completeness.databases !== 'complete'
+        )
+      ) {
         observed.completeness.databases = 'unknown';
         const dbResult = await adapterFactory.getDatabaseAdapter(dbProvider, project);
         const dbAdapter = dbResult.adapter as unknown as {
@@ -231,8 +249,17 @@ export class PlanService {
         } | undefined;
         if (dbResult.success && dbAdapter && typeof dbAdapter.observeDatabase === 'function') {
           try {
-            const engine = environmentSpec.database?.engine ?? 'postgres';
-            const component = this.componentRepo.findByEnvironmentAndType(environment.id, engine);
+            const engine =
+              environmentSpec.database?.engine
+              ?? localDatabase?.type
+              ?? 'postgres';
+            const component =
+              localDatabase?.type === engine
+                ? localDatabase
+                : this.componentRepo.findByEnvironmentAndType(
+                    environment.id,
+                    engine
+                  );
             const db = await dbAdapter.observeDatabase(environment, component, {
               resourceName: `${project.name}-${environment.name}-${engine}`,
             });
@@ -256,14 +283,27 @@ export class PlanService {
         }
       }
 
-      const cacheProvider = environmentSpec.cache?.provider;
-      if (cacheProvider && cacheProvider !== provider) {
+      const localCache = localComponents.find(
+        (component) => component.type === 'redis'
+      );
+      const localCacheProvider =
+        typeof localCache?.bindings.provider === 'string'
+          ? localCache.bindings.provider
+          : undefined;
+      const cacheProvider =
+        environmentSpec.cache?.provider ?? localCacheProvider;
+      if (
+        cacheProvider
+        && (
+          cacheProvider !== provider
+          || observed.completeness.caches !== 'complete'
+        )
+      ) {
         observed.completeness.caches = 'unknown';
         const cacheResult = await adapterFactory.getCacheAdapter(cacheProvider, project);
         if (cacheResult.success && cacheResult.adapter) {
           try {
-            const component = this.componentRepo.findByEnvironmentAndType(environment.id, 'redis');
-            const cache = await cacheResult.adapter.observeCache(environment, component, {
+            const cache = await cacheResult.adapter.observeCache(environment, localCache, {
               resourceName: `${project.name}-${environment.name}-redis`,
             });
             observed.caches = [
