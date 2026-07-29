@@ -187,6 +187,44 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     credentialExample: 'hv_connect provider="aws-secrets" credentialsRef="file:/absolute/path/aws-secrets.json"',
     notes: ['Credentials come from the connection or the AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN environment variables; profiles, SSO, and instance roles are not read.'],
   },
+  'azure-container-apps': {
+    provider: 'azure-container-apps',
+    displayName: 'Azure Container Apps',
+    tokenType: 'Microsoft Entra application service principal (tenantId, clientId, and clientSecret) scoped to one existing Azure subscription/resource group and Azure Container Registry',
+    setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+    setupUrls: [
+      {
+        label: 'Create or review the Microsoft Entra application',
+        url: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+      },
+      {
+        label: 'Microsoft Entra service-principal setup guide',
+        url: 'https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal',
+      },
+      {
+        label: 'Azure Container Apps built-in roles',
+        url: 'https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/containers',
+      },
+      {
+        label: 'Azure Container Registry service-principal authentication',
+        url: 'https://learn.microsoft.com/en-us/azure/container-registry/container-registry-auth-service-principal',
+      },
+    ],
+    permissions: [
+      'At the exact resource-group scope Hypervibe will manage, assign Container Apps Contributor (role ID 358470bc-b998-42bd-ab17-a7e34c199c0f) for Container App lifecycle and managed-environment joins.',
+      'At the same resource-group scope, assign Container Apps ManagedEnvironments Contributor (role ID 57cc5028-e6a7-4284-868d-0611c5923f8d) so Hypervibe can create, observe, and delete its managed environments.',
+      'At the exact existing Azure Container Registry resource scope, grant Reader so Hypervibe can verify the durable registry binding.',
+      'For a registry using classic Registry RBAC permissions, also grant AcrPush (role ID 8311e382-0749-4cb8-b61a-304f252e45ec). For an ABAC-enabled registry, use Container Registry Repository Writer (role ID 2a1e307c-b015-4ebd-883e-5b7698a07328) instead.',
+    ],
+    credentialExample: 'hv_connect provider="azure-container-apps" credentialsRef="file:/absolute/path/azure-container-apps.json"',
+    notes: [
+      'The JSON file must contain tenantId, subscriptionId, clientId, clientSecret, resourceGroup, location, registryId, and registryServer. registryId is the full ARM resource ID of an existing ACR registry; registryServer is its login hostname.',
+      'Hypervibe owns its managed environments and Container Apps. It does not create or delete the subscription, resource group, registry, service principal, or role assignments.',
+      'The same service principal is synchronized into the managed GitHub workflow, which pushes the full checked-out SHA to the existing registry and releases only already-bound Container App IDs by exact registry digest.',
+      'Client secrets expire. Store this JSON outside the repository, rotate the secret before expiry, and reconnect with the replacement value; Hypervibe never prints or persists it in repo state.',
+      'Container App service creation is confirmation-gated because the resulting compute and supporting Azure resources can be billable.',
+    ],
+  },
   bitwarden: {
     provider: 'bitwarden',
     displayName: 'Bitwarden Secrets Manager',
