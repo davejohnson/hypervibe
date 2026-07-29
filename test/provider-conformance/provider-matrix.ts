@@ -66,6 +66,7 @@ const awsCredentials: ProviderCredentialField[] = [
 
 const digitalOceanCredentials: ProviderCredentialField[] = [
   { field: 'apiToken', environmentVariable: 'HYPERVIBE_TEST_DIGITALOCEAN_TOKEN' },
+  { field: 'containerRegistry', environmentVariable: 'HYPERVIBE_TEST_DIGITALOCEAN_REGISTRY' },
 ];
 
 const railwayCredentials: ProviderCredentialField[] = [
@@ -128,6 +129,8 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     service: 'App Platform',
     status: 'planned',
     credentials: digitalOceanCredentials,
+    implementationNote:
+      'The registry, credential schema, App Platform adapter, guidance, mocked lifecycle, and exact-SHA CI workflow are implemented. Promotion requires a live harness that can execute the managed GitHub workflow plus a successful create/deploy/noop/destroy run.',
   },
   {
     kind: 'hosting',
@@ -201,6 +204,8 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     status: 'planned',
     credentials: digitalOceanCredentials,
     fixtureHostingProvider: 'digitalocean',
+    implementationNote:
+      'The derived Managed PostgreSQL adapter and mocked lifecycle safety contract are implemented. Promotion remains gated on a live harness for the DigitalOcean managed GitHub workflow and one complete live stack run.',
   },
   {
     kind: 'database',
@@ -315,6 +320,8 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     status: 'planned',
     credentials: digitalOceanCredentials,
     fixtureHostingProvider: 'digitalocean',
+    implementationNote:
+      'The derived Managed Valkey adapter and mocked lifecycle safety contract are implemented. New clusters use the Valkey engine while observation accepts legacy Redis clusters; promotion remains gated on a live harness for the complete DigitalOcean stack.',
   },
   {
     kind: 'cache',

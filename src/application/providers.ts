@@ -12,6 +12,7 @@ import '../adapters/providers/supabase/supabase.adapter.js';
 import '../adapters/providers/gcp/cloudsql.adapter.js';
 import '../adapters/providers/aws/rds.adapter.js';
 import '../adapters/providers/neon/neon.adapter.js';
+import '../adapters/providers/digitalocean/digitalocean.adapter.js';
 
 // Product and infrastructure providers
 import '../adapters/providers/stripe/stripe.adapter.js';

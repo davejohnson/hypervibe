@@ -125,4 +125,21 @@ describe('provider conformance matrix', () => {
       expect(providerRegistry.supportsEngine(entry.provider, 'cache', entry.engine)).toBe(true);
     }
   });
+
+  it('tracks the implemented DigitalOcean slice without claiming live support', () => {
+    const entries = providerContracts.filter(
+      (entry) => entry.provider === 'digitalocean'
+    );
+
+    expect(entries).toHaveLength(3);
+    expect(entries.every((entry) => entry.status === 'planned')).toBe(true);
+    expect(entries.every((entry) => entry.implementationNote?.includes('implemented'))).toBe(true);
+    expect(providerRegistry.supports('digitalocean', 'hosting')).toBe(true);
+    expect(
+      providerRegistry.supportsEngine('digitalocean', 'database', 'postgres')
+    ).toBe(true);
+    expect(
+      providerRegistry.supportsEngine('digitalocean', 'cache', 'redis')
+    ).toBe(true);
+  });
 });

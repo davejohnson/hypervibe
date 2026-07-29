@@ -54,6 +54,30 @@ contract are green. It is `ready-for-live`, not `supported`, until the opt-in
 live contract proves create, noop, and terminal teardown against an isolated
 Neon account.
 
+DigitalOcean is the first combined hosting/database/cache slice. One registered
+deployment provider exposes App Platform directly and derives Managed
+PostgreSQL and Managed Valkey adapters through the provider registry. Its mocked
+contracts pin complete pagination, durable-ID-first observation, duplicate-name
+blocking, partial-create identity preservation, secret-safe receipts, and
+provider-confirmed terminal deletion. New Redis-compatible clusters use
+DigitalOcean's current `valkey` engine; observation also recognizes legacy
+`redis` clusters.
+
+All three DigitalOcean entries remain `planned` despite those green unit
+contracts. Hypervibe now generates a provider-owned GitHub Actions workflow
+that publishes one DOCR image tagged with the exact checked-out Git SHA,
+updates only already-bound App Platform components, waits for that exact
+deployment ID to become `ACTIVE`, and verifies the active component image.
+It never creates a container registry, app, or component from CI. A verified
+connection must name an existing registry with `containerRegistry`, supplied to
+the live runner as `HYPERVIBE_TEST_DIGITALOCEAN_REGISTRY`.
+
+The remaining promotion gate is a live harness that can execute the managed
+GitHub workflow (the current temporary local fixture cannot), followed by a
+successful opt-in stack run proving that App Platform can create the app shell,
+deploy the fixture, converge to noop, and tear down the app, PostgreSQL cluster,
+and Valkey cluster through spec/plan/apply.
+
 The extended matrix also includes:
 
 - [Azure Container Apps](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/container-apps)

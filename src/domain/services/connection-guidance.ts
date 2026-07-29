@@ -275,6 +275,26 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     permissions: ['Use a database user with the least privileges required for the intended hv_db query or migration operation.'],
     credentialExample: 'hv_connect provider="database" credentialsRef="dotenv:/absolute/path/.env#DATABASE_URL"',
   },
+  digitalocean: {
+    provider: 'digitalocean',
+    displayName: 'DigitalOcean',
+    tokenType: 'DigitalOcean personal access token (PAT, normally prefixed dop_v1_)',
+    setupUrl: 'https://cloud.digitalocean.com/account/api/tokens',
+    permissions: [
+      'For Managed PostgreSQL and Valkey observation, grant database:read and database:view_credentials on the DigitalOcean team that owns the clusters.',
+      'For Managed PostgreSQL and Valkey lifecycle through hv_plan/hv_apply, also grant database:create, database:update, and database:delete.',
+      'DigitalOcean requires regions:read, sizes:read, and actions:read alongside non-read database scopes so Hypervibe can validate regions/sizes and observe asynchronous actions.',
+      'When DigitalOcean App Platform hosting is enabled, also grant app:read, app:create, app:update, and app:delete; omit those app scopes for a database/cache-only connection.',
+      'For exact-SHA App Platform CI deploys, grant registry:read and registry:update on the team that owns the existing DOCR registry named by containerRegistry.',
+    ],
+    credentialExample: 'hv_connect provider="digitalocean" credentialsRef="file:/absolute/path/digitalocean.json"',
+    notes: [
+      'Create the PAT at https://cloud.digitalocean.com/account/api/tokens with Custom Scopes for least privilege. Full Access is a broader fallback, not the recommended default.',
+      'For App Platform CI, the JSON credential file must contain apiToken and containerRegistry. Hypervibe verifies the registry but never creates a registry implicitly because registry subscriptions can be billable.',
+      'DigitalOcean shows a PAT only once. Store it in a dotenv file or secret manager instead of chat; Hypervibe accepts DIGITALOCEAN_TOKEN and HYPERVIBE_DIGITALOCEAN_TOKEN.',
+      'Token scopes cannot be changed after creation, and the token cannot exceed its creator\'s DigitalOcean team role. Create a replacement token if scopes or team access are wrong.',
+    ],
+  },
   doppler: {
     provider: 'doppler',
     displayName: 'Doppler',

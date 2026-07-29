@@ -6,6 +6,7 @@ import path from 'path';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
+import '../../../adapters/providers/digitalocean/digitalocean.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
@@ -140,6 +141,15 @@ describe('ci-deploy.service', () => {
         'GCP_SERVICE_ACCOUNT_JSON',
         'GCP_PROJECT_ID',
         'GCP_REGION',
+      ]);
+    });
+
+    it('returns the DigitalOcean API token and existing registry name', () => {
+      expect(
+        requiredProviderSecretNamesForGitHubActions('digitalocean')
+      ).toEqual([
+        'DIGITALOCEAN_TOKEN',
+        'DIGITALOCEAN_REGISTRY',
       ]);
     });
 
