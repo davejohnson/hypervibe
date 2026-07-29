@@ -30,6 +30,7 @@ export function diffEnvironment(input: {
   local: LocalSnapshot;
   providerBehavior?: {
     requiresBranchDeployForCode?: boolean;
+    serviceCreatesBillable?: boolean;
     workloadKindObservation?: 'exact' | 'cron-only';
     presenceOnlyManagedEnvVar?: (params: { key: string; value: string }) => boolean;
   };
@@ -130,6 +131,9 @@ export function diffEnvironment(input: {
         verified,
         reason: `Service moves from ${boundProvider} to ${provider} (create new, verify health, then remove old)`,
         dependsOn: projectDep,
+        ...(providerBehavior.serviceCreatesBillable
+          ? { billable: true, requiresConfirm: true }
+          : {}),
       });
       continue;
     }
@@ -163,6 +167,9 @@ export function diffEnvironment(input: {
           verified: true,
           reason: `Service "${name}" is not deployed on ${provider}`,
           dependsOn: projectDep,
+          ...(providerBehavior.serviceCreatesBillable
+            ? { billable: true, requiresConfirm: true }
+            : {}),
         });
         continue;
       }
@@ -178,6 +185,9 @@ export function diffEnvironment(input: {
           reason: `Workload kind changes from ${live.workloadKind} to ${serviceSpec.workloadKind}`,
           diff: [{ field: 'workloadKind', from: live.workloadKind, to: serviceSpec.workloadKind }],
           dependsOn: projectDep,
+          ...(providerBehavior.serviceCreatesBillable
+            ? { billable: true, requiresConfirm: true }
+            : {}),
         });
         continue;
       }
@@ -256,6 +266,11 @@ export function diffEnvironment(input: {
         dependsOn: projectDep,
         ...(observed && !serviceObservationKnown
           ? { metadata: { blockedReason: 'service_observation_unknown' } }
+          : {}),
+        ...(!observed || serviceObservationKnown
+          ? providerBehavior.serviceCreatesBillable
+            ? { billable: true, requiresConfirm: true }
+            : {}
           : {}),
       });
     }

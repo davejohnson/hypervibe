@@ -48,6 +48,8 @@ export interface ProviderOrchestrationMetadata {
   diff?: {
     /** Source-less services are expected unless branch deploys are configured. */
     requiresBranchDeployForCode?: boolean;
+    /** Creating or replacing a service can charge the provider account. */
+    serviceCreatesBillable?: boolean;
     /** Some providers cannot observe web vs worker, only cron vs non-cron. */
     workloadKindObservation?: 'exact' | 'cron-only';
     /**

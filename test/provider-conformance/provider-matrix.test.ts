@@ -142,4 +142,21 @@ describe('provider conformance matrix', () => {
       providerRegistry.supportsEngine('digitalocean', 'cache', 'redis')
     ).toBe(true);
   });
+
+  it('tracks the implemented Render slice without claiming live support', () => {
+    const entries = providerContracts.filter(
+      (entry) => entry.provider === 'render'
+    );
+
+    expect(entries).toHaveLength(3);
+    expect(entries.every((entry) => entry.status === 'planned')).toBe(true);
+    expect(entries.every((entry) => entry.implementationNote?.includes('implemented'))).toBe(true);
+    expect(providerRegistry.supports('render', 'hosting')).toBe(true);
+    expect(
+      providerRegistry.supportsEngine('render', 'database', 'postgres')
+    ).toBe(true);
+    expect(
+      providerRegistry.supportsEngine('render', 'cache', 'redis')
+    ).toBe(true);
+  });
 });

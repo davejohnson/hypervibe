@@ -389,6 +389,24 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'If multiple workspaces are visible, include workspaceId: credentialsMap={"apiToken":"HYPERVIBE_RAILWAY_TOKEN","workspaceId":"RAILWAY_WORKSPACE_ID"} so projects are created in the right workspace.',
     ],
   },
+  render: {
+    provider: 'render',
+    displayName: 'Render',
+    tokenType: 'Render personal API key plus the target workspace ID (tea-...; a legacy own-... ID resolves to the user default workspace)',
+    setupUrl: 'https://dashboard.render.com/u/settings#api-keys',
+    permissions: [
+      'Render API keys are not scope-selectable and inherit access to every workspace your Render user belongs to; use ownerId to pin Hypervibe to the one intended workspace.',
+      'The Render user must be allowed to read, create, update, and delete services, Postgres instances, and Key Value instances in that workspace for the lifecycle capabilities declared in the spec.',
+      'For exact-SHA CI deploys, create a GitHub Container Registry credential in the target Render workspace and pass its durable ID as registryCredentialId; Hypervibe verifies and reuses it but never creates or rotates it implicitly.',
+    ],
+    credentialExample: 'hv_connect provider="render" credentialsRef="file:/absolute/path/render.json"',
+    notes: [
+      'Create the API key under Render Account Settings -> API Keys at https://dashboard.render.com/u/settings#api-keys. Render shows the key only once.',
+      'Find the workspace ID on the workspace Settings page. The JSON must contain apiKey and ownerId; add registryCredentialId when Render hosting uses the managed exact-SHA GitHub Actions workflow.',
+      'Create the registry credential under Workspace Settings -> Container Registry Credentials for GitHub Container Registry. Its GitHub token needs read:packages for the private image repository; scope the GitHub account/repository as narrowly as possible.',
+      'Store the API key and registry credential ID in a local JSON or dotenv reference instead of chat. RENDER_API_KEY and HYPERVIBE_RENDER_API_KEY are accepted API-key aliases.',
+    ],
+  },
   recaptcha: {
     provider: 'recaptcha',
     displayName: 'reCAPTCHA',

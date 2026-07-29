@@ -693,6 +693,128 @@ describe('PlanService.plan', () => {
     });
   });
 
+  it('uses a derived datastore observer when same-provider hosting marks that resource class unknown', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'render' },
+          services: {},
+          database: { provider: 'render', engine: 'postgres' },
+        },
+      },
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'render',
+        projectId: 'tea-owner-1',
+        services: {},
+      },
+    });
+    const component = new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      externalId: 'dpg-render-1',
+      bindings: {
+        provider: 'render',
+        instanceId: 'dpg-render-1',
+      },
+    });
+    const connection = new ConnectionRepository().create({
+      provider: 'render',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        apiKey: 'render-key',
+        ownerId: 'tea-owner-1',
+      }),
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'render',
+        capabilities: {
+          supportedBuilders: ['dockerfile'],
+          supportedComponents: [],
+          supportsAutoWiring: false,
+          supportsHealthChecks: true,
+          supportsCronSchedule: true,
+          supportsReleaseCommand: false,
+          supportsMultiEnvironment: false,
+          managedTls: true,
+          supportsObserve: true,
+        },
+        connect: async () => {},
+        verify: async () => ({ success: true }),
+        ensureProject: async () => ({ success: true, message: 'ok' }),
+        ensureComponent: async () => { throw new Error('unused'); },
+        deploy: async () => { throw new Error('unused'); },
+        setEnvVars: async () => ({ success: true, message: 'ok' }),
+        observe: async () => ({
+          provider: 'render',
+          observedAt: new Date().toISOString(),
+          projectExists: true,
+          projectId: 'tea-owner-1',
+          services: [],
+          databases: [],
+          caches: [],
+          completeness: {
+            project: 'complete',
+            environment: 'complete',
+            services: 'complete',
+            databases: 'unknown',
+            caches: 'unknown',
+            storage: 'complete',
+          },
+          partial: false,
+          warnings: [],
+        }),
+      },
+    });
+    const observeDatabase = vi.fn(async (
+      _environment: Environment,
+      observedComponent?: typeof component | null
+    ) => {
+      expect(observedComponent?.externalId).toBe('dpg-render-1');
+      return {
+        provider: 'render',
+        engine: 'postgres',
+        externalId: 'dpg-render-1',
+        name: 'plan-test-staging-postgres',
+        status: 'running',
+      };
+    });
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'render',
+        capabilities: {
+          supportedDatabases: ['postgres'],
+          supportsPooling: true,
+          supportsReadReplicas: true,
+          supportsPointInTimeRecovery: true,
+          serverlessOptimized: false,
+        },
+        connect: async () => {},
+        verify: async () => ({ success: true }),
+        provision: async () => { throw new Error('unused'); },
+        getConnectionUrl: async () => null,
+        destroy: async () => ({ success: true, message: 'unused' }),
+        observeDatabase,
+      } as never,
+    });
+
+    const result = await new PlanService().plan(project, 'staging');
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions.find((action) => action.id === 'database:render'))
+      .toMatchObject({ type: 'noop', verified: true });
+    expect(observeDatabase).toHaveBeenCalledOnce();
+  });
+
   it('plans Railway environment scaffolding before storage when a shared project has no target environment', async () => {
     new SpecStore().replace(project, {
       version: 1,

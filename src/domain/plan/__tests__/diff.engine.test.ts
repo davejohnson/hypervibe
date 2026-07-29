@@ -115,6 +115,41 @@ describe('diffEnvironment — creates', () => {
     expect(byId.get('database:railway')?.type).toBe('create');
   });
 
+  it('confirmation-gates service creation when provider metadata marks it billable', () => {
+    const result = diffEnvironment({
+      spec: spec({
+        hosting: { provider: 'render' },
+        database: undefined,
+      }),
+      envName: 'production',
+      observed: observed({
+        provider: 'render',
+        projectExists: true,
+        projectId: 'tea-owner-1',
+        services: [],
+        databases: [],
+      }),
+      local: local({
+        services: [],
+        components: [],
+        bindings: {
+          provider: 'render',
+          projectId: 'tea-owner-1',
+          services: {},
+        },
+      }),
+      providerBehavior: { serviceCreatesBillable: true },
+    });
+
+    expect(result.actions.find((action) => action.id === 'service:web'))
+      .toMatchObject({
+        type: 'create',
+        billable: true,
+        requiresConfirm: true,
+      });
+    expect(confirmGatedActionIds(result.actions)).toContain('service:web');
+  });
+
   it('does not let stale local service and database bindings mask missing observed environment resources', () => {
     const result = diffEnvironment({
       spec: spec(),
