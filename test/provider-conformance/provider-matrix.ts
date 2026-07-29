@@ -8,6 +8,8 @@ export interface ProviderCredentialField {
   field: string;
   /** Environment variable read only by the opt-in live test runner. */
   environmentVariable: string;
+  /** Explicit conversion applied by the live runner before writing the credential object. */
+  parseAs?: 'json' | 'number' | 'boolean';
   optional?: boolean;
 }
 
@@ -62,6 +64,49 @@ const awsCredentials: ProviderCredentialField[] = [
   { field: 'accessKeyId', environmentVariable: 'HYPERVIBE_TEST_AWS_ACCESS_KEY_ID' },
   { field: 'secretAccessKey', environmentVariable: 'HYPERVIBE_TEST_AWS_SECRET_ACCESS_KEY' },
   { field: 'region', environmentVariable: 'HYPERVIBE_TEST_AWS_REGION', optional: true },
+];
+
+const awsEcsCredentials: ProviderCredentialField[] = [
+  ...awsCredentials,
+  { field: 'ecrRepositoryArn', environmentVariable: 'HYPERVIBE_TEST_AWS_ECR_REPOSITORY_ARN' },
+  { field: 'ecrRepositoryUri', environmentVariable: 'HYPERVIBE_TEST_AWS_ECR_REPOSITORY_URI' },
+  {
+    field: 'subnetIds',
+    environmentVariable: 'HYPERVIBE_TEST_AWS_SUBNET_IDS_JSON',
+    parseAs: 'json',
+  },
+  {
+    field: 'securityGroupIds',
+    environmentVariable: 'HYPERVIBE_TEST_AWS_SECURITY_GROUP_IDS_JSON',
+    parseAs: 'json',
+  },
+  { field: 'executionRoleArn', environmentVariable: 'HYPERVIBE_TEST_AWS_EXECUTION_ROLE_ARN' },
+  {
+    field: 'taskRoleArn',
+    environmentVariable: 'HYPERVIBE_TEST_AWS_TASK_ROLE_ARN',
+    optional: true,
+  },
+  {
+    field: 'targetGroupArn',
+    environmentVariable: 'HYPERVIBE_TEST_AWS_TARGET_GROUP_ARN',
+  },
+  {
+    field: 'publicUrl',
+    environmentVariable: 'HYPERVIBE_TEST_AWS_PUBLIC_URL',
+    optional: true,
+  },
+  {
+    field: 'assignPublicIp',
+    environmentVariable: 'HYPERVIBE_TEST_AWS_ASSIGN_PUBLIC_IP',
+    parseAs: 'boolean',
+    optional: true,
+  },
+  {
+    field: 'containerPort',
+    environmentVariable: 'HYPERVIBE_TEST_AWS_CONTAINER_PORT',
+    parseAs: 'number',
+    optional: true,
+  },
 ];
 
 const digitalOceanCredentials: ProviderCredentialField[] = [
@@ -145,7 +190,9 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'AWS',
     service: 'ECS on Fargate',
     status: 'planned',
-    credentials: awsCredentials,
+    credentials: awsEcsCredentials,
+    implementationNote:
+      'The cluster/service/task-definition lifecycle adapter, prerequisite guidance, mocked safety contracts, and exact-digest ECR workflow are implemented. Promotion requires an isolated AWS account and a live harness that executes the managed GitHub workflow before proving create/release/noop/update/terminal teardown.',
   },
   {
     kind: 'hosting',

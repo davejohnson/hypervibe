@@ -138,6 +138,50 @@ The default Basic dyno becomes billable when the workflow scales the process to
 one, so the live run must preserve exact-action confirmation and surface cleanup
 failures with the remaining app UUID.
 
+AWS ECS on Fargate is the next hosting-only adapter slice. The AWS account,
+existing private ECR repository, VPC subnets, security groups, IAM execution
+and optional task roles, and optional Application Load Balancer target group
+are externally owned. Hypervibe owns one ECS cluster per Hypervibe environment,
+one ECS service per web or worker workload, and that service's task-definition
+revisions. Cron workloads stay outside this adapter. Public web services require
+an existing `ip` target group in the same VPC, routed by an HTTP or HTTPS
+listener on one active internet-facing Application Load Balancer. An explicit
+`publicUrl` pins the externally routed origin for host/path rules and HTTPS-only
+listeners; without it, Hypervibe accepts only a default HTTP route whose bare
+ALB hostname can be health-checked safely.
+
+AWS ECS remains `planned`. Its mocked contracts pin complete token pagination,
+long-form durable ARN validation, provider-confirmed `MISSING` semantics,
+unknown-error preservation, duplicate and unbound identity blocking, partial
+create identity, immutable task-definition configuration, billable
+confirmation, dependency-ordered terminal deletion, and safe task-definition
+cleanup. Apply creates a zero-task ECS service using a public Alpine bootstrap
+task definition, so it does not deploy application code or start billable
+Fargate tasks before the reviewed CI action.
+
+The generated workflow builds one `linux/amd64` image tagged with the full
+checked-out Git SHA, pushes it to the existing ECR repository, and deploys the
+ECR-reported digest only to already-bound long-form ECS service ARNs. It
+registers a release-only task-definition revision, scales that exact service to
+one task, waits for the exact rollout, verifies the running task image digest
+and SHA marker, and checks configured public web health paths. CI never creates
+an ECS cluster or service, task role, ECR repository, VPC resource, load
+balancer, listener rule, or target group, and it does not depend on the AWS CLI.
+
+The connection uses a scoped IAM user access key because the same credential is
+currently synchronized into managed GitHub Actions. It needs ECS lifecycle and
+observation permissions, exact-repository ECR read/push access, read-only
+EC2/ELB prerequisite inspection, and `iam:GetRole` plus `iam:PassRole` on only
+the configured task roles. The `serviceLongArnFormat` account setting must be
+enabled. This first slice supports the commercial `aws` partition; temporary
+STS and GitHub OIDC credential lifecycles are future work.
+
+Promotion requires an isolated AWS account with the external prerequisites and
+a live harness that can execute the managed workflow before proving
+create/release/noop/update/terminal teardown. The current local fixture can
+exercise spec/plan/apply but cannot publish and run the workflow, so green
+mocked tests do not justify `ready-for-live` or `supported`.
+
 Azure Container Apps is the next hosting-only adapter slice. The Azure
 subscription, resource group, Microsoft Entra service principal, and Azure
 Container Registry are externally owned. Hypervibe owns one managed environment
@@ -262,6 +306,21 @@ fixture-host credentials. Set `HYPERVIBE_TEST_NEON_ORGANIZATION_ID` when a
 personal Neon key should target an organization, and optionally set
 `HYPERVIBE_TEST_NEON_REGION_ID`. Use only an isolated account/workspace because
 the contract creates and destroys real provider resources.
+
+The planned ECS contract declares its complete future live credential shape:
+`HYPERVIBE_TEST_AWS_ACCESS_KEY_ID`,
+`HYPERVIBE_TEST_AWS_SECRET_ACCESS_KEY`, optional
+`HYPERVIBE_TEST_AWS_REGION`, `HYPERVIBE_TEST_AWS_ECR_REPOSITORY_ARN`,
+`HYPERVIBE_TEST_AWS_ECR_REPOSITORY_URI`,
+`HYPERVIBE_TEST_AWS_SUBNET_IDS_JSON`,
+`HYPERVIBE_TEST_AWS_SECURITY_GROUP_IDS_JSON`,
+`HYPERVIBE_TEST_AWS_EXECUTION_ROLE_ARN`, optional
+`HYPERVIBE_TEST_AWS_TASK_ROLE_ARN`, and
+`HYPERVIBE_TEST_AWS_TARGET_GROUP_ARN` for the public web fixture. Optional
+`HYPERVIBE_TEST_AWS_PUBLIC_URL` pins the routed origin when the fixture is not
+served by the default HTTP action. Array values
+are parsed explicitly as JSON by the live runner instead of being passed to the
+provider as strings.
 
 The runner copies a tiny HTTP fixture into a temporary worktree and writes a
 mode-`0600` temporary credential object. Hypervibe consumes it through

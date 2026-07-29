@@ -47,8 +47,34 @@ function selectedContract() {
   return undefined;
 }
 
-function requiredCredentials(fields: ProviderCredentialField[]): Record<string, string> {
-  const output: Record<string, string> = {};
+function parseCredentialValue(
+  credential: ProviderCredentialField,
+  value: string
+): unknown {
+  try {
+    if (credential.parseAs === 'json') return JSON.parse(value);
+    if (credential.parseAs === 'number') {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) throw new Error('not a finite number');
+      return parsed;
+    }
+    if (credential.parseAs === 'boolean') {
+      if (value === 'true') return true;
+      if (value === 'false') return false;
+      throw new Error('not true or false');
+    }
+    return value;
+  } catch {
+    throw new Error(
+      `${credential.environmentVariable} must contain a valid ${
+        credential.parseAs ?? 'string'
+      } value`
+    );
+  }
+}
+
+function requiredCredentials(fields: ProviderCredentialField[]): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
   const missing: string[] = [];
   for (const credential of fields) {
     const value = process.env[credential.environmentVariable];
@@ -58,7 +84,7 @@ function requiredCredentials(fields: ProviderCredentialField[]): Record<string, 
       }
       continue;
     }
-    output[credential.field] = value;
+    output[credential.field] = parseCredentialValue(credential, value);
   }
   if (missing.length > 0) {
     throw new Error(`Missing live-provider credential environment variables: ${missing.join(', ')}`);

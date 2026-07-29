@@ -333,6 +333,49 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Token scopes cannot be changed after creation, and the token cannot exceed its creator\'s DigitalOcean team role. Create a replacement token if scopes or team access are wrong.',
     ],
   },
+  ecs: {
+    provider: 'ecs',
+    displayName: 'Amazon ECS on Fargate',
+    tokenType: 'AWS IAM user access key (accessKeyId and secretAccessKey) for one commercial-partition account and region; the same scoped key is synchronized to managed GitHub Actions',
+    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+    setupUrls: [
+      {
+        label: 'Create or review the IAM access key',
+        url: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+      },
+      {
+        label: 'AWS access-key security guidance',
+        url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html',
+      },
+      {
+        label: 'Amazon ECS API permissions reference',
+        url: 'https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonelasticcontainerservice.html',
+      },
+      {
+        label: 'Amazon ECR repository push permissions',
+        url: 'https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-push-iam.html',
+      },
+    ],
+    permissions: [
+      'For ECS observation and lifecycle: ecs:ListAccountSettings, ecs:ListClusters, ecs:DescribeClusters, ecs:CreateCluster, ecs:DeleteCluster, ecs:ListServices, ecs:DescribeServices, ecs:CreateService, ecs:UpdateService, ecs:DeleteService, ecs:RegisterTaskDefinition, ecs:DescribeTaskDefinition, ecs:ListTaskDefinitions, ecs:DeregisterTaskDefinition, ecs:DeleteTaskDefinitions, ecs:ListTasks, ecs:DescribeTasks, ecs:TagResource, and ecs:ListTagsForResource.',
+      'For the existing private ECR repository and exact-digest managed workflow: ecr:GetAuthorizationToken on Resource="*", plus ecr:DescribeRepositories, ecr:BatchCheckLayerAvailability, ecr:GetDownloadUrlForLayer, ecr:BatchGetImage, ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload, and ecr:PutImage on the exact repository ARN.',
+      'For read-only network prerequisite verification: ec2:DescribeSubnets and ec2:DescribeSecurityGroups. Hypervibe does not create, modify, or delete the VPC, subnets, or security groups.',
+      'For an existing public Application Load Balancer target: elasticloadbalancing:DescribeTargetGroups, elasticloadbalancing:DescribeLoadBalancers, elasticloadbalancing:DescribeListeners, and elasticloadbalancing:DescribeRules. Hypervibe does not create, modify, or delete the load balancer, listener rules, or target group.',
+      'For existing ECS task roles: iam:GetRole and iam:PassRole on the exact execution-role ARN and optional task-role ARN. Restrict iam:PassedToService to ecs-tasks.amazonaws.com.',
+    ],
+    credentialExample: 'hv_connect provider="ecs" credentialsRef="file:/absolute/path/aws-ecs.json"',
+    notes: [
+      'The JSON must include accessKeyId, secretAccessKey, region, ecrRepositoryArn, ecrRepositoryUri, subnetIds (a JSON array), securityGroupIds (a JSON array), and executionRoleArn. Public web services also require targetGroupArn. Set publicUrl to the externally routed HTTP(S) origin when the target is not the default HTTP listener action, including HTTPS-only listeners; taskRoleArn and assignPublicIp are optional.',
+      'The existing ECR repository, VPC subnets, security groups, IAM roles, and optional Application Load Balancer target group stay externally owned. Hypervibe owns only its ECS cluster, ECS services, and task-definition revisions.',
+      'Scope ECS create/update/delete permissions to the intended Hypervibe cluster, service, and task-definition-family ARN patterns where AWS supports resource-level authorization. ECS list/account-setting actions require Resource="*", and cross-cluster service observation must remain available so Hypervibe can prove the external target group is not already attached elsewhere.',
+      'A public target group must use target type ip, be in the subnet/security-group VPC, and be routed by an HTTP or HTTPS listener on one active internet-facing Application Load Balancer. One target group cannot be shared implicitly by multiple Hypervibe services.',
+      'The selected subnets need outbound access to ECR and application dependencies, and the security group must allow the load balancer to reach containerPort while permitting required egress. Hypervibe verifies identity and VPC scope but does not modify these external network rules.',
+      'Both configured IAM roles must trust ecs-tasks.amazonaws.com for sts:AssumeRole. The execution role also needs the usual private-ECR pull permissions (ecr:GetAuthorizationToken, ecr:BatchCheckLayerAvailability, ecr:GetDownloadUrlForLayer, and ecr:BatchGetImage); Hypervibe verifies the trust relationship but cannot prove every attached role policy before a task runs.',
+      'Enable the ECS serviceLongArnFormat account setting before connecting. Durable long-form service ARNs are required so Hypervibe can prove exact cluster and service identity.',
+      'Service creation is billable and exact-action confirmation-gated. Apply creates a zero-task bootstrap service; the managed workflow builds the full checked-out Git SHA, publishes it to the existing repository, resolves the ECR digest, and scales only already-bound services to one task.',
+      'This adapter currently supports the commercial aws partition and static IAM access keys. Keep the credential file outside the repository, rotate the key regularly, and reconnect after rotation; support for temporary STS/OIDC credentials requires a separate credential lifecycle.',
+    ],
+  },
   doppler: {
     provider: 'doppler',
     displayName: 'Doppler',

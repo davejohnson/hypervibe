@@ -84,6 +84,9 @@ describe('provider conformance matrix', () => {
       for (const credential of entry.credentials) {
         expect(credential.field).toMatch(/^[A-Za-z][A-Za-z0-9]*$/);
         expect(credential.environmentVariable).toMatch(environmentVariablePattern);
+        expect(['json', 'number', 'boolean', undefined]).toContain(
+          credential.parseAs
+        );
         expect(credential).not.toHaveProperty('value');
       }
     }
@@ -204,5 +207,26 @@ describe('provider conformance matrix', () => {
       ]),
     });
     expect(providerRegistry.supports('vercel', 'hosting')).toBe(true);
+  });
+
+  it('tracks the implemented AWS ECS hosting slice without claiming live support', () => {
+    const entry = hostingProviderContracts.find(
+      (provider) => provider.provider === 'ecs'
+    );
+
+    expect(entry).toMatchObject({
+      status: 'planned',
+      implementationNote: expect.stringContaining('implemented'),
+      credentials: expect.arrayContaining([
+        expect.objectContaining({ field: 'ecrRepositoryArn' }),
+        expect.objectContaining({ field: 'ecrRepositoryUri' }),
+        expect.objectContaining({ field: 'subnetIds', parseAs: 'json' }),
+        expect.objectContaining({ field: 'securityGroupIds', parseAs: 'json' }),
+        expect.objectContaining({ field: 'executionRoleArn' }),
+        expect.objectContaining({ field: 'targetGroupArn' }),
+        expect.objectContaining({ field: 'publicUrl', optional: true }),
+      ]),
+    });
+    expect(providerRegistry.supports('ecs', 'hosting')).toBe(true);
   });
 });
