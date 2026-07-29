@@ -474,6 +474,39 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Store the API key and registry credential ID in a local JSON or dotenv reference instead of chat. RENDER_API_KEY and HYPERVIBE_RENDER_API_KEY are accepted API-key aliases.',
     ],
   },
+  vercel: {
+    provider: 'vercel',
+    displayName: 'Vercel',
+    tokenType: 'Vercel personal access token created under the Personal Account and scoped to the intended personal account or Team (new tokens normally use the vcp_ prefix)',
+    setupUrl: 'https://vercel.com/account/settings/tokens',
+    setupUrls: [
+      {
+        label: 'Create or review Vercel personal access tokens',
+        url: 'https://vercel.com/account/settings/tokens',
+      },
+      {
+        label: 'Vercel access-token and Team-scope guidance',
+        url: 'https://vercel.com/kb/guide/how-do-i-use-a-vercel-api-access-token',
+      },
+      {
+        label: 'Vercel roles and extended permissions',
+        url: 'https://vercel.com/docs/rbac/access-roles',
+      },
+    ],
+    permissions: [
+      'For a Team scope, use an Owner or Member token identity, or a Developer/Contributor identity granted Create Project, Full Production Deployment, and Environment Variable Manager permissions for the intended Team.',
+      'Hypervibe needs REST access to read/create/delete Projects, read and upsert/delete Project environment variables, upload deployment files, and create/read production Deployments.',
+      'Scope the token to only the intended Vercel Team when possible and include that immutable teamId in the connection JSON; omit teamId only for a personal-account deployment scope.',
+    ],
+    credentialExample: 'hv_connect provider="vercel" credentialsRef="file:/absolute/path/vercel.json"',
+    notes: [
+      'The JSON must contain accessToken and may contain teamId. Find the immutable Team ID under Team Settings -> General; Hypervibe records only a non-secret team:<id> or user:<id> binding.',
+      'VERCEL_ACCESS_TOKEN, VERCEL_TOKEN, and HYPERVIBE_VERCEL_ACCESS_TOKEN are accepted aliases when resolving a scalar accessToken. Use a JSON file or credentialsMap when teamId is required.',
+      'Hypervibe creates source-less Vercel Projects and deploys exact checked-out Git files through the REST API. If a bound Project has a Vercel-native Git link, CI reconciliation blocks until that link is manually disconnected.',
+      'The Vercel hosting slice supports public web projects built by Vercel framework/static auto-detection. It rejects workers, cron jobs, release commands, arbitrary long-lived start commands, and build/Dockerfile overrides it cannot honestly apply.',
+      'Project creation and production deployments may consume metered build/function resources. Hypervibe confirmation-gates service creation and never creates Projects from the managed CI workflow.',
+    ],
+  },
   recaptcha: {
     provider: 'recaptcha',
     displayName: 'reCAPTCHA',

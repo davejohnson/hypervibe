@@ -9,6 +9,7 @@ import '../adapters/providers/gcp/cloudrun.adapter.js';
 import '../adapters/providers/render/render.adapter.js';
 import '../adapters/providers/heroku/heroku.adapter.js';
 import '../adapters/providers/azure/azure-container-apps.adapter.js';
+import '../adapters/providers/vercel/vercel.adapter.js';
 
 // Database providers
 import '../adapters/providers/supabase/supabase.adapter.js';
