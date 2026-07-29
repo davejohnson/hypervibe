@@ -245,8 +245,9 @@ The extended matrix also includes:
   reconciles deployments by repository and full Git SHA before creating one,
   and blocks Vercel-native Git links. It supports public framework/static web
   projects and rejects arbitrary long-lived start commands or build overrides
-  it cannot apply. Promotion still requires a complete live
-  create/deploy/noop/destroy run.
+  it cannot apply. Its review-gated managed-workflow harness is now available,
+  so the matrix entry is `ready-for-live`; promotion still requires a
+  successful opt-in create/deploy/noop/update/destroy run.
 - [Neon Postgres](https://api-docs.neon.tech/reference/use-cases) as its own
   database provider. Neon owns the project, branch, endpoint, database, and
   deletion lifecycle even when a Vercel integration wires it to an app. Its
@@ -328,6 +329,104 @@ mode-`0600` temporary credential object. Hypervibe consumes it through
 verification. Values are never passed as CLI arguments or printed. The test
 removes its services, databases, and caches through spec/plan/apply, and its
 `afterAll` repeats that desired-state cleanup after a partial test failure.
+
+## Running a managed-workflow live test
+
+Providers whose first application release must run through a managed GitHub
+Actions workflow use a separate review-gated harness. Vercel is the first
+enabled contract. The harness never merges its own infrastructure pull
+request: it applies the reviewed plan, prints the Hypervibe PR URL, waits for a
+human merge, and then continues through `hv_ci_trigger`, `hv_ci_status`,
+`hv_health`, noop/update checks, and spec-driven teardown. Teardown may produce
+a second infrastructure PR that removes durable service ids from the workflow;
+the harness waits for that review too. Exact-SHA proof comes from the successful
+Hypervibe server-release evidence artifact tied to the observed workflow run,
+not from GitHub's dispatch-ref `head_sha`.
+
+Use a disposable checkout of a dedicated GitHub repository and an isolated
+Vercel account or Team. Copy the tracked files from
+`test/provider-conformance/fixture-vercel` into the repository. Add this
+canonical `.hypervibe/spec.json`, replacing the project and repository:
+
+```json
+{
+  "version": 1,
+  "project": "hypervibe-vercel-live",
+  "gitRemoteUrl": "https://github.com/OWNER/REPOSITORY.git",
+  "secrets": {},
+  "environments": {
+    "production": {
+      "hosting": {
+        "provider": "vercel"
+      },
+      "services": {
+        "web": {
+          "workloadKind": "web",
+          "healthCheckPath": "/api/health",
+          "public": true
+        }
+      },
+      "email": {
+        "enabled": false
+      },
+      "envVars": {
+        "HYPERVIBE_CONFORMANCE_REVISION": "create"
+      },
+      "deploy": {
+        "strategy": "branch",
+        "trigger": "ci",
+        "branch": "main",
+        "autoDeploy": false
+      }
+    }
+  }
+}
+```
+
+Commit and push those files to `main` before running the harness. The test
+proves the local spec is byte-for-byte committed at `HEAD` and that every
+required fixture path is tracked before it can create a provider resource.
+`HYPERVIBE_LIVE_DATA_DIR` must be a persistent absolute directory; interrupted
+runs retain encrypted connection state, durable bindings, and cleanup
+authority there instead of losing them in a temporary directory.
+
+Export:
+
+```sh
+export HYPERVIBE_LIVE_REPOSITORY_WORKTREE="/absolute/path/to/disposable-checkout"
+export HYPERVIBE_LIVE_DATA_DIR="/absolute/path/to/hypervibe-vercel-live-state"
+export HYPERVIBE_TEST_GITHUB_REPOSITORY="OWNER/REPOSITORY"
+export HYPERVIBE_TEST_GITHUB_API_TOKEN="<fine-grained repository PAT, or classic PAT with repo + workflow>"
+export HYPERVIBE_TEST_VERCEL_ACCESS_TOKEN="<Vercel personal or Team token>"
+# Required only when the token should operate in a Team:
+export HYPERVIBE_TEST_VERCEL_TEAM_ID="team_..."
+
+HYPERVIBE_LIVE_MANAGED_HOSTING=vercel npm run test:providers:managed-live
+```
+
+The recommended GitHub credential is a
+[fine-grained repository PAT](https://github.com/settings/personal-access-tokens/new)
+whose selected repository is only the isolated fixture. Grant Metadata read
+plus Administration, Actions, Contents, Pull requests, Secrets, and Workflows
+read/write. A classic PAT with `repo` and `workflow` also works but cannot be
+restricted to one repository. The credential is stored through a repository-
+scoped `credentialsRef`; no package permission is needed for Vercel. The
+Vercel credential is a
+[personal access token](https://vercel.com/account/settings/tokens) scoped to
+the intended personal account or Team. It must be able to read that scope and
+create, configure, deploy, and delete Projects there; include the immutable
+`teamId` for a Team-scoped run. The harness writes temporary
+mode-`0600` credential files inside the persistent data directory and removes
+them immediately after Hypervibe verifies each connection; values never enter
+command arguments, plans, receipts, or test output.
+
+The default review and workflow timeouts are 30 minutes. Override them with
+positive millisecond values in `HYPERVIBE_LIVE_REVIEW_TIMEOUT_MS` and
+`HYPERVIBE_LIVE_WORKFLOW_TIMEOUT_MS`. If a review or workflow fails, the
+`afterAll` stage still changes the spec to desired-absent for the service,
+confirms its exact destroy action, waits for provider-confirmed absence, and
+preserves the data directory if cleanup cannot be proven. Do not delete that
+directory until the test reports verified teardown.
 
 Until the environment desired-absent lifecycle is implemented, the final live
 provider-context/local-binding assertion remains a test-first `todo`. A live

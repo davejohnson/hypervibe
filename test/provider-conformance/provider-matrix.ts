@@ -13,6 +13,22 @@ export interface ProviderCredentialField {
   optional?: boolean;
 }
 
+export interface ManagedWorkflowFixture {
+  /** Environment exercised by the managed workflow. Production keeps deploys manual. */
+  environmentName: 'production';
+  /** Fixture files that must already be committed in the isolated live repository. */
+  fixtureDirectory: string;
+  requiredPaths: string[];
+  /** Generated workflow filename, consumed through hv_ci_trigger/hv_ci_status. */
+  workflow: string;
+  serviceName: string;
+  service: {
+    workloadKind: 'web';
+    healthCheckPath: string;
+    public: true;
+  };
+}
+
 export interface HostingProviderContract {
   kind: 'hosting';
   /** Hypervibe provider id used in environments.*.hosting.provider. */
@@ -21,6 +37,8 @@ export interface HostingProviderContract {
   service: string;
   status: ProviderImplementationStatus;
   credentials: ProviderCredentialField[];
+  /** Opt-in managed GitHub workflow live-test profile. */
+  managedWorkflow?: ManagedWorkflowFixture;
   /** A promotion gate that is specific to this provider, if one exists. */
   implementationNote?: string;
 }
@@ -151,6 +169,10 @@ const vercelCredentials: ProviderCredentialField[] = [
   { field: 'teamId', environmentVariable: 'HYPERVIBE_TEST_VERCEL_TEAM_ID', optional: true },
 ];
 
+export const managedWorkflowGitHubCredentials: ProviderCredentialField[] = [
+  { field: 'apiToken', environmentVariable: 'HYPERVIBE_TEST_GITHUB_API_TOKEN' },
+];
+
 const neonCredentials: ProviderCredentialField[] = [
   { field: 'apiKey', environmentVariable: 'HYPERVIBE_TEST_NEON_API_KEY' },
   { field: 'organizationId', environmentVariable: 'HYPERVIBE_TEST_NEON_ORGANIZATION_ID', optional: true },
@@ -241,10 +263,27 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     provider: 'vercel',
     vendor: 'Vercel',
     service: 'Vercel Projects and Deployments',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: vercelCredentials,
+    managedWorkflow: {
+      environmentName: 'production',
+      fixtureDirectory: 'test/provider-conformance/fixture-vercel',
+      requiredPaths: [
+        '.hypervibe/spec.json',
+        'api/health.js',
+        'index.html',
+        'package.json',
+      ],
+      workflow: 'deploy-vercel-production.yml',
+      serviceName: 'web',
+      service: {
+        workloadKind: 'web',
+        healthCheckPath: '/api/health',
+        public: true,
+      },
+    },
     implementationNote:
-      'The source-less Project lifecycle adapter, personal/team token guidance, mocked safety contracts, native-Git-source guard, and exact-file REST deployment workflow are implemented. Promotion requires a complete live create/deploy/noop/destroy run through the managed GitHub workflow.',
+      'The source-less Project lifecycle adapter, personal/team token guidance, mocked safety contracts, native-Git-source guard, exact-file REST deployment workflow, and review-gated managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run.',
   },
 ];
 

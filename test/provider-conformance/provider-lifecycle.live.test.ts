@@ -253,6 +253,12 @@ liveDescribe('live provider lifecycle contract', () => {
         + 'Its registry, mocked lifecycle, and safe teardown contract must pass before live provisioning is enabled.'
       );
     }
+    if (contract.kind === 'hosting' && contract.managedWorkflow) {
+      throw new Error(
+        `Hosting provider "${contract.provider}" requires its managed GitHub workflow contract. `
+        + `Use HYPERVIBE_LIVE_MANAGED_HOSTING=${contract.provider} npm run test:providers:managed-live.`
+      );
+    }
     if (!existsSync(cliPath)) {
       throw new Error('dist/index.js is missing. Run npm run build before the live provider contract.');
     }

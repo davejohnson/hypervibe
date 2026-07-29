@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import '../../src/application/providers.js';
 import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import {
   cacheProviderContracts,
   databaseProviderContracts,
   hostingProviderContracts,
+  managedWorkflowGitHubCredentials,
   providerContracts,
 } from './provider-matrix.js';
 
@@ -97,6 +100,39 @@ describe('provider conformance matrix', () => {
       `${entry.kind}:${entry.provider}:${'engine' in entry ? entry.engine : 'hosting'}`
     ));
     expect(new Set(identities).size).toBe(identities.length);
+  });
+
+  it('keeps managed-workflow live profiles reviewable, exact, and fixture-backed', () => {
+    for (const entry of hostingProviderContracts.filter(
+      (provider) => provider.managedWorkflow
+    )) {
+      expect(entry.status).not.toBe('planned');
+      const managed = entry.managedWorkflow!;
+      expect(managed.environmentName).toBe('production');
+      expect(managed.workflow).toMatch(/^deploy-[a-z0-9-]+-production\.yml$/);
+      expect(new Set(managed.requiredPaths).size).toBe(
+        managed.requiredPaths.length
+      );
+      expect(managed.requiredPaths).toContain('.hypervibe/spec.json');
+      for (const requiredPath of managed.requiredPaths.filter(
+        (requiredPath) => requiredPath !== '.hypervibe/spec.json'
+      )) {
+        expect(
+          existsSync(path.join(
+            import.meta.dirname,
+            '../..',
+            managed.fixtureDirectory,
+            requiredPath
+          ))
+        ).toBe(true);
+      }
+    }
+    for (const credential of managedWorkflowGitHubCredentials) {
+      expect(credential.environmentVariable).toMatch(
+        environmentVariablePattern
+      );
+      expect(credential).not.toHaveProperty('value');
+    }
   });
 
   it('names a hosting fixture for every live datastore contract', () => {
@@ -193,18 +229,28 @@ describe('provider conformance matrix', () => {
     );
   });
 
-  it('tracks the implemented Vercel hosting slice without claiming live support', () => {
+  it('exposes the implemented Vercel slice only to the managed-workflow live gate', () => {
     const entry = hostingProviderContracts.find(
       (provider) => provider.provider === 'vercel'
     );
 
     expect(entry).toMatchObject({
-      status: 'planned',
+      status: 'ready-for-live',
       implementationNote: expect.stringContaining('implemented'),
       credentials: expect.arrayContaining([
         expect.objectContaining({ field: 'accessToken' }),
         expect.objectContaining({ field: 'teamId', optional: true }),
       ]),
+      managedWorkflow: {
+        environmentName: 'production',
+        workflow: 'deploy-vercel-production.yml',
+        serviceName: 'web',
+        service: {
+          workloadKind: 'web',
+          healthCheckPath: '/api/health',
+          public: true,
+        },
+      },
     });
     expect(providerRegistry.supports('vercel', 'hosting')).toBe(true);
   });
