@@ -36,6 +36,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:providers:roadmap": "vitest run --config vitest.provider-roadmap.config.ts",
     "test:providers:live": "npm run build && vitest run test/provider-conformance/provider-lifecycle.live.test.ts --testTimeout=1200000",
     "docs:tools": "node scripts/generate-tools-doc.mjs",
     "release:check": "npm test && npm run typecheck && npm run build && npm run prepublish-check",

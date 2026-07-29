@@ -113,14 +113,15 @@ describe('provider conformance matrix', () => {
     }
   });
 
-  it('marks providers supported only when the installed registry exposes that lifecycle', () => {
-    for (const entry of hostingProviderContracts.filter((provider) => provider.status === 'supported')) {
+  it('allows live candidates only after the installed registry exposes that lifecycle', () => {
+    const implemented = new Set(['ready-for-live', 'supported']);
+    for (const entry of hostingProviderContracts.filter((provider) => implemented.has(provider.status))) {
       expect(providerRegistry.supports(entry.provider, 'hosting')).toBe(true);
     }
-    for (const entry of databaseProviderContracts.filter((provider) => provider.status === 'supported')) {
+    for (const entry of databaseProviderContracts.filter((provider) => implemented.has(provider.status))) {
       expect(providerRegistry.supportsEngine(entry.provider, 'database', entry.engine)).toBe(true);
     }
-    for (const entry of cacheProviderContracts.filter((provider) => provider.status === 'supported')) {
+    for (const entry of cacheProviderContracts.filter((provider) => implemented.has(provider.status))) {
       expect(providerRegistry.supportsEngine(entry.provider, 'cache', entry.engine)).toBe(true);
     }
   });

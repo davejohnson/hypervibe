@@ -148,6 +148,14 @@ describe('connection guidance', () => {
         'personal access token',
         'Owner or Administrator',
       ],
+      neon: [
+        'https://console.neon.tech/app/settings/api-keys',
+        'personal API key or organization API key',
+        'create, read, and delete projects',
+        'project-scoped organization API key',
+        'organizationId',
+        'credentialsMap={"apiKey":"NEON_API_KEY"',
+      ],
       stripe: [
         'https://dashboard.stripe.com/apikeys',
         'sk_test_',

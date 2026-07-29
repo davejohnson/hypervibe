@@ -221,7 +221,7 @@ liveDescribe('live provider lifecycle contract', () => {
         + 'HYPERVIBE_LIVE_DATABASE, or HYPERVIBE_LIVE_CACHE.'
       );
     }
-    if (contract.status !== 'supported') {
+    if (contract.status === 'planned') {
       throw new Error(
         `${contract.kind} provider "${contract.provider}" is still planned. `
         + 'Its registry, mocked lifecycle, and safe teardown contract must pass before live provisioning is enabled.'

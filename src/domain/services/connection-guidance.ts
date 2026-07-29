@@ -426,6 +426,21 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'hv_connect provider="supabase" credentialsRef="dotenv:/absolute/path/.env#SUPABASE_ACCESS_TOKEN"',
   },
+  neon: {
+    provider: 'neon',
+    displayName: 'Neon',
+    tokenType: 'Neon personal API key or organization API key with project create/read/delete access (not a project-scoped organization key)',
+    setupUrl: 'https://console.neon.tech/app/settings/api-keys',
+    permissions: [
+      'Use a personal API key for personal projects, or a personal API key with organizationId / an organization API key for organization projects; the identity must be allowed to create, read, and delete projects in the target account or organization.',
+      'Do not use a project-scoped organization API key: Neon limits it to one existing project and explicitly prevents destructive project operations such as project deletion.',
+    ],
+    credentialExample: 'hv_connect provider="neon" credentialsRef="dotenv:/absolute/path/.env#NEON_API_KEY"',
+    notes: [
+      'organizationId is required when a personal API key should manage organization-owned projects; use credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiKey":"NEON_API_KEY","organizationId":"NEON_ORGANIZATION_ID"} in that case. Omit it for personal projects or when an organization API key already infers the organization.',
+      'regionId is optional and uses Neon region IDs such as aws-us-west-2. The API key token is shown only when created, so store it in a dotenv file or secret manager instead of chat.',
+    ],
+  },
   tunnel: {
     provider: 'tunnel',
     displayName: 'Tunnel',
