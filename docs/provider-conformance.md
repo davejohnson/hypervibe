@@ -194,6 +194,15 @@ The extended matrix also includes:
   hosting. Vercel is intentionally absent from the database matrix because
   [Vercel Postgres is no longer available](https://vercel.com/docs/postgres);
   its current Postgres offerings are provider-owned Marketplace integrations.
+  The replacement hosting slice binds a verified personal or Team scope,
+  creates one source-less Project per logical web service, and keeps project,
+  production-variable, and deletion mutations inside spec/plan/apply. Its
+  managed workflow uploads the exact checked-out files through the REST API,
+  reconciles deployments by repository and full Git SHA before creating one,
+  and blocks Vercel-native Git links. It supports public framework/static web
+  projects and rejects arbitrary long-lived start commands or build overrides
+  it cannot apply. Promotion still requires a complete live
+  create/deploy/noop/destroy run.
 - [Neon Postgres](https://api-docs.neon.tech/reference/use-cases) as its own
   database provider. Neon owns the project, branch, endpoint, database, and
   deletion lifecycle even when a Vercel integration wires it to an app. Its

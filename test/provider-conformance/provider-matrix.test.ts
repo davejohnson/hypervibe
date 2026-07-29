@@ -189,4 +189,20 @@ describe('provider conformance matrix', () => {
       true
     );
   });
+
+  it('tracks the implemented Vercel hosting slice without claiming live support', () => {
+    const entry = hostingProviderContracts.find(
+      (provider) => provider.provider === 'vercel'
+    );
+
+    expect(entry).toMatchObject({
+      status: 'planned',
+      implementationNote: expect.stringContaining('implemented'),
+      credentials: expect.arrayContaining([
+        expect.objectContaining({ field: 'accessToken' }),
+        expect.objectContaining({ field: 'teamId', optional: true }),
+      ]),
+    });
+    expect(providerRegistry.supports('vercel', 'hosting')).toBe(true);
+  });
 });

@@ -196,6 +196,8 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     service: 'Vercel Projects and Deployments',
     status: 'planned',
     credentials: vercelCredentials,
+    implementationNote:
+      'The source-less Project lifecycle adapter, personal/team token guidance, mocked safety contracts, native-Git-source guard, and exact-file REST deployment workflow are implemented. Promotion requires a complete live create/deploy/noop/destroy run through the managed GitHub workflow.',
   },
 ];
 
