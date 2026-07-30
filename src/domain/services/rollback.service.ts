@@ -11,6 +11,7 @@ import { syncProjectIntent } from './intent.service.js';
 import { SpecStore } from '../spec/spec.store.js';
 import { ConvergeExecutor, type ActionResult, type PlanRunDocument } from '../plan/converge.executor.js';
 import type { PlanAction } from '../plan/plan.types.js';
+import { resolvePlanActionAuthority } from '../plan/action-authority.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { DeployResult } from './deploy.orchestrator.js';
@@ -203,6 +204,20 @@ export async function executeRollback(params: {
   };
 
   const handler = async (action: PlanAction): Promise<ActionResult> => {
+    const authority = resolvePlanActionAuthority(action);
+    if (
+      authority?.capability !== 'hosting.service.rollback'
+      || authority.resource.provider !== adapter.name
+      || !planned.serviceNames.includes(authority.resource.name)
+      || action.metadata?.fromRunId !== planned.fromRunId
+    ) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Rollback action ${action.id} has stale mutation authority`,
+        error: 'The reviewed provider, service, or source deploy run does not match this rollback. Start a new hv_rollback.',
+      };
+    }
     const deployed = await ensureDeploy();
     const serviceName = action.resource.name;
     if (deployed.success) {

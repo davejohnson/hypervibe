@@ -1,7 +1,4 @@
-import {
-  HOSTING_ENVIRONMENT_ENSURE_OPERATION,
-  PlanService,
-} from '../domain/plan/plan.service.js';
+import { PlanService } from '../domain/plan/plan.service.js';
 import {
   ConvergeExecutor,
   fingerprintObservedState,
@@ -22,32 +19,28 @@ import {
   applyCloudflareDomainRegistration,
   isCloudflareDomainRegistrationAction,
 } from '../domain/services/domain-registration.service.js';
-import { applyIosAction, isIosAction } from '../domain/services/appstore-plan.service.js';
-import { applyQueueAction, isQueueAction } from '../domain/services/queue-plan.service.js';
+import { applyIosAction } from '../domain/services/appstore-plan.service.js';
+import { applyQueueAction } from '../domain/services/queue-plan.service.js';
 import { resolveQueueEnvVars } from '../domain/services/queue-env.js';
-import { applyStorageAction, isStorageAction, resolveStorageServiceEnvVars } from '../domain/services/storage-plan.service.js';
+import { applyStorageAction, resolveStorageServiceEnvVars } from '../domain/services/storage-plan.service.js';
 import {
-  isDelegatedSecretAction,
   recordDelegatedSecretBindings,
   type DelegatedSecretInputRequirement,
 } from '../domain/services/delegated-secret.service.js';
 import {
   applyGitHubActionsAppliedSpecHash,
   applyGitHubActionsDeploy,
-  isGitHubActionsAppliedSpecHashAction,
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
 import {
   applyGitHubCollaboration,
-  isGitHubCollaborationAction,
+  resolveCollaborationRepository,
 } from '../domain/services/repo-collaboration.service.js';
 import {
   applyGitHubInfrastructure,
   applyGitHubNativeSetting,
   applyGitHubOpenAISecret,
-  isGitHubInfrastructureAction,
-  isGitHubNativeSettingAction,
-  isGitHubOpenAISecretAction,
+  resolveGitHubInfrastructureRepository,
 } from '../domain/services/github-infrastructure.service.js';
 import { setupCustomDomain } from '../domain/services/domain.service.js';
 import {
@@ -56,18 +49,11 @@ import {
   GITHUB_TOKEN_URLS,
 } from '../domain/services/connection-guidance.js';
 import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
-import {
-  isHostingEnvRemovalAction,
-  removeHostingEnvVars,
-  syncHostingEnvVars,
-} from '../domain/services/hosting-env.service.js';
+import { removeHostingEnvVars, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import {
   applyStripeCatalogAction,
   applyStripeHostingEnvSync,
   applyStripeWebhookAction,
-  isStripeCatalogAction,
-  isStripeHostingEnvSyncAction,
-  isStripeWebhookAction,
   resolveStripeIntegrationState,
   stripeIntegrationFingerprint,
 } from '../domain/services/stripe-env.service.js';
@@ -82,16 +68,16 @@ import {
   buildDatabaseEnvVarsFromComponent,
 } from '../domain/services/database-env.js';
 import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
-import { CACHE_OPERATIONS, isCacheAction } from '../domain/services/cache-plan.service.js';
 import type { CacheEngine } from '../domain/ports/cache.port.js';
 import type { DatabaseType } from '../domain/ports/database.port.js';
 import { setupBootstrapEmail } from '../domain/services/bootstrap-email.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import {
   applyProviderNativeDeploySourceAction,
-  isProviderNativeDeploySourceAction,
 } from '../domain/services/provider-native-deploy-source.service.js';
+import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
+import { resolvePlanActionAuthority } from '../domain/plan/action-authority.js';
 
 /**
  * The shared plan-apply pipeline: connection gating, TOCTOU re-observe,
@@ -114,6 +100,18 @@ function stringArrayField(record: Record<string, unknown> | null, key: string): 
   return Array.isArray(value)
     ? value.filter((entry): entry is string => typeof entry === 'string')
     : [];
+}
+
+function blockedActionIdentity(
+  action: PlanAction,
+  expected: string
+): ActionResult {
+  return {
+    success: false,
+    status: 'blocked',
+    message: `Action ${action.id} does not match its current mutation target`,
+    error: `${expected} Re-run hv_plan to review one current action with an exact resource identity.`,
+  };
 }
 
 export type ConnectionBlock = {
@@ -523,13 +521,42 @@ export async function executePlanApply(ctx: CommandContext, params: {
         error: blockedReason,
       };
     }
-    if (action.metadata?.operation === HOSTING_ENVIRONMENT_ENSURE_OPERATION) {
+    const authority = resolvePlanActionAuthority(action);
+    if (!authority) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `No mutation authority exists for ${action.id}`,
+        error: 'The persisted action kind, provider, type, and operation do not map to one supported mutation capability.',
+      };
+    }
+    const capability = authority.capability;
+
+    if (capability === 'hosting.environment.ensure') {
       return ensureHostingEnvironment(ctx, applyProject, envName, action);
     }
-    if (isCloudflareDomainRegistrationAction(action)) {
+    if (capability === 'domain.registration.mutate') {
+      const expectedDomain = envSpec.domain?.trim().replace(/\.$/, '').toLowerCase();
+      if (!expectedDomain || action.resource.name !== expectedDomain) {
+        return blockedActionIdentity(
+          action,
+          `Reviewed domain is ${action.resource.name}; the current registration target is ${expectedDomain ?? 'unset'}.`
+        );
+      }
       return applyCloudflareDomainRegistration({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
-    if (isGitHubActionsDeployAction(action)) {
+    if (capability === 'github.ci.sync') {
+      const expectedRepository = parseGitHubRepoFromRemote(applyProject.gitRemoteUrl);
+      if (
+        action.resource.name !== `deploy-branch:${envName}`
+        || stringField(asRecord(action.metadata), 'repository') !== expectedRepository
+        || stringField(asRecord(action.metadata), 'provider') !== envSpec.hosting.provider
+      ) {
+        return blockedActionIdentity(
+          action,
+          `The GitHub deploy target must be ${expectedRepository ?? 'an unset repository'}/${envName} for ${envSpec.hosting.provider}.`
+        );
+      }
       return applyGitHubActionsDeploy({
         project: applyProject,
         spec,
@@ -537,13 +564,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentSpec: envSpec,
       });
     }
-    if (isGitHubActionsAppliedSpecHashAction(action)) {
+    if (capability === 'github.applied-spec-hash.sync') {
       const desiredHash = stringField(asRecord(action.metadata), 'desiredHash');
-      if (!desiredHash) {
+      const expectedRepository = parseGitHubRepoFromRemote(applyProject.gitRemoteUrl);
+      if (
+        !desiredHash
+        || action.resource.name !== `applied-spec-hash:${envName}`
+        || stringField(asRecord(action.metadata), 'repository') !== expectedRepository
+        || stringField(asRecord(action.metadata), 'environmentName') !== envName
+      ) {
         return {
           success: false,
-          message: 'Applied deployment contract action is invalid',
-          error: 'Plan action is missing desiredHash.',
+          status: 'blocked',
+          message: 'Applied deployment contract action has stale mutation authority',
+          error: 'The reviewed repository, environment, resource name, or desired hash no longer matches. Re-run hv_plan.',
         };
       }
       return applyGitHubActionsAppliedSpecHash({
@@ -552,30 +586,60 @@ export async function executePlanApply(ctx: CommandContext, params: {
         desiredHash,
       });
     }
-    if (isGitHubCollaborationAction(action)) {
+    if (capability === 'github.collaboration.sync') {
+      const expectedRepository = resolveCollaborationRepository(applyProject, spec);
+      if (action.resource.name !== expectedRepository) {
+        return blockedActionIdentity(
+          action,
+          `Reviewed repository is ${action.resource.name}; collaboration currently targets ${expectedRepository ?? 'no repository'}.`
+        );
+      }
       return applyGitHubCollaboration({ project: applyProject, spec, environmentName: envName });
     }
-    if (isGitHubInfrastructureAction(action)) {
+    if (capability === 'github.infrastructure.sync') {
+      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
+      if (action.resource.name !== expectedRepository) {
+        return blockedActionIdentity(
+          action,
+          `Reviewed repository is ${action.resource.name}; GitHub infrastructure currently targets ${expectedRepository ?? 'no repository'}.`
+        );
+      }
       return applyGitHubInfrastructure({ action });
     }
-    if (isGitHubOpenAISecretAction(action)) {
+    if (capability === 'github.openai-secret.sync') {
+      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
+      if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
+        return blockedActionIdentity(
+          action,
+          `The reviewed secret destination must be ${expectedRepository ?? 'a configured GitHub repository'}.`
+        );
+      }
       return applyGitHubOpenAISecret({ project: applyProject, environmentName: envName, action });
     }
-    if (isGitHubNativeSettingAction(action)) {
+    if (capability === 'github.setting.sync') {
+      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
+      if (action.resource.name !== expectedRepository) {
+        return blockedActionIdentity(
+          action,
+          `Reviewed repository is ${action.resource.name}; GitHub settings currently target ${expectedRepository ?? 'no repository'}.`
+        );
+      }
       return applyGitHubNativeSetting({ action });
     }
-    if (isIosAction(action)) {
+    if (capability === 'appstore.mutate') {
       return applyIosAction({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
-    if (isQueueAction(action)) {
+    if (capability === 'queue.mutate') {
       return applyQueueAction({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
-    if (isStorageAction(action)) {
+    if (capability === 'storage.mutate') {
       return applyStorageAction({ project: applyProject, envName, environmentSpec: envSpec, action });
     }
-    if (isDelegatedSecretAction(action)) {
+    if (capability === 'hosting.delegated-secret.sync') {
       const value = delegatedSecretEnvVars?.[action.resource.name];
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+      const destinationServices = stringArrayField(asRecord(action.metadata), 'services');
+      const invalidDestination = destinationServices.find((serviceName) => !envSpec.services[serviceName]);
       if (value === undefined || !latestEnvironment) {
         return {
           success: false,
@@ -585,8 +649,24 @@ export async function executePlanApply(ctx: CommandContext, params: {
             : `Environment "${envName}" is not tracked locally.`,
         };
       }
+      if (
+        action.resource.provider !== envSpec.hosting.provider
+        || destinationServices.length === 0
+        || invalidDestination
+      ) {
+        return {
+          success: false,
+          status: 'blocked',
+          message: `Delegated secret action ${action.id} has invalid destination authority`,
+          error: action.resource.provider !== envSpec.hosting.provider
+            ? `Plan targets ${action.resource.provider}, but ${envName} uses ${envSpec.hosting.provider}.`
+            : invalidDestination
+              ? `Service "${invalidDestination}" is not declared in ${envName}.`
+              : 'The reviewed action does not declare any destination services.',
+        };
+      }
       const failures: string[] = [];
-      for (const serviceName of Object.keys(envSpec.services)) {
+      for (const serviceName of destinationServices) {
         const service = ctx.repos.services.findByProjectAndName(project.id, serviceName);
         if (!service) {
           failures.push(`${serviceName}: service is not tracked locally`);
@@ -611,10 +691,10 @@ export async function executePlanApply(ctx: CommandContext, params: {
           }
         : {
             success: true,
-            message: `Synced delegated secret ${action.resource.name} to ${Object.keys(envSpec.services).length} service(s)`,
+            message: `Synced delegated secret ${action.resource.name} to ${destinationServices.length} service(s)`,
           };
     }
-    if (isStripeHostingEnvSyncAction(action)) {
+    if (capability === 'stripe.hosting-env.sync') {
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
       const service = ctx.repos.services.findByProjectAndName(project.id, action.resource.name);
       if (!latestEnvironment || !service) {
@@ -634,7 +714,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         action,
       });
     }
-    if (isStripeCatalogAction(action)) {
+    if (capability === 'stripe.catalog.mutate') {
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
       if (!latestEnvironment) {
         return {
@@ -649,7 +729,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         action,
       });
     }
-    if (isStripeWebhookAction(action)) {
+    if (capability === 'stripe.webhook.mutate') {
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
       if (!latestEnvironment) {
         return {
@@ -665,9 +745,18 @@ export async function executePlanApply(ctx: CommandContext, params: {
         action,
       });
     }
-    if (isHostingEnvRemovalAction(action)) {
+    if (capability === 'hosting.env.remove') {
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
       const service = ctx.repos.services.findByProjectAndName(project.id, action.resource.name);
+      if (
+        action.resource.provider !== envSpec.hosting.provider
+        || !envSpec.services[action.resource.name]
+      ) {
+        return blockedActionIdentity(
+          action,
+          `Environment ${envName} allows env removal only from a declared ${envSpec.hosting.provider} service.`
+        );
+      }
       if (!latestEnvironment || !service) {
         return {
           success: false,
@@ -684,7 +773,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         keys: stringArrayField(asRecord(action.metadata), 'keys'),
       });
     }
-    if (isProviderNativeDeploySourceAction(action)) {
+    if (capability === 'hosting.deploy-source.disconnect') {
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
       if (!latestEnvironment) {
         return {
@@ -700,40 +789,40 @@ export async function executePlanApply(ctx: CommandContext, params: {
         action,
       });
     }
-    if (isCacheAction(action) && action.metadata?.operation === CACHE_OPERATIONS.ensure) {
+    if (capability === 'cache.provision') {
       return createCache(ctx, applyProject, envName, action);
     }
-    if (isCacheAction(action) && action.metadata?.operation === CACHE_OPERATIONS.unwire) {
+    if (capability === 'cache.env.remove') {
       return unwireCache(ctx, applyProject, envName, action);
     }
-    if (isCacheAction(action) && action.metadata?.operation === CACHE_OPERATIONS.destroy) {
+    if (capability === 'cache.destroy') {
       return destroyCache(ctx, applyProject, envName, action);
     }
-    if (action.resource.kind === 'database' && action.type === 'create') {
+    if (capability === 'database.provision') {
       return createDatabase(ctx, applyProject, envName, action);
     }
-    if (action.resource.kind === 'database' && action.metadata?.operation === 'databaseSeed') {
+    if (capability === 'database.seed') {
       return applyDatabaseSeed(ctx, applyProject, envName, action);
     }
-    if (action.resource.kind === 'database' && action.type === 'destroy') {
+    if (capability === 'database.destroy') {
       return destroyDatabase(ctx, applyProject, envName, action);
     }
-    if (action.resource.kind === 'service' && action.type === 'destroy') {
-      if (action.metadata?.operation === 'taskServiceCleanup') {
-        return destroyTaskService(applyProject, action);
-      }
-      if (action.metadata?.operation === 'previousHostingDestroy') {
-        return destroyPreviousHostingService(ctx, applyProject, envName, action);
-      }
+    if (capability === 'hosting.task-service.destroy') {
+      return destroyTaskService(applyProject, action);
+    }
+    if (capability === 'hosting.previous-service.destroy') {
+      return destroyPreviousHostingService(ctx, applyProject, envName, action);
+    }
+    if (capability === 'hosting.service.destroy') {
       return destroyService(ctx, applyProject, spec, envName, action);
     }
-    if (action.resource.kind === 'domain') {
-      return applyDomain(ctx, applyProject, envName, action);
+    if (capability === 'domain.configure') {
+      return applyDomain(ctx, applyProject, envName, envSpec, action);
     }
-    if (action.resource.kind === 'email' && action.metadata?.operation === 'emailSetup') {
-      return applyEmailSetup(ctx, applyProject, envName, envSpec);
+    if (capability === 'email.configure') {
+      return applyEmailSetup(ctx, applyProject, envName, envSpec, action);
     }
-    if (action.resource.kind === 'environment') {
+    if (capability === 'local.environment.record') {
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
       return latestEnvironment
         ? { success: true, message: `Environment "${envName}" is recorded locally` }
@@ -743,10 +832,21 @@ export async function executePlanApply(ctx: CommandContext, params: {
             error: 'Re-run hv_plan to create the local environment record.',
           };
     }
-    if (action.resource.kind === 'project') {
-      return ensureHostingProject(ctx, applyProject, envName, envSpec.hosting.provider);
+    if (capability === 'hosting.project.ensure') {
+      return ensureHostingProject(ctx, applyProject, envName, envSpec.hosting.provider, action);
     }
-    if (action.resource.kind === 'service') {
+    if (capability === 'hosting.service.converge') {
+      if (
+        action.resource.provider !== envSpec.hosting.provider
+        || !envSpec.services[action.resource.name]
+      ) {
+        return {
+          success: false,
+          status: 'blocked',
+          message: `Service action ${action.id} does not match the current environment spec`,
+          error: `Reviewed target is ${action.resource.provider}/${action.resource.name}; expected provider ${envSpec.hosting.provider} and a declared service name.`,
+        };
+      }
       const result = await ensureServiceBootstrap(action.resource.name);
       return bootstrapActionResultFromSummary(action, result);
     }
@@ -809,19 +909,37 @@ async function applyEmailSetup(
   ctx: CommandContext,
   project: Project,
   envName: string,
-  environmentSpec: EnvironmentSpec
+  environmentSpec: EnvironmentSpec,
+  action: PlanAction
 ): Promise<ActionResult> {
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
   if (!environment) {
     return { success: false, message: 'Environment not found locally', error: `No local environment "${envName}"` };
   }
-  const workloads = Object.keys(environmentSpec.services)
-    .map((name) => ctx.repos.services.findByProjectAndName(project.id, name))
-    .filter((service): service is NonNullable<typeof service> => Boolean(service));
-  if (workloads.length !== Object.keys(environmentSpec.services).length) {
+  const declaredServices = stringArrayField(asRecord(action.metadata), 'services');
+  const expectedServices = Object.keys(environmentSpec.services).sort();
+  const declaredDomain = stringField(asRecord(action.metadata), 'domain');
+  const expectedDomain = environmentSpec.domain;
+  if (
+    action.resource.provider !== 'sendgrid'
+    || action.resource.name !== (expectedDomain ?? envName)
+    || JSON.stringify([...declaredServices].sort()) !== JSON.stringify(expectedServices)
+    || declaredDomain !== expectedDomain
+  ) {
     return {
       success: false,
-      message: 'Cannot configure email before every service is tracked locally',
+      status: 'blocked',
+      message: `Email action ${action.id} does not match its declared environment targets`,
+      error: 'Re-run hv_plan so the SendGrid domain and service destinations are frozen into one current action.',
+    };
+  }
+  const workloads = declaredServices
+    .map((name) => ctx.repos.services.findByProjectAndName(project.id, name))
+    .filter((service): service is NonNullable<typeof service> => Boolean(service));
+  if (workloads.length !== declaredServices.length) {
+    return {
+      success: false,
+      message: 'Cannot configure email before every declared service is tracked locally',
       error: 'Apply the service actions first, then re-run hv_plan.',
     };
   }
@@ -829,9 +947,17 @@ async function applyEmailSetup(
   if (!hosting.success || !hosting.adapter) {
     return { success: false, message: 'Hosting adapter unavailable for email setup', error: hosting.error };
   }
+  if (hosting.adapter.name !== environmentSpec.hosting.provider) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'Hosting adapter does not match the reviewed email action',
+      error: `Environment uses ${environmentSpec.hosting.provider}, but resolved ${hosting.adapter.name}.`,
+    };
+  }
   const summary: Record<string, unknown> = {};
   const setup = await setupBootstrapEmail({
-    domain: environmentSpec.domain,
+    domain: declaredDomain,
     workloads,
     environment,
     hostingAdapter: hosting.adapter,
@@ -847,7 +973,7 @@ async function applyEmailSetup(
     };
   }
   const apiKeySynced = summary.sendgridApiKeySynced === true;
-  const dnsSynced = !environmentSpec.domain || summary.sendgridDnsSynced === true;
+  const dnsSynced = !declaredDomain || summary.sendgridDnsSynced === true;
   if (!apiKeySynced || !dnsSynced) {
     return {
       success: false,
@@ -860,7 +986,7 @@ async function applyEmailSetup(
     email: {
       enabled: true,
       provider: 'sendgrid',
-      domain: environmentSpec.domain ?? null,
+      domain: declaredDomain ?? null,
       services: workloads.map((service) => service.name).sort(),
       configuredAt: new Date().toISOString(),
     },
@@ -887,7 +1013,8 @@ async function ensureHostingProject(
   ctx: CommandContext,
   project: Project,
   envName: string,
-  provider: string
+  provider: string,
+  action: PlanAction
 ): Promise<ActionResult> {
   let environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
   if (!environment) {
@@ -895,6 +1022,17 @@ async function ensureHostingProject(
       success: false,
       message: 'Environment not found locally',
       error: `No local environment "${envName}"`,
+    };
+  }
+  if (
+    action.resource.provider !== provider
+    || action.resource.name !== envName
+  ) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: `Project action ${action.id} does not match the current hosting target`,
+      error: `Reviewed target is ${action.resource.provider}/${action.resource.name}; expected ${provider}/${envName}.`,
     };
   }
 
@@ -926,6 +1064,14 @@ async function ensureHostingProject(
       success: false,
       message: `Cannot ensure ${provider} project`,
       error: adapterResult.error ?? `${provider} hosting adapter is unavailable`,
+    };
+  }
+  if (adapterResult.adapter.name !== action.resource.provider) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'Hosting adapter does not match the reviewed project action',
+      error: `Plan targets ${action.resource.provider}, but resolved ${adapterResult.adapter.name}.`,
     };
   }
   const receipt = await adapterResult.adapter.ensureProject(project.name, environment);
@@ -983,6 +1129,17 @@ async function ensureHostingEnvironment(
       error: `No local environment "${envName}"`,
     };
   }
+  if (
+    action.resource.name !== envName
+    || action.resource.provider !== project.defaultPlatform
+  ) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: `Environment action ${action.id} does not match the current hosting target`,
+      error: `Reviewed target is ${action.resource.provider}/${action.resource.name}; expected ${project.defaultPlatform}/${envName}.`,
+    };
+  }
 
   const currentBindings = parseHostingBindings(environment);
   if (!currentBindings.projectId) {
@@ -1004,6 +1161,14 @@ async function ensureHostingEnvironment(
       message: `Cannot ensure provider environment "${envName}"`,
       error: adapterResult.error
         ?? `${action.resource.provider} does not implement explicit environment lifecycle`,
+    };
+  }
+  if (adapterResult.adapter.name !== action.resource.provider) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'Hosting adapter does not match the reviewed environment action',
+      error: `Plan targets ${action.resource.provider}, but resolved ${adapterResult.adapter.name}.`,
     };
   }
 
@@ -1077,6 +1242,7 @@ async function applyDomain(
   ctx: CommandContext,
   project: Project,
   envName: string,
+  environmentSpec: EnvironmentSpec,
   action: PlanAction
 ): Promise<ActionResult> {
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
@@ -1085,6 +1251,17 @@ async function applyDomain(
       success: false,
       message: 'Environment not found locally',
       error: `No local environment "${envName}"`,
+    };
+  }
+  if (
+    action.resource.provider !== environmentSpec.hosting.provider
+    || action.resource.name !== environmentSpec.domain
+  ) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: `Domain action ${action.id} does not match the current environment spec`,
+      error: `Reviewed target is ${action.resource.provider}/${action.resource.name}; expected ${environmentSpec.hosting.provider}/${environmentSpec.domain ?? 'no domain'}.`,
     };
   }
 

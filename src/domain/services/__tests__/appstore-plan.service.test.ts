@@ -188,7 +188,7 @@ describe('appstore-plan.service', () => {
           resource: { kind: 'ios', name: BUNDLE, provider: 'appstoreconnect' },
           verified: true,
           reason: 'test',
-          metadata: { operation: 'iosBundleIdRegister' },
+          metadata: { operation: 'iosBundleIdRegister', bundleId: BUNDLE },
         },
       });
 
@@ -196,6 +196,31 @@ describe('appstore-plan.service', () => {
       expect(register).toHaveBeenCalledWith(BUNDLE, 'exampleapp', 'IOS');
       const bindings = new EnvironmentRepository().findById(environment.id)!.platformBindings as Record<string, Record<string, unknown>>;
       expect(bindings.ios.bundleIdResourceId).toBe('bid-new');
+    });
+
+    it('rejects a different bundle identity before any App Store mutation', async () => {
+      const register = vi.spyOn(AppStoreConnectAdapter.prototype, 'registerBundleId');
+
+      const result = await applyIosAction({
+        project,
+        envName: 'production',
+        environmentSpec: envSpec(),
+        action: {
+          id: `ios:bundle-id:${BUNDLE}`,
+          type: 'create',
+          resource: { kind: 'ios', name: BUNDLE, provider: 'appstoreconnect' },
+          verified: true,
+          reason: 'test',
+          metadata: {
+            operation: 'iosBundleIdRegister',
+            bundleId: 'com.example.different',
+          },
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain('stale mutation authority');
+      expect(register).not.toHaveBeenCalled();
     });
 
     it('fails capability enables with per-type errors in the receipt', async () => {
@@ -218,7 +243,7 @@ describe('appstore-plan.service', () => {
           resource: { kind: 'ios', name: BUNDLE, provider: 'appstoreconnect' },
           verified: true,
           reason: 'test',
-          metadata: { operation: 'iosCapabilitiesEnable', missingCapabilities: ['BOGUS_CAP'] },
+          metadata: { operation: 'iosCapabilitiesEnable', bundleId: BUNDLE, missingCapabilities: ['BOGUS_CAP'] },
         },
       });
 
@@ -241,7 +266,7 @@ describe('appstore-plan.service', () => {
           resource: { kind: 'ios', name: BUNDLE, provider: 'appstoreconnect' },
           verified: true,
           reason: 'test',
-          metadata: { operation: 'iosAppRecord', manual: true },
+          metadata: { operation: 'iosAppRecord', bundleId: BUNDLE, manual: true },
         },
       });
 
@@ -265,7 +290,7 @@ describe('appstore-plan.service', () => {
           resource: { kind: 'ios', name: BUNDLE, provider: 'appstoreconnect' },
           verified: true,
           reason: 'test',
-          metadata: { operation: 'iosAppRecord', manual: true },
+          metadata: { operation: 'iosAppRecord', bundleId: BUNDLE, manual: true },
         },
       });
 
@@ -297,7 +322,7 @@ describe('appstore-plan.service', () => {
         project,
         envName: 'production',
         environmentSpec: envSpec(),
-        action: { ...baseAction, metadata: { operation: 'iosBetaGroupEnsure', groupName: 'External Testers' } },
+        action: { ...baseAction, metadata: { operation: 'iosBetaGroupEnsure', bundleId: BUNDLE, groupName: 'External Testers' } },
       });
       expect(created.success).toBe(true);
       expect(created.data).toMatchObject({ groupId: 'grp-new', created: true });
@@ -310,7 +335,7 @@ describe('appstore-plan.service', () => {
         project,
         envName: 'production',
         environmentSpec: envSpec(),
-        action: { ...baseAction, type: 'update', metadata: { operation: 'iosBetaGroupEnsure', groupName: 'External Testers', groupId: 'grp-new' } },
+        action: { ...baseAction, type: 'update', metadata: { operation: 'iosBetaGroupEnsure', bundleId: BUNDLE, groupName: 'External Testers', groupId: 'grp-new' } },
       });
       expect(updated.success).toBe(true);
       expect(update).toHaveBeenCalledWith('grp-new', expect.objectContaining({ publicLinkEnabled: true }));
@@ -336,7 +361,7 @@ describe('appstore-plan.service', () => {
           resource: { kind: 'ios', name: 'External Testers', provider: 'appstoreconnect' },
           verified: true,
           reason: 'test',
-          metadata: { operation: 'iosGroupTestersEnsure', groupName: 'External Testers', missingTesters: ['b@example.com'] },
+          metadata: { operation: 'iosGroupTestersEnsure', bundleId: BUNDLE, groupName: 'External Testers', missingTesters: ['b@example.com'] },
         },
       });
 

@@ -269,13 +269,53 @@ export async function applyStorageAction(params: {
 }): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
   const environment = envRepo.findByProjectAndName(params.project.id, params.envName);
   if (!environment) return { success: false, message: 'Environment not found locally', error: `No local environment "${params.envName}"` };
-  const name = String(params.action.metadata?.storageName ?? params.action.resource.name);
+  const name = typeof params.action.metadata?.storageName === 'string'
+    ? params.action.metadata.storageName
+    : '';
   const operation = String(params.action.metadata?.operation ?? '');
   const bindings = parseStorageBindings(environment);
   const contexts = parseStorageProviderContexts(environment);
+  const desired = params.environmentSpec.storage?.[name];
+  const plannedService = typeof params.action.metadata?.serviceName === 'string'
+    ? params.action.metadata.serviceName
+    : undefined;
+  const binding = bindings[name];
+  const identityMatches = Boolean(name)
+    && name === params.action.resource.name
+    && (
+      operation === STORAGE_OPERATIONS.ensure
+        ? desired?.provider === params.action.resource.provider
+        : operation === STORAGE_OPERATIONS.wire
+          ? desired?.provider === params.action.resource.provider
+            && Boolean(plannedService && desired.injectInto.includes(plannedService))
+          : operation === STORAGE_OPERATIONS.unwire
+            ? binding?.provider === params.action.resource.provider
+              && Boolean(plannedService)
+            : operation === STORAGE_OPERATIONS.destroy
+              ? !desired
+                && binding?.provider === params.action.resource.provider
+                && params.action.metadata?.externalId === binding.externalId
+              : false
+    );
+  if (!identityMatches) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: `Storage action "${params.action.id}" has stale mutation authority`,
+      error: `The reviewed bucket, provider, service destination, or durable provider id no longer matches environment "${params.envName}". Re-run hv_plan.`,
+    };
+  }
   const storageResult = await adapterFactory.getStorageAdapter(params.action.resource.provider, params.project);
   if (!storageResult.success || !storageResult.adapter) return { success: false, message: 'Storage adapter unavailable', error: storageResult.error };
   const adapter = storageResult.adapter;
+  if (adapter.name !== params.action.resource.provider) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: `Storage action "${params.action.id}" resolved the wrong provider adapter`,
+      error: `Plan targets ${params.action.resource.provider}, but the resolved adapter is ${adapter.name}.`,
+    };
+  }
 
   if (params.action.metadata?.blockedReason) {
     return { success: false, status: 'blocked', message: params.action.reason, error: params.action.metadata.blockedReason === 'unmanaged_conflict'
@@ -292,7 +332,7 @@ export async function applyStorageAction(params: {
     const contextResult = await adapter.ensureContext(params.project.name, environment, context);
     if (!contextResult.receipt.success || !contextResult.context) return { success: false, message: contextResult.receipt.message, error: contextResult.receipt.error };
     context = contextResult.context;
-    const spec = params.environmentSpec.storage?.[name];
+    const spec = desired;
     if (!spec) return { success: false, message: `Storage "${name}" is absent from the current spec` };
     const result = await adapter.ensureBucket(environment, context, name, spec.region);
     if (!result.receipt.success || !result.externalId) return { success: false, message: result.receipt.message, error: result.receipt.error };
@@ -301,7 +341,6 @@ export async function applyStorageAction(params: {
     return { success: true, message: result.receipt.message, data: { externalId: result.externalId, region: spec.region } };
   }
 
-  const binding = bindings[name];
   const context = contexts[binding?.provider] ?? (params.environmentSpec.hosting.provider === binding?.provider
     ? (() => { const root = environment.platformBindings as { projectId?: string; environmentId?: string }; return root.projectId && root.environmentId ? { projectId: root.projectId, environmentId: root.environmentId } : undefined; })()
     : undefined);
@@ -319,6 +358,14 @@ export async function applyStorageAction(params: {
   const hostingResult = await adapterFactory.getProviderAdapter(params.environmentSpec.hosting.provider, params.project);
   const hosting = hostingResult.adapter as IProviderAdapter | undefined;
   if (!hostingResult.success || !hosting?.setEnvVars) return { success: false, message: 'Hosting adapter cannot sync storage variables', error: hostingResult.error };
+  if (hosting.name !== params.environmentSpec.hosting.provider) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: `Storage action "${params.action.id}" resolved the wrong hosting adapter`,
+      error: `Environment uses ${params.environmentSpec.hosting.provider}, but the resolved adapter is ${hosting.name}.`,
+    };
+  }
 
   if (operation === STORAGE_OPERATIONS.unwire) {
     const cleared = Object.fromEntries((binding.envKeys ?? storageEnvKeys(name)).map((key) => [key, '']));

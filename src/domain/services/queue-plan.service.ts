@@ -327,24 +327,50 @@ export async function applyQueueAction(params: {
   environmentSpec: EnvironmentSpec;
   action: PlanAction;
 }): Promise<{ success: boolean; message: string; error?: string; data?: Record<string, unknown> }> {
-  const queueName = String(params.action.metadata?.queueName ?? params.action.resource.name);
+  const queueName = typeof params.action.metadata?.queueName === 'string'
+    ? params.action.metadata.queueName
+    : '';
+  const operation = String(params.action.metadata?.operation ?? '');
+  const provider = params.environmentSpec.hosting.provider;
+  if (
+    !queueName
+    || queueName !== params.action.resource.name
+    || params.action.resource.provider !== provider
+    || (
+      operation === QUEUE_OPERATIONS.ensure
+        ? !params.environmentSpec.queues?.[queueName]
+        : operation === QUEUE_OPERATIONS.destroy
+          ? Boolean(params.environmentSpec.queues?.[queueName])
+          : true
+    )
+  ) {
+    return {
+      success: false,
+      message: `Queue action "${params.action.id}" has stale mutation authority`,
+      error: `The reviewed queue name, operation, or provider does not match environment "${params.envName}". Re-run hv_plan.`,
+    };
+  }
   const environment = envRepo.findByProjectAndName(params.project.id, params.envName);
   if (!environment) {
     return { success: false, message: 'Environment not found locally', error: `No local environment "${params.envName}"` };
   }
 
-  const provider = params.environmentSpec.hosting.provider;
   const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: 'Hosting adapter unavailable', error: adapterResult.error };
   }
   const adapter = adapterResult.adapter as IProviderAdapter;
+  if (adapter.name !== params.action.resource.provider) {
+    return {
+      success: false,
+      message: `Queue action "${params.action.id}" resolved the wrong provider adapter`,
+      error: `Plan targets ${params.action.resource.provider}, but the resolved adapter is ${adapter.name}.`,
+    };
+  }
   const backend = queueBackend(adapter);
   if (!backend) {
     return { success: false, message: `${provider} does not support queues`, error: `Hosting provider ${provider} has no queue backend.` };
   }
-
-  const operation = String(params.action.metadata?.operation ?? '');
 
   if (backend === 'postgres') {
     if (operation === QUEUE_OPERATIONS.destroy) {
