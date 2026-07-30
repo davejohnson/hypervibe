@@ -4,8 +4,28 @@ import { parseJsonColumn } from '../json.codec.js';
 import { runPlanColumnSchema, runReceiptsColumnSchema } from '../column.schemas.js';
 import type { Run, CreateRunInput, RunStatus, RunReceipt } from '../../../domain/entities/run.entity.js';
 
+export interface ReserveApplyInput {
+  projectId: string;
+  environmentId: string;
+  planRunId: string;
+  environmentName: string;
+  specRevision: number;
+}
+
+export type ReserveApplyResult =
+  | { reserved: true; run: Run }
+  | {
+    reserved: false;
+    reason: 'already_applied' | 'plan_in_progress' | 'environment_in_progress';
+    conflictingRunId: string;
+  };
+
 export class RunRepository {
   create(input: CreateRunInput): Run {
+    if (input.type === 'apply') {
+      throw new Error('Apply runs must be created with RunRepository.reserveApply().');
+    }
+
     const db = getDb();
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -25,6 +45,93 @@ export class RunRepository {
     );
 
     return this.findById(id)!;
+  }
+
+  /**
+   * Atomically reserves mutation authority for a persisted plan.
+   *
+   * BEGIN IMMEDIATE serializes the conflict checks with the insert across
+   * processes sharing this SQLite database. Schema constraints independently
+   * enforce one running apply per environment and one successful apply per
+   * plan, so a future caller cannot accidentally weaken the invariant.
+   */
+  reserveApply(input: ReserveApplyInput): ReserveApplyResult {
+    const db = getDb();
+    return db.transaction((): ReserveApplyResult => {
+      const priorApplied = db.prepare(`
+        SELECT *
+        FROM runs
+        WHERE type = 'apply'
+          AND status = 'succeeded'
+          AND json_valid(plan)
+          AND json_type(plan, '$.planRunId') = 'text'
+          AND json_extract(plan, '$.planRunId') = ?
+        ORDER BY created_at ASC
+        LIMIT 1
+      `).get(input.planRunId) as Record<string, unknown> | undefined;
+      if (priorApplied) {
+        return {
+          reserved: false,
+          reason: 'already_applied',
+          conflictingRunId: priorApplied.id as string,
+        };
+      }
+
+      const activeApply = db.prepare(`
+        SELECT *
+        FROM runs
+        WHERE type = 'apply'
+          AND status = 'running'
+          AND environment_id = ?
+        ORDER BY created_at ASC
+        LIMIT 1
+      `).get(input.environmentId) as Record<string, unknown> | undefined;
+      if (activeApply) {
+        const activeDocument = parseJsonColumn(
+          runPlanColumnSchema,
+          activeApply.plan,
+          `runs.plan (${activeApply.id})`
+        ) as Record<string, unknown>;
+        return {
+          reserved: false,
+          reason: activeDocument.planRunId === input.planRunId
+            ? 'plan_in_progress'
+            : 'environment_in_progress',
+          conflictingRunId: activeApply.id as string,
+        };
+      }
+
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      db.prepare(`
+        INSERT INTO runs (
+          id,
+          project_id,
+          environment_id,
+          type,
+          status,
+          plan,
+          receipts,
+          started_at,
+          created_at
+        )
+        VALUES (?, ?, ?, 'apply', 'running', ?, ?, ?, ?)
+      `).run(
+        id,
+        input.projectId,
+        input.environmentId,
+        JSON.stringify({
+          planRunId: input.planRunId,
+          environmentName: input.environmentName,
+          specRevision: input.specRevision,
+        }),
+        JSON.stringify([]),
+        now,
+        now
+      );
+
+      return { reserved: true, run: this.findById(id)! };
+    }).immediate();
   }
 
   findById(id: string): Run | null {

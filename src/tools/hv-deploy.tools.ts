@@ -157,6 +157,16 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
           next: ['hv_connect', 'hv_deploy'],
         });
       }
+      if (!outcome.result.success && !outcome.result.applyRunId) {
+        const conflict = outcome.result.conflict;
+        return commandError('VALIDATION', outcome.result.error ?? 'Deploy apply was rejected.', {
+          ...(conflict ? { details: { applyConflict: conflict } } : {}),
+          hint: conflict && conflict.kind !== 'already_applied'
+            ? `Inspect apply run "${conflict.runId}" with hv_runs action="get". Do not start another deploy until that run is no longer running.`
+            : 'Create and inspect a fresh plan before retrying the deployment.',
+          next: conflict && conflict.kind !== 'already_applied' ? ['hv_runs'] : ['hv_plan'],
+        });
+      }
 
       const summary = outcome.bootstrapSummary ?? {};
       const data = {

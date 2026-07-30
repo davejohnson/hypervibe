@@ -148,6 +148,78 @@ describe('ConvergeExecutor staleness', () => {
     expect(second.success).toBe(false);
     expect(second.error).toContain('already applied');
   });
+
+  it('atomically rejects a concurrent apply of the same plan', async () => {
+    const planId = storePlan([action({ id: 'service:web' })]);
+    let finishFirst!: () => void;
+    const firstCanFinish = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const handler = vi.fn(async () => {
+      await firstCanFinish;
+      return { success: true, message: 'ok' };
+    });
+
+    const firstPromise = new ConvergeExecutor().execute({
+      planRunId: planId,
+      currentSpecRevision: 1,
+      handler,
+    });
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+
+    const second = await new ConvergeExecutor().execute({
+      planRunId: planId,
+      currentSpecRevision: 1,
+      handler,
+    });
+    expect(second.success).toBe(false);
+    expect(second.error).toContain('already being applied');
+    expect(second.conflict).toMatchObject({
+      kind: 'plan_in_progress',
+      runId: expect.any(String),
+    });
+    expect(handler).toHaveBeenCalledOnce();
+
+    finishFirst();
+    await expect(firstPromise).resolves.toMatchObject({ success: true });
+  });
+
+  it('serializes different plans that target the same environment', async () => {
+    const firstPlanId = storePlan([action({ id: 'service:web' })]);
+    const secondPlanId = storePlan([action({ id: 'service:worker' })]);
+    let finishFirst!: () => void;
+    const firstCanFinish = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const firstHandler = vi.fn(async () => {
+      await firstCanFinish;
+      return { success: true, message: 'ok' };
+    });
+
+    const firstPromise = new ConvergeExecutor().execute({
+      planRunId: firstPlanId,
+      currentSpecRevision: 1,
+      handler: firstHandler,
+    });
+    await vi.waitFor(() => expect(firstHandler).toHaveBeenCalledOnce());
+
+    const secondHandler = vi.fn().mockResolvedValue({ success: true, message: 'ok' });
+    const second = await new ConvergeExecutor().execute({
+      planRunId: secondPlanId,
+      currentSpecRevision: 1,
+      handler: secondHandler,
+    });
+    expect(second.success).toBe(false);
+    expect(second.error).toContain('already has a running apply');
+    expect(second.conflict).toMatchObject({
+      kind: 'environment_in_progress',
+      runId: expect.any(String),
+    });
+    expect(secondHandler).not.toHaveBeenCalled();
+
+    finishFirst();
+    await expect(firstPromise).resolves.toMatchObject({ success: true });
+  });
 });
 
 describe('ConvergeExecutor execution', () => {
@@ -336,6 +408,30 @@ describe('ConvergeExecutor execution', () => {
     expect(statuses.get('service:web')).toBe('failed');
     expect(statuses.get('domain:myapp.dev')).toBe('aborted');
     expect(runRepo().findById(result.applyRunId!)!.status).toBe('failed');
+  });
+
+  it('releases the environment reservation after a failed apply', async () => {
+    const firstPlanId = storePlan([action({ id: 'service:web' })]);
+    const failed = await new ConvergeExecutor().execute({
+      planRunId: firstPlanId,
+      currentSpecRevision: 1,
+      handler: vi.fn().mockResolvedValue({
+        success: false,
+        message: 'provider rejected the mutation',
+        error: 'boom',
+      }),
+    });
+    expect(failed.success).toBe(false);
+
+    const secondPlanId = storePlan([action({ id: 'service:worker' })]);
+    const secondHandler = vi.fn().mockResolvedValue({ success: true, message: 'ok' });
+    const retried = await new ConvergeExecutor().execute({
+      planRunId: secondPlanId,
+      currentSpecRevision: 1,
+      handler: secondHandler,
+    });
+    expect(retried.success).toBe(true);
+    expect(secondHandler).toHaveBeenCalledOnce();
   });
 });
 

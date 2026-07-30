@@ -321,6 +321,62 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 11,
+    name: 'serialize_plan_applies',
+    up: '-- Apply serialization indexes are installed after legacy-conflict checks.',
+    run: (db) => {
+      const duplicatePlan = db.prepare(`
+        SELECT json_extract(plan, '$.planRunId') AS planRunId, COUNT(*) AS applyCount
+        FROM runs
+        WHERE type = 'apply'
+          AND status = 'succeeded'
+          AND json_valid(plan)
+          AND json_type(plan, '$.planRunId') = 'text'
+        GROUP BY json_extract(plan, '$.planRunId')
+        HAVING COUNT(*) > 1
+        LIMIT 1
+      `).get() as { planRunId: string; applyCount: number } | undefined;
+      if (duplicatePlan) {
+        throw new Error(
+          `Cannot install apply serialization: plan ${duplicatePlan.planRunId} has ${duplicatePlan.applyCount} successful apply runs. Inspect the conflicting run history before upgrading.`
+        );
+      }
+
+      const duplicateEnvironment = db.prepare(`
+        SELECT environment_id AS environmentId, COUNT(*) AS applyCount
+        FROM runs
+        WHERE type = 'apply' AND status = 'running'
+        GROUP BY environment_id
+        HAVING COUNT(*) > 1
+        LIMIT 1
+      `).get() as { environmentId: string; applyCount: number } | undefined;
+      if (duplicateEnvironment) {
+        throw new Error(
+          `Cannot install apply serialization: environment ${duplicateEnvironment.environmentId} has ${duplicateEnvironment.applyCount} running apply records. Inspect the conflicting runs before upgrading.`
+        );
+      }
+
+      // A persisted plan may succeed at most once, and only one apply may
+      // actively mutate an environment at a time. Guard malformed legacy JSON
+      // by excluding it from the expression index.
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_succeeded_apply_plan
+        ON runs (
+          CASE
+            WHEN json_valid(plan) AND json_type(plan, '$.planRunId') = 'text'
+              THEN json_extract(plan, '$.planRunId')
+            ELSE NULL
+          END
+        )
+        WHERE type = 'apply' AND status = 'succeeded';
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_running_apply_environment
+        ON runs (environment_id)
+        WHERE type = 'apply' AND status = 'running';
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION = migrations[migrations.length - 1]?.version ?? 0;
@@ -355,6 +411,7 @@ export class SqliteAdapter {
     hardenPrivateFile(finalPath);
     this.db = new Database(finalPath);
     this.hardenDatabaseFiles();
+    this.db.pragma('busy_timeout = 5000');
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.hardenDatabaseFiles();

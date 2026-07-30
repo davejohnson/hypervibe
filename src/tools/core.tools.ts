@@ -873,6 +873,16 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const pending = result.receipts.filter((r) => r.status === 'pending');
       const blockedReceipts = result.receipts.filter((r) => r.status === 'blocked');
       if (!result.success && !result.applyRunId) {
+        if (result.conflict) {
+          const inProgress = result.conflict.kind !== 'already_applied';
+          return commandError('VALIDATION', result.error ?? 'Apply rejected', {
+            details: { applyConflict: result.conflict },
+            hint: inProgress
+              ? `Inspect apply run "${result.conflict.runId}" with hv_runs action="get". Do not start another apply until that run is no longer running.`
+              : 'This persisted plan has already succeeded. Create a fresh plan from current observed state before applying again.',
+            next: inProgress ? ['hv_runs'] : ['hv_plan'],
+          });
+        }
         // Rejected before execution (stale plan, superseded spec, etc.)
         return commandError('VALIDATION', result.error ?? 'Apply rejected', { next: ['hv_plan'] });
       }
