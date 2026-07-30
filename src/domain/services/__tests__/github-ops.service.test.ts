@@ -570,6 +570,11 @@ describe('github tools', () => {
     expect(releaseWorkflow).toContain('concurrency:');
     expect(releaseWorkflow).toContain('group: hypervibe-deploy-development');
     expect(releaseWorkflow).toContain("node-version: '20'");
+    expect(releaseWorkflow).toContain('ruby/setup-ruby@v1');
+    expect(releaseWorkflow).toContain("ruby-version: '3.3'");
+    expect(releaseWorkflow).toContain('bundler-cache: true');
+    expect(releaseWorkflow.indexOf('ruby/setup-ruby@v1'))
+      .toBeLessThan(releaseWorkflow.indexOf('Build signed IPA'));
     expect(releaseWorkflow).toContain('Run project-owned TestFlight release script');
     expect(releaseWorkflow).toContain('node "$HYPERVIBE_RELEASE_SCRIPT"');
     expect(releaseWorkflow).toContain('HYPERVIBE_RELEASE_SCRIPT: "scripts/hypervibe-ios-release.mjs"');

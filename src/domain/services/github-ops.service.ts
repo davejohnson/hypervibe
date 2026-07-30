@@ -615,6 +615,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
       - name: Verify project-owned release script
         shell: bash
         run: |
