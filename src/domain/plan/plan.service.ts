@@ -227,7 +227,7 @@ export class PlanService {
         environment.id
       );
       const localDatabase = localComponents.find((component) =>
-        component.type === 'postgres' || component.type === 'mongodb'
+        component.type === 'postgres'
       );
       const localDatabaseProvider =
         typeof localDatabase?.bindings.provider === 'string'
