@@ -8,7 +8,6 @@ describe('database provider schema', () => {
     'supabase',
     'rds',
     'digitalocean',
-    'render',
     'acme-postgres',
   ] as const)('accepts stable provider id %s for Postgres', (provider) => {
     expect(databaseSpecSchema.parse({ provider })).toEqual({ provider, engine: 'postgres' });

@@ -11,7 +11,7 @@ import {
 describe('provider-logs.service helpers', () => {
   describe('detectProviderName', () => {
     it('prefers explicit provider from bindings', () => {
-      expect(detectProviderName('railway', 'render')).toBe('render');
+      expect(detectProviderName('railway', 'cloudrun')).toBe('cloudrun');
     });
 
     it('falls back to project default platform', () => {

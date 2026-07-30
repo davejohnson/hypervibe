@@ -21,10 +21,7 @@ describe('provider conformance matrix', () => {
       'Google Cloud',
       'DigitalOcean',
       'AWS',
-      'Heroku',
-      'Render',
       'Microsoft Azure',
-      'Fly.io',
       'Vercel',
     ]);
   });
@@ -35,11 +32,9 @@ describe('provider conformance matrix', () => {
       ['DigitalOcean', 'postgres'],
       ['AWS', 'postgres'],
       ['Railway', 'postgres'],
-      ['Render', 'postgres'],
       ['Supabase', 'postgres'],
       ['MongoDB', 'mongodb'],
       ['Microsoft Azure', 'postgres'],
-      ['Fly.io', 'postgres'],
       ['Neon', 'postgres'],
     ]);
   });
@@ -71,13 +66,13 @@ describe('provider conformance matrix', () => {
     expect(hostingProviderContracts.some((entry) => entry.provider === 'neon')).toBe(false);
   });
 
-  it('gates Fly Managed Postgres on a supported provider lifecycle API', () => {
-    const flyPostgres = databaseProviderContracts.find(
-      (entry) => entry.provider === 'fly-managed-postgres'
-    );
-    expect(flyPostgres?.status).toBe('planned');
-    expect(flyPostgres?.implementationNote).toContain('supported provider lifecycle API');
-    expect(flyPostgres?.implementationNote).toContain('Do not implement against flyctl');
+  it('keeps deliberately excluded providers out of the lifecycle catalog and registry', () => {
+    const excluded = new Set(['heroku', 'render', 'fly', 'fly-managed-postgres']);
+    expect(providerContracts.some((entry) => excluded.has(entry.provider))).toBe(false);
+    expect(providerRegistry.supports('heroku', 'hosting')).toBe(false);
+    expect(providerRegistry.supports('render', 'hosting')).toBe(false);
+    expect(providerRegistry.supportsEngine('render', 'database', 'postgres')).toBe(false);
+    expect(providerRegistry.supportsEngine('render', 'cache', 'redis')).toBe(false);
   });
 
   it('uses stable provider ids and secret-free credential descriptors', () => {
@@ -238,75 +233,6 @@ describe('provider conformance matrix', () => {
     expect(
       providerRegistry.supportsEngine('digitalocean', 'cache', 'redis')
     ).toBe(true);
-  });
-
-  it('exposes the complete Render stack to the managed-workflow live gate', () => {
-    const entries = providerContracts.filter(
-      (entry) => entry.provider === 'render'
-    );
-    const hosting = entries.find((entry) => entry.kind === 'hosting');
-
-    expect(entries).toHaveLength(3);
-    expect(hosting).toMatchObject({
-      status: 'ready-for-live',
-      managedWorkflow: {
-        environmentName: 'production',
-        fixtureDirectory: 'test/provider-conformance/fixture',
-        workflow: 'deploy-render-production.yml',
-        publicUrlProtocols: ['https:'],
-        serviceName: 'web',
-        service: {
-          workloadKind: 'web',
-          startCommand: 'node server.mjs',
-          healthCheckPath: '/health',
-          public: true,
-        },
-        database: {
-          provider: 'render',
-          engine: 'postgres',
-        },
-        cache: {
-          provider: 'render',
-          engine: 'redis',
-        },
-      },
-    });
-    expect(
-      entries.every((entry) => entry.status === 'ready-for-live')
-    ).toBe(true);
-    expect(entries.every((entry) => entry.implementationNote?.includes('implemented'))).toBe(true);
-    expect(providerRegistry.supports('render', 'hosting')).toBe(true);
-    expect(
-      providerRegistry.supportsEngine('render', 'database', 'postgres')
-    ).toBe(true);
-    expect(
-      providerRegistry.supportsEngine('render', 'cache', 'redis')
-    ).toBe(true);
-  });
-
-  it('exposes the implemented Heroku hosting slice to the managed-workflow live gate', () => {
-    const entry = hostingProviderContracts.find(
-      (provider) => provider.provider === 'heroku'
-    );
-
-    expect(entry).toMatchObject({
-      status: 'ready-for-live',
-      implementationNote: expect.stringContaining('implemented'),
-      managedWorkflow: {
-        environmentName: 'production',
-        fixtureDirectory: 'test/provider-conformance/fixture',
-        workflow: 'deploy-heroku-production.yml',
-        publicUrlProtocols: ['https:'],
-        serviceName: 'web',
-        service: {
-          workloadKind: 'web',
-          startCommand: 'node server.mjs',
-          healthCheckPath: '/health',
-          public: true,
-        },
-      },
-    });
-    expect(providerRegistry.supports('heroku', 'hosting')).toBe(true);
   });
 
   it('exposes the implemented Azure hosting slice to the managed-workflow live gate', () => {

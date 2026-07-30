@@ -189,14 +189,6 @@ describe('connection guidance', () => {
         'Full Access is a broader fallback',
         'credentialsRef="file:/absolute/path/digitalocean.json"',
       ],
-      render: [
-        'https://dashboard.render.com/u/settings#api-keys',
-        'personal API key',
-        'workspace ID',
-        'registryCredentialId',
-        'read:packages',
-        'credentialsRef="file:/absolute/path/render.json"',
-      ],
       vercel: [
         'https://vercel.com/account/settings/tokens',
         'personal access token',
@@ -209,15 +201,6 @@ describe('connection guidance', () => {
         'framework/static auto-detection',
         'long-lived start commands',
         'credentialsRef="file:/absolute/path/vercel.json"',
-      ],
-      heroku: [
-        'https://dashboard.heroku.com/account',
-        'https://devcenter.heroku.com/articles/oauth#direct-authorization',
-        'Platform API bearer token',
-        'global scope',
-        'registry.heroku.com',
-        'billable',
-        'credentialsRef="env:HEROKU_API_KEY"',
       ],
       stripe: [
         'https://dashboard.stripe.com/apikeys',
@@ -293,6 +276,12 @@ describe('connection guidance', () => {
         expect(guidance, `${provider}: ${snippet}`).toContain(snippet);
       }
     }
+  });
+
+  it('keeps deliberately excluded hosting providers out of connection guidance', () => {
+    expect(getConnectionGuidance('heroku')).toBeUndefined();
+    expect(getConnectionGuidance('render')).toBeUndefined();
+    expect(getConnectionGuidance('fly')).toBeUndefined();
   });
 });
 

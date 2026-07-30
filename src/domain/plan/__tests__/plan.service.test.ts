@@ -699,9 +699,9 @@ describe('PlanService.plan', () => {
       project: project.name,
       environments: {
         staging: {
-          hosting: { provider: 'render' },
+          hosting: { provider: 'derived-host' },
           services: {},
-          database: { provider: 'render', engine: 'postgres' },
+          database: { provider: 'derived-postgres', engine: 'postgres' },
         },
       },
     });
@@ -709,7 +709,7 @@ describe('PlanService.plan', () => {
       projectId: project.id,
       name: 'staging',
       platformBindings: {
-        provider: 'render',
+        provider: 'derived-host',
         projectId: 'tea-owner-1',
         services: {},
       },
@@ -717,24 +717,23 @@ describe('PlanService.plan', () => {
     const component = new ComponentRepository().create({
       environmentId: environment.id,
       type: 'postgres',
-      externalId: 'dpg-render-1',
+      externalId: 'database-1',
       bindings: {
-        provider: 'render',
-        instanceId: 'dpg-render-1',
+        provider: 'derived-postgres',
+        instanceId: 'database-1',
       },
     });
     const connection = new ConnectionRepository().create({
-      provider: 'render',
+      provider: 'derived-postgres',
       credentialsEncrypted: getSecretStore().encryptObject({
-        apiKey: 'render-key',
-        ownerId: 'tea-owner-1',
+        apiKey: 'derived-provider-key',
       }),
     });
     new ConnectionRepository().updateStatus(connection.id, 'verified');
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'render',
+        name: 'derived-host',
         capabilities: {
           supportedBuilders: ['dockerfile'],
           supportedComponents: [],
@@ -753,7 +752,7 @@ describe('PlanService.plan', () => {
         deploy: async () => { throw new Error('unused'); },
         setEnvVars: async () => ({ success: true, message: 'ok' }),
         observe: async () => ({
-          provider: 'render',
+          provider: 'derived-host',
           observedAt: new Date().toISOString(),
           projectExists: true,
           projectId: 'tea-owner-1',
@@ -777,11 +776,11 @@ describe('PlanService.plan', () => {
       _environment: Environment,
       observedComponent?: typeof component | null
     ) => {
-      expect(observedComponent?.externalId).toBe('dpg-render-1');
+      expect(observedComponent?.externalId).toBe('database-1');
       return {
-        provider: 'render',
+        provider: 'derived-postgres',
         engine: 'postgres',
-        externalId: 'dpg-render-1',
+        externalId: 'database-1',
         name: 'plan-test-staging-postgres',
         status: 'running',
       };
@@ -789,7 +788,7 @@ describe('PlanService.plan', () => {
     vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
       success: true,
       adapter: {
-        name: 'render',
+        name: 'derived-postgres',
         capabilities: {
           supportedDatabases: ['postgres'],
           supportsPooling: true,
@@ -810,7 +809,7 @@ describe('PlanService.plan', () => {
 
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
-    expect(plan.actions.find((action) => action.id === 'database:render'))
+    expect(plan.actions.find((action) => action.id === 'database:derived-postgres'))
       .toMatchObject({ type: 'noop', verified: true });
     expect(observeDatabase).toHaveBeenCalledOnce();
   });

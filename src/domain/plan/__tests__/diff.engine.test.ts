@@ -118,12 +118,12 @@ describe('diffEnvironment — creates', () => {
   it('confirmation-gates service creation when provider metadata marks it billable', () => {
     const result = diffEnvironment({
       spec: spec({
-        hosting: { provider: 'render' },
+        hosting: { provider: 'billable-host' },
         database: undefined,
       }),
       envName: 'production',
       observed: observed({
-        provider: 'render',
+        provider: 'billable-host',
         projectExists: true,
         projectId: 'tea-owner-1',
         services: [],
@@ -133,7 +133,7 @@ describe('diffEnvironment — creates', () => {
         services: [],
         components: [],
         bindings: {
-          provider: 'render',
+          provider: 'billable-host',
           projectId: 'tea-owner-1',
           services: {},
         },
