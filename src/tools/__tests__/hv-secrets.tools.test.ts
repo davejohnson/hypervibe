@@ -101,17 +101,21 @@ describe('hv_secrets_set target=mapping', () => {
 });
 
 describe('hv_secrets_set target=github', () => {
-  it('sets a GitHub Actions secret from a dotenv secretRef without echoing the value', async () => {
+  function seedGitHubProject(name: string) {
     new ProjectRepository().create({
-      name: 'github-secret-app',
-      gitRemoteUrl: 'https://github.com/davejohnson/github-secret-app',
+      name,
+      gitRemoteUrl: `https://github.com/davejohnson/${name}`,
     });
     const github = new ConnectionRepository().create({
       provider: 'github',
-      scope: 'davejohnson/github-secret-app',
+      scope: `davejohnson/${name}`,
       credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'gh-token' }),
     });
     new ConnectionRepository().updateStatus(github.id, 'verified');
+  }
+
+  it('sets a GitHub Actions secret from a dotenv secretRef without echoing the value', async () => {
+    seedGitHubProject('github-secret-app');
     const envPath = path.join(tempDir, '.env');
     writeFileSync(envPath, 'GHCR_TOKEN=ghp_secret_value\n');
     const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
@@ -133,6 +137,76 @@ describe('hv_secrets_set target=github', () => {
     });
     expect(setSecret).toHaveBeenCalledWith('davejohnson', 'github-secret-app', 'IMAGE_REGISTRY_TOKEN', 'ghp_secret_value');
     expect(JSON.stringify(result)).not.toContain('ghp_secret_value');
+    await t.close();
+  });
+
+  it('sets a GitHub Actions environment secret when env is provided', async () => {
+    seedGitHubProject('github-environment-secret-app');
+    const secretPath = path.join(tempDir, 'match-password');
+    writeFileSync(secretPath, 'match-secret-value\n');
+    const setRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    const setEnvironmentSecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
+    const t = await makeClient();
+
+    const result = await t.call('hv_secrets_set', {
+      project: 'github-environment-secret-app',
+      target: 'github',
+      env: 'production',
+      key: 'MATCH_PASSWORD',
+      secretRef: `file:${secretPath}`,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({
+      repository: 'davejohnson/github-environment-secret-app',
+      environment: 'production',
+      secretName: 'MATCH_PASSWORD',
+      action: 'set',
+      valueSource: 'file',
+    });
+    expect(setEnvironmentSecret).toHaveBeenCalledWith(
+      'davejohnson',
+      'github-environment-secret-app',
+      'production',
+      'MATCH_PASSWORD',
+      'match-secret-value'
+    );
+    expect(setRepositorySecret).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('match-secret-value');
+    await t.close();
+  });
+
+  it('deletes a GitHub Actions environment secret when env is provided', async () => {
+    seedGitHubProject('github-environment-secret-delete-app');
+    const deleteRepositorySecret = vi.spyOn(GitHubAdapter.prototype, 'deleteSecret').mockResolvedValue();
+    const deleteEnvironmentSecret = vi.spyOn(
+      GitHubAdapter.prototype,
+      'deleteEnvironmentSecret'
+    ).mockResolvedValue();
+    const t = await makeClient();
+
+    const result = await t.call('hv_secrets_set', {
+      project: 'github-environment-secret-delete-app',
+      target: 'github',
+      env: 'production',
+      key: 'MATCH_PASSWORD',
+      remove: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({
+      repository: 'davejohnson/github-environment-secret-delete-app',
+      environment: 'production',
+      secretName: 'MATCH_PASSWORD',
+      action: 'deleted',
+    });
+    expect(deleteEnvironmentSecret).toHaveBeenCalledWith(
+      'davejohnson',
+      'github-environment-secret-delete-app',
+      'production',
+      'MATCH_PASSWORD'
+    );
+    expect(deleteRepositorySecret).not.toHaveBeenCalled();
     await t.close();
   });
 });

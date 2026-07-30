@@ -688,6 +688,22 @@ export class GitHubAdapter {
     );
   }
 
+  /**
+   * Delete an Actions secret scoped to a GitHub environment.
+   */
+  async deleteEnvironmentSecret(
+    owner: string,
+    repo: string,
+    environmentName: string,
+    secretName: string
+  ): Promise<void> {
+    const environment = encodeURIComponent(environmentName);
+    await this.request<unknown>(
+      'DELETE',
+      `/repos/${owner}/${repo}/environments/${environment}/secrets/${encodeURIComponent(secretName)}`
+    );
+  }
+
   // ============= Repository Secrets =============
 
   /**
