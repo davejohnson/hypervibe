@@ -23,7 +23,10 @@ import {
   orderActions,
   type PlanRunDocument,
 } from './converge.executor.js';
-import { buildDatabaseEnvVarsFromComponent, DATABASE_ENV_KEYS } from '../services/database-env.js';
+import {
+  buildManagedDatabaseEnvVars,
+  DATABASE_ENV_KEYS,
+} from '../services/database-env.js';
 import { buildCacheEnvVarsFromComponent, CACHE_ENV_KEYS } from '../services/cache-env.js';
 import { planCache } from '../services/cache-plan.service.js';
 import {
@@ -777,13 +780,10 @@ export class PlanService {
         suppliedValues: delegatedSecretValues,
       });
     const local = this.buildLocalSnapshot(projectForPlan, environment, effectiveBindings);
-    const localDb = local.components.find((component) => component.type === environmentSpec.database?.engine);
-    const localDbProvider = localDb
-      ? String((localDb.bindings as Record<string, unknown>).provider ?? '') || undefined
-      : undefined;
-    const managedDatabaseEnvVars = environmentSpec.database && localDb && localDbProvider === environmentSpec.database.provider
-      ? buildDatabaseEnvVarsFromComponent(localDb).envVars
-      : undefined;
+    const managedDatabaseEnvVars = buildManagedDatabaseEnvVars(
+      environmentSpec.database,
+      local.components
+    );
     const localCache = local.components.find((component) => component.type === 'redis');
     const localCacheProvider = localCache
       ? String((localCache.bindings as Record<string, unknown>).provider ?? '') || undefined
@@ -794,6 +794,8 @@ export class PlanService {
     const managedQueueEnvVars = await resolveQueueEnvVars(projectForPlan, environmentSpec, environment);
     const managedEnvKeys = new Set([
       ...Object.keys(managedDatabaseEnvVars ?? {}),
+      ...Object.values(environmentSpec.services)
+        .flatMap((service) => Object.keys(service.databaseEnvAliases ?? {})),
       ...Object.keys(managedCacheEnvVars ?? {}),
       ...Object.keys(managedQueueEnvVars ?? {}),
       ...delegatedSecretSlots.keys(),

@@ -32,7 +32,7 @@ const EXPECTED_TOOLS = [
   // Deploy + observability
   'hv_deploy', 'hv_rollback', 'hv_logs', 'hv_errors', 'hv_health',
   // Database
-  'hv_db_query', 'hv_db_migrate', 'hv_db_url',
+  'hv_db_query', 'hv_db_url',
   // Secrets
   'hv_secrets_set', 'hv_secrets_get', 'hv_secrets_list', 'hv_secrets_sync',
   // Email
@@ -65,15 +65,16 @@ describe('server tool surface', () => {
     await server.close();
   });
 
-  it('registers exactly the 33 pinned hv_* tools', async () => {
+  it('registers exactly the 32 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
-    expect(names).toHaveLength(33);
+    expect(names).toHaveLength(32);
     expect(tools.find((tool) => tool.name === 'hv_ci_status')?.description).toContain(
       'Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls.'
     );
+    expect(names).not.toContain('hv_db_migrate');
     await client.close();
     await server.close();
   });
@@ -85,10 +86,11 @@ describe('server tool surface', () => {
     const cliPaths = definitions.map((definition) => definition.cliPath.join(' '));
 
     expect(ids).toEqual(EXPECTED_TOOLS);
-    expect(new Set(cliPaths).size).toBe(33);
+    expect(new Set(cliPaths).size).toBe(32);
     expect(registry.get('hv_spec_set')?.cliPath).toEqual(['spec', 'set']);
     expect(registry.get('hv_plan')?.cliPath).toEqual(['plan']);
     expect(registry.get('hv_db_query')?.cliPath).toEqual(['db', 'query']);
+    expect(registry.get('hv_db_migrate')).toBeUndefined();
   });
 
   it('returns the same structured envelope through the registry and MCP', async () => {

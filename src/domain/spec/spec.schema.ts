@@ -9,6 +9,18 @@ import { z } from 'zod';
  * one environment at a time.
  */
 
+const environmentVariableNameSchema = z.string().regex(
+  /^[A-Za-z_][A-Za-z0-9_]*$/,
+  'environment variable names must start with a letter or underscore and contain only letters, numbers, and underscores'
+);
+
+const DATABASE_ENV_ALIAS_SOURCES = [
+  'DATABASE_URL',
+  'DIRECT_URL',
+] as const;
+
+export const databaseEnvAliasSourceSchema = z.enum(DATABASE_ENV_ALIAS_SOURCES);
+
 export const serviceSpecSchema = z.object({
   workloadKind: z.enum(['web', 'worker', 'cron'], {
     errorMap: () => ({ message: "workloadKind 'job' was removed; use 'worker' (always-on) or 'cron' (scheduled, requires cronSchedule). See README migration notes." }),
@@ -19,6 +31,15 @@ export const serviceSpecSchema = z.object({
   cronSchedule: z.string().min(1).optional(),
   timeZone: z.string().min(1).optional(),
   public: z.boolean().optional(),
+  /**
+   * Per-service compatibility aliases for Hypervibe-managed database URLs.
+   * Only names and canonical sources are persisted; resolved values remain
+   * inside the encrypted plan/provider boundary.
+   */
+  databaseEnvAliases: z.record(
+    environmentVariableNameSchema,
+    databaseEnvAliasSourceSchema
+  ).optional(),
 }).superRefine((service, ctx) => {
   if (service.workloadKind === 'cron' && !service.cronSchedule) {
     ctx.addIssue({
@@ -822,6 +843,47 @@ export const environmentSpecSchema = z.object({
       path: ['queues'],
     });
   }
+  const databaseAliasKeys = new Set<string>();
+  for (const [serviceName, service] of Object.entries(environment.services)) {
+    for (const [alias, source] of Object.entries(service.databaseEnvAliases ?? {})) {
+      databaseAliasKeys.add(alias);
+      if (!environment.database) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `service "${serviceName}" declares databaseEnvAliases but this environment has no database`,
+          path: ['services', serviceName, 'databaseEnvAliases'],
+        });
+      }
+      if ((DATABASE_ENV_ALIAS_SOURCES as readonly string[]).includes(alias)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `database alias "${alias}" cannot replace a canonical managed database variable`,
+          path: ['services', serviceName, 'databaseEnvAliases', alias],
+        });
+      }
+      if (alias in environment.envVars) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `database alias "${alias}" cannot also be declared in envVars`,
+          path: ['services', serviceName, 'databaseEnvAliases', alias],
+        });
+      }
+      if (environment.envFile?.include.includes(alias)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `database alias "${alias}" cannot also be selected through envFile.include`,
+          path: ['services', serviceName, 'databaseEnvAliases', alias],
+        });
+      }
+      if (environment.removeEnvVars?.includes(alias)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `database alias "${alias}" cannot also be retired`,
+          path: ['services', serviceName, 'databaseEnvAliases', alias],
+        });
+      }
+    }
+  }
   const retiredKeys = new Set<string>();
   for (const key of environment.removeEnvVars ?? []) {
     if (retiredKeys.has(key)) {
@@ -937,6 +999,13 @@ export const environmentSpecSchema = z.object({
       ...Object.values(stripe.webhooks).map((webhook) => webhook.envVar),
     ]);
     for (const key of managedKeys) {
+      if (databaseAliasKeys.has(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe-managed environment variable "${key}" cannot also be a managed database alias`,
+          path: ['payments', 'stripe'],
+        });
+      }
       if (key in environment.envVars) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -1037,6 +1106,16 @@ export const projectSpecSchema = z.object({
           code: z.ZodIssueCode.custom,
           message: `delegated secret "${key}" cannot also be retired in environment "${environmentName}"`,
           path: ['environments', environmentName, 'removeEnvVars'],
+        });
+      }
+      const databaseAliasServices = Object.entries(environment.services)
+        .filter(([, service]) => key in (service.databaseEnvAliases ?? {}))
+        .map(([serviceName]) => serviceName);
+      if (databaseAliasServices.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" cannot also be a managed database alias on service(s): ${databaseAliasServices.join(', ')}`,
+          path: ['secrets', key],
         });
       }
       const stripe = environment.payments?.stripe;

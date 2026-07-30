@@ -32,7 +32,14 @@ describe('provider-logs.service helpers', () => {
     it('detects error by message keywords', () => {
       expect(isErrorLike({ timestamp: '', severity: 'info', message: 'Unhandled exception occurred' })).toBe(true);
       expect(isErrorLike({ timestamp: '', severity: 'info', message: 'deploy failed due to timeout' })).toBe(true);
+      expect(isErrorLike({ timestamp: '', severity: 'info', message: 'SequelizeConnectionRefusedError: connect ECONNREFUSED 127.0.0.1:5432' })).toBe(true);
       expect(isErrorLike({ timestamp: '', severity: 'info', message: 'service is healthy' })).toBe(false);
+    });
+
+    it('ignores benign filenames and zero-error summaries', () => {
+      expect(isErrorLike({ timestamp: '', severity: 'info', message: 'Loading model: exception.js' })).toBe(false);
+      expect(isErrorLike({ timestamp: '', severity: 'info', message: 'Checks complete: 0 errors' })).toBe(false);
+      expect(isErrorLike({ timestamp: '', severity: 'info', message: '0 errors, 0 failures' })).toBe(false);
     });
   });
 

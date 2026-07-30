@@ -194,7 +194,7 @@ Hypervibe exposes the same focused operations as canonical `hv_*` MCP tools and 
 3. `hv_apply planId=...` — converge. Stale plans are rejected; destroying data-bearing resources requires explicit confirmation
 4. `hv_status` — see drift between desired and observed state at any time
 
-Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/health, database query/migrate, secrets, domains/DNS, email, payments, CI, App Store/TestFlight, and local dev tools.
+Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/health, bounded database diagnostics, secrets, domains/DNS, email, payments, CI, App Store/TestFlight, and local dev tools.
 
 - Full generated MCP/CLI catalog: `docs/TOOLS.md`
 - Regenerate after tool changes: `npm run build && npm run docs:tools`
@@ -204,6 +204,37 @@ Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/healt
 `hv_db_query` can diagnose managed Postgres without asking you to expose it permanently. Railway uses a temporary TCP proxy, Cloud SQL uses a local authenticated connector, and a publicly addressable RDS instance gets a temporary `/32` security-group rule for the Hypervibe caller. Supabase normally uses its existing direct endpoint, so no temporary provider resource is needed. Hypervibe releases only access it created; concurrent queries share the same short-lived lease, and every response reports the access mode and cleanup status without returning database credentials or endpoints.
 
 Diagnostic reads run in a PostgreSQL read-only transaction with a 30-second statement timeout. Results are capped at 500 rows and 512 KiB. Mutations still require `allowMutations=true`, and multi-statement SQL remains blocked.
+
+### Managed database runtime variables
+
+PostgreSQL services receive the canonical managed variables `DATABASE_URL` and
+`DIRECT_URL`. Applications with a legacy name can declare a per-service alias;
+Hypervibe resolves it inside plan/apply and never writes the database value to
+the spec:
+
+```json
+{
+  "services": {
+    "events-worker": {
+      "workloadKind": "worker",
+      "startCommand": "npm run events:worker",
+      "public": false,
+      "databaseEnvAliases": {
+        "POSTGRES_DB_URL": "DATABASE_URL"
+      }
+    }
+  },
+  "database": {
+    "provider": "railway",
+    "engine": "postgres"
+  }
+}
+```
+
+`hv_plan` and `hv_status` expose the key-only contract and verify that each
+declared alias is attached to its target service. `inSync` describes
+configuration convergence; `runtimeHealth` remains unverified until HTTP
+health or worker log/error evidence is checked.
 
 ## Team-Shared Desired State
 
@@ -563,7 +594,7 @@ image, so do not collapse these two releases into one.
 
 ### Database data operations
 
-Do not temporarily change a service `releaseCommand` just to seed or import production data. Release commands are desired deploy configuration for repeatable schema work, such as `migrations: { "mode": "releaseCommand", "command": "npm run db:migrate" }`.
+Do not temporarily change a service `releaseCommand` just to seed or import production data. Application containers should converge schema during startup. When startup migration is not appropriate, a release command is durable desired deploy configuration for repeatable schema work, such as `migrations: { "mode": "releaseCommand", "command": "npm run db:migrate" }`.
 
 For fresh environments, declare seed/bootstrap data on the database. This is provider-neutral desired state; it works through the normal plan/apply flow for any supported hosting/database target:
 
@@ -579,16 +610,12 @@ For fresh environments, declare seed/bootstrap data on the database. This is pro
 
 `hv_plan` emits a visible one-shot database seed action. `hv_apply` runs it after the database exists as a one-off command inside the deployed service environment, then records the command hash plus `seededAt` on the database component. The command does not run again unless the command changes.
 
-Use `hv_db_migrate` for operational data work:
-
-- `mode: "move"` copies data from the previous provider database into the current database during a staged migration, using `pg_dump | pg_restore` plus row-count verification. This is the path for moves like Cloud SQL -> Railway Postgres. If the target Railway database is private-only, the confirmed move creates or reuses a Railway TCP proxy so the local PostgreSQL tools can reach it.
-- `mode: "seed"` explicitly re-runs a seed/bootstrap command against the target database without changing service config. This is for repair/re-seed operations, not the normal fresh-environment path. Hypervibe sets `DATABASE_URL` and `DIRECT_URL` for that command, masks the URL in output, and confirm-gates the operation.
-
-Example:
-
-```text
-hv_db_migrate project="my-app" env="production" mode="seed" command="npm run db:seed"
-```
+Hypervibe does not expose an imperative database migration command. Schema
+migrations belong in application startup or durable declared release
+configuration. Provider-to-provider data moves and database resets must be
+modeled as explicit desired-state lifecycle actions before Hypervibe supports
+them; they cannot bypass `hv_plan`/`hv_apply`. Re-seeding likewise requires a
+reviewable desired-state change rather than a generic command runner.
 
 Typical team flow:
 

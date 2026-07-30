@@ -11,6 +11,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
+import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
@@ -1369,6 +1370,99 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(status.data.inSync).toBe(false);
     const drift = status.data.drift.find((a: { id: string }) => a.id === 'service:web');
     expect(drift.type).toBe('update');
+    await t.close();
+  });
+
+  it('does not report in sync when a declared managed database alias is missing', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'database-alias-status-app',
+        environments: {
+          staging: {
+            hosting: { provider: 'railway' },
+            services: {
+              'events-worker': {
+                workloadKind: 'worker',
+                startCommand: 'npm run events:worker',
+                public: false,
+                databaseEnvAliases: {
+                  POSTGRES_DB_URL: 'DATABASE_URL',
+                },
+              },
+            },
+            database: { provider: 'railway', engine: 'postgres' },
+            envVars: { NODE_ENV: 'staging' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    const project = new ProjectRepository().findByName('database-alias-status-app')!;
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { 'events-worker': { serviceId: 'svc-worker' } },
+      },
+    });
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      externalId: 'db-1',
+      bindings: {
+        provider: 'railway',
+        pluginName: 'postgres-db',
+      },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 're-1',
+      services: [{
+        name: 'events-worker',
+        externalId: 'svc-worker',
+        workloadKind: 'web',
+        customDomains: [],
+        config: {
+          startCommand: 'npm run events:worker',
+          public: false,
+        },
+        envVarKeys: ['NODE_ENV', 'DATABASE_URL', 'DIRECT_URL'],
+        envVarHashes: {
+          NODE_ENV: hashEnvValue('staging'),
+          DATABASE_URL: hashEnvValue('postgresql://resolved-internal'),
+          DIRECT_URL: hashEnvValue('postgresql://resolved-private'),
+        },
+        status: 'running',
+      }],
+      databases: [{
+        provider: 'railway',
+        engine: 'postgres',
+        externalId: 'db-1',
+        status: 'running',
+      }],
+      partial: false,
+      warnings: [],
+    });
+
+    const status = await t.call('hv_status', {
+      project: project.name,
+      env: 'staging',
+    });
+
+    expect(status.ok).toBe(true);
+    expect(status.data.inSync).toBe(false);
+    expect(status.data.runtimeHealth.status).toBe('unverified');
+    expect(status.data.managedDatabase.services['events-worker'].aliases)
+      .toEqual({ POSTGRES_DB_URL: 'DATABASE_URL' });
+    expect(status.data.drift.find((action: { id: string }) => action.id === 'service:events-worker')?.diff)
+      .toContainEqual({ field: 'env:POSTGRES_DB_URL' });
     await t.close();
   });
 

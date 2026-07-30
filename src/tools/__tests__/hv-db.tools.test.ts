@@ -510,77 +510,6 @@ describe('hv_db_query', () => {
   });
 });
 
-describe('hv_db_migrate', () => {
-  it('confirm-gates reset mode with a masked URL preview', async () => {
-    seedDbProject();
-    const t = await makeClient();
-    const result = await t.call('hv_db_migrate', { project: 'db-app', env: 'staging', mode: 'reset' });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('CONFIRM_REQUIRED');
-    const details = JSON.stringify(result.error.details);
-    expect(details).not.toContain('secretpw');
-    expect(details).toContain('***');
-    await t.close();
-  });
-
-  it('previews reset mode for internal managed databases without passing provider refs to the adapter', async () => {
-    seedInternalRailwayDbProject();
-    const t = await makeClient();
-    const result = await t.call('hv_db_migrate', { project: 'rail-db-app', env: 'production', mode: 'reset' });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('CONFIRM_REQUIRED');
-    expect(result.error.message).toContain('drops ALL tables');
-    expect(result.error.details.reachable).toBe(false);
-    expect(result.error.details.canCreateTcpProxy).toBe(true);
-    expect(result.hint).toContain('confirm=true');
-    await t.close();
-  });
-
-  it('requires a command for seed mode', async () => {
-    seedDbProject();
-    const t = await makeClient();
-    const result = await t.call('hv_db_migrate', { project: 'db-app', env: 'staging', mode: 'seed' });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('VALIDATION');
-    expect(result.hint).toContain('releaseCommand');
-    await t.close();
-  });
-
-  it('confirm-gates seed mode and masks database URLs', async () => {
-    seedDbProject();
-    const t = await makeClient();
-    const result = await t.call('hv_db_migrate', {
-      project: 'db-app',
-      env: 'staging',
-      mode: 'seed',
-      command: 'npm run db:seed',
-      targetConnectionUrl: 'postgres://user:secretpw@db.example.com:5432/app',
-    });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('CONFIRM_REQUIRED');
-    expect(JSON.stringify(result)).not.toContain('secretpw');
-    expect(JSON.stringify(result)).toContain('postgres://***:***@db.example.com:5432/app');
-    await t.close();
-  });
-
-  it('runs seed mode without leaking database URLs printed by the command', async () => {
-    seedDbProject();
-    const t = await makeClient();
-    const result = await t.call('hv_db_migrate', {
-      project: 'db-app',
-      env: 'staging',
-      mode: 'seed',
-      command: 'node -e "console.log(process.env.DATABASE_URL)"',
-      targetConnectionUrl: 'postgres://user:secretpw@db.example.com:5432/app',
-      confirm: true,
-    });
-    expect(result.ok).toBe(true);
-    expect(result.data.stdout).toContain('postgres://***:***@db.example.com:5432/app');
-    expect(JSON.stringify(result)).not.toContain('secretpw');
-    await t.close();
-  });
-});
-
 describe('hv_db_url', () => {
   it('masks credentials by default and suppresses raw reveal in tool output', async () => {
     seedDbProject();
@@ -642,59 +571,6 @@ describe('hv_db_url', () => {
     expect(result.data.databaseUrl).toContain('worker-db.example.com');
     expect(result.data.databaseUrl).not.toContain('workerpw');
     expect(getDatabaseUrl).toHaveBeenCalledWith('rail-proj-1', 'rail-env-1', 'svc-worker');
-    await t.close();
-  });
-});
-
-describe('hv_db_migrate mode="move"', () => {
-  const SOURCE_URL = 'postgresql://postgres:oldpass@db.supabase.co:5432/postgres';
-  const TARGET_URL = 'postgresql://app:newpass@railway.internal:5432/app';
-
-  function seedStagedMigration() {
-    const project = new ProjectRepository().create({ name: 'move-app', defaultPlatform: 'railway' });
-    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
-    new ComponentRepository().create({
-      environmentId: environment.id,
-      type: 'postgres',
-      bindings: {
-        provider: 'railway',
-        connectionUrl: TARGET_URL,
-        previousProvider: 'supabase',
-        previousBindings: { provider: 'supabase', connectionString: SOURCE_URL },
-      },
-    });
-  }
-
-  it('confirm-gates the move with masked source and target', async () => {
-    seedStagedMigration();
-
-    const t = await makeClient();
-    const result = await t.call('hv_db_migrate', { project: 'move-app', env: 'production', mode: 'move' });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('CONFIRM_REQUIRED');
-    expect(result.error.details.source.provider).toBe('supabase');
-    expect(result.error.details.target.provider).toBe('railway');
-    // URLs are masked — passwords never reach chat.
-    expect(JSON.stringify(result)).not.toContain('oldpass');
-    expect(JSON.stringify(result)).not.toContain('newpass');
-    expect(result.error.details.strategy.writeFreezeRequired).toBe(true);
-    await t.close();
-  });
-
-  it('returns NOT_FOUND with guidance when no previous database is recorded', async () => {
-    const project = new ProjectRepository().create({ name: 'nosrc-app', defaultPlatform: 'railway' });
-    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
-    new ComponentRepository().create({
-      environmentId: environment.id,
-      type: 'postgres',
-      bindings: { provider: 'railway', connectionUrl: TARGET_URL },
-    });
-
-    const t = await makeClient();
-    const result = await t.call('hv_db_migrate', { project: 'nosrc-app', env: 'production', mode: 'move' });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('NOT_FOUND');
-    expect(result.error.message).toContain('previous database');
     await t.close();
   });
 });

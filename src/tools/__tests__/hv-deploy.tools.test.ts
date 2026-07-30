@@ -271,9 +271,22 @@ describe('hv_deploy database env injection', () => {
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
-      platformBindings: { provider: 'cloudrun', projectId: 'gcp-project', services: { web: { serviceId: 'gcp-project-web' } } },
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        services: {
+          web: { serviceId: 'gcp-project-web' },
+          'events-worker': { serviceId: 'gcp-project-events-worker' },
+        },
+      },
     });
     new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+    new ServiceRepository().create({
+      projectId: project.id,
+      name: 'events-worker',
+      buildConfig: { workloadKind: 'worker' },
+      envVarSpec: {},
+    });
     new ComponentRepository().create({
       environmentId: environment.id,
       type: 'postgres',
@@ -284,7 +297,7 @@ describe('hv_deploy database env injection', () => {
       externalId: 'production-postgres',
     });
 
-    const deployCalls: Array<Record<string, string>> = [];
+    const deployCalls: Array<{ service: string; envVars: Record<string, string> }> = [];
     const fakeAdapter: IHostingAdapter = {
       name: 'cloudrun',
       capabilities: {
@@ -302,10 +315,10 @@ describe('hv_deploy database env injection', () => {
       async verify() { return { success: true }; },
       async ensureProject() { return { success: true, message: 'ok', data: { projectId: 'gcp-project' } }; },
       async deploy(service, _environment, envVars) {
-        deployCalls.push({ ...envVars });
+        deployCalls.push({ service: service.name, envVars: { ...envVars } });
         return {
           serviceId: service.id,
-          externalId: 'gcp-project-web',
+          externalId: `gcp-project-${service.name}`,
           status: 'deployed',
           receipt: { success: true, message: 'deployed' },
         };
@@ -319,7 +332,15 @@ describe('hv_deploy database env injection', () => {
       environments: {
         production: {
           hosting: { provider: 'cloudrun' },
-          services: { web: {} },
+          services: {
+            web: {},
+            'events-worker': {
+              workloadKind: 'worker',
+              databaseEnvAliases: {
+                POSTGRES_DB_URL: 'DATABASE_URL',
+              },
+            },
+          },
           database: { provider: 'cloudsql' },
         },
       },
@@ -336,9 +357,17 @@ describe('hv_deploy database env injection', () => {
     const result = await t.call('hv_deploy', { project: 'dbenv-app', env: 'production' });
     expect(result.ok).toBe(true);
 
-    expect(deployCalls).toHaveLength(1);
+    expect(deployCalls).toHaveLength(2);
     // The managed database URL is injected even though the caller passed no envVars.
-    expect(deployCalls[0].DATABASE_URL).toBe('postgresql://app:pw@34.44.202.227:5432/app');
+    expect(deployCalls.find((call) => call.service === 'web')?.envVars.DATABASE_URL)
+      .toBe('postgresql://app:pw@34.44.202.227:5432/app');
+    expect(deployCalls.find((call) => call.service === 'web')?.envVars.POSTGRES_DB_URL)
+      .toBeUndefined();
+    expect(deployCalls.find((call) => call.service === 'events-worker')?.envVars)
+      .toMatchObject({
+        DATABASE_URL: 'postgresql://app:pw@34.44.202.227:5432/app',
+        POSTGRES_DB_URL: 'postgresql://app:pw@34.44.202.227:5432/app',
+      });
 
     // Sugar path: the deploy is recorded as a plan + apply run pair.
     expect(typeof result.data.planId).toBe('string');

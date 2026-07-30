@@ -77,7 +77,10 @@ import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
 import { runEnvironmentTask } from '../domain/services/environment-task.service.js';
-import { buildDatabaseEnvVarsFromComponent } from '../domain/services/database-env.js';
+import {
+  buildDatabaseAliasEnvVars,
+  buildDatabaseEnvVarsFromComponent,
+} from '../domain/services/database-env.js';
 import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
 import { CACHE_OPERATIONS, isCacheAction } from '../domain/services/cache-plan.service.js';
 import type { CacheEngine } from '../domain/ports/cache.port.js';
@@ -427,18 +430,43 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     const storageServiceEnvVars = await resolveStorageServiceEnvVars(applyProject, envSpec, latestEnvironment);
     if (storageServiceEnvVars) {
-      bootstrapParams = { ...bootstrapParams, storageServiceEnvVars };
+      bootstrapParams = { ...bootstrapParams, envVarsByService: storageServiceEnvVars };
     }
     const database = latestEnvironment && envSpec.database
       ? ctx.repos.components.findByEnvironmentAndType(latestEnvironment.id, envSpec.database.engine)
       : null;
     if (database) {
+      const databaseEnvVars = buildDatabaseEnvVarsFromComponent(database).envVars;
+      const databaseAliasEnvVars = Object.fromEntries(
+        Object.entries(envSpec.services)
+          .map(([serviceName, serviceSpec]) => [
+            serviceName,
+            buildDatabaseAliasEnvVars(databaseEnvVars, serviceSpec.databaseEnvAliases),
+          ])
+          .filter(([, aliases]) => Object.keys(aliases as Record<string, string>).length > 0)
+      ) as Record<string, Record<string, string>>;
       bootstrapParams = {
         ...bootstrapParams,
         envVars: {
-          ...buildDatabaseEnvVarsFromComponent(database).envVars,
+          ...databaseEnvVars,
           ...(bootstrapParams.envVars ?? {}),
         },
+        ...(Object.keys(databaseAliasEnvVars).length > 0
+          ? {
+            envVarsByService: Object.fromEntries(
+              Array.from(new Set([
+                ...Object.keys(bootstrapParams.envVarsByService ?? {}),
+                ...Object.keys(databaseAliasEnvVars),
+              ])).map((serviceName) => [
+                serviceName,
+                {
+                  ...(bootstrapParams.envVarsByService?.[serviceName] ?? {}),
+                  ...(databaseAliasEnvVars[serviceName] ?? {}),
+                },
+              ])
+            ),
+          }
+          : {}),
       };
     }
     const cache = latestEnvironment
@@ -1594,7 +1622,7 @@ export async function applyDatabaseSeed(
         message: `Database seed is pending the first deploy for ${project.name}/${envName}`,
         data: {
           pendingDeploy: true,
-          hint: 'Deploy first (push to the deploy branch or hv_ci_trigger), then re-run hv_plan/hv_apply — the seed action stays planned until it completes. hv_db_migrate mode="seed" also works once deployed.',
+          hint: 'Deploy first (push to the deploy branch or hv_ci_trigger), then re-run hv_plan/hv_apply — the declarative seed action stays planned until it completes.',
         },
       };
     }

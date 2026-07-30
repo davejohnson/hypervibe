@@ -266,6 +266,17 @@ Environment-variable desired state is additive/preserve-only by default.
 Omission never means deletion because provider observation may be partial and
 live variables may be intentionally managed outside ordinary `envVars`.
 
+Managed database compatibility aliases are per-service desired state through
+`services.<name>.databaseEnvAliases`. The spec stores only an alias name and
+canonical source (`DATABASE_URL` or `DIRECT_URL`); the resolved
+value is derived from the managed component inside plan/apply and never written
+to the spec, plan preview, status, receipt, or bindings. Alias keys cannot
+collide with ordinary env vars, env-file includes, removal tombstones,
+delegated secrets, Stripe-managed keys, or canonical database variables.
+Planning and status must diff each alias only on its target service, and
+provider reference values may use presence-only comparison where the provider
+returns a resolved value instead of the reference expression.
+
 Deletion uses `EnvironmentSpec.removeEnvVars` as an explicit durable tombstone:
 
 - validate names and reject collisions with `envVars`, env-file includes,
@@ -460,11 +471,21 @@ until the reviewed commit is present on the default branch.
 
 Do not use temporary release-command changes to run one-off data operations. Release commands are durable deploy-time schema configuration.
 
-Provider-to-provider data moves belong in `hv_db_migrate mode="move"`.
+Schema migrations are not an imperative Hypervibe operation. Application
+containers should converge schema during startup, or the spec may declare a
+durable provider predeploy/release command when startup migration is not
+appropriate.
 
 Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`. It should plan a visible one-shot seed action, run through the provider-neutral environment task runner during `hv_apply`, and record completion on the database component only after terminal success.
 
-`hv_db_migrate mode="seed"` is only for explicit re-runs or repair operations and must be confirm-gated, masked, and audited.
+`hv_db_migrate` must not exist in the command registry, MCP surface, or CLI.
+Provider-to-provider data moves are lifecycle operations and must be modeled as
+explicit spec/plan/apply actions with dependency edges, data-bearing
+confirmation, cutover state, and verification receipts before they are
+supported. Database resets likewise belong to desired-state destruction, not
+an imperative shortcut. Re-running or repairing seed data requires a new
+reviewable desired-state intent; Hypervibe does not expose a generic seed
+command runner.
 
 ## New Provider Checklist
 

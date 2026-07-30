@@ -5,6 +5,7 @@ import type { ObservedState, ObservedService } from '../ports/observe.port.js';
 import { hashEnvValue } from '../ports/observe.port.js';
 import type { PlanAction, PlanFieldDiff, DiffResult, LocalSnapshot } from './plan.types.js';
 import { providerRequiresCustomDomainAttach } from '../services/domain-attach-policy.js';
+import { buildDatabaseAliasEnvVars } from '../services/database-env.js';
 
 /**
  * Pure diff: desired spec vs observed live state (or local state when the
@@ -56,13 +57,6 @@ export function diffEnvironment(input: {
     warnings.push(migrationWarning);
   }
   const provider = spec.hosting.provider;
-  const desiredEnvVars = {
-    ...(managedDatabaseEnvVars ?? {}),
-    ...(managedCacheEnvVars ?? {}),
-    ...(managedQueueEnvVars ?? {}),
-    ...spec.envVars,
-  };
-
   if (observed?.partial) {
     warnings.push('Observation was partial; some diffs may be incomplete.');
   }
@@ -195,13 +189,21 @@ export function diffEnvironment(input: {
       const presenceOnlyManagedEnvVars = providerBehavior.presenceOnlyManagedEnvVar
         ? new Set(Object.entries({
           ...(managedDatabaseEnvVars ?? {}),
+          ...buildDatabaseAliasEnvVars(managedDatabaseEnvVars ?? {}, serviceSpec.databaseEnvAliases),
           ...(managedCacheEnvVars ?? {}),
           ...(managedQueueEnvVars ?? {}),
         })
           .filter(([key, value]) => providerBehavior.presenceOnlyManagedEnvVar?.({ key, value }))
           .map(([key]) => key))
         : undefined;
-      const diff = diffServiceConfig(serviceSpec, live, desiredEnvVars, {
+      const desiredServiceEnvVars = {
+        ...(managedDatabaseEnvVars ?? {}),
+        ...buildDatabaseAliasEnvVars(managedDatabaseEnvVars ?? {}, serviceSpec.databaseEnvAliases),
+        ...(managedCacheEnvVars ?? {}),
+        ...(managedQueueEnvVars ?? {}),
+        ...spec.envVars,
+      };
+      const diff = diffServiceConfig(serviceSpec, live, desiredServiceEnvVars, {
         presenceOnlyEnvVars: presenceOnlyManagedEnvVars,
       });
       const workloadKindObservable = providerBehavior.workloadKindObservation !== 'cron-only';
@@ -609,6 +611,21 @@ export function diffEnvironment(input: {
         ...(serviceAction.dependsOn ?? []),
         activeDatabaseAction.id,
       ]));
+    }
+  }
+
+  if (spec.database) {
+    const canonicalKey = 'DATABASE_URL';
+    for (const serviceAction of actions.filter((action) =>
+      action.resource.kind === 'service'
+      && (action.type === 'create' || action.type === 'replace')
+    )) {
+      const serviceSpec = spec.services[serviceAction.resource.name];
+      if (!serviceSpec || Object.keys(serviceSpec.databaseEnvAliases ?? {}).length > 0) continue;
+      warnings.push(
+        `New service "${serviceAction.resource.name}" will receive the managed database contract through ${canonicalKey}. `
+        + `Hypervibe can verify variable attachment but cannot prove application code consumes it; declare service.databaseEnvAliases for legacy runtime names.`
+      );
     }
   }
 

@@ -2,7 +2,11 @@ import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { canonicalizeLegacyGitHubSpec, deepMergeSpec, SpecStore } from '../domain/spec/spec.store.js';
-import { projectSpecSchema, type ProjectSpec } from '../domain/spec/spec.schema.js';
+import {
+  projectSpecSchema,
+  type EnvironmentSpec,
+  type ProjectSpec,
+} from '../domain/spec/spec.schema.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { diffEnvironment } from '../domain/plan/diff.engine.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
@@ -39,6 +43,8 @@ import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service.js';
 import { planEmailSetup } from '../domain/services/email-plan.service.js';
 import { validateProjectSpecProviders } from '../domain/services/provider-spec-validation.js';
+import { buildManagedDatabaseEnvVars } from '../domain/services/database-env.js';
+import type { ObservedState } from '../domain/ports/observe.port.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
@@ -111,6 +117,40 @@ function summarizeActions(actions: PlanAction[]) {
     counts[action.type] = (counts[action.type] ?? 0) + 1;
   }
   return counts;
+}
+
+function managedDatabaseContract(environment: EnvironmentSpec) {
+  if (!environment.database) return undefined;
+  return {
+    provider: environment.database.provider,
+    engine: environment.database.engine,
+    canonicalEnvVars: ['DATABASE_URL', 'DIRECT_URL'],
+    services: Object.fromEntries(
+      Object.entries(environment.services).map(([serviceName, service]) => [
+        serviceName,
+        {
+          aliases: service.databaseEnvAliases ?? {},
+        },
+      ])
+    ),
+  };
+}
+
+function runtimeHealthSummary(observed: ObservedState | null) {
+  const failed = observed?.services
+    .filter((service) => service.status === 'failed')
+    .map((service) => service.name) ?? [];
+  if (failed.length > 0) {
+    return {
+      status: 'failed',
+      services: failed,
+      reason: 'The provider reports a failed deployment. Inspect hv_errors and hv_logs before treating the environment as healthy.',
+    };
+  }
+  return {
+    status: 'unverified',
+    reason: 'hv_status verifies desired infrastructure and managed variable attachment, not application behavior. Use hv_health for HTTP services and hv_errors/hv_logs for workers.',
+  };
 }
 
 function normalizeGitSourceRepo(repo?: string): string | undefined {
@@ -296,7 +336,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     'Create or update the desired-state spec for a project (services, databases, Redis caches, storage buckets, queues, domains, and deploy infrastructure). This is the source of truth that hv_plan diffs against live infrastructure. When run inside a git worktree, Hypervibe writes .hypervibe/spec.json. Merges by default; pass replace=true to overwrite or null to delete a key.',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Canonical shape: { gitRemoteUrl?, github?: { repository?, canonicalEnvironment?, actions?: { <id>: typed check|autofix|pull-request-review|code-audit }, dependencies?, security?, collaboration? }, secrets?: { <ENV_KEY>: delegated-secret declaration }, environments: { <env>: { hosting, services, database?, cache?, storage?, queues?, domain?, email?, envVars?, deploy?, migrations?, ios? } } }. database.engine is postgres; cache.engine is redis. github actions use typed behavior plus triggers/schedules; a schedule is five-field POSIX cron with an optional IANA timezone. GitHub workflow files and repository settings are planned and applied through the desired-state loop, with generated infrastructure delivered through a reviewable PR. GitHub and OpenAI connections are required only for their corresponding GitHub actions and do not block unrelated providers. The deprecated top-level collaboration field remains readable and is moved to github.collaboration on the next write. Delegated secrets declare ownership and targets but never values; pass values to hv_plan with secretRefs. database.seedCommand is a visible, receipt-backed one-shot bootstrap. deploy.trigger="ci" is the portable branch-deploy default; trigger="native" is provider-specific and confirmation-gated. Use hv_db_migrate for explicit PostgreSQL data operations; declare iOS builds and TestFlight distribution under ios.release so the managed workflow invokes the reviewed project release script.'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Canonical shape: { gitRemoteUrl?, github?: { repository?, canonicalEnvironment?, actions?: { <id>: typed check|autofix|pull-request-review|code-audit }, dependencies?, security?, collaboration? }, secrets?: { <ENV_KEY>: delegated-secret declaration }, environments: { <env>: { hosting, services, database?, cache?, storage?, queues?, domain?, email?, envVars?, deploy?, migrations?, ios? } } }. database.engine is postgres; cache.engine is redis. Services may declare databaseEnvAliases such as { POSTGRES_DB_URL: "DATABASE_URL" } without storing the resolved value. github actions use typed behavior plus triggers/schedules; a schedule is five-field POSIX cron with an optional IANA timezone. GitHub workflow files and repository settings are planned and applied through the desired-state loop, with generated infrastructure delivered through a reviewable PR. GitHub and OpenAI connections are required only for their corresponding GitHub actions and do not block unrelated providers. The deprecated top-level collaboration field remains readable and is moved to github.collaboration on the next write. Delegated secrets declare ownership and targets but never values; pass values to hv_plan with secretRefs. database.seedCommand is a visible, receipt-backed one-shot bootstrap. Schema migrations run during container startup or a durable declared predeploy/release command; database moves and resets must be modeled as desired-state lifecycle actions. deploy.trigger="ci" is the portable branch-deploy default; trigger="native" is provider-specific and confirmation-gated. Declare iOS builds and TestFlight distribution under ios.release so the managed workflow invokes the reviewed project release script.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external app access such as the Railway GitHub App.'),
     },
@@ -458,6 +498,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if ('error' in result) {
         return commandError('VALIDATION', result.error, { next: ['hv_spec_set'] });
       }
+      const plannedEnvironmentSpec = specStore.get(project)?.spec.environments[result.environmentName];
 
       const confirmIds = result.actions.filter((a) => a.requiresConfirm).map((a) => a.id);
       const pending = result.actions.filter((a) => a.type !== 'noop');
@@ -510,6 +551,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         {
           planId: result.planRunId,
           environment: result.environmentName,
+          ...(plannedEnvironmentSpec && managedDatabaseContract(plannedEnvironmentSpec)
+            ? { managedDatabase: managedDatabaseContract(plannedEnvironmentSpec) }
+            : {}),
           specRevision: result.specRevision,
           specSource: result.specSource ?? { kind: 'local' },
           verified: result.verified,
@@ -542,7 +586,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_status',
-    'Show desired vs observed state for an environment: drift, unmanaged resources, blocked connections, and observed service endpoints (name, live status, URL, custom domains). Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
+    'Show desired vs observed infrastructure state for an environment: drift, unmanaged resources, blocked connections, managed database-variable attachment, and observed service endpoints. inSync means configuration convergence only; runtimeHealth remains unverified until hv_health or worker log/error evidence is checked. Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
     { project: projectField, env: envField },
     wrapCommandHandler(async ({ project: projectRef, env }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -562,6 +606,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);
       const { observed, warnings } = await planService.observeEnvironment(projectForStatus, environment, envSpec);
       const local = planService.buildLocalSnapshot(projectForStatus, environment);
+      const managedDatabaseEnvVars = buildManagedDatabaseEnvVars(
+        envSpec.database,
+        local.components
+      );
       const diff = diffEnvironment({
         spec: envSpec,
         envName,
@@ -569,6 +617,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         local,
         providerBehavior: providerRegistry.getMetadata(envSpec.hosting.provider)?.orchestration?.diff,
         expectedSource: planService.expectedDeploySource(projectForStatus, envName, envSpec),
+        managedDatabaseEnvVars,
       });
       const drift = diff.actions.filter((a) => a.type !== 'noop');
 
@@ -705,6 +754,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       return commandSuccess(
         {
           environment: envName,
+          ...(managedDatabaseContract(envSpec)
+            ? { managedDatabase: managedDatabaseContract(envSpec) }
+            : {}),
           specRevision: specResult.revision,
           specSource: specResult.source ?? { kind: 'local' },
           verified: observed !== null && !observed.partial,
@@ -724,6 +776,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             }
             : {}),
           inSync: !observationIncomplete && drift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0,
+          runtimeHealth: runtimeHealthSummary(observed),
           summary: summarizeActions([...diff.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...(emailAction ? [emailAction] : [])]),
           drift: [...drift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift],
           unmanaged: [...diff.unmanaged, ...storage.unmanaged],
@@ -754,7 +807,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
               : delegatedSecrets.inputRequired.length > 0
                 ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
-              : drift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 ? 'Run hv_plan to get an executable plan for this drift.' : undefined,
+              : drift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0
+                ? 'Run hv_plan to get an executable plan for this drift.'
+                : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_errors/hv_logs for workers.',
           next: blocked.length > 0 ? ['hv_connect'] : undefined,
         }
       );

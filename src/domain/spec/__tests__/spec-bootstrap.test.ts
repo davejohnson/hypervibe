@@ -57,7 +57,7 @@ describe('service action bootstrap authority', () => {
       databaseProvider: 'railway',
       domain: 'example.com',
       setupEmail: true,
-      storageServiceEnvVars: {
+      envVarsByService: {
         web: { BUCKET: 'web' },
         worker: { BUCKET: 'worker' },
       },
@@ -68,7 +68,7 @@ describe('service action bootstrap authority', () => {
       setupEmail: false,
       ensureHostingProject: false,
       serviceConfig: { worker: { workloadKind: 'worker' } },
-      storageServiceEnvVars: { worker: { BUCKET: 'worker' } },
+      envVarsByService: { worker: { BUCKET: 'worker' } },
     });
     expect(scoped.databaseProvider).toBeUndefined();
     expect(scoped.domain).toBeUndefined();

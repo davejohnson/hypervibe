@@ -772,7 +772,7 @@ export class VercelAdapter implements IProviderAdapter {
       return 'Vercel watchPaths are not supported by the exact-SHA managed workflow, which deploys the complete reviewed commit.';
     }
     if (service.buildConfig.releaseCommand?.trim()) {
-      return 'Vercel release commands are not supported. Use declarative database.seedCommand or hv_db_migrate for explicit data operations.';
+      return 'Vercel release commands are not supported. Use declarative database.seedCommand for first seed/bootstrap data, and run schema migrations during application startup.';
     }
     return undefined;
   }
