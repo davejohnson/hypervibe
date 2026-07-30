@@ -1,0 +1,145 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AzureDatastoreCredentialsSchema } from '../azure-datastore.credentials.js';
+import {
+  AzureResourceManagerClient,
+  AzureResourceManagerError,
+} from '../azure-resource-manager.client.js';
+
+const SUBSCRIPTION_ID = '22222222-2222-4222-8222-222222222222';
+const RESOURCE_GROUP = 'hypervibe-test';
+const COLLECTION =
+  `/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}`
+  + '/providers/Microsoft.Example/resources';
+
+const credentials = AzureDatastoreCredentialsSchema.parse({
+  tenantId: '11111111-1111-4111-8111-111111111111',
+  subscriptionId: SUBSCRIPTION_ID,
+  clientId: '33333333-3333-4333-8333-333333333333',
+  clientSecret: 'azure-client-secret',
+  resourceGroup: RESOURCE_GROUP,
+  location: 'canadacentral',
+});
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function tokenResponse(): Response {
+  return jsonResponse({ access_token: 'safe-access-token' });
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe('AzureResourceManagerClient', () => {
+  it('uses client credentials and follows every exact-collection page', async () => {
+    const firstId = `${COLLECTION}/one`;
+    const secondId = `${COLLECTION}/two`;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse({
+        value: [{ id: firstId }],
+        nextLink:
+          `https://management.azure.com${COLLECTION}`
+          + '?api-version=2025-08-01&$skiptoken=next',
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        value: [{ id: secondId }],
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new AzureResourceManagerClient(credentials);
+    await expect(
+      client.listAll<{ id: string }>(COLLECTION, '2025-08-01')
+    ).resolves.toEqual([{ id: firstId }, { id: secondId }]);
+    expect(String(fetchMock.mock.calls[0]![1]?.body)).toContain(
+      'grant_type=client_credentials'
+    );
+    expect(fetchMock.mock.calls[2]![0]).toContain('$skiptoken=next');
+  });
+
+  it('rejects off-origin and same-resource-group collection escapes', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse({
+        value: [],
+        nextLink: 'https://example.invalid/steal-token',
+      })));
+    const offOrigin = new AzureResourceManagerClient(credentials);
+    await expect(
+      offOrigin.listAll(COLLECTION, '2025-08-01')
+    ).rejects.toThrow(/left management\.azure\.com/);
+
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse({
+        value: [],
+        nextLink:
+          `https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}`
+          + `/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Example/other`
+          + '?api-version=2025-08-01',
+      })));
+    const otherCollection = new AzureResourceManagerClient(credentials);
+    await expect(
+      otherCollection.listAll(COLLECTION, '2025-08-01')
+    ).rejects.toThrow(/left the observed collection/);
+  });
+
+  it('blocks duplicate durable identities across complete pagination', async () => {
+    const duplicate = `${COLLECTION}/one`;
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse({
+        value: [{ id: duplicate }, { id: duplicate.toUpperCase() }],
+      })));
+
+    const client = new AzureResourceManagerClient(credentials);
+    await expect(
+      client.listAll(COLLECTION, '2025-08-01')
+    ).rejects.toThrow(/duplicate resource identity/);
+  });
+
+  it('treats only 404 as absence and never includes response bodies in errors', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse({ error: 'missing' }, 404)));
+    const absent = new AzureResourceManagerClient(credentials);
+    await expect(
+      absent.getNullable(`${COLLECTION}/one`, '2025-08-01')
+    ).resolves.toBeNull();
+
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse({
+        error: 'provider-echoed-secret-never-output',
+      }, 403)));
+    const unknown = new AzureResourceManagerClient(credentials);
+    const error = await unknown
+      .getNullable(`${COLLECTION}/one`, '2025-08-01')
+      .catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(AzureResourceManagerError);
+    expect(error).toMatchObject({ status: 403 });
+    expect(String(error)).not.toContain(
+      'provider-echoed-secret-never-output'
+    );
+  });
+
+  it('rejects durable ids outside the configured scope before auth', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new AzureResourceManagerClient(credentials);
+
+    expect(() => client.parseResourceId(
+      `/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/other`
+        + '/providers/Microsoft.Example/resources/one',
+      'Microsoft.Example',
+      'resources'
+    )).toThrow(/outside the configured subscription\/resource group/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

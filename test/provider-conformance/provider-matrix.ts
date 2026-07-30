@@ -30,6 +30,15 @@ export interface ManagedWorkflowFixture {
     healthCheckPath: string;
     public: true;
   };
+  /** Optional datastore resources exercised in the same desired-state run. */
+  database?: {
+    provider: string;
+    engine: 'postgres' | 'mongodb';
+  };
+  cache?: {
+    provider: string;
+    engine: 'redis';
+  };
 }
 
 export interface HostingProviderContract {
@@ -231,11 +240,13 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     service: 'App Platform',
     status: 'ready-for-live',
     credentials: digitalOceanCredentials,
-    managedWorkflow: dockerWebManagedWorkflow(
-      'deploy-digitalocean-production.yml'
-    ),
+    managedWorkflow: {
+      ...dockerWebManagedWorkflow('deploy-digitalocean-production.yml'),
+      database: { provider: 'digitalocean', engine: 'postgres' },
+      cache: { provider: 'digitalocean', engine: 'redis' },
+    },
     implementationNote:
-      'The registry, credential schema, App Platform adapter, guidance, mocked lifecycle, exact-SHA CI workflow, and review-gated managed-workflow live harness are implemented. Hosting promotion requires a successful opt-in create/deploy/noop/update/destroy run against an isolated DigitalOcean team and existing DOCR registry.',
+      'The registry, credential schema, App Platform adapter, derived PostgreSQL and Valkey adapters, guidance, mocked lifecycle, exact-SHA CI workflow, and review-gated full-stack managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run against an isolated DigitalOcean team and existing DOCR registry.',
   },
   {
     kind: 'hosting',
@@ -275,11 +286,13 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     service: 'Render Services',
     status: 'ready-for-live',
     credentials: renderCredentials,
-    managedWorkflow: dockerWebManagedWorkflow(
-      'deploy-render-production.yml'
-    ),
+    managedWorkflow: {
+      ...dockerWebManagedWorkflow('deploy-render-production.yml'),
+      database: { provider: 'render', engine: 'postgres' },
+      cache: { provider: 'render', engine: 'redis' },
+    },
     implementationNote:
-      'The workspace/registry binding, image-backed service adapter, guidance, mocked lifecycle, exact-SHA GHCR workflow, and review-gated managed-workflow live harness are implemented. Hosting promotion requires a successful opt-in create/deploy/noop/update/destroy run against an isolated Render workspace and existing GHCR credential.',
+      'The workspace/registry binding, image-backed service adapter, derived Postgres and Key Value adapters, guidance, mocked lifecycle, exact-SHA GHCR workflow, and review-gated full-stack managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run against an isolated Render workspace and existing GHCR credential.',
   },
   {
     kind: 'hosting',
@@ -288,11 +301,15 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     service: 'Azure Container Apps',
     status: 'ready-for-live',
     credentials: azureContainerAppsCredentials,
-    managedWorkflow: dockerWebManagedWorkflow(
-      'deploy-azure-container-apps-production.yml'
-    ),
+    managedWorkflow: {
+      ...dockerWebManagedWorkflow(
+        'deploy-azure-container-apps-production.yml'
+      ),
+      database: { provider: 'azure-postgres', engine: 'postgres' },
+      cache: { provider: 'azure-managed-redis', engine: 'redis' },
+    },
     implementationNote:
-      'The managed-environment and Container App lifecycle adapter, service-principal guidance, mocked safety contracts, native-source guard, exact-digest ACR workflow, and review-gated managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run in an isolated Azure subscription.',
+      'The managed-environment, Container App, PostgreSQL Flexible Server, and Managed Redis lifecycle adapters, service-principal guidance, mocked safety contracts, native-source guard, exact-digest ACR workflow, and review-gated full-stack managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run in an isolated Azure subscription.',
   },
   {
     kind: 'hosting',
@@ -349,11 +366,11 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     vendor: 'DigitalOcean',
     service: 'Managed PostgreSQL',
     engine: 'postgres',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: digitalOceanCredentials,
     fixtureHostingProvider: 'digitalocean',
     implementationNote:
-      'The derived Managed PostgreSQL adapter and mocked lifecycle safety contract are implemented. Promotion remains gated on a live harness for the DigitalOcean managed GitHub workflow and one complete live stack run.',
+      'The derived Managed PostgreSQL adapter, mocked lifecycle safety contract, and review-gated full-stack live profile are implemented. Promotion requires one successful complete live stack run.',
   },
   {
     kind: 'database',
@@ -381,11 +398,11 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     vendor: 'Render',
     service: 'Render Postgres',
     engine: 'postgres',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: renderCredentials,
     fixtureHostingProvider: 'render',
     implementationNote:
-      'The derived Render Postgres adapter and mocked lifecycle safety contract are implemented. Promotion remains gated on the complete managed-workflow live stack run.',
+      'The derived Render Postgres adapter, mocked lifecycle safety contract, and review-gated full-stack live profile are implemented. Promotion requires one successful complete live stack run.',
   },
   {
     kind: 'database',
@@ -420,9 +437,11 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     vendor: 'Microsoft Azure',
     service: 'Azure Database for PostgreSQL Flexible Server',
     engine: 'postgres',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: azureCredentials,
     fixtureHostingProvider: 'azure-container-apps',
+    implementationNote:
+      'The ARM registry, credential schema, PostgreSQL Flexible Server adapter, Azure-services firewall wiring, and mocked lifecycle safety contract are implemented. Promotion requires one successful complete Azure live stack run.',
   },
   {
     kind: 'database',
@@ -467,11 +486,11 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     vendor: 'DigitalOcean',
     service: 'Managed Valkey/Redis',
     engine: 'redis',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: digitalOceanCredentials,
     fixtureHostingProvider: 'digitalocean',
     implementationNote:
-      'The derived Managed Valkey adapter and mocked lifecycle safety contract are implemented. New clusters use the Valkey engine while observation accepts legacy Redis clusters; promotion remains gated on a live harness for the complete DigitalOcean stack.',
+      'The derived Managed Valkey adapter, mocked lifecycle safety contract, and review-gated full-stack live profile are implemented. New clusters use the Valkey engine while observation accepts legacy Redis clusters; promotion requires one successful complete live stack run.',
   },
   {
     kind: 'cache',
@@ -499,11 +518,11 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     vendor: 'Render',
     service: 'Render Key Value',
     engine: 'redis',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: renderCredentials,
     fixtureHostingProvider: 'render',
     implementationNote:
-      'The derived Render Key Value adapter and mocked lifecycle safety contract are implemented. Promotion remains gated on the complete managed-workflow live stack run.',
+      'The derived Render Key Value adapter, mocked lifecycle safety contract, and review-gated full-stack live profile are implemented. Promotion requires one successful complete live stack run.',
   },
   {
     kind: 'cache',
@@ -524,9 +543,11 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     vendor: 'Microsoft Azure',
     service: 'Azure Managed Redis',
     engine: 'redis',
-    status: 'planned',
+    status: 'ready-for-live',
     credentials: azureCredentials,
     fixtureHostingProvider: 'azure-container-apps',
+    implementationNote:
+      'The ARM registry, credential schema, Azure Managed Redis adapter, encrypted default database wiring, and mocked lifecycle safety contract are implemented. Promotion requires one successful complete Azure live stack run.',
   },
 ];
 

@@ -1,0 +1,326 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { Environment } from '../../../../domain/entities/environment.entity.js';
+import { AzurePostgresAdapter } from '../azure-postgres.adapter.js';
+
+const SUBSCRIPTION_ID = '22222222-2222-4222-8222-222222222222';
+const RESOURCE_GROUP = 'hypervibe-test';
+const SERVER_NAME = 'invoice-perfect-production-postgres';
+const SERVER_ID =
+  `/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}`
+  + `/providers/Microsoft.DBforPostgreSQL/flexibleServers/${SERVER_NAME}`;
+const CLIENT_SECRET = 'azure-client-secret-never-output';
+
+const credentials = {
+  tenantId: '11111111-1111-4111-8111-111111111111',
+  subscriptionId: SUBSCRIPTION_ID,
+  clientId: '33333333-3333-4333-8333-333333333333',
+  clientSecret: CLIENT_SECRET,
+  resourceGroup: RESOURCE_GROUP,
+  location: 'canadacentral',
+};
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function accepted(): Response {
+  return new Response(null, { status: 202 });
+}
+
+function server(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    id: SERVER_ID,
+    name: SERVER_NAME,
+    location: 'canadacentral',
+    sku: { name: 'Standard_B1ms', tier: 'Burstable' },
+    properties: {
+      state: 'Ready',
+      fullyQualifiedDomainName: `${SERVER_NAME}.postgres.database.azure.com`,
+      administratorLogin: 'hypervibeadmin',
+      version: '16',
+    },
+    ...overrides,
+  };
+}
+
+function environment(): Environment {
+  return {
+    id: 'env-local',
+    projectId: 'project-local',
+    name: 'production',
+    platformBindings: {},
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+}
+
+function installAzureFetch(
+  handler: (
+    url: URL,
+    method: string,
+    body: unknown
+  ) => Response | Promise<Response>
+): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(async (
+    input: string | URL | Request,
+    init?: RequestInit
+  ) => {
+    const url = new URL(String(input));
+    if (url.hostname === 'login.microsoftonline.com') {
+      return jsonResponse({ access_token: 'safe-access-token' });
+    }
+    const body = typeof init?.body === 'string'
+      ? JSON.parse(init.body)
+      : undefined;
+    return handler(url, init?.method ?? 'GET', body);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+async function connected(): Promise<AzurePostgresAdapter> {
+  const adapter = new AzurePostgresAdapter();
+  await adapter.connect(credentials);
+  return adapter;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
+
+describe('AzurePostgresAdapter', () => {
+  it('creates a server and logical database while keeping receipts secret-safe', async () => {
+    const requests: Array<{
+      method: string;
+      pathname: string;
+      body: any;
+    }> = [];
+    installAzureFetch((url, method, body) => {
+      requests.push({ method, pathname: url.pathname, body });
+      if (method === 'GET' && url.pathname.endsWith('/flexibleServers')) {
+        return jsonResponse({ value: [] });
+      }
+      if (method === 'PUT' && url.pathname.endsWith(`/flexibleServers/${SERVER_NAME}`)) {
+        return accepted();
+      }
+      if (method === 'GET' && url.pathname.endsWith(`/flexibleServers/${SERVER_NAME}`)) {
+        return jsonResponse(server());
+      }
+      if (method === 'PUT' && url.pathname.endsWith('/firewallRules/hypervibe-azure-services')) {
+        return accepted();
+      }
+      if (method === 'GET' && url.pathname.endsWith('/firewallRules/hypervibe-azure-services')) {
+        return jsonResponse({
+          id: `${SERVER_ID}/firewallRules/hypervibe-azure-services`,
+          name: 'hypervibe-azure-services',
+          properties: {
+            startIpAddress: '0.0.0.0',
+            endIpAddress: '0.0.0.0',
+          },
+        });
+      }
+      if (method === 'PUT' && url.pathname.endsWith('/databases/app')) {
+        return accepted();
+      }
+      if (method === 'GET' && url.pathname.endsWith('/databases/app')) {
+        return jsonResponse({
+          id: `${SERVER_ID}/databases/app`,
+          name: 'app',
+          properties: { charset: 'UTF8', collation: 'en_US.utf8' },
+        });
+      }
+      throw new Error(`Unexpected ${method} ${url.pathname}`);
+    });
+    const adapter = await connected();
+
+    const result = await adapter.provision('postgres', environment(), {
+      resourceName: 'Invoice Perfect Production Postgres',
+      databaseName: 'app',
+    });
+
+    expect(result.receipt.success).toBe(true);
+    expect(result.component.externalId).toBe(SERVER_ID);
+    expect(result.connectionUrl).toMatch(
+      /^postgresql:\/\/hypervibeadmin:.*@invoice-perfect-production-postgres\.postgres\.database\.azure\.com:5432\/app\?sslmode=require$/
+    );
+    const create = requests.find((request) =>
+      request.method === 'PUT'
+      && request.pathname.endsWith(`/flexibleServers/${SERVER_NAME}`)
+    );
+    expect(create?.body).toMatchObject({
+      location: 'canadacentral',
+      sku: { name: 'Standard_B1ms', tier: 'Burstable' },
+      properties: {
+        administratorLogin: 'hypervibeadmin',
+        network: { publicNetworkAccess: 'Enabled' },
+      },
+    });
+    const password =
+      create?.body?.properties?.administratorLoginPassword as string;
+    expect(password.length).toBeGreaterThan(20);
+    expect(requests).toContainEqual(expect.objectContaining({
+      method: 'PUT',
+      pathname: expect.stringContaining(
+        '/firewallRules/hypervibe-azure-services'
+      ),
+      body: {
+        properties: {
+          startIpAddress: '0.0.0.0',
+          endIpAddress: '0.0.0.0',
+        },
+      },
+    }));
+    expect(JSON.stringify(result.receipt)).not.toContain(password);
+    expect(JSON.stringify(result.receipt)).not.toContain(CLIENT_SECRET);
+    expect(JSON.stringify(result.receipt)).not.toContain('postgresql://');
+  });
+
+  it('blocks name-match adoption and never issues a create', async () => {
+    const fetchMock = installAzureFetch((url, method) => {
+      if (method === 'GET' && url.pathname.endsWith('/flexibleServers')) {
+        return jsonResponse({ value: [server()] });
+      }
+      throw new Error(`Unexpected ${method} ${url.pathname}`);
+    });
+    const adapter = await connected();
+
+    const result = await adapter.provision('postgres', environment(), {
+      resourceName: SERVER_NAME,
+    });
+
+    expect(result.receipt.success).toBe(false);
+    expect(result.receipt.error).toContain('will not choose or silently adopt');
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT'))
+      .toBe(false);
+  });
+
+  it('preserves the reviewed resource id after an unknown create outcome', async () => {
+    installAzureFetch((url, method) => {
+      if (method === 'GET' && url.pathname.endsWith('/flexibleServers')) {
+        return jsonResponse({ value: [] });
+      }
+      if (method === 'PUT') {
+        throw new Error('connection closed after request transmission');
+      }
+      throw new Error(`Unexpected ${method} ${url.pathname}`);
+    });
+    const adapter = await connected();
+
+    const result = await adapter.provision('postgres', environment(), {
+      resourceName: SERVER_NAME,
+    });
+
+    expect(result.receipt.success).toBe(false);
+    expect(result.component.externalId).toBe(SERVER_ID);
+    expect(result.receipt.data).toMatchObject({
+      serverId: SERVER_ID,
+      mutationAttempted: true,
+    });
+  });
+
+  it('resolves durable ids before names and treats only 404 as absence', async () => {
+    let listCalled = false;
+    installAzureFetch((url, method) => {
+      if (method === 'GET' && url.pathname.endsWith(`/flexibleServers/${SERVER_NAME}`)) {
+        return jsonResponse(server());
+      }
+      if (url.pathname.endsWith('/flexibleServers')) listCalled = true;
+      throw new Error(`Unexpected ${method} ${url.pathname}`);
+    });
+    const adapter = await connected();
+
+    await expect(adapter.observeDatabase(
+      environment(),
+      {
+        id: 'component',
+        environmentId: 'env-local',
+        type: 'postgres',
+        bindings: { provider: 'azure-postgres' },
+        externalId: SERVER_ID,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }
+    )).resolves.toMatchObject({
+      externalId: SERVER_ID,
+      status: 'running',
+    });
+    expect(listCalled).toBe(false);
+
+    installAzureFetch((_url, _method) =>
+      jsonResponse({ error: 'forbidden' }, 403)
+    );
+    const unknown = await connected();
+    await expect(unknown.observeDatabase(
+      environment(),
+      {
+        id: 'component',
+        environmentId: 'env-local',
+        type: 'postgres',
+        bindings: { provider: 'azure-postgres' },
+        externalId: SERVER_ID,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }
+    )).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('makes deletion idempotent and verifies terminal absence', async () => {
+    let getCount = 0;
+    let deleted = false;
+    installAzureFetch((url, method) => {
+      if (url.pathname.endsWith(`/flexibleServers/${SERVER_NAME}`)) {
+        if (method === 'DELETE') {
+          deleted = true;
+          return accepted();
+        }
+        getCount += 1;
+        return deleted
+          ? jsonResponse({ error: 'gone' }, 404)
+          : jsonResponse(server());
+      }
+      throw new Error(`Unexpected ${method} ${url.pathname}`);
+    });
+    const adapter = await connected();
+    const component = {
+      id: 'component',
+      environmentId: 'env-local',
+      type: 'postgres' as const,
+      bindings: { provider: 'azure-postgres', instanceId: SERVER_ID },
+      externalId: SERVER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    await expect(adapter.destroy(component)).resolves.toMatchObject({
+      success: true,
+    });
+    expect(getCount).toBe(2);
+
+    installAzureFetch(() => jsonResponse({ error: 'gone' }, 404));
+    const absent = await connected();
+    await expect(absent.destroy(component)).resolves.toMatchObject({
+      success: true,
+      message: expect.stringContaining('already absent'),
+    });
+
+    let observed = false;
+    installAzureFetch((_url, method) => {
+      if (method === 'GET' && !observed) {
+        observed = true;
+        return jsonResponse(server());
+      }
+      return jsonResponse({ error: 'gone' }, 404);
+    });
+    const raced = await connected();
+    await expect(raced.destroy(component)).resolves.toMatchObject({
+      success: true,
+    });
+  });
+});

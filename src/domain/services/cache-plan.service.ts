@@ -223,7 +223,7 @@ export function planCache(params: {
     const destroyDependencies: string[] = [];
     for (const serviceName of serviceNames) {
       if (!params.environmentSpec.services[serviceName]) {
-        destroyDependencies.push(`service:${serviceName}`);
+        destroyDependencies.push(`service:${serviceName}:destroy`);
         continue;
       }
       const id = `cache:redis:unwire:${serviceName}`;

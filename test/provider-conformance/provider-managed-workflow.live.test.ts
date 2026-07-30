@@ -11,9 +11,12 @@ import {
 import path from 'node:path';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import {
+  cacheProviderContracts,
+  databaseProviderContracts,
   hostingProviderContracts,
   managedWorkflowGitHubCredentials,
   type HostingProviderContract,
+  type ManagedWorkflowFixture,
   type ProviderCredentialField,
 } from './provider-matrix.js';
 import {
@@ -226,6 +229,12 @@ function fixtureSpec(params: {
           : {
               [fixture.serviceName]: fixture.service,
             },
+        ...(params.includeService !== false && fixture.database
+          ? { database: fixture.database }
+          : {}),
+        ...(params.includeService !== false && fixture.cache
+          ? { cache: fixture.cache }
+          : {}),
         email: { enabled: false },
         envVars: params.includeService === false
           ? {}
@@ -241,6 +250,54 @@ function fixtureSpec(params: {
       },
     },
   });
+}
+
+function datastoreConnectionProfiles(
+  fixture: ManagedWorkflowFixture
+): Array<{ provider: string; credentials: ProviderCredentialField[] }> {
+  const profiles: Array<{
+    provider: string;
+    credentials: ProviderCredentialField[];
+  }> = [];
+  if (fixture.database) {
+    const database = databaseProviderContracts.find((entry) => (
+      entry.provider === fixture.database!.provider
+      && entry.engine === fixture.database!.engine
+    ));
+    if (!database || database.status === 'planned') {
+      throw new Error(
+        `Managed workflow database ${fixture.database.provider}/${fixture.database.engine} is not ready for live use.`
+      );
+    }
+    profiles.push(database);
+  }
+  if (fixture.cache) {
+    const cache = cacheProviderContracts.find((entry) => (
+      entry.provider === fixture.cache!.provider
+      && entry.engine === fixture.cache!.engine
+    ));
+    if (!cache || cache.status === 'planned') {
+      throw new Error(
+        `Managed workflow cache ${fixture.cache.provider}/${fixture.cache.engine} is not ready for live use.`
+      );
+    }
+    profiles.push(cache);
+  }
+  return profiles;
+}
+
+function expectedDestroyActionIds(
+  fixture: ManagedWorkflowFixture
+): string[] {
+  return [
+    `service:${fixture.serviceName}:destroy`,
+    ...(fixture.database
+      ? [`database:${fixture.database.provider}:destroy`]
+      : []),
+    ...(fixture.cache
+      ? [`cache:${fixture.cache.provider}:destroy`]
+      : []),
+  ];
 }
 
 async function setSpec(spec: JsonObject): Promise<void> {
@@ -546,7 +603,15 @@ liveDescribe('live managed provider workflow contract', () => {
 
     await verifyCommittedFixture();
     await setSpec(fixtureSpec({}));
-    await connectProvider(contract.provider, contract.credentials);
+    const connectedProviders = new Set<string>();
+    for (const profile of [
+      contract,
+      ...datastoreConnectionProfiles(contract.managedWorkflow),
+    ]) {
+      if (connectedProviders.has(profile.provider)) continue;
+      await connectProvider(profile.provider, profile.credentials);
+      connectedProviders.add(profile.provider);
+    }
     await connectProvider(
       'github',
       managedWorkflowGitHubCredentials,
@@ -559,22 +624,24 @@ liveDescribe('live managed provider workflow contract', () => {
     await setSpec(fixtureSpec({ includeService: false }));
     const teardown = await applyCurrentSpec();
     assertNoTerminalApplyFailure(teardown.apply);
-    const destroyReceipt = (teardown.apply.data.receipts as JsonObject[] ?? [])
-      .find((receipt) => (
-        receipt.actionId
-          === `service:${contract!.managedWorkflow!.serviceName}:destroy`
-      ));
-    expect(destroyReceipt).toMatchObject({ status: 'succeeded' });
+    for (const actionId of expectedDestroyActionIds(contract.managedWorkflow)) {
+      const destroyReceipt = (
+        teardown.apply.data.receipts as JsonObject[] ?? []
+      ).find((receipt) => receipt.actionId === actionId);
+      expect(destroyReceipt).toMatchObject({ status: 'succeeded' });
+    }
     await convergeReviewedInfrastructure(teardown.apply);
 
     const verified = await plan();
     const incomplete = nonNoopActions(verified).filter(
-      (action) => action.resource?.kind === 'service'
+      (action) => ['service', 'database', 'cache'].includes(
+        action.resource?.kind
+      )
     );
     expect(incomplete).toEqual([]);
     expect(
       (verified.data.unmanaged as JsonObject[] ?? [])
-        .filter((item) => item.kind === 'service')
+        .filter((item) => ['service', 'database', 'cache'].includes(item.kind))
     ).toEqual([]);
     resourcesMayExist = false;
   }, 40 * 60_000);

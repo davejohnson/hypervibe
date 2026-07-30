@@ -9,6 +9,8 @@ import '../adapters/providers/gcp/cloudrun.adapter.js';
 import '../adapters/providers/render/render.adapter.js';
 import '../adapters/providers/heroku/heroku.adapter.js';
 import '../adapters/providers/azure/azure-container-apps.adapter.js';
+import '../adapters/providers/azure/azure-postgres.adapter.js';
+import '../adapters/providers/azure/azure-managed-redis.adapter.js';
 import '../adapters/providers/vercel/vercel.adapter.js';
 import '../adapters/providers/aws/ecs.adapter.js';
 
