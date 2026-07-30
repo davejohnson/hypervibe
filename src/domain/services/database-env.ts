@@ -4,7 +4,6 @@ import type { Component } from '../entities/component.entity.js';
 export const DATABASE_ENV_KEYS = [
   'DATABASE_URL',
   'DIRECT_URL',
-  'MONGODB_URI',
   'CLOUD_SQL_CONNECTION_NAME',
   'INSTANCE_CONNECTION_NAME',
   'DATABASE_HOST',
@@ -54,13 +53,6 @@ export function buildDatabaseEnvVarsFromComponent(component: Component): { envVa
   const envVars: Record<string, string> = {};
   const provider = stringBinding(bindings, 'provider');
   const connectionUrl = stringBinding(bindings, 'connectionUrl') ?? stringBinding(bindings, 'connectionString');
-
-  if (component.type === 'mongodb') {
-    return {
-      envVars: connectionUrl ? { MONGODB_URI: connectionUrl } : {},
-      connectionUrl,
-    };
-  }
 
   if (provider === 'railway') {
     const pluginName = stringBinding(bindings, 'pluginName');

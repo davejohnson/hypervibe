@@ -378,6 +378,24 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'hv_connect provider="cloudsql" credentialsRef="file:/absolute/path/cloudsql.json"',
   },
+  memorystore: {
+    provider: 'memorystore',
+    displayName: 'Google Cloud Memorystore',
+    tokenType: 'Google Cloud service account JSON key scoped to one project and existing VPC network',
+    setupUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    permissions: [
+      'Grant roles/redis.viewer for connection verification and live observation of Memorystore instances.',
+      'Grant roles/redis.admin when Hypervibe should create and delete Memorystore instances through hv_plan/hv_apply.',
+      'Grant serviceusage.services.use on the target project (roles/serviceusage.serviceUsageConsumer is the standard role) and enable redis.googleapis.com before connecting.',
+      'The Cloud Run runtime separately needs a declarative VPC egress path to the authorizedNetwork. The current Cloud Run adapter does not create that path, so the Cloud Run + Memorystore full-stack live profile remains blocked.',
+    ],
+    credentialExample: 'hv_connect provider="memorystore" credentialsRef="file:/absolute/path/memorystore.json"',
+    notes: [
+      'The JSON must include projectId, credentials (the service-account JSON as a string), and region. authorizedNetwork may select an existing full VPC resource name; it defaults to projects/<projectId>/global/networks/default.',
+      'Hypervibe creates private-IP Redis with AUTH enabled and transit encryption disabled. Access is limited by the selected VPC, so never treat the resulting REDIS_URL as internet reachable.',
+      'Google recommends short-lived credentials over service-account JSON keys. If a key is required, rotate it and grant only the project roles above.',
+    ],
+  },
   database: {
     provider: 'database',
     displayName: 'External database',
@@ -446,6 +464,24 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Enable the ECS serviceLongArnFormat account setting before connecting. Durable long-form service ARNs are required so Hypervibe can prove exact cluster and service identity.',
       'Service creation is billable and exact-action confirmation-gated. Apply creates a zero-task bootstrap service; the managed workflow builds the full checked-out Git SHA, publishes it to the existing repository, resolves the ECR digest, and scales only already-bound services to one task.',
       'This adapter currently supports the commercial aws partition and static IAM access keys. Keep the credential file outside the repository, rotate the key regularly, and reconnect after rotation; support for temporary STS/OIDC credentials requires a separate credential lifecycle.',
+    ],
+  },
+  elasticache: {
+    provider: 'elasticache',
+    displayName: 'Amazon ElastiCache',
+    tokenType: 'AWS IAM access key (accessKeyId/secretAccessKey, plus sessionToken for temporary STS credentials) scoped to one account, region, and VPC',
+    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+    permissions: [
+      'For verification and observation: elasticache:DescribeServerlessCaches, ec2:DescribeSubnets, and ec2:DescribeSecurityGroups.',
+      'For lifecycle management through hv_plan/hv_apply: elasticache:CreateServerlessCache, elasticache:DeleteServerlessCache, elasticache:AddTagsToResource, ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress, ec2:DeleteSecurityGroup, and ec2:CreateTags.',
+      'If the account has never used ElastiCache, allow iam:CreateServiceLinkedRole only when iam:AWSServiceName equals elasticache.amazonaws.com, or have an administrator create that service-linked role first.',
+    ],
+    credentialExample: 'hv_connect provider="elasticache" credentialsRef="file:/absolute/path/elasticache.json"',
+    notes: [
+      'The JSON must include accessKeyId, secretAccessKey, region, at least two subnetIds in distinct availability zones, and one or more securityGroupIds used by the workloads that connect to the cache.',
+      'Hypervibe creates a dedicated managed security group that accepts TCP 6379 only from the declared workload security groups, then creates a TLS-only serverless Valkey cache in those subnets.',
+      'Deletion waits for provider-confirmed cache absence before removing the managed security group. Cache deletion is data-bearing and exact-action confirmation remains required.',
+      'Prefer temporary STS credentials. Scope mutation permissions to the intended account, region, VPC, and Hypervibe-tagged resources where AWS supports resource-level conditions.',
     ],
   },
   doppler: {
