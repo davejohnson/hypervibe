@@ -115,7 +115,7 @@ function resolveHostingService(
 export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_secrets_set',
-    'Set secrets and environment variables. NEVER pass sensitive values via value/vars — they appear in the chat transcript; use secretRef (env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref — read locally, never enters chat) or generate=true for a new server-side random secret. target="hosting" (default) sets env vars on the deployed environment; destinations explicitly shares one resolved/generated value across selected environment/service targets. "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time; "github" sets a GitHub Actions repo secret. remove=true deletes (mapping/github targets).',
+    'Set secrets and environment variables. NEVER pass sensitive values via value/vars — they appear in the chat transcript; use secretRef (env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref — read locally, never enters chat) or generate=true for a new server-side random secret. target="hosting" (default) sets env vars on the deployed environment; destinations explicitly shares one resolved/generated value across selected environment/service targets. "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time; "github" sets a GitHub Actions repository secret, or an environment secret when env is provided. remove=true deletes (mapping/github targets).',
     {
       project: projectField,
       env: envField,
@@ -134,7 +134,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       path: z.string().optional().describe('target=manager: secret path'),
       secretRef: z.string().optional().describe('Chat-safe value source for targets hosting/manager/github: env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like 1password://vault/item#field — the value is read locally and never enters chat. For target=mapping: the secret-manager reference to map.'),
       environments: z.array(z.string()).optional().describe('target=mapping: environments the mapping applies to'),
-      repo: z.string().optional().describe('target=github: "owner/name" (defaults to project git remote)'),
+      repo: z.string().optional().describe('target=github: "owner/name" (defaults to project git remote); pass env to scope the secret to a GitHub environment'),
       remove: z.boolean().optional().describe('Delete instead of set (mapping/github)'),
     },
     wrapCommandHandler(async ({ project: projectRef, env, service, destinations, target = 'hosting', key, value, generate, generateLength, vars, provider, path, secretRef, environments, repo, remove }) => {
@@ -205,6 +205,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       if (target === 'github') {
         const project = ctx.resolveProjectOrThrow({ project: projectRef });
         const { owner, repo: repoName } = githubRepoForProject(project, repo);
+        const environmentName = env?.trim();
         if (!key) throw new HvError('VALIDATION', 'key is required for target="github".');
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
         if ('error' in gh) {
@@ -214,9 +215,28 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
           });
         }
         if (remove) {
-          await gh.adapter.deleteSecret(owner, repoName, key);
-          ctx.repos.audit.create({ action: 'github.secret_deleted', resourceType: 'github_secret', resourceId: `${owner}/${repoName}/${key}`, details: { secretName: key } });
-          return commandSuccess({ repository: `${owner}/${repoName}`, secretName: key, action: 'deleted' });
+          if (environmentName) {
+            await gh.adapter.deleteEnvironmentSecret(owner, repoName, environmentName, key);
+          } else {
+            await gh.adapter.deleteSecret(owner, repoName, key);
+          }
+          ctx.repos.audit.create({
+            action: 'github.secret_deleted',
+            resourceType: 'github_secret',
+            resourceId: environmentName
+              ? `${owner}/${repoName}/environments/${environmentName}/${key}`
+              : `${owner}/${repoName}/${key}`,
+            details: {
+              secretName: key,
+              ...(environmentName ? { environmentName } : {}),
+            },
+          });
+          return commandSuccess({
+            repository: `${owner}/${repoName}`,
+            ...(environmentName ? { environment: environmentName } : {}),
+            secretName: key,
+            action: 'deleted',
+          });
         }
         if (value !== undefined && secretRef) {
           throw new HvError('VALIDATION', 'Pass either value or secretRef for target="github", not both.');
@@ -226,11 +246,34 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
             hint: 'Use secretRef="env:NAME", secretRef="dotenv:/absolute/path/.env#KEY", secretRef="file:/absolute/path", or a secret-manager ref to avoid putting the secret value in chat.',
           });
         }
-        const secretValue = value ?? await resolveSecretValueRef(secretRef!, { projectId: project.id, ...(env ? { environmentName: env } : {}) });
-        await gh.adapter.setRepositorySecret(owner, repoName, key, secretValue);
-        ctx.repos.audit.create({ action: 'github.secret_set', resourceType: 'github_secret', resourceId: `${owner}/${repoName}/${key}`, details: { secretName: key } });
+        const secretValue = value ?? await resolveSecretValueRef(secretRef!, {
+          projectId: project.id,
+          ...(environmentName ? { environmentName } : {}),
+        });
+        if (environmentName) {
+          await gh.adapter.setEnvironmentSecret(owner, repoName, environmentName, key, secretValue);
+        } else {
+          await gh.adapter.setRepositorySecret(owner, repoName, key, secretValue);
+        }
+        ctx.repos.audit.create({
+          action: 'github.secret_set',
+          resourceType: 'github_secret',
+          resourceId: environmentName
+            ? `${owner}/${repoName}/environments/${environmentName}/${key}`
+            : `${owner}/${repoName}/${key}`,
+          details: {
+            secretName: key,
+            ...(environmentName ? { environmentName } : {}),
+          },
+        });
         return commandSuccess(
-          { repository: `${owner}/${repoName}`, secretName: key, action: 'set', valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw' },
+          {
+            repository: `${owner}/${repoName}`,
+            ...(environmentName ? { environment: environmentName } : {}),
+            secretName: key,
+            action: 'set',
+            valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw',
+          },
           exposureWarning ? { warnings: [exposureWarning] } : undefined
         );
       }

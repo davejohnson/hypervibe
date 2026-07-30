@@ -97,6 +97,24 @@ describe('GitHub Actions environment variables', () => {
   });
 });
 
+describe('GitHub Actions environment secrets', () => {
+  it('deletes an environment-scoped secret', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response(undefined, 204));
+
+    await connectedAdapter().deleteEnvironmentSecret(
+      'dave',
+      'app',
+      'production/us',
+      'MATCH_PASSWORD'
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.github.com/repos/dave/app/environments/production%2Fus/secrets/MATCH_PASSWORD',
+      expect.objectContaining({ method: 'DELETE' })
+    );
+  });
+});
+
 describe('GitHub repository infrastructure', () => {
   const unicodeWorkflow = 'Deployment blocked — Hypervibe reconciliation required 🚧\n';
 
