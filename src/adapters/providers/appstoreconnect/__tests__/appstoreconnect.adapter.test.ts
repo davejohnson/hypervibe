@@ -9,6 +9,19 @@ function adapterWithApiMock() {
 }
 
 describe('AppStoreConnectAdapter TestFlight management', () => {
+  it('lists App Store versions without the unsupported sort parameter', async () => {
+    const { adapter, apiRequest } = adapterWithApiMock();
+    apiRequest.mockResolvedValueOnce({ data: [] });
+
+    await adapter.listAppStoreVersions('app-1', { platform: 'IOS', limit: 10 });
+
+    const requestPath = apiRequest.mock.calls[0][1] as string;
+    const requestUrl = new URL(requestPath, 'https://api.appstoreconnect.apple.com');
+    expect(requestUrl.pathname).toBe('/apps/app-1/appStoreVersions');
+    expect(requestUrl.searchParams.get('filter[platform]')).toBe('IOS');
+    expect(requestUrl.searchParams.has('sort')).toBe(false);
+  });
+
   it('parses builds when App Store Connect omits preReleaseVersion relationships', async () => {
     const { adapter, apiRequest } = adapterWithApiMock();
     apiRequest.mockResolvedValueOnce({
