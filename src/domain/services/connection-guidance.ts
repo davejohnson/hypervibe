@@ -522,35 +522,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
     ],
   },
-  heroku: {
-    provider: 'heroku',
-    displayName: 'Heroku',
-    tokenType: 'Heroku Platform API bearer token (prefer a revocable OAuth direct-authorization token with global scope for durable automation)',
-    setupUrl: 'https://dashboard.heroku.com/account',
-    setupUrls: [
-      {
-        label: 'Heroku Account Settings API key',
-        url: 'https://dashboard.heroku.com/account',
-      },
-      {
-        label: 'Heroku OAuth direct authorization',
-        url: 'https://devcenter.heroku.com/articles/oauth#direct-authorization',
-      },
-    ],
-    permissions: [
-      'Heroku direct authorizations expose the Platform API global scope; Heroku does not offer an app-scoped permission set for this token type.',
-      'The Heroku user behind the token must be allowed to list, create, inspect, configure, release, scale, and delete apps in the intended account/team.',
-      'The same token authenticates the managed GitHub workflow to registry.heroku.com and authorizes exact-image formation releases.',
-    ],
-    credentialExample: 'export HEROKU_API_KEY="<Heroku bearer token>"; hv_connect provider="heroku" credentialsRef="env:HEROKU_API_KEY"',
-    notes: [
-      'The Account Settings API key is available only for non-SSO users, is account-wide, and is invalidated by a password change. Use a separately revocable direct authorization for durable automation when possible.',
-      'Federated/SSO users cannot issue non-expiring direct authorizations. Heroku recommends a separate non-federated automation user invited only to the intended organization when a long-lived integration token is required.',
-      'For JSON credentials, apiKey is required; region defaults to us and dynoSize defaults to basic. HEROKU_API_KEY and HYPERVIBE_HEROKU_API_KEY are accepted aliases.',
-      'The default basic dyno is billable once the managed workflow releases and scales a process to one. Hypervibe marks service creation billable and requires the exact reviewed action id before apply.',
-      'Store the token in an exported variable, dotenv file, or secret manager. It grants broad account access and must never be committed or printed.',
-    ],
-  },
   openai: {
     provider: 'openai',
     displayName: 'OpenAI API',
@@ -605,24 +576,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Create the token at https://railway.com/account/tokens and select "No workspace" so it is an account token. Hypervibe verifies with the GraphQL me query, which Railway documents as unusable with workspace or project tokens — workspace-scoped tokens fail verification.',
       'Do NOT use a Project token (from a project\'s settings page): project tokens are scoped to one environment, use a different auth header, and cannot call the account-level API Hypervibe needs.',
       'If multiple workspaces are visible, include workspaceId: credentialsMap={"apiToken":"HYPERVIBE_RAILWAY_TOKEN","workspaceId":"RAILWAY_WORKSPACE_ID"} so projects are created in the right workspace.',
-    ],
-  },
-  render: {
-    provider: 'render',
-    displayName: 'Render',
-    tokenType: 'Render personal API key plus the target workspace ID (tea-...; a legacy own-... ID resolves to the user default workspace)',
-    setupUrl: 'https://dashboard.render.com/u/settings#api-keys',
-    permissions: [
-      'Render API keys are not scope-selectable and inherit access to every workspace your Render user belongs to; use ownerId to pin Hypervibe to the one intended workspace.',
-      'The Render user must be allowed to read, create, update, and delete services, Postgres instances, and Key Value instances in that workspace for the lifecycle capabilities declared in the spec.',
-      'For exact-SHA CI deploys, create a GitHub Container Registry credential in the target Render workspace and pass its durable ID as registryCredentialId; Hypervibe verifies and reuses it but never creates or rotates it implicitly.',
-    ],
-    credentialExample: 'hv_connect provider="render" credentialsRef="file:/absolute/path/render.json"',
-    notes: [
-      'Create the API key under Render Account Settings -> API Keys at https://dashboard.render.com/u/settings#api-keys. Render shows the key only once.',
-      'Find the workspace ID on the workspace Settings page. The JSON must contain apiKey and ownerId; add registryCredentialId when Render hosting uses the managed exact-SHA GitHub Actions workflow.',
-      'Create the registry credential under Workspace Settings -> Container Registry Credentials for GitHub Container Registry. Its GitHub token needs read:packages for the private image repository; scope the GitHub account/repository as narrowly as possible.',
-      'Store the API key and registry credential ID in a local JSON or dotenv reference instead of chat. RENDER_API_KEY and HYPERVIBE_RENDER_API_KEY are accepted API-key aliases.',
     ],
   },
   vercel: {

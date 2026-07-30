@@ -6,8 +6,6 @@
 // Hosting platforms
 import '../adapters/providers/railway/railway.adapter.js';
 import '../adapters/providers/gcp/cloudrun.adapter.js';
-import '../adapters/providers/render/render.adapter.js';
-import '../adapters/providers/heroku/heroku.adapter.js';
 import '../adapters/providers/azure/azure-container-apps.adapter.js';
 import '../adapters/providers/azure/azure-postgres.adapter.js';
 import '../adapters/providers/azure/azure-managed-redis.adapter.js';

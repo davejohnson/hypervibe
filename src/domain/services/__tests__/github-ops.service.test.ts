@@ -435,7 +435,7 @@ describe('github tools', () => {
       cloudRunWorkflow.content,
       railwayWorkflow.content,
     ].join('\n');
-    expect(combinedContent).not.toMatch(/railway-github-action|vercel deploy|doctl apps|gcloud |heroku container|heroku git/);
+    expect(combinedContent).not.toMatch(/railway-github-action|vercel deploy|doctl apps|gcloud /);
   });
 
   it('separates Cloud Run service and scheduled job deploy targets', () => {

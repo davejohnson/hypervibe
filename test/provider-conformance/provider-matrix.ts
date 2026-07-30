@@ -163,12 +163,6 @@ const railwayCredentials: ProviderCredentialField[] = [
   { field: 'workspaceId', environmentVariable: 'HYPERVIBE_TEST_RAILWAY_WORKSPACE_ID', optional: true },
 ];
 
-const renderCredentials: ProviderCredentialField[] = [
-  { field: 'apiKey', environmentVariable: 'HYPERVIBE_TEST_RENDER_API_KEY' },
-  { field: 'ownerId', environmentVariable: 'HYPERVIBE_TEST_RENDER_OWNER_ID' },
-  { field: 'registryCredentialId', environmentVariable: 'HYPERVIBE_TEST_RENDER_REGISTRY_CREDENTIAL_ID' },
-];
-
 const azureCredentials: ProviderCredentialField[] = [
   { field: 'tenantId', environmentVariable: 'HYPERVIBE_TEST_AZURE_TENANT_ID' },
   { field: 'subscriptionId', environmentVariable: 'HYPERVIBE_TEST_AZURE_SUBSCRIPTION_ID' },
@@ -182,12 +176,6 @@ const azureContainerAppsCredentials: ProviderCredentialField[] = [
   ...azureCredentials,
   { field: 'registryId', environmentVariable: 'HYPERVIBE_TEST_AZURE_REGISTRY_ID' },
   { field: 'registryServer', environmentVariable: 'HYPERVIBE_TEST_AZURE_REGISTRY_SERVER' },
-];
-
-const flyCredentials: ProviderCredentialField[] = [
-  { field: 'apiToken', environmentVariable: 'HYPERVIBE_TEST_FLY_API_TOKEN' },
-  { field: 'organizationSlug', environmentVariable: 'HYPERVIBE_TEST_FLY_ORGANIZATION_SLUG' },
-  { field: 'region', environmentVariable: 'HYPERVIBE_TEST_FLY_REGION', optional: true },
 ];
 
 const vercelCredentials: ProviderCredentialField[] = [
@@ -278,38 +266,6 @@ export const hostingProviderContracts: HostingProviderContract[] = [
   },
   {
     kind: 'hosting',
-    provider: 'heroku',
-    vendor: 'Heroku',
-    service: 'Heroku Platform',
-    status: 'ready-for-live',
-    credentials: [
-      { field: 'apiKey', environmentVariable: 'HYPERVIBE_TEST_HEROKU_API_KEY' },
-      { field: 'region', environmentVariable: 'HYPERVIBE_TEST_HEROKU_REGION', optional: true },
-      { field: 'dynoSize', environmentVariable: 'HYPERVIBE_TEST_HEROKU_DYNO_SIZE', optional: true },
-    ],
-    managedWorkflow: dockerWebManagedWorkflow(
-      'deploy-heroku-production.yml'
-    ),
-    implementationNote:
-      'The account binding, container-app lifecycle adapter, guidance, mocked lifecycle, exact-image-ID managed workflow, and review-gated managed-workflow live harness are implemented. Promotion requires a successful opt-in create/release/noop/update/destroy run in an isolated Heroku account.',
-  },
-  {
-    kind: 'hosting',
-    provider: 'render',
-    vendor: 'Render',
-    service: 'Render Services',
-    status: 'ready-for-live',
-    credentials: renderCredentials,
-    managedWorkflow: {
-      ...dockerWebManagedWorkflow('deploy-render-production.yml'),
-      database: { provider: 'render', engine: 'postgres' },
-      cache: { provider: 'render', engine: 'redis' },
-    },
-    implementationNote:
-      'The workspace/registry binding, image-backed service adapter, derived Postgres and Key Value adapters, guidance, mocked lifecycle, exact-SHA GHCR workflow, and review-gated full-stack managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run against an isolated Render workspace and existing GHCR credential.',
-  },
-  {
-    kind: 'hosting',
     provider: 'azure-container-apps',
     vendor: 'Microsoft Azure',
     service: 'Azure Container Apps',
@@ -324,14 +280,6 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     },
     implementationNote:
       'The managed-environment, Container App, PostgreSQL Flexible Server, and Managed Redis lifecycle adapters, service-principal guidance, mocked safety contracts, native-source guard, exact-digest ACR workflow, and review-gated full-stack managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run in an isolated Azure subscription.',
-  },
-  {
-    kind: 'hosting',
-    provider: 'fly',
-    vendor: 'Fly.io',
-    service: 'Fly Machines',
-    status: 'planned',
-    credentials: flyCredentials,
   },
   {
     kind: 'hosting',
@@ -408,18 +356,6 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
   },
   {
     kind: 'database',
-    provider: 'render',
-    vendor: 'Render',
-    service: 'Render Postgres',
-    engine: 'postgres',
-    status: 'ready-for-live',
-    credentials: renderCredentials,
-    fixtureHostingProvider: 'render',
-    implementationNote:
-      'The derived Render Postgres adapter, mocked lifecycle safety contract, and review-gated full-stack live profile are implemented. Promotion requires one successful complete live stack run.',
-  },
-  {
-    kind: 'database',
     provider: 'supabase',
     vendor: 'Supabase',
     service: 'Supabase Postgres',
@@ -442,18 +378,6 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     fixtureHostingProvider: 'azure-container-apps',
     implementationNote:
       'The ARM registry, credential schema, PostgreSQL Flexible Server adapter, Azure-services firewall wiring, and mocked lifecycle safety contract are implemented. Promotion requires one successful complete Azure live stack run.',
-  },
-  {
-    kind: 'database',
-    provider: 'fly-managed-postgres',
-    vendor: 'Fly.io',
-    service: 'Fly Managed Postgres',
-    engine: 'postgres',
-    status: 'planned',
-    credentials: flyCredentials,
-    fixtureHostingProvider: 'fly',
-    implementationNote:
-      'Do not implement against flyctl or an undocumented MPG endpoint; promotion requires a supported provider lifecycle API.',
   },
   {
     kind: 'database',
@@ -515,18 +439,6 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     status: 'ready-for-live',
     credentials: railwayCredentials,
     fixtureHostingProvider: 'railway',
-  },
-  {
-    kind: 'cache',
-    provider: 'render',
-    vendor: 'Render',
-    service: 'Render Key Value',
-    engine: 'redis',
-    status: 'ready-for-live',
-    credentials: renderCredentials,
-    fixtureHostingProvider: 'render',
-    implementationNote:
-      'The derived Render Key Value adapter, mocked lifecycle safety contract, and review-gated full-stack live profile are implemented. Promotion requires one successful complete live stack run.',
   },
   {
     kind: 'cache',
