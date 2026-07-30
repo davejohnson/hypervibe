@@ -725,7 +725,6 @@ export class AppStoreConnectAdapter {
     const params = new URLSearchParams();
     params.set('limit', String(options?.limit ?? 10));
     params.set('fields[appStoreVersions]', 'versionString,appStoreState,platform');
-    params.set('sort', '-createdDate');
     if (options?.platform) {
       params.set('filter[platform]', options.platform);
     }
