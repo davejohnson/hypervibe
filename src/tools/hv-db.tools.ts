@@ -7,40 +7,27 @@ import {
   type DatabaseCredentials,
 } from '../adapters/providers/database/database.adapter.js';
 import {
-  runDatabaseMigration,
-  runDatabaseSeed,
-  executeDatabaseReset,
-  canCreateRailwayDatabaseTcpProxy,
-  ensureExternalDatabaseUrl,
   isExternallyUsableDatabaseUrl,
   isPostgresDatabaseUrl,
   resolveExternalDatabaseUrl,
   maskDatabaseUrl,
 } from '../domain/services/database-ops.service.js';
 import {
-  databaseMigrationStrategyStatus,
-  executeManagedDatabaseMove,
-  resolveManagedMoveTargets,
-} from '../domain/services/database-move.service.js';
-import {
   acquireExistingDatabaseAccess,
   acquireManagedDatabaseAccess,
   type DatabaseAccessCleanup,
   type DatabaseAccessLease,
 } from '../domain/services/database-access.service.js';
-import { resolveSecretValueRef } from '../domain/services/secret-value-ref.js';
 import type { CommandContext } from '../application/context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
-import { projectField, envField, confirmField } from './schemas.js';
+import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 
 type ResolvedDatabaseTarget = {
   url: string;
   source: string;
   project?: Project;
-  tcpProxyCreated?: boolean;
-  proxyDomain?: string;
 };
 
 type ResolvedDatabaseAccessTarget = {
@@ -49,6 +36,24 @@ type ResolvedDatabaseAccessTarget = {
   environment?: string;
   databaseAccess: DatabaseAccessLease;
 };
+
+function assertManagedEnvironmentUsesPostgres(
+  ctx: CommandContext,
+  environment: { id: string; name: string }
+): void {
+  const postgres = ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres');
+  const mongodb = ctx.repos.components.findByEnvironmentAndType(environment.id, 'mongodb');
+  if (!postgres && mongodb) {
+    throw new HvError(
+      'VALIDATION',
+      `Environment "${environment.name}" uses MongoDB; hv_db_query and hv_db_url support PostgreSQL only.`,
+      {
+        details: { engine: 'mongodb' },
+        hint: 'Use an engine-aware MongoDB operation through the application or provider until Hypervibe exposes a bounded MongoDB command contract.',
+      }
+    );
+  }
+}
 
 function sqlFingerprint(sql: string): string {
   const normalized = stripSqlLiteralsAndComments(sql).trim().replace(/\s+/g, ' ').toLowerCase();
@@ -63,7 +68,7 @@ function assertPostgresTarget(url: string, source: string): void {
   }
   if (!isExternallyUsableDatabaseUrl(url)) {
     throw new HvError('VALIDATION', `Database target ${source} is not externally reachable from Hypervibe.`, {
-      hint: 'Use a public/provider-supported database URL, create or reuse a managed TCP proxy through a confirmed database operation, or run migrations/seeds in-environment so no external database URL is needed.',
+      hint: 'Use a public/provider-supported database URL, or select the managed environment with hv_db_query so Hypervibe can acquire operation-scoped access.',
     });
   }
 }
@@ -91,15 +96,11 @@ async function resolveConfiguredTarget(
 }
 
 function unavailableExternalDatabaseTarget(project: Project, environment: { name: string; id: string; platformBindings: Record<string, unknown> }): HvError {
-  const canCreateTcpProxy = canCreateRailwayDatabaseTcpProxy(environment);
   return new HvError('NOT_FOUND', `Could not resolve an externally reachable Postgres URL for ${project.name}/${environment.name}.`, {
     details: {
       source: `${project.name}/${environment.name}`,
-      canCreateTcpProxy,
     },
-    hint: canCreateTcpProxy
-      ? 'The managed database appears to be internal-only or stored as provider runtime references. Create or reuse a public TCP proxy through a confirmed database operation, or pass connectionUrl/connectionName explicitly. In-environment migrations/seeds do not need this because they run inside the hosting network.'
-      : 'Ensure the environment has a tracked Postgres database with an externally reachable connection URL, or pass connectionUrl/connectionName explicitly.',
+    hint: 'The managed database may be internal-only or stored as a provider runtime reference. Use hv_db_query for bounded diagnostics with operation-scoped access, or pass connectionUrl/connectionName explicitly.',
   });
 }
 
@@ -119,34 +120,12 @@ async function resolveExternalTarget(
 
   const project = ctx.resolveProjectOrThrow({ project: opts.project });
   const environment = ctx.resolveEnvironmentOrThrow(project, opts.env);
+  assertManagedEnvironmentUsesPostgres(ctx, environment);
   const url = await resolveExternalDatabaseUrl(project, environment, opts.service);
   if (!url) {
     throw unavailableExternalDatabaseTarget(project, environment);
   }
   return { url, source: `${project.name}/${environment.name}${opts.service ? `/${opts.service}` : ''}`, project };
-}
-
-async function resolveConfirmedExternalTarget(
-  ctx: CommandContext,
-  opts: { connectionUrl?: string; connectionName?: string; project?: string; env?: string; service?: string }
-): Promise<ResolvedDatabaseTarget> {
-  const configured = await resolveConfiguredTarget(ctx, opts);
-  if (configured) return configured;
-
-  const project = ctx.resolveProjectOrThrow({ project: opts.project });
-  const environment = ctx.resolveEnvironmentOrThrow(project, opts.env);
-  const result = await ensureExternalDatabaseUrl(project, environment, opts.service);
-  if (!result.ok) {
-    const code = result.code === 'provider_error' ? 'PROVIDER_ERROR' : 'NOT_FOUND';
-    throw new HvError(code, result.error, { hint: result.hint });
-  }
-  return {
-    url: result.url,
-    source: `${project.name}/${environment.name}${opts.service ? `/${opts.service}` : ''}`,
-    project,
-    tcpProxyCreated: result.tcpProxyCreated,
-    proxyDomain: result.proxyDomain,
-  };
 }
 
 async function resolveTemporaryExternalTarget(
@@ -164,6 +143,7 @@ async function resolveTemporaryExternalTarget(
 
   const project = ctx.resolveProjectOrThrow({ project: opts.project });
   const environment = ctx.resolveEnvironmentOrThrow(project, opts.env);
+  assertManagedEnvironmentUsesPostgres(ctx, environment);
   const result = await acquireManagedDatabaseAccess(project, environment, opts.service);
   if (!result.ok) {
     const code = result.code === 'provider_error' ? 'PROVIDER_ERROR' : 'NOT_FOUND';
@@ -330,201 +310,6 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
   );
 
   commands.register(
-    'hv_db_migrate',
-    'Database operations for a deployed environment. mode="up" runs schema migrations; mode="seed" explicitly re-runs a one-off seed/bootstrap command (fresh-environment seed/bootstrap data should be declared as database.seedCommand and applied through hv_plan/hv_apply); mode="reset" drops all tables; mode="move" copies data from the previous provider into the current database during staged provider migration (pg_dump | pg_restore snapshot plus row-count verification). up/seed default to runIn="environment": the command runs INSIDE the hosting environment (Cloud Run job / temporary Railway service) using the deployed image and its env vars — no database exposure, no local .env. runIn="local" spawns the command locally against an externally reachable database URL instead. Mutating modes are confirm-gated.',
-    {
-      project: projectField,
-      env: envField,
-      mode: z.enum(['up', 'reset', 'move', 'seed']).optional().describe('Default "up"'),
-      command: z.string().optional().describe('mode=up: migration command (default: prisma preset); mode=seed: required explicit re-run/repair seed command. For fresh environments prefer database.seedCommand in the spec.'),
-      preset: z.enum(['prisma', 'prisma-push', 'drizzle', 'typeorm', 'knex', 'sequelize', 'django', 'rails', 'laravel']).optional()
-        .describe('mode=up: use a preset migration command'),
-      service: z.string().optional().describe('Service to run the migration on (default: first service)'),
-      runIn: z.enum(['environment', 'local']).optional().describe('mode=up/seed: "environment" (default when supported) runs inside the hosting environment with the deployed image + env vars; "local" spawns locally against an externally reachable database URL.'),
-      dryRun: z.boolean().optional().describe('mode=up or mode=seed: show what would run without executing'),
-      sourceConnectionUrl: z.string().optional().describe('mode=move: override the source database URL. Accepts chat-safe refs — env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path — so the URL/password never enters chat. (Default: the previous provider recorded during hv_apply.)'),
-      targetConnectionUrl: z.string().optional().describe('mode=move or mode=seed: override the target database URL; same chat-safe refs supported. (Default: the environment\'s current database, creating a Railway TCP proxy only from a confirmed mutating operation when required.)'),
-      criticalTables: z.array(z.string()).optional().describe('mode=move: tables to verify with exact row counts (default: the 8 largest)'),
-      confirm: confirmField,
-    },
-    wrapCommandHandler(async ({ project: projectRef, env, mode = 'up', command, preset, service, runIn, dryRun, sourceConnectionUrl, targetConnectionUrl, criticalTables, confirm }) => {
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const environment = ctx.resolveEnvironmentOrThrow(project, env);
-
-      if (mode === 'move') {
-        const resolveUrlOverride = async (input?: string): Promise<string | undefined> => {
-          if (!input) return undefined;
-          if (/^(env|dotenv|file):/.test(input.trim())) {
-            return resolveSecretValueRef(input, { projectId: project.id, environmentName: environment.name });
-          }
-          return input;
-        };
-        const [sourceOverride, targetOverride] = await Promise.all([
-          resolveUrlOverride(sourceConnectionUrl),
-          resolveUrlOverride(targetConnectionUrl),
-        ]);
-        const resolved = await resolveManagedMoveTargets({ project, environment, sourceConnectionUrl: sourceOverride, targetConnectionUrl: targetOverride });
-        // target_unreachable is previewable: the confirm-gated execute path
-        // creates a public TCP proxy so the target becomes reachable.
-        if (!resolved.ok && resolved.code !== 'target_unreachable') {
-          const code = resolved.code === 'tooling' ? 'UNSUPPORTED' : 'NOT_FOUND';
-          return commandError(code, resolved.error, { hint: resolved.hint });
-        }
-        if (!confirm) {
-          if (!resolved.ok) {
-            return commandError('CONFIRM_REQUIRED', 'Managed database move copies data with pg_dump | pg_restore (pg_restore --clean replaces existing objects in the target). The target Railway database is internal-only: confirming will also create a public TCP proxy for it.', {
-              details: {
-                target: {
-                  provider: 'railway',
-                  reachable: false,
-                  note: 'A public TCP proxy will be created for the database so pg_dump/pg_restore can reach it.',
-                },
-                strategy: databaseMigrationStrategyStatus('snapshot'),
-              },
-              hint: 'Freeze writes to the source (or plan a final re-run) and re-run with confirm=true. After the move, re-run hv_plan to repoint services, verify the app, then confirm the old database destroy.',
-            });
-          }
-          return commandError('CONFIRM_REQUIRED', 'Managed database move copies data with pg_dump | pg_restore (pg_restore --clean replaces existing objects in the target).', {
-            details: {
-              source: { provider: resolved.sourceProvider ?? 'unknown', url: maskDatabaseUrl(resolved.sourceUrl) },
-              target: { provider: resolved.targetProvider ?? 'unknown', url: maskDatabaseUrl(resolved.targetUrl) },
-              strategy: databaseMigrationStrategyStatus('snapshot'),
-            },
-            hint: 'Freeze writes to the source (or plan a final re-run) and re-run with confirm=true. After the move, re-run hv_plan to repoint services, verify the app, then confirm the old database destroy.',
-          });
-        }
-
-        const result = await executeManagedDatabaseMove({ project, environment, sourceConnectionUrl: sourceOverride, targetConnectionUrl: targetOverride, criticalTables });
-        if (!result.ok) {
-          const code = result.code === 'tooling' ? 'UNSUPPORTED' : 'PROVIDER_ERROR';
-          return commandError(code, result.error, { hint: result.hint });
-        }
-        return commandSuccess(
-          {
-            moved: true,
-            source: { provider: result.sourceProvider ?? 'unknown' },
-            target: { provider: result.targetProvider ?? 'unknown' },
-            ...(result.tcpProxyCreated !== undefined
-              ? { tcpProxyCreated: result.tcpProxyCreated, proxyDomain: result.proxyDomain }
-              : {}),
-            verification: result.verification,
-          },
-          {
-            warnings: result.verification.ok
-              ? undefined
-              : [`Row counts differ on ${result.verification.mismatches.length} table(s) — writes may have continued on the source. Freeze writes and re-run the move, or verify manually.`],
-            hint: result.verification.ok
-              ? 'Copy verified. Next: hv_plan then hv_apply to repoint services at the new database, verify app health, then re-run hv_plan and confirm the old database destroy action.'
-              : 'Resolve the row-count mismatches before cutting over.',
-            next: ['hv_plan', 'hv_apply'],
-          }
-        );
-      }
-
-      if (mode === 'seed') {
-        const resolvedTargetRaw = targetConnectionUrl && /^(env|dotenv|file):/.test(targetConnectionUrl.trim())
-          ? await resolveSecretValueRef(targetConnectionUrl, { projectId: project.id, environmentName: environment.name })
-          : targetConnectionUrl;
-        const resolvedTarget = resolvedTargetRaw?.trim();
-        if (!command?.trim()) {
-          return commandError('VALIDATION', 'mode="seed" requires command, for example command="npm run db:seed".', {
-            hint: 'Seed data is a one-off database operation; do not set a temporary releaseCommand for it.',
-          });
-        }
-        const preview = await runDatabaseSeed({
-          project,
-          env: environment,
-          command,
-          targetConnectionUrl: resolvedTarget,
-          runIn,
-          dryRun: true,
-        });
-        if (dryRun) {
-          return commandSuccess(preview);
-        }
-        if (!confirm) {
-          return commandError('CONFIRM_REQUIRED', 'Seed commands mutate the target database and must be confirmed.', {
-            details: preview,
-            hint: 'Review the target and command, then re-run with confirm=true. This does not change service releaseCommand.',
-          });
-        }
-        const result = await runDatabaseSeed({
-          project,
-          env: environment,
-          command,
-          targetConnectionUrl: resolvedTarget,
-          runIn,
-        });
-        if (result.success === false) {
-          return commandError('PROVIDER_ERROR', String(result.error ?? 'Seed command failed'), {
-            details: result,
-            hint: typeof result.hint === 'string'
-              ? result.hint
-              : result.runner === 'environment'
-                ? 'Check the task output. The command ran inside the hosting environment with the deployed image and env vars.'
-                : 'Check the command output. The command runs locally with DATABASE_URL and DIRECT_URL pinned to the target database.',
-          });
-        }
-        return commandSuccess(result, {
-          hint: 'Seed complete. Run hv_db_query or app-level health checks to verify the seeded data.',
-        });
-      }
-
-      if (mode === 'reset') {
-        if (!confirm) {
-          const configured = await resolveConfiguredTarget(ctx, { project: projectRef, env, service });
-          const project = ctx.resolveProjectOrThrow({ project: projectRef });
-          const environment = ctx.resolveEnvironmentOrThrow(project, env);
-          const previewUrl = configured?.url ?? await resolveExternalDatabaseUrl(project, environment, service);
-          const canCreateTcpProxy = canCreateRailwayDatabaseTcpProxy(environment);
-          return commandError('CONFIRM_REQUIRED', 'Database reset drops ALL tables and data.', {
-            details: previewUrl
-              ? {
-                source: configured?.source ?? `${project.name}/${environment.name}${service ? `/${service}` : ''}`,
-                connectionUrl: maskDatabaseUrl(previewUrl),
-              }
-              : {
-                source: `${project.name}/${environment.name}${service ? `/${service}` : ''}`,
-                reachable: false,
-                canCreateTcpProxy,
-              },
-            hint: previewUrl
-              ? 'Re-run with confirm=true to execute the reset.'
-              : canCreateTcpProxy
-                ? 'The database is internal-only. Re-running with confirm=true will create or reuse a public TCP proxy before executing the reset.'
-                : 'No externally reachable database URL is available. Pass connectionUrl/connectionName explicitly or fix the managed database bindings before confirming.',
-          });
-        }
-        const target = await resolveConfirmedExternalTarget(ctx, { project: projectRef, env, service });
-        const payload = await executeDatabaseReset(target.url, target.source);
-        return commandSuccess({
-          ...payload,
-          ...(target.tcpProxyCreated !== undefined
-            ? { tcpProxyCreated: target.tcpProxyCreated, proxyDomain: target.proxyDomain }
-            : {}),
-        });
-      }
-
-      const payload = await runDatabaseMigration({
-        project,
-        env: environment,
-        command,
-        preset,
-        serviceName: service,
-        runIn,
-        dryRun,
-      });
-      if (payload.success === false) {
-        return commandError('PROVIDER_ERROR', String(payload.error ?? 'Migration failed'), {
-          details: payload,
-          hint: typeof payload.hint === 'string' ? payload.hint : undefined,
-        });
-      }
-      return commandSuccess(payload);
-    })
-  );
-
-  commands.register(
     'hv_db_url',
     'Get the database connection URL for an environment. Values are always masked in command output to avoid leaking credentials into transcripts or terminals.',
     {
@@ -544,8 +329,8 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
         },
         {
           hint: reveal
-            ? 'Raw database URLs are not returned in command output. Prefer hv_db_query/hv_db_migrate for managed workflows, or retrieve the credential directly from the provider/secret manager when a human must use it.'
-            : 'Use hv_db_query/hv_db_migrate for managed database work without exposing the connection URL.',
+            ? 'Raw database URLs are not returned in command output. Prefer hv_db_query for bounded diagnostics, or retrieve the credential directly from the provider/secret manager when a human must use it.'
+            : 'Use hv_db_query for bounded diagnostics without exposing the connection URL.',
         }
       );
     })

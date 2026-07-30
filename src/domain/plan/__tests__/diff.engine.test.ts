@@ -113,6 +113,9 @@ describe('diffEnvironment — creates', () => {
     expect(byId.get('service:web')?.type).toBe('create');
     expect(byId.get('service:web')?.dependsOn).toEqual(['project:railway', 'database:railway']);
     expect(byId.get('database:railway')?.type).toBe('create');
+    expect(result.warnings).toContainEqual(expect.stringContaining(
+      'cannot prove application code consumes it'
+    ));
   });
 
   it('confirmation-gates service creation when provider metadata marks it billable', () => {
@@ -286,6 +289,64 @@ describe('diffEnvironment — config drift', () => {
     const web = result.actions.find((a) => a.id === 'service:web')!;
     expect((web.diff ?? []).some((entry) => entry.field === 'env:DATABASE_URL')).toBe(false);
     expect(web.diff).toContainEqual({ field: 'env:DIRECT_URL' });
+  });
+
+  it('verifies per-service database aliases by presence for Railway references', () => {
+    const environment = spec({
+      services: {
+        web: {
+          workloadKind: 'web',
+          startCommand: 'npm start',
+          healthCheckPath: '/health',
+          public: true,
+          databaseEnvAliases: {
+            POSTGRES_DB_URL: 'DATABASE_URL',
+          },
+        },
+      },
+    });
+    const baseLive = observedWeb({
+      envVarKeys: ['NODE_ENV', 'DATABASE_URL', 'DIRECT_URL'],
+      envVarHashes: {
+        NODE_ENV: hashEnvValue('production'),
+        DATABASE_URL: hashEnvValue('postgres://resolved-internal-url'),
+        DIRECT_URL: hashEnvValue('postgres://resolved-private-url'),
+      },
+    });
+    const inputs = {
+      spec: environment,
+      envName: 'production',
+      local: local(),
+      providerBehavior: {
+        presenceOnlyManagedEnvVar: ({ value }: { value: string }) => /^\$\{\{[^}]+\}\}$/.test(value),
+      },
+      managedDatabaseEnvVars: {
+        DATABASE_URL: '${{postgres-db.DATABASE_URL}}',
+        DIRECT_URL: '${{postgres-db.DATABASE_PRIVATE_URL}}',
+      },
+    };
+
+    const missing = diffEnvironment({
+      ...inputs,
+      observed: observed({ services: [baseLive] }),
+    });
+    expect(missing.actions.find((action) => action.id === 'service:web')?.diff)
+      .toContainEqual({ field: 'env:POSTGRES_DB_URL' });
+
+    const attached = diffEnvironment({
+      ...inputs,
+      observed: observed({
+        services: [{
+          ...baseLive,
+          envVarKeys: [...baseLive.envVarKeys, 'POSTGRES_DB_URL'],
+          envVarHashes: {
+            ...baseLive.envVarHashes,
+            POSTGRES_DB_URL: hashEnvValue('postgres://resolved-internal-url'),
+          },
+        }],
+      }),
+    });
+    expect(attached.actions.find((action) => action.id === 'service:web')?.type).toBe('noop');
   });
 
   it('compares Railway-style references exactly for non-Railway hosts', () => {

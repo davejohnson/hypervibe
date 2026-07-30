@@ -1,4 +1,5 @@
 import type { Component } from '../entities/component.entity.js';
+import type { DatabaseSpec, ServiceSpec } from '../spec/spec.schema.js';
 
 /** Runtime keys owned by a declared database component. */
 export const DATABASE_ENV_KEYS = [
@@ -24,6 +25,34 @@ export const DATABASE_ENV_KEYS = [
   'DB_NAME',
   'PGDATABASE',
 ] as const;
+
+export type DatabaseEnvAliasSource = 'DATABASE_URL' | 'DIRECT_URL';
+
+export function buildDatabaseAliasEnvVars(
+  managedEnvVars: Record<string, string>,
+  aliases: ServiceSpec['databaseEnvAliases']
+): Record<string, string> {
+  const resolved: Record<string, string> = {};
+  for (const [alias, source] of Object.entries(aliases ?? {})) {
+    const value = managedEnvVars[source as DatabaseEnvAliasSource];
+    if (value !== undefined) {
+      resolved[alias] = value;
+    }
+  }
+  return resolved;
+}
+
+export function buildManagedDatabaseEnvVars(
+  databaseSpec: DatabaseSpec | undefined,
+  components: Component[]
+): Record<string, string> | undefined {
+  if (!databaseSpec) return undefined;
+  const component = components.find((candidate) => candidate.type === databaseSpec.engine);
+  if (!component) return undefined;
+  const provider = stringBinding(component.bindings as Record<string, unknown>, 'provider');
+  if (provider !== databaseSpec.provider) return undefined;
+  return buildDatabaseEnvVarsFromComponent(component).envVars;
+}
 
 function stringBinding(bindings: Record<string, unknown>, key: string): string | undefined {
   const value = bindings[key];
