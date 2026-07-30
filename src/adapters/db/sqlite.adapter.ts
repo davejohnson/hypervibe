@@ -1,10 +1,11 @@
 import Database from 'better-sqlite3';
 import { getSecretStore } from '../secrets/secret-store.js';
 import path from 'path';
-import fs from 'fs';
-import { getDataDir } from '../storage/paths.js';
-
-const DATA_DIR = getDataDir();
+import {
+  ensurePrivateDirectory,
+  getDataDir,
+  hardenPrivateFile,
+} from '../storage/paths.js';
 
 export interface Migration {
   version: number;
@@ -337,18 +338,26 @@ export interface SchemaMigrationStatus {
 export class SqliteAdapter {
   private db: Database.Database;
   private dbPath: string;
+  private dataDir: string;
   private static instance: SqliteAdapter | null = null;
 
   private constructor(dbPath?: string) {
-    const finalPath = dbPath ?? path.join(DATA_DIR, 'hypervibe.db');
+    const usesDefaultDataDir = dbPath === undefined;
+    const dataDir = usesDefaultDataDir
+      ? getDataDir()
+      : path.dirname(dbPath);
+    const finalPath = dbPath ?? path.join(dataDir, 'hypervibe.db');
     this.dbPath = finalPath;
-    const dir = path.dirname(finalPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    this.dataDir = dataDir;
+    ensurePrivateDirectory(dataDir, {
+      hardenExisting: usesDefaultDataDir,
+    });
+    hardenPrivateFile(finalPath);
     this.db = new Database(finalPath);
+    this.hardenDatabaseFiles();
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
+    this.hardenDatabaseFiles();
   }
 
   static getInstance(dbPath?: string): SqliteAdapter {
@@ -373,6 +382,12 @@ export class SqliteAdapter {
     return this.dbPath;
   }
 
+  private hardenDatabaseFiles(): void {
+    hardenPrivateFile(this.dbPath);
+    hardenPrivateFile(`${this.dbPath}-wal`);
+    hardenPrivateFile(`${this.dbPath}-shm`);
+  }
+
   private ensureMigrationsTable(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -394,7 +409,7 @@ export class SqliteAdapter {
       .map((migration) => ({ version: migration.version, name: migration.name }));
 
     return {
-      dataDir: DATA_DIR,
+      dataDir: this.dataDir,
       databasePath: this.dbPath,
       currentVersion: applied.length > 0 ? Math.max(...applied.map((row) => row.version)) : 0,
       latestVersion: CURRENT_SCHEMA_VERSION,
@@ -405,34 +420,42 @@ export class SqliteAdapter {
   }
 
   migrate(): Migration[] {
-    this.ensureMigrationsTable();
+    try {
+      this.ensureMigrationsTable();
 
-    const appliedVersions = new Set(
-      this.db
-        .prepare('SELECT version FROM schema_migrations')
-        .all()
-        .map((row: unknown) => (row as { version: number }).version)
-    );
+      const appliedVersions = new Set(
+        this.db
+          .prepare('SELECT version FROM schema_migrations')
+          .all()
+          .map((row: unknown) => (row as { version: number }).version)
+      );
 
-    const appliedNow: Migration[] = [];
-    for (const migration of migrations) {
-      if (!appliedVersions.has(migration.version)) {
-        this.db.transaction(() => {
-          this.db.exec(migration.up);
-          migration.run?.(this.db);
-          this.db
-            .prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)')
-            .run(migration.version, migration.name);
-        })();
-        appliedNow.push(migration);
-        console.error(`Applied migration ${migration.version}: ${migration.name}`);
+      const appliedNow: Migration[] = [];
+      for (const migration of migrations) {
+        if (!appliedVersions.has(migration.version)) {
+          this.db.transaction(() => {
+            this.db.exec(migration.up);
+            migration.run?.(this.db);
+            this.db
+              .prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)')
+              .run(migration.version, migration.name);
+          })();
+          appliedNow.push(migration);
+          console.error(`Applied migration ${migration.version}: ${migration.name}`);
+        }
       }
+      return appliedNow;
+    } finally {
+      this.hardenDatabaseFiles();
     }
-    return appliedNow;
   }
 
   close(): void {
-    this.db.close();
+    try {
+      this.db.close();
+    } finally {
+      this.hardenDatabaseFiles();
+    }
   }
 }
 

@@ -71,7 +71,7 @@ struct ConnectionsView: View {
             }
             .clickTargetCursor()
         } message: {
-            Text("Hypervibe will remove the encrypted \(pendingDelete?.provider ?? "provider") credentials for scope \(pendingDelete?.scope ?? "global") from this project's local connection store.")
+            Text("Hypervibe will remove the encrypted \(pendingDelete?.provider ?? "provider") credentials for scope \(pendingDelete?.scope ?? "global") from this Mac's shared Hypervibe connection store.")
         }
     }
 
@@ -176,7 +176,7 @@ struct ConnectionsView: View {
 
     private var footer: some View {
         HStack {
-            Text("Connections are stored by Hypervibe for this project. The app never stores credentials.")
+            Text("Connections are encrypted in this Mac's shared Hypervibe store. Scopes control where each credential is used; the app never stores credential values.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()

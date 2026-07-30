@@ -1,13 +1,18 @@
 import { randomUUID } from 'crypto';
 import { getDb } from '../sqlite.adapter.js';
-import type { Connection, CreateConnectionInput, ConnectionStatus } from '../../../domain/entities/connection.entity.js';
+import {
+  normalizeConnectionScope,
+  type Connection,
+  type CreateConnectionInput,
+  type ConnectionStatus,
+} from '../../../domain/entities/connection.entity.js';
 
 export class ConnectionRepository {
   create(input: CreateConnectionInput): Connection {
     const db = getDb();
     const id = randomUUID();
     const now = new Date().toISOString();
-    const scope = input.scope ?? null;
+    const scope = normalizeConnectionScope(input.scope);
 
     db.prepare(`
       INSERT INTO connections (id, provider, scope, credentials_encrypted, status, created_at, updated_at)
@@ -37,7 +42,14 @@ export class ConnectionRepository {
    */
   findByProvider(provider: string): Connection | null {
     const db = getDb();
-    const row = db.prepare('SELECT * FROM connections WHERE provider = ? AND scope IS NULL').get(provider) as Record<string, unknown> | undefined;
+    const row = db.prepare(`
+      SELECT *
+      FROM connections
+      WHERE provider = ?
+        AND (scope IS NULL OR lower(trim(scope)) = 'global')
+      ORDER BY CASE WHEN scope IS NULL THEN 0 ELSE 1 END, updated_at DESC
+      LIMIT 1
+    `).get(provider) as Record<string, unknown> | undefined;
     return row ? this.mapRow(row) : null;
   }
 
@@ -47,11 +59,12 @@ export class ConnectionRepository {
   findByProviderAndScope(provider: string, scope: string | null): Connection | null {
     const db = getDb();
     let row: Record<string, unknown> | undefined;
+    const normalizedScope = normalizeConnectionScope(scope);
 
-    if (scope === null) {
-      row = db.prepare('SELECT * FROM connections WHERE provider = ? AND scope IS NULL').get(provider) as Record<string, unknown> | undefined;
+    if (normalizedScope === null) {
+      return this.findByProvider(provider);
     } else {
-      row = db.prepare('SELECT * FROM connections WHERE provider = ? AND scope = ?').get(provider, scope) as Record<string, unknown> | undefined;
+      row = db.prepare('SELECT * FROM connections WHERE provider = ? AND scope = ?').get(provider, normalizedScope) as Record<string, unknown> | undefined;
     }
 
     return row ? this.mapRow(row) : null;
@@ -62,8 +75,19 @@ export class ConnectionRepository {
    */
   findAllByProvider(provider: string): Connection[] {
     const db = getDb();
-    const rows = db.prepare('SELECT * FROM connections WHERE provider = ? ORDER BY scope NULLS LAST').all(provider) as Record<string, unknown>[];
-    return rows.map((row) => this.mapRow(row));
+    const rows = db.prepare(`
+      SELECT *
+      FROM connections
+      WHERE provider = ?
+      ORDER BY
+        CASE
+          WHEN scope IS NULL THEN 0
+          WHEN lower(trim(scope)) = 'global' THEN 1
+          ELSE 2
+        END,
+        scope
+    `).all(provider) as Record<string, unknown>[];
+    return this.dedupeSemanticScopes(rows);
   }
 
   /**
@@ -139,11 +163,18 @@ export class ConnectionRepository {
       return this.findByProvider(provider);
     }
 
+    const candidates = this.findAllByProvider(provider);
     for (const hint of scopeHints) {
-      const match = this.findBestMatch(provider, hint);
-      if (match) {
-        return match;
-      }
+      const scoped = candidates
+        .map((connection) => ({
+          connection,
+          rank: this.scopeMatchRank(connection.scope, hint),
+        }))
+        .filter((entry): entry is { connection: Connection; rank: number } => (
+          entry.rank !== null && entry.rank < 2
+        ))
+        .sort((a, b) => a.rank - b.rank);
+      if (scoped[0]) return scoped[0].connection;
     }
 
     return this.findByProvider(provider);
@@ -157,11 +188,19 @@ export class ConnectionRepository {
       return this.findBestVerifiedMatch(provider);
     }
 
+    const candidates = this.findAllByProvider(provider)
+      .filter((connection) => connection.status === 'verified');
     for (const hint of scopeHints) {
-      const match = this.findBestVerifiedMatch(provider, hint);
-      if (match) {
-        return match;
-      }
+      const scoped = candidates
+        .map((connection) => ({
+          connection,
+          rank: this.scopeMatchRank(connection.scope, hint),
+        }))
+        .filter((entry): entry is { connection: Connection; rank: number } => (
+          entry.rank !== null && entry.rank < 2
+        ))
+        .sort((a, b) => a.rank - b.rank);
+      if (scoped[0]) return scoped[0].connection;
     }
 
     const global = this.findByProvider(provider);
@@ -170,8 +209,19 @@ export class ConnectionRepository {
 
   findAll(): Connection[] {
     const db = getDb();
-    const rows = db.prepare('SELECT * FROM connections ORDER BY provider, scope NULLS LAST').all() as Record<string, unknown>[];
-    return rows.map((row) => this.mapRow(row));
+    const rows = db.prepare(`
+      SELECT *
+      FROM connections
+      ORDER BY
+        provider,
+        CASE
+          WHEN scope IS NULL THEN 0
+          WHEN lower(trim(scope)) = 'global' THEN 1
+          ELSE 2
+        END,
+        scope
+    `).all() as Record<string, unknown>[];
+    return this.dedupeSemanticScopes(rows);
   }
 
   updateStatus(id: string, status: ConnectionStatus): Connection | null {
@@ -206,7 +256,7 @@ export class ConnectionRepository {
    * Otherwise, create a new connection.
    */
   upsert(input: CreateConnectionInput): Connection {
-    const scope = input.scope ?? null;
+    const scope = normalizeConnectionScope(input.scope);
     const existing = this.findByProviderAndScope(input.provider, scope);
     if (existing) {
       return this.updateCredentials(existing.id, input.credentialsEncrypted)!;
@@ -226,11 +276,16 @@ export class ConnectionRepository {
   deleteByProviderAndScope(provider: string, scope: string | null): boolean {
     const db = getDb();
     let result;
+    const normalizedScope = normalizeConnectionScope(scope);
 
-    if (scope === null) {
-      result = db.prepare('DELETE FROM connections WHERE provider = ? AND scope IS NULL').run(provider);
+    if (normalizedScope === null) {
+      result = db.prepare(`
+        DELETE FROM connections
+        WHERE provider = ?
+          AND (scope IS NULL OR lower(trim(scope)) = 'global')
+      `).run(provider);
     } else {
-      result = db.prepare('DELETE FROM connections WHERE provider = ? AND scope = ?').run(provider, scope);
+      result = db.prepare('DELETE FROM connections WHERE provider = ? AND scope = ?').run(provider, normalizedScope);
     }
 
     return result.changes > 0;
@@ -240,13 +295,27 @@ export class ConnectionRepository {
     return {
       id: row.id as string,
       provider: row.provider as string,
-      scope: row.scope as string | null,
+      scope: normalizeConnectionScope(row.scope as string | null),
       credentialsEncrypted: row.credentials_encrypted as string,
       status: row.status as ConnectionStatus,
       lastVerifiedAt: row.last_verified_at ? new Date(row.last_verified_at as string) : null,
       createdAt: new Date(row.created_at as string),
       updatedAt: new Date(row.updated_at as string),
     };
+  }
+
+  private dedupeSemanticScopes(
+    rows: Record<string, unknown>[]
+  ): Connection[] {
+    const byScope = new Map<string, Connection>();
+    for (const row of rows) {
+      const connection = this.mapRow(row);
+      const key = `${connection.provider}\u0000${connection.scope ?? ''}`;
+      if (!byScope.has(key)) {
+        byScope.set(key, connection);
+      }
+    }
+    return [...byScope.values()];
   }
 
   private scopeMatchRank(connectionScope: string | null, scopeHint: string): number | null {

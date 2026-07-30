@@ -18,7 +18,11 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { classifyDeployEnvironment, resolveGitDeploySource } from '../services/deploy-source.js';
 import { diffEnvironment } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
-import { fingerprintObservedState, type PlanRunDocument } from './converge.executor.js';
+import {
+  fingerprintObservedState,
+  orderActions,
+  type PlanRunDocument,
+} from './converge.executor.js';
 import { buildDatabaseEnvVarsFromComponent, DATABASE_ENV_KEYS } from '../services/database-env.js';
 import { buildCacheEnvVarsFromComponent, CACHE_ENV_KEYS } from '../services/cache-env.js';
 import { planCache } from '../services/cache-plan.service.js';
@@ -1159,6 +1163,7 @@ export class PlanService {
       // scaffolding (project/environment) and database creates the deploy
       // depends on, keep the selected services, and never destroy anything.
       const keep = new Set(serviceFilter);
+      const unfilteredActionIds = new Set(actions.map((action) => action.id));
       actions = actions.filter((action) => {
         if (action.type === 'destroy') return false;
         if (action.resource.kind === 'project' || action.resource.kind === 'environment') return true;
@@ -1167,6 +1172,16 @@ export class PlanService {
         }
         if (action.resource.kind === 'service') return keep.has(action.resource.name);
         return false;
+      });
+      const retainedActionIds = new Set(actions.map((action) => action.id));
+      actions = actions.map((action) => {
+        const retainedDependencies = action.dependsOn?.filter((dependency) => (
+          retainedActionIds.has(dependency)
+          || !unfilteredActionIds.has(dependency)
+        ));
+        return retainedDependencies?.length
+          ? { ...action, dependsOn: retainedDependencies }
+          : { ...action, dependsOn: undefined };
       });
       filterWarnings.push(
         `Partial plan (services: ${serviceFilter.join(', ')}): delegated secrets, domain, CI, collaboration, iOS, queue, storage, and destroy convergence was excluded; run hv_plan without services for full convergence.`
@@ -1237,6 +1252,15 @@ export class PlanService {
           : {}),
       }
       : undefined;
+
+    try {
+      orderActions(actions);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        error: `Hypervibe generated an invalid action graph. No plan was saved or provider mutation authorized. ${detail}`,
+      };
+    }
 
     const document: PlanRunDocument = {
       kind: 'hv_plan',
