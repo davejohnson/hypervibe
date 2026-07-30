@@ -5,7 +5,7 @@ import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from './provider.
 /**
  * Supported database types that can be provisioned
  */
-export type DatabaseType = 'postgres' | 'mongodb';
+export type DatabaseType = 'postgres';
 
 /**
  * All provisionable component types

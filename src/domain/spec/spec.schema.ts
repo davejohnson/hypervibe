@@ -36,7 +36,7 @@ export const providerIdSchema = z.string().regex(
 
 export const databaseSpecSchema = z.object({
   provider: providerIdSchema,
-  engine: z.enum(['postgres', 'mongodb']).default('postgres'),
+  engine: z.literal('postgres').default('postgres'),
   /**
    * Optional one-shot bootstrap/seed command. hv_plan emits a visible database
    * seed action. hv_apply runs it inside the deployed service environment and
@@ -820,17 +820,6 @@ export const environmentSpecSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'railway queues are postgres-backed (pg-boss model): declare a postgres spec.database',
       path: ['queues'],
-    });
-  }
-  if (
-    environment.database?.engine === 'mongodb'
-    && environment.migrations
-    && environment.migrations.mode !== 'none'
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'migrations are PostgreSQL-only; MongoDB data operations require a separate engine-aware command contract',
-      path: ['migrations'],
     });
   }
   const retiredKeys = new Set<string>();

@@ -33,7 +33,7 @@ export interface ManagedWorkflowFixture {
   /** Optional datastore resources exercised in the same desired-state run. */
   database?: {
     provider: string;
-    engine: 'postgres' | 'mongodb';
+    engine: 'postgres';
   };
   cache?: {
     provider: string;
@@ -61,7 +61,7 @@ export interface DatabaseProviderContract {
   provider: string;
   vendor: string;
   service: string;
-  engine: 'postgres' | 'mongodb';
+  engine: 'postgres';
   status: ProviderImplementationStatus;
   credentials: ProviderCredentialField[];
   /** Hosting provider used by the end-to-end ProjectSpec fixture. */
@@ -94,6 +94,20 @@ const awsCredentials: ProviderCredentialField[] = [
   { field: 'accessKeyId', environmentVariable: 'HYPERVIBE_TEST_AWS_ACCESS_KEY_ID' },
   { field: 'secretAccessKey', environmentVariable: 'HYPERVIBE_TEST_AWS_SECRET_ACCESS_KEY' },
   { field: 'region', environmentVariable: 'HYPERVIBE_TEST_AWS_REGION', optional: true },
+];
+
+const awsNetworkCredentials: ProviderCredentialField[] = [
+  ...awsCredentials,
+  {
+    field: 'subnetIds',
+    environmentVariable: 'HYPERVIBE_TEST_AWS_SUBNET_IDS_JSON',
+    parseAs: 'json',
+  },
+  {
+    field: 'securityGroupIds',
+    environmentVariable: 'HYPERVIBE_TEST_AWS_SECURITY_GROUP_IDS_JSON',
+    parseAs: 'json',
+  },
 ];
 
 const awsEcsCredentials: ProviderCredentialField[] = [
@@ -355,20 +369,6 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
   },
   {
     kind: 'database',
-    provider: 'mongodb-atlas',
-    vendor: 'MongoDB',
-    service: 'Atlas',
-    engine: 'mongodb',
-    status: 'planned',
-    credentials: [
-      { field: 'clientId', environmentVariable: 'HYPERVIBE_TEST_MONGODB_ATLAS_CLIENT_ID' },
-      { field: 'clientSecret', environmentVariable: 'HYPERVIBE_TEST_MONGODB_ATLAS_CLIENT_SECRET' },
-      { field: 'projectId', environmentVariable: 'HYPERVIBE_TEST_MONGODB_ATLAS_PROJECT_ID' },
-    ],
-    fixtureHostingProvider: 'railway',
-  },
-  {
-    kind: 'database',
     provider: 'azure-postgres',
     vendor: 'Microsoft Azure',
     service: 'Azure Database for PostgreSQL Flexible Server',
@@ -403,6 +403,8 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     status: 'planned',
     credentials: gcpCredentials,
     fixtureHostingProvider: 'cloudrun',
+    implementationNote:
+      'The registry, private-IP Redis AUTH adapter, durable observation, and mocked lifecycle safety contract are implemented. Live promotion remains blocked until the Cloud Run adapter can declaratively attach VPC egress to the selected authorizedNetwork.',
   },
   {
     kind: 'cache',
@@ -422,9 +424,11 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     vendor: 'AWS',
     service: 'ElastiCache for Valkey/Redis',
     engine: 'redis',
-    status: 'planned',
-    credentials: awsCredentials,
+    status: 'ready-for-live',
+    credentials: awsNetworkCredentials,
     fixtureHostingProvider: 'ecs',
+    implementationNote:
+      'The serverless Valkey adapter, dedicated workload-source security group, durable ARN observation, dependency-ordered teardown, and mocked lifecycle safety contract are implemented. Promotion requires one successful ECS full-stack live run.',
   },
   {
     kind: 'cache',
@@ -434,19 +438,6 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     engine: 'redis',
     status: 'ready-for-live',
     credentials: railwayCredentials,
-    fixtureHostingProvider: 'railway',
-  },
-  {
-    kind: 'cache',
-    provider: 'upstash',
-    vendor: 'Upstash',
-    service: 'Redis',
-    engine: 'redis',
-    status: 'planned',
-    credentials: [
-      { field: 'apiKey', environmentVariable: 'HYPERVIBE_TEST_UPSTASH_API_KEY' },
-      { field: 'email', environmentVariable: 'HYPERVIBE_TEST_UPSTASH_EMAIL' },
-    ],
     fixtureHostingProvider: 'railway',
   },
   {

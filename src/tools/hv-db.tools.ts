@@ -50,24 +50,6 @@ type ResolvedDatabaseAccessTarget = {
   databaseAccess: DatabaseAccessLease;
 };
 
-function assertManagedEnvironmentUsesPostgres(
-  ctx: CommandContext,
-  environment: { id: string; name: string }
-): void {
-  const postgres = ctx.repos.components.findByEnvironmentAndType(environment.id, 'postgres');
-  const mongodb = ctx.repos.components.findByEnvironmentAndType(environment.id, 'mongodb');
-  if (!postgres && mongodb) {
-    throw new HvError(
-      'VALIDATION',
-      `Environment "${environment.name}" uses MongoDB; hv_db_query, hv_db_migrate, reset, and SQL URL workflows support PostgreSQL only.`,
-      {
-        details: { engine: 'mongodb' },
-        hint: 'Use an engine-aware MongoDB operation through the application or provider until Hypervibe exposes a bounded MongoDB command contract.',
-      }
-    );
-  }
-}
-
 function sqlFingerprint(sql: string): string {
   const normalized = stripSqlLiteralsAndComments(sql).trim().replace(/\s+/g, ' ').toLowerCase();
   return createHash('sha256').update(normalized).digest('hex');
@@ -137,7 +119,6 @@ async function resolveExternalTarget(
 
   const project = ctx.resolveProjectOrThrow({ project: opts.project });
   const environment = ctx.resolveEnvironmentOrThrow(project, opts.env);
-  assertManagedEnvironmentUsesPostgres(ctx, environment);
   const url = await resolveExternalDatabaseUrl(project, environment, opts.service);
   if (!url) {
     throw unavailableExternalDatabaseTarget(project, environment);
@@ -154,7 +135,6 @@ async function resolveConfirmedExternalTarget(
 
   const project = ctx.resolveProjectOrThrow({ project: opts.project });
   const environment = ctx.resolveEnvironmentOrThrow(project, opts.env);
-  assertManagedEnvironmentUsesPostgres(ctx, environment);
   const result = await ensureExternalDatabaseUrl(project, environment, opts.service);
   if (!result.ok) {
     const code = result.code === 'provider_error' ? 'PROVIDER_ERROR' : 'NOT_FOUND';
@@ -184,7 +164,6 @@ async function resolveTemporaryExternalTarget(
 
   const project = ctx.resolveProjectOrThrow({ project: opts.project });
   const environment = ctx.resolveEnvironmentOrThrow(project, opts.env);
-  assertManagedEnvironmentUsesPostgres(ctx, environment);
   const result = await acquireManagedDatabaseAccess(project, environment, opts.service);
   if (!result.ok) {
     const code = result.code === 'provider_error' ? 'PROVIDER_ERROR' : 'NOT_FOUND';

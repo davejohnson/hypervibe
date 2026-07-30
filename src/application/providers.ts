@@ -15,7 +15,9 @@ import '../adapters/providers/aws/ecs.adapter.js';
 // Database providers
 import '../adapters/providers/supabase/supabase.adapter.js';
 import '../adapters/providers/gcp/cloudsql.adapter.js';
+import '../adapters/providers/gcp/memorystore.adapter.js';
 import '../adapters/providers/aws/rds.adapter.js';
+import '../adapters/providers/aws/elasticache.adapter.js';
 import '../adapters/providers/neon/neon.adapter.js';
 import '../adapters/providers/digitalocean/digitalocean.adapter.js';
 

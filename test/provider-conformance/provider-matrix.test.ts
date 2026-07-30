@@ -26,20 +26,19 @@ describe('provider conformance matrix', () => {
     ]);
   });
 
-  it('covers the requested Postgres and MongoDB providers', () => {
+  it('covers the retained PostgreSQL providers', () => {
     expect(databaseProviderContracts.map((entry) => [entry.vendor, entry.engine])).toEqual([
       ['Google Cloud', 'postgres'],
       ['DigitalOcean', 'postgres'],
       ['AWS', 'postgres'],
       ['Railway', 'postgres'],
       ['Supabase', 'postgres'],
-      ['MongoDB', 'mongodb'],
       ['Microsoft Azure', 'postgres'],
       ['Neon', 'postgres'],
     ]);
   });
 
-  it('models Redis separately from SQL and document databases', () => {
+  it('models Redis separately from PostgreSQL databases', () => {
     expect(cacheProviderContracts.length).toBeGreaterThan(0);
     expect(cacheProviderContracts.every((entry) => entry.engine === 'redis')).toBe(true);
     expect(databaseProviderContracts.some((entry) => entry.engine === 'redis')).toBe(false);
@@ -53,6 +52,35 @@ describe('provider conformance matrix', () => {
         engine: 'redis',
       })
     );
+  });
+
+  it('excludes Upstash from the provider catalog', () => {
+    expect(
+      providerContracts.some((entry) => entry.provider === 'upstash')
+    ).toBe(false);
+  });
+
+  it('keeps Memorystore live promotion blocked on declarative Cloud Run VPC egress', () => {
+    const memorystore = cacheProviderContracts.find(
+      (entry) => entry.provider === 'memorystore'
+    );
+    expect(memorystore).toMatchObject({
+      status: 'planned',
+      fixtureHostingProvider: 'cloudrun',
+    });
+    expect(memorystore?.implementationNote).toContain(
+      'declaratively attach VPC egress'
+    );
+  });
+
+  it('opens ElastiCache for opt-in live lifecycle validation', () => {
+    expect(
+      cacheProviderContracts.find((entry) => entry.provider === 'elasticache')
+    ).toMatchObject({
+      status: 'ready-for-live',
+      engine: 'redis',
+      fixtureHostingProvider: 'ecs',
+    });
   });
 
   it('assigns database lifecycle to the provider that owns the resource', () => {

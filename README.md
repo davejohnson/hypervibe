@@ -864,7 +864,7 @@ Provider credentials remain local and encrypted. Database component bindings (co
 
 The provider catalog is intentionally focused. DigitalOcean, Azure Container Apps, Vercel, and AWS ECS on Fargate pass mocked lifecycle and managed exact-SHA/image workflow contracts, but remain behind the provider-conformance live promotion gate and are not advertised as supported yet. Heroku, Render, and Fly are deliberately out of scope. Supported database providers remain `supabase`, `cloudsql`, `railway`, and `rds`; Azure PostgreSQL, Neon, and DigitalOcean are conformance targets at various pre-support stages. Stored connections for removed providers can still be deleted with `hv_connect action="remove"`.
 
-Redis is now a separate cache lifecycle instead of a database component. Railway Redis is the first adapter slice and wires `REDIS_URL`. MongoDB is modeled as a database engine with `MONGODB_URI`, but no MongoDB provider is marked supported until its full mocked and live lifecycle contracts—including teardown—pass. MySQL remains unsupported.
+Redis is a separate cache lifecycle instead of a database component and wires `REDIS_URL`. Railway, DigitalOcean, Azure Managed Redis, and Amazon ElastiCache have adapter or conformance slices; GCP Memorystore's private-IP lifecycle is implemented, but its Cloud Run full-stack profile remains blocked on declarative VPC egress. PostgreSQL is the only database engine in desired state; MongoDB and MySQL are intentionally outside the core lifecycle.
 
 ## Adding New Providers
 

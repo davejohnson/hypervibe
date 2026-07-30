@@ -158,7 +158,7 @@ async function connectProvider(
 
 function fixtureSpec(params: {
   hostingProvider: string;
-  database?: { provider: string; engine: 'postgres' | 'mongodb' };
+  database?: { provider: string; engine: 'postgres' };
   cache?: { provider: string; engine: 'redis' };
   revision?: string;
   includeService?: boolean;

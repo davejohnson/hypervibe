@@ -397,7 +397,7 @@ export function diffEnvironment(input: {
   const localDb = local.components.find((component) => (
     desiredDatabaseEngine
       ? component.type === desiredDatabaseEngine
-      : component.type === 'postgres' || component.type === 'mongodb'
+      : component.type === 'postgres'
   ));
   const localDbBindings = localDb?.bindings as Record<string, unknown> | undefined;
   const localDbProvider = localDb
@@ -410,7 +410,7 @@ export function diffEnvironment(input: {
     ? (observed?.databases ?? []).filter((database) => (
       desiredDatabaseEngine
         ? database.engine === desiredDatabaseEngine
-        : database.engine === 'postgres' || database.engine === 'mongodb'
+        : database.engine === 'postgres'
     ))
     : [];
   const observedDb = observedDatabases.length === 1 ? observedDatabases[0] : undefined;
@@ -421,7 +421,7 @@ export function diffEnvironment(input: {
 
   if (spec.database) {
     const wanted = spec.database.provider;
-    const databaseEngineLabel = spec.database.engine === 'postgres' ? 'PostgreSQL' : 'MongoDB';
+    const databaseEngineLabel = 'PostgreSQL';
     const createId = `database:${wanted}`;
     activeDatabaseActionId = createId;
     if (databaseAmbiguous) {

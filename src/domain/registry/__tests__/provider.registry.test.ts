@@ -43,7 +43,7 @@ describe('ProviderRegistry lifecycle capabilities', () => {
     expect(registry.namesFor('cache')).toEqual(['multi']);
     expect(registry.namesFor('storage')).toEqual(['multi']);
     expect(registry.supportsEngine('multi', 'database', 'postgres')).toBe(true);
-    expect(registry.supportsEngine('multi', 'database', 'mongodb')).toBe(false);
+    expect(registry.supportsEngine('multi', 'database', 'mysql')).toBe(false);
     expect(registry.supportsEngine('multi', 'cache', 'redis')).toBe(true);
   });
 

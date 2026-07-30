@@ -49,25 +49,4 @@ describe('validateProjectSpecProviders', () => {
     expect(issues[2].available).toContain('railway');
   });
 
-  it('rejects an engine the selected provider cannot reconcile', () => {
-    const candidate = projectSpecSchema.parse({
-      version: 1,
-      project: 'provider-contract',
-      environments: {
-        staging: {
-          hosting: { provider: 'railway' },
-          services: {},
-          database: { provider: 'cloudsql', engine: 'mongodb' },
-        },
-      },
-    });
-    expect(validateProjectSpecProviders(candidate)).toEqual([
-      expect.objectContaining({
-        field: 'database.engine',
-        provider: 'cloudsql',
-        engine: 'mongodb',
-        available: ['postgres'],
-      }),
-    ]);
-  });
 });

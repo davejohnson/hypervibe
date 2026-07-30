@@ -18,9 +18,6 @@ Hosting, databases, and caches have separate contracts:
 - PostgreSQL: provision, observe, wire runtime variables, connect with a
   bounded operation, noop, replace/migrate, destroy, retry, and terminal
   absence.
-- MongoDB: provision, observe, wire `MONGODB_URI`, verify a bounded database
-  operation, noop, destroy, retry, and terminal absence. PostgreSQL migration
-  and SQL-query commands must reject MongoDB clearly.
 - Redis: provision, observe, wire `REDIS_URL`, verify a bounded `SET`/`GET`,
   noop, destroy, retry, and terminal absence. SQL migrations and database reset
   do not apply.
@@ -46,7 +43,7 @@ says App Runner is unavailable to new customers after March 31, 2026. The
 requested database matrix uses RDS independently of that hosting choice.
 
 Redis/Valkey starts with Railway, Memorystore, DigitalOcean, ElastiCache,
-Upstash, and Azure Managed Redis. Railway is the first implemented
+and Azure Managed Redis. Railway is the first implemented
 adapter slice. It is `ready-for-live`, not `supported`, until the opt-in live
 teardown contract passes.
 
@@ -202,6 +199,19 @@ The extended matrix also includes:
   deletion lifecycle even when a Vercel integration wires it to an app. Its
   adapter uses the public Neon API directly and does not depend on a provider
   CLI.
+- [Amazon ElastiCache Serverless](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/wwe-getting-started.html)
+  under the `elasticache` cache provider. Hypervibe creates TLS serverless
+  Valkey plus a dedicated security group that permits port 6379 only from the
+  declared workload security groups. It observes by ARN and deletes the cache
+  before retrying managed security-group cleanup. The entry is
+  `ready-for-live` for an ECS full-stack run.
+- [Google Cloud Memorystore for Redis](https://cloud.google.com/memorystore/docs/redis/reference/rest)
+  under the `memorystore` cache provider. Its private-IP, Redis AUTH, durable
+  resource observation, uncertain-create preservation, and terminal deletion
+  lifecycle pass mocked tests. It remains `planned` for live conformance
+  because Cloud Run must first gain declarative VPC egress to the selected
+  `authorizedNetwork`; Hypervibe will not present the private endpoint as
+  publicly reachable or hide that networking mutation in diagnostics.
 
 These entries are test-first targets, not current support promises. An entry
 stays `planned` until its provider adapter and mocked lifecycle contract pass,
@@ -245,6 +255,7 @@ then select exactly one contract:
 HYPERVIBE_LIVE_HOSTING=railway npm run test:providers:live
 HYPERVIBE_LIVE_DATABASE=cloudsql npm run test:providers:live
 HYPERVIBE_LIVE_DATABASE=neon npm run test:providers:live
+HYPERVIBE_LIVE_CACHE=elasticache npm run test:providers:live
 ```
 
 `HYPERVIBE_LIVE_CACHE=<provider>` becomes available when a cache entry reaches
@@ -256,6 +267,13 @@ fixture-host credentials. Set `HYPERVIBE_TEST_NEON_ORGANIZATION_ID` when a
 personal Neon key should target an organization, and optionally set
 `HYPERVIBE_TEST_NEON_REGION_ID`. Use only an isolated account/workspace because
 the contract creates and destroys real provider resources.
+
+The ElastiCache contract requires the AWS access key and region plus
+`HYPERVIBE_TEST_AWS_SUBNET_IDS_JSON` and
+`HYPERVIBE_TEST_AWS_SECURITY_GROUP_IDS_JSON`. The subnets must span at least
+two availability zones in one VPC; the security groups must be the workload
+groups that should receive TCP 6379 access. Hypervibe creates and later removes
+a separate cache security group.
 
 The ECS managed-workflow contract declares its complete live credential shape:
 `HYPERVIBE_TEST_AWS_ACCESS_KEY_ID`,

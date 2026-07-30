@@ -135,6 +135,15 @@ describe('connection guidance', () => {
         'roles/cloudsql.admin',
         'roles/cloudsql.client',
       ],
+      memorystore: [
+        'https://console.cloud.google.com/iam-admin/serviceaccounts',
+        'roles/redis.viewer',
+        'roles/redis.admin',
+        'roles/serviceusage.serviceUsageConsumer',
+        'redis.googleapis.com',
+        'declarative VPC egress',
+        'credentialsRef="file:/absolute/path/memorystore.json"',
+      ],
       rds: [
         'https://console.aws.amazon.com/iam/home#/security_credentials',
         'AWS IAM access key',
@@ -142,6 +151,17 @@ describe('connection guidance', () => {
         'ec2:AuthorizeSecurityGroupIngress',
         'ec2:RevokeSecurityGroupIngress',
         'credentialsRef="file:/absolute/path/rds.json"',
+      ],
+      elasticache: [
+        'https://console.aws.amazon.com/iam/home#/security_credentials',
+        'AWS IAM access key',
+        'elasticache:DescribeServerlessCaches',
+        'elasticache:CreateServerlessCache',
+        'ec2:AuthorizeSecurityGroupIngress',
+        'iam:CreateServiceLinkedRole',
+        'subnetIds',
+        'securityGroupIds',
+        'credentialsRef="file:/absolute/path/elasticache.json"',
       ],
       ecs: [
         'https://console.aws.amazon.com/iam/home#/security_credentials',
