@@ -95,6 +95,10 @@ export interface ConvergeResult {
   success: boolean;
   applyRunId?: string;
   error?: string;
+  conflict?: {
+    kind: 'already_applied' | 'plan_in_progress' | 'environment_in_progress';
+    runId: string;
+  };
   receipts: ActionReceipt[];
 }
 
@@ -245,20 +249,6 @@ export class ConvergeExecutor {
       }
     }
 
-    // Reject double-apply of the same plan.
-    const priorApply = this.runRepo
-      .findByEnvironmentId(planRun.environmentId, 50)
-      .find((r) => r.type === 'apply'
-        && (r.plan as Record<string, unknown>)?.planRunId === params.planRunId
-        && r.status === 'succeeded');
-    if (priorApply) {
-      return {
-        success: false,
-        error: `Plan ${params.planRunId} was already applied (run ${priorApply.id}). Re-run hv_plan.`,
-        receipts: [],
-      };
-    }
-
     const confirmed = new Set([...(params.confirmActions ?? []), ...(params.confirmDestroy ?? [])]);
     let ordered: PlanAction[];
     try {
@@ -267,13 +257,30 @@ export class ConvergeExecutor {
       return { success: false, error: error instanceof Error ? error.message : String(error), receipts: [] };
     }
 
-    const applyRun = this.runRepo.create({
+    const reservation = this.runRepo.reserveApply({
       projectId: planRun.projectId,
       environmentId: planRun.environmentId,
-      type: 'apply',
-      plan: { planRunId: params.planRunId, environmentName: document.environmentName, specRevision: document.specRevision },
+      planRunId: params.planRunId,
+      environmentName: document.environmentName,
+      specRevision: document.specRevision,
     });
-    this.runRepo.updateStatus(applyRun.id, 'running');
+    if (!reservation.reserved) {
+      const error = reservation.reason === 'already_applied'
+        ? `Plan ${params.planRunId} was already applied (run ${reservation.conflictingRunId}). Re-run hv_plan.`
+        : reservation.reason === 'plan_in_progress'
+          ? `Plan ${params.planRunId} is already being applied (run ${reservation.conflictingRunId}). Wait for that apply to finish and inspect its receipts before retrying.`
+          : `Environment ${document.environmentName} already has a running apply (run ${reservation.conflictingRunId}). Wait for it to finish and inspect its receipts before applying another plan.`;
+      return {
+        success: false,
+        error,
+        conflict: {
+          kind: reservation.reason,
+          runId: reservation.conflictingRunId,
+        },
+        receipts: [],
+      };
+    }
+    const applyRun = reservation.run;
 
     const receipts: ActionReceipt[] = [];
     const unconfirmed = ordered.find((action) =>
