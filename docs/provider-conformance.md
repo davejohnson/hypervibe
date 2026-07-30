@@ -63,8 +63,8 @@ provider-confirmed terminal deletion. New Redis-compatible clusters use
 DigitalOcean's current `valkey` engine; observation also recognizes legacy
 `redis` clusters.
 
-DigitalOcean App Platform hosting is `ready-for-live`; its PostgreSQL and
-Valkey entries remain `planned`. Hypervibe generates a provider-owned GitHub
+DigitalOcean App Platform, Managed PostgreSQL, and Managed Valkey are
+`ready-for-live`. Hypervibe generates a provider-owned GitHub
 Actions workflow that publishes one DOCR image tagged with the exact checked-
 out Git SHA, updates only already-bound App Platform components, waits for that
 exact deployment ID to become `ACTIVE`, and verifies the active component
@@ -74,10 +74,11 @@ supplied to the live runner as
 `HYPERVIBE_TEST_DIGITALOCEAN_REGISTRY`.
 
 The review-gated managed-workflow harness and provider-neutral Docker fixture
-can now prove hosting create/deploy/noop/update/terminal teardown. Promotion of
-App Platform to `supported` still requires one successful opt-in run against
-an isolated DigitalOcean team and existing DOCR registry. PostgreSQL and
-Valkey keep their separate live stack promotion gates.
+can now prove one full desired-state stack: App Platform, Managed PostgreSQL, and
+Managed Valkey create/observe/wire, exact-SHA deploy, noop, update, dependency-
+ordered destruction, and terminal absence. Promotion to `supported` still
+requires one successful opt-in run against an isolated DigitalOcean team and
+existing DOCR registry.
 
 Render is the second combined hosting/database/cache slice. One registered
 deployment provider binds an existing Render workspace, creates image-backed
@@ -89,8 +90,8 @@ existing GitHub Container Registry credential as `registryCredentialId`.
 Hypervibe verifies that credential but never creates, rotates, or deletes it
 from a service or CI action.
 
-Render hosting is `ready-for-live`; its PostgreSQL and Key Value entries remain
-`planned`. Their mocked contracts pin durable-ID-first observation, complete
+Render hosting, PostgreSQL, and Key Value are `ready-for-live`. Their mocked
+contracts pin durable-ID-first observation, complete
 cursor pagination, unbound-name adoption blocking, secret-safe connection
 handling, partial-create identity, and provider-confirmed terminal deletion.
 Service creates are marked billable and exact-action confirmation-gated because
@@ -110,10 +111,11 @@ creates a workspace, service, registry credential, database, or Key Value
 instance.
 
 The review-gated managed-workflow harness and provider-neutral Docker fixture
-can now prove hosting create/deploy/noop/update/terminal teardown. Promotion of
-Render hosting to `supported` still requires one successful opt-in run against
-an isolated workspace and existing GHCR credential. Postgres and Key Value
-keep their separate live stack promotion gates.
+can now prove one full desired-state stack: Render Service, Postgres, and Key Value
+create/observe/wire, exact-SHA deploy, noop, update, dependency-ordered
+destruction, and terminal absence. Promotion to `supported` still requires one
+successful opt-in run against an isolated workspace and existing GHCR
+credential.
 
 Heroku is the next hosting-only adapter slice. The provider context is the
 verified Heroku account, which Hypervibe binds but never creates or deletes.
@@ -184,7 +186,7 @@ can now prove create/release/noop/update/terminal teardown. Promotion to
 `supported` still requires one successful opt-in run in an isolated AWS
 account with all external prerequisites.
 
-Azure Container Apps is the next hosting-only adapter slice. The Azure
+Azure Container Apps is the hosting side of the Azure adapter slice. The Azure
 subscription, resource group, Microsoft Entra service principal, and Azure
 Container Registry are externally owned. Hypervibe owns one managed environment
 per Hypervibe environment and one Container App per web or worker service so
@@ -213,24 +215,35 @@ needs Reader plus AcrPush for classic Registry RBAC, or Container Registry
 Repository Writer for an ABAC-enabled registry. Hypervibe authenticates through
 ARM and ACR directly and never depends on `az`.
 
+Azure Database for PostgreSQL Flexible Server and Azure Managed Redis are now
+`ready-for-live` under their independent `azure-postgres` and
+`azure-managed-redis` provider ids. Both use the same Microsoft Entra,
+subscription, resource-group, and location credential fields as the hosting
+adapter, without requiring the hosting adapter's ACR fields. The PostgreSQL
+adapter creates a generated-password Flexible Server, logical `app` database,
+and Azure-services firewall subresource. The Redis adapter creates a TLS-only
+Managed Redis cluster and its default database, then retrieves its access key
+only for encrypted local runtime wiring. Their receipts never contain the
+generated password, access key, or connection URL.
+
 The review-gated managed-workflow harness and provider-neutral Docker fixture
-can now prove create/release/noop/update/terminal teardown. Promotion to
-`supported` still requires one successful opt-in run in an isolated Azure
-subscription/resource group with an existing ACR registry. Service creation is
-confirmation-gated because Container Apps and supporting managed-environment
-resources can be billable, and cleanup failures must preserve the remaining
-ARM resource IDs.
+can now prove the combined Container Apps, PostgreSQL, and Managed Redis stack:
+create/observe/wire, exact-digest release, noop, update, dependency-ordered
+destruction, and terminal absence. Promotion to `supported` still requires one
+successful opt-in run in an isolated Azure subscription/resource group with
+an existing ACR registry. All three creates are confirmation-gated because
+they can be billable, and cleanup failures preserve the remaining ARM resource
+ids.
 
 The extended matrix also includes:
 
 - [Azure Database for PostgreSQL Flexible Server](https://learn.microsoft.com/en-us/rest/api/postgresql/)
   for PostgreSQL, and [Azure Managed Redis](https://learn.microsoft.com/en-us/azure/redis/overview)
   for Redis. They use separate provider ids from Azure Container Apps because
-  they have independent
-  resource types, durable identities, observation, and deletion lifecycles,
-  while sharing the core Microsoft Entra, subscription, resource-group, and
-  location fields. Azure Container Apps additionally binds an existing ACR
-  registry by resource ID and login server.
+  they have independent resource types, durable identities, observation, and
+  deletion lifecycles, while sharing the core Microsoft Entra, subscription,
+  resource-group, and location fields. Azure Container Apps additionally binds
+  an existing ACR registry by resource ID and login server.
 - [Fly Machines](https://fly.io/docs/machines/api/) for hosting. Fly Managed
   Postgres is also represented as a planned PostgreSQL target, but its promotion
   is gated on a documented, supported provider lifecycle API. The current
@@ -341,14 +354,14 @@ Providers whose first application release must run through a managed GitHub
 Actions workflow use a separate review-gated harness. These hosting profiles
 are enabled:
 
-| Provider id | Fixture directory | Workflow | Health URL |
-| --- | --- | --- | --- |
-| `vercel` | `test/provider-conformance/fixture-vercel` | `deploy-vercel-production.yml` | HTTPS `/api/health` |
-| `digitalocean` | `test/provider-conformance/fixture` | `deploy-digitalocean-production.yml` | HTTPS `/health` |
-| `render` | `test/provider-conformance/fixture` | `deploy-render-production.yml` | HTTPS `/health` |
-| `heroku` | `test/provider-conformance/fixture` | `deploy-heroku-production.yml` | HTTPS `/health` |
-| `ecs` | `test/provider-conformance/fixture` | `deploy-ecs-production.yml` | HTTP or HTTPS `/health` |
-| `azure-container-apps` | `test/provider-conformance/fixture` | `deploy-azure-container-apps-production.yml` | HTTPS `/health` |
+| Provider id | Fixture directory | Workflow | Managed datastores | Health URL |
+| --- | --- | --- | --- | --- |
+| `vercel` | `test/provider-conformance/fixture-vercel` | `deploy-vercel-production.yml` | none | HTTPS `/api/health` |
+| `digitalocean` | `test/provider-conformance/fixture` | `deploy-digitalocean-production.yml` | PostgreSQL + Valkey | HTTPS `/health` |
+| `render` | `test/provider-conformance/fixture` | `deploy-render-production.yml` | Postgres + Key Value | HTTPS `/health` |
+| `heroku` | `test/provider-conformance/fixture` | `deploy-heroku-production.yml` | none | HTTPS `/health` |
+| `ecs` | `test/provider-conformance/fixture` | `deploy-ecs-production.yml` | none | HTTP or HTTPS `/health` |
+| `azure-container-apps` | `test/provider-conformance/fixture` | `deploy-azure-container-apps-production.yml` | PostgreSQL + Managed Redis | HTTPS `/health` |
 
 The harness never merges its own infrastructure pull request: it applies the
 reviewed plan, prints the Hypervibe PR URL, waits for a human merge, and then
@@ -413,6 +426,36 @@ provider id and replace the service block with this exact object:
 }
 ```
 
+The `digitalocean` profile also requires these environment fields:
+
+```json
+"database": {
+  "provider": "digitalocean",
+  "engine": "postgres"
+},
+"cache": {
+  "provider": "digitalocean",
+  "engine": "redis"
+}
+```
+
+The `render` profile requires the same fields with provider `render`.
+Hypervibe creates and wires these datastores during plan/apply; the GitHub
+workflow only deploys the already-bound service and never mutates a datastore.
+
+The `azure-container-apps` profile requires:
+
+```json
+"database": {
+  "provider": "azure-postgres",
+  "engine": "postgres"
+},
+"cache": {
+  "provider": "azure-managed-redis",
+  "engine": "redis"
+}
+```
+
 Commit and push those files to `main` before running the harness. The test
 proves the local spec is byte-for-byte committed at `HEAD` and that every
 required fixture path is tracked before it can create a provider resource.
@@ -471,7 +514,11 @@ isolated team. Grant `app:read`, `app:create`, `app:update`, `app:delete`,
 scopes described in the DigitalOcean section above. Export
 `HYPERVIBE_TEST_DIGITALOCEAN_TOKEN` and
 `HYPERVIBE_TEST_DIGITALOCEAN_REGISTRY`. The existing DOCR registry remains
-externally owned and is not removed by the test.
+externally owned and is not removed by the test. The full-stack profile also
+requires `database:read`, `database:view_credentials`, `database:create`,
+`database:update`, and `database:delete`; the created PostgreSQL and Valkey
+clusters are billable and are removed by exact confirmed actions during
+teardown.
 
 For Render, create a personal
 [API key](https://dashboard.render.com/u/settings#api-keys) whose user can
@@ -480,7 +527,10 @@ manage services in the isolated workspace. Export
 `HYPERVIBE_TEST_RENDER_REGISTRY_CREDENTIAL_ID`. The registry credential must
 already exist in that workspace, target GHCR, and contain a narrowly scoped
 GitHub token with `read:packages`; Hypervibe verifies and reuses it but does
-not create, rotate, or delete it.
+not create, rotate, or delete it. The user behind the API key must also be able
+to create, inspect, and delete Postgres and Key Value resources in that
+workspace. Both resources can be billable and are removed by exact confirmed
+actions during teardown.
 
 For Heroku, use an Account Settings API key or preferably a revocable
 [OAuth direct-authorization token](https://devcenter.heroku.com/articles/oauth#direct-authorization)
@@ -513,14 +563,21 @@ for the isolated subscription. Export
 `HYPERVIBE_TEST_AZURE_REGISTRY_SERVER`. Grant the resource-group and exact-ACR
 roles described in the Azure section above. The resource group, registry, and
 role assignments remain externally owned and are not removed by the test.
+The same service-principal values are stored as separate verified
+`azure-postgres` and `azure-managed-redis` connections by the harness. At the
+resource group, grant the PostgreSQL ARM permissions and Azure Managed Redis
+Contributor role documented by `hv_connections_list`. The test owns and
+removes its Flexible Server, Azure-services firewall rule, logical database,
+Managed Redis cluster, and default Redis database.
 
 The default review and workflow timeouts are 30 minutes. Override them with
 positive millisecond values in `HYPERVIBE_LIVE_REVIEW_TIMEOUT_MS` and
 `HYPERVIBE_LIVE_WORKFLOW_TIMEOUT_MS`. If a review or workflow fails, the
-`afterAll` stage still changes the spec to desired-absent for the service,
-confirms its exact destroy action, waits for provider-confirmed absence, and
-preserves the data directory if cleanup cannot be proven. Do not delete that
-directory until the test reports verified teardown.
+`afterAll` stage still changes the spec to desired-absent for the service and
+any declared database/cache, confirms every exact destroy action, waits for
+provider-confirmed absence, and preserves the data directory if cleanup cannot
+be proven. Do not delete that directory until the test reports verified
+teardown.
 
 Until the environment desired-absent lifecycle is implemented, the final live
 provider-context/local-binding assertion remains a test-first `todo`. A live

@@ -269,6 +269,22 @@ describe('connection guidance', () => {
         'registryId',
         'credentialsRef="file:/absolute/path/azure-container-apps.json"',
       ],
+      'azure-postgres': [
+        'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+        'Microsoft Entra application service principal',
+        'Microsoft.DBforPostgreSQL/flexibleServers/read',
+        'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules/read',
+        'start/end are 0.0.0.0',
+        'credentialsRef="file:/absolute/path/azure-postgres.json"',
+      ],
+      'azure-managed-redis': [
+        'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+        'Microsoft Entra application service principal',
+        'Azure Managed Redis Contributor',
+        '3015e5ed-6856-4ab3-b2f0-b8492aa30ca6',
+        'listKeys',
+        'credentialsRef="file:/absolute/path/azure-managed-redis.json"',
+      ],
     };
 
     for (const [provider, expectedSnippets] of Object.entries(expectations)) {

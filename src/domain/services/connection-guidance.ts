@@ -225,6 +225,78 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Container App service creation is confirmation-gated because the resulting compute and supporting Azure resources can be billable.',
     ],
   },
+  'azure-postgres': {
+    provider: 'azure-postgres',
+    displayName: 'Azure Database for PostgreSQL',
+    tokenType: 'Microsoft Entra application service principal (tenantId, clientId, and clientSecret) scoped to one existing Azure subscription/resource group',
+    setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+    setupUrls: [
+      {
+        label: 'Create or review the Microsoft Entra application',
+        url: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+      },
+      {
+        label: 'Microsoft Entra service-principal setup guide',
+        url: 'https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal',
+      },
+      {
+        label: 'PostgreSQL Flexible Server ARM operations',
+        url: 'https://learn.microsoft.com/en-us/rest/api/postgresql/',
+      },
+      {
+        label: 'PostgreSQL Flexible Server firewall behavior',
+        url: 'https://learn.microsoft.com/en-us/azure/postgresql/security/security-firewall-rules',
+      },
+    ],
+    permissions: [
+      'At the exact resource-group scope, grant Microsoft.Resources/subscriptions/resourceGroups/read.',
+      'Grant Microsoft.DBforPostgreSQL/flexibleServers/read, write, and delete plus Microsoft.DBforPostgreSQL/flexibleServers/databases/read and write.',
+      'Grant Microsoft.DBforPostgreSQL/flexibleServers/firewallRules/read and write so Hypervibe can install the reviewed Azure-services access rule required by Azure-hosted workloads.',
+      'Resource-group Contributor is a broader fallback. Prefer a custom role containing only the operations above when your organization supports custom roles.',
+    ],
+    credentialExample: 'hv_connect provider="azure-postgres" credentialsRef="file:/absolute/path/azure-postgres.json"',
+    notes: [
+      'The JSON file must contain tenantId, subscriptionId, clientId, clientSecret, resourceGroup, and location. Optional postgresSkuName, postgresSkuTier, postgresVersion, and postgresStorageSizeGb values select the server shape.',
+      'Hypervibe creates one Flexible Server, one logical app database, and a firewall rule whose start/end are 0.0.0.0. Microsoft defines that rule as access from Azure services; it includes other customers’ Azure resources, so strong generated database credentials remain essential.',
+      'The generated administrator credential and connection URL are encrypted in local component state and never returned in plans, receipts, logs, or repo bindings.',
+      'Client secrets expire. Store this JSON outside the repository, rotate before expiry, and reconnect with the replacement value.',
+    ],
+  },
+  'azure-managed-redis': {
+    provider: 'azure-managed-redis',
+    displayName: 'Azure Managed Redis',
+    tokenType: 'Microsoft Entra application service principal (tenantId, clientId, and clientSecret) scoped to one existing Azure subscription/resource group',
+    setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+    setupUrls: [
+      {
+        label: 'Create or review the Microsoft Entra application',
+        url: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+      },
+      {
+        label: 'Microsoft Entra service-principal setup guide',
+        url: 'https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal',
+      },
+      {
+        label: 'Azure Managed Redis built-in role',
+        url: 'https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/databases',
+      },
+      {
+        label: 'Azure Managed Redis REST operations',
+        url: 'https://learn.microsoft.com/en-us/rest/api/redis/redisenterprisecache/',
+      },
+    ],
+    permissions: [
+      'At the exact resource-group scope, assign Azure Managed Redis Contributor (role ID 3015e5ed-6856-4ab3-b2f0-b8492aa30ca6). It creates/manages Managed Redis resources without granting cache data access.',
+      'The service principal must be allowed to invoke the database listKeys action so Hypervibe can wire the generated TLS endpoint; confirm that a custom deny assignment does not remove this action.',
+      'Also grant Microsoft.Resources/subscriptions/resourceGroups/read at the same scope when it is not already included by the role assignment.',
+    ],
+    credentialExample: 'hv_connect provider="azure-managed-redis" credentialsRef="file:/absolute/path/azure-managed-redis.json"',
+    notes: [
+      'The JSON file must contain tenantId, subscriptionId, clientId, clientSecret, resourceGroup, and location. Optional redisSkuName selects the billable cache size and defaults to Balanced_B0.',
+      'Hypervibe creates one TLS-only Azure Managed Redis cluster and its default database with access-key authentication enabled. The access key and REDIS_URL are encrypted locally and never enter output or repo state.',
+      'Client secrets expire. Store this JSON outside the repository, rotate before expiry, and reconnect with the replacement value.',
+    ],
+  },
   bitwarden: {
     provider: 'bitwarden',
     displayName: 'Bitwarden Secrets Manager',

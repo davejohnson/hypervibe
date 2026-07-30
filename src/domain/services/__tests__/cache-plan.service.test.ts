@@ -163,6 +163,38 @@ describe('Redis cache plan contract', () => {
     }));
   });
 
+  it('destroys removed services before their bound cache', () => {
+    const result = planCache({
+      environmentSpec: {
+        ...spec(null),
+        services: {},
+      },
+      observed: observed({
+        caches: [{
+          provider: 'railway',
+          engine: 'redis',
+          externalId: 'redis-1',
+          status: 'running',
+        }],
+      }),
+      local: {
+        ...local([component()]),
+        bindings: {
+          services: {
+            web: { serviceId: 'service-web' },
+          },
+        },
+      },
+    });
+
+    expect(result.actions).toEqual([
+      expect.objectContaining({
+        id: 'cache:railway:destroy',
+        dependsOn: ['service:web:destroy'],
+      }),
+    ]);
+  });
+
   it('keeps provider-confirmed already-absent deletion retryable through apply', () => {
     const result = planCache({
       environmentSpec: spec(null),

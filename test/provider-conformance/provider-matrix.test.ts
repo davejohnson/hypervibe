@@ -123,6 +123,28 @@ describe('provider conformance matrix', () => {
         managed.requiredPaths.length
       );
       expect(managed.requiredPaths).toContain('.hypervibe/spec.json');
+      if (managed.database) {
+        const database = databaseProviderContracts.find((entry) => (
+          entry.provider === managed.database!.provider
+          && entry.engine === managed.database!.engine
+        ));
+        expect(database).toMatchObject({
+          provider: managed.database.provider,
+          engine: managed.database.engine,
+        });
+        expect(database?.status).not.toBe('planned');
+      }
+      if (managed.cache) {
+        const cache = cacheProviderContracts.find((entry) => (
+          entry.provider === managed.cache!.provider
+          && entry.engine === managed.cache!.engine
+        ));
+        expect(cache).toMatchObject({
+          provider: managed.cache.provider,
+          engine: managed.cache.engine,
+        });
+        expect(cache?.status).not.toBe('planned');
+      }
       for (const requiredPath of managed.requiredPaths.filter(
         (requiredPath) => requiredPath !== '.hypervibe/spec.json'
       )) {
@@ -174,7 +196,7 @@ describe('provider conformance matrix', () => {
     }
   });
 
-  it('exposes DigitalOcean hosting to the managed-workflow gate without promoting its datastores', () => {
+  it('exposes the complete DigitalOcean stack to the managed-workflow live gate', () => {
     const entries = providerContracts.filter(
       (entry) => entry.provider === 'digitalocean'
     );
@@ -195,11 +217,18 @@ describe('provider conformance matrix', () => {
           healthCheckPath: '/health',
           public: true,
         },
+        database: {
+          provider: 'digitalocean',
+          engine: 'postgres',
+        },
+        cache: {
+          provider: 'digitalocean',
+          engine: 'redis',
+        },
       },
     });
     expect(
-      entries.filter((entry) => entry.kind !== 'hosting')
-        .every((entry) => entry.status === 'planned')
+      entries.every((entry) => entry.status === 'ready-for-live')
     ).toBe(true);
     expect(entries.every((entry) => entry.implementationNote?.includes('implemented'))).toBe(true);
     expect(providerRegistry.supports('digitalocean', 'hosting')).toBe(true);
@@ -211,7 +240,7 @@ describe('provider conformance matrix', () => {
     ).toBe(true);
   });
 
-  it('exposes Render hosting to the managed-workflow gate without promoting its datastores', () => {
+  it('exposes the complete Render stack to the managed-workflow live gate', () => {
     const entries = providerContracts.filter(
       (entry) => entry.provider === 'render'
     );
@@ -232,11 +261,18 @@ describe('provider conformance matrix', () => {
           healthCheckPath: '/health',
           public: true,
         },
+        database: {
+          provider: 'render',
+          engine: 'postgres',
+        },
+        cache: {
+          provider: 'render',
+          engine: 'redis',
+        },
       },
     });
     expect(
-      entries.filter((entry) => entry.kind !== 'hosting')
-        .every((entry) => entry.status === 'planned')
+      entries.every((entry) => entry.status === 'ready-for-live')
     ).toBe(true);
     expect(entries.every((entry) => entry.implementationNote?.includes('implemented'))).toBe(true);
     expect(providerRegistry.supports('render', 'hosting')).toBe(true);
@@ -297,11 +333,33 @@ describe('provider conformance matrix', () => {
           healthCheckPath: '/health',
           public: true,
         },
+        database: {
+          provider: 'azure-postgres',
+          engine: 'postgres',
+        },
+        cache: {
+          provider: 'azure-managed-redis',
+          engine: 'redis',
+        },
       },
     });
     expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(
       true
     );
+    expect(
+      providerRegistry.supportsEngine(
+        'azure-postgres',
+        'database',
+        'postgres'
+      )
+    ).toBe(true);
+    expect(
+      providerRegistry.supportsEngine(
+        'azure-managed-redis',
+        'cache',
+        'redis'
+      )
+    ).toBe(true);
   });
 
   it('exposes the implemented Vercel slice only to the managed-workflow live gate', () => {
