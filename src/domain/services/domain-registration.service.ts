@@ -286,11 +286,25 @@ export async function applyCloudflareDomainRegistration(params: {
   const envRepo = new EnvironmentRepository();
   const environment = envRepo.findByProjectAndName(project.id, envName);
   const binding = registrationBinding(environment, domain);
+  const plannedAccountId = typeof action.metadata?.accountId === 'string'
+    ? action.metadata.accountId
+    : undefined;
+  const effectiveAccountId = binding?.state && !binding.completed && binding.state !== 'failed'
+    ? binding.accountId ?? accountId
+    : accountId;
+  if (!plannedAccountId || plannedAccountId !== effectiveAccountId) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: `Cloudflare registration action for ${domain} has stale account authority`,
+      error: `The reviewed account is ${plannedAccountId ?? 'missing'}, but the current registration target is ${effectiveAccountId}. Re-run hv_plan.`,
+    };
+  }
 
   if (binding?.state && !binding.completed && binding.state !== 'failed') {
     try {
-      const workflow = await adapter.getRegistrarRegistrationStatus(binding.accountId ?? accountId, domain);
-      persistWorkflow(envRepo, project, envName, domain, binding.accountId ?? accountId, workflow);
+      const workflow = await adapter.getRegistrarRegistrationStatus(effectiveAccountId, domain);
+      persistWorkflow(envRepo, project, envName, domain, effectiveAccountId, workflow);
       return workflowActionResult(domain, workflow, 'polled');
     } catch (error) {
       return {

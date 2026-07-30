@@ -108,7 +108,7 @@ export function planDelegatedSecrets(params: {
   warnings: string[];
 } {
   const slots = delegatedSecretsForEnvironment(params.spec, params.environmentName);
-  const serviceNames = Object.keys(params.spec.environments[params.environmentName]?.services ?? {});
+  const serviceNames = Object.keys(params.spec.environments[params.environmentName]?.services ?? {}).sort();
   const bindings = new Map(parseDelegatedSecretBindings(params.environment).map((binding) => [binding.name, binding]));
   const suppliedValues = params.suppliedValues ?? {};
   const actions: PlanAction[] = [];
@@ -141,6 +141,7 @@ export function planDelegatedSecrets(params: {
           principal: slot.principal,
           inputProvided: true,
           driftPolicy: slot.driftPolicy,
+          services: serviceNames,
         },
       });
       continue;
@@ -163,6 +164,7 @@ export function planDelegatedSecrets(params: {
           principal: slot.principal,
           inputProvided: false,
           driftPolicy: slot.driftPolicy,
+          services: serviceNames,
         },
       });
       continue;
@@ -180,6 +182,7 @@ export function planDelegatedSecrets(params: {
           principal: slot.principal,
           inputProvided: false,
           driftPolicy: slot.driftPolicy,
+          services: serviceNames,
         },
       });
       warnings.push(`Could not verify delegated secret ${key} for ${slot.principal}; Hypervibe preserved it and did not use local env input.`);
@@ -198,6 +201,7 @@ export function planDelegatedSecrets(params: {
           principal: slot.principal,
           inputProvided: false,
           driftPolicy: slot.driftPolicy,
+          services: serviceNames,
         },
       });
       continue;
@@ -226,6 +230,7 @@ export function planDelegatedSecrets(params: {
         inputProvided: false,
         inputRequired: true,
         driftPolicy: slot.driftPolicy,
+        services: serviceNames,
       },
     });
   }

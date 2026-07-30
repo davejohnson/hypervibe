@@ -1,0 +1,449 @@
+import type { PlanAction, PlanResourceKind } from './plan.types.js';
+import { HOSTING_ENVIRONMENT_ENSURE_OPERATION } from './plan.service.js';
+import {
+  isCloudflareDomainRegistrationAction,
+} from '../services/domain-registration.service.js';
+import {
+  isGitHubActionsAppliedSpecHashAction,
+  isGitHubActionsDeployAction,
+} from '../services/ci-deploy.service.js';
+import { isGitHubCollaborationAction } from '../services/repo-collaboration.service.js';
+import {
+  isGitHubInfrastructureAction,
+  isGitHubNativeSettingAction,
+  isGitHubOpenAISecretAction,
+  OPENAI_ACTIONS_SECRET,
+} from '../services/github-infrastructure.service.js';
+import { IOS_OPERATIONS, isIosAction } from '../services/appstore-plan.service.js';
+import { QUEUE_OPERATIONS, isQueueAction } from '../services/queue-plan.service.js';
+import { STORAGE_OPERATIONS, isStorageAction } from '../services/storage-plan.service.js';
+import {
+  delegatedSecretActionId,
+  isDelegatedSecretAction,
+} from '../services/delegated-secret.service.js';
+import {
+  STRIPE_CATALOG_OPERATIONS,
+  STRIPE_HOSTING_ENV_SYNC_OPERATION,
+  STRIPE_WEBHOOK_OPERATIONS,
+  isStripeCatalogAction,
+  isStripeHostingEnvSyncAction,
+  isStripeWebhookAction,
+} from '../services/stripe-env.service.js';
+import { isHostingEnvRemovalAction } from '../services/hosting-env.service.js';
+import { isProviderNativeDeploySourceAction } from '../services/provider-native-deploy-source.service.js';
+import { CACHE_OPERATIONS, isCacheAction } from '../services/cache-plan.service.js';
+
+export type PlanMutationCapability =
+  | 'hosting.environment.ensure'
+  | 'domain.registration.mutate'
+  | 'github.ci.sync'
+  | 'github.applied-spec-hash.sync'
+  | 'github.collaboration.sync'
+  | 'github.infrastructure.sync'
+  | 'github.openai-secret.sync'
+  | 'github.setting.sync'
+  | 'appstore.mutate'
+  | 'queue.mutate'
+  | 'storage.mutate'
+  | 'hosting.delegated-secret.sync'
+  | 'stripe.hosting-env.sync'
+  | 'stripe.catalog.mutate'
+  | 'stripe.webhook.mutate'
+  | 'hosting.env.remove'
+  | 'hosting.deploy-source.disconnect'
+  | 'cache.provision'
+  | 'cache.env.remove'
+  | 'cache.destroy'
+  | 'database.provision'
+  | 'database.seed'
+  | 'database.destroy'
+  | 'hosting.task-service.destroy'
+  | 'hosting.previous-service.destroy'
+  | 'hosting.service.destroy'
+  | 'domain.configure'
+  | 'email.configure'
+  | 'local.environment.record'
+  | 'hosting.project.ensure'
+  | 'hosting.service.converge'
+  | 'hosting.service.rollback';
+
+export interface PlanActionAuthority {
+  actionId: string;
+  capability: PlanMutationCapability;
+  operation?: string;
+  resource: {
+    kind: PlanResourceKind;
+    name: string;
+    provider: string;
+  };
+}
+
+function authority(
+  action: PlanAction,
+  capability: PlanMutationCapability
+): PlanActionAuthority {
+  const operation = typeof action.metadata?.operation === 'string'
+    ? action.metadata.operation
+    : undefined;
+  return {
+    actionId: action.id,
+    capability,
+    ...(operation ? { operation } : {}),
+    resource: { ...action.resource },
+  };
+}
+
+function exactResource(
+  action: PlanAction,
+  kind: PlanResourceKind,
+  provider?: string
+): boolean {
+  return action.resource.kind === kind
+    && (!provider || action.resource.provider === provider);
+}
+
+function hasType(action: PlanAction, ...types: PlanAction['type'][]): boolean {
+  return types.includes(action.type);
+}
+
+function metadataString(action: PlanAction, key: string): string | undefined {
+  const value = action.metadata?.[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function metadataStringArray(action: PlanAction, key: string): string[] | undefined {
+  const value = action.metadata?.[key];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string' || entry.length === 0)) {
+    return undefined;
+  }
+  return value;
+}
+
+function operationTypeIsValid(action: PlanAction): boolean {
+  const operation = metadataString(action, 'operation');
+  switch (operation) {
+    case IOS_OPERATIONS.bundleIdRegister:
+    case IOS_OPERATIONS.appRecord:
+      return action.type === 'create';
+    case IOS_OPERATIONS.capabilitiesEnable:
+    case IOS_OPERATIONS.groupTestersEnsure:
+      return action.type === 'update';
+    case IOS_OPERATIONS.betaGroupEnsure:
+      return hasType(action, 'create', 'update');
+    case QUEUE_OPERATIONS.ensure:
+      return hasType(action, 'create', 'update');
+    case QUEUE_OPERATIONS.destroy:
+      return action.type === 'destroy';
+    case STORAGE_OPERATIONS.ensure:
+      return action.type === 'create';
+    case STORAGE_OPERATIONS.wire:
+    case STORAGE_OPERATIONS.unwire:
+      return action.type === 'update';
+    case STORAGE_OPERATIONS.destroy:
+      return action.type === 'destroy';
+    case STRIPE_HOSTING_ENV_SYNC_OPERATION:
+      return action.type === 'update';
+    case STRIPE_CATALOG_OPERATIONS.productEnsure:
+    case STRIPE_CATALOG_OPERATIONS.priceEnsure:
+      return hasType(action, 'create', 'update', 'replace');
+    case STRIPE_CATALOG_OPERATIONS.productAdopt:
+    case STRIPE_CATALOG_OPERATIONS.priceAdopt:
+      return action.type === 'update';
+    case STRIPE_CATALOG_OPERATIONS.productArchive:
+    case STRIPE_CATALOG_OPERATIONS.priceArchive:
+      return action.type === 'destroy';
+    case STRIPE_WEBHOOK_OPERATIONS.ensure:
+      return hasType(action, 'create', 'update', 'replace');
+    case STRIPE_WEBHOOK_OPERATIONS.adopt:
+      return action.type === 'update';
+    case STRIPE_WEBHOOK_OPERATIONS.destroy:
+      return action.type === 'destroy';
+    default:
+      return true;
+  }
+}
+
+function iosIdentityIsValid(action: PlanAction): boolean {
+  const operation = metadataString(action, 'operation');
+  const bundleId = metadataString(action, 'bundleId');
+  if (!bundleId) return false;
+  if (
+    operation === IOS_OPERATIONS.bundleIdRegister
+    || operation === IOS_OPERATIONS.capabilitiesEnable
+    || operation === IOS_OPERATIONS.appRecord
+  ) {
+    return action.resource.name === bundleId;
+  }
+  const groupName = metadataString(action, 'groupName');
+  return Boolean(groupName && action.resource.name === groupName);
+}
+
+function stripeCatalogIdentityIsValid(action: PlanAction): boolean {
+  const productKey = metadataString(action, 'productKey');
+  if (!productKey) return false;
+  const priceKey = metadataString(action, 'priceKey');
+  return action.resource.name === (priceKey ? `${productKey}.${priceKey}` : productKey);
+}
+
+/**
+ * Resolve the one mutation boundary authorized by a reviewed plan action.
+ *
+ * Operation classifiers alone are insufficient: persisted plan JSON can be
+ * corrupt or crafted, so every special operation is paired with its expected
+ * resource kind/provider before it can reach a mutation handler.
+ */
+export function resolvePlanActionAuthority(
+  action: PlanAction
+): PlanActionAuthority | null {
+  if (action.type === 'noop') return null;
+  if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
+    return null;
+  }
+
+  if (
+    action.metadata?.operation === HOSTING_ENVIRONMENT_ENSURE_OPERATION
+    && exactResource(action, 'environment')
+    && hasType(action, 'create', 'update')
+  ) {
+    return authority(action, 'hosting.environment.ensure');
+  }
+  if (
+    isCloudflareDomainRegistrationAction(action)
+    && exactResource(action, 'domain', 'cloudflare')
+    && hasType(action, 'create', 'update')
+    && metadataString(action, 'accountId')
+  ) {
+    return authority(action, 'domain.registration.mutate');
+  }
+  if (
+    isGitHubActionsDeployAction(action)
+    && exactResource(action, 'ci', 'github')
+    && hasType(action, 'create', 'update')
+    && action.resource.name.startsWith('deploy-branch:')
+    && metadataString(action, 'repository')
+  ) {
+    return authority(action, 'github.ci.sync');
+  }
+  if (
+    isGitHubActionsAppliedSpecHashAction(action)
+    && exactResource(action, 'ci', 'github')
+    && action.type === 'update'
+    && action.resource.name === `applied-spec-hash:${metadataString(action, 'environmentName') ?? ''}`
+    && metadataString(action, 'repository')
+    && metadataString(action, 'desiredHash')
+  ) {
+    return authority(action, 'github.applied-spec-hash.sync');
+  }
+  if (
+    isGitHubCollaborationAction(action)
+    && exactResource(action, 'repo', 'github')
+    && action.type === 'update'
+    && action.resource.name === metadataString(action, 'repository')
+  ) {
+    return authority(action, 'github.collaboration.sync');
+  }
+  if (
+    isGitHubInfrastructureAction(action)
+    && exactResource(action, 'repo', 'github')
+    && action.type === 'update'
+    && action.resource.name === metadataString(action, 'repository')
+  ) {
+    return authority(action, 'github.infrastructure.sync');
+  }
+  if (
+    isGitHubOpenAISecretAction(action)
+    && exactResource(action, 'secret', 'github')
+    && action.type === 'update'
+    && action.resource.name === OPENAI_ACTIONS_SECRET
+    && metadataString(action, 'secretName') === OPENAI_ACTIONS_SECRET
+    && metadataString(action, 'repository')
+  ) {
+    return authority(action, 'github.openai-secret.sync');
+  }
+  if (
+    isGitHubNativeSettingAction(action)
+    && exactResource(action, 'repo', 'github')
+    && action.type === 'update'
+    && action.resource.name === metadataString(action, 'repository')
+  ) {
+    return authority(action, 'github.setting.sync');
+  }
+  if (
+    isIosAction(action)
+    && exactResource(action, 'ios', 'appstoreconnect')
+    && operationTypeIsValid(action)
+    && iosIdentityIsValid(action)
+  ) {
+    return authority(action, 'appstore.mutate');
+  }
+  if (
+    isQueueAction(action)
+    && exactResource(action, 'queue')
+    && operationTypeIsValid(action)
+    && action.resource.name === metadataString(action, 'queueName')
+  ) {
+    return authority(action, 'queue.mutate');
+  }
+  if (
+    isStorageAction(action)
+    && exactResource(action, 'storage')
+    && operationTypeIsValid(action)
+    && action.resource.name === metadataString(action, 'storageName')
+    && (
+      action.metadata?.operation === STORAGE_OPERATIONS.ensure
+      || action.metadata?.operation === STORAGE_OPERATIONS.destroy
+      || Boolean(metadataString(action, 'serviceName'))
+    )
+  ) {
+    return authority(action, 'storage.mutate');
+  }
+  if (
+    isDelegatedSecretAction(action)
+    && exactResource(action, 'secret')
+    && action.type === 'update'
+    && action.id === delegatedSecretActionId(action.resource.name)
+    && Boolean(metadataString(action, 'principal'))
+    && (metadataStringArray(action, 'services')?.length ?? 0) > 0
+  ) {
+    return authority(action, 'hosting.delegated-secret.sync');
+  }
+  if (
+    isStripeHostingEnvSyncAction(action)
+    && operationTypeIsValid(action)
+    && action.resource.name === metadataString(action, 'service')
+  ) {
+    return authority(action, 'stripe.hosting-env.sync');
+  }
+  if (
+    isStripeCatalogAction(action)
+    && operationTypeIsValid(action)
+    && stripeCatalogIdentityIsValid(action)
+  ) {
+    return authority(action, 'stripe.catalog.mutate');
+  }
+  if (
+    isStripeWebhookAction(action)
+    && operationTypeIsValid(action)
+    && action.resource.name === metadataString(action, 'webhookName')
+  ) {
+    return authority(action, 'stripe.webhook.mutate');
+  }
+  if (
+    isHostingEnvRemovalAction(action)
+    && exactResource(action, 'service')
+    && action.type === 'update'
+    && (metadataStringArray(action, 'keys')?.length ?? 0) > 0
+  ) {
+    return authority(action, 'hosting.env.remove');
+  }
+  if (
+    isProviderNativeDeploySourceAction(action)
+    && exactResource(action, 'service')
+    && action.type === 'update'
+    && metadataString(action, 'serviceId')
+  ) {
+    return authority(action, 'hosting.deploy-source.disconnect');
+  }
+  if (
+    isCacheAction(action)
+    && exactResource(action, 'cache')
+    && action.resource.name === 'redis'
+  ) {
+    if (
+      action.metadata?.operation === CACHE_OPERATIONS.ensure
+      && ['create', 'update', 'replace'].includes(action.type)
+    ) {
+      return authority(action, 'cache.provision');
+    }
+    if (
+      action.metadata?.operation === CACHE_OPERATIONS.unwire
+      && action.type === 'update'
+      && metadataString(action, 'serviceName')
+    ) {
+      return authority(action, 'cache.env.remove');
+    }
+    if (
+      action.metadata?.operation === CACHE_OPERATIONS.destroy
+      && action.type === 'destroy'
+    ) {
+      return authority(action, 'cache.destroy');
+    }
+    return null;
+  }
+  if (exactResource(action, 'database')) {
+    if (
+      action.metadata?.operation === 'databaseSeed'
+      && action.type === 'update'
+      && metadataString(action, 'engine')
+      && metadataString(action, 'command')
+      && metadataString(action, 'commandHash')
+    ) {
+      return authority(action, 'database.seed');
+    }
+    if (action.type === 'create' && !action.metadata?.operation) {
+      return authority(action, 'database.provision');
+    }
+    if (action.type === 'destroy' && !action.metadata?.operation) {
+      return authority(action, 'database.destroy');
+    }
+    return null;
+  }
+  if (exactResource(action, 'service') && action.type === 'destroy') {
+    if (
+      action.metadata?.operation === 'taskServiceCleanup'
+      && metadataString(action, 'externalId')
+    ) {
+      return authority(action, 'hosting.task-service.destroy');
+    }
+    if (action.metadata?.operation === 'previousHostingDestroy') {
+      return authority(action, 'hosting.previous-service.destroy');
+    }
+    if (action.metadata?.operation) return null;
+    return authority(action, 'hosting.service.destroy');
+  }
+  if (
+    exactResource(action, 'domain')
+    && hasType(action, 'create', 'update')
+    && !action.metadata?.operation
+  ) {
+    return authority(action, 'domain.configure');
+  }
+  if (
+    exactResource(action, 'email', 'sendgrid')
+    && action.metadata?.operation === 'emailSetup'
+    && action.type === 'update'
+    && metadataStringArray(action, 'services')
+  ) {
+    return authority(action, 'email.configure');
+  }
+  if (
+    exactResource(action, 'environment')
+    && hasType(action, 'create', 'update')
+    && !action.metadata?.operation
+  ) {
+    return authority(action, 'local.environment.record');
+  }
+  if (
+    exactResource(action, 'project')
+    && hasType(action, 'create', 'update')
+    && !action.metadata?.operation
+  ) {
+    return authority(action, 'hosting.project.ensure');
+  }
+  if (
+    exactResource(action, 'service')
+    && ['create', 'update', 'replace'].includes(action.type)
+    && !action.metadata?.operation
+  ) {
+    return authority(action, 'hosting.service.converge');
+  }
+  if (
+    exactResource(action, 'service')
+    && action.type === 'update'
+    && action.metadata?.operation === 'rollbackRedeploy'
+    && metadataString(action, 'fromRunId')
+  ) {
+    return authority(action, 'hosting.service.rollback');
+  }
+  return null;
+}

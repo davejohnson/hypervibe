@@ -152,7 +152,7 @@ describe('PlanService delegated secret inputs', () => {
     expect(plan.inputRequired).toEqual([]);
     expect(plan.actions.find((action) => action.id === 'secret:ANTHROPIC_API_KEY')).toMatchObject({
       type: 'update',
-      metadata: { inputProvided: true },
+      metadata: { inputProvided: true, services: ['web'] },
     });
     expect(plan.actions.find((action) => action.id === 'service:web')?.diff).toContainEqual({
       field: 'env:ANTHROPIC_API_KEY',

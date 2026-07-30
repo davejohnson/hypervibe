@@ -62,7 +62,10 @@ interface FakeQueueAdapter {
 
 function stubAdapter(capabilities: Record<string, unknown>): FakeQueueAdapter {
   const fake = {
-    name: 'fake',
+    name: capabilities.queues
+      && (capabilities.queues as { backend?: string }).backend === 'postgres'
+      ? 'railway'
+      : 'cloudrun',
     capabilities,
     getQueueSubscription: vi.fn().mockResolvedValue(null),
     ensureQueue: vi.fn().mockResolvedValue({
@@ -80,22 +83,26 @@ function stubAdapter(capabilities: Record<string, unknown>): FakeQueueAdapter {
   return fake;
 }
 
-function ensureAction(name: string, extraMetadata: Record<string, unknown> = {}): PlanAction {
+function ensureAction(
+  name: string,
+  extraMetadata: Record<string, unknown> = {},
+  provider = 'cloudrun'
+): PlanAction {
   return {
     id: `queue:${name}`,
     type: 'create',
-    resource: { kind: 'queue', name, provider: 'cloudrun' },
+    resource: { kind: 'queue', name, provider },
     verified: true,
     reason: 'test',
     metadata: { operation: QUEUE_OPERATIONS.ensure, queueName: name, ...extraMetadata },
   };
 }
 
-function destroyAction(name: string): PlanAction {
+function destroyAction(name: string, provider = 'cloudrun'): PlanAction {
   return {
     id: `queue:${name}:destroy`,
     type: 'destroy',
-    resource: { kind: 'queue', name, provider: 'cloudrun' },
+    resource: { kind: 'queue', name, provider },
     verified: true,
     reason: 'test',
     metadata: { operation: QUEUE_OPERATIONS.destroy, queueName: name },
@@ -269,6 +276,25 @@ describe('queue-plan.service', () => {
       });
     });
 
+    it('rejects a queue action for a different provider before resolving an adapter', async () => {
+      const { project } = seedProject();
+      const getProviderAdapter = vi.spyOn(adapterFactory, 'getProviderAdapter');
+
+      const result = await applyQueueAction({
+        project,
+        envName: 'production',
+        environmentSpec: pubsubSpec(),
+        action: {
+          ...ensureAction('email-jobs'),
+          resource: { kind: 'queue', name: 'email-jobs', provider: 'railway' },
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain('stale mutation authority');
+      expect(getProviderAdapter).not.toHaveBeenCalled();
+    });
+
     it('applies destroy via the adapter and clears the binding', async () => {
       const { project, environment } = seedProject();
       envRepo().updatePlatformBindings(environment.id, {
@@ -282,7 +308,7 @@ describe('queue-plan.service', () => {
       const result = await applyQueueAction({
         project,
         envName: 'production',
-        environmentSpec: pubsubSpec(),
+        environmentSpec: pubsubSpec({ queues: undefined }),
         action: destroyAction('email-jobs'),
       });
 
@@ -348,7 +374,7 @@ describe('queue-plan.service', () => {
         project,
         envName: 'production',
         environmentSpec: postgresSpec(),
-        action: ensureAction('email-jobs'),
+        action: ensureAction('email-jobs', {}, 'railway'),
       });
       expect(ensured.success).toBe(true);
       expect(parseQueueBindings(envRepo().findById(environment.id))['email-jobs']).toMatchObject({ backend: 'postgres' });
@@ -357,8 +383,8 @@ describe('queue-plan.service', () => {
       const destroyed = await applyQueueAction({
         project,
         envName: 'production',
-        environmentSpec: postgresSpec(),
-        action: destroyAction('email-jobs'),
+        environmentSpec: postgresSpec({ queues: undefined }),
+        action: destroyAction('email-jobs', 'railway'),
       });
       expect(destroyed.success).toBe(true);
       expect(parseQueueBindings(envRepo().findById(environment.id))['email-jobs']).toBeUndefined();

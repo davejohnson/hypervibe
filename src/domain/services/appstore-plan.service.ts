@@ -415,6 +415,20 @@ export async function applyIosAction(params: {
   if (!spec) {
     return { success: false, message: 'iOS action without ios spec', error: 'The spec no longer declares an ios section for this environment.' };
   }
+  const plannedBundleId = typeof params.action.metadata?.bundleId === 'string'
+    ? params.action.metadata.bundleId
+    : '';
+  if (
+    params.action.resource.provider !== 'appstoreconnect'
+    || !plannedBundleId
+    || plannedBundleId !== spec.bundleId
+  ) {
+    return {
+      success: false,
+      message: `iOS action "${params.action.id}" has stale mutation authority`,
+      error: 'The reviewed App Store Connect provider or bundle id no longer matches the current environment spec. Re-run hv_plan.',
+    };
+  }
 
   const adapterResult = getAppStoreConnectAdapter(spec.bundleId);
   if ('error' in adapterResult) {
