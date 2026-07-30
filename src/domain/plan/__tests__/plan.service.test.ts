@@ -2302,6 +2302,13 @@ describe('PlanService.plan', () => {
       expect(plan.actions.some((action) => action.resource.kind === 'domain')).toBe(false);
       expect(plan.actions.some((action) => action.type === 'destroy')).toBe(false);
       expect(plan.warnings.some((warning) => warning.includes('Partial plan'))).toBe(true);
+      const actionIds = new Set(plan.actions.map((action) => action.id));
+      for (const action of plan.actions) {
+        expect(
+          (action.dependsOn ?? [])
+            .filter((dependency) => !actionIds.has(dependency))
+        ).toEqual([]);
+      }
 
       const doc = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
       const overrides = doc.overrides as Record<string, unknown>;

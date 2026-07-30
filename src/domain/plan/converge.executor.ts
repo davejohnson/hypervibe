@@ -151,6 +151,13 @@ export function fingerprintObservedState(observed: ObservedState): string {
 
 /** Topological order by dependsOn; throws on cycles or unknown dependencies. */
 export function orderActions(actions: PlanAction[]): PlanAction[] {
+  const seen = new Set<string>();
+  for (const action of actions) {
+    if (seen.has(action.id)) {
+      throw new Error(`Duplicate plan action id "${action.id}"`);
+    }
+    seen.add(action.id);
+  }
   const byId = new Map(actions.map((a) => [a.id, a]));
   const ordered: PlanAction[] = [];
   const state = new Map<string, 'visiting' | 'done'>();
@@ -164,7 +171,12 @@ export function orderActions(actions: PlanAction[]): PlanAction[] {
     state.set(action.id, 'visiting');
     for (const dep of action.dependsOn ?? []) {
       const target = byId.get(dep);
-      if (target) visit(target);
+      if (!target) {
+        throw new Error(
+          `Unknown dependency "${dep}" referenced by action "${action.id}"`
+        );
+      }
+      visit(target);
     }
     state.set(action.id, 'done');
     ordered.push(action);

@@ -65,6 +65,25 @@ describe('orderActions', () => {
       action({ id: 'b', dependsOn: ['a'] }),
     ])).toThrow(/cycle/i);
   });
+
+  it('throws on unknown dependencies instead of silently dropping the edge', () => {
+    expect(() => orderActions([
+      action({
+        id: 'cache:redis:destroy',
+        dependsOn: ['service:web'],
+      }),
+      action({ id: 'service:web:destroy', type: 'destroy' }),
+    ])).toThrow(
+      'Unknown dependency "service:web" referenced by action "cache:redis:destroy"'
+    );
+  });
+
+  it('throws on duplicate action ids', () => {
+    expect(() => orderActions([
+      action({ id: 'service:web' }),
+      action({ id: 'service:web', type: 'update' }),
+    ])).toThrow('Duplicate plan action id "service:web"');
+  });
 });
 
 describe('ConvergeExecutor staleness', () => {

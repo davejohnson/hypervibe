@@ -4,6 +4,7 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { secretManagerRegistry } from '../registry/secretmanager.registry.js';
 import { githubCiDeployPermissionProblem } from './ci-deploy.service.js';
+import { normalizeConnectionScope } from '../entities/connection.entity.js';
 
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
@@ -32,6 +33,7 @@ export async function saveConnection(
   credentials: Record<string, unknown>,
   scope?: string
 ): Promise<SaveConnectionOutcome> {
+  scope = normalizeConnectionScope(scope) ?? undefined;
   const secretStore = getSecretStore();
 
   // Validate credentials using the provider's schema. Secret managers
@@ -95,6 +97,7 @@ export type VerifyConnectionOutcome =
  * connection status and writes audit entries.
  */
 export async function verifyConnection(provider: string, scope?: string): Promise<VerifyConnectionOutcome> {
+  scope = normalizeConnectionScope(scope) ?? undefined;
   const connection = connectionRepo.findByProviderAndScope(provider, scope || null);
 
   const scopeDisplay = scope || 'global';
@@ -297,6 +300,7 @@ export interface DeleteConnectionOutcome {
 
 /** Delete a stored provider connection (shared by connection_delete and hv_connect). */
 export function deleteConnection(provider: string, scope?: string): DeleteConnectionOutcome {
+  scope = normalizeConnectionScope(scope) ?? undefined;
   const connection = connectionRepo.findByProviderAndScope(provider, scope || null);
 
   const scopeDisplay = scope || 'global';
@@ -304,7 +308,7 @@ export function deleteConnection(provider: string, scope?: string): DeleteConnec
     return { success: false, error: `No connection found for provider: ${provider} (${scopeDisplay})` };
   }
 
-  connectionRepo.delete(connection.id);
+  connectionRepo.deleteByProviderAndScope(provider, scope || null);
 
   auditRepo.create({
     action: 'connection.deleted',

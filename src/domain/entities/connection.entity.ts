@@ -19,6 +19,17 @@ export interface CreateConnectionInput {
   credentialsEncrypted: string;
 }
 
+/** Empty and historical literal "global" scopes both mean unscoped. */
+export function normalizeConnectionScope(
+  scope?: string | null
+): string | null {
+  const normalized = scope?.trim();
+  if (!normalized || normalized.toLowerCase() === 'global') {
+    return null;
+  }
+  return normalized;
+}
+
 export interface RailwayCredentials {
   apiToken: string;
   workspaceId?: string;
