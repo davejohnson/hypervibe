@@ -11,6 +11,7 @@ import { PlanService } from '../domain/plan/plan.service.js';
 import { diffEnvironment } from '../domain/plan/diff.engine.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import { planIos } from '../domain/services/appstore-plan.service.js';
+import { planCache } from '../domain/services/cache-plan.service.js';
 import { planQueues } from '../domain/services/queue-plan.service.js';
 import { planStorage } from '../domain/services/storage-plan.service.js';
 import {
@@ -44,6 +45,7 @@ import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service
 import { planEmailSetup } from '../domain/services/email-plan.service.js';
 import { validateProjectSpecProviders } from '../domain/services/provider-spec-validation.js';
 import { buildManagedDatabaseEnvVars } from '../domain/services/database-env.js';
+import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
 import type { ObservedState } from '../domain/ports/observe.port.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
@@ -610,6 +612,15 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         envSpec.database,
         local.components
       );
+      const localCache = local.components.find((component) => component.type === 'redis');
+      const localCacheProvider = typeof localCache?.bindings.provider === 'string'
+        ? localCache.bindings.provider
+        : undefined;
+      const managedCacheEnvVars = envSpec.cache
+        && localCache
+        && localCacheProvider === envSpec.cache.provider
+        ? buildCacheEnvVarsFromComponent(localCache).envVars
+        : undefined;
       const diff = diffEnvironment({
         spec: envSpec,
         envName,
@@ -618,8 +629,15 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         providerBehavior: providerRegistry.getMetadata(envSpec.hosting.provider)?.orchestration?.diff,
         expectedSource: planService.expectedDeploySource(projectForStatus, envName, envSpec),
         managedDatabaseEnvVars,
+        managedCacheEnvVars,
       });
       const drift = diff.actions.filter((a) => a.type !== 'noop');
+      const cache = planCache({
+        environmentSpec: envSpec,
+        observed,
+        local,
+      });
+      const cacheDrift = cache.actions.filter((action) => action.type !== 'noop');
 
       const expectedSource = planService.expectedDeploySource(projectForStatus, envName, envSpec);
       const observedSources = Object.fromEntries(
@@ -775,11 +793,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               }),
             }
             : {}),
-          inSync: !observationIncomplete && drift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0,
+          inSync: !observationIncomplete && drift.length === 0 && cacheDrift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0,
           runtimeHealth: runtimeHealthSummary(observed),
-          summary: summarizeActions([...diff.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...(emailAction ? [emailAction] : [])]),
-          drift: [...drift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift],
-          unmanaged: [...diff.unmanaged, ...storage.unmanaged],
+          summary: summarizeActions([...diff.actions, ...cache.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...(emailAction ? [emailAction] : [])]),
+          drift: [...drift, ...cacheDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift],
+          unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...storage.unmanaged],
           inputRequired: delegatedSecrets.inputRequired.length > 0 ? delegatedSecrets.inputRequired : undefined,
           blocked,
           ...(blocked.length > 0 ? connectionRecoveryDetails(blocked) : {}),
@@ -796,7 +814,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           },
         },
         {
-          warnings: [...warnings, ...diff.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings],
+          warnings: [...warnings, ...diff.warnings, ...cache.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings],
           hint: blocked.length > 0
             ? connectionRecoveryHint(blocked, {
               after: 'After the connection verifies, rerun hv_status or hv_plan. Do not ask to run hv_plan for DNS/domain drift until the required connection is verified.',
@@ -807,7 +825,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
               : delegatedSecrets.inputRequired.length > 0
                 ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
-              : drift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0
+              : drift.length > 0 || cacheDrift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 || emailDrift.length > 0
                 ? 'Run hv_plan to get an executable plan for this drift.'
                 : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_errors/hv_logs for workers.',
           next: blocked.length > 0 ? ['hv_connect'] : undefined,

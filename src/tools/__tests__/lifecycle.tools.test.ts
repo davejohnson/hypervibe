@@ -15,6 +15,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter, type RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
+import type { ObservedService, ObservedState } from '../../domain/ports/observe.port.js';
 import { registerLifecycleTools } from '../lifecycle.tools.js';
 import { createToolContext } from '../context.js';
 
@@ -36,6 +37,24 @@ async function makeClient() {
   const server = new McpServer({ name: 'lifecycle-tools-test', version: '0.0.0' });
   registerLifecycleTools(createMcpCommandRegistrar(server), createToolContext());
   const client = new Client({ name: 'lifecycle-tools-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  return {
+    async call(name: string, args: Record<string, unknown>) {
+      const result = await client.callTool({ name, arguments: args });
+      return parseToolEnvelope(result) as Record<string, any>;
+    },
+    async close() {
+      await client.close();
+      await server.close();
+    },
+  };
+}
+
+async function makeFullClient() {
+  const { createServer } = await import('../../server.js');
+  const server = createServer();
+  const client = new Client({ name: 'lifecycle-roundtrip-test', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   return {
@@ -162,21 +181,88 @@ describe('hv_inspect / hv_import', () => {
     plugins: { edges: [{ node: { id: 'plug-1', name: 'Postgres' } }] },
   };
 
-  function createRailwayConnection() {
-    new ConnectionRepository().create({
+  function createRailwayConnection(verified = false) {
+    const repository = new ConnectionRepository();
+    const connection = repository.create({
       provider: 'railway',
       credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'token' }),
     });
+    return verified ? repository.updateStatus(connection.id, 'verified')! : connection;
   }
 
-  function mockAdapter() {
+  function mockAdapter(projectDetails: RailwayProjectDetails = details) {
     vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
     vi.spyOn(RailwayAdapter.prototype, 'disconnect').mockResolvedValue();
-    vi.spyOn(RailwayAdapter.prototype, 'listProjects').mockResolvedValue([{ id: 'rp-1', name: 'demo-app' }]);
-    vi.spyOn(RailwayAdapter.prototype, 'getProjectDetails').mockResolvedValue(details);
-    vi.spyOn(RailwayAdapter.prototype, 'findProjectByName').mockResolvedValue({ id: 'rp-1', name: 'demo-app' });
-    vi.spyOn(RailwayAdapter.prototype, 'findProjectsByName').mockResolvedValue([{ id: 'rp-1', name: 'demo-app' }]);
+    vi.spyOn(RailwayAdapter.prototype, 'listProjects').mockResolvedValue([{ id: projectDetails.id, name: projectDetails.name }]);
+    vi.spyOn(RailwayAdapter.prototype, 'getProjectDetails').mockResolvedValue(projectDetails);
+    vi.spyOn(RailwayAdapter.prototype, 'findProjectByName').mockResolvedValue({ id: projectDetails.id, name: projectDetails.name });
+    vi.spyOn(RailwayAdapter.prototype, 'findProjectsByName').mockResolvedValue([{ id: projectDetails.id, name: projectDetails.name }]);
     vi.spyOn(RailwayAdapter.prototype, 'getServiceVariables').mockResolvedValue({ DATABASE_URL: 'postgres://x' });
+  }
+
+  function railwayService(input: {
+    id: string;
+    name: string;
+    domain?: string;
+    startCommand?: string;
+    releaseCommand?: string;
+    healthCheckPath?: string;
+    cronSchedule?: string;
+  }): RailwayProjectDetails['services']['edges'][number] {
+    return {
+      node: {
+        id: input.id,
+        name: input.name,
+        repoTriggers: { edges: [] },
+        serviceInstances: {
+          edges: [{
+            node: {
+              environmentId: 'env-prod',
+              domains: {
+                serviceDomains: input.domain ? [{ domain: input.domain }] : [],
+                customDomains: [],
+              },
+              startCommand: input.startCommand,
+              preDeployCommand: input.releaseCommand ? [input.releaseCommand] : undefined,
+              healthcheckPath: input.healthCheckPath,
+              cronSchedule: input.cronSchedule,
+            },
+          }],
+        },
+      },
+    };
+  }
+
+  function observedService(input: {
+    id: string;
+    name: string;
+    workloadKind?: ObservedService['workloadKind'];
+    url?: string;
+    startCommand?: string;
+    releaseCommand?: string;
+    healthCheckPath?: string;
+    cronSchedule?: string;
+    envVarKeys?: string[];
+  }): ObservedService {
+    const envVarKeys = input.envVarKeys ?? [];
+    return {
+      name: input.name,
+      externalId: input.id,
+      workloadKind: input.workloadKind ?? 'web',
+      ...(input.url ? { url: input.url } : {}),
+      customDomains: [],
+      config: {
+        ...(input.startCommand ? { startCommand: input.startCommand } : {}),
+        ...(input.releaseCommand ? { releaseCommand: input.releaseCommand } : {}),
+        ...(input.healthCheckPath ? { healthCheckPath: input.healthCheckPath } : {}),
+        ...(input.cronSchedule ? { cronSchedule: input.cronSchedule } : {}),
+        public: Boolean(input.url),
+      },
+      sourceState: 'disconnected',
+      envVarKeys,
+      envVarHashes: Object.fromEntries(envVarKeys.map((key) => [key, `hash:${key}`])),
+      status: 'running',
+    };
   }
 
   it('hv_inspect returns MISSING_CONNECTION when no Railway connection exists', async () => {
@@ -301,6 +387,81 @@ describe('hv_inspect / hv_import', () => {
     await t.close();
   });
 
+  it('validates the complete imported spec before writing any local records', async () => {
+    createRailwayConnection();
+    const invalidStorageDetails: RailwayProjectDetails = {
+      ...details,
+      environments: {
+        edges: [{
+          node: {
+            id: 'env-prod',
+            name: 'production',
+            config: {
+              buckets: {
+                'bucket-unsupported-region': {
+                  region: 'moon-1',
+                  isDeleted: false,
+                },
+              },
+            },
+          },
+        }],
+      },
+      buckets: {
+        edges: [{
+          node: {
+            id: 'bucket-unsupported-region',
+            name: 'uploads',
+          },
+        }],
+      },
+    };
+    mockAdapter(invalidStorageDetails);
+    const t = await makeClient();
+
+    const result = await t.call('hv_import', {
+      railwayProjectId: invalidStorageDetails.id,
+      environmentMappings: { production: 'production' },
+      storageMappings: { 'bucket-unsupported-region': 'uploads' },
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.details.reason).toContain('region');
+    expect(new ProjectRepository().findByName(details.name)).toBeNull();
+    await t.close();
+  });
+
+  it('keeps unmapped Railway datastore candidates unmanaged instead of importing them as app services', async () => {
+    createRailwayConnection();
+    const serviceBackedDetails: RailwayProjectDetails = {
+      ...details,
+      plugins: { edges: [] },
+      services: {
+        edges: [
+          ...details.services.edges,
+          railwayService({ id: 'svc-postgres-unmanaged', name: 'Postgres reporting' }),
+        ],
+      },
+    };
+    mockAdapter(serviceBackedDetails);
+    const t = await makeClient();
+
+    const result = await t.call('hv_import', {
+      railwayProjectId: serviceBackedDetails.id,
+      environmentMappings: { production: 'production' },
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(true);
+    const project = new ProjectRepository().findByName(details.name)!;
+    expect(new ServiceRepository().findByProjectAndName(project.id, 'Postgres reporting')).toBeNull();
+    expect(result.data.spec.environments.production.services['Postgres reporting']).toBeUndefined();
+    expect(result.data.spec.environments.production.database).toBeUndefined();
+    await t.close();
+  });
+
   it('explicitly adopts a service-backed Railway Postgres as a component, not an app service', async () => {
     createRailwayConnection();
     mockAdapter();
@@ -409,6 +570,251 @@ describe('hv_inspect / hv_import', () => {
         connectionUrl: '${{redis-cache.REDIS_URL}}',
       },
     });
+    await t.close();
+  });
+
+  it.each([
+    {
+      label: 'legacy plugin databases, caches, and each service workload shape',
+      projectDetails: {
+        id: 'rp-legacy',
+        name: 'legacy-shapes',
+        environments: {
+          edges: [{ node: { id: 'env-prod', name: 'production' } }],
+        },
+        services: {
+          edges: [
+            railwayService({
+              id: 'svc-web',
+              name: 'web',
+              domain: 'legacy-shapes.up.railway.app',
+              startCommand: 'npm start',
+              releaseCommand: 'npm run migrate',
+              healthCheckPath: '/health',
+            }),
+            railwayService({
+              id: 'svc-worker',
+              name: 'worker',
+              startCommand: 'npm run worker',
+            }),
+            railwayService({
+              id: 'svc-cron',
+              name: 'cron',
+              startCommand: 'npm run cron',
+              cronSchedule: '*/5 * * * *',
+            }),
+          ],
+        },
+        plugins: {
+          edges: [
+            { node: { id: 'plugin-postgres', name: 'Postgres' } },
+            { node: { id: 'plugin-redis', name: 'Redis' } },
+          ],
+        },
+      } satisfies RailwayProjectDetails,
+      importArgs: {},
+      observed: {
+        provider: 'railway',
+        observedAt: '2026-07-30T00:00:00.000Z',
+        projectExists: true,
+        projectId: 'rp-legacy',
+        environmentId: 'env-prod',
+        services: [
+          observedService({
+            id: 'svc-web',
+            name: 'web',
+            url: 'https://legacy-shapes.up.railway.app',
+            startCommand: 'npm start',
+            releaseCommand: 'npm run migrate',
+            healthCheckPath: '/health',
+            envVarKeys: ['DATABASE_URL', 'DIRECT_URL', 'REDIS_URL'],
+          }),
+          observedService({
+            id: 'svc-worker',
+            name: 'worker',
+            startCommand: 'npm run worker',
+            envVarKeys: ['DATABASE_URL', 'DIRECT_URL', 'REDIS_URL'],
+          }),
+          observedService({
+            id: 'svc-cron',
+            name: 'cron',
+            workloadKind: 'cron',
+            startCommand: 'npm run cron',
+            cronSchedule: '*/5 * * * *',
+            envVarKeys: ['DATABASE_URL', 'DIRECT_URL', 'REDIS_URL'],
+          }),
+        ],
+        databases: [{
+          provider: 'railway',
+          engine: 'postgres',
+          externalId: 'plugin-postgres',
+          name: 'Postgres',
+          status: 'unknown',
+        }],
+        caches: [{
+          provider: 'railway',
+          engine: 'redis',
+          externalId: 'plugin-redis',
+          name: 'Redis',
+          status: 'unknown',
+        }],
+        storage: [],
+        completeness: {
+          project: 'complete',
+          environment: 'complete',
+          services: 'complete',
+          databases: 'complete',
+          caches: 'complete',
+          storage: 'complete',
+        },
+        partial: false,
+        warnings: [],
+      } satisfies ObservedState,
+      expectedServices: ['cron', 'web', 'worker'],
+      expectedStorage: [],
+    },
+    {
+      label: 'service-backed datastores and explicitly mapped object storage',
+      projectDetails: {
+        id: 'rp-service-backed',
+        name: 'service-backed-shapes',
+        environments: {
+          edges: [{
+            node: {
+              id: 'env-prod',
+              name: 'production',
+              config: { buckets: { 'bucket-uploads': { region: 'sjc', isDeleted: false } } },
+            },
+          }],
+        },
+        services: {
+          edges: [
+            railwayService({
+              id: 'svc-web',
+              name: 'web',
+              domain: 'service-backed-shapes.up.railway.app',
+              startCommand: 'npm start',
+            }),
+            railwayService({ id: 'svc-postgres', name: 'Postgres' }),
+            railwayService({ id: 'svc-redis', name: 'redis-cache' }),
+          ],
+        },
+        plugins: { edges: [] },
+        buckets: {
+          edges: [{ node: { id: 'bucket-uploads', name: 'provider-upload-bucket' } }],
+        },
+      } satisfies RailwayProjectDetails,
+      importArgs: {
+        databaseMappings: { 'svc-postgres': 'postgres' },
+        cacheMappings: { 'svc-redis': 'redis' },
+        storageMappings: { 'bucket-uploads': 'uploads' },
+      },
+      observed: {
+        provider: 'railway',
+        observedAt: '2026-07-30T00:00:00.000Z',
+        projectExists: true,
+        projectId: 'rp-service-backed',
+        environmentId: 'env-prod',
+        services: [
+          observedService({
+            id: 'svc-web',
+            name: 'web',
+            url: 'https://service-backed-shapes.up.railway.app',
+            startCommand: 'npm start',
+            envVarKeys: ['DATABASE_URL', 'DIRECT_URL', 'REDIS_URL'],
+          }),
+        ],
+        databases: [{
+          provider: 'railway',
+          engine: 'postgres',
+          externalId: 'svc-postgres',
+          name: 'Postgres',
+          status: 'unknown',
+        }],
+        caches: [{
+          provider: 'railway',
+          engine: 'redis',
+          externalId: 'svc-redis',
+          name: 'redis-cache',
+          status: 'unknown',
+        }],
+        storage: [{
+          provider: 'railway',
+          kind: 'object',
+          externalId: 'bucket-uploads',
+          name: 'provider-upload-bucket',
+          region: 'sjc',
+          status: 'ready',
+        }],
+        completeness: {
+          project: 'complete',
+          environment: 'complete',
+          services: 'complete',
+          databases: 'complete',
+          caches: 'complete',
+          storage: 'complete',
+        },
+        partial: false,
+        warnings: [],
+      } satisfies ObservedState,
+      expectedServices: ['web'],
+      expectedStorage: ['uploads'],
+    },
+  ])('inspect → import → status is mutation-safe for $label', async ({
+    projectDetails,
+    importArgs,
+    observed,
+    expectedServices,
+    expectedStorage,
+  }) => {
+    createRailwayConnection(true);
+    mockAdapter(projectDetails);
+    const observe = vi.spyOn(RailwayAdapter.prototype, 'observe').mockResolvedValue(observed);
+    const t = await makeFullClient();
+
+    const inspection = await t.call('hv_inspect', {
+      provider: 'railway',
+      railwayProjectId: projectDetails.id,
+    });
+    expect(inspection.ok).toBe(true);
+    expect(inspection.data.project.railwayId).toBe(projectDetails.id);
+
+    const imported = await t.call('hv_import', {
+      provider: 'railway',
+      railwayProjectId: projectDetails.id,
+      environmentMappings: { production: 'production' },
+      ...importArgs,
+      confirm: true,
+    });
+    expect(imported.ok).toBe(true);
+    expect(imported.data.specRevision).toBe(1);
+    expect(Object.keys(imported.data.spec.environments.production.services).sort()).toEqual(expectedServices);
+    expect(Object.keys(imported.data.spec.environments.production.storage ?? {}).sort()).toEqual(expectedStorage);
+
+    const status = await t.call('hv_status', {
+      project: projectDetails.name,
+      env: 'production',
+    });
+    expect(status.ok).toBe(true);
+    expect(status.data.drift.filter((action: { type: string }) =>
+      action.type === 'create' || action.type === 'destroy'
+    )).toEqual([]);
+    expect(status.data.drift).toEqual([]);
+    expect(status.data.inSync).toBe(true);
+
+    observe.mockResolvedValue({ ...observed, caches: [] });
+    const missingCacheStatus = await t.call('hv_status', {
+      project: projectDetails.name,
+      env: 'production',
+    });
+    expect(missingCacheStatus.data.drift).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'cache:railway',
+        type: 'create',
+        resource: expect.objectContaining({ kind: 'cache', provider: 'railway' }),
+      }),
+    ]));
+
     await t.close();
   });
 

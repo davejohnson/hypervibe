@@ -10,9 +10,9 @@ describe('storage spec', () => {
     }).success).toBe(true);
   });
 
-  it('requires a supported region and at least one service', () => {
+  it('requires a supported region and permits a standalone bucket with no runtime injection', () => {
     expect(storageSpecSchema.safeParse({ provider: 'railway', type: 'bucket', region: 'xyz', injectInto: ['api'] }).success).toBe(false);
-    expect(storageSpecSchema.safeParse({ provider: 'railway', type: 'bucket', region: 'sjc', injectInto: [] }).success).toBe(false);
+    expect(storageSpecSchema.safeParse({ provider: 'railway', type: 'bucket', region: 'sjc', injectInto: [] }).success).toBe(true);
   });
 
   it('rejects storage targets that are not declared services', () => {

@@ -2799,7 +2799,9 @@ export class RailwayAdapter implements IProviderAdapter {
                           }
                         }
                         startCommand
+                        preDeployCommand
                         healthcheckPath
+                        cronSchedule
                         numReplicas
                         sleepApplication
                       }
@@ -4327,7 +4329,9 @@ export interface RailwayServiceInstance {
     customDomains: Array<{ id?: string; domain: string; status?: RailwayCustomDomainStatus | null }>;
   };
   startCommand?: string;
+  preDeployCommand?: unknown;
   healthcheckPath?: string;
+  cronSchedule?: string;
   numReplicas?: number;
   sleepApplication?: boolean;
 }
