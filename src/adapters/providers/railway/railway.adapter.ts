@@ -1560,9 +1560,20 @@ export class RailwayAdapter implements IProviderAdapter {
     return { success: false, error: errors.join(' | ') };
   }
 
-  async deleteService(serviceId: string): Promise<{ success: boolean; error?: string }> {
+  async deleteService(serviceId: string): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }> {
     if (!this.client) {
       return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+
+    const existing = await this.serviceExists(serviceId);
+    if (existing.state === 'absent') {
+      return { success: true, alreadyAbsent: true };
+    }
+    if (existing.state === 'unknown') {
+      return {
+        success: false,
+        error: `service absence is unknown (${serviceId}): ${existing.error}`,
+      };
     }
 
     try {
@@ -1586,7 +1597,7 @@ export class RailwayAdapter implements IProviderAdapter {
       };
     } catch (error) {
       if (this.describeError(error).toLowerCase().includes('not found')) {
-        return { success: true };
+        return { success: true, alreadyAbsent: true };
       }
       return { success: false, error: `serviceDelete.id: ${this.describeError(error)}` };
     }

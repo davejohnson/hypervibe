@@ -35,6 +35,7 @@ interface Call {
 function fakeClient(overrides: Record<string, (variables: Record<string, unknown>, call: number) => unknown> = {}) {
   const calls: Call[] = [];
   const counts = new Map<string, number>();
+  const deletedServices = new Set<string>();
   const defaults: Record<string, (variables: Record<string, unknown>, call: number) => unknown> = {
     GetProjectServicesConnection: () => ({ project: { services: { edges: [{ node: { id: 'src-svc-1', name: 'web' } }] } } }),
     GetServiceEnvironmentInstance: () => ({
@@ -51,7 +52,11 @@ function fakeClient(overrides: Record<string, (variables: Record<string, unknown
       { timestamp: 't', message: '__HYPERVIBE_TASK_EXIT:0__', severity: 'info' },
     ] }),
     serviceDelete: () => ({ serviceDelete: true }),
-    GetService: () => { throw new Error('Service not found'); },
+    GetService: (variables) => {
+      const id = String(variables.id);
+      if (deletedServices.has(id)) throw new Error('Service not found');
+      return { service: { id } };
+    },
   };
   const request = vi.fn(async (query: string, variables: Record<string, unknown> = {}) => {
     const text = String(query);
@@ -61,7 +66,16 @@ function fakeClient(overrides: Record<string, (variables: Record<string, unknown
     const n = (counts.get(key) ?? 0) + 1;
     counts.set(key, n);
     const handler = overrides[key] ?? defaults[key];
-    return handler(variables, n);
+    const result = await handler(variables, n);
+    if (
+      key === 'serviceDelete'
+      && result
+      && typeof result === 'object'
+      && (result as { serviceDelete?: unknown }).serviceDelete
+    ) {
+      deletedServices.add(String(variables.id));
+    }
+    return result;
   });
   return { request, calls };
 }

@@ -118,6 +118,9 @@ describe('infra_apply local rollback coverage', () => {
       async verify() {
         return { success: true };
       },
+      async observeDatabase() {
+        return null;
+      },
       async provision(_type, env) {
         envRepo.updatePlatformBindings(env.id, {
           provider: 'railway',

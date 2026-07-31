@@ -181,6 +181,12 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
       const { projectId, region } = this.credentials;
 
       const instanceName = this.sanitizeName(options?.resourceName || `${environment.name}-${type}`);
+      const existing = await this.getInstance(instanceName);
+      if (existing) {
+        throw new Error(
+          `Cloud SQL instance "${instanceName}" already exists. Hypervibe will not silently adopt or replace it; use hv_import for that exact provider identity.`
+        );
+      }
       const rootPassword = this.generatePassword();
       const dbName = options?.databaseName?.trim() || 'app';
 

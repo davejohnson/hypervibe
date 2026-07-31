@@ -203,6 +203,7 @@ describe('RdsAdapter lifecycle reconciliation', () => {
   }
 
   it('provisions with the provider resource identity instead of the logical database name', async () => {
+    let describeCount = 0;
     const instance = {
       DBInstanceIdentifier: 'invoice-perfect-production-postgres',
       DBInstanceArn: 'arn:aws:rds:us-west-2:123:db:invoice-perfect-production-postgres',
@@ -213,7 +214,10 @@ describe('RdsAdapter lifecycle reconciliation', () => {
     const { adapter, rdsSend } = await lifecycleAdapter({
       rdsSend: async (command) => {
         if (command instanceof CreateDBInstanceCommand) return { DBInstance: instance };
-        if (command instanceof DescribeDBInstancesCommand) return { DBInstances: [instance] };
+        if (command instanceof DescribeDBInstancesCommand) {
+          describeCount += 1;
+          return { DBInstances: describeCount === 1 ? [] : [instance] };
+        }
         throw new Error(`Unexpected RDS command: ${(command as { constructor?: { name?: string } }).constructor?.name}`);
       },
       ec2Send: async (command) => {
@@ -255,10 +259,13 @@ describe('RdsAdapter lifecycle reconciliation', () => {
   });
 
   it('does not tear down networking when failed provisioning leaves database existence unknown', async () => {
+    let describeCount = 0;
     const { adapter, ec2Send } = await lifecycleAdapter({
       rdsSend: async (command) => {
         if (command instanceof CreateDBInstanceCommand) return {};
         if (command instanceof DescribeDBInstancesCommand) {
+          describeCount += 1;
+          if (describeCount === 1) return { DBInstances: [] };
           const error = new Error('RDS observation unavailable');
           Object.assign(error, { name: 'ServiceUnavailable' });
           throw error;

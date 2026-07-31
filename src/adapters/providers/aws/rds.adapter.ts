@@ -185,6 +185,32 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
     const password = this.generatePassword();
     let securityGroupId: string | undefined;
     let securityGroupCreated = false;
+    let existing: DBInstance | null;
+    try {
+      existing = await this.describeInstance(identifier);
+    } catch (error) {
+      return this.failedProvision(
+        environment,
+        type,
+        `Could not observe Amazon RDS instance ${identifier}, so Hypervibe refused to create a database whose absence is unknown: ${error instanceof Error ? error.message : String(error)}`,
+        {
+          instanceId: identifier,
+          resourceCreated: 'unknown',
+          liveObservationError: error instanceof Error ? error.message : String(error),
+        }
+      );
+    }
+    if (existing) {
+      return this.failedProvision(
+        environment,
+        type,
+        `Amazon RDS instance ${identifier} already exists. Hypervibe will not silently adopt or replace it; use hv_import for that exact provider identity.`,
+        {
+          instanceId: existing.DBInstanceIdentifier ?? identifier,
+          resourceCreated: true,
+        }
+      );
+    }
     try {
       const securityGroup = await this.ensureSecurityGroup(identifier);
       securityGroupId = securityGroup.id;
