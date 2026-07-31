@@ -3,6 +3,7 @@ import type { Environment } from '../../../domain/entities/environment.entity.js
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import type { IProviderAdapter, TemporaryDatabaseAccess } from '../../../domain/ports/provider.port.js';
 import type { IDatabaseAdapter, ProvisionResult, ProvisionableType } from '../../../domain/ports/database.port.js';
+import type { ObservedState } from '../../../domain/ports/observe.port.js';
 import type { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
 
 interface RailwayHostingOps {
@@ -17,8 +18,9 @@ interface RailwayHostingOps {
     receipt: { success: boolean; message: string; error?: string; data?: Record<string, unknown> };
   }>;
   listPlugins: (projectId: string) => Promise<Array<{ id: string; name: string; type: string }>>;
+  observe?: (environment: Environment) => Promise<ObservedState>;
   deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
-  deleteService?: (serviceId: string) => Promise<{ success: boolean; error?: string }>;
+  deleteService?: (serviceId: string) => Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }>;
   deleteVolume?: (volumeId: string) => Promise<{ success: boolean; error?: string }>;
   acquireTemporaryDatabaseAccess?: (
     environment: Environment,
@@ -58,6 +60,37 @@ export function createRailwayDatabaseAdapter(params: {
     return {};
   };
 
+  const observeRailwayDatabase = async (
+    environment: Environment,
+    component?: Component | null,
+    options?: { resourceName?: string }
+  ) => {
+    if (typeof railway.observe !== 'function') {
+      throw new Error('Railway hosting adapter does not expose database observation.');
+    }
+    const observed = await railway.observe(environment);
+    if (observed.completeness?.databases !== 'complete') {
+      throw new Error(
+        `Railway database observation is unknown: ${observed.warnings.join('; ') || 'provider returned incomplete state'}`
+      );
+    }
+    const postgres = observed.databases.filter((database) => database.engine === 'postgres');
+    if (component?.externalId) {
+      return postgres.find((database) => database.externalId === component.externalId) ?? null;
+    }
+    const expectedName = options?.resourceName?.trim().toLowerCase();
+    const named = expectedName
+      ? postgres.filter((database) => database.name?.trim().toLowerCase() === expectedName)
+      : postgres;
+    const candidates = named.length > 0 ? named : postgres;
+    if (candidates.length > 1) {
+      throw new Error(
+        `Multiple Railway PostgreSQL databases are visible: ${candidates.map((database) => database.externalId).join(', ')}`
+      );
+    }
+    return candidates[0] ?? null;
+  };
+
   return {
     name: 'railway',
     capabilities: {
@@ -77,7 +110,7 @@ export function createRailwayDatabaseAdapter(params: {
       }
       return { success: true };
     },
-    async provision(type, environment, _options): Promise<ProvisionResult> {
+    async provision(type, environment, options): Promise<ProvisionResult> {
       if (type !== 'postgres') {
         return {
           component: {
@@ -126,6 +159,45 @@ export function createRailwayDatabaseAdapter(params: {
       }
 
       const refreshedEnvironment = envRepo.findById(environment.id) ?? environment;
+      let existingDatabase;
+      try {
+        existingDatabase = await observeRailwayDatabase(refreshedEnvironment, null, options);
+      } catch (error) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type,
+            bindings: {},
+            externalId: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: false,
+            message: 'Failed to observe Railway databases before provisioning',
+            error: error instanceof Error ? error.message : String(error),
+          },
+        };
+      }
+      if (existingDatabase) {
+        return {
+          component: {
+            id: '',
+            environmentId: environment.id,
+            type,
+            bindings: {},
+            externalId: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          receipt: {
+            success: false,
+            message: `Railway PostgreSQL database ${existingDatabase.externalId} already exists`,
+            error: 'Hypervibe will not silently adopt or replace it; use hv_import for that exact provider identity.',
+          },
+        };
+      }
       const componentResult = await railway.ensureComponent(type, refreshedEnvironment);
 
       if (!componentResult.receipt.success) {
@@ -193,6 +265,9 @@ export function createRailwayDatabaseAdapter(params: {
       const value = bindings.connectionUrl;
       return typeof value === 'string' ? value : null;
     },
+    async observeDatabase(environment, component, options) {
+      return observeRailwayDatabase(environment, component, options);
+    },
     async acquireTemporaryDatabaseAccess(environment, component, applicationPort) {
       if (typeof railway.acquireTemporaryDatabaseAccess !== 'function') {
         throw new Error('Railway does not expose temporary database access.');
@@ -228,7 +303,9 @@ export function createRailwayDatabaseAdapter(params: {
         if (cleanupErrors.length === 0) {
           return {
             success: true,
-            message: `Deleted Railway service ${component.externalId}${volumeId ? ` and volume ${volumeId}` : ''}`,
+            message: deletedService.alreadyAbsent
+              ? `Railway database service is already absent: ${component.externalId}${volumeId ? `; deleted volume ${volumeId}` : ''}`
+              : `Deleted Railway service ${component.externalId}${volumeId ? ` and volume ${volumeId}` : ''}`,
           };
         }
         return {

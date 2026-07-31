@@ -1,6 +1,7 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Component, ComponentType } from '../entities/component.entity.js';
 import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from './provider.port.js';
+import type { ObservedDatabase } from './observe.port.js';
 
 /**
  * Supported database types that can be provisioned
@@ -123,6 +124,16 @@ export interface IDatabaseAdapter {
       resourceName?: string;
     }
   ): Promise<ProvisionResult>;
+
+  /**
+   * Observe one durable provider database identity. Provider-confirmed
+   * not-found returns null; every other read failure must throw.
+   */
+  observeDatabase(
+    environment: Environment,
+    component?: Component | null,
+    options?: { resourceName?: string }
+  ): Promise<ObservedDatabase | null>;
 
   /**
    * Get the connection URL for an existing component.

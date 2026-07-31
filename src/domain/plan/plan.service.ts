@@ -247,14 +247,8 @@ export class PlanService {
       ) {
         observed.completeness.databases = 'unknown';
         const dbResult = await adapterFactory.getDatabaseAdapter(dbProvider, project);
-        const dbAdapter = dbResult.adapter as unknown as {
-          observeDatabase?: (
-            env: Environment,
-            component?: import('../entities/component.entity.js').Component | null,
-            options?: { resourceName?: string }
-          ) => Promise<import('../ports/observe.port.js').ObservedDatabase | null>;
-        } | undefined;
-        if (dbResult.success && dbAdapter && typeof dbAdapter.observeDatabase === 'function') {
+        const dbAdapter = dbResult.adapter;
+        if (dbResult.success && dbAdapter) {
           try {
             const engine =
               environmentSpec.database?.engine

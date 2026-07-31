@@ -110,6 +110,9 @@ describe('infra_apply multi-service convergence', () => {
       async verify() {
         return { success: true };
       },
+      async observeDatabase() {
+        return null;
+      },
       async provision(type, environment) {
         provisionCalls.push(`${type}:${environment.name}`);
         return {
@@ -327,6 +330,9 @@ describe('infra_apply multi-service convergence', () => {
         async verify() {
           return { success: true };
         },
+        async observeDatabase() {
+          return null;
+        },
         async provision() {
           throw new Error('db provision should not be called when a matching component already exists');
         },
@@ -394,6 +400,9 @@ describe('infra_apply multi-service convergence', () => {
       async connect() {},
       async verify() {
         return { success: true };
+      },
+      async observeDatabase() {
+        return null;
       },
       async provision(_type, environment) {
         return {
@@ -554,6 +563,9 @@ describe('infra_apply multi-service convergence', () => {
       async connect() {},
       async verify() {
         return { success: true };
+      },
+      async observeDatabase() {
+        return null;
       },
       async provision(_type, environment) {
         return {
@@ -822,6 +834,9 @@ describe('infra_apply multi-service convergence', () => {
       async verify() {
         return { success: true };
       },
+      async observeDatabase() {
+        return null;
+      },
       async provision(_type, environment) {
         return {
           component: {
@@ -990,6 +1005,9 @@ describe('infra_apply multi-service convergence', () => {
       async connect() {},
       async verify() {
         return { success: true };
+      },
+      async observeDatabase() {
+        return null;
       },
       async provision(_type, environment) {
         return {
@@ -1188,6 +1206,9 @@ describe('infra_apply multi-service convergence', () => {
       async verify() {
         return { success: true };
       },
+      async observeDatabase() {
+        return null;
+      },
       async provision(_type, environment) {
         return {
           component: {
@@ -1361,6 +1382,9 @@ describe('infra_apply multi-service convergence', () => {
       async verify() {
         return { success: true };
       },
+      async observeDatabase() {
+        return null;
+      },
       async provision(_type, environment) {
         return {
           component: {
@@ -1492,6 +1516,9 @@ describe('infra_apply multi-service convergence', () => {
       async connect() {},
       async verify() {
         return { success: true };
+      },
+      async observeDatabase() {
+        return null;
       },
       async provision(_type, environment) {
         return {

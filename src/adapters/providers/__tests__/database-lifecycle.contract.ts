@@ -17,6 +17,28 @@ export interface MockDatabaseLifecycleContract {
   listResponse(projects: Array<{ id: string; name: string }>): unknown;
 }
 
+export type DatabaseLifecycleParityScenario =
+  | 'observation_unknown'
+  | 'identity_conflict'
+  | 'already_absent'
+  | 'delete_observation_unknown'
+  | 'delete_retry';
+
+export interface DatabaseLifecycleParityFixture {
+  adapter: IDatabaseAdapter;
+  mutations(): unknown[];
+  observations(): number;
+}
+
+export interface DatabaseLifecycleParityContract {
+  displayName: string;
+  externalIds: [string, string];
+  resourceName: string;
+  makeEnvironment(): Environment;
+  makeComponent(externalId: string): Component;
+  setup(scenario: DatabaseLifecycleParityScenario): Promise<DatabaseLifecycleParityFixture>;
+}
+
 function mutationCalls(fetchMock: FetchMock): unknown[][] {
   return fetchMock.mock.calls.filter((call) => {
     const init = call[1] as RequestInit | undefined;
@@ -132,6 +154,86 @@ export function runMockDatabaseLifecycleContract(
       expect(receipt.success).toBe(false);
       expect(receipt.error).toContain('403');
       expect(mutationCalls(fetchMock)).toEqual([]);
+    });
+  });
+}
+
+/**
+ * Protocol-neutral lifecycle contract for the database providers supported by
+ * plan/apply. Fixtures may use HTTP, GraphQL, SDK commands, or a composed
+ * hosting adapter; the safety assertions are intentionally identical.
+ */
+export function runDatabaseProviderParityContract(
+  contract: DatabaseLifecycleParityContract
+): void {
+  describe(`${contract.displayName} database provider parity`, () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    });
+
+    it('fails closed when pre-create observation is unknown', async () => {
+      const fixture = await contract.setup('observation_unknown');
+
+      const result = await fixture.adapter.provision('postgres', contract.makeEnvironment(), {
+        resourceName: contract.resourceName,
+      });
+
+      expect(result.receipt.success).toBe(false);
+      expect(fixture.observations()).toBeGreaterThanOrEqual(1);
+      expect(fixture.mutations()).toEqual([]);
+    });
+
+    it('blocks an observed provider identity instead of adopting or replacing it', async () => {
+      const fixture = await contract.setup('identity_conflict');
+
+      const result = await fixture.adapter.provision('postgres', contract.makeEnvironment(), {
+        resourceName: contract.resourceName,
+      });
+
+      expect(result.receipt.success).toBe(false);
+      expect(`${result.receipt.message} ${result.receipt.error ?? ''}`)
+        .toContain(contract.externalIds[0]);
+      expect(fixture.observations()).toBeGreaterThanOrEqual(1);
+      expect(fixture.mutations()).toEqual([]);
+    });
+
+    it('treats provider-confirmed absence as idempotent deletion success', async () => {
+      const fixture = await contract.setup('already_absent');
+
+      const receipt = await fixture.adapter.destroy(
+        contract.makeComponent(contract.externalIds[0])
+      );
+
+      expect(receipt.success).toBe(true);
+      expect(receipt.message).toContain('already absent');
+      expect(fixture.observations()).toBeGreaterThanOrEqual(1);
+      expect(fixture.mutations()).toEqual([]);
+    });
+
+    it('does not mutate when deletion preflight is unknown', async () => {
+      const fixture = await contract.setup('delete_observation_unknown');
+
+      const receipt = await fixture.adapter.destroy(
+        contract.makeComponent(contract.externalIds[0])
+      );
+
+      expect(receipt.success).toBe(false);
+      expect(fixture.observations()).toBeGreaterThanOrEqual(1);
+      expect(fixture.mutations()).toEqual([]);
+    });
+
+    it('waits for terminal absence and remains retry-safe', async () => {
+      const fixture = await contract.setup('delete_retry');
+
+      const receipt = await fixture.adapter.destroy(
+        contract.makeComponent(contract.externalIds[0])
+      );
+
+      expect(receipt.success).toBe(true);
+      expect(fixture.mutations()).toHaveLength(1);
+      expect(fixture.observations()).toBeGreaterThanOrEqual(3);
     });
   });
 }
