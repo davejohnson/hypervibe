@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 describe('public release configuration', () => {
@@ -35,5 +36,42 @@ describe('public release configuration', () => {
     expect(workflow).not.toContain('npm.pkg.github.com');
     expect(workflow).not.toContain('--access restricted');
     expect(releaseScript).toContain("const releaseWorkflow = 'release.yml';");
+  });
+
+  it('requires signed and notarized macOS release artifacts', () => {
+    const workflow = readFileSync(
+      new URL('../../.github/workflows/release.yml', import.meta.url),
+      'utf8'
+    );
+    const installer = readFileSync(
+      new URL('../../scripts/build-macos-installer.sh', import.meta.url),
+      'utf8'
+    );
+
+    for (const secret of [
+      'MACOS_CERTIFICATE_P12_BASE64',
+      'MACOS_CERTIFICATE_PASSWORD',
+      'APP_STORE_CONNECT_KEY_ID',
+      'APP_STORE_CONNECT_ISSUER_ID',
+      'APP_STORE_CONNECT_PRIVATE_KEY',
+    ]) {
+      expect(workflow).toContain(`secrets.${secret}`);
+    }
+    expect(workflow).toContain('./scripts/configure-macos-release-signing.sh');
+    expect(installer).toContain('xcrun stapler validate "$DMG"');
+    expect(installer).toContain('spctl --assess --type open');
+  });
+
+  it('fails closed before touching a keychain when signing inputs are missing', () => {
+    const script = new URL('../../scripts/configure-macos-release-signing.sh', import.meta.url);
+    const result = spawnSync('/bin/bash', [script.pathname], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '' },
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('Missing required macOS release signing input(s)');
+    expect(result.stderr).toContain('MACOS_CERTIFICATE_P12_BASE64');
+    expect(result.stderr).toContain('APP_STORE_CONNECT_PRIVATE_KEY');
   });
 });

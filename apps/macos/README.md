@@ -173,8 +173,24 @@ succeed, the release workflow creates a public GitHub Release containing:
 - `Hypervibe-<version>-arm64.dmg` and its SHA-256 checksum;
 - `Hypervibe-<version>-x86_64.dmg` and its SHA-256 checksum.
 
-These CI artifacts use the default ad-hoc signature until Developer ID and
-notarization credentials are configured for the workflow.
+Tagged CI releases require Developer ID signing and App Store Connect
+notarization credentials. Each architecture job imports them into an ephemeral
+keychain, validates the notarization profile with Apple, signs the complete app
+and DMG with hardened runtime and a trusted timestamp, submits the DMG, staples
+and validates the ticket, and removes the temporary keychain even on failure.
+
+Configure these GitHub Actions secrets before pushing a release tag:
+
+- `MACOS_CERTIFICATE_P12_BASE64`: the Developer ID Application identity and
+  private key exported as a password-protected PKCS#12 file, then base64 encoded;
+- `MACOS_CERTIFICATE_PASSWORD`: the PKCS#12 export password;
+- `APP_STORE_CONNECT_KEY_ID`: the App Store Connect API key id;
+- `APP_STORE_CONNECT_ISSUER_ID`: the Team API key issuer UUID;
+- `APP_STORE_CONNECT_PRIVATE_KEY`: the complete one-time-download `.p8` value.
+
+The expected signing identity is
+`Developer ID Application: David Johnson (4AW333LW3U)`. Secret values are never
+stored in the repository or release artifacts.
 
 For a public artifact, provide a Developer ID identity and a `notarytool`
 keychain profile:
@@ -186,5 +202,6 @@ NOTARY_PROFILE="hypervibe-notary" \
 ```
 
 The script uses hardened runtime signing, submits the DMG for notarization,
-and staples the result. Signing and notarization credentials stay in the
-developer's keychain and are never stored in the repository.
+staples and validates the result, and asks Gatekeeper to assess the final disk
+image. Local signing and notarization credentials stay in the developer's
+keychain and are never stored in the repository.

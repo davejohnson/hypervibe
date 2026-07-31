@@ -74,6 +74,15 @@ jobs:
       - name: Test macOS companion
         run: swift test --package-path apps/macos
 
+      - name: Configure Developer ID signing and notarization
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: ./scripts/configure-macos-release-signing.sh
+
       - name: Build macOS installer
         env:
           ARCH: ${{ matrix.arch }}
@@ -103,6 +112,16 @@ jobs:
             build/macos/Hypervibe-*-${{ matrix.arch }}.dmg.sha256
           if-no-files-found: error
           retention-days: 14
+
+      - name: Remove ephemeral signing material
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/hypervibe-signing.keychain-db" >/dev/null 2>&1 || true
+          rm -f \
+            "$RUNNER_TEMP/hypervibe-developer-id.p12" \
+            "$RUNNER_TEMP"/AuthKey_*.p8 \
+            "$RUNNER_TEMP/hypervibe-signing.keychain-db"
 
   publish-package:
     name: Publish public npm package

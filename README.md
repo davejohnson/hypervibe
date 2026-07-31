@@ -961,10 +961,11 @@ workflow. If validation fails before the release commit, the script restores
 the original package version files. If the atomic push fails, it keeps the
 local release commit and tag and prints the exact retry command.
 
-The GitHub-hosted DMGs are currently ad-hoc signed, matching the default local
-installer build. They are suitable for testing, but macOS Gatekeeper may ask
-the recipient to confirm the first launch. Configure Developer ID signing and
-notarization before treating them as polished public distribution artifacts.
+Local installer builds use an ad-hoc signature by default. Tagged GitHub
+releases require the Developer ID Application and App Store Connect secrets
+documented in [`apps/macos/README.md`](apps/macos/README.md). The release
+workflow imports them only into an ephemeral keychain, notarizes and staples
+both DMGs, and fails rather than publishing an unsigned installer.
 
 ## Philosophy
 
