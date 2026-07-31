@@ -541,7 +541,7 @@ export const storageSpecSchema = z.object({
   /** Railway bucket regions are immutable after the bucket instance is created. */
   region: z.enum(['sjc', 'iad', 'ams', 'sin']),
   /** Services that receive this bucket's generated runtime variables. */
-  injectInto: z.array(z.string().min(1)).min(1),
+  injectInto: z.array(z.string().min(1)),
 }).strict();
 
 export const stripePriceEnvBindingSpecSchema = z.object({

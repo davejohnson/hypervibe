@@ -4,6 +4,7 @@ import {
   connectRailwayForImport,
   listRailwayImportCandidates,
   inspectRailwayProject,
+  buildImportedRailwaySpec,
   importRailwayProject,
 } from '../domain/services/import.service.js';
 import {
@@ -114,10 +115,14 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
       railwayProjectId: z.string().optional().describe('Exact Railway project id to adopt. Use this when multiple Railway projects have the same display name.'),
       force: z.boolean().optional().describe('Set true to override the safety check when a Hypervibe project with the same name already exists.'),
       environmentMappings: z
-        .record(z.string(), z.string())
+        .record(z.string(), z.string().trim().min(1))
+        .refine((mappings) => Object.keys(mappings).length > 0, 'environmentMappings must contain at least one mapping')
         .optional()
         .describe('Map provider environment names to Hypervibe environments (e.g., {"prod-us-east": "production", "blue": "staging"})'),
-      storageMappings: z.record(z.string(), z.string()).optional().describe('Explicitly adopt Railway buckets by id, mapping bucket id to desired storage name (e.g. {"bucket-id":"uploads"}).'),
+      storageMappings: z.record(
+        z.string(),
+        z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'storage names: lowercase alphanumeric and dashes, starting with a letter')
+      ).optional().describe('Explicitly adopt Railway buckets by id, mapping bucket id to desired storage name (e.g. {"bucket-id":"uploads"}).'),
       databaseMappings: z.record(z.string(), z.enum(['postgres'])).optional().describe('Explicitly adopt service-backed Railway databases by service id (e.g. {"service-id":"postgres"}). Datastore candidates are shown by hv_inspect.'),
       cacheMappings: z.record(z.string(), z.enum(['redis'])).optional().describe('Explicitly adopt service-backed Railway Redis/Valkey caches by service id (e.g. {"service-id":"redis"}). Datastore candidates are shown by hv_inspect.'),
       confirm: confirmField,
@@ -177,6 +182,26 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
         }
 
         const { details, environments, services, components } = inspection;
+        const providerEnvironmentNames = new Set(environments.map((environment) => environment.name));
+        const unknownEnvironmentMappings = Object.keys(environmentMappings)
+          .filter((environmentName) => !providerEnvironmentNames.has(environmentName));
+        if (unknownEnvironmentMappings.length > 0) {
+          return commandError('VALIDATION', `environmentMappings references unknown Railway environment(s): ${unknownEnvironmentMappings.join(', ')}`, {
+            hint: 'Use the exact provider environment names returned by hv_inspect.',
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
+        const normalizedEnvironmentTargets = Object.values(environmentMappings)
+          .map((environmentName) => environmentName.trim().toLowerCase());
+        const duplicateEnvironmentTargets = normalizedEnvironmentTargets.filter(
+          (environmentName, index) => normalizedEnvironmentTargets.indexOf(environmentName) !== index
+        );
+        if (duplicateEnvironmentTargets.length > 0) {
+          return commandError('VALIDATION', `Multiple Railway environments cannot map to the same Hypervibe environment: ${Array.from(new Set(duplicateEnvironmentTargets)).join(', ')}`, {
+            hint: 'Give every adopted provider environment one distinct Hypervibe environment name.',
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
         const unknownDatabaseMappings = Object.keys(databaseMappings ?? {})
           .filter((serviceId) => !services.some((service) => service.railwayId === serviceId));
         if (unknownDatabaseMappings.length > 0) {
@@ -209,6 +234,72 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
           .filter((serviceId) => serviceId in (cacheMappings ?? {}));
         if (overlappingDatastoreMappings.length > 0) {
           return commandError('VALIDATION', `A Railway service cannot be adopted as both database and cache: ${overlappingDatastoreMappings.join(', ')}`, {
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
+        const selectedProviderEnvironmentIds = new Set(
+          details.environments.edges
+            .filter((environment) => Object.prototype.hasOwnProperty.call(environmentMappings, environment.node.name))
+            .map((environment) => environment.node.id)
+        );
+        const inactiveDatastoreMappings = [
+          ...Object.keys(databaseMappings ?? {}),
+          ...Object.keys(cacheMappings ?? {}),
+        ].filter((serviceId) => {
+          const service = services.find((candidate) => candidate.railwayId === serviceId);
+          return !Object.keys(service?.instancesByEnv ?? {}).some((environmentId) =>
+            selectedProviderEnvironmentIds.has(environmentId)
+          );
+        });
+        if (inactiveDatastoreMappings.length > 0) {
+          return commandError('VALIDATION', `Datastore mapping(s) have no active instance in the selected environments: ${inactiveDatastoreMappings.join(', ')}`, {
+            hint: 'Map an environment where each selected datastore service has an instance, or omit that datastore from this import.',
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
+        const storageById = new Map(inspection.storage.map((bucket) => [bucket.railwayId, bucket]));
+        const unknownStorageMappings = Object.keys(storageMappings ?? {})
+          .filter((bucketId) => !storageById.has(bucketId));
+        if (unknownStorageMappings.length > 0) {
+          return commandError('VALIDATION', `storageMappings references unknown Railway bucket id(s): ${unknownStorageMappings.join(', ')}`, {
+            hint: 'Use the exact bucket ids returned by hv_inspect.',
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
+        const duplicateStorageNames = Object.values(storageMappings ?? {})
+          .map((storageName) => storageName.toLowerCase())
+          .filter((storageName, index, names) => names.indexOf(storageName) !== index);
+        if (duplicateStorageNames.length > 0) {
+          return commandError('VALIDATION', `Multiple Railway buckets cannot map to the same desired storage name: ${Array.from(new Set(duplicateStorageNames)).join(', ')}`, {
+            hint: 'Give every adopted bucket one distinct desired storage name.',
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
+        const selectedProviderEnvironments = new Set(Object.keys(environmentMappings));
+        const inactiveStorageMappings = Object.keys(storageMappings ?? {}).filter((bucketId) =>
+          !(storageById.get(bucketId)?.environments.some((environment) =>
+            selectedProviderEnvironments.has(environment.name) && Boolean(environment.region)
+          ))
+        );
+        if (inactiveStorageMappings.length > 0) {
+          return commandError('VALIDATION', `storageMappings references bucket(s) with no active instance in the selected environments: ${inactiveStorageMappings.join(', ')}`, {
+            hint: 'Map an environment where each bucket is active, or omit that bucket from this import.',
+            next: ['hv_inspect', 'hv_import'],
+          });
+        }
+        try {
+          buildImportedRailwaySpec(details, environmentMappings, services, components, {
+            force,
+            storageMappings,
+            databaseMappings,
+            cacheMappings,
+          });
+        } catch (error) {
+          return commandError('VALIDATION', 'The selected Railway resources cannot be represented safely in a Hypervibe spec.', {
+            details: {
+              reason: error instanceof Error ? error.message : String(error),
+            },
+            hint: 'Review the exact environment and resource mappings returned by hv_inspect.',
             next: ['hv_inspect', 'hv_import'],
           });
         }
@@ -257,10 +348,12 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
             environments: result.environments,
             services: result.services,
             components: result.components,
+            spec: result.spec,
+            specRevision: result.specRevision,
             intent: result.intent,
           },
           {
-            hint: `Imported "${details.name}" from Railway. Define a spec with hv_spec_set to manage it declaratively.`,
+            hint: `Imported "${details.name}" from Railway with matching desired state. Review it with hv_spec_get, then use hv_status to verify the adoption round trip.`,
             next: ['hv_status'],
           }
         );

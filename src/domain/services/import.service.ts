@@ -10,6 +10,8 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import type { RailwayCredentials } from '../entities/connection.entity.js';
 import type { ComponentType } from '../entities/component.entity.js';
 import type { HostingBindings } from '../ports/hosting.port.js';
+import { projectSpecSchema, type ProjectSpec, type ServiceSpec } from '../spec/spec.schema.js';
+import { SpecStore } from '../spec/spec.store.js';
 import { detectGitRemoteUrl } from '../../lib/git-remote.js';
 import { syncProjectIntent } from './intent.service.js';
 
@@ -38,7 +40,9 @@ export interface ImportServiceSummary {
     domains: string[];
     customDomains: string[];
     startCommand?: string;
+    releaseCommand?: string;
     healthcheckPath?: string;
+    cronSchedule?: string;
     numReplicas?: number;
     sleepApplication?: boolean;
   }>;
@@ -69,6 +73,8 @@ export type ImportResult =
     environments: Array<{ name: string; id: string; railwayId: string }>;
     services: Array<{ name: string; id: string; railwayId: string }>;
     components: Array<{ type: string; environmentId: string; railwayId: string }>;
+    spec: ProjectSpec;
+    specRevision: number;
     intent: unknown;
   };
 
@@ -93,6 +99,117 @@ export function classifyRailwayDatastoreEngine(name: string): 'postgres' | 'redi
   if (normalized.includes('postgres')) return 'postgres';
   if (normalized.includes('redis') || normalized.includes('valkey')) return 'redis';
   return undefined;
+}
+
+function normalizeRailwayPreDeployCommand(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.trim() || undefined;
+  if (!Array.isArray(value)) return undefined;
+  const commands = value.filter(
+    (command): command is string => typeof command === 'string' && command.trim().length > 0
+  );
+  return commands.length > 0 ? commands.join(' && ') : undefined;
+}
+
+function importedGitRemoteUrl(services: ImportServiceSummary[]): string | undefined {
+  const repo = services.find((service) => service.repo)?.repo;
+  return repo ? `https://github.com/${repo}` : detectGitRemoteUrl() ?? undefined;
+}
+
+function importedServiceSpec(
+  instance: ImportServiceSummary['instancesByEnv'][string]
+): ServiceSpec {
+  const cronSchedule = instance.cronSchedule?.trim() || undefined;
+  const isPublic = instance.domains.length > 0 || instance.customDomains.length > 0;
+  return {
+    workloadKind: cronSchedule ? 'cron' : isPublic ? 'web' : 'worker',
+    ...(instance.startCommand ? { startCommand: instance.startCommand } : {}),
+    ...(instance.releaseCommand ? { releaseCommand: instance.releaseCommand } : {}),
+    ...(instance.healthcheckPath ? { healthCheckPath: instance.healthcheckPath } : {}),
+    ...(cronSchedule ? { cronSchedule } : {}),
+    public: isPublic,
+  };
+}
+
+/**
+ * Freeze the imported provider shape into desired state before any local
+ * records are written. Explicitly mapped resources become managed; unmapped
+ * datastore candidates remain provider-side unmanaged resources.
+ */
+export function buildImportedRailwaySpec(
+  details: RailwayProjectDetails,
+  environmentMappings: Record<string, string>,
+  services: ImportServiceSummary[],
+  components: ImportComponentSummary[],
+  options: ImportRailwayProjectOptions = {}
+): ProjectSpec {
+  const datastoreServiceIds = new Set([
+    ...services
+      .filter((service) => service.datastoreEngine !== undefined)
+      .map((service) => service.railwayId),
+    ...Object.keys(options.databaseMappings ?? {}),
+    ...Object.keys(options.cacheMappings ?? {}),
+  ]);
+  const environments: Record<string, unknown> = {};
+
+  for (const [railwayEnvironmentName, environmentName] of Object.entries(environmentMappings)) {
+    const railwayEnvironment = details.environments.edges.find(
+      (edge) => edge.node.name === railwayEnvironmentName
+    )?.node;
+    if (!railwayEnvironment) {
+      throw new Error(`Railway environment "${railwayEnvironmentName}" was not found during import.`);
+    }
+
+    const importedServices = Object.fromEntries(
+      services.flatMap((service) => {
+        if (datastoreServiceIds.has(service.railwayId)) return [];
+        const instance = service.instancesByEnv[railwayEnvironment.id];
+        return instance ? [[service.name, importedServiceSpec(instance)] as const] : [];
+      })
+    );
+    const hasPluginDatabase = components.some((component) => component.type === 'postgres');
+    const hasMappedDatabase = Object.keys(options.databaseMappings ?? {}).some((serviceId) =>
+      Boolean(services.find((service) => service.railwayId === serviceId)?.instancesByEnv[railwayEnvironment.id])
+    );
+    const hasPluginCache = components.some((component) => component.type === 'redis');
+    const hasMappedCache = Object.keys(options.cacheMappings ?? {}).some((serviceId) =>
+      Boolean(services.find((service) => service.railwayId === serviceId)?.instancesByEnv[railwayEnvironment.id])
+    );
+    const storage = Object.fromEntries(
+      Object.entries(options.storageMappings ?? {}).flatMap(([bucketId, desiredName]) => {
+        const bucket = details.buckets?.edges.find((edge) => edge.node.id === bucketId)?.node;
+        const instance = railwayEnvironment.config?.buckets?.[bucketId];
+        if (!bucket || !instance || instance.isDeleted === true || !instance.region) return [];
+        return [[desiredName, {
+          provider: 'railway',
+          type: 'bucket',
+          region: instance.region,
+          injectInto: [],
+        }] as const];
+      })
+    );
+
+    environments[environmentName] = {
+      hosting: { provider: 'railway' },
+      services: importedServices,
+      ...(hasPluginDatabase || hasMappedDatabase
+        ? { database: { provider: 'railway', engine: 'postgres' as const } }
+        : {}),
+      ...(hasPluginCache || hasMappedCache
+        ? { cache: { provider: 'railway', engine: 'redis' as const } }
+        : {}),
+      ...(Object.keys(storage).length > 0 ? { storage } : {}),
+      email: { enabled: false },
+      envVars: {},
+    };
+  }
+
+  const gitRemoteUrl = importedGitRemoteUrl(services);
+  return projectSpecSchema.parse({
+    version: 1,
+    project: details.name,
+    ...(gitRemoteUrl ? { gitRemoteUrl } : {}),
+    environments,
+  });
 }
 
 /**
@@ -155,7 +272,9 @@ export async function inspectRailwayProject(
         domains: inst.node.domains?.serviceDomains?.map((d) => d.domain) ?? [],
         customDomains: inst.node.domains?.customDomains?.map((d) => d.domain) ?? [],
         startCommand: inst.node.startCommand,
+        releaseCommand: normalizeRailwayPreDeployCommand(inst.node.preDeployCommand),
         healthcheckPath: inst.node.healthcheckPath,
+        cronSchedule: inst.node.cronSchedule,
         numReplicas: inst.node.numReplicas,
         sleepApplication: inst.node.sleepApplication,
       };
@@ -232,11 +351,17 @@ export async function importRailwayProject(
     return { status: 'already_exists' };
   }
 
-  // Extract git remote URL from service repo triggers
-  const repoUrl = services.find((s) => s.repo)?.repo ?? undefined;
-  const gitRemoteUrl = repoUrl
-    ? `https://github.com/${repoUrl}`
-    : detectGitRemoteUrl() ?? undefined;
+  // Validate and freeze the complete adopted desired state before the first
+  // local write. A malformed mapping must not leave a partially imported
+  // project that a later plan could mistake for mutation authority.
+  const importedSpec = buildImportedRailwaySpec(
+    details,
+    environmentMappings,
+    services,
+    components,
+    options
+  );
+  const gitRemoteUrl = importedSpec.gitRemoteUrl;
 
   const project = existingProject
     ? projectRepo.update(existingProject.id, {
@@ -306,6 +431,9 @@ export async function importRailwayProject(
   const createdServices: Array<{ name: string; id: string; railwayId: string }> = [];
 
   const adoptedDatastoreServiceIds = new Set([
+    ...services
+      .filter((service) => service.datastoreEngine !== undefined)
+      .map((service) => service.railwayId),
     ...Object.keys(options.databaseMappings ?? {}),
     ...Object.keys(options.cacheMappings ?? {}),
   ]);
@@ -314,8 +442,20 @@ export async function importRailwayProject(
     const firstInstance = Object.values(svc.instancesByEnv)[0];
     const buildConfig = {
       ...(svc.repo ? { builder: 'nixpacks' as const } : {}),
+      ...(firstInstance
+        ? {
+          workloadKind: firstInstance.cronSchedule
+            ? 'cron' as const
+            : firstInstance.domains.length > 0 || firstInstance.customDomains.length > 0
+              ? 'web' as const
+              : 'worker' as const,
+          public: firstInstance.domains.length > 0 || firstInstance.customDomains.length > 0,
+        }
+        : {}),
       ...(firstInstance?.startCommand ? { startCommand: firstInstance.startCommand } : {}),
+      ...(firstInstance?.releaseCommand ? { releaseCommand: firstInstance.releaseCommand } : {}),
       ...(firstInstance?.healthcheckPath ? { healthCheckPath: firstInstance.healthcheckPath } : {}),
+      ...(firstInstance?.cronSchedule ? { cronSchedule: firstInstance.cronSchedule } : {}),
     };
     const existingService = serviceRepo.findByProjectAndName(project.id, svc.name);
     const service = existingService
@@ -459,6 +599,7 @@ export async function importRailwayProject(
       componentCount: createdComponents.length,
     },
   });
+  const storedSpec = new SpecStore().replace(project, importedSpec);
 
   return {
     status: 'imported',
@@ -466,6 +607,8 @@ export async function importRailwayProject(
     environments: createdEnvironments,
     services: createdServices,
     components: createdComponents,
+    spec: storedSpec.spec,
+    specRevision: storedSpec.revision,
     intent: syncProjectIntent(project.id),
   };
 }
