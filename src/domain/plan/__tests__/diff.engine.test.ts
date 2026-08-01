@@ -178,6 +178,22 @@ describe('diffEnvironment — creates', () => {
 });
 
 describe('diffEnvironment — config drift', () => {
+  it('plans explicit project runtime drift without claiming provider verification', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed(),
+      local: local(),
+      projectRuntime: { kind: 'node', version: '24' },
+    });
+
+    expect(result.actions.find((action) => action.id === 'service:web')).toMatchObject({
+      type: 'update',
+      verified: false,
+      diff: [{ field: 'runtime', from: 'undeclared', to: 'node:24' }],
+    });
+  });
+
   it('detects changed startCommand and missing env var', () => {
     const live = observedWeb({
       config: { startCommand: 'node old.js', healthCheckPath: '/health', public: true },
@@ -600,6 +616,24 @@ describe('diffEnvironment — unverified fallback', () => {
     const web = result.actions.find((a) => a.id === 'service:web')!;
     expect(web.type).toBe('create');
     expect(web.verified).toBe(false);
+  });
+
+  it('updates a locally bound service when explicit runtime state changes', () => {
+    const existing = localService('web');
+    existing.buildConfig.runtime = { kind: 'node', version: '20' };
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'staging',
+      observed: null,
+      local: local({ services: [existing] }),
+      projectRuntime: { kind: 'python', version: '3.13' },
+    });
+
+    expect(result.actions.find((action) => action.id === 'service:web')).toMatchObject({
+      type: 'update',
+      verified: false,
+      diff: [{ field: 'runtime', from: 'node:20', to: 'python:3.13' }],
+    });
   });
 });
 

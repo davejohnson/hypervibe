@@ -27,6 +27,10 @@ export const buildConfigColumnSchema = z
     healthCheckPath: z.string().optional(),
     cronSchedule: z.string().optional(),
     public: z.boolean().optional(),
+    runtime: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('node'), version: z.string() }),
+      z.object({ kind: z.literal('python'), version: z.string() }),
+    ]).optional(),
   })
   .passthrough()
   .default({});

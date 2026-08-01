@@ -1,3 +1,5 @@
+import type { ProjectRuntime } from '../spec/project-runtime.js';
+
 export type WorkloadKind = 'web' | 'worker' | 'cron';
 
 export interface BuildConfig {
@@ -11,6 +13,8 @@ export interface BuildConfig {
   healthCheckPath?: string;
   cronSchedule?: string;
   public?: boolean;
+  /** Project runtime recorded for provider-owned source builds. */
+  runtime?: ProjectRuntime;
 }
 
 export interface EnvVarSpec {

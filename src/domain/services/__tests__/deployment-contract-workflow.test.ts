@@ -20,6 +20,7 @@ const SPEC = {
   version: 1,
   project: 'contract-app',
   gitRemoteUrl: 'git@github.com:dave/contract-app.git',
+  runtime: { kind: 'node', version: '24' },
   secrets: {
     SHARED_KEY: {
       ownership: 'delegated',

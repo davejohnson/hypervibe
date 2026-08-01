@@ -1,3 +1,5 @@
+import type { ProjectRuntime } from '../spec/project-runtime.js';
+
 export type BranchDeployProvider = string;
 export type BranchDeployEnvironmentKind = 'development' | 'test' | 'staging' | 'production' | 'custom';
 
@@ -15,6 +17,8 @@ export interface BranchDeployTarget {
   needsServiceNames?: boolean;
   needsJobNames?: boolean;
   webStartCommand?: string;
+  /** Effective project runtime for Hypervibe-generated build tooling. */
+  runtime?: ProjectRuntime;
 }
 
 export interface BranchDeployWorkflow {

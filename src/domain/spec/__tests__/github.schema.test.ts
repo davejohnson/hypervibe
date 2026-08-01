@@ -40,13 +40,33 @@ describe('github desired state', () => {
     expect(spec.github?.actions.tests).toMatchObject({
       kind: 'check',
       enabled: true,
-      runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
+      runtime: { kind: 'node', installCommand: 'npm ci' },
     });
     expect(spec.github?.actions['fix-tests']).toMatchObject({
       kind: 'autofix',
       agent: { provider: 'openai', model: 'gpt-5.6-sol', effort: 'high' },
       draftPullRequest: true,
     });
+  });
+
+  it('accepts concrete project runtimes and rejects ranges or image-tag injection', () => {
+    const node = projectSpecSchema.parse({
+      ...baseSpec({}),
+      runtime: { kind: 'node', version: '22.17.1' },
+    });
+    const python = projectSpecSchema.parse({
+      ...baseSpec({}),
+      runtime: { kind: 'python', version: '3.13' },
+    });
+
+    expect(node.runtime).toEqual({ kind: 'node', version: '22.17.1' });
+    expect(python.runtime).toEqual({ kind: 'python', version: '3.13' });
+    for (const version of ['>=20', 'v22', '22-slim', '22\nRUN echo unsafe']) {
+      expect(projectSpecSchema.safeParse({
+        ...baseSpec({}),
+        runtime: { kind: 'node', version },
+      }).success).toBe(false);
+    }
   });
 
   it('requires five-field cron and a valid automation reference', () => {

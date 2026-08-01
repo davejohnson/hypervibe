@@ -850,6 +850,7 @@ export class PlanService {
       managedDatabaseEnvVars,
       managedCacheEnvVars,
       managedQueueEnvVars,
+      projectRuntime: specResult.spec.runtime,
     });
     const cache = planCache({
       environmentSpec,

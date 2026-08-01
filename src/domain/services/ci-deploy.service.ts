@@ -557,7 +557,7 @@ export async function applyGitHubActionsDeploy(params: {
       && spec.github
       && resolveGitHubInfrastructureRepository(project, spec) === repo;
     const repositoryFiles = canBatchGitHubInfrastructure
-      ? compileManagedGitHubFiles(spec.github!)
+      ? compileManagedGitHubFiles(spec.github!, spec.runtime)
       : [];
     const desiredFiles = new Map(repositoryFiles.map((file) => [file.path, file]));
     for (const file of desiredWorkflowFiles) {

@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
 import type { IosSpec } from '../spec/spec.schema.js';
+import { effectiveProjectRuntime } from '../spec/project-runtime.js';
 import { getManagedIosReleaseRuntimeBase64 } from './ios-release-template.service.js';
 
 export const IOS_RELEASE_REQUIRED_SECRETS = [
@@ -23,6 +24,24 @@ const matchSigningStepTemplateUrl = new URL(
   '../../../templates/ios/match-signing-step.yml',
   import.meta.url
 );
+
+/** Node only executes Hypervibe's isolated release helper, not project code. */
+const HYPERVIBE_MANAGED_NODE_VERSION = '20';
+
+function projectRuntimeSetup(target: BranchDeployTarget): string {
+  const runtime = effectiveProjectRuntime(target.runtime);
+  return runtime.kind === 'node'
+    ? [
+      '      - uses: actions/setup-node@v4',
+      '        with:',
+      `          node-version: '${runtime.version}'`,
+    ].join('\n')
+    : [
+      '      - uses: actions/setup-python@v5',
+      '        with:',
+      `          python-version: '${runtime.version}'`,
+    ].join('\n');
+}
 
 function renderTemplate(content: string, replacements: Record<string, string>): string {
   for (const [name, value] of Object.entries(replacements)) {
@@ -85,6 +104,8 @@ export function buildIosReleaseWorkflow(params: {
     ENVIRONMENT_JSON: JSON.stringify(environmentName),
     SAFE_ENVIRONMENT: safeEnvironment,
     AUTOMATIC_TRIGGER: automaticTrigger,
+    PROJECT_RUNTIME_SETUP: projectRuntimeSetup(params.target),
+    MANAGED_NODE_VERSION: HYPERVIBE_MANAGED_NODE_VERSION,
     BUNDLE_ID_JSON: JSON.stringify(params.ios.bundleId),
     WORKING_DIRECTORY_JSON: JSON.stringify(release.build.workingDirectory),
     IPA_PATH_JSON: JSON.stringify(release.build.ipaPath),

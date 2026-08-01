@@ -1,4 +1,4 @@
-import type { EnvironmentSpec } from './spec.schema.js';
+import type { EnvironmentSpec, ProjectRuntimeSpec } from './spec.schema.js';
 import type { DesiredState } from '../services/spec.service.js';
 
 export interface BootstrapParams {
@@ -23,6 +23,8 @@ export interface BootstrapParams {
    * silently re-run project creation while deploying one workload.
    */
   ensureHostingProject?: boolean;
+  /** Explicit project runtime projected into service build configuration. */
+  runtime?: ProjectRuntimeSpec;
 }
 
 function classifyEnvName(name: string): 'staging' | 'production' | null {
@@ -80,7 +82,8 @@ export function migrationReleaseCommandWarning(env: EnvironmentSpec): string | u
 export function specToBootstrapParams(
   projectName: string,
   environmentName: string,
-  envInput: EnvironmentSpec
+  envInput: EnvironmentSpec,
+  runtime?: ProjectRuntimeSpec
 ): BootstrapParams {
   const env = withMigrationReleaseCommand(envInput);
   const services: string[] = [];
@@ -133,6 +136,7 @@ export function specToBootstrapParams(
     ...(Object.keys(serviceConfig).length > 0 ? { serviceConfig } : {}),
     ...(Object.keys(env.envVars).length > 0 ? { envVars: env.envVars } : {}),
     ...(deploy ? { deploy } : {}),
+    ...(runtime ? { runtime } : {}),
   };
 }
 

@@ -408,6 +408,7 @@ describe('github tools', () => {
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
+      runtime: { kind: 'node', version: '24' },
       environments: {
         staging: {
           hosting: { provider: 'railway' },
@@ -428,9 +429,10 @@ describe('github tools', () => {
       branch: target.branch,
       autoDeployOnPush: target.autoDeployOnPush,
       promoteFromEnvironment: target.promoteFromEnvironment,
+      runtime: target.runtime,
     }))).toEqual([
-      { env: 'staging', branch: 'main', autoDeployOnPush: true, promoteFromEnvironment: undefined },
-      { env: 'production', branch: 'main', autoDeployOnPush: false, promoteFromEnvironment: 'staging' },
+      { env: 'staging', branch: 'main', autoDeployOnPush: true, promoteFromEnvironment: undefined, runtime: { kind: 'node', version: '24' } },
+      { env: 'production', branch: 'main', autoDeployOnPush: false, promoteFromEnvironment: 'staging', runtime: { kind: 'node', version: '24' } },
     ]);
 
     const stagingWorkflow = buildBranchDeployWorkflow('railway', targets[0], { includeStep: false });
@@ -652,6 +654,40 @@ describe('github tools', () => {
     }
     const defaulted = buildBranchDeployWorkflow('railway', { ...baseTarget, webStartCommand: undefined }, { includeStep: false });
     expect(defaulted.content).toContain('CMD ["sh", "-lc", "npm start"]');
+  });
+
+  it('generates builds and migration setup from the declared project runtime', () => {
+    const nodeTarget = {
+      environmentName: 'staging',
+      kind: 'staging' as const,
+      branch: 'main',
+      autoDeployOnPush: true,
+      serviceNames: ['web'],
+      providerServiceIds: ['service-1'],
+      webStartCommand: 'npm start',
+      runtime: { kind: 'node' as const, version: '24.1' },
+    };
+    const nodeWorkflow = buildBranchDeployWorkflow(
+      'railway',
+      nodeTarget,
+      { includeStep: true, command: 'npm run migrate' }
+    );
+    expect(nodeWorkflow.content).toContain('FROM node:24.1-slim');
+    expect(nodeWorkflow.content).toContain("node-version: '24.1'");
+
+    const pythonWorkflow = buildBranchDeployWorkflow(
+      'railway',
+      {
+        ...nodeTarget,
+        webStartCommand: 'python app.py',
+        runtime: { kind: 'python', version: '3.13' },
+      },
+      { includeStep: true, command: 'python manage.py migrate' }
+    );
+    expect(pythonWorkflow.content).toContain('FROM python:3.13-slim');
+    expect(pythonWorkflow.content).toContain("python-version: '3.13'");
+    expect(pythonWorkflow.content).toContain('python -m pip install -r requirements.txt');
+    expect(pythonWorkflow.content).not.toContain('FROM node:20-slim');
   });
 
   it('emits server evidence and a gated iOS release workflow with separate provenance', () => {
