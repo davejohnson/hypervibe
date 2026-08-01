@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import {
   buildGitHubInfrastructurePullRequestBody,
@@ -173,10 +173,16 @@ describe('GitHub infrastructure compiler', () => {
     expect(workflow).toContain('open_pr:');
     expect(workflow).toContain('validate_fix:');
     expect(workflow).toContain('Validate test 1.1');
-    expect(workflow).toContain('Verify required failure evidence');
+    expect(workflow).toContain('Inspect required failure evidence');
     expect(workflow).toContain('hypervibe-failure-evidence/**');
+    expect(workflow).toContain('pattern: ${{ needs.check_existing.outputs.evidence_pattern }}');
+    expect(workflow).toContain('"artifactPattern":"tests-failure-evidence"');
     expect(workflow).not.toContain('continue-on-error: true');
-    expect(workflow).toContain('output-file: hypervibe-autofix-summary.md');
+    expect(workflow).toContain("if: steps.evidence.outputs.actionable == 'true'");
+    expect(workflow).toContain('output-file: ${{ runner.temp }}/hypervibe-autofix-summary.md');
+    expect(workflow).toContain('AUTOFIX_PATCH_PATH: ${{ runner.temp }}/codex.patch');
+    expect(workflow).toContain('git diff --binary --full-index HEAD > "$AUTOFIX_PATCH_PATH"');
+    expect(workflow).not.toContain('output-file: hypervibe-autofix-summary.md');
     expect(workflow).toContain('git diff --cached --check');
     expect(workflow).toContain('AUTOFIX_SUMMARY_PATH: hypervibe-autofix-summary.md');
     expect(workflow).toContain('pull-requests: write');
@@ -188,7 +194,7 @@ describe('GitHub infrastructure compiler', () => {
     expect(workflow).not.toContain('ANTHROPIC');
   });
 
-  it('fails closed unless an external workflow supplies its declared evidence', async () => {
+  it('runs only with declared external evidence and treats missing evidence as non-actionable', async () => {
     const github = projectSpecSchema.parse({
       version: 1,
       project: 'external-check',
@@ -199,6 +205,7 @@ describe('GitHub infrastructure compiler', () => {
         externalWorkflows: {
           'staging-deploy': {
             workflowName: 'Deploy Railway (staging)',
+            failureArtifactPattern: 'deploy-staging-failure-evidence',
             failureArtifacts: ['hypervibe-deploy-failure.log'],
           },
         },
@@ -209,27 +216,36 @@ describe('GitHub infrastructure compiler', () => {
     const workflow = compileManagedGitHubFiles(github)
       .find((file) => file.path.endsWith('hypervibe-fix-deploy.yml'))!.content;
 
-    expect(workflow).toContain('Verify required failure evidence');
+    expect(workflow).toContain('Inspect required failure evidence');
+    expect(workflow).toContain('"artifactPattern":"deploy-staging-failure-evidence"');
     expect(workflow).toContain('hypervibe-deploy-failure.log');
     expect(workflow).toContain('Required failure evidence is missing');
     expect(workflow).not.toContain('continue-on-error: true');
 
-    const script = extractGitHubScript(workflow, 'Verify required failure evidence');
-    const execute = new AsyncFunction('require', 'context', script);
+    const script = extractGitHubScript(workflow, 'Inspect required failure evidence');
+    const execute = new AsyncFunction('require', 'context', 'core', script);
     const context = { payload: { workflow_run: { name: 'Deploy Railway (staging)' } } };
     const fileEntry = {
       name: 'hypervibe-deploy-failure.log',
       isDirectory: () => false,
     };
 
+    const presentCore = { notice: vi.fn(), setOutput: vi.fn() };
     await expect(execute(
       () => ({ existsSync: () => true, readdirSync: () => [fileEntry] }),
-      context
+      context,
+      presentCore
     )).resolves.toBeUndefined();
+    expect(presentCore.setOutput).toHaveBeenCalledWith('actionable', 'true');
+
+    const missingCore = { notice: vi.fn(), setOutput: vi.fn() };
     await expect(execute(
       () => ({ existsSync: () => true, readdirSync: () => [] }),
-      context
-    )).rejects.toThrow('Required failure evidence is missing');
+      context,
+      missingCore
+    )).resolves.toBeUndefined();
+    expect(missingCore.notice).toHaveBeenCalledWith(expect.stringContaining('Required failure evidence is missing'));
+    expect(missingCore.setOutput).toHaveBeenCalledWith('actionable', 'false');
   });
 
   it('uses stable code-audit identities without line numbers and closes only after a clean completed job', () => {

@@ -113,12 +113,34 @@ target branch. It always opens a draft pull request. The generated patch cannot
 change `.github/`, `.hypervibe/`, agent instruction files, or `.env` files, and
 its validation job receives no OpenAI or live-provider secret. Extra failure
 artifacts must be narrow relative result paths; credential-shaped paths and
-whole-workspace globs are rejected. External workflow sources must declare at
-least one failure artifact. Artifact download and path verification fail closed:
-the repair agent never runs when its declared evidence is absent. When a patch
-is produced, the configured agent's bounded diagnosis and verification summary
-is included in the draft pull request; human-facing labels are not tied to one
-hardcoded model name.
+whole-workspace globs are rejected. External workflow sources must declare both
+the artifact name or narrow trailing-wildcard `failureArtifactPattern` and at
+least one required path in `failureArtifacts`. Hypervibe passes that pattern to
+the artifact downloader, so unrelated artifacts from the failed run are never
+fetched. A legacy spec without a pattern remains readable, but reconciliation
+blocks until the contract is completed.
+
+```json
+{
+  "github": {
+    "externalWorkflows": {
+      "staging-deploy": {
+        "workflowName": "Deploy Railway (staging)",
+        "failureArtifactPattern": "deploy-staging-failure-evidence",
+        "failureArtifacts": ["hypervibe-deploy-failure.log"]
+      }
+    }
+  }
+}
+```
+
+Missing or incomplete declared evidence is a successful, non-actionable
+autofix outcome: the repair agent and patch publication steps do not run.
+Artifact transport, authorization, and other unexpected errors still fail the
+job. When a patch is produced, both the patch and configured agent's bounded
+diagnosis are staged outside the checked-out repository, so the summary cannot
+become part of the patch. The summary is included in the draft pull request;
+human-facing labels are not tied to one hardcoded model name.
 
 The dependency and security booleans are enable-only controls in this version:
 `true` asks Hypervibe to enable and verify the feature; `false` or omission

@@ -804,14 +804,18 @@ with read-only Actions access. It reads the completed deploy job's last 400 log
 lines, applies credential-pattern redaction in addition to GitHub's normal
 secret masking, bounds the result to 64 KiB, and retains
 `hypervibe-deploy-failure.log` as an artifact for 14 days. Declare that path on
-an external workflow source when a Hypervibe autofix should consume deploy
-evidence. The artifact remains untrusted diagnostic input: generated autofix
+an external workflow source together with its exact artifact name or narrow
+trailing-wildcard `failureArtifactPattern` when a Hypervibe autofix should
+consume deploy evidence. The generated downloader filters by that pattern, so
+other artifacts from the source run are ignored. The artifact remains untrusted diagnostic input: generated autofix
 workflows cannot change `.github/`, `.hypervibe/`, secrets, deployment, auth,
 billing, or database schema, and they only open draft pull requests for human
 review. Evidence collection runs even though the deploy dependency failed, and
-autofix stops before model invocation unless every declared evidence path was
-downloaded. Draft pull requests include the configured agent's diagnosis and
-verification summary instead of model-specific boilerplate. A
+missing or incomplete declared evidence is a successful non-actionable outcome:
+autofix stops before model invocation and publishes no patch. Its patch and
+summary are staged outside the checkout so the summary cannot enter the patch.
+Draft pull requests include the configured agent's diagnosis and verification
+summary instead of model-specific boilerplate. A
 reconciliation-gate failure explicitly identifies itself as infrastructure
 work, so the agent produces no source patch and the operator continues through
 `hv_plan` and `hv_apply`.

@@ -503,6 +503,16 @@ canonical lowercase `.github/pull_request_template.md`. `externalWorkflows`
 remains a read-only integration surface because it names workflows Hypervibe
 observes but does not manage.
 
+Every external workflow consumed by autofix declares a narrow evidence artifact
+name/pattern separately from its required paths. The generated consumer filters
+the source run by that pattern and treats absent or incomplete required evidence
+as non-actionable: it must not invoke the repair agent or publish a patch. A
+legacy spec without the artifact pattern remains parseable so it can be repaired,
+but GitHub infrastructure reconciliation blocks and the compiled workflow uses a
+non-matching sentinel. Unexpected artifact transport or authorization failures
+remain errors. Repair summaries and patch files are written outside the checkout
+so diagnostic output cannot be included in the proposed source patch.
+
 When a canonical environment has both deployment-workflow drift and other
 managed GitHub file drift, apply must combine all known repository files and
 the manifest into the same infrastructure pull request. Dependent secrets,
