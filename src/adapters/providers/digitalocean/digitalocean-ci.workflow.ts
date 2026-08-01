@@ -60,6 +60,7 @@ export function buildDigitalOceanGitHubActionsSteps(
   return {
     displayName: 'DigitalOcean App Platform',
     permissions: `    permissions:
+      actions: read
       contents: read
 `,
     reviewDetails: [

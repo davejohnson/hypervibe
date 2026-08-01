@@ -22,6 +22,8 @@ import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../dom
 import { bootstrapActionResultFromSummary } from '../core.tools.js';
 import { applyDatabaseSeed } from '../../application/apply-plan.js';
 import { createToolContext } from '../context.js';
+import { SpecStore } from '../../domain/spec/spec.store.js';
+import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 
 let tempDir: string;
 
@@ -233,6 +235,132 @@ describe('hv_spec_set / hv_spec_get', () => {
     expect(bad.ok).toBe(false);
     expect(bad.error.code).toBe('VALIDATION');
     expect(JSON.stringify(bad.error.details)).toContain('cronSchedule');
+    await t.close();
+  });
+
+  it('blocks a new runtime key that is missing from a matching release environment', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_spec_set', {
+      spec: {
+        project: 'coverage-block-app',
+        environments: {
+          staging: { hosting: { provider: 'railway' }, services: { web: {} } },
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: {} },
+            envVars: { RECAPTCHA_SITE_KEY: 'production-site-id' },
+          },
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'VALIDATION', message: 'Environment-variable coverage is incomplete.' },
+    });
+    expect(result.error.details).toContainEqual(expect.objectContaining({
+      key: 'RECAPTCHA_SITE_KEY',
+      environment: 'staging',
+      reason: 'missing_environment',
+    }));
+    expect(result.hint).toContain('separately chosen');
+    expect(result.hint).toContain('envVarExceptions');
+    expect(JSON.stringify(result)).not.toContain('production-site-id');
+    await t.close();
+  });
+
+  it('accepts separate values, delegated slots, and explicit environment exceptions', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_spec_set', {
+      spec: {
+        project: 'coverage-complete-app',
+        secrets: {
+          RECAPTCHA_SECRET_KEY: {
+            principal: 'github:dave',
+            environments: ['staging', 'production'],
+          },
+        },
+        environments: {
+          staging: {
+            hosting: { provider: 'railway' },
+            services: { web: {} },
+            envVars: { RECAPTCHA_SITE_KEY: 'staging-site-id' },
+            envVarExceptions: ['PRODUCTION_ONLY_FLAG'],
+          },
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: {} },
+            envVars: {
+              RECAPTCHA_SITE_KEY: 'production-site-id',
+              PRODUCTION_ONLY_FLAG: 'enabled',
+            },
+          },
+        },
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.environmentVariableCoverage).toEqual({ complete: true, issues: [] });
+    expect(result.data.spec.secrets.RECAPTCHA_SECRET_KEY.environments).toEqual(['staging', 'production']);
+    await t.close();
+  });
+
+  it('blocks adding a matching environment until existing runtime keys are covered', async () => {
+    const t = await makeClient();
+    const initial = await t.call('hv_spec_set', {
+      spec: {
+        project: 'coverage-expansion-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: {} },
+            envVars: { SITE_KEY: 'production-id' },
+          },
+        },
+      },
+    });
+    expect(initial.ok).toBe(true);
+
+    const expanded = await t.call('hv_spec_set', {
+      project: 'coverage-expansion-app',
+      spec: {
+        environments: {
+          staging: { hosting: { provider: 'railway' }, services: { web: {} } },
+        },
+      },
+    });
+
+    expect(expanded).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    expect(expanded.error.details).toContainEqual(expect.objectContaining({
+      key: 'SITE_KEY', environment: 'staging',
+    }));
+    await t.close();
+  });
+
+  it('grandfathers pre-existing gaps without allowing new ones', async () => {
+    const project = new ProjectRepository().create({ name: 'legacy-coverage-app' });
+    new SpecStore().replace(project, projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: { hosting: { provider: 'railway' }, services: { web: {} } },
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          envVars: { LEGACY_GAP: 'production-only' },
+        },
+      },
+    }));
+    const t = await makeClient();
+    const unrelated = await t.call('hv_spec_set', {
+      project: project.name,
+      spec: { gitRemoteUrl: 'git@github.com:davejohnson/legacy-coverage-app.git' },
+    });
+
+    expect(unrelated.ok).toBe(true);
+    expect(unrelated.data.environmentVariableCoverage.complete).toBe(false);
+    expect(unrelated.warnings).toContainEqual(expect.stringContaining('pre-existing'));
+    expect(JSON.stringify(unrelated.data.environmentVariableCoverage)).not.toContain('production-only');
     await t.close();
   });
 

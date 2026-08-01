@@ -509,13 +509,16 @@ evidence records mobile and server repository/SHA fields separately:
         "workingDirectory": "apps/ios",
         "command": "bundle exec fastlane build",
         "ipaPath": "build/Example.ipa",
-        "requiredSecrets": ["MATCH_PASSWORD"]
+        "requiredSecrets": ["SENTRY_AUTH_TOKEN"]
+      },
+      "signing": {
+        "provider": "match",
+        "gitBranch": "main"
       },
       "testflight": {
         "groups": ["Internal"],
         "usesNonExemptEncryption": false,
-        "submitForBetaReview": false,
-        "scriptPath": "scripts/hypervibe-ios-release.mjs"
+        "submitForBetaReview": false
       }
     }
   }
@@ -524,25 +527,27 @@ evidence records mobile and server repository/SHA fields separately:
 
 `hv_plan`/`hv_apply` reconcile the bundle ID, capabilities, beta groups,
 server deploy workflow, iOS release workflow, and its App Store Connect
-environment secrets. User-managed signing secrets named by `requiredSecrets`
-must already exist in the matching GitHub environment.
+environment secrets. With `signing.provider: "match"`, the matching GitHub
+environment must already contain `MATCH_GIT_URL`, `MATCH_PASSWORD`, and
+`MATCH_GIT_BASIC_AUTHORIZATION`. Hypervibe observes those names and scopes the
+values to read-only signing preparation; they never enter Hypervibe state or
+the project build step. `build.requiredSecrets` is only for additional secrets
+needed by the app-defined build command.
 
 The server workflow uploads signed release evidence only after provider deploy
 success. The macOS iOS workflow shares the server deploy concurrency group,
-downloads that evidence, requires the same repository and full Git SHA,
-verifies every gated service, and validates the IPA bundle/version/build
-metadata. It then calls the reviewed project script named by `scriptPath`.
-App Store credentials are available only to that step, not to the arbitrary
-build command.
+downloads that evidence, and requires the same repository and full Git SHA.
+Its build job checks out that exact commit, installs existing Match assets into
+an ephemeral keychain, runs the project build, validates the IPA, and uploads a
+short-lived artifact. A fresh release job revalidates the artifact and server
+evidence before running Hypervibe's embedded Apple upload, processing,
+compliance, declared-group distribution, optional beta-review, and
+release-manifest runtime. App Store credentials never enter the project build
+job, and the release job never checks out or executes project code.
 
-The reusable project template provides
-`scripts/hypervibe-ios-release.mjs`, which performs the Apple upload,
-processing, compliance, declared-group distribution, optional beta review, and
-release-manifest protocol. Concrete apps can replace the script deliberately,
-but Hypervibe never generates or exposes separate upload/distribution tools for
-an agent to improvise. Versioned App Store metadata/screenshots belong in the
-project's Fastlane files, while local device builds belong in a project script;
-neither is a Hypervibe command.
+Use `signing.provider: "project"` when a project intentionally owns its signing
+implementation. Versioned App Store metadata/screenshots and local device builds
+remain project files; neither becomes an imperative Hypervibe command.
 
 The iOS artifact records separate mobile and server provenance. Inspect these
 workflows through `hv_ci_status`; final `hv_appstore_submit` also refuses
@@ -794,14 +799,18 @@ with read-only Actions access. It reads the completed deploy job's last 400 log
 lines, applies credential-pattern redaction in addition to GitHub's normal
 secret masking, bounds the result to 64 KiB, and retains
 `hypervibe-deploy-failure.log` as an artifact for 14 days. Declare that path on
-an external workflow source when a Hypervibe autofix should consume deploy
-evidence. The artifact remains untrusted diagnostic input: generated autofix
+an external workflow source together with its exact artifact name or narrow
+trailing-wildcard `failureArtifactPattern` when a Hypervibe autofix should
+consume deploy evidence. The generated downloader filters by that pattern, so
+other artifacts from the source run are ignored. The artifact remains untrusted diagnostic input: generated autofix
 workflows cannot change `.github/`, `.hypervibe/`, secrets, deployment, auth,
 billing, or database schema, and they only open draft pull requests for human
 review. Evidence collection runs even though the deploy dependency failed, and
-autofix stops before model invocation unless every declared evidence path was
-downloaded. Draft pull requests include the configured agent's diagnosis and
-verification summary instead of model-specific boilerplate. A
+missing or incomplete declared evidence is a successful non-actionable outcome:
+autofix stops before model invocation and publishes no patch. Its patch and
+summary are staged outside the checkout so the summary cannot enter the patch.
+Draft pull requests include the configured agent's diagnosis and verification
+summary instead of model-specific boilerplate. A
 reconciliation-gate failure explicitly identifies itself as infrastructure
 work, so the agent produces no source patch and the operator continues through
 `hv_plan` and `hv_apply`.

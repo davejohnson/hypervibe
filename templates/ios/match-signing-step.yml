@@ -1,0 +1,79 @@
+      - name: Prepare Hypervibe-managed signing assets
+        working-directory: ${{ env.HYPERVIBE_WORKING_DIRECTORY }}
+        env:
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          MATCH_GIT_BRANCH: @@GIT_BRANCH_JSON@@
+          MATCH_APP_IDENTIFIER: ${{ env.HYPERVIBE_BUNDLE_ID }}
+          MATCH_TYPE: appstore
+          MATCH_READONLY: "true"
+          MATCH_KEYCHAIN_NAME: ${{ env.HYPERVIBE_SIGNING_KEYCHAIN }}
+          FASTLANE_SKIP_UPDATE_CHECK: "true"
+          FASTLANE_HIDE_CHANGELOG: "true"
+        run: |
+          set -euo pipefail
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$HYPERVIBE_SIGNING_KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$HYPERVIBE_SIGNING_KEYCHAIN"
+          security unlock-keychain -p "$keychain_password" "$HYPERVIBE_SIGNING_KEYCHAIN"
+          existing_keychains=()
+          while IFS= read -r keychain; do
+            keychain="${keychain//\"/}"
+            keychain="${keychain#"${keychain%%[![:space:]]*}"}"
+            keychain="${keychain%"${keychain##*[![:space:]]}"}"
+            existing_keychains+=("$keychain")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$HYPERVIBE_SIGNING_KEYCHAIN" "${existing_keychains[@]}"
+          security default-keychain -d user -s "$HYPERVIBE_SIGNING_KEYCHAIN"
+          MATCH_KEYCHAIN_PASSWORD="$keychain_password" bundle exec fastlane match appstore --readonly
+          python3 - <<'PY'
+          import datetime, os, pathlib, plistlib, subprocess
+
+          bundle_id = os.environ["HYPERVIBE_BUNDLE_ID"]
+          profile_directories = [
+              pathlib.Path.home() / "Library/Developer/Xcode/UserData/Provisioning Profiles",
+              pathlib.Path.home() / "Library/MobileDevice/Provisioning Profiles",
+          ]
+          candidates = []
+          for directory in profile_directories:
+              if not directory.is_dir():
+                  continue
+              for profile in [*directory.glob("*.mobileprovision"), *directory.glob("*.provisionprofile")]:
+                  decoded = subprocess.run(
+                      ["security", "cms", "-D", "-i", str(profile)],
+                      check=True,
+                      capture_output=True,
+                  ).stdout
+                  data = plistlib.loads(decoded)
+                  teams = data.get("TeamIdentifier") or []
+                  app_identifier = data.get("Entitlements", {}).get("application-identifier", "")
+                  if not any(app_identifier == f"{team}.{bundle_id}" for team in teams):
+                      continue
+                  if data.get("Entitlements", {}).get("get-task-allow") is True:
+                      continue
+                  expires = data.get("ExpirationDate")
+                  if not isinstance(expires, datetime.datetime):
+                      continue
+                  if expires.tzinfo is None:
+                      expires = expires.replace(tzinfo=datetime.timezone.utc)
+                  if expires <= datetime.datetime.now(datetime.timezone.utc):
+                      continue
+                  candidates.append((expires, data, profile))
+
+          if not candidates:
+              raise SystemExit("Match did not install a non-expired App Store profile for " + bundle_id)
+          _, profile, profile_path = max(candidates, key=lambda candidate: candidate[0])
+          values = {
+              "HYPERVIBE_PROVISIONING_PROFILE_NAME": profile["Name"],
+              "HYPERVIBE_PROVISIONING_PROFILE_UUID": profile["UUID"],
+              "HYPERVIBE_PROVISIONING_PROFILE_PATH": str(profile_path),
+              "HYPERVIBE_DEVELOPMENT_TEAM": profile["TeamIdentifier"][0],
+          }
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              for name, value in values.items():
+                  if "\n" in value or "\r" in value:
+                      raise SystemExit("provisioning profile metadata contains an unsupported newline")
+                  output.write(f"{name}={value}\n")
+          PY

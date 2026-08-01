@@ -141,6 +141,15 @@ describe('github tools', () => {
     expect(workflow.content).not.toContain('  push:\n    branches:');
     expect(workflow.content).toContain('workflow_dispatch:');
     expect(workflow.content).toContain('commit_sha:');
+    expect(workflow.content).toContain('rollback:');
+    expect(workflow.content).toContain('expected_latest_run_id:');
+    expect(workflow.content).toContain("core.setOutput('operation', operation)");
+    expect(workflow.content).toContain('name: Verify rollback release evidence');
+    expect(workflow.content).toContain("if: steps.deploy.outputs.operation == 'rollback'");
+    expect(workflow.content).toContain('listWorkflowRunArtifacts');
+    expect(workflow.content).toContain('Rollback dispatch is stale');
+    expect(workflow.content).toContain('run.data.path !== workflowPath');
+    expect(workflow.content).toContain('actions: read');
     expect(workflow.content).toContain('environment: production');
     expect(workflow.content).toContain('ref: ${{ steps.deploy.outputs.sha }}');
     expect(workflow.content).toContain('name: "Deployment safety gate: verify Hypervibe reconciliation"');
@@ -152,6 +161,7 @@ describe('github tools', () => {
     expect(workflow.content).toContain('group: hypervibe-deploy-production');
     expect(workflow.content).toContain('cancel-in-progress: false');
     expect(workflow.content).toContain('run: npm run migrate');
+    expect(workflow.content).toContain("if: steps.deploy.outputs.operation != 'rollback'");
     // Migrations need dependencies installed on the runner; the deploy steps
     // build a container image and never run npm ci themselves.
     expect(workflow.content.indexOf('npm ci')).toBeGreaterThan(-1);
@@ -192,6 +202,7 @@ describe('github tools', () => {
     expect(workflow.content).not.toContain('secrets.GHCR_TOKEN');
     expect(workflow.content).not.toContain('railway-github-action');
     expect(workflow.content).not.toContain('vars.MIGRATION_COMMAND');
+    expect(workflow.content).toContain('retention-days: 90');
   });
 
   it('retries transient Railway reads without replaying deploy mutations', async () => {
@@ -261,6 +272,127 @@ describe('github tools', () => {
     expect(core.warning).toHaveBeenCalledWith(
       expect.stringContaining('Retrying Railway DeploymentStatus after API 503')
     );
+  });
+
+  it('verifies exact rollback release evidence before deployment', async () => {
+    const targetSha = '0123456789abcdef0123456789abcdef01234567';
+    const target = {
+      environmentName: 'production',
+      kind: 'production' as const,
+      branch: 'main',
+      autoDeployOnPush: false,
+      serviceNames: ['web'],
+      providerProjectId: 'rail-project',
+      providerEnvironmentId: 'rail-env',
+      providerServiceIds: ['rail-web'],
+      providerJobNames: [],
+    };
+    const generated = buildBranchDeployWorkflow('railway', target, { includeStep: false });
+    const script = extractGitHubScript(generated.content, 'Verify rollback release evidence');
+    const listWorkflowRuns = vi.fn().mockResolvedValue({
+      data: { workflow_runs: [{ id: 900 }, { id: 99 }] },
+    });
+    const listWorkflowRunArtifacts = vi.fn();
+    const getWorkflowRun = vi.fn().mockResolvedValue({
+      data: {
+        id: 42,
+        conclusion: 'success',
+        path: '.github/workflows/deploy-railway-production.yml',
+      },
+    });
+    const paginate = vi.fn().mockResolvedValue([{
+      id: 7,
+      name: `hypervibe-server-release-production-${targetSha}`,
+      expired: false,
+      workflow_run: { id: 42 },
+    }]);
+    const github = {
+      paginate,
+      rest: { actions: { listWorkflowRuns, listWorkflowRunArtifacts, getWorkflowRun } },
+    };
+    const core = { info: vi.fn() };
+    const execute = new AsyncFunction('github', 'context', 'process', 'core', script);
+
+    await expect(execute(
+      github,
+      { repo: { owner: 'dave', repo: 'app' }, runId: 900 },
+      {
+        env: {
+          HYPERVIBE_ENVIRONMENT: 'production',
+          HYPERVIBE_ROLLBACK_SHA: targetSha,
+          HYPERVIBE_WORKFLOW_REF: 'dave/app/.github/workflows/deploy-railway-production.yml@refs/heads/main',
+          HYPERVIBE_EXPECTED_LATEST_RUN_ID: '99',
+          HYPERVIBE_SOURCE_ARTIFACT_ID: '7',
+          HYPERVIBE_SOURCE_WORKFLOW_RUN_ID: '42',
+        },
+      },
+      core
+    )).resolves.toBeUndefined();
+
+    expect(listWorkflowRuns).toHaveBeenCalledWith({
+      owner: 'dave',
+      repo: 'app',
+      workflow_id: '.github/workflows/deploy-railway-production.yml',
+      per_page: 10,
+    });
+    expect(paginate).toHaveBeenCalledWith(listWorkflowRunArtifacts, {
+      owner: 'dave',
+      repo: 'app',
+      run_id: 42,
+      per_page: 100,
+    });
+    expect(getWorkflowRun).toHaveBeenCalledWith({ owner: 'dave', repo: 'app', run_id: 42 });
+    expect(core.info).toHaveBeenCalledWith('Verified rollback evidence from successful workflow run 42');
+  });
+
+  it('rejects a stale rollback dispatch before reading release artifacts', async () => {
+    const targetSha = '0123456789abcdef0123456789abcdef01234567';
+    const target = {
+      environmentName: 'production',
+      kind: 'production' as const,
+      branch: 'main',
+      autoDeployOnPush: false,
+      serviceNames: ['web'],
+      providerProjectId: 'rail-project',
+      providerEnvironmentId: 'rail-env',
+      providerServiceIds: ['rail-web'],
+      providerJobNames: [],
+    };
+    const generated = buildBranchDeployWorkflow('railway', target, { includeStep: false });
+    const script = extractGitHubScript(generated.content, 'Verify rollback release evidence');
+    const listWorkflowRunArtifacts = vi.fn();
+    const paginate = vi.fn();
+    const github = {
+      paginate,
+      rest: {
+        actions: {
+          listWorkflowRuns: vi.fn().mockResolvedValue({
+            data: { workflow_runs: [{ id: 900 }, { id: 100 }, { id: 99 }] },
+          }),
+          listWorkflowRunArtifacts,
+          getWorkflowRun: vi.fn(),
+        },
+      },
+    };
+    const execute = new AsyncFunction('github', 'context', 'process', 'core', script);
+
+    await expect(execute(
+      github,
+      { repo: { owner: 'dave', repo: 'app' }, runId: 900 },
+      {
+        env: {
+          HYPERVIBE_ENVIRONMENT: 'production',
+          HYPERVIBE_ROLLBACK_SHA: targetSha,
+          HYPERVIBE_WORKFLOW_REF: 'dave/app/.github/workflows/deploy-railway-production.yml@refs/heads/main',
+          HYPERVIBE_EXPECTED_LATEST_RUN_ID: '99',
+          HYPERVIBE_SOURCE_ARTIFACT_ID: '7',
+          HYPERVIBE_SOURCE_WORKFLOW_RUN_ID: '42',
+        },
+      },
+      { info: vi.fn() }
+    )).rejects.toThrow('Rollback dispatch is stale: expected latest run 99, observed 100');
+    expect(paginate).not.toHaveBeenCalled();
+    expect(listWorkflowRunArtifacts).not.toHaveBeenCalled();
   });
 
   it('defaults to main auto-deploy for staging and manual main promotion for production', () => {
@@ -546,13 +678,13 @@ describe('github tools', () => {
             workingDirectory: 'apps/ios',
             command: 'bundle exec fastlane build',
             ipaPath: 'build/Example.ipa',
-            requiredSecrets: ['MATCH_PASSWORD'],
+            requiredSecrets: ['SENTRY_AUTH_TOKEN'],
           },
+          signing: { provider: 'match', gitBranch: 'main' },
           testflight: {
             groups: ['beta'],
             usesNonExemptEncryption: false,
             submitForBetaReview: false,
-            scriptPath: 'scripts/hypervibe-ios-release.mjs',
           },
         },
       }
@@ -566,28 +698,58 @@ describe('github tools', () => {
     ]);
     const releaseWorkflow = workflow.companionFiles?.[0].content ?? '';
     expect(releaseWorkflow).toContain('Download verified server release evidence');
+    expect(releaseWorkflow).toContain('runs-on: macos-26');
+    expect(releaseWorkflow).toContain('pattern: hypervibe-server-release-development-*');
+    expect(releaseWorkflow).toContain('path: ${{ runner.temp }}/hypervibe-server-evidence');
+    expect(releaseWorkflow).toContain(
+      'HYPERVIBE_SERVER_EVIDENCE_PATH: ${{ runner.temp }}/hypervibe-server-evidence/hypervibe-server-release.json'
+    );
+    expect(releaseWorkflow).toContain(
+      'fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")'
+    );
     expect(releaseWorkflow).toContain('server evidence repository/SHA mismatch');
     expect(releaseWorkflow).toContain('concurrency:');
     expect(releaseWorkflow).toContain('group: hypervibe-deploy-development');
+    expect(releaseWorkflow).toContain('  build:');
+    expect(releaseWorkflow).toContain('  release:\n    needs: build');
     expect(releaseWorkflow).toContain("node-version: '20'");
     expect(releaseWorkflow).toContain('ruby/setup-ruby@v1');
     expect(releaseWorkflow).toContain("ruby-version: '3.3'");
     expect(releaseWorkflow).toContain('bundler-cache: true');
     expect(releaseWorkflow.indexOf('ruby/setup-ruby@v1'))
       .toBeLessThan(releaseWorkflow.indexOf('Build signed IPA'));
-    expect(releaseWorkflow).toContain('Run project-owned TestFlight release script');
-    expect(releaseWorkflow).toContain('node "$HYPERVIBE_RELEASE_SCRIPT"');
-    expect(releaseWorkflow).toContain('HYPERVIBE_RELEASE_SCRIPT: "scripts/hypervibe-ios-release.mjs"');
+    expect(releaseWorkflow).toContain('Prepare Hypervibe-managed signing assets');
+    expect(releaseWorkflow).toContain('bundle exec fastlane match appstore --readonly');
+    expect(releaseWorkflow).toContain('MATCH_GIT_BRANCH: "main"');
+    expect(releaseWorkflow).toContain('HYPERVIBE_PROVISIONING_PROFILE_NAME');
+    expect(releaseWorkflow).toContain('Materialize Hypervibe release runtime');
+    expect(releaseWorkflow).toContain('Run Hypervibe-managed TestFlight release');
+    expect(releaseWorkflow).not.toContain('project-owned TestFlight release script');
+    expect(releaseWorkflow).not.toContain('HYPERVIBE_RELEASE_SCRIPT');
     expect(releaseWorkflow).not.toContain('xcrun altool --upload-app');
-    const jobConfiguration = releaseWorkflow.slice(0, releaseWorkflow.indexOf('    steps:'));
-    expect(jobConfiguration).not.toContain('APP_STORE_CONNECT_PRIVATE_KEY');
-    expect(releaseWorkflow.indexOf('Build signed IPA'))
-      .toBeLessThan(releaseWorkflow.indexOf('APP_STORE_CONNECT_PRIVATE_KEY:'));
+    const releaseJobStart = releaseWorkflow.indexOf('\n  release:\n');
+    const buildJob = releaseWorkflow.slice(0, releaseJobStart);
+    const releaseJob = releaseWorkflow.slice(releaseJobStart);
+    expect(buildJob).not.toContain('APP_STORE_CONNECT_PRIVATE_KEY');
+    expect(releaseJob).toContain('APP_STORE_CONNECT_PRIVATE_KEY:');
+    expect(releaseJob).not.toContain('actions/checkout');
+    const buildCommand = buildJob.slice(
+      buildJob.indexOf('      - name: Build signed IPA'),
+      buildJob.indexOf('      - name: Validate IPA identity')
+    );
+    expect(buildCommand).toContain('SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}');
+    expect(buildCommand).not.toContain('MATCH_PASSWORD');
+    expect(buildCommand).not.toContain('MATCH_GIT_BASIC_AUTHORIZATION');
+    expect(releaseWorkflow).toContain('Verify release IPA identity');
+    expect(releaseWorkflow).toContain('hypervibe-ios-build-development-${{ steps.gate.outputs.sha }}');
     expect(workflow.requiredSecrets).toEqual(expect.arrayContaining([
       'APP_STORE_CONNECT_KEY_ID',
       'APP_STORE_CONNECT_ISSUER_ID',
       'APP_STORE_CONNECT_PRIVATE_KEY',
+      'MATCH_GIT_URL',
       'MATCH_PASSWORD',
+      'MATCH_GIT_BASIC_AUTHORIZATION',
+      'SENTRY_AUTH_TOKEN',
     ]));
   });
 

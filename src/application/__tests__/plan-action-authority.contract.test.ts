@@ -23,6 +23,7 @@ import {
 import { HOSTING_ENV_REMOVE_OPERATION } from '../../domain/services/hosting-env.service.js';
 import { PROVIDER_NATIVE_SOURCE_DISCONNECT_OPERATION } from '../../domain/services/provider-native-deploy-source.service.js';
 import { CACHE_OPERATIONS } from '../../domain/services/cache-plan.service.js';
+import { GITHUB_ACTIONS_ROLLBACK_OPERATION } from '../../domain/services/ci-rollback.contract.js';
 import {
   resolvePlanActionAuthority,
   type PlanMutationCapability,
@@ -102,6 +103,27 @@ const authorized: AuthorizedCase[] = [
       provider: 'github',
       operation: 'githubActionsDeployBranch',
       metadata: { repository: 'owner/repo' },
+    }),
+  },
+  {
+    label: 'GitHub Actions exact-SHA rollback',
+    capability: 'github.ci.rollback',
+    action: action({
+      id: 'ci:github-actions:production:rollback',
+      type: 'update',
+      kind: 'ci',
+      name: 'deploy-branch:production',
+      provider: 'github',
+      operation: GITHUB_ACTIONS_ROLLBACK_OPERATION,
+      metadata: {
+        repository: 'owner/repo',
+        workflow: '.github/workflows/deploy-railway-production.yml',
+        ref: 'main',
+        targetSha: 'a'.repeat(40),
+        targetArtifactId: 17,
+        targetWorkflowRunId: 27,
+        observedLatestWorkflowRunId: 37,
+      },
     }),
   },
   {

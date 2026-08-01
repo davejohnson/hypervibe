@@ -313,6 +313,24 @@ the later CI run and `hv_health` own that verification. New resources with no
 existing image may still require provider bootstrap before CI can target them,
 and receipts must report that honestly.
 
+### Environment Variable Coverage
+
+Desired state prevents new cross-environment configuration gaps before they
+reach providers. A runtime key introduced through ordinary `envVars`, an
+`envFile.include` slot, or a delegated secret must be represented in every
+non-local environment that shares a desired service with a declaring
+environment. Each environment supplies its own value or secret reference;
+Hypervibe never copies values between environments.
+
+An environment may list a key in `envVarExceptions` only to document that the
+shared key intentionally does not apply there. Retirement tombstones also make
+absence explicit. Mixed ordinary/delegated handling for the same key is
+invalid. `hv_spec_set` blocks newly introduced gaps and gaps created by adding
+a matching environment or service. Pre-existing gaps remain readable and do
+not block unrelated spec changes, but are reported until repaired or explicitly
+excepted. Provider observation and AI are not required for this guardrail;
+`hv_plan` and `hv_apply` continue to own convergence of the accepted spec.
+
 ## Stripe Desired State
 
 Stripe sandboxes are isolated environments with their own API keys and object
@@ -372,23 +390,34 @@ TestFlight upload, or TestFlight distribution commands.
 
 - `ios.release` requires a CI-triggered branch deploy. It names the server
   services that gate the mobile release, the repository-relative build command
-  and IPA path, required GitHub environment secret names, TestFlight groups,
-  export-compliance answer, and optional beta-review submission.
+  and IPA path, build-only GitHub environment secret names, signing provider,
+  TestFlight groups, export-compliance answer, and optional beta-review
+  submission.
 - Hypervibe manages the server deploy workflow, iOS release workflow, and App
-  Store Connect credentials through plan/apply. The app repository owns the
-  release implementation named by `ios.release.testflight.scriptPath`; the
-  managed workflow invokes it only after the provenance gate passes. User-owned
-  signing secrets are observed by name and block apply when missing; their
-  values never enter Hypervibe state or output.
+  Store Connect credentials through plan/apply. TestFlight upload, processing,
+  compliance, declared-group distribution, optional beta review, and release
+  evidence use a Hypervibe-owned runtime embedded into the managed workflow;
+  the app does not supply submission code. The legacy default `scriptPath` is
+  accepted only while existing specs migrate and custom values are rejected.
+- Signing is an explicit provider contract. `provider: "project"` preserves the
+  compatibility path where the app build owns signing. `provider: "match"`
+  makes Hypervibe install existing Match assets read-only into an ephemeral
+  keychain before invoking the app-defined build command. Match credentials are
+  scoped to that preparation step and cannot also be declared as build-command
+  secrets. Certificate/profile creation, rotation, and revocation never happen
+  during deploys; they require a separate explicit lifecycle design.
 - A successful server deploy writes an artifact whose name and JSON body carry
   the environment, repository, exact full Git SHA, and deployed service set.
   The artifact is emitted only after provider deployment steps succeed.
-- The macOS iOS workflow shares the server deploy concurrency key, consumes a
-  specific successful server run, validates its evidence, checks out that exact
-  SHA, validates the IPA archive and bundle/version/build metadata, and invokes
-  the reviewed project release script with the validated IPA and declared
-  TestFlight policy. App Store credentials are scoped to that step and are not
-  exposed to the project-defined build command.
+- The macOS iOS workflow shares the server deploy concurrency key and uses two
+  isolated jobs. The build job consumes a specific successful server run,
+  validates its evidence, checks out that exact SHA, prepares signing, invokes
+  the app-defined build command, validates the IPA identity, and uploads a
+  short-lived artifact. A fresh release job receives App Store credentials,
+  downloads and revalidates the IPA and server evidence, then runs the managed
+  release runtime. It never checks out or executes project code. This job
+  boundary prevents an arbitrary build command from modifying the submission
+  runtime or inheriting App Store Connect credentials.
 - The iOS artifact records separate `mobile.repository`/`mobile.sha` and
   `server.repository`/`server.sha` fields. V1 is monorepo-first and therefore
   requires those repositories and SHAs to match at the workflow gate, while the
@@ -396,9 +425,9 @@ TestFlight upload, or TestFlight distribution commands.
 - `hv_ci_status` is the read-only path for workflows, runs, logs, and release
   artifact provenance. `hv_appstore_submit` requires successful managed server
   and iOS evidence artifacts for the same SHA before final review submission.
-- App Store metadata/screenshots and local Xcode device operations are
-  project-owned release/development files (for example Fastlane `deliver` and
-  a reviewed device script), not Hypervibe commands.
+- Xcode projects, schemes, entitlements, build/test commands, artifact paths,
+  App Store metadata/screenshots, and local device operations remain
+  project-owned. Hypervibe owns the release envelope around the resulting IPA.
 
 ## CI And Push Deploys
 
@@ -422,6 +451,21 @@ The standard team workflow is:
 5. production is manually promoted from `main`, ideally by passing the exact commit SHA that already passed staging.
 
 Do not default to a long-lived `staging` branch. `main` is the accepted-code branch, staging is the deployed preview of `main`, and production is a deliberate manual promotion. Generated production deploy workflows must not run from push events by default; they should use `workflow_dispatch` and support a `commit_sha` input.
+
+Managed CI rollback is an explicit operational action over that same exact-SHA
+release boundary. `hv_rollback` must select only unexpired server-release
+evidence emitted by a successful run of the exact managed environment workflow.
+After a failed promotion it restores the latest known-good release; after a
+successful promotion it selects the previous distinct successful release unless
+the caller names another previously verified full SHA. The repository, workflow,
+ref, target SHA, source artifact id, source run id, and latest observed workflow
+run id are frozen into a persisted rollback plan and re-observed immediately
+before dispatch. Any workflow drift, unknown observation, ambiguous evidence,
+newer run, or in-progress deployment blocks without mutation. Dispatch is a
+pending receipt until `hv_ci_status` proves the workflow succeeded and
+`hv_health` proves the endpoint. Rollback never reverses database migrations or
+provider-side manual configuration; tool-mode migration steps are skipped during
+rollback, while startup/release-command migrations must remain backward-compatible.
 
 Do not switch a project to `deploy.trigger: "native"` just to avoid missing CI, package, or image credentials. That changes the desired infrastructure contract. Provider-native deploys are an explicit opt-in and may require provider-specific external app access such as the Railway GitHub App.
 
@@ -458,6 +502,16 @@ delegated back to the repository. Requiring pull requests therefore owns the
 canonical lowercase `.github/pull_request_template.md`. `externalWorkflows`
 remains a read-only integration surface because it names workflows Hypervibe
 observes but does not manage.
+
+Every external workflow consumed by autofix declares a narrow evidence artifact
+name/pattern separately from its required paths. The generated consumer filters
+the source run by that pattern and treats absent or incomplete required evidence
+as non-actionable: it must not invoke the repair agent or publish a patch. A
+legacy spec without the artifact pattern remains parseable so it can be repaired,
+but GitHub infrastructure reconciliation blocks and the compiled workflow uses a
+non-matching sentinel. Unexpected artifact transport or authorization failures
+remain errors. Repair summaries and patch files are written outside the checkout
+so diagnostic output cannot be included in the proposed source patch.
 
 When a canonical environment has both deployment-workflow drift and other
 managed GitHub file drift, apply must combine all known repository files and

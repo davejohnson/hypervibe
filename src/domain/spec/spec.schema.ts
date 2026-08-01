@@ -203,6 +203,21 @@ const githubFailureArtifactPathSchema = z.string().min(1).superRefine((value, ct
   }
 });
 
+const githubFailureArtifactPatternSchema = z.string().min(1).superRefine((value, ctx) => {
+  const literalPrefix = value.endsWith('*') ? value.slice(0, -1) : value;
+  const unsafe = value.trim() !== value
+    || /[\r\n\0/\\]/.test(value)
+    || value.includes('${{')
+    || literalPrefix.length < 3
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]*(?:\*)?$/.test(value);
+  if (unsafe) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'failure artifact patterns must be a narrow artifact name or identifier-shaped prefix ending in *',
+    });
+  }
+});
+
 const githubAiAgentSchema = z.object({
   provider: z.literal('openai').default('openai'),
   model: z.literal('gpt-5.6-sol').default('gpt-5.6-sol'),
@@ -296,6 +311,8 @@ export const githubSpecSchema = z.object({
   /** Existing workflow names that autofix may consume but Hypervibe does not own. */
   externalWorkflows: z.record(automationIdSchema, z.object({
     workflowName: z.string().min(1),
+    /** Exact artifact name or narrow trailing-wildcard pattern. Optional only for legacy spec readability. */
+    failureArtifactPattern: githubFailureArtifactPatternSchema.optional(),
     failureArtifacts: z.array(githubFailureArtifactPathSchema).default([]),
   }).strict()).default({}),
   dependencies: z.object({
@@ -439,6 +456,33 @@ const repositoryRelativePathSchema = z.string().min(1).refine(
   'must be a repository-relative path without parent-directory traversal'
 );
 
+export const iosReleaseSigningSpecSchema = z.discriminatedUnion('provider', [
+  z.object({
+    /** The project build command owns signing and explicitly names any secrets it needs. */
+    provider: z.literal('project'),
+  }).strict(),
+  z.object({
+    /** Hypervibe installs existing Match assets read-only before invoking the project build. */
+    provider: z.literal('match'),
+    gitBranch: z.string().min(1).regex(
+      /^[A-Za-z0-9._/-]+$/,
+      'gitBranch contains unsupported characters'
+    ).default('main'),
+  }).strict(),
+]);
+
+const appStoreReleaseSecretNames = [
+  'APP_STORE_CONNECT_KEY_ID',
+  'APP_STORE_CONNECT_ISSUER_ID',
+  'APP_STORE_CONNECT_PRIVATE_KEY',
+];
+
+const matchSigningSecretNames = [
+  'MATCH_GIT_URL',
+  'MATCH_PASSWORD',
+  'MATCH_GIT_BASIC_AUTHORIZATION',
+];
+
 export const iosReleaseSpecSchema = z.object({
   /** Server services whose successful deployment evidence gates this mobile release. */
   services: z.array(z.string().min(1)).min(1),
@@ -453,22 +497,20 @@ export const iosReleaseSpecSchema = z.object({
       (value) => value.toLowerCase().endsWith('.ipa'),
       'ipaPath must end in .ipa'
     ),
-    /** Existing GitHub environment secret names needed for signing/building. */
+    /** Existing GitHub environment secret names needed only by the project build command. */
     requiredSecrets: z.array(runtimeEnvVarNameSchema).default([]),
   }).strict(),
+  signing: iosReleaseSigningSpecSchema.default({ provider: 'project' }),
   testflight: z.object({
     /** Names declared under ios.testflight.groups. */
     groups: z.array(z.string().min(1)).min(1),
     usesNonExemptEncryption: z.boolean().default(false),
     submitForBetaReview: z.boolean().default(false),
-    /**
-     * Project-owned release implementation invoked only after the managed
-     * server/mobile provenance gate passes.
-     */
+    /** Accepted only while existing specs migrate to Hypervibe's managed release runtime. */
     scriptPath: repositoryRelativePathSchema.refine(
-      (value) => /\.(?:mjs|js)$/.test(value),
-      'scriptPath must point to a repository-owned JavaScript module'
-    ).default('scripts/hypervibe-ios-release.mjs'),
+      (value) => value === 'scripts/hypervibe-ios-release.mjs',
+      'TestFlight submission is managed by Hypervibe; custom scriptPath values are not supported'
+    ).optional(),
   }).strict(),
 }).strict();
 
@@ -476,9 +518,10 @@ export const iosReleaseSpecSchema = z.object({
  * iOS identity + TestFlight desired state. Capabilities and tester
  * membership converge additively (never disabled/removed); extras on the
  * live side are reported as unmanaged. Release builds/uploads/distribution
- * run in a managed GitHub Actions workflow tied to server deploy evidence.
- * App Store metadata lives in project-owned Fastlane files. Final review
- * submission remains an explicit, release-gated Hypervibe command.
+ * run in isolated build/release jobs tied to server deploy evidence.
+ * Hypervibe owns signing preparation and TestFlight submission when their
+ * managed providers are selected; projects retain build commands and metadata.
+ * Final App Store review remains an explicit, release-gated Hypervibe command.
  */
 export const iosSpecSchema = z.object({
   bundleId: z.string().min(1).regex(/^[A-Za-z0-9][A-Za-z0-9.-]*$/, 'bundleId must be a reverse-DNS identifier'),
@@ -516,6 +559,20 @@ export const iosSpecSchema = z.object({
         path: ['release', 'testflight', 'groups', index],
       });
     }
+  }
+
+  const buildSecretNames = new Set(ios.release?.build.requiredSecrets ?? []);
+  const reservedSecretNames = [
+    ...appStoreReleaseSecretNames,
+    ...(ios.release?.signing.provider === 'match' ? matchSigningSecretNames : []),
+  ];
+  for (const name of reservedSecretNames) {
+    if (!buildSecretNames.has(name)) continue;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `${name} is reserved for the Hypervibe-managed release boundary`,
+      path: ['release', 'build', 'requiredSecrets'],
+    });
   }
 });
 
@@ -776,6 +833,10 @@ export const environmentSpecSchema = z.object({
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: z.object({ enabled: z.boolean() }).default({ enabled: false }),
   envVars: z.record(z.string()).default({}),
+  /** Explicitly documents that a shared runtime key does not apply here. */
+  envVarExceptions: z.array(
+    z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'exception keys must be valid environment variable names')
+  ).optional(),
   /**
    * Durable, explicit tombstones for provider variables that Hypervibe should
    * delete. Variables merely omitted from envVars remain untouched.
@@ -909,6 +970,38 @@ export const environmentSpecSchema = z.object({
       });
     }
   }
+  const exceptionKeys = new Set<string>();
+  for (const key of environment.envVarExceptions ?? []) {
+    if (exceptionKeys.has(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable exception "${key}" is listed more than once`,
+        path: ['envVarExceptions'],
+      });
+    }
+    exceptionKeys.add(key);
+    if (key in environment.envVars) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable exception "${key}" cannot also be declared in envVars`,
+        path: ['envVarExceptions'],
+      });
+    }
+    if (environment.envFile?.include.includes(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable exception "${key}" cannot also be selected through envFile.include`,
+        path: ['envVarExceptions'],
+      });
+    }
+    if (environment.removeEnvVars?.includes(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable exception "${key}" cannot also be retired`,
+        path: ['envVarExceptions'],
+      });
+    }
+  }
   const storageByService = new Map<string, string>();
   for (const [storageName, storage] of Object.entries(environment.storage ?? {})) {
     for (const serviceName of storage.injectInto) {
@@ -1013,6 +1106,13 @@ export const environmentSpecSchema = z.object({
           path: ['envVars', key],
         });
       }
+      if (environment.envVarExceptions?.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe-managed environment variable "${key}" cannot also be an environment variable exception`,
+          path: ['envVarExceptions'],
+        });
+      }
       if (environment.envFile?.include.includes(key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -1092,6 +1192,13 @@ export const projectSpecSchema = z.object({
           code: z.ZodIssueCode.custom,
           message: `delegated secret "${key}" cannot also be declared in environments.${environmentName}.envVars`,
           path: ['environments', environmentName, 'envVars', key],
+        });
+      }
+      if (environment.envVarExceptions?.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" cannot also be an environment variable exception in "${environmentName}"`,
+          path: ['environments', environmentName, 'envVarExceptions'],
         });
       }
       if (environment.envFile?.include.includes(key)) {

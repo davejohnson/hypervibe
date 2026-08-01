@@ -8,6 +8,8 @@ import type { Project } from '../entities/project.entity.js';
 import { projectSpecSchema, type IosSpec } from '../spec/spec.schema.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
+import { buildIosReleaseWorkflow } from './ios-release-workflow.service.js';
+export { IOS_RELEASE_REQUIRED_SECRETS } from './ios-release-workflow.service.js';
 import type {
   BranchDeployEnvironmentKind,
   BranchDeployProvider,
@@ -314,12 +316,15 @@ function buildMigrationStep(command: string): string {
   // dependencies installed — the deploy steps that follow build a container
   // image and never run npm ci on the runner themselves.
   return `      - uses: actions/setup-node@v4
+        if: steps.deploy.outputs.operation != 'rollback'
         with:
           node-version: '20'
           cache: 'npm'
       - name: Install dependencies for migrations
+        if: steps.deploy.outputs.operation != 'rollback'
         run: npm ci
       - name: Run migrations
+        if: steps.deploy.outputs.operation != 'rollback'
         run: ${command}
         env:
           DATABASE_URL: \${{ secrets.DATABASE_URL }}
@@ -339,6 +344,23 @@ function buildWorkflowTrigger(target: BranchDeployTarget): string {
     inputs:
       commit_sha:
         description: 'Commit SHA to deploy. Defaults to the selected ref when omitted.'
+        required: false
+        type: string
+      rollback:
+        description: 'Restore a previously verified release. Hypervibe sets this automatically.'
+        required: false
+        default: false
+        type: boolean
+      expected_latest_run_id:
+        description: 'Latest observed deploy run. Hypervibe uses it to reject stale rollback dispatches.'
+        required: false
+        type: string
+      source_artifact_id:
+        description: 'Verified release artifact selected by Hypervibe for rollback.'
+        required: false
+        type: string
+      source_workflow_run_id:
+        description: 'Successful workflow run that emitted the verified rollback artifact.'
         required: false
         type: string`;
   if (!target.autoDeployOnPush) {
@@ -515,182 +537,6 @@ function buildDeploymentFailureEvidenceJob(environmentName: string): string {
 `;
 }
 
-export const IOS_RELEASE_REQUIRED_SECRETS = [
-  'APP_STORE_CONNECT_KEY_ID',
-  'APP_STORE_CONNECT_ISSUER_ID',
-  'APP_STORE_CONNECT_PRIVATE_KEY',
-] as const;
-
-function buildIosReleaseWorkflow(params: {
-  provider: BranchDeployProvider;
-  providerName: string;
-  target: BranchDeployTarget;
-  ios: IosSpec;
-  serverWorkflowPath: string;
-}): { files: Array<{ path: string; content: string }>; requiredSecrets: string[] } | null {
-  const release = params.ios.release;
-  if (!release) return null;
-  const environmentName = params.target.environmentName;
-  const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
-  const workflowPath = `.github/workflows/hypervibe-ios-release-${safeEnvironment}.yml`;
-  const automaticTrigger = release.trigger === 'after-server-deploy'
-    ? `  workflow_run:
-    workflows: [${JSON.stringify(`Deploy ${params.providerName} (${environmentName})`)}]
-    types: [completed]
-`
-    : '';
-  const content = `name: iOS release (${environmentName})
-
-on:
-${automaticTrigger}  workflow_dispatch:
-    inputs:
-      commit_sha:
-        description: Exact monorepo commit already deployed to ${environmentName}
-        required: true
-        type: string
-      server_run_id:
-        description: Successful server deploy workflow run containing matching release evidence
-        required: true
-        type: string
-
-permissions:
-  actions: read
-  contents: read
-
-concurrency:
-  group: hypervibe-deploy-${environmentName}
-  cancel-in-progress: false
-
-jobs:
-  release:
-    if: \${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    runs-on: macos-14
-    timeout-minutes: 60
-    environment: ${environmentName}
-    env:
-      HYPERVIBE_ENVIRONMENT: ${JSON.stringify(environmentName)}
-      HYPERVIBE_BUNDLE_ID: ${JSON.stringify(params.ios.bundleId)}
-      HYPERVIBE_TESTFLIGHT_GROUPS: ${JSON.stringify(JSON.stringify(release.testflight.groups))}
-      HYPERVIBE_USES_NON_EXEMPT_ENCRYPTION: ${JSON.stringify(String(release.testflight.usesNonExemptEncryption))}
-      HYPERVIBE_SUBMIT_BETA_REVIEW: ${JSON.stringify(String(release.testflight.submitForBetaReview))}
-      HYPERVIBE_WORKING_DIRECTORY: ${JSON.stringify(release.build.workingDirectory)}
-      HYPERVIBE_IPA_PATH: ${JSON.stringify(release.build.ipaPath)}
-      HYPERVIBE_RELEASE_SCRIPT: ${JSON.stringify(release.testflight.scriptPath)}
-    steps:
-      - name: Resolve release provenance
-        id: release
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const automatic = context.eventName === 'workflow_run';
-            const requestedSha = automatic
-              ? ''
-              : String(context.payload.inputs.commit_sha || '').trim();
-            const serverRunId = automatic
-              ? String(context.payload.workflow_run.id)
-              : String(context.payload.inputs.server_run_id || '').trim();
-            if (requestedSha && !/^[0-9a-f]{40}$/i.test(requestedSha)) throw new Error('commit_sha must be a full 40-character Git SHA');
-            if (!/^[0-9]+$/.test(serverRunId)) throw new Error('server_run_id must be a GitHub Actions run id');
-            core.setOutput('requested_sha', requestedSha);
-            core.setOutput('server_run_id', serverRunId);
-      - name: Download verified server release evidence
-        uses: actions/download-artifact@v4
-        with:
-          path: .
-          merge-multiple: true
-          github-token: \${{ github.token }}
-          run-id: \${{ steps.release.outputs.server_run_id }}
-      - name: Verify server release gate
-        id: gate
-        shell: bash
-        env:
-          HYPERVIBE_REQUESTED_SHA: \${{ steps.release.outputs.requested_sha }}
-          HYPERVIBE_REQUIRED_SERVICES: ${JSON.stringify(JSON.stringify(release.services))}
-        run: |
-          node -e 'const fs=require("fs"); const evidence=JSON.parse(fs.readFileSync("hypervibe-server-release.json","utf8")); const required=JSON.parse(process.env.HYPERVIBE_REQUIRED_SERVICES); if(evidence.version!==1||evidence.environment!==process.env.HYPERVIBE_ENVIRONMENT) throw new Error("server evidence environment mismatch"); if(evidence.server.repository!==process.env.GITHUB_REPOSITORY||!/^[0-9a-f]{40}$/i.test(evidence.server.sha)) throw new Error("server evidence repository/SHA mismatch"); if(process.env.HYPERVIBE_REQUESTED_SHA&&evidence.server.sha!==process.env.HYPERVIBE_REQUESTED_SHA) throw new Error("server evidence does not match requested SHA"); for(const service of required) if(!evidence.services.includes(service)) throw new Error("server evidence is missing service "+service); fs.appendFileSync(process.env.GITHUB_OUTPUT, "sha="+evidence.server.sha+"\\n");'
-      - uses: actions/checkout@v4
-        with:
-          ref: \${{ steps.gate.outputs.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.3'
-          bundler-cache: true
-      - name: Verify project-owned release script
-        shell: bash
-        run: |
-          if [ ! -f "$HYPERVIBE_RELEASE_SCRIPT" ]; then
-            echo "::error::Missing project-owned iOS release script: $HYPERVIBE_RELEASE_SCRIPT"
-            exit 1
-          fi
-      - name: Build signed IPA
-        working-directory: ${JSON.stringify(release.build.workingDirectory)}
-        env:
-${release.build.requiredSecrets.map((name) => `          ${name}: \${{ secrets.${name} }}`).join('\n') || '          HYPERVIBE_NO_ADDITIONAL_BUILD_SECRETS: "true"'}
-        run: |
-${release.build.command.split('\n').map((line) => `          ${line}`).join('\n')}
-      - name: Validate IPA identity
-        id: ipa
-        shell: bash
-        env:
-          HYPERVIBE_RELEASE_SHA: \${{ steps.gate.outputs.sha }}
-        run: |
-          python3 - <<'PY'
-          import os, pathlib, plistlib, zipfile
-          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-          ipa = (root / os.environ["HYPERVIBE_WORKING_DIRECTORY"] / os.environ["HYPERVIBE_IPA_PATH"]).resolve()
-          if root not in ipa.parents or not ipa.is_file():
-              raise SystemExit("IPA is missing or outside the checked-out repository")
-          with zipfile.ZipFile(ipa) as archive:
-              for info in archive.infolist():
-                  path = pathlib.PurePosixPath(info.filename)
-                  if path.is_absolute() or ".." in path.parts or (info.external_attr >> 16) & 0o170000 == 0o120000:
-                      raise SystemExit("unsafe IPA archive entry: " + info.filename)
-              plists = [name for name in archive.namelist() if name.startswith("Payload/") and name.count("/") == 2 and name.endswith(".app/Info.plist")]
-              if len(plists) != 1:
-                  raise SystemExit("expected exactly one Payload/*.app/Info.plist")
-              info = plistlib.loads(archive.read(plists[0]))
-          if info.get("CFBundleIdentifier") != os.environ["HYPERVIBE_BUNDLE_ID"]:
-              raise SystemExit("IPA bundle identifier does not match desired ios.bundleId")
-          version = str(info.get("CFBundleShortVersionString", ""))
-          build = str(info.get("CFBundleVersion", ""))
-          if not version or not build:
-              raise SystemExit("IPA is missing marketing version or build number")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write("path=" + str(ipa) + "\\n")
-              output.write("version=" + version + "\\n")
-              output.write("build=" + build + "\\n")
-          PY
-      - name: Run project-owned TestFlight release script
-        env:
-          APP_STORE_CONNECT_KEY_ID: \${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          APP_STORE_CONNECT_ISSUER_ID: \${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          APP_STORE_CONNECT_PRIVATE_KEY: \${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
-          HYPERVIBE_IPA_PATH: \${{ steps.ipa.outputs.path }}
-          HYPERVIBE_RELEASE_SHA: \${{ steps.gate.outputs.sha }}
-          HYPERVIBE_MARKETING_VERSION: \${{ steps.ipa.outputs.version }}
-          HYPERVIBE_BUILD_NUMBER: \${{ steps.ipa.outputs.build }}
-        run: node "$HYPERVIBE_RELEASE_SCRIPT"
-      - name: Upload iOS release manifest
-        uses: actions/upload-artifact@v4
-        with:
-          name: hypervibe-ios-release-${safeEnvironment}-\${{ steps.gate.outputs.sha }}
-          path: hypervibe-ios-release.json
-          if-no-files-found: error
-          retention-days: 90
-`;
-  return {
-    files: [{ path: workflowPath, content }],
-    requiredSecrets: [
-      ...IOS_RELEASE_REQUIRED_SECRETS,
-      ...release.build.requiredSecrets,
-    ],
-  };
-}
-
 export function buildBranchDeployWorkflow(
   provider: BranchDeployProvider,
   target: BranchDeployTarget,
@@ -708,10 +554,13 @@ export function buildBranchDeployWorkflow(
     : [...deployBlock.requiredSecrets];
   const requiredVariables = [...deployBlock.requiredVariables];
   const permissionsBlock = deployBlock.permissions ?? `    permissions:
+      actions: read
       contents: read
 `;
 
   const content = `name: Deploy ${providerName} (${target.environmentName})
+
+run-name: Deploy ${target.environmentName} \${{ inputs.commit_sha || github.sha }} \${{ inputs.rollback && '(rollback)' || '' }}
 
 on:
 ${buildWorkflowTrigger(target)}
@@ -732,12 +581,75 @@ ${permissionsBlock.trimEnd()}
         with:
           script: |
             const inputSha = ((context.payload.inputs || {}).commit_sha || '').trim();
-            const sha = inputSha || process.env.GITHUB_SHA;
+            const sha = (inputSha || process.env.GITHUB_SHA).toLowerCase();
             if (!/^[0-9a-f]{40}$/i.test(sha)) {
               throw new Error('commit_sha must be a full 40-character Git commit SHA, got: ' + JSON.stringify(inputSha || sha));
             }
+            const rollbackInput = (context.payload.inputs || {}).rollback;
+            const operation = rollbackInput === true || rollbackInput === 'true' ? 'rollback' : 'deploy';
             core.setOutput('sha', sha);
-            core.info('Deploying commit ' + sha);
+            core.setOutput('operation', operation);
+            core.info((operation === 'rollback' ? 'Restoring' : 'Deploying') + ' commit ' + sha);
+      - name: Verify rollback release evidence
+        if: steps.deploy.outputs.operation == 'rollback'
+        uses: actions/github-script@v8
+        env:
+          HYPERVIBE_ENVIRONMENT: ${JSON.stringify(target.environmentName)}
+          HYPERVIBE_ROLLBACK_SHA: \${{ steps.deploy.outputs.sha }}
+          HYPERVIBE_WORKFLOW_REF: \${{ github.workflow_ref }}
+          HYPERVIBE_EXPECTED_LATEST_RUN_ID: \${{ inputs.expected_latest_run_id }}
+          HYPERVIBE_SOURCE_ARTIFACT_ID: \${{ inputs.source_artifact_id }}
+          HYPERVIBE_SOURCE_WORKFLOW_RUN_ID: \${{ inputs.source_workflow_run_id }}
+        with:
+          script: |
+            const environment = process.env.HYPERVIBE_ENVIRONMENT;
+            const targetSha = process.env.HYPERVIBE_ROLLBACK_SHA.toLowerCase();
+            const safeEnvironment = environment.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+            const expectedName = 'hypervibe-server-release-' + safeEnvironment + '-' + targetSha;
+            const expectedLatestRunId = Number(process.env.HYPERVIBE_EXPECTED_LATEST_RUN_ID);
+            if (!Number.isSafeInteger(expectedLatestRunId) || expectedLatestRunId <= 0) {
+              throw new Error('Rollback requires Hypervibe expected_latest_run_id evidence');
+            }
+            const sourceArtifactId = Number(process.env.HYPERVIBE_SOURCE_ARTIFACT_ID);
+            const sourceWorkflowRunId = Number(process.env.HYPERVIBE_SOURCE_WORKFLOW_RUN_ID);
+            if (!Number.isSafeInteger(sourceArtifactId) || sourceArtifactId <= 0
+                || !Number.isSafeInteger(sourceWorkflowRunId) || sourceWorkflowRunId <= 0) {
+              throw new Error('Rollback requires exact Hypervibe source artifact and workflow run evidence');
+            }
+            const workflowPath = process.env.HYPERVIBE_WORKFLOW_REF.split('@')[0].split('/').slice(2).join('/');
+            const recentRuns = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: workflowPath,
+              per_page: 10,
+            });
+            const latestPriorRun = recentRuns.data.workflow_runs.find((run) => run.id !== context.runId);
+            if (!latestPriorRun || latestPriorRun.id !== expectedLatestRunId) {
+              throw new Error(
+                'Rollback dispatch is stale: expected latest run ' + expectedLatestRunId
+                + ', observed ' + (latestPriorRun ? latestPriorRun.id : 'none')
+              );
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: sourceWorkflowRunId,
+              per_page: 100,
+            });
+            const artifact = artifacts.find((candidate) => candidate.id === sourceArtifactId);
+            if (!artifact || artifact.name !== expectedName || artifact.expired
+                || artifact.workflow_run?.id !== sourceWorkflowRunId) {
+              throw new Error('Exact Hypervibe rollback artifact evidence is missing, expired, or does not match SHA ' + targetSha);
+            }
+            const run = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: sourceWorkflowRunId,
+            });
+            if (run.data.conclusion !== 'success' || run.data.path !== workflowPath) {
+              throw new Error('Rollback evidence for ' + targetSha + ' did not come from a successful run of ' + workflowPath);
+            }
+            core.info('Verified rollback evidence from successful workflow run ' + run.data.id);
       - uses: actions/checkout@v4
         with:
           ref: \${{ steps.deploy.outputs.sha }}
@@ -753,16 +665,14 @@ ${buildDeploymentContractStep(target.environmentName)}${migrationStep}${deployBl
           name: hypervibe-server-release-${safeEnvironment}-\${{ steps.deploy.outputs.sha }}
           path: hypervibe-server-release.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 ${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
 
   const iosRelease = ios
     ? buildIosReleaseWorkflow({
-      provider,
       providerName,
       target,
       ios,
-      serverWorkflowPath: `.github/workflows/${filename}`,
     })
     : null;
   if (iosRelease) requiredSecrets = [...requiredSecrets, ...iosRelease.requiredSecrets];

@@ -28,6 +28,7 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
   return {
     displayName: 'Cloud Run',
     permissions: `    permissions:
+      actions: read
       contents: read
 `,
     steps: `      - name: Resolve Cloud Run image URI

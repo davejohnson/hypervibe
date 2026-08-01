@@ -47,6 +47,11 @@ import { validateProjectSpecProviders } from '../domain/services/provider-spec-v
 import { buildManagedDatabaseEnvVars } from '../domain/services/database-env.js';
 import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
 import type { ObservedState } from '../domain/ports/observe.port.js';
+import {
+  environmentVariableCoverage,
+  environmentVariableCoverageIssueId,
+  type EnvironmentVariableCoverageReport,
+} from '../domain/services/environment-variable-coverage.service.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
@@ -335,10 +340,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_spec_set',
-    'Create or update the desired-state spec for a project (services, databases, Redis caches, storage buckets, queues, domains, and deploy infrastructure). This is the source of truth that hv_plan diffs against live infrastructure. When run inside a git worktree, Hypervibe writes .hypervibe/spec.json. Merges by default; pass replace=true to overwrite or null to delete a key.',
+    'Create or update desired state for a project, including runtime configuration and infrastructure. New runtime keys must cover every non-local environment with matching services unless envVarExceptions explicitly documents that a key does not apply. Hypervibe never copies values between environments. This is the source of truth that hv_plan diffs against live infrastructure. When run inside a git worktree, Hypervibe writes .hypervibe/spec.json. Merges by default; pass replace=true to overwrite or null to delete a key.',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Canonical shape: { gitRemoteUrl?, github?: { repository?, canonicalEnvironment?, actions?: { <id>: typed check|autofix|pull-request-review|code-audit }, dependencies?, security?, collaboration? }, secrets?: { <ENV_KEY>: delegated-secret declaration }, environments: { <env>: { hosting, services, database?, cache?, storage?, queues?, domain?, email?, envVars?, deploy?, migrations?, ios? } } }. database.engine is postgres; cache.engine is redis. Services may declare databaseEnvAliases such as { POSTGRES_DB_URL: "DATABASE_URL" } without storing the resolved value. github actions use typed behavior plus triggers/schedules; a schedule is five-field POSIX cron with an optional IANA timezone. GitHub workflow files and repository settings are planned and applied through the desired-state loop, with generated infrastructure delivered through a reviewable PR. GitHub and OpenAI connections are required only for their corresponding GitHub actions and do not block unrelated providers. The deprecated top-level collaboration field remains readable and is moved to github.collaboration on the next write. Delegated secrets declare ownership and targets but never values; pass values to hv_plan with secretRefs. database.seedCommand is a visible, receipt-backed one-shot bootstrap. Schema migrations run during container startup or a durable declared predeploy/release command; database moves and resets must be modeled as desired-state lifecycle actions. deploy.trigger="ci" is the portable branch-deploy default; trigger="native" is provider-specific and confirmation-gated. Declare iOS builds and TestFlight distribution under ios.release so the managed workflow invokes the reviewed project release script.'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Canonical shape: { gitRemoteUrl?, github?: { repository?, canonicalEnvironment?, actions?: { <id>: typed check|autofix|pull-request-review|code-audit }, dependencies?, security?, collaboration? }, secrets?: { <ENV_KEY>: delegated-secret declaration }, environments: { <env>: { hosting, services, database?, cache?, storage?, queues?, domain?, email?, envVars?, envVarExceptions?, deploy?, migrations?, ios? } } }. New runtime keys must be declared in every non-local environment sharing a desired service, with separately chosen values or secret references; use envVarExceptions only for intentional absence. database.engine is postgres; cache.engine is redis. Services may declare databaseEnvAliases such as { POSTGRES_DB_URL: "DATABASE_URL" } without storing the resolved value. github actions use typed behavior plus triggers/schedules; a schedule is five-field POSIX cron with an optional IANA timezone. GitHub workflow files and repository settings are planned and applied through the desired-state loop, with generated infrastructure delivered through a reviewable PR. GitHub and OpenAI connections are required only for their corresponding GitHub actions and do not block unrelated providers. The deprecated top-level collaboration field remains readable and is moved to github.collaboration on the next write. Delegated secrets declare ownership and targets but never values; pass values to hv_plan with secretRefs. database.seedCommand is a visible, receipt-backed one-shot bootstrap. Schema migrations run during container startup or a durable declared predeploy/release command; database moves and resets must be modeled as desired-state lifecycle actions. deploy.trigger="ci" is the portable branch-deploy default; trigger="native" is provider-specific and confirmation-gated. Under ios.release, projects own the build command and artifact path while Hypervibe can prepare Match signing assets read-only and owns the isolated TestFlight submission runtime.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external app access such as the Railway GitHub App.'),
     },
@@ -360,6 +365,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       let result;
+      let coverageReport: EnvironmentVariableCoverageReport = { complete: true, issues: [] };
       try {
         const previousSpec = specStore.get(project)?.spec ?? null;
         const baseSpec = previousSpec ?? { version: 1 as const, project: project.name, environments: {} };
@@ -371,6 +377,21 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           }
           : deepMergeSpec(baseSpec, spec);
         const candidateSpec = projectSpecSchema.parse(canonicalizeLegacyGitHubSpec(candidateInput));
+        coverageReport = environmentVariableCoverage(candidateSpec);
+        const previousIssueIds = new Set(
+          previousSpec
+            ? environmentVariableCoverage(previousSpec).issues.map(environmentVariableCoverageIssueId)
+            : []
+        );
+        const introducedCoverageIssues = coverageReport.issues.filter(
+          (issue) => !previousIssueIds.has(environmentVariableCoverageIssueId(issue))
+        );
+        if (introducedCoverageIssues.length > 0) {
+          throw new HvError('VALIDATION', 'Environment-variable coverage is incomplete.', {
+            details: introducedCoverageIssues,
+            hint: 'Declare each key in every listed matching environment using a separately chosen envVars value, envFile include, or delegated-secret target. If a key intentionally does not apply, add it to that environment\'s envVarExceptions. Hypervibe never copies values between environments.',
+          });
+        }
         const nativeChanges = providerNativeDeployChanges(candidateSpec, previousSpec);
         if (nativeChanges.length > 0 && !confirmNativeDeploy) {
           throw new HvError('CONFIRM_REQUIRED', 'Provider-native branch deploys require explicit confirmation.', {
@@ -392,9 +413,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       project = syncProjectGitRemoteUrl(ctx, project, result.spec);
       const connections = requiredConnectionChecklist(ctx, result.spec);
       const nativeDeploys = providerNativeDeployChanges(result.spec, null);
-      const warnings = nativeDeploys.length > 0
-        ? [nativeDeployConfirmationHint(nativeDeploys)]
-        : [];
+      const warnings = [
+        ...(nativeDeploys.length > 0 ? [nativeDeployConfirmationHint(nativeDeploys)] : []),
+        ...(coverageReport.issues.length > 0
+          ? [`The spec still has ${coverageReport.issues.length} pre-existing environment-variable coverage gap(s). Unrelated changes remain allowed, but new gaps are blocked.`]
+          : []),
+      ];
 
       return commandSuccess(
         {
@@ -402,6 +426,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           revision: result.revision,
           specSource: result.source ?? { kind: 'local' },
           spec: result.spec,
+          environmentVariableCoverage: coverageReport,
           connections,
         },
         {

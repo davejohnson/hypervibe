@@ -5,6 +5,7 @@ import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { requiresProductionConfirm } from '../domain/services/policy.service.js';
 import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { executeRollback, ROLLBACK_NOTE } from '../domain/services/rollback.service.js';
+import { CI_ROLLBACK_NOTE } from '../domain/services/ci-rollback.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
@@ -204,28 +205,64 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
 
   commands.register(
     'hv_rollback',
-    'Rollback by redeploying services from the most recent successful deploy run (or a specific run via toRunId). Recorded as a plan/apply run pair (planId + applyRunId returned) with per-service receipts; redeploys current code, not a pinned image. Protected environments require confirm=true.',
+    'Rollback an environment through one plan-authorized command. Managed GitHub Actions deploys restore the previous verified exact-SHA release (or toSha) and return pending until the workflow is verified with hv_ci_status; direct provider deploys retain toRunId rollback. Database migrations and provider-side manual configuration are never reversed implicitly. Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
       toRunId: z.string().uuid().optional().describe('Specific successful deploy run ID to roll back to'),
+      toSha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Specific previously verified exact Git SHA for a managed CI rollback'),
       services: z.array(z.string()).optional().describe('Specific services to rollback (default: all in target run)'),
       confirm: confirmField,
     },
-    wrapCommandHandler(async ({ project: projectRef, env, toRunId, services, confirm }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, toRunId, toSha, services, confirm }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
 
       assertConfirmed(project, environment, confirm, 'hv_rollback');
 
-      const result = await executeRollback({ project, environment, toRunId, services });
+      const result = await executeRollback({
+        project,
+        environment,
+        ...(toRunId ? { toRunId } : {}),
+        ...(toSha ? { toSha } : {}),
+        ...(services ? { services } : {}),
+      });
       if (!result.ok) {
         const code = result.reason === 'no_adapter' ? 'MISSING_CONNECTION'
-          : result.reason === 'invalid_run' ? 'VALIDATION'
+          : ['invalid_run', 'invalid_target', 'workflow_drift', 'workflow_inactive', 'rollback_in_progress'].includes(result.reason)
+            ? 'VALIDATION'
+            : result.reason === 'observation_failed' ? 'PROVIDER_ERROR'
             : 'NOT_FOUND';
-        return commandError(code, result.error, code === 'MISSING_CONNECTION'
-          ? { details: connectionRecoveryDetails([{ provider: project.defaultPlatform }]) }
-          : undefined);
+        return commandError(code, result.error, {
+          ...(code === 'MISSING_CONNECTION'
+            ? { details: connectionRecoveryDetails([{ provider: 'provider' in result && result.provider ? result.provider : project.defaultPlatform }]) }
+            : {}),
+          ...('hint' in result && result.hint ? { hint: result.hint } : {}),
+          ...(result.reason === 'workflow_drift' ? { next: ['hv_plan', 'hv_apply'] } : {}),
+        });
+      }
+
+      if ('strategy' in result && result.strategy === 'managed-ci') {
+        const { ok: _ok, ...payload } = result;
+        if (!result.pending) {
+          return commandError('PROVIDER_ERROR', 'Rollback workflow was not dispatched.', {
+            details: { ...payload, note: CI_ROLLBACK_NOTE },
+            hint: 'Inspect the rollback plan/apply receipts and start a fresh hv_rollback only after resolving the blocker.',
+            next: ['hv_runs'],
+          });
+        }
+        return commandSuccess(
+          { ...payload, note: CI_ROLLBACK_NOTE },
+          {
+            hint: 'Rollback was dispatched but is not yet proven. Inspect the managed workflow with hv_ci_status; after success, verify the public endpoint with hv_health.',
+            warnings: [CI_ROLLBACK_NOTE],
+            next: ['hv_ci_status'],
+            agentInstruction: {
+              action: 'stop_and_report',
+              message: 'Stop here. Report the exact rollback SHA and pending workflow, then inspect it only through hv_ci_status before running hv_health after success.',
+            },
+          }
+        );
       }
 
       const { ok: _ok, success, ...payload } = result;

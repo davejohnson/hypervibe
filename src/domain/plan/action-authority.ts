@@ -32,11 +32,13 @@ import {
 import { isHostingEnvRemovalAction } from '../services/hosting-env.service.js';
 import { isProviderNativeDeploySourceAction } from '../services/provider-native-deploy-source.service.js';
 import { CACHE_OPERATIONS, isCacheAction } from '../services/cache-plan.service.js';
+import { GITHUB_ACTIONS_ROLLBACK_OPERATION } from '../services/ci-rollback.contract.js';
 
 export type PlanMutationCapability =
   | 'hosting.environment.ensure'
   | 'domain.registration.mutate'
   | 'github.ci.sync'
+  | 'github.ci.rollback'
   | 'github.applied-spec-hash.sync'
   | 'github.collaboration.sync'
   | 'github.infrastructure.sync'
@@ -117,6 +119,11 @@ function metadataStringArray(action: PlanAction, key: string): string[] | undefi
     return undefined;
   }
   return value;
+}
+
+function metadataPositiveInteger(action: PlanAction, key: string): number | undefined {
+  const value = action.metadata?.[key];
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 function operationTypeIsValid(action: PlanAction): boolean {
@@ -223,6 +230,21 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'repository')
   ) {
     return authority(action, 'github.ci.sync');
+  }
+  if (
+    action.metadata?.operation === GITHUB_ACTIONS_ROLLBACK_OPERATION
+    && exactResource(action, 'ci', 'github')
+    && action.type === 'update'
+    && action.resource.name.startsWith('deploy-branch:')
+    && metadataString(action, 'repository')
+    && metadataString(action, 'workflow')
+    && metadataString(action, 'ref')
+    && /^[0-9a-f]{40}$/i.test(metadataString(action, 'targetSha') ?? '')
+    && metadataPositiveInteger(action, 'targetArtifactId')
+    && metadataPositiveInteger(action, 'targetWorkflowRunId')
+    && metadataPositiveInteger(action, 'observedLatestWorkflowRunId')
+  ) {
+    return authority(action, 'github.ci.rollback');
   }
   if (
     isGitHubActionsAppliedSpecHashAction(action)
