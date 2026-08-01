@@ -83,7 +83,8 @@
   },
   "files": [
     "dist/",
-    "data/.gitkeep"
+    "data/.gitkeep",
+    "templates/"
   ],
   "engines": {
     "node": ">=20.0.0"

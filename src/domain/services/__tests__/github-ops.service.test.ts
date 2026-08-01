@@ -678,13 +678,13 @@ describe('github tools', () => {
             workingDirectory: 'apps/ios',
             command: 'bundle exec fastlane build',
             ipaPath: 'build/Example.ipa',
-            requiredSecrets: ['MATCH_PASSWORD'],
+            requiredSecrets: ['SENTRY_AUTH_TOKEN'],
           },
+          signing: { provider: 'match', gitBranch: 'main' },
           testflight: {
             groups: ['beta'],
             usesNonExemptEncryption: false,
             submitForBetaReview: false,
-            scriptPath: 'scripts/hypervibe-ios-release.mjs',
           },
         },
       }
@@ -710,25 +710,46 @@ describe('github tools', () => {
     expect(releaseWorkflow).toContain('server evidence repository/SHA mismatch');
     expect(releaseWorkflow).toContain('concurrency:');
     expect(releaseWorkflow).toContain('group: hypervibe-deploy-development');
+    expect(releaseWorkflow).toContain('  build:');
+    expect(releaseWorkflow).toContain('  release:\n    needs: build');
     expect(releaseWorkflow).toContain("node-version: '20'");
     expect(releaseWorkflow).toContain('ruby/setup-ruby@v1');
     expect(releaseWorkflow).toContain("ruby-version: '3.3'");
     expect(releaseWorkflow).toContain('bundler-cache: true');
     expect(releaseWorkflow.indexOf('ruby/setup-ruby@v1'))
       .toBeLessThan(releaseWorkflow.indexOf('Build signed IPA'));
-    expect(releaseWorkflow).toContain('Run project-owned TestFlight release script');
-    expect(releaseWorkflow).toContain('node "$HYPERVIBE_RELEASE_SCRIPT"');
-    expect(releaseWorkflow).toContain('HYPERVIBE_RELEASE_SCRIPT: "scripts/hypervibe-ios-release.mjs"');
+    expect(releaseWorkflow).toContain('Prepare Hypervibe-managed signing assets');
+    expect(releaseWorkflow).toContain('bundle exec fastlane match appstore --readonly');
+    expect(releaseWorkflow).toContain('MATCH_GIT_BRANCH: "main"');
+    expect(releaseWorkflow).toContain('HYPERVIBE_PROVISIONING_PROFILE_NAME');
+    expect(releaseWorkflow).toContain('Materialize Hypervibe release runtime');
+    expect(releaseWorkflow).toContain('Run Hypervibe-managed TestFlight release');
+    expect(releaseWorkflow).not.toContain('project-owned TestFlight release script');
+    expect(releaseWorkflow).not.toContain('HYPERVIBE_RELEASE_SCRIPT');
     expect(releaseWorkflow).not.toContain('xcrun altool --upload-app');
-    const jobConfiguration = releaseWorkflow.slice(0, releaseWorkflow.indexOf('    steps:'));
-    expect(jobConfiguration).not.toContain('APP_STORE_CONNECT_PRIVATE_KEY');
-    expect(releaseWorkflow.indexOf('Build signed IPA'))
-      .toBeLessThan(releaseWorkflow.indexOf('APP_STORE_CONNECT_PRIVATE_KEY:'));
+    const releaseJobStart = releaseWorkflow.indexOf('\n  release:\n');
+    const buildJob = releaseWorkflow.slice(0, releaseJobStart);
+    const releaseJob = releaseWorkflow.slice(releaseJobStart);
+    expect(buildJob).not.toContain('APP_STORE_CONNECT_PRIVATE_KEY');
+    expect(releaseJob).toContain('APP_STORE_CONNECT_PRIVATE_KEY:');
+    expect(releaseJob).not.toContain('actions/checkout');
+    const buildCommand = buildJob.slice(
+      buildJob.indexOf('      - name: Build signed IPA'),
+      buildJob.indexOf('      - name: Validate IPA identity')
+    );
+    expect(buildCommand).toContain('SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}');
+    expect(buildCommand).not.toContain('MATCH_PASSWORD');
+    expect(buildCommand).not.toContain('MATCH_GIT_BASIC_AUTHORIZATION');
+    expect(releaseWorkflow).toContain('Verify release IPA identity');
+    expect(releaseWorkflow).toContain('hypervibe-ios-build-development-${{ steps.gate.outputs.sha }}');
     expect(workflow.requiredSecrets).toEqual(expect.arrayContaining([
       'APP_STORE_CONNECT_KEY_ID',
       'APP_STORE_CONNECT_ISSUER_ID',
       'APP_STORE_CONNECT_PRIVATE_KEY',
+      'MATCH_GIT_URL',
       'MATCH_PASSWORD',
+      'MATCH_GIT_BASIC_AUTHORIZATION',
+      'SENTRY_AUTH_TOKEN',
     ]));
   });
 
