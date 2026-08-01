@@ -127,6 +127,45 @@ describe('GitHub infrastructure plan/apply', () => {
     expect(result.blocked.find((block) => block.provider === 'openai')).toBeUndefined();
   });
 
+  it('blocks unsafe reconciliation until an external autofix source declares its artifact pattern', async () => {
+    const legacySpec = projectSpecSchema.parse({
+      version: 1,
+      project: 'example',
+      github: {
+        actions: {
+          fix: { kind: 'autofix', sources: ['staging-deploy'] },
+        },
+        externalWorkflows: {
+          'staging-deploy': {
+            workflowName: 'Deploy Railway (staging)',
+            failureArtifacts: ['hypervibe-deploy-failure.log'],
+          },
+        },
+      },
+      environments: { production: { hosting: { provider: 'railway' }, services: {} } },
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+
+    const result = await planGitHubInfrastructure({
+      project,
+      spec: legacySpec,
+      environmentName: 'production',
+    });
+
+    expect(result.actions[0]).toMatchObject({
+      id: GITHUB_INFRASTRUCTURE_ACTION_ID,
+      type: 'update',
+      metadata: { blockedReason: 'github_autofix_artifact_contract_incomplete' },
+    });
+    expect(result.warnings).toContain(
+      'GitHub autofix fix source staging-deploy must declare github.externalWorkflows.staging-deploy.failureArtifactPattern before reconciliation.'
+    );
+    const workflow = (result.actions[0].metadata?.desiredFiles as Array<{ path: string; content: string }>).find(
+      (file) => file.path.endsWith('hypervibe-fix.yml')
+    )?.content;
+    expect(workflow).toContain('hypervibe-no-evidence-artifact-match');
+  });
+
   it('plans action-scoped OpenAI and native settings only after files are merged', async () => {
     const desired = new Map(compileManagedGitHubFiles(spec().github!).map((file) => [file.path, file.content]));
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, filePath) => desired.get(filePath) ?? null);

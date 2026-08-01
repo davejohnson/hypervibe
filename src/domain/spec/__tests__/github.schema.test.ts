@@ -98,6 +98,50 @@ describe('github desired state', () => {
     );
   });
 
+  it('keeps legacy external evidence readable while accepting a narrow artifact pattern', () => {
+    const legacy = projectSpecSchema.parse(baseSpec({
+      actions: { fix: { kind: 'autofix', sources: ['deploy'] } },
+      externalWorkflows: {
+        deploy: {
+          workflowName: 'Deploy staging',
+          failureArtifacts: ['hypervibe-deploy-failure.log'],
+        },
+      },
+    }));
+    expect(legacy.github?.externalWorkflows.deploy.failureArtifactPattern).toBeUndefined();
+
+    const current = projectSpecSchema.parse(baseSpec({
+      actions: { fix: { kind: 'autofix', sources: ['deploy'] } },
+      externalWorkflows: {
+        deploy: {
+          workflowName: 'Deploy staging',
+          failureArtifactPattern: 'deploy-staging-failure-*',
+          failureArtifacts: ['hypervibe-deploy-failure.log'],
+        },
+      },
+    }));
+    expect(current.github?.externalWorkflows.deploy.failureArtifactPattern).toBe('deploy-staging-failure-*');
+  });
+
+  it('rejects broad or expression-shaped evidence artifact patterns', () => {
+    const result = projectSpecSchema.safeParse(baseSpec({
+      actions: { fix: { kind: 'autofix', sources: ['deploy'] } },
+      externalWorkflows: {
+        deploy: {
+          workflowName: 'Deploy staging',
+          failureArtifactPattern: '${{ github.run_id }}',
+          failureArtifacts: ['hypervibe-deploy-failure.log'],
+        },
+      },
+    }));
+
+    expect(result.success).toBe(false);
+    const messages = result.success ? [] : result.error.issues.map((issue) => issue.message);
+    expect(messages).toContain(
+      'failure artifact patterns must be a narrow artifact name or identifier-shaped prefix ending in *'
+    );
+  });
+
   it('keeps autofix pull requests and code-audit findings review-gated', () => {
     const result = projectSpecSchema.safeParse(baseSpec({
       actions: {

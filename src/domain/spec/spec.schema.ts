@@ -203,6 +203,21 @@ const githubFailureArtifactPathSchema = z.string().min(1).superRefine((value, ct
   }
 });
 
+const githubFailureArtifactPatternSchema = z.string().min(1).superRefine((value, ctx) => {
+  const literalPrefix = value.endsWith('*') ? value.slice(0, -1) : value;
+  const unsafe = value.trim() !== value
+    || /[\r\n\0/\\]/.test(value)
+    || value.includes('${{')
+    || literalPrefix.length < 3
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]*(?:\*)?$/.test(value);
+  if (unsafe) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'failure artifact patterns must be a narrow artifact name or identifier-shaped prefix ending in *',
+    });
+  }
+});
+
 const githubAiAgentSchema = z.object({
   provider: z.literal('openai').default('openai'),
   model: z.literal('gpt-5.6-sol').default('gpt-5.6-sol'),
@@ -296,6 +311,8 @@ export const githubSpecSchema = z.object({
   /** Existing workflow names that autofix may consume but Hypervibe does not own. */
   externalWorkflows: z.record(automationIdSchema, z.object({
     workflowName: z.string().min(1),
+    /** Exact artifact name or narrow trailing-wildcard pattern. Optional only for legacy spec readability. */
+    failureArtifactPattern: githubFailureArtifactPatternSchema.optional(),
     failureArtifacts: z.array(githubFailureArtifactPathSchema).default([]),
   }).strict()).default({}),
   dependencies: z.object({
