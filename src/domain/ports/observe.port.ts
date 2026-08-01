@@ -92,7 +92,6 @@ export interface ObservedState {
     project?: 'complete' | 'unknown';
     environment?: 'complete' | 'unknown';
     services?: 'complete' | 'unknown';
-    environmentVariables?: 'complete' | 'unknown';
     databases?: 'complete' | 'unknown';
     caches?: 'complete' | 'unknown';
     storage?: 'complete' | 'unknown';
