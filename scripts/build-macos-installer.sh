@@ -146,10 +146,17 @@ if [ -n "${NOTARY_PROFILE:-}" ]; then
         echo "NOTARY_PROFILE requires a Developer ID CODESIGN_IDENTITY." >&2
         exit 2
     fi
+    NOTARY_KEYCHAIN_ARGS=()
+    if [ -n "${NOTARY_KEYCHAIN:-}" ]; then
+        NOTARY_KEYCHAIN_ARGS=(--keychain "$NOTARY_KEYCHAIN")
+    fi
     xcrun notarytool submit "$DMG" \
         --keychain-profile "$NOTARY_PROFILE" \
+        "${NOTARY_KEYCHAIN_ARGS[@]}" \
         --wait
     xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 fi
 
 echo "Created $DMG"

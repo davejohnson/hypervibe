@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const packageJsonPath = path.join(repoRoot, 'package.json');
 const packageLockPath = path.join(repoRoot, 'package-lock.json');
-const releaseWorkflow = 'publish-private-package.yml';
+const releaseWorkflow = 'release.yml';
 const semverPattern = /^(\d+)\.(\d+)\.(\d+)$/;
 
 function usage() {

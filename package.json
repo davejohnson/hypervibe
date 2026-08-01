@@ -25,8 +25,8 @@
     "hypervibe-mcp": "dist/mcp.js"
   },
   "publishConfig": {
-    "access": "restricted",
-    "registry": "https://npm.pkg.github.com"
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",

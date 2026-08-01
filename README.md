@@ -71,25 +71,10 @@ Download the latest installer from
 Choose `arm64` for Apple Silicon Macs or `x86_64` for Intel Macs. Each DMG has
 an adjacent `.sha256` checksum file.
 
-### 1. Authenticate to the Private Package
+### 1. Install the CLI
 
-Hypervibe is distributed as a private package through GitHub Packages. Ask the
-package owner to grant your GitHub account read access, then create a
-[classic personal access token](https://github.com/settings/tokens/new?scopes=read%3Apackages)
-with the `read:packages` scope. If your account uses organization SSO, authorize
-the token for that organization.
-
-Configure npm to use GitHub Packages for the `@davejohnson` scope:
-
-```bash
-npm login --scope=@davejohnson --auth-type=legacy --registry=https://npm.pkg.github.com
-```
-
-Use your GitHub username, the classic token as the password, and your GitHub
-email address when prompted. Keep the token in your local npm configuration;
-never commit it to this repository.
-
-### 2. Install the CLI
+Published releases are public on the npm registry. Installation does not
+require GitHub access, a package token, or custom npm registry configuration.
 
 ```bash
 npm install -g @davejohnson/hypervibe@latest
@@ -109,14 +94,24 @@ Human-readable output is the default. Add `--json` for automation, or
 `--input <file|->` to supply the complete command input as JSON. Confirmation
 prompts are TTY-only; scripts must pass explicit confirmation flags.
 
-### 3. Install As Codex MCP
+To run the current source checkout instead:
+
+```bash
+git clone https://github.com/davejohnson/hypervibe.git
+cd hypervibe
+npm ci
+npm run build
+node dist/index.js --help
+```
+
+### 2. Install As Codex MCP
 
 ```bash
 codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest
 codex mcp list
 ```
 
-### 4. Install As Claude Code MCP
+### 3. Install As Claude Code MCP
 
 Add to `~/.claude/settings.json`:
 
@@ -131,7 +126,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-### 5. Connect Providers
+### 4. Connect Providers
 
 Restart Claude Code, then:
 
@@ -143,7 +138,7 @@ You: "Connect Cloudflare with API token xyz..."
 Claude: Validates and stores the connection.
 ```
 
-### 6. Deploy
+### 5. Deploy
 
 ```
 You: "Create a new project called my-app with staging and production environments"
@@ -152,7 +147,7 @@ You: "Add a custom domain api.myapp.com"
 You: "Run database migrations"
 ```
 
-### 7. Manage Secrets (Optional)
+### 6. Manage Secrets (Optional)
 
 Connect a secret manager and let hypervibe inject secrets at deploy time:
 
@@ -945,16 +940,23 @@ npm ci
 npm run release -- patch
 ```
 
+Before publishing the first public package, the `@davejohnson` scope must be
+available to the npm account and the repository must have an Actions secret
+named `NPM_TOKEN`. Use a granular npm token limited to this package with
+publish permission and automation/2FA bypass enabled. The workflow exposes it
+only to the npm publish step; GitHub's OIDC token is used to attach public
+provenance to the package.
+
 Use `minor`, `major`, or an exact stable version such as `0.2.0` instead of
 `patch`. The release command verifies that `main` exactly matches
 `origin/main`, updates `package.json` and `package-lock.json`, runs the full
 test/typecheck/build/package-safety suite, creates the release commit and an
 annotated `vX.Y.Z` tag, and atomically pushes both. The tag starts
-`publish-private-package.yml`; it publishes the private npm package, builds
+`release.yml`; it publishes the public npm package with provenance, builds
 native Apple Silicon (`arm64`) and Intel (`x86_64`) DMGs on matching GitHub
-macOS runners, creates SHA-256 checksum files, and attaches all four files to
-a public [GitHub Release](https://github.com/davejohnson/hypervibe/releases).
-By default the command watches that workflow through `gh` and fails if any
+macOS runners, creates SHA-256 checksum files, and attaches all four files to a
+public [GitHub Release](https://github.com/davejohnson/hypervibe/releases). By
+default the command watches that workflow through `gh` and fails if any
 package, installer, or release job fails.
 
 Preview the next version and git operations without changing anything:
@@ -963,15 +965,16 @@ Preview the next version and git operations without changing anything:
 npm run release -- patch --dry-run
 ```
 
-Pass `--no-wait` only when another process will monitor the GitHub package
+Pass `--no-wait` only when another process will monitor the GitHub release
 workflow. If validation fails before the release commit, the script restores
 the original package version files. If the atomic push fails, it keeps the
 local release commit and tag and prints the exact retry command.
 
-The GitHub-hosted DMGs are currently ad-hoc signed, matching the default local
-installer build. They are suitable for testing, but macOS Gatekeeper may ask
-the recipient to confirm the first launch. Configure Developer ID signing and
-notarization before treating them as polished public distribution artifacts.
+Local installer builds use an ad-hoc signature by default. Tagged GitHub
+releases require the Developer ID Application and App Store Connect secrets
+documented in [`apps/macos/README.md`](apps/macos/README.md). The release
+workflow imports them only into an ephemeral keychain, notarizes and staples
+both DMGs, and fails rather than publishing an unsigned installer.
 
 ## Philosophy
 
