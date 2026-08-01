@@ -313,6 +313,24 @@ the later CI run and `hv_health` own that verification. New resources with no
 existing image may still require provider bootstrap before CI can target them,
 and receipts must report that honestly.
 
+### Environment Variable Coverage
+
+Desired state prevents new cross-environment configuration gaps before they
+reach providers. A runtime key introduced through ordinary `envVars`, an
+`envFile.include` slot, or a delegated secret must be represented in every
+non-local environment that shares a desired service with a declaring
+environment. Each environment supplies its own value or secret reference;
+Hypervibe never copies values between environments.
+
+An environment may list a key in `envVarExceptions` only to document that the
+shared key intentionally does not apply there. Retirement tombstones also make
+absence explicit. Mixed ordinary/delegated handling for the same key is
+invalid. `hv_spec_set` blocks newly introduced gaps and gaps created by adding
+a matching environment or service. Pre-existing gaps remain readable and do
+not block unrelated spec changes, but are reported until repaired or explicitly
+excepted. Provider observation and AI are not required for this guardrail;
+`hv_plan` and `hv_apply` continue to own convergence of the accepted spec.
+
 ## Stripe Desired State
 
 Stripe sandboxes are isolated environments with their own API keys and object

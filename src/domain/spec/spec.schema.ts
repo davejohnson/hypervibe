@@ -816,6 +816,10 @@ export const environmentSpecSchema = z.object({
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: z.object({ enabled: z.boolean() }).default({ enabled: false }),
   envVars: z.record(z.string()).default({}),
+  /** Explicitly documents that a shared runtime key does not apply here. */
+  envVarExceptions: z.array(
+    z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'exception keys must be valid environment variable names')
+  ).optional(),
   /**
    * Durable, explicit tombstones for provider variables that Hypervibe should
    * delete. Variables merely omitted from envVars remain untouched.
@@ -949,6 +953,38 @@ export const environmentSpecSchema = z.object({
       });
     }
   }
+  const exceptionKeys = new Set<string>();
+  for (const key of environment.envVarExceptions ?? []) {
+    if (exceptionKeys.has(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable exception "${key}" is listed more than once`,
+        path: ['envVarExceptions'],
+      });
+    }
+    exceptionKeys.add(key);
+    if (key in environment.envVars) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable exception "${key}" cannot also be declared in envVars`,
+        path: ['envVarExceptions'],
+      });
+    }
+    if (environment.envFile?.include.includes(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable exception "${key}" cannot also be selected through envFile.include`,
+        path: ['envVarExceptions'],
+      });
+    }
+    if (environment.removeEnvVars?.includes(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable exception "${key}" cannot also be retired`,
+        path: ['envVarExceptions'],
+      });
+    }
+  }
   const storageByService = new Map<string, string>();
   for (const [storageName, storage] of Object.entries(environment.storage ?? {})) {
     for (const serviceName of storage.injectInto) {
@@ -1053,6 +1089,13 @@ export const environmentSpecSchema = z.object({
           path: ['envVars', key],
         });
       }
+      if (environment.envVarExceptions?.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Stripe-managed environment variable "${key}" cannot also be an environment variable exception`,
+          path: ['envVarExceptions'],
+        });
+      }
       if (environment.envFile?.include.includes(key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -1132,6 +1175,13 @@ export const projectSpecSchema = z.object({
           code: z.ZodIssueCode.custom,
           message: `delegated secret "${key}" cannot also be declared in environments.${environmentName}.envVars`,
           path: ['environments', environmentName, 'envVars', key],
+        });
+      }
+      if (environment.envVarExceptions?.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" cannot also be an environment variable exception in "${environmentName}"`,
+          path: ['environments', environmentName, 'envVarExceptions'],
         });
       }
       if (environment.envFile?.include.includes(key)) {
