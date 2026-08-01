@@ -564,7 +564,7 @@ concurrency:
 jobs:
   release:
     if: \${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 60
     environment: ${environmentName}
     env:
@@ -596,7 +596,8 @@ jobs:
       - name: Download verified server release evidence
         uses: actions/download-artifact@v4
         with:
-          path: .
+          pattern: hypervibe-server-release-${safeEnvironment}-*
+          path: \${{ runner.temp }}/hypervibe-server-evidence
           merge-multiple: true
           github-token: \${{ github.token }}
           run-id: \${{ steps.release.outputs.server_run_id }}
@@ -604,10 +605,11 @@ jobs:
         id: gate
         shell: bash
         env:
+          HYPERVIBE_SERVER_EVIDENCE_PATH: \${{ runner.temp }}/hypervibe-server-evidence/hypervibe-server-release.json
           HYPERVIBE_REQUESTED_SHA: \${{ steps.release.outputs.requested_sha }}
           HYPERVIBE_REQUIRED_SERVICES: ${JSON.stringify(JSON.stringify(release.services))}
         run: |
-          node -e 'const fs=require("fs"); const evidence=JSON.parse(fs.readFileSync("hypervibe-server-release.json","utf8")); const required=JSON.parse(process.env.HYPERVIBE_REQUIRED_SERVICES); if(evidence.version!==1||evidence.environment!==process.env.HYPERVIBE_ENVIRONMENT) throw new Error("server evidence environment mismatch"); if(evidence.server.repository!==process.env.GITHUB_REPOSITORY||!/^[0-9a-f]{40}$/i.test(evidence.server.sha)) throw new Error("server evidence repository/SHA mismatch"); if(process.env.HYPERVIBE_REQUESTED_SHA&&evidence.server.sha!==process.env.HYPERVIBE_REQUESTED_SHA) throw new Error("server evidence does not match requested SHA"); for(const service of required) if(!evidence.services.includes(service)) throw new Error("server evidence is missing service "+service); fs.appendFileSync(process.env.GITHUB_OUTPUT, "sha="+evidence.server.sha+"\\n");'
+          node -e 'const fs=require("fs"); const evidence=JSON.parse(fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")); const required=JSON.parse(process.env.HYPERVIBE_REQUIRED_SERVICES); if(evidence.version!==1||evidence.environment!==process.env.HYPERVIBE_ENVIRONMENT) throw new Error("server evidence environment mismatch"); if(evidence.server.repository!==process.env.GITHUB_REPOSITORY||!/^[0-9a-f]{40}$/i.test(evidence.server.sha)) throw new Error("server evidence repository/SHA mismatch"); if(process.env.HYPERVIBE_REQUESTED_SHA&&evidence.server.sha!==process.env.HYPERVIBE_REQUESTED_SHA) throw new Error("server evidence does not match requested SHA"); for(const service of required) if(!evidence.services.includes(service)) throw new Error("server evidence is missing service "+service); fs.appendFileSync(process.env.GITHUB_OUTPUT, "sha="+evidence.server.sha+"\\n");'
       - uses: actions/checkout@v4
         with:
           ref: \${{ steps.gate.outputs.sha }}
@@ -673,6 +675,7 @@ ${release.build.command.split('\n').map((line) => `          ${line}`).join('\n'
           HYPERVIBE_RELEASE_SHA: \${{ steps.gate.outputs.sha }}
           HYPERVIBE_MARKETING_VERSION: \${{ steps.ipa.outputs.version }}
           HYPERVIBE_BUILD_NUMBER: \${{ steps.ipa.outputs.build }}
+          HYPERVIBE_SERVER_EVIDENCE_PATH: \${{ runner.temp }}/hypervibe-server-evidence/hypervibe-server-release.json
         run: node "$HYPERVIBE_RELEASE_SCRIPT"
       - name: Upload iOS release manifest
         uses: actions/upload-artifact@v4
