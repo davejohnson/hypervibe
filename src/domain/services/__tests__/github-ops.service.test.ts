@@ -566,6 +566,15 @@ describe('github tools', () => {
     ]);
     const releaseWorkflow = workflow.companionFiles?.[0].content ?? '';
     expect(releaseWorkflow).toContain('Download verified server release evidence');
+    expect(releaseWorkflow).toContain('runs-on: macos-26');
+    expect(releaseWorkflow).toContain('pattern: hypervibe-server-release-development-*');
+    expect(releaseWorkflow).toContain('path: ${{ runner.temp }}/hypervibe-server-evidence');
+    expect(releaseWorkflow).toContain(
+      'HYPERVIBE_SERVER_EVIDENCE_PATH: ${{ runner.temp }}/hypervibe-server-evidence/hypervibe-server-release.json'
+    );
+    expect(releaseWorkflow).toContain(
+      'fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")'
+    );
     expect(releaseWorkflow).toContain('server evidence repository/SHA mismatch');
     expect(releaseWorkflow).toContain('concurrency:');
     expect(releaseWorkflow).toContain('group: hypervibe-deploy-development');
