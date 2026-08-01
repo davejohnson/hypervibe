@@ -110,6 +110,9 @@ function automationReview(
         summary: `Adds or updates the “${name}” GitHub check.`,
         details: [
           `Runs the project's declared ${automation.category} command${automation.commands.length === 1 ? '' : 's'}.`,
+          automation.changeScope === 'application'
+            ? 'Skips expensive application steps when a pull request changes only Hypervibe infrastructure files.'
+            : 'Runs for every matching pull request, including infrastructure-only changes.',
           'Reports pass or fail in GitHub so problems are visible before code is accepted.',
         ],
       };
@@ -175,16 +178,20 @@ function triggerLines(automation: Extract<GitHubAutomationSpec, { kind: 'check' 
 
 function runtimeSteps(
   automation: Extract<GitHubAutomationSpec, { kind: 'check' }>,
-  projectRuntime?: ProjectRuntimeSpec
+  projectRuntime?: ProjectRuntimeSpec,
+  condition?: string
 ): string[] {
+  const conditionLine = condition ? [`        if: ${condition}`] : [];
   if (automation.runtime.kind === 'node') {
     const version = effectiveGitHubCheckRuntimeVersion('node', automation.runtime.version, projectRuntime);
     return [
       '      - uses: actions/setup-node@v4',
+      ...conditionLine,
       '        with:',
       `          node-version: ${yamlString(version)}`,
       '          cache: npm',
       '      - name: Install dependencies',
+      ...conditionLine,
       '        run: |',
       ...indentBlock(automation.runtime.installCommand, 10),
     ];
@@ -192,12 +199,52 @@ function runtimeSteps(
   const version = effectiveGitHubCheckRuntimeVersion('python', automation.runtime.version, projectRuntime);
   return [
     '      - uses: actions/setup-python@v5',
+    ...conditionLine,
     '        with:',
     `          python-version: ${yamlString(version)}`,
     '          cache: pip',
     '      - name: Install dependencies',
+    ...conditionLine,
     '        run: |',
     ...indentBlock(automation.runtime.installCommand, 10),
+  ];
+}
+
+const APPLICATION_CHECK_CONDITION = "github.event_name != 'pull_request' || steps.hypervibe_changes.outputs.run_expensive == 'true'";
+
+function pullRequestChangeClassifier(): string[] {
+  return [
+    '      - name: Classify pull request changes',
+    "        if: github.event_name == 'pull_request'",
+    '        id: hypervibe_changes',
+    '        uses: actions/github-script@v8',
+    '        with:',
+    '          script: |',
+    '            const files = await github.paginate(github.rest.pulls.listFiles, {',
+    '              owner: context.repo.owner,',
+    '              repo: context.repo.repo,',
+    '              pull_number: context.issue.number,',
+    '              per_page: 100,',
+    '            });',
+    '            const exactInfrastructurePaths = new Set([',
+    '              ".hypervibe/spec.json",',
+    '              ".hypervibe/bindings.json",',
+    '              ".github/hypervibe/manifest.json",',
+    '              ".github/pull_request_template.md",',
+    '              ".github/ISSUE_TEMPLATE/task.yml",',
+    '              ".github/dependabot.yml",',
+    '            ]);',
+    '            const isHypervibeInfrastructure = (filename) =>',
+    '              exactInfrastructurePaths.has(filename)',
+    '              || /^\\.github\\/workflows\\/hypervibe-[a-z0-9-]+\\.yml$/.test(filename)',
+    '              || /^\\.github\\/workflows\\/deploy-[a-z0-9-]+\\.yml$/.test(filename);',
+    '            const infrastructureOnly = files.length > 0',
+    '              && files.every((file) => isHypervibeInfrastructure(file.filename)',
+    '                && (!file.previous_filename || isHypervibeInfrastructure(file.previous_filename)));',
+    '            core.setOutput("run_expensive", infrastructureOnly ? "false" : "true");',
+    '            if (infrastructureOnly) {',
+    '              core.notice("Skipping expensive application steps: this pull request changes only Hypervibe infrastructure files.");',
+    '            }',
   ];
 }
 
@@ -210,6 +257,8 @@ function buildCheckWorkflow(
   automation: Extract<GitHubAutomationSpec, { kind: 'check' }>,
   projectRuntime?: ProjectRuntimeSpec
 ): string {
+  const applicationScoped = automation.changeScope === 'application' && automation.triggers.pullRequest;
+  const expensiveCondition = applicationScoped ? APPLICATION_CHECK_CONDITION : undefined;
   const lines = [
     MANAGED_HEADER,
     `name: ${yamlString(githubWorkflowName(id))}`,
@@ -218,22 +267,27 @@ function buildCheckWorkflow(
     '',
     'permissions:',
     '  contents: read',
+    ...(applicationScoped ? ['  pull-requests: read'] : []),
     '',
     'jobs:',
     '  check:',
     '    runs-on: ubuntu-latest',
     '    timeout-minutes: 30',
     '    steps:',
+    ...(applicationScoped ? pullRequestChangeClassifier() : []),
     '      - uses: actions/checkout@v5',
+    ...(expensiveCondition ? [`        if: ${expensiveCondition}`] : []),
     '        with:',
     '          persist-credentials: false',
-    ...runtimeSteps(automation, projectRuntime),
+    ...runtimeSteps(automation, projectRuntime, expensiveCondition),
     '      - name: Prepare failure evidence',
+    ...(expensiveCondition ? [`        if: ${expensiveCondition}`] : []),
     '        run: mkdir -p hypervibe-failure-evidence',
   ];
   for (const [index, command] of automation.commands.entries()) {
     lines.push(
       `      - name: ${yamlString(`${automation.category} ${index + 1}`)}`,
+      ...(expensiveCondition ? [`        if: ${expensiveCondition}`] : []),
       '        shell: bash',
       '        run: |',
       '          set -o pipefail',
@@ -244,7 +298,7 @@ function buildCheckWorkflow(
   }
   lines.push(
     '      - name: Upload non-secret failure evidence',
-    '        if: failure()',
+    `        if: failure()${expensiveCondition ? ` && (${expensiveCondition})` : ''}`,
     '        uses: actions/upload-artifact@v4',
     '        with:',
     `          name: ${yamlString(`${id}-failure-evidence`)}`,

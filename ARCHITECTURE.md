@@ -528,6 +528,17 @@ canonical lowercase `.github/pull_request_template.md`. `externalWorkflows`
 remains a read-only integration surface because it names workflows Hypervibe
 observes but does not manage.
 
+Managed checks default to `changeScope: "application"`. On pull requests they
+must keep the workflow and required check alive, classify changed paths through
+the read-only GitHub pull-request API, and skip checkout, runtime setup,
+dependency installation, application commands, and failure upload only when
+every changed path is narrow Hypervibe-owned infrastructure. Empty,
+unrecognized, mixed, or renamed-from-application path sets run the full check.
+Checks that validate repository infrastructure declare `changeScope: "all"`.
+Do not implement this policy with workflow-level `paths-ignore` or commit skip
+markers: skipped required workflows can remain pending and block merges, while
+selectively skipped job steps preserve the required check result.
+
 Every external workflow consumed by autofix declares a narrow evidence artifact
 name/pattern separately from its required paths. The generated consumer filters
 the source run by that pattern and treats absent or incomplete required evidence

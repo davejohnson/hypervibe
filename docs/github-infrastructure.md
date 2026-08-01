@@ -108,6 +108,13 @@ Checks also support `lint`, `typecheck`, `build`, `dependency-audit`,
 per stable finding and closes it after one complete clean audit; failed or
 partial audit runs never close findings.
 
+Checks default to `changeScope: "application"`. Pull requests that change only
+`.hypervibe` desired state or Hypervibe-managed GitHub files keep the required
+check alive but skip checkout, dependency installation, and application
+commands. Mixed or unrecognized changes run the complete check. Set
+`changeScope: "all"` on a dedicated infrastructure validator that should run
+for those files too.
+
 Autofix runs only for a failed run from the same repository on the configured
 target branch. It always opens a draft pull request. The generated patch cannot
 change `.github/`, `.hypervibe/`, agent instruction files, or `.env` files, and

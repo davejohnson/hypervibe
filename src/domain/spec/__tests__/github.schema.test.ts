@@ -40,6 +40,7 @@ describe('github desired state', () => {
     expect(spec.github?.actions.tests).toMatchObject({
       kind: 'check',
       enabled: true,
+      changeScope: 'application',
       runtime: { kind: 'node', installCommand: 'npm ci' },
     });
     expect(spec.github?.actions['fix-tests']).toMatchObject({
@@ -47,6 +48,23 @@ describe('github desired state', () => {
       agent: { provider: 'openai', model: 'gpt-5.6-sol', effort: 'high' },
       draftPullRequest: true,
     });
+  });
+
+  it('allows checks to opt into Hypervibe infrastructure changes', () => {
+    const spec = projectSpecSchema.parse(baseSpec({
+      actions: {
+        infrastructure: {
+          kind: 'check',
+          category: 'lint',
+          changeScope: 'all',
+          runtime: { kind: 'node' },
+          commands: ['npm run validate:infrastructure'],
+          triggers: { pullRequest: true },
+        },
+      },
+    }));
+
+    expect(spec.github?.actions.infrastructure).toMatchObject({ changeScope: 'all' });
   });
 
   it('accepts concrete project runtimes and rejects ranges or image-tag injection', () => {
