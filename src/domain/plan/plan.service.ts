@@ -178,6 +178,7 @@ export class PlanService {
             project: 'unknown',
             environment: 'unknown',
             services: 'unknown',
+            environmentVariables: 'unknown',
             databases: 'unknown',
             caches: 'unknown',
             storage: 'unknown',
@@ -218,6 +219,8 @@ export class PlanService {
               : 'unknown'
             : 'complete'),
         services: observed.completeness?.services ?? (observed.partial ? 'unknown' : 'complete'),
+        environmentVariables: observed.completeness?.environmentVariables
+          ?? (observed.partial ? 'unknown' : 'complete'),
         databases: observed.completeness?.databases ?? 'complete',
         caches: observed.completeness?.caches ?? 'complete',
         storage: observed.completeness?.storage ?? 'complete',

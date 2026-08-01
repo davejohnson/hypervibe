@@ -25,6 +25,8 @@ import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
+import { EnvironmentConfigAuditService } from '../domain/services/environment-config-audit.service.js';
+import { connectionRecoveryDetails } from '../application/apply-plan.js';
 
 function resolveEnvOrThrow(ctx: CommandContext, projectRef: string | undefined, envName: string | undefined) {
   const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -35,6 +37,71 @@ function resolveEnvOrThrow(ctx: CommandContext, projectRef: string | undefined, 
 }
 
 export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: CommandContext): void {
+  commands.register(
+    'hv_env_audit',
+    'AI-assisted environment configuration audit. Compares live environment-variable key names across matching services, fails closed on incomplete provider reads, and classifies unexplained gaps without exposing values or hashes. Recommendations never copy values or mutate infrastructure; apply accepted decisions through hv_spec_set, hv_plan, and hv_apply.',
+    {
+      project: projectField,
+      environments: z.array(z.string().min(1)).min(2).max(8).optional()
+        .describe('Exact environments to compare. Defaults to staging and production when both exist, otherwise all non-local spec environments.'),
+      services: z.array(z.string().min(1)).min(1).max(50).optional()
+        .describe('Matching desired service names to compare. Defaults to services declared in at least two selected environments.'),
+    },
+    wrapCommandHandler(async ({ project: projectRef, environments, services }) => {
+      const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      const result = await new EnvironmentConfigAuditService().audit({
+        project,
+        ...(environments ? { environments } : {}),
+        ...(services ? { services } : {}),
+      });
+      if (!result.ok) {
+        const code = result.reason === 'missing_connection' || result.reason === 'advisor_unavailable'
+          ? 'MISSING_CONNECTION'
+          : result.reason === 'observation_unsupported'
+            ? 'UNSUPPORTED'
+            : result.reason === 'missing_spec' || result.reason === 'missing_environment'
+              ? 'NOT_FOUND'
+              : result.reason === 'invalid_environments'
+                || result.reason === 'environment_not_converged'
+                || result.reason === 'audit_too_large'
+                ? 'VALIDATION'
+                : 'PROVIDER_ERROR';
+        return commandError(code, result.error, {
+          details: {
+            ...(result.provider ? { provider: result.provider } : {}),
+            ...(result.environment ? { environment: result.environment } : {}),
+            ...(result.warnings ? { warnings: result.warnings } : {}),
+            ...(result.candidateCount !== undefined ? { candidateCount: result.candidateCount } : {}),
+            ...((code === 'MISSING_CONNECTION' && result.provider)
+              ? connectionRecoveryDetails([{ provider: result.provider }])
+              : {}),
+          },
+          ...(result.hint ? { hint: result.hint } : {}),
+          next: code === 'MISSING_CONNECTION' ? ['hv_connect'] : ['hv_status'],
+        });
+      }
+      const { ok: _ok, ...data } = result;
+      const critical = result.findings.filter((finding) => finding.severity === 'critical').length;
+      const warning = result.findings.filter((finding) => finding.severity === 'warning').length;
+      return commandSuccess(data, result.findings.length === 0
+        ? {
+            hint: 'No key-name parity gaps were found. Values were not compared or exposed.',
+          }
+        : {
+            hint: `Review ${critical} critical and ${warning} warning finding(s). Supply separate environment values where required; never copy production secrets by assumption. Encode accepted intent with hv_spec_set, then review hv_plan before hv_apply.`,
+            warnings: [
+              'AI classifications are advisory and carry no mutation authority.',
+              'Environment-variable values and hashes were excluded from model input and command output.',
+            ],
+            next: ['hv_spec_set'],
+            agentInstruction: {
+              action: 'ask_user',
+              message: 'Stop here. Summarize the AI classifications and deterministic desired-state conflicts. Ask the user to approve the intended spec changes and provide separate safe value references where required; do not copy a value from another environment.',
+            },
+          });
+    })
+  );
+
   commands.register(
     'hv_logs',
     'Fetch logs and delivery status: runtime service logs, build logs, recent deployments, or Stripe webhook endpoint status.',

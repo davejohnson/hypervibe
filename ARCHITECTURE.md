@@ -313,6 +313,23 @@ the later CI run and `hv_health` own that verification. New resources with no
 existing image may still require provider bootstrap before CI can target them,
 and receipts must report that honestly.
 
+### Environment Configuration Audits
+
+`hv_env_audit` is a read-only advisory command for finding unexplained
+environment-variable gaps across matching desired services. It observes live
+key names through provider adapters and must block when service or variable
+observation is partial, unknown, unsupported, or ambiguous. Provider values,
+value hashes, resource ids, credentials, and secret references never enter the
+AI request or command result.
+
+The AI classifies only the exact observed candidate set and has no mutation
+authority. Hypervibe rejects missing, duplicate, or invented decisions and
+deterministically overrides advice that conflicts with declared ordinary vars,
+delegated secrets, or retirement tombstones. Recommendations never copy a
+value between environments. Accepted changes return to desired state through
+`hv_spec_set`, then `hv_plan` and `hv_apply`; the audit cannot repair, create,
+adopt, attach, deploy, or delete provider resources.
+
 ## Stripe Desired State
 
 Stripe sandboxes are isolated environments with their own API keys and object
