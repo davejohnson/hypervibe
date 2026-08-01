@@ -339,8 +339,8 @@ describe('ci-deploy.service', () => {
               workingDirectory: 'apps/ios',
               command: 'make ipa',
               ipaPath: 'build/Billforge.ipa',
-              requiredSecrets: ['MATCH_PASSWORD'],
             },
+            signing: { provider: 'match' },
             testflight: { groups: ['beta'] },
           },
         },
@@ -373,7 +373,11 @@ describe('ci-deploy.service', () => {
       expect(result.action).toMatchObject({
         type: 'create',
         metadata: {
-          missingEnvironmentSecrets: ['MATCH_PASSWORD'],
+          missingEnvironmentSecrets: [
+            'MATCH_GIT_URL',
+            'MATCH_PASSWORD',
+            'MATCH_GIT_BASIC_AUTHORIZATION',
+          ],
           workflow: {
             companionPaths: [
               '.github/workflows/hypervibe-ios-release-production.yml',

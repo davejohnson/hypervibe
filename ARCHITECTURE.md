@@ -372,23 +372,34 @@ TestFlight upload, or TestFlight distribution commands.
 
 - `ios.release` requires a CI-triggered branch deploy. It names the server
   services that gate the mobile release, the repository-relative build command
-  and IPA path, required GitHub environment secret names, TestFlight groups,
-  export-compliance answer, and optional beta-review submission.
+  and IPA path, build-only GitHub environment secret names, signing provider,
+  TestFlight groups, export-compliance answer, and optional beta-review
+  submission.
 - Hypervibe manages the server deploy workflow, iOS release workflow, and App
-  Store Connect credentials through plan/apply. The app repository owns the
-  release implementation named by `ios.release.testflight.scriptPath`; the
-  managed workflow invokes it only after the provenance gate passes. User-owned
-  signing secrets are observed by name and block apply when missing; their
-  values never enter Hypervibe state or output.
+  Store Connect credentials through plan/apply. TestFlight upload, processing,
+  compliance, declared-group distribution, optional beta review, and release
+  evidence use a Hypervibe-owned runtime embedded into the managed workflow;
+  the app does not supply submission code. The legacy default `scriptPath` is
+  accepted only while existing specs migrate and custom values are rejected.
+- Signing is an explicit provider contract. `provider: "project"` preserves the
+  compatibility path where the app build owns signing. `provider: "match"`
+  makes Hypervibe install existing Match assets read-only into an ephemeral
+  keychain before invoking the app-defined build command. Match credentials are
+  scoped to that preparation step and cannot also be declared as build-command
+  secrets. Certificate/profile creation, rotation, and revocation never happen
+  during deploys; they require a separate explicit lifecycle design.
 - A successful server deploy writes an artifact whose name and JSON body carry
   the environment, repository, exact full Git SHA, and deployed service set.
   The artifact is emitted only after provider deployment steps succeed.
-- The macOS iOS workflow shares the server deploy concurrency key, consumes a
-  specific successful server run, validates its evidence, checks out that exact
-  SHA, validates the IPA archive and bundle/version/build metadata, and invokes
-  the reviewed project release script with the validated IPA and declared
-  TestFlight policy. App Store credentials are scoped to that step and are not
-  exposed to the project-defined build command.
+- The macOS iOS workflow shares the server deploy concurrency key and uses two
+  isolated jobs. The build job consumes a specific successful server run,
+  validates its evidence, checks out that exact SHA, prepares signing, invokes
+  the app-defined build command, validates the IPA identity, and uploads a
+  short-lived artifact. A fresh release job receives App Store credentials,
+  downloads and revalidates the IPA and server evidence, then runs the managed
+  release runtime. It never checks out or executes project code. This job
+  boundary prevents an arbitrary build command from modifying the submission
+  runtime or inheriting App Store Connect credentials.
 - The iOS artifact records separate `mobile.repository`/`mobile.sha` and
   `server.repository`/`server.sha` fields. V1 is monorepo-first and therefore
   requires those repositories and SHAs to match at the workflow gate, while the
@@ -396,9 +407,9 @@ TestFlight upload, or TestFlight distribution commands.
 - `hv_ci_status` is the read-only path for workflows, runs, logs, and release
   artifact provenance. `hv_appstore_submit` requires successful managed server
   and iOS evidence artifacts for the same SHA before final review submission.
-- App Store metadata/screenshots and local Xcode device operations are
-  project-owned release/development files (for example Fastlane `deliver` and
-  a reviewed device script), not Hypervibe commands.
+- Xcode projects, schemes, entitlements, build/test commands, artifact paths,
+  App Store metadata/screenshots, and local device operations remain
+  project-owned. Hypervibe owns the release envelope around the resulting IPA.
 
 ## CI And Push Deploys
 
