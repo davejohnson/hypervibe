@@ -265,6 +265,12 @@ export const githubCheckAutomationSpecSchema = z.object({
   ]),
   triggers: githubAutomationTriggersSchema,
   runtime: githubAutomationRuntimeSchema,
+  /**
+   * Application checks skip expensive steps for Hypervibe-only PRs while
+   * retaining a successful required check. Use "all" for infrastructure
+   * validators that intentionally inspect those files.
+   */
+  changeScope: z.enum(['application', 'all']).default('application'),
   commands: z.array(z.string().min(1)).min(1),
   failureArtifacts: z.array(githubFailureArtifactPathSchema).default([]),
 }).strict();

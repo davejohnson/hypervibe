@@ -137,6 +137,84 @@ describe('GitHub infrastructure compiler', () => {
       .toContain('node-version: "22"');
   });
 
+  it('skips expensive application steps only for narrow Hypervibe-only pull requests', async () => {
+    const workflow = compileManagedGitHubFiles(githubSpec())
+      .find((file) => file.path.endsWith('hypervibe-tests.yml'))!.content;
+    const condition = "github.event_name != 'pull_request' || steps.hypervibe_changes.outputs.run_expensive == 'true'";
+
+    expect(workflow).toContain('Classify pull request changes');
+    expect(workflow).toContain('pull-requests: read');
+    expect(workflow).toContain(`if: ${condition}`);
+    expect(workflow).toContain(`      - name: Install dependencies\n        if: ${condition}`);
+    expect(workflow).not.toContain('paths-ignore:');
+    expect(workflow).not.toContain('[skip ci]');
+
+    const script = extractGitHubScript(workflow, 'Classify pull request changes');
+    const execute = new AsyncFunction('github', 'context', 'core', script);
+    const runFor = async (files: Array<{ filename: string; previous_filename?: string }>) => {
+      const core = { notice: vi.fn(), setOutput: vi.fn() };
+      const listFiles = vi.fn();
+      const github = {
+        rest: { pulls: { listFiles } },
+        paginate: vi.fn(async () => files),
+      };
+      await execute(github, {
+        repo: { owner: 'davejohnson', repo: 'hls-property-care' },
+        issue: { number: 72 },
+      }, core);
+      return { core, github };
+    };
+
+    const infrastructure = await runFor([
+      { filename: '.hypervibe/spec.json' },
+      { filename: '.github/workflows/deploy-railway-staging.yml' },
+    ]);
+    expect(infrastructure.core.setOutput).toHaveBeenCalledWith('run_expensive', 'false');
+    expect(infrastructure.core.notice).toHaveBeenCalledWith(expect.stringContaining('Skipping expensive application steps'));
+
+    const mixed = await runFor([
+      { filename: '.hypervibe/spec.json' },
+      { filename: 'services/chatService.js' },
+    ]);
+    expect(mixed.core.setOutput).toHaveBeenCalledWith('run_expensive', 'true');
+    expect(mixed.core.notice).not.toHaveBeenCalled();
+
+    const renamedApplicationFile = await runFor([{
+      filename: '.github/workflows/hypervibe-tests.yml',
+      previous_filename: 'services/chatService.js',
+    }]);
+    expect(renamedApplicationFile.core.setOutput).toHaveBeenCalledWith('run_expensive', 'true');
+
+    const unknown = await runFor([]);
+    expect(unknown.core.setOutput).toHaveBeenCalledWith('run_expensive', 'true');
+  });
+
+  it('runs all steps when a check opts into all changes', () => {
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: 'infrastructure-validator',
+      github: {
+        actions: {
+          infrastructure: {
+            kind: 'check',
+            category: 'lint',
+            changeScope: 'all',
+            runtime: { kind: 'node' },
+            commands: ['npm run validate:infrastructure'],
+            triggers: { pullRequest: true },
+          },
+        },
+      },
+      environments: { production: { hosting: { provider: 'railway' }, services: {} } },
+    });
+    const workflow = compileManagedGitHubFiles(spec.github!, spec.runtime)
+      .find((file) => file.path.endsWith('hypervibe-infrastructure.yml'))!.content;
+
+    expect(workflow).not.toContain('Classify pull request changes');
+    expect(workflow).not.toContain('hypervibe_changes.outputs.run_expensive');
+    expect(workflow).not.toContain('pull-requests: read');
+  });
+
   it('owns a canonical pull-request template whenever pull requests are required', () => {
     const github = projectSpecSchema.parse({
       version: 1,
