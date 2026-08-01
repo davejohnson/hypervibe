@@ -85,8 +85,9 @@ describe('iosSpecSchema', () => {
             workingDirectory: 'apps/ios',
             command: 'bundle exec fastlane build',
             ipaPath: 'build/Example.ipa',
-            requiredSecrets: ['MATCH_PASSWORD'],
+            requiredSecrets: ['SENTRY_AUTH_TOKEN'],
           },
+          signing: { provider: 'match', gitBranch: 'main' },
           testflight: { groups: ['beta'] },
         },
       },
@@ -95,10 +96,10 @@ describe('iosSpecSchema', () => {
       trigger: 'after-server-deploy',
       services: ['web'],
       build: { workingDirectory: 'apps/ios', ipaPath: 'build/Example.ipa' },
+      signing: { provider: 'match', gitBranch: 'main' },
       testflight: {
         groups: ['beta'],
         usesNonExemptEncryption: false,
-        scriptPath: 'scripts/hypervibe-ios-release.mjs',
       },
     });
 
@@ -134,12 +135,36 @@ describe('iosSpecSchema', () => {
         release: {
           services: ['web'],
           build: { command: 'make ipa', ipaPath: 'Example.ipa' },
-          testflight: { groups: ['beta'], scriptPath: '../release.sh' },
+          testflight: { groups: ['beta'], scriptPath: 'scripts/custom-release.mjs' },
         },
       },
     });
     expect(unsafeScript.success).toBe(false);
-    expect(unsafeScript.success ? '' : unsafeScript.error.message).toContain('scriptPath');
+    expect(unsafeScript.success ? '' : unsafeScript.error.message).toContain('managed by Hypervibe');
+
+    const leakedSigningSecret = environmentSpecSchema.safeParse({
+      hosting: { provider: 'railway' },
+      services: { web: {} },
+      deploy: { strategy: 'branch', trigger: 'ci' },
+      ios: {
+        bundleId: 'com.example.app',
+        testflight: { groups: { beta: {} } },
+        release: {
+          services: ['web'],
+          build: {
+            command: 'make ipa',
+            ipaPath: 'Example.ipa',
+            requiredSecrets: ['MATCH_PASSWORD', 'APP_STORE_CONNECT_PRIVATE_KEY'],
+          },
+          signing: { provider: 'match' },
+          testflight: { groups: ['beta'] },
+        },
+      },
+    });
+    expect(leakedSigningSecret.success).toBe(false);
+    expect(leakedSigningSecret.success ? '' : leakedSigningSecret.error.message).toContain(
+      'reserved for the Hypervibe-managed release boundary'
+    );
   });
 
   it('requires CI branch deploys and known server services for release gates', () => {

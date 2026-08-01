@@ -13,10 +13,13 @@ import type { PlanAction } from '../plan/plan.types.js';
 import {
   buildBranchDeployWorkflow,
   getGitHubAdapter,
-  IOS_RELEASE_REQUIRED_SECRETS,
   resolveBranchDeployTargets,
   type BranchDeployWorkflow,
 } from './github-ops.service.js';
+import {
+  IOS_RELEASE_REQUIRED_SECRETS,
+  MATCH_SIGNING_REQUIRED_SECRETS,
+} from './ios-release-workflow.service.js';
 import { getVerifiedAppStoreConnectCredentials } from './appstore-ops.service.js';
 import {
   compileManagedGitHubFiles,
@@ -331,7 +334,12 @@ export async function planGitHubActionsDeploy(params: {
   if (appStoreSecretResolution.error) warnings.push(appStoreSecretResolution.error);
   const appStoreSecrets = appStoreSecretResolution.secrets;
   const appStoreSecretHashes = secretHashes(appStoreSecrets);
-  const requiredBuildSecrets = environmentSpec.ios?.release?.build.requiredSecrets ?? [];
+  const requiredBuildSecrets = [
+    ...(environmentSpec.ios?.release?.build.requiredSecrets ?? []),
+    ...(environmentSpec.ios?.release?.signing.provider === 'match'
+      ? MATCH_SIGNING_REQUIRED_SECRETS
+      : []),
+  ];
   const contentHash = workflowContentHash(workflow);
   const binding = ciBindings(environment)[workflow.path];
 
@@ -565,7 +573,9 @@ export async function applyGitHubActionsDeploy(params: {
               summary: `Updates the GitHub workflow that releases the iOS app after the ${environmentName} server deployment succeeds.`,
               details: [
                 'Uses the exact server commit that was successfully deployed.',
-                'Builds and validates the app before sending it to the declared TestFlight groups.',
+                'Keeps the project build and Hypervibe-managed Apple release in isolated jobs.',
+                'Installs existing Match assets read-only when managed signing is selected.',
+                'Revalidates the IPA before sending it to the declared TestFlight groups.',
                 'Does not submit the app to the App Store automatically.',
               ],
               mergeEffect: workflow.autoDeployOnPush
@@ -601,7 +611,13 @@ export async function applyGitHubActionsDeploy(params: {
         error: error instanceof Error ? error.message : String(error),
       };
     }
-    const missingBuildSecrets = environmentSpec.ios.release.build.requiredSecrets
+    const requiredBuildSecrets = [
+      ...environmentSpec.ios.release.build.requiredSecrets,
+      ...(environmentSpec.ios.release.signing.provider === 'match'
+        ? MATCH_SIGNING_REQUIRED_SECRETS
+        : []),
+    ];
+    const missingBuildSecrets = requiredBuildSecrets
       .filter((name) => !environmentSecretNames.includes(name));
     if (missingBuildSecrets.length > 0) {
       return {
