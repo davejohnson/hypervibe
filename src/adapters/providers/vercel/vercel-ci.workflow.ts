@@ -45,6 +45,7 @@ export function buildVercelGitHubActionsSteps(
   return {
     displayName: 'Vercel',
     permissions: `    permissions:
+      actions: read
       contents: read
 `,
     reviewDetails: [

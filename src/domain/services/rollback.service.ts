@@ -15,6 +15,11 @@ import { resolvePlanActionAuthority } from '../plan/action-authority.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { DeployResult } from './deploy.orchestrator.js';
+import {
+  executeManagedCiRollback,
+  type CiRollbackFailure,
+  type CiRollbackResult,
+} from './ci-rollback.service.js';
 
 const runRepo = new RunRepository();
 const serviceRepo = new ServiceRepository();
@@ -146,9 +151,38 @@ export async function executeRollback(params: {
   project: Project;
   environment: Environment;
   toRunId?: string;
+  toSha?: string;
   services?: string[];
-}): Promise<RollbackFailure | RollbackSuccess> {
+}): Promise<RollbackFailure | RollbackSuccess | CiRollbackFailure | CiRollbackResult> {
   const { project, environment } = params;
+
+  const environmentSpec = new SpecStore().get(project)?.spec.environments[environment.name];
+  const usesManagedCi = environmentSpec?.deploy?.strategy === 'branch'
+    && (environmentSpec.deploy.trigger ?? 'ci') === 'ci';
+  if (usesManagedCi) {
+    if (params.toRunId) {
+      return {
+        ok: false,
+        reason: 'invalid_target',
+        error: 'toRunId applies only to direct provider deploy runs. Use toSha for a managed CI rollback.',
+      };
+    }
+    if (params.services?.length) {
+      return {
+        ok: false,
+        reason: 'invalid_target',
+        error: 'Managed CI rollback restores the complete verified release; per-service rollback is not supported.',
+      };
+    }
+    return executeManagedCiRollback({ project, environment, toSha: params.toSha });
+  }
+  if (params.toSha) {
+    return {
+      ok: false,
+      reason: 'invalid_run',
+      error: 'toSha requires deploy.strategy="branch" with deploy.trigger="ci". Use toRunId for a direct provider deploy.',
+    };
+  }
 
   const planned = planRollback(params);
   if (!planned.ok) {

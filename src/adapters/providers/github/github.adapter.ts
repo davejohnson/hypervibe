@@ -925,6 +925,34 @@ export class GitHubAdapter {
   }
 
   /**
+   * List artifacts emitted by one workflow run. Scoping the read to a durable
+   * run id lets operational commands prove provenance without trusting a
+   * repository-wide artifact name match.
+   */
+  async listWorkflowRunArtifacts(owner: string, repo: string, runId: string | number): Promise<{
+    total_count: number;
+    artifacts: Array<{
+      id: number;
+      name: string;
+      expired: boolean;
+      created_at: string;
+      updated_at: string;
+      workflow_run: {
+        id: number;
+        repository_id: number;
+        head_repository_id: number;
+        head_branch: string;
+        head_sha: string;
+      } | null;
+    }>;
+  }> {
+    return this.request(
+      'GET',
+      `/repos/${owner}/${repo}/actions/runs/${runId}/artifacts?per_page=100`
+    );
+  }
+
+  /**
    * List jobs and steps for a workflow run.
    */
   async listWorkflowRunJobs(

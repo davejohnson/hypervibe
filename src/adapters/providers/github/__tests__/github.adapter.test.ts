@@ -115,6 +115,37 @@ describe('GitHub Actions environment secrets', () => {
   });
 });
 
+describe('GitHub Actions release evidence', () => {
+  it('scopes artifact reads to the exact workflow run', async () => {
+    const payload = {
+      total_count: 1,
+      artifacts: [{
+        id: 7,
+        name: 'hypervibe-server-release-production-0123456789abcdef0123456789abcdef01234567',
+        expired: false,
+        created_at: '2026-07-31T10:00:00Z',
+        updated_at: '2026-07-31T10:00:00Z',
+        workflow_run: {
+          id: 42,
+          repository_id: 1,
+          head_repository_id: 1,
+          head_branch: 'main',
+          head_sha: '0123456789abcdef0123456789abcdef01234567',
+        },
+      }],
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response(payload));
+
+    await expect(
+      connectedAdapter().listWorkflowRunArtifacts('dave', 'app', 42)
+    ).resolves.toEqual(payload);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.github.com/repos/dave/app/actions/runs/42/artifacts?per_page=100',
+      expect.objectContaining({ method: 'GET' })
+    );
+  });
+});
+
 describe('GitHub repository infrastructure', () => {
   const unicodeWorkflow = 'Deployment blocked — Hypervibe reconciliation required 🚧\n';
 

@@ -39,6 +39,7 @@ export function buildAzureContainerAppsGitHubActionsSteps(
   return {
     displayName: 'Azure Container Apps',
     permissions: `    permissions:
+      actions: read
       contents: read
 `,
     reviewDetails: [
