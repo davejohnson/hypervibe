@@ -423,6 +423,21 @@ The standard team workflow is:
 
 Do not default to a long-lived `staging` branch. `main` is the accepted-code branch, staging is the deployed preview of `main`, and production is a deliberate manual promotion. Generated production deploy workflows must not run from push events by default; they should use `workflow_dispatch` and support a `commit_sha` input.
 
+Managed CI rollback is an explicit operational action over that same exact-SHA
+release boundary. `hv_rollback` must select only unexpired server-release
+evidence emitted by a successful run of the exact managed environment workflow.
+After a failed promotion it restores the latest known-good release; after a
+successful promotion it selects the previous distinct successful release unless
+the caller names another previously verified full SHA. The repository, workflow,
+ref, target SHA, source artifact id, source run id, and latest observed workflow
+run id are frozen into a persisted rollback plan and re-observed immediately
+before dispatch. Any workflow drift, unknown observation, ambiguous evidence,
+newer run, or in-progress deployment blocks without mutation. Dispatch is a
+pending receipt until `hv_ci_status` proves the workflow succeeded and
+`hv_health` proves the endpoint. Rollback never reverses database migrations or
+provider-side manual configuration; tool-mode migration steps are skipped during
+rollback, while startup/release-command migrations must remain backward-compatible.
+
 Do not switch a project to `deploy.trigger: "native"` just to avoid missing CI, package, or image credentials. That changes the desired infrastructure contract. Provider-native deploys are an explicit opt-in and may require provider-specific external app access such as the Railway GitHub App.
 
 Generated provider CI workflow steps belong under provider-owned modules and are exposed through provider registry metadata. Generic GitHub orchestration should assemble workflows, sync files/secrets, inspect runs/logs, and diagnose failures without owning provider API scripts.

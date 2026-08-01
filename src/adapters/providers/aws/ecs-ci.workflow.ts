@@ -36,6 +36,7 @@ export function buildAwsEcsGitHubActionsSteps(
   return {
     displayName: 'AWS ECS on Fargate',
     permissions: `    permissions:
+      actions: read
       contents: read
 `,
     reviewDetails: [

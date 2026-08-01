@@ -314,12 +314,15 @@ function buildMigrationStep(command: string): string {
   // dependencies installed — the deploy steps that follow build a container
   // image and never run npm ci on the runner themselves.
   return `      - uses: actions/setup-node@v4
+        if: steps.deploy.outputs.operation != 'rollback'
         with:
           node-version: '20'
           cache: 'npm'
       - name: Install dependencies for migrations
+        if: steps.deploy.outputs.operation != 'rollback'
         run: npm ci
       - name: Run migrations
+        if: steps.deploy.outputs.operation != 'rollback'
         run: ${command}
         env:
           DATABASE_URL: \${{ secrets.DATABASE_URL }}
@@ -339,6 +342,23 @@ function buildWorkflowTrigger(target: BranchDeployTarget): string {
     inputs:
       commit_sha:
         description: 'Commit SHA to deploy. Defaults to the selected ref when omitted.'
+        required: false
+        type: string
+      rollback:
+        description: 'Restore a previously verified release. Hypervibe sets this automatically.'
+        required: false
+        default: false
+        type: boolean
+      expected_latest_run_id:
+        description: 'Latest observed deploy run. Hypervibe uses it to reject stale rollback dispatches.'
+        required: false
+        type: string
+      source_artifact_id:
+        description: 'Verified release artifact selected by Hypervibe for rollback.'
+        required: false
+        type: string
+      source_workflow_run_id:
+        description: 'Successful workflow run that emitted the verified rollback artifact.'
         required: false
         type: string`;
   if (!target.autoDeployOnPush) {
@@ -711,10 +731,13 @@ export function buildBranchDeployWorkflow(
     : [...deployBlock.requiredSecrets];
   const requiredVariables = [...deployBlock.requiredVariables];
   const permissionsBlock = deployBlock.permissions ?? `    permissions:
+      actions: read
       contents: read
 `;
 
   const content = `name: Deploy ${providerName} (${target.environmentName})
+
+run-name: Deploy ${target.environmentName} \${{ inputs.commit_sha || github.sha }} \${{ inputs.rollback && '(rollback)' || '' }}
 
 on:
 ${buildWorkflowTrigger(target)}
@@ -735,12 +758,75 @@ ${permissionsBlock.trimEnd()}
         with:
           script: |
             const inputSha = ((context.payload.inputs || {}).commit_sha || '').trim();
-            const sha = inputSha || process.env.GITHUB_SHA;
+            const sha = (inputSha || process.env.GITHUB_SHA).toLowerCase();
             if (!/^[0-9a-f]{40}$/i.test(sha)) {
               throw new Error('commit_sha must be a full 40-character Git commit SHA, got: ' + JSON.stringify(inputSha || sha));
             }
+            const rollbackInput = (context.payload.inputs || {}).rollback;
+            const operation = rollbackInput === true || rollbackInput === 'true' ? 'rollback' : 'deploy';
             core.setOutput('sha', sha);
-            core.info('Deploying commit ' + sha);
+            core.setOutput('operation', operation);
+            core.info((operation === 'rollback' ? 'Restoring' : 'Deploying') + ' commit ' + sha);
+      - name: Verify rollback release evidence
+        if: steps.deploy.outputs.operation == 'rollback'
+        uses: actions/github-script@v8
+        env:
+          HYPERVIBE_ENVIRONMENT: ${JSON.stringify(target.environmentName)}
+          HYPERVIBE_ROLLBACK_SHA: \${{ steps.deploy.outputs.sha }}
+          HYPERVIBE_WORKFLOW_REF: \${{ github.workflow_ref }}
+          HYPERVIBE_EXPECTED_LATEST_RUN_ID: \${{ inputs.expected_latest_run_id }}
+          HYPERVIBE_SOURCE_ARTIFACT_ID: \${{ inputs.source_artifact_id }}
+          HYPERVIBE_SOURCE_WORKFLOW_RUN_ID: \${{ inputs.source_workflow_run_id }}
+        with:
+          script: |
+            const environment = process.env.HYPERVIBE_ENVIRONMENT;
+            const targetSha = process.env.HYPERVIBE_ROLLBACK_SHA.toLowerCase();
+            const safeEnvironment = environment.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+            const expectedName = 'hypervibe-server-release-' + safeEnvironment + '-' + targetSha;
+            const expectedLatestRunId = Number(process.env.HYPERVIBE_EXPECTED_LATEST_RUN_ID);
+            if (!Number.isSafeInteger(expectedLatestRunId) || expectedLatestRunId <= 0) {
+              throw new Error('Rollback requires Hypervibe expected_latest_run_id evidence');
+            }
+            const sourceArtifactId = Number(process.env.HYPERVIBE_SOURCE_ARTIFACT_ID);
+            const sourceWorkflowRunId = Number(process.env.HYPERVIBE_SOURCE_WORKFLOW_RUN_ID);
+            if (!Number.isSafeInteger(sourceArtifactId) || sourceArtifactId <= 0
+                || !Number.isSafeInteger(sourceWorkflowRunId) || sourceWorkflowRunId <= 0) {
+              throw new Error('Rollback requires exact Hypervibe source artifact and workflow run evidence');
+            }
+            const workflowPath = process.env.HYPERVIBE_WORKFLOW_REF.split('@')[0].split('/').slice(2).join('/');
+            const recentRuns = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: workflowPath,
+              per_page: 10,
+            });
+            const latestPriorRun = recentRuns.data.workflow_runs.find((run) => run.id !== context.runId);
+            if (!latestPriorRun || latestPriorRun.id !== expectedLatestRunId) {
+              throw new Error(
+                'Rollback dispatch is stale: expected latest run ' + expectedLatestRunId
+                + ', observed ' + (latestPriorRun ? latestPriorRun.id : 'none')
+              );
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: sourceWorkflowRunId,
+              per_page: 100,
+            });
+            const artifact = artifacts.find((candidate) => candidate.id === sourceArtifactId);
+            if (!artifact || artifact.name !== expectedName || artifact.expired
+                || artifact.workflow_run?.id !== sourceWorkflowRunId) {
+              throw new Error('Exact Hypervibe rollback artifact evidence is missing, expired, or does not match SHA ' + targetSha);
+            }
+            const run = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: sourceWorkflowRunId,
+            });
+            if (run.data.conclusion !== 'success' || run.data.path !== workflowPath) {
+              throw new Error('Rollback evidence for ' + targetSha + ' did not come from a successful run of ' + workflowPath);
+            }
+            core.info('Verified rollback evidence from successful workflow run ' + run.data.id);
       - uses: actions/checkout@v4
         with:
           ref: \${{ steps.deploy.outputs.sha }}
@@ -756,7 +842,7 @@ ${buildDeploymentContractStep(target.environmentName)}${migrationStep}${deployBl
           name: hypervibe-server-release-${safeEnvironment}-\${{ steps.deploy.outputs.sha }}
           path: hypervibe-server-release.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 ${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
 
   const iosRelease = ios

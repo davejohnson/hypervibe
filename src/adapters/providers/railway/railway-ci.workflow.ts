@@ -102,6 +102,7 @@ export function buildRailwayGitHubActionsSteps(target: BranchDeployTarget): Bran
       'Waits for every Railway service to finish and includes recent provider logs when a deployment fails.',
     ],
     permissions: `    permissions:
+      actions: read
       contents: read
       packages: write
 `,

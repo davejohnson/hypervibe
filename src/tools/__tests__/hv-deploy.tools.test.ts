@@ -20,6 +20,11 @@ import { SpecStore } from '../../domain/spec/spec.store.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CLOUD_PREPARE_PROFILES } from '../../domain/services/cloud-prepare.js';
+import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
+import {
+  buildBranchDeployWorkflow,
+  resolveBranchDeployTargets,
+} from '../../domain/services/github-ops.service.js';
 import { createToolContext } from '../context.js';
 import { registerHvDeployTools } from '../hv-deploy.tools.js';
 
@@ -44,6 +49,80 @@ function seedVerifiedConnection(provider: string): void {
     credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'test-token' }),
   });
   repo.updateStatus(connection.id, 'verified');
+}
+
+function seedManagedCiRollbackProject(name: string) {
+  const project = new ProjectRepository().create({
+    name,
+    defaultPlatform: 'railway',
+    gitRemoteUrl: `https://github.com/davejohnson/${name}`,
+    policies: { protectedEnvironments: ['production'] },
+  });
+  const environment = new EnvironmentRepository().create({
+    projectId: project.id,
+    name: 'production',
+    platformBindings: {
+      provider: 'railway',
+      projectId: 'rail-project',
+      environmentId: 'rail-production',
+      services: { web: { serviceId: 'rail-web' } },
+    },
+  });
+  new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+  new SpecStore().replace(project, {
+    version: 1,
+    project: project.name,
+    gitRemoteUrl: project.gitRemoteUrl,
+    environments: {
+      production: {
+        hosting: { provider: 'railway' },
+        services: { web: { workloadKind: 'web' } },
+        deploy: { strategy: 'branch', trigger: 'ci', branch: 'main', autoDeploy: false },
+      },
+    },
+  });
+  seedVerifiedConnection('github');
+  const resolved = resolveBranchDeployTargets(project);
+  const target = resolved.targets.find((candidate) => candidate.environmentName === 'production')!;
+  const workflow = buildBranchDeployWorkflow('railway', target, resolved.migration);
+  return { project, environment, workflow };
+}
+
+function workflowRun(
+  id: number,
+  status: string,
+  conclusion: string | null,
+  createdAt: string
+) {
+  return {
+    id,
+    name: 'Deploy Railway (production)',
+    status,
+    conclusion,
+    created_at: createdAt,
+    updated_at: createdAt,
+    head_sha: 'f'.repeat(40),
+    head_branch: 'main',
+    event: 'workflow_dispatch',
+    html_url: `https://github.com/davejohnson/app/actions/runs/${id}`,
+  };
+}
+
+function releaseArtifact(runId: number, sha: string, artifactId = runId * 10) {
+  return {
+    id: artifactId,
+    name: `hypervibe-server-release-production-${sha}`,
+    expired: false,
+    created_at: `2026-07-${String(runId).padStart(2, '0')}T00:05:00Z`,
+    updated_at: `2026-07-${String(runId).padStart(2, '0')}T00:05:00Z`,
+    workflow_run: {
+      id: runId,
+      repository_id: 1,
+      head_repository_id: 1,
+      head_branch: 'main',
+      head_sha: 'f'.repeat(40),
+    },
+  };
 }
 
 async function makeClient() {
@@ -377,6 +456,343 @@ describe('hv_deploy database env injection', () => {
 });
 
 describe('hv_rollback', () => {
+  it('dispatches the previous verified exact-SHA release for managed production CI', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('rollback-ci-app');
+    const currentSha = 'b'.repeat(40);
+    const previousSha = 'a'.repeat(40);
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
+      total_count: 1,
+      workflows: [{
+        id: 7,
+        name: workflow.templateName,
+        path: workflow.path,
+        state: 'active',
+        created_at: '2026-07-01T00:00:00Z',
+        updated_at: '2026-07-01T00:00:00Z',
+      }],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+      total_count: 2,
+      workflow_runs: [
+        workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
+        workflowRun(10, 'completed', 'success', '2026-07-10T00:00:00Z'),
+      ],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockImplementation(async (_owner, _repo, runId) => ({
+      total_count: 1,
+      artifacts: [runId === 20 ? releaseArtifact(20, currentSha) : releaseArtifact(10, previousSha)],
+    }));
+    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      strategy: 'managed-ci',
+      status: 'pending',
+      pending: true,
+      repository: `davejohnson/${project.name}`,
+      workflow: workflow.path,
+      ref: 'main',
+      rollbackToSha: previousSha,
+      currentSha,
+      sourceArtifactId: 100,
+      sourceWorkflowRunId: 10,
+      observedLatestWorkflowRunId: 20,
+      selection: 'previous_successful',
+    });
+    expect(result.data.receipts).toEqual([
+      expect.objectContaining({
+        actionId: 'ci:github-actions:production:rollback',
+        status: 'pending',
+      }),
+    ]);
+    expect(result.agentInstruction.action).toBe('stop_and_report');
+    expect(trigger).toHaveBeenCalledWith(
+      'davejohnson',
+      project.name,
+      workflow.path,
+      'main',
+      {
+        commit_sha: previousSha,
+        rollback: 'true',
+        expected_latest_run_id: '20',
+        source_artifact_id: '100',
+        source_workflow_run_id: '10',
+      }
+    );
+
+    const runRepo = new RunRepository();
+    const plan = runRepo.findById(result.data.planId)!;
+    const action = (plan.plan as Record<string, any>).actions[0];
+    expect(action.metadata).toMatchObject({
+      operation: 'githubActionsRollback',
+      repository: `davejohnson/${project.name}`,
+      workflow: workflow.path,
+      ref: 'main',
+      targetSha: previousSha,
+      targetArtifactId: 100,
+      targetWorkflowRunId: 10,
+      observedLatestWorkflowRunId: 20,
+    });
+    await t.close();
+  });
+
+  it('restores the latest known-good exact SHA after a failed production promotion', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('rollback-failed-promotion-app');
+    const knownGoodSha = 'c'.repeat(40);
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
+      total_count: 1,
+      workflows: [{ id: 7, name: workflow.templateName, path: workflow.path, state: 'active' } as any],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+      total_count: 2,
+      workflow_runs: [
+        workflowRun(30, 'completed', 'failure', '2026-07-30T00:00:00Z'),
+        workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
+      ],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockResolvedValue({
+      total_count: 1,
+      artifacts: [releaseArtifact(20, knownGoodSha)],
+    });
+    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      status: 'pending',
+      rollbackToSha: knownGoodSha,
+      selection: 'last_known_good',
+      observedLatestWorkflowRunId: 30,
+    });
+    expect(result.data.currentSha).toBeUndefined();
+    expect(trigger).toHaveBeenCalledWith(
+      'davejohnson',
+      project.name,
+      workflow.path,
+      'main',
+      {
+        commit_sha: knownGoodSha,
+        rollback: 'true',
+        expected_latest_run_id: '30',
+        source_artifact_id: '200',
+        source_workflow_run_id: '20',
+      }
+    );
+    await t.close();
+  });
+
+  it('restores an explicitly requested previously verified exact SHA', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('rollback-explicit-sha-app');
+    const currentSha = 'c'.repeat(40);
+    const previousSha = 'b'.repeat(40);
+    const requestedSha = 'a'.repeat(40);
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
+      total_count: 1,
+      workflows: [{ id: 7, name: workflow.templateName, path: workflow.path, state: 'active' } as any],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+      total_count: 3,
+      workflow_runs: [
+        workflowRun(30, 'completed', 'success', '2026-07-30T00:00:00Z'),
+        workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
+        workflowRun(10, 'completed', 'success', '2026-07-10T00:00:00Z'),
+      ],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockImplementation(async (_owner, _repo, runId) => ({
+      total_count: 1,
+      artifacts: [
+        runId === 30
+          ? releaseArtifact(30, currentSha)
+          : runId === 20
+            ? releaseArtifact(20, previousSha)
+            : releaseArtifact(10, requestedSha),
+      ],
+    }));
+    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      toSha: requestedSha,
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      status: 'pending',
+      rollbackToSha: requestedSha,
+      selection: 'explicit',
+      sourceArtifactId: 100,
+      sourceWorkflowRunId: 10,
+    });
+    expect(trigger).toHaveBeenCalledWith(
+      'davejohnson',
+      project.name,
+      workflow.path,
+      'main',
+      {
+        commit_sha: requestedSha,
+        rollback: 'true',
+        expected_latest_run_id: '30',
+        source_artifact_id: '100',
+        source_workflow_run_id: '10',
+      }
+    );
+    await t.close();
+  });
+
+  it('blocks managed rollback when the generated workflow has drifted', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('rollback-workflow-drift-app');
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue('name: user-modified-workflow\n');
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
+      total_count: 1,
+      workflows: [{ id: 7, name: workflow.templateName, path: workflow.path, state: 'active' } as any],
+    });
+    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('missing or differs');
+    expect(result.next).toEqual(['hv_plan', 'hv_apply']);
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('blocks managed rollback when GitHub release observation is unknown', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('rollback-observation-error-app');
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
+      total_count: 1,
+      workflows: [{ id: 7, name: workflow.templateName, path: workflow.path, state: 'active' } as any],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockRejectedValue(
+      new Error('GitHub API rate limit prevented observation')
+    );
+    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('PROVIDER_ERROR');
+    expect(result.error.message).toContain('Could not verify managed rollback evidence');
+    expect(result.error.message).toContain('rate limit');
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('blocks managed rollback when one run has ambiguous release identities', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('rollback-ambiguous-evidence-app');
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
+      total_count: 1,
+      workflows: [{ id: 7, name: workflow.templateName, path: workflow.path, state: 'active' } as any],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+      total_count: 2,
+      workflow_runs: [
+        workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
+        workflowRun(10, 'completed', 'success', '2026-07-10T00:00:00Z'),
+      ],
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockResolvedValue({
+      total_count: 2,
+      artifacts: [
+        releaseArtifact(20, 'a'.repeat(40), 201),
+        releaseArtifact(20, 'b'.repeat(40), 202),
+      ],
+    });
+    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('PROVIDER_ERROR');
+    expect(result.error.message).toContain('ambiguous production release evidence');
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('re-observes the latest production run before dispatch and blocks stale authority', async () => {
+    const { project, workflow } = seedManagedCiRollbackProject('rollback-stale-run-app');
+    const currentSha = 'e'.repeat(40);
+    const previousSha = 'd'.repeat(40);
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(workflow.content);
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({
+      total_count: 1,
+      workflows: [{ id: 7, name: workflow.templateName, path: workflow.path, state: 'active' } as any],
+    });
+    let read = 0;
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockImplementation(async () => {
+      read += 1;
+      return {
+        total_count: read === 1 ? 2 : 3,
+        workflow_runs: read === 1
+          ? [
+              workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
+              workflowRun(10, 'completed', 'success', '2026-07-10T00:00:00Z'),
+            ]
+          : [
+              workflowRun(30, 'completed', 'failure', '2026-07-30T00:00:00Z'),
+              workflowRun(20, 'completed', 'success', '2026-07-20T00:00:00Z'),
+              workflowRun(10, 'completed', 'success', '2026-07-10T00:00:00Z'),
+            ],
+      };
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockImplementation(async (_owner, _repo, runId) => ({
+      total_count: 1,
+      artifacts: [runId === 20 ? releaseArtifact(20, currentSha) : releaseArtifact(10, previousSha)],
+    }));
+    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: project.name,
+      env: 'production',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('PROVIDER_ERROR');
+    expect(result.error.details.status).toBe('blocked');
+    expect(result.error.details.errors.join('\n')).toContain('newer workflow run');
+    expect(trigger).not.toHaveBeenCalled();
+    await t.close();
+  });
+
   it('records the rollback as a plan/apply run pair with per-service receipts', async () => {
     const project = new ProjectRepository().create({ name: 'rollback-pair-app', defaultPlatform: 'railway' });
     const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
