@@ -29,6 +29,31 @@ Desired infrastructure state is repo-backed when Hypervibe runs inside a git wor
 
 Do not treat cached local state as proof of convergence when live observation is available.
 
+## Project Runtime Desired State
+
+The top-level `runtime` field declares the project runtime used by
+Hypervibe-generated build and automation paths. It is a typed contract such as
+`{ "kind": "node", "version": "24" }` or
+`{ "kind": "python", "version": "3.13" }`; it is not the runtime used to
+execute Hypervibe itself.
+
+- A repository-owned Dockerfile remains authoritative and is never rewritten
+  from `runtime`. When no Dockerfile exists, generated CI/provider builds use
+  the declared runtime image and the matching package manifest conventions.
+- Migration setup, project build jobs, and managed checks with no explicit
+  same-kind version inherit the project runtime. A check-level version remains
+  an intentional override.
+- Hypervibe-owned isolated helpers, such as the App Store release runtime, keep
+  their own runtime contract and must not inherit project language settings.
+- Runtime changes are part of each environment's deployment contract and are
+  projected into local service build state during apply. Because hosting APIs
+  generally cannot observe the base runtime directly, that drift is reported
+  as unverified rather than falsely presented as provider-confirmed.
+- Specs that omit `runtime` preserve the historical Node 20 generated-build
+  behavior for compatibility. Hypervibe does not silently add the field or
+  upgrade existing projects; selecting a new runtime is an explicit spec
+  change reviewed through plan/apply.
+
 ## Code Map
 
 - `src/application/`: the transport-neutral command registry, command context, result envelope, provider bootstrap, and shared orchestration entrypoint.

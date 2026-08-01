@@ -7,6 +7,17 @@ import {
 } from '../spec-bootstrap.js';
 
 describe('spec bootstrap env vars', () => {
+  it('projects explicit project runtime into apply parameters', () => {
+    const params = specToBootstrapParams('runtime-app', 'staging', {
+      hosting: { provider: 'cloudrun' },
+      services: { web: { workloadKind: 'web' } },
+      email: { enabled: false },
+      envVars: {},
+    }, { kind: 'python', version: '3.13' });
+
+    expect(params.runtime).toEqual({ kind: 'python', version: '3.13' });
+  });
+
   it('merges deploy env files below spec envVars and explicit overrides above both', () => {
     const params = specToBootstrapParams('env-app', 'production', {
       hosting: { provider: 'railway' },

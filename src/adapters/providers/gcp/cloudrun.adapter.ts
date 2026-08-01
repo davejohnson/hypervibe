@@ -17,6 +17,7 @@ import { parseHostingBindings, type GetLogsOptions, type LogEntry } from '../../
 import * as pubsub from './pubsub.api.js';
 import { pubsubQueueResourceIds } from '../../../domain/services/queue-env.js';
 import { hashEnvValue, type ObservedService, type ObservedState } from '../../../domain/ports/observe.port.js';
+import { effectiveProjectRuntime } from '../../../domain/spec/project-runtime.js';
 
 // Credentials schema for self-registration
 export const CloudRunCredentialsSchema = z.object({
@@ -2538,30 +2539,46 @@ export class CloudRunAdapter implements IProviderAdapter {
 
   private cloudBuildScript(service: Service, imageUri: string): string {
     const dockerfilePath = service.buildConfig.dockerfilePath?.trim() || 'Dockerfile';
-    const startCommand = service.buildConfig.startCommand?.trim() || 'npm start';
-    const generatedDockerfile = [
-      'FROM node:20-slim',
-      'WORKDIR /app',
-      'COPY package*.json ./',
-      'RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi',
-      'COPY . .',
-      'ENV PORT=8080',
-      'EXPOSE 8080',
-      `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`,
-      '',
-    ].join('\n');
+    const runtime = effectiveProjectRuntime(service.buildConfig.runtime);
+    const startCommand = service.buildConfig.startCommand?.trim()
+      || (runtime.kind === 'node' ? 'npm start' : 'python app.py');
+    const generatedDockerfile = runtime.kind === 'node'
+      ? [
+        `FROM node:${runtime.version}-slim`,
+        'WORKDIR /app',
+        'COPY package*.json ./',
+        'RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi',
+        'COPY . .',
+        'ENV PORT=8080',
+        'EXPOSE 8080',
+        `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`,
+        '',
+      ].join('\n')
+      : [
+        `FROM python:${runtime.version}-slim`,
+        'WORKDIR /app',
+        'COPY . .',
+        'RUN if [ -f requirements.txt ]; then python -m pip install --no-cache-dir -r requirements.txt; else python -m pip install --no-cache-dir .; fi',
+        'ENV PORT=8080',
+        'EXPOSE 8080',
+        `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`,
+        '',
+      ].join('\n');
+    const manifestCondition = runtime.kind === 'node'
+      ? '[ -f package.json ]'
+      : '[ -f requirements.txt ] || [ -f pyproject.toml ]';
 
     return [
       'set -euo pipefail',
       `if [ -f ${JSON.stringify(dockerfilePath)} ]; then`,
       `  docker build -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
-      'elif [ -f package.json ]; then',
+      `elif ${manifestCondition}; then`,
       "  cat > Dockerfile.infraprint <<'EOF'",
       generatedDockerfile,
       'EOF',
       `  docker build -t ${JSON.stringify(imageUri)} -f Dockerfile.infraprint .`,
       'else',
-      '  echo "No Dockerfile or package.json found. Add a Dockerfile or a Node package.json so Infraprint can build this service automatically." >&2',
+      `  echo "No Dockerfile or manifest for the declared ${runtime.kind} runtime was found." >&2`,
       '  exit 1',
       'fi',
     ].join('\n');

@@ -14,6 +14,32 @@ const environmentVariableNameSchema = z.string().regex(
   'environment variable names must start with a letter or underscore and contain only letters, numbers, and underscores'
 );
 
+/**
+ * A concrete Node release usable by both actions/setup-node and the official
+ * Docker image tags Hypervibe generates. Ranges and expressions are rejected
+ * because desired state must resolve to one reviewable runtime.
+ */
+export const nodeVersionSchema = z.string().regex(
+  /^[1-9]\d*(?:\.\d+){0,2}$/,
+  'Node versions must be a concrete major, major.minor, or major.minor.patch release such as 22 or 22.17.1'
+);
+
+export const pythonVersionSchema = z.string().regex(
+  /^[1-9]\d*(?:\.\d+){0,2}$/,
+  'Python versions must be a concrete major, major.minor, or major.minor.patch release such as 3.13 or 3.13.5'
+);
+
+export const projectRuntimeSpecSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('node'),
+    version: nodeVersionSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal('python'),
+    version: pythonVersionSchema,
+  }).strict(),
+]);
+
 const DATABASE_ENV_ALIAS_SOURCES = [
   'DATABASE_URL',
   'DIRECT_URL',
@@ -176,12 +202,13 @@ const githubAutomationTriggersSchema = z.object({
 const githubAutomationRuntimeSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('node'),
-    version: z.string().min(1).default('22'),
+    /** Explicit check override; otherwise the project Node runtime is used. */
+    version: z.string().min(1).optional(),
     installCommand: z.string().min(1).default('npm ci'),
   }).strict(),
   z.object({
     kind: z.literal('python'),
-    version: z.string().min(1).default('3.13'),
+    version: z.string().min(1).optional(),
     installCommand: z.string().min(1).default('python -m pip install -r requirements.txt'),
   }).strict(),
 ]);
@@ -1135,6 +1162,8 @@ export const projectSpecSchema = z.object({
   version: z.literal(1),
   project: z.string().min(1),
   gitRemoteUrl: z.string().min(1).optional(),
+  /** Project-wide build and automation runtime desired state. */
+  runtime: projectRuntimeSpecSchema.optional(),
   github: githubSpecSchema.optional(),
   /** @deprecated Use github.collaboration. Accepted for one compatibility period. */
   collaboration: collaborationSpecSchema.optional(),
@@ -1250,6 +1279,7 @@ export const projectSpecSchema = z.object({
 });
 
 export type ServiceSpec = z.infer<typeof serviceSpecSchema>;
+export type ProjectRuntimeSpec = z.infer<typeof projectRuntimeSpecSchema>;
 export type DatabaseSpec = z.infer<typeof databaseSpecSchema>;
 export type IosSpec = z.infer<typeof iosSpecSchema>;
 export type IosReleaseSpec = z.infer<typeof iosReleaseSpecSchema>;

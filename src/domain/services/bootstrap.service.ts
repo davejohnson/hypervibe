@@ -19,6 +19,7 @@ import { buildRailwayGitHubRepoAccessHelp, isRailwayGitHubRepoAccessError } from
 import { formatConnectionGuidance } from './connection-guidance.js';
 import type { WorkloadKind } from '../entities/service.entity.js';
 import type { Receipt } from '../ports/provider.port.js';
+import type { ProjectRuntime } from '../spec/project-runtime.js';
 import { parseHostingBindings, type IHostingAdapter } from '../ports/hosting.port.js';
 import {
   type DesiredState,
@@ -96,6 +97,7 @@ export async function executeBootstrap(params: {
   queueEnvVars?: Record<string, string>;
   envVarsByService?: Record<string, Record<string, string>>;
   ensureHostingProject?: boolean;
+  runtime?: ProjectRuntime;
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
   const tx = new InfraTransaction();
   let project = resolveProject({ projectName: params.projectName });
@@ -146,6 +148,7 @@ export async function executeBootstrap(params: {
           ...(runtimeConfig?.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
           ...(runtimeConfig?.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),
           ...(runtimeConfig?.healthCheckPath ? { healthCheckPath: runtimeConfig.healthCheckPath } : {}),
+          ...(params.runtime ? { runtime: params.runtime } : {}),
           public: publicAccess,
         },
       });
@@ -166,6 +169,7 @@ export async function executeBootstrap(params: {
         ...(runtimeConfig?.startCommand ? { startCommand: runtimeConfig.startCommand } : {}),
         ...(runtimeConfig?.releaseCommand ? { releaseCommand: runtimeConfig.releaseCommand } : {}),
         ...(runtimeConfig?.healthCheckPath ? { healthCheckPath: runtimeConfig.healthCheckPath } : {}),
+        ...(params.runtime ? { runtime: params.runtime } : {}),
         public: publicAccess,
       };
       const buildConfigChanged = JSON.stringify(service.buildConfig) !== JSON.stringify(nextBuildConfig);
@@ -188,6 +192,7 @@ export async function executeBootstrap(params: {
           builder: 'nixpacks',
           cronSchedule: cronConfig.schedule,
           ...(cronConfig.command ? { startCommand: cronConfig.command } : {}),
+          ...(params.runtime ? { runtime: params.runtime } : {}),
         },
       });
       const createdServiceId = service.id;
@@ -208,6 +213,7 @@ export async function executeBootstrap(params: {
           builder: service.buildConfig.builder ?? 'nixpacks',
           cronSchedule: cronConfig.schedule,
           ...(cronConfig.command ? { startCommand: cronConfig.command } : {}),
+          ...(params.runtime ? { runtime: params.runtime } : {}),
         },
       }) ?? service;
     }

@@ -6,6 +6,11 @@ import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js
 import type { GitHubCredentials } from '../../adapters/providers/github/github.adapter.js';
 import type { Project } from '../entities/project.entity.js';
 import { projectSpecSchema, type IosSpec } from '../spec/spec.schema.js';
+import {
+  effectiveProjectRuntime,
+  LEGACY_PROJECT_RUNTIME,
+  type ProjectRuntime,
+} from '../spec/project-runtime.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { buildIosReleaseWorkflow } from './ios-release-workflow.service.js';
@@ -156,6 +161,7 @@ export function resolveBranchDeployTargets(project: Project): {
     const skippedEnvironments: string[] = [];
     const desiredBranches: Record<string, string | undefined> = {};
     let migration: { includeStep: boolean; command?: string; note?: string } = { includeStep: false };
+    const runtime = effectiveProjectRuntime(parsedSpec.data.runtime);
 
     for (const [environmentName, envSpec] of Object.entries(parsedSpec.data.environments)) {
       const kind = classifyEnvironmentName(environmentName);
@@ -199,6 +205,7 @@ export function resolveBranchDeployTargets(project: Project): {
         needsServiceNames: runtimeServiceNames.length > 0 || (serviceNames.length === 0 && bindings.providerServiceIds.length > 0),
         needsJobNames: jobServiceNames.length > 0 || (serviceNames.length === 0 && bindings.providerJobNames.length > 0),
         webStartCommand: webService?.startCommand,
+        runtime,
       });
 
       if (!migration.includeStep && envSpec.migrations?.mode === 'tool' && envSpec.migrations.runInDeploy !== false && envSpec.migrations.command) {
@@ -311,18 +318,28 @@ export function resolveBranchDeployTargets(project: Project): {
   };
 }
 
-function buildMigrationStep(command: string): string {
+function buildMigrationStep(command: string, runtime: ProjectRuntime): string {
   // Migrations run app tooling (prisma, node scripts), so the runner needs
   // dependencies installed — the deploy steps that follow build a container
   // image and never run npm ci on the runner themselves.
-  return `      - uses: actions/setup-node@v4
+  const setup = runtime.kind === 'node'
+    ? `      - uses: actions/setup-node@v4
         if: steps.deploy.outputs.operation != 'rollback'
         with:
-          node-version: '20'
+          node-version: '${runtime.version}'
           cache: 'npm'
       - name: Install dependencies for migrations
         if: steps.deploy.outputs.operation != 'rollback'
-        run: npm ci
+        run: npm ci`
+    : `      - uses: actions/setup-python@v5
+        if: steps.deploy.outputs.operation != 'rollback'
+        with:
+          python-version: '${runtime.version}'
+          cache: 'pip'
+      - name: Install dependencies for migrations
+        if: steps.deploy.outputs.operation != 'rollback'
+        run: python -m pip install -r requirements.txt`;
+  return `${setup}
       - name: Run migrations
         if: steps.deploy.outputs.operation != 'rollback'
         run: ${command}
@@ -416,6 +433,7 @@ function buildDeploymentContractStep(environmentName: string): string {
               version: spec.version,
               project: spec.project,
               gitRemoteUrl: spec.gitRemoteUrl || null,
+              ...(spec.runtime ? { runtime: spec.runtime } : {}),
               environmentName,
               environment,
               secrets,
@@ -546,7 +564,9 @@ export function buildBranchDeployWorkflow(
   const safeEnvironment = target.environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
   const template = `deploy-${provider}-${safeEnvironment}`;
   const filename = `${template}.yml`;
-  const migrationStep = migration.includeStep && migration.command ? buildMigrationStep(migration.command) : '';
+  const migrationStep = migration.includeStep && migration.command
+    ? buildMigrationStep(migration.command, target.runtime ?? LEGACY_PROJECT_RUNTIME)
+    : '';
   const deployBlock = buildProviderDeploySteps(provider, target);
   const providerName = deployBlock.displayName ?? providerRegistry.getMetadata(provider)?.displayName ?? provider;
   let requiredSecrets = migrationStep

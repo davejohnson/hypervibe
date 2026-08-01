@@ -75,9 +75,7 @@ jobs:
         with:
           ref: ${{ steps.gate.outputs.sha }}
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+@@PROJECT_RUNTIME_SETUP@@
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.3'
@@ -147,7 +145,7 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '@@MANAGED_NODE_VERSION@@'
       - name: Download validated iOS build
         uses: actions/download-artifact@v4
         with:

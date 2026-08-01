@@ -1,4 +1,4 @@
-import type { EnvironmentSpec, ServiceSpec } from '../spec/spec.schema.js';
+import type { EnvironmentSpec, ProjectRuntimeSpec, ServiceSpec } from '../spec/spec.schema.js';
 import { createHash } from 'crypto';
 import { migrationReleaseCommandWarning, withMigrationReleaseCommand } from '../spec/spec-bootstrap.js';
 import type { ObservedState, ObservedService } from '../ports/observe.port.js';
@@ -41,6 +41,8 @@ export function diffEnvironment(input: {
   managedDatabaseEnvVars?: Record<string, string>;
   managedCacheEnvVars?: Record<string, string>;
   managedQueueEnvVars?: Record<string, string>;
+  /** Explicit project build runtime; omission preserves legacy local state. */
+  projectRuntime?: ProjectRuntimeSpec;
 }): DiffResult {
   const { envName, observed, local, expectedSource, managedDatabaseEnvVars, managedCacheEnvVars, managedQueueEnvVars } = input;
   const providerBehavior = input.providerBehavior ?? {};
@@ -206,6 +208,16 @@ export function diffEnvironment(input: {
       const diff = diffServiceConfig(serviceSpec, live, desiredServiceEnvVars, {
         presenceOnlyEnvVars: presenceOnlyManagedEnvVars,
       });
+      const localRuntime = localServices.get(name)?.buildConfig.runtime;
+      const runtimeDrift = Boolean(input.projectRuntime)
+        && JSON.stringify(localRuntime) !== JSON.stringify(input.projectRuntime);
+      if (runtimeDrift) {
+        diff.push({
+          field: 'runtime',
+          from: localRuntime ? `${localRuntime.kind}:${localRuntime.version}` : 'undeclared',
+          to: `${input.projectRuntime!.kind}:${input.projectRuntime!.version}`,
+        });
+      }
       const workloadKindObservable = providerBehavior.workloadKindObservation !== 'cron-only';
       if (live.workloadKind !== serviceSpec.workloadKind && workloadKindObservable) {
         diff.push({ field: 'workloadKind', from: live.workloadKind, to: serviceSpec.workloadKind });
@@ -231,7 +243,7 @@ export function diffEnvironment(input: {
           id,
           type: 'update',
           resource,
-          verified: true,
+          verified: !runtimeDrift,
           reason: reasons.join('; '),
           ...(diff.length > 0 ? { diff } : {}),
         });
@@ -246,13 +258,27 @@ export function diffEnvironment(input: {
     // create.
     const known = localServices.has(name);
     const bound = Boolean(localServiceBindings[name]?.serviceId);
+    const localRuntime = localServices.get(name)?.buildConfig.runtime;
+    const runtimeDrift = Boolean(input.projectRuntime)
+      && JSON.stringify(localRuntime) !== JSON.stringify(input.projectRuntime);
     if (known && bound) {
       actions.push({
         id,
-        type: 'noop',
+        type: runtimeDrift ? 'update' : 'noop',
         resource,
         verified: false,
-        reason: 'Bound in local state; provider does not support observation',
+        reason: runtimeDrift
+          ? `Project runtime changes from ${localRuntime ? `${localRuntime.kind}:${localRuntime.version}` : 'undeclared'} to ${input.projectRuntime!.kind}:${input.projectRuntime!.version}`
+          : 'Bound in local state; provider does not support observation',
+        ...(runtimeDrift
+          ? {
+            diff: [{
+              field: 'runtime',
+              from: localRuntime ? `${localRuntime.kind}:${localRuntime.version}` : 'undeclared',
+              to: `${input.projectRuntime!.kind}:${input.projectRuntime!.version}`,
+            }],
+          }
+          : {}),
       });
     } else {
       actions.push({

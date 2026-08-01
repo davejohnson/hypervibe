@@ -606,6 +606,7 @@ describe('CloudRunAdapter', () => {
       buildConfig: {
         builder: 'dockerfile',
         startCommand: 'npm start',
+        runtime: { kind: 'node', version: '24' },
       },
       envVarSpec: {},
       createdAt: now,
@@ -637,6 +638,7 @@ describe('CloudRunAdapter', () => {
     );
     expect(buildCall).toBeTruthy();
     const buildBody = JSON.parse(String(buildCall?.[1]?.body));
+    expect(buildBody.steps[0].args[1]).toContain('FROM node:24-slim');
     expect(buildBody.source.gitSource).toEqual({
       url: 'https://x-access-token:ghp_private_repo_token@github.com/acme/demo.git',
       revision: 'main',

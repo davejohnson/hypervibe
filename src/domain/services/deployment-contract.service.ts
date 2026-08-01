@@ -9,6 +9,7 @@ type DeploymentContractSpec = {
   version?: unknown;
   project?: unknown;
   gitRemoteUrl?: unknown;
+  runtime?: unknown;
   secrets?: unknown;
   environments?: unknown;
 };
@@ -57,6 +58,7 @@ export function environmentDeploymentContract(
     version: spec.version,
     project: spec.project,
     gitRemoteUrl: spec.gitRemoteUrl ?? null,
+    ...(spec.runtime !== undefined ? { runtime: spec.runtime } : {}),
     environmentName,
     environment,
     secrets: applicableSecrets,

@@ -9,7 +9,13 @@ import type { OpenAIAdapter } from '../../adapters/providers/openai/openai.adapt
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import type { Project } from '../entities/project.entity.js';
 import type { PlanAction } from '../plan/plan.types.js';
-import type { GitHubAutomationSpec, GitHubSpec, ProjectSpec } from '../spec/spec.schema.js';
+import type {
+  GitHubAutomationSpec,
+  GitHubSpec,
+  ProjectRuntimeSpec,
+  ProjectSpec,
+} from '../spec/spec.schema.js';
+import { effectiveGitHubCheckRuntimeVersion } from '../spec/project-runtime.js';
 import { adapterFactory } from './adapter.factory.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { getGitHubAdapter } from './github-ops.service.js';
@@ -167,22 +173,27 @@ function triggerLines(automation: Extract<GitHubAutomationSpec, { kind: 'check' 
   return lines.length === 1 ? [...lines, '  workflow_dispatch:'] : lines;
 }
 
-function runtimeSteps(automation: Extract<GitHubAutomationSpec, { kind: 'check' }>): string[] {
+function runtimeSteps(
+  automation: Extract<GitHubAutomationSpec, { kind: 'check' }>,
+  projectRuntime?: ProjectRuntimeSpec
+): string[] {
   if (automation.runtime.kind === 'node') {
+    const version = effectiveGitHubCheckRuntimeVersion('node', automation.runtime.version, projectRuntime);
     return [
       '      - uses: actions/setup-node@v4',
       '        with:',
-      `          node-version: ${yamlString(automation.runtime.version)}`,
+      `          node-version: ${yamlString(version)}`,
       '          cache: npm',
       '      - name: Install dependencies',
       '        run: |',
       ...indentBlock(automation.runtime.installCommand, 10),
     ];
   }
+  const version = effectiveGitHubCheckRuntimeVersion('python', automation.runtime.version, projectRuntime);
   return [
     '      - uses: actions/setup-python@v5',
     '        with:',
-    `          python-version: ${yamlString(automation.runtime.version)}`,
+    `          python-version: ${yamlString(version)}`,
     '          cache: pip',
     '      - name: Install dependencies',
     '        run: |',
@@ -194,7 +205,11 @@ export function githubWorkflowName(id: string): string {
   return `Hypervibe / ${id}`;
 }
 
-function buildCheckWorkflow(id: string, automation: Extract<GitHubAutomationSpec, { kind: 'check' }>): string {
+function buildCheckWorkflow(
+  id: string,
+  automation: Extract<GitHubAutomationSpec, { kind: 'check' }>,
+  projectRuntime?: ProjectRuntimeSpec
+): string {
   const lines = [
     MANAGED_HEADER,
     `name: ${yamlString(githubWorkflowName(id))}`,
@@ -212,7 +227,7 @@ function buildCheckWorkflow(id: string, automation: Extract<GitHubAutomationSpec
     '      - uses: actions/checkout@v5',
     '        with:',
     '          persist-credentials: false',
-    ...runtimeSteps(automation),
+    ...runtimeSteps(automation, projectRuntime),
     '      - name: Prepare failure evidence',
     '        run: mkdir -p hypervibe-failure-evidence',
   ];
@@ -316,7 +331,8 @@ function sourceFailureEvidence(github: GitHubSpec, sources: string[]): Record<st
 function buildAutofixWorkflow(
   id: string,
   automation: Extract<GitHubAutomationSpec, { kind: 'autofix' }>,
-  github: GitHubSpec
+  github: GitHubSpec,
+  projectRuntime?: ProjectRuntimeSpec
 ): string {
   const workflowNames = sourceWorkflowNames(github, automation.sources).map(yamlString).join(', ');
   const requiredEvidence = sourceFailureEvidence(github, automation.sources);
@@ -327,10 +343,10 @@ function buildAutofixWorkflow(
   const preparationSteps: string[] = [];
   const seenRuntimes = new Set<string>();
   for (const check of sourceChecks) {
-    const key = JSON.stringify(check.runtime);
+    const key = JSON.stringify({ runtime: check.runtime, projectRuntime });
     if (seenRuntimes.has(key)) continue;
     seenRuntimes.add(key);
-    preparationSteps.push(...runtimeSteps(check));
+    preparationSteps.push(...runtimeSteps(check, projectRuntime));
   }
   const validationSteps = sourceChecks.flatMap((check, checkIndex) =>
     check.commands.flatMap((command, commandIndex) => [
@@ -758,10 +774,15 @@ function buildAuditWorkflow(id: string, automation: Extract<GitHubAutomationSpec
   ].join('\n');
 }
 
-export function compileGitHubAutomationWorkflow(id: string, automation: GitHubAutomationSpec, github: GitHubSpec): string {
+export function compileGitHubAutomationWorkflow(
+  id: string,
+  automation: GitHubAutomationSpec,
+  github: GitHubSpec,
+  projectRuntime?: ProjectRuntimeSpec
+): string {
   switch (automation.kind) {
-    case 'check': return buildCheckWorkflow(id, automation);
-    case 'autofix': return buildAutofixWorkflow(id, automation, github);
+    case 'check': return buildCheckWorkflow(id, automation, projectRuntime);
+    case 'autofix': return buildAutofixWorkflow(id, automation, github, projectRuntime);
     case 'pull-request-review': return buildReviewWorkflow(id, automation);
     case 'code-audit': return buildAuditWorkflow(id, automation);
   }
@@ -855,7 +876,10 @@ export function githubSpecNeedsOpenAI(github: GitHubSpec): boolean {
   );
 }
 
-export function compileManagedGitHubFiles(github: GitHubSpec): ManagedGitHubFile[] {
+export function compileManagedGitHubFiles(
+  github: GitHubSpec,
+  projectRuntime?: ProjectRuntimeSpec
+): ManagedGitHubFile[] {
   const files: ManagedGitHubFile[] = [];
   if (github.collaboration.issues.enabled && github.collaboration.issues.templates) {
     files.push(managedFile(
@@ -883,7 +907,7 @@ export function compileManagedGitHubFiles(github: GitHubSpec): ManagedGitHubFile
     if (!automation.enabled) continue;
     files.push(managedFile(
       `.github/workflows/hypervibe-${id}.yml`,
-      compileGitHubAutomationWorkflow(id, automation, github),
+      compileGitHubAutomationWorkflow(id, automation, github, projectRuntime),
       automationReview(id, automation)
     ));
   }
@@ -1042,7 +1066,7 @@ export async function planGitHubInfrastructure(params: {
   if (!parts) return { actions: [], warnings: [`Could not parse GitHub repository ${repository}.`], blocked: [] };
 
   const artifactContractIssues = autofixArtifactContractIssues(params.spec.github);
-  const files = compileManagedGitHubFiles(params.spec.github);
+  const files = compileManagedGitHubFiles(params.spec.github, params.spec.runtime);
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
     return {

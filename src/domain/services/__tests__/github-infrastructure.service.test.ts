@@ -112,6 +112,31 @@ describe('GitHub infrastructure compiler', () => {
       });
   });
 
+  it('uses project runtime as the check default while preserving explicit overrides', () => {
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: 'runtime-checks',
+      runtime: { kind: 'node', version: '24' },
+      github: {
+        actions: {
+          inherited: {
+            kind: 'check', category: 'test', runtime: { kind: 'node' }, commands: ['npm test'],
+          },
+          overridden: {
+            kind: 'check', category: 'test', runtime: { kind: 'node', version: '22' }, commands: ['npm test'],
+          },
+        },
+      },
+      environments: { production: { hosting: { provider: 'railway' }, services: {} } },
+    });
+    const files = compileManagedGitHubFiles(spec.github!, spec.runtime);
+
+    expect(files.find((file) => file.path.endsWith('hypervibe-inherited.yml'))?.content)
+      .toContain('node-version: "24"');
+    expect(files.find((file) => file.path.endsWith('hypervibe-overridden.yml'))?.content)
+      .toContain('node-version: "22"');
+  });
+
   it('owns a canonical pull-request template whenever pull requests are required', () => {
     const github = projectSpecSchema.parse({
       version: 1,

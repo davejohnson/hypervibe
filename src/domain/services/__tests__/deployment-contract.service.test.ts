@@ -104,6 +104,17 @@ describe('environment deployment contract', () => {
       .not.toBe(environmentDeploymentContractHash(SPEC, 'staging'));
   });
 
+  it('includes an explicit project runtime without changing legacy contract shape', () => {
+    const withRuntime = { ...SPEC, runtime: { kind: 'node', version: '22' } };
+
+    expect(environmentDeploymentContract(withRuntime, 'staging')).toMatchObject({
+      runtime: { kind: 'node', version: '22' },
+    });
+    expect(environmentDeploymentContract(SPEC, 'staging')).not.toHaveProperty('runtime');
+    expect(environmentDeploymentContractHash(withRuntime, 'staging'))
+      .not.toBe(environmentDeploymentContractHash(SPEC, 'staging'));
+  });
+
   it('rejects an unknown environment', () => {
     expect(() => environmentDeploymentContractHash(SPEC, 'preview'))
       .toThrow('Spec has no environment "preview"');

@@ -413,7 +413,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? getSecretStore().decryptObject<Record<string, string>>(overrides.delegatedSecretVarsEncrypted)
     : undefined;
   const buildDeployBootstrapParams = async () => {
-    let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec);
+    let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec, spec.runtime);
     bootstrapParams = applyEnvFileVarsToBootstrapParams(bootstrapParams, envFileEnvVars);
     bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
       envVars: overrideEnvVars,
