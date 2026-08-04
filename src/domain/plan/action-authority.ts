@@ -37,6 +37,10 @@ import {
   DATABASE_RESILIENCE_OPERATIONS,
   isDatabaseResilienceAction,
 } from '../services/database-resilience-plan.service.js';
+import {
+  isLoadBalancerAction,
+  LOAD_BALANCER_OPERATIONS,
+} from '../services/load-balancer-plan.service.js';
 
 export type PlanMutationCapability =
   | 'hosting.environment.ensure'
@@ -51,6 +55,9 @@ export type PlanMutationCapability =
   | 'appstore.mutate'
   | 'queue.mutate'
   | 'storage.mutate'
+  | 'load-balancer.monitor.mutate'
+  | 'load-balancer.pool.mutate'
+  | 'load-balancer.mutate'
   | 'hosting.delegated-secret.sync'
   | 'stripe.hosting-env.sync'
   | 'stripe.catalog.mutate'
@@ -326,6 +333,66 @@ export function resolvePlanActionAuthority(
     )
   ) {
     return authority(action, 'storage.mutate');
+  }
+  if (
+    isLoadBalancerAction(action)
+    && exactResource(action, 'load-balancer')
+    && action.resource.name === metadataString(action, 'hostname')
+    && metadataString(action, 'accountId')
+    && metadataString(action, 'zoneId')
+    && metadataString(action, 'configHash')
+  ) {
+    const operation = action.metadata?.operation;
+    if (
+      operation === LOAD_BALANCER_OPERATIONS.monitorEnsure
+      && hasType(action, 'create', 'update')
+      && action.id === 'load-balancer:monitor'
+      && metadataString(action, 'externalName')
+    ) {
+      return authority(action, 'load-balancer.monitor.mutate');
+    }
+    if (
+      operation === LOAD_BALANCER_OPERATIONS.poolEnsure
+      && hasType(action, 'create', 'update')
+      && action.id === 'load-balancer:pool'
+      && metadataString(action, 'externalName')
+      && (metadataStringArray(action, 'services')?.length ?? 0) >= 2
+    ) {
+      return authority(action, 'load-balancer.pool.mutate');
+    }
+    if (
+      operation === LOAD_BALANCER_OPERATIONS.ensure
+      && hasType(action, 'create', 'update')
+      && action.id === `load-balancer:${action.resource.name}`
+      && (metadataStringArray(action, 'services')?.length ?? 0) >= 2
+    ) {
+      return authority(action, 'load-balancer.mutate');
+    }
+    if (
+      operation === LOAD_BALANCER_OPERATIONS.destroy
+      && action.type === 'destroy'
+      && action.id === `load-balancer:${action.resource.name}:destroy`
+      && metadataString(action, 'externalId')
+    ) {
+      return authority(action, 'load-balancer.mutate');
+    }
+    if (
+      operation === LOAD_BALANCER_OPERATIONS.poolDestroy
+      && action.type === 'destroy'
+      && action.id === 'load-balancer:pool:destroy'
+      && metadataString(action, 'externalId')
+    ) {
+      return authority(action, 'load-balancer.pool.mutate');
+    }
+    if (
+      operation === LOAD_BALANCER_OPERATIONS.monitorDestroy
+      && action.type === 'destroy'
+      && action.id === 'load-balancer:monitor:destroy'
+      && metadataString(action, 'externalId')
+    ) {
+      return authority(action, 'load-balancer.monitor.mutate');
+    }
+    return null;
   }
   if (
     isDelegatedSecretAction(action)

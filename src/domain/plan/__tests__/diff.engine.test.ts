@@ -812,6 +812,28 @@ describe('diffEnvironment — reconciliation safety', () => {
 });
 
 describe('diffEnvironment — domain and workload', () => {
+  it('does not plan the single-service domain action when a load balancer owns the hostname', () => {
+    const withLoadBalancer = spec({
+      domain: 'myapp.dev',
+      services: {
+        web: { startCommand: 'npm start', healthCheckPath: '/health', public: true },
+        'web-secondary': { startCommand: 'npm start', healthCheckPath: '/health', public: true },
+      },
+      loadBalancer: {
+        provider: 'cloudflare',
+        services: ['web', 'web-secondary'],
+        healthCheckPath: '/health',
+      },
+    });
+    const result = diffEnvironment({
+      spec: withLoadBalancer,
+      envName: 'production',
+      observed: observed(),
+      local: local(),
+    });
+    expect(result.actions.some((candidate) => candidate.resource.kind === 'domain')).toBe(false);
+  });
+
   it('updates when the domain is not attached and noops when it is', () => {
     const withDomain = spec({ domain: 'myapp.dev' });
     const detached = diffEnvironment({ spec: withDomain, envName: 'production', observed: observed(), local: local() });

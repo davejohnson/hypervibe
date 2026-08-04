@@ -308,7 +308,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   cloudflare: {
     provider: 'cloudflare',
     displayName: 'Cloudflare',
-    tokenType: 'Cloudflare User API Token as apiToken for simple DNS, custom domains, email routing, and Registrar/domain purchase; or Cloudflare Account API Token as apiToken for durable DNS, custom domains, and email routing automation, with a separate User API Token only when that account-token setup also buys domains',
+    tokenType: 'Cloudflare User API Token as apiToken for simple DNS, custom domains, load balancing, email routing, and Registrar/domain purchase; or Cloudflare Account API Token as apiToken for durable DNS, custom domains, load balancing, and email routing automation, with a separate User API Token only when that account-token setup also buys domains',
     setupUrl: 'https://dash.cloudflare.com/profile/api-tokens',
     setupUrls: [
       {
@@ -326,6 +326,8 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'For DNS/custom domains with either token type: grant Zone -> Zone -> Read.',
       'For DNS/custom domains with either token type: grant Zone -> DNS -> Edit.',
       'For Railway/custom-domain verification and some zone lookups: grant Zone -> Zone Settings -> Read or Edit.',
+      'For environments declaring loadBalancer: grant the Cloudflare API token Load Balancers Read and Load Balancers Write on the target zone.',
+      'For environments declaring loadBalancer: grant Load Balancing: Monitors and Pools Read and Load Balancing: Monitors and Pools Write on the owning account.',
       'For DNS/custom domains with either token type: Zone Resources must be Include -> Specific zone -> the target domain, for example hlspropertycare.com.',
       'For email routing only: grant Zone -> Email Routing Rules -> Edit.',
       'For email routing only: grant Account -> Email Routing Addresses -> Edit.',
@@ -338,7 +340,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'User API Tokens are fine for DNS, custom domains, and email routing, and are the simplest path when Hypervibe may also register domains. New user tokens use the documented cfut_ prefix.',
       'Account API Tokens are for durable service-principal style automation that should survive an individual user leaving the account. New account tokens use the documented cfat_ prefix (older tokens are unprefixed and still work). Cloudflare lists Registrar as NOT supported by Account API Tokens, so account-token setups need a User API Token only for Registrar/domain purchase.',
       'If the spec does not purchase/register domains, omit registrarApiToken. If apiToken is a User API Token with Registrar permissions, omit registrarApiToken even when registering domains.',
-      'For either token type, use Create Token, start from the Edit zone DNS template when available, then confirm the permissions above for the target zone. Cloudflare token verification only proves the token is active, not that it has these permissions — missing permissions surface at apply time.',
+      'For either token type, use Create Token, start from the Edit zone DNS template when available, then confirm the permissions above for the target zone. Add both zone load-balancer and account monitor/pool permissions when loadBalancer is declared. Cloudflare token verification only proves the token is active, not that it has these permissions — missing permissions surface at plan/apply time.',
       'Use the token secret itself as apiToken/CLOUDFLARE_API_TOKEN; do not use the token name or token id. Do not use the legacy Global API Key.',
     ],
   },

@@ -184,7 +184,7 @@ Secret references use the format: `provider://path[#key][@version]`
 
 Hypervibe exposes the same focused operations as canonical `hv_*` MCP tools and friendly CLI commands. The core is a Terraform-style loop:
 
-1. `hv_spec_set` — declare the desired state (services, database, cache, storage, domain, email, env vars) as a revisioned spec
+1. `hv_spec_set` — declare the desired state (services, database, cache, storage, load balancer, domain, email, env vars) as a revisioned spec
 2. `hv_plan` — observe live infrastructure, diff against the spec, and get an executable plan
 3. `hv_apply planId=...` — converge. Stale plans are rejected; destroying data-bearing resources requires explicit confirmation
 4. `hv_status` — see drift between desired and observed state at any time
@@ -617,6 +617,36 @@ modeled as explicit desired-state lifecycle actions before Hypervibe supports
 them; they cannot bypass `hv_plan`/`hv_apply`. Re-seeding likewise requires a
 reviewable desired-state change rather than a generic command runner.
 
+### Managed load balancing
+
+The first load-balancer slice uses Cloudflare in front of two or more
+equivalent public web services. The environment `domain` is the public
+hostname; each origin continues to use its provider-issued HTTPS URL and host
+header. Declare it through the normal desired-state loop:
+
+```json
+{
+  "domain": "app.example.com",
+  "services": {
+    "web-a": { "workloadKind": "web", "public": true },
+    "web-b": { "workloadKind": "web", "public": true }
+  },
+  "loadBalancer": {
+    "provider": "cloudflare",
+    "services": ["web-a", "web-b"],
+    "healthCheckPath": "/health"
+  }
+}
+```
+
+`hv_plan` observes and reconciles three explicit resources: an HTTPS health
+monitor, an equal-weight random origin pool, and the zone hostname load
+balancer. Pool/topology changes and initial hostname creation are marked
+billable. Removing the block plans confirmed deletion of public routing before
+the pool and monitor are removed. Same-name resources without durable bindings
+are never adopted implicitly; adopting existing Cloudflare load-balancer
+resources is outside V1, so those conflicts block until removed or renamed.
+
 Typical team flow:
 
 1. One person changes infrastructure through Hypervibe, such as adding a cron service.
@@ -645,6 +675,8 @@ Permissions:
 - Zone -> Zone -> Read
 - Zone -> Zone Settings -> Read or Edit
 - Zone -> DNS -> Edit
+- Load Balancers Read and Load Balancers Write on the target zone (for `loadBalancer`)
+- Load Balancing: Monitors and Pools Read and Write on the owning account (for `loadBalancer`)
 - Zone -> Email Routing Rules -> Edit (for hv_email_setup/hv_email_forwarding)
 - Account -> Email Routing Addresses -> Edit (to create/verify forwarding destinations)
 - Account -> Account Settings -> Read (lets Hypervibe auto-resolve accountId)

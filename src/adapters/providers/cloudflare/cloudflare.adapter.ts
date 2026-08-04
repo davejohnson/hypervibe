@@ -1,6 +1,14 @@
 import { z } from 'zod';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import type { IDnsProvider, DnsZone, DnsRecord } from '../../../domain/ports/dns.port.js';
+import type {
+  ILoadBalancerAdapter,
+  LoadBalancerEnsureResult,
+  LoadBalancerMonitor,
+  LoadBalancerPool,
+  LoadBalancerScope,
+  ManagedLoadBalancer,
+} from '../../../domain/ports/load-balancer.port.js';
 
 const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4';
 const CLOUDFLARE_USER_TOKEN_URL = 'https://dash.cloudflare.com/profile/api-tokens';
@@ -184,6 +192,52 @@ interface CloudflareResponse<T> {
   };
 }
 
+interface CloudflareLoadBalancerMonitor {
+  id: string;
+  description?: string;
+  type?: string;
+  path?: string;
+  interval?: number;
+  timeout?: number;
+  expected_codes?: string;
+  follow_redirects?: boolean;
+}
+
+interface CloudflareLoadBalancerPool {
+  id: string;
+  name: string;
+  monitor?: string;
+  enabled?: boolean;
+  origin_steering?: { policy?: string };
+  origins?: Array<{
+    name?: string;
+    address?: string;
+    enabled?: boolean;
+    header?: { Host?: string[] };
+  }>;
+}
+
+interface CloudflareManagedLoadBalancer {
+  id: string;
+  name: string;
+  default_pools?: string[];
+  fallback_pool?: string;
+  enabled?: boolean;
+  proxied?: boolean;
+  steering_policy?: string;
+}
+
+class CloudflareApiError extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message);
+    this.name = 'CloudflareApiError';
+  }
+}
+
+function isCloudflareNotFound(error: unknown): boolean {
+  return error instanceof CloudflareApiError && error.status === 404;
+}
+
 // Credentials schema for self-registration
 export const CloudflareCredentialsSchema = z.object({
   apiToken: z.string().min(1, 'API token is required'),
@@ -291,7 +345,7 @@ function isDuplicateDnsRecordError(error: unknown): boolean {
   return /already exists|identical record/i.test(message);
 }
 
-export class CloudflareAdapter implements IDnsProvider {
+export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
   readonly name = 'cloudflare';
   private credentials: CloudflareCredentials | null = null;
 
@@ -328,10 +382,27 @@ export class CloudflareAdapter implements IDnsProvider {
 
     if (!data.success) {
       const errorMsg = data.errors.map((e) => e.message).join(', ');
-      throw new Error(`Cloudflare API error: ${errorMsg}`);
+      throw new CloudflareApiError(
+        `Cloudflare API error: ${errorMsg || `HTTP ${response.status}`}`,
+        response.status
+      );
     }
 
     return data;
+  }
+
+  private async listPaginated<T>(endpoint: string): Promise<T[]> {
+    const items: T[] = [];
+    let page = 1;
+    let hasMore = true;
+    while (hasMore) {
+      const separator = endpoint.includes('?') ? '&' : '?';
+      const response = await this.request<T[]>('GET', `${endpoint}${separator}page=${page}&per_page=100`);
+      items.push(...response.result);
+      hasMore = Boolean(response.result_info && page < response.result_info.total_pages);
+      page += 1;
+    }
+    return items;
   }
 
   private registrarToken(domain?: string): string {
@@ -536,6 +607,223 @@ export class CloudflareAdapter implements IDnsProvider {
   async findZoneByName(domain: string): Promise<CloudflareZone | null> {
     const response = await this.request<CloudflareZone[]>('GET', `/zones?name=${encodeURIComponent(domain)}`);
     return response.result[0] ?? null;
+  }
+
+  async resolveLoadBalancerScope(hostname: string): Promise<LoadBalancerScope> {
+    const labels = hostname.trim().replace(/\.$/, '').toLowerCase().split('.');
+    for (let index = 0; index <= labels.length - 2; index++) {
+      const zone = await this.findZoneByName(labels.slice(index).join('.'));
+      if (!zone) continue;
+      return {
+        zoneId: zone.id,
+        accountId: zone.account?.id ?? await this.resolveAccountId(),
+      };
+    }
+    throw new Error(`Cloudflare zone not found for load-balancer hostname ${hostname}.`);
+  }
+
+  private mapLoadBalancerMonitor(resource: CloudflareLoadBalancerMonitor): LoadBalancerMonitor {
+    return {
+      id: resource.id,
+      name: resource.description ?? '',
+      type: resource.type ?? '',
+      path: resource.path ?? '/',
+      intervalSeconds: resource.interval ?? 60,
+      timeoutSeconds: resource.timeout ?? 5,
+      expectedCodes: resource.expected_codes ?? '200-399',
+      followRedirects: resource.follow_redirects ?? false,
+    };
+  }
+
+  async findMonitorsByName(accountId: string, name: string): Promise<LoadBalancerMonitor[]> {
+    const resources = await this.listPaginated<CloudflareLoadBalancerMonitor>(
+      `/accounts/${encodeURIComponent(accountId)}/load_balancers/monitors`
+    );
+    return resources
+      .map((resource) => this.mapLoadBalancerMonitor(resource))
+      .filter((resource) => resource.name === name);
+  }
+
+  async getMonitor(accountId: string, id: string): Promise<LoadBalancerMonitor | null> {
+    try {
+      const response = await this.request<CloudflareLoadBalancerMonitor>(
+        'GET',
+        `/accounts/${encodeURIComponent(accountId)}/load_balancers/monitors/${encodeURIComponent(id)}`
+      );
+      return this.mapLoadBalancerMonitor(response.result);
+    } catch (error) {
+      if (isCloudflareNotFound(error)) return null;
+      throw error;
+    }
+  }
+
+  async ensureMonitor(
+    accountId: string,
+    desired: Omit<LoadBalancerMonitor, 'id'>,
+    id?: string
+  ): Promise<LoadBalancerEnsureResult<LoadBalancerMonitor>> {
+    const body = {
+      description: desired.name,
+      type: desired.type,
+      method: 'GET',
+      path: desired.path,
+      interval: desired.intervalSeconds,
+      timeout: desired.timeoutSeconds,
+      expected_codes: desired.expectedCodes,
+      follow_redirects: desired.followRedirects,
+    };
+    const endpoint = `/accounts/${encodeURIComponent(accountId)}/load_balancers/monitors${id ? `/${encodeURIComponent(id)}` : ''}`;
+    const response = await this.request<CloudflareLoadBalancerMonitor>(id ? 'PUT' : 'POST', endpoint, body);
+    return { resource: this.mapLoadBalancerMonitor(response.result), created: !id };
+  }
+
+  async deleteMonitor(accountId: string, id: string): Promise<void> {
+    const endpoint = `/accounts/${encodeURIComponent(accountId)}/load_balancers/monitors/${encodeURIComponent(id)}`;
+    try {
+      await this.request<{ id: string }>('DELETE', endpoint);
+    } catch (error) {
+      if (!isCloudflareNotFound(error)) throw error;
+    }
+    if (await this.getMonitor(accountId, id)) {
+      throw new Error(`Cloudflare monitor ${id} still exists after deletion.`);
+    }
+  }
+
+  private mapLoadBalancerPool(resource: CloudflareLoadBalancerPool): LoadBalancerPool {
+    return {
+      id: resource.id,
+      name: resource.name,
+      monitorId: resource.monitor ?? '',
+      origins: (resource.origins ?? []).map((origin) => ({
+        name: origin.name ?? '',
+        address: origin.address ?? '',
+        hostHeader: origin.header?.Host?.[0] ?? '',
+        enabled: origin.enabled !== false,
+      })),
+      enabled: resource.enabled !== false,
+      steering: resource.origin_steering?.policy ?? 'random',
+    };
+  }
+
+  async findPoolsByName(accountId: string, name: string): Promise<LoadBalancerPool[]> {
+    const resources = await this.listPaginated<CloudflareLoadBalancerPool>(
+      `/accounts/${encodeURIComponent(accountId)}/load_balancers/pools`
+    );
+    return resources
+      .map((resource) => this.mapLoadBalancerPool(resource))
+      .filter((resource) => resource.name === name);
+  }
+
+  async getPool(accountId: string, id: string): Promise<LoadBalancerPool | null> {
+    try {
+      const response = await this.request<CloudflareLoadBalancerPool>(
+        'GET',
+        `/accounts/${encodeURIComponent(accountId)}/load_balancers/pools/${encodeURIComponent(id)}`
+      );
+      return this.mapLoadBalancerPool(response.result);
+    } catch (error) {
+      if (isCloudflareNotFound(error)) return null;
+      throw error;
+    }
+  }
+
+  async ensurePool(
+    accountId: string,
+    desired: Omit<LoadBalancerPool, 'id'>,
+    id?: string
+  ): Promise<LoadBalancerEnsureResult<LoadBalancerPool>> {
+    const body = {
+      name: desired.name,
+      monitor: desired.monitorId,
+      enabled: desired.enabled,
+      origin_steering: { policy: desired.steering },
+      origins: desired.origins.map((origin) => ({
+        name: origin.name,
+        address: origin.address,
+        enabled: origin.enabled,
+        header: { Host: [origin.hostHeader] },
+      })),
+    };
+    const endpoint = `/accounts/${encodeURIComponent(accountId)}/load_balancers/pools${id ? `/${encodeURIComponent(id)}` : ''}`;
+    const response = await this.request<CloudflareLoadBalancerPool>(id ? 'PUT' : 'POST', endpoint, body);
+    return { resource: this.mapLoadBalancerPool(response.result), created: !id };
+  }
+
+  async deletePool(accountId: string, id: string): Promise<void> {
+    const endpoint = `/accounts/${encodeURIComponent(accountId)}/load_balancers/pools/${encodeURIComponent(id)}`;
+    try {
+      await this.request<{ id: string }>('DELETE', endpoint);
+    } catch (error) {
+      if (!isCloudflareNotFound(error)) throw error;
+    }
+    if (await this.getPool(accountId, id)) {
+      throw new Error(`Cloudflare load-balancer pool ${id} still exists after deletion.`);
+    }
+  }
+
+  private mapManagedLoadBalancer(resource: CloudflareManagedLoadBalancer): ManagedLoadBalancer {
+    return {
+      id: resource.id,
+      hostname: resource.name,
+      poolId: resource.default_pools?.[0] ?? '',
+      fallbackPoolId: resource.fallback_pool ?? '',
+      enabled: resource.enabled !== false,
+      proxied: resource.proxied !== false,
+      steering: resource.steering_policy ?? 'off',
+    };
+  }
+
+  async findLoadBalancersByHostname(zoneId: string, hostname: string): Promise<ManagedLoadBalancer[]> {
+    const resources = await this.listPaginated<CloudflareManagedLoadBalancer>(
+      `/zones/${encodeURIComponent(zoneId)}/load_balancers`
+    );
+    const normalized = hostname.trim().replace(/\.$/, '').toLowerCase();
+    return resources
+      .map((resource) => this.mapManagedLoadBalancer(resource))
+      .filter((resource) => resource.hostname.trim().replace(/\.$/, '').toLowerCase() === normalized);
+  }
+
+  async getLoadBalancer(zoneId: string, id: string): Promise<ManagedLoadBalancer | null> {
+    try {
+      const response = await this.request<CloudflareManagedLoadBalancer>(
+        'GET',
+        `/zones/${encodeURIComponent(zoneId)}/load_balancers/${encodeURIComponent(id)}`
+      );
+      return this.mapManagedLoadBalancer(response.result);
+    } catch (error) {
+      if (isCloudflareNotFound(error)) return null;
+      throw error;
+    }
+  }
+
+  async ensureLoadBalancer(
+    zoneId: string,
+    desired: Omit<ManagedLoadBalancer, 'id'>,
+    id?: string
+  ): Promise<LoadBalancerEnsureResult<ManagedLoadBalancer>> {
+    const body = {
+      name: desired.hostname,
+      default_pools: [desired.poolId],
+      fallback_pool: desired.fallbackPoolId,
+      enabled: desired.enabled,
+      proxied: desired.proxied,
+      steering_policy: desired.steering,
+    };
+    const endpoint = `/zones/${encodeURIComponent(zoneId)}/load_balancers${id ? `/${encodeURIComponent(id)}` : ''}`;
+    const response = await this.request<CloudflareManagedLoadBalancer>(id ? 'PUT' : 'POST', endpoint, body);
+    return { resource: this.mapManagedLoadBalancer(response.result), created: !id };
+  }
+
+  async deleteLoadBalancer(zoneId: string, id: string): Promise<void> {
+    const endpoint = `/zones/${encodeURIComponent(zoneId)}/load_balancers/${encodeURIComponent(id)}`;
+    try {
+      await this.request<{ id: string }>('DELETE', endpoint);
+    } catch (error) {
+      if (!isCloudflareNotFound(error)) throw error;
+    }
+    if (await this.getLoadBalancer(zoneId, id)) {
+      throw new Error(`Cloudflare load balancer ${id} still exists after deletion.`);
+    }
   }
 
   async searchRegistrarDomains(params: {

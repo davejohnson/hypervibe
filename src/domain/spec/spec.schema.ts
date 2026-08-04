@@ -132,6 +132,18 @@ export const cacheSpecSchema = z.object({
   engine: z.literal('redis').default('redis'),
 });
 
+/**
+ * Provider-managed traffic distribution in front of deployed web services.
+ * The schema is provider-neutral; capability support is resolved during plan.
+ */
+export const loadBalancerSpecSchema = z.object({
+  provider: providerIdSchema,
+  /** Two or more equivalent public web services that can receive traffic. */
+  services: z.array(z.string().min(1)).min(2),
+  /** HTTPS endpoint used by the provider's active health monitor. */
+  healthCheckPath: z.string().regex(/^\/[\S]*$/, 'healthCheckPath must be an absolute path beginning with /').default('/health'),
+}).strict();
+
 export const deploySpecSchema = z.object({
   strategy: z.enum(['branch', 'manual']).default('manual'),
   trigger: z.enum(['ci', 'native']).optional(),
@@ -897,6 +909,7 @@ export const environmentSpecSchema = z.object({
   database: databaseSpecSchema.optional(),
   cache: cacheSpecSchema.optional(),
   domain: z.string().min(1).optional(),
+  loadBalancer: loadBalancerSpecSchema.optional(),
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: z.object({ enabled: z.boolean() }).default({ enabled: false }),
   envVars: z.record(z.string()).default({}),
@@ -940,6 +953,41 @@ export const environmentSpecSchema = z.object({
       message: 'domainRegistration requires domain',
       path: ['domainRegistration'],
     });
+  }
+  if (environment.loadBalancer) {
+    if (!environment.domain) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'loadBalancer requires domain because the domain is its public hostname',
+        path: ['loadBalancer'],
+      });
+    }
+    const seenServices = new Set<string>();
+    for (const [index, serviceName] of environment.loadBalancer.services.entries()) {
+      if (seenServices.has(serviceName)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `loadBalancer service "${serviceName}" is declared more than once`,
+          path: ['loadBalancer', 'services', index],
+        });
+        continue;
+      }
+      seenServices.add(serviceName);
+      const service = environment.services[serviceName];
+      if (!service) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `loadBalancer targets unknown service "${serviceName}"`,
+          path: ['loadBalancer', 'services', index],
+        });
+      } else if (service.workloadKind !== 'web' || service.public === false) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `loadBalancer service "${serviceName}" must be a public web service`,
+          path: ['loadBalancer', 'services', index],
+        });
+      }
+    }
   }
   if (environment.ios?.release) {
     for (const [index, serviceName] of environment.ios.release.services.entries()) {
