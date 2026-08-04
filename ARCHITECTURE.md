@@ -557,6 +557,40 @@ until the reviewed commit is present on the default branch.
 
 `hv_ci_status` is the authoritative observation path for Hypervibe-managed GitHub Actions deploys. Agents should use it to inspect workflows, runs, jobs, and bounded log tails, then use `hv_health` after a successful run. They must not bypass it with `gh`, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls; a blocked `hv_ci_status` result should surface its connection/error guidance and stop the stage.
 
+## Database Resilience
+
+Provider-managed database resilience is optional desired state under
+`database.resilience`. Omitting the block preserves backward compatibility and
+means Hypervibe does not manage resilience settings. Within a declared block:
+
+- `availability` owns the provider's zonal/regional HA mode;
+- `backups` owns automated-backup count and PITR log retention; and
+- `replicas` owns named provider read replicas. Removing a named replica is an
+  explicit, confirm-gated deletion. Removing the whole resilience block stops
+  management and does not silently reduce protection or delete replicas.
+
+Resilience planning is provider-neutral and capability-driven. Unsupported
+providers and incomplete observations produce blocked actions, not fallback
+provider branches or inferred absence. A regional-HA action depends on backup
+and PITR enablement when those settings are not already live. Cost-increasing
+HA, retention, and replica creates are billable actions; retention/HA
+reductions and replica deletion require exact action-id confirmation.
+
+Read replicas are provider resources, not backups. Their exact provider ids are
+stored in encrypted component bindings with connection material, while the
+sanitized environment topology stores only provider ids, regions, and tiers so
+repo-backed recovery remains possible. Runtime wiring uses
+`DATABASE_READ_URL_<NAME>` and, only when one replica exists,
+`DATABASE_READ_URL`. Replica deletion must first remove those variables from
+every bound service, then verify provider-terminal absence before pruning the
+binding. A noop action performs no provider mutation, and immutable replica
+region/tier drift blocks until an explicit replacement lifecycle is supported.
+
+Cloud SQL is the first resilience adapter. It observes and verifies HA,
+backup/PITR policy, and replica topology through the SQL Admin API. Restore
+drills, provider-to-provider database migration, replica promotion/failover,
+and replica replacement are separate future lifecycle slices.
+
 ## Database Tasks And Seed Data
 
 Do not use temporary release-command changes to run one-off data operations. Release commands are durable deploy-time schema configuration.

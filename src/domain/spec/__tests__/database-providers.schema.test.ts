@@ -26,4 +26,40 @@ describe('database provider schema', () => {
       }).success).toBe(false);
     }
   });
+
+  it('accepts a provider-neutral resilience declaration', () => {
+    expect(databaseSpecSchema.parse({
+      provider: 'cloudsql',
+      resilience: {
+        availability: 'regional',
+        backups: { retainedBackups: 8, pitrRetentionDays: 7 },
+        replicas: { analytics: { region: 'us-west1', tier: 'db-custom-2-7680' } },
+      },
+    })).toMatchObject({
+      provider: 'cloudsql',
+      resilience: {
+        availability: 'regional',
+        backups: { retainedBackups: 8, pitrRetentionDays: 7 },
+        replicas: { analytics: { region: 'us-west1', tier: 'db-custom-2-7680' } },
+      },
+    });
+  });
+
+  it('defaults an explicitly declared backup policy and rejects unsafe retention', () => {
+    expect(databaseSpecSchema.parse({
+      provider: 'cloudsql',
+      resilience: { backups: {} },
+    }).resilience?.backups).toEqual({ retainedBackups: 8, pitrRetentionDays: 7 });
+    expect(databaseSpecSchema.safeParse({
+      provider: 'cloudsql',
+      resilience: { backups: { retainedBackups: 7, pitrRetentionDays: 7 } },
+    }).success).toBe(false);
+  });
+
+  it('rejects replica names that cannot map to stable runtime keys', () => {
+    expect(databaseSpecSchema.safeParse({
+      provider: 'cloudsql',
+      resilience: { replicas: { 'Analytics DB': {} } },
+    }).success).toBe(false);
+  });
 });

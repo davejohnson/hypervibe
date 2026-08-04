@@ -78,6 +78,7 @@ import {
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
 import { resolvePlanActionAuthority } from '../domain/plan/action-authority.js';
+import { applyDatabaseResilienceAction } from './apply-database-resilience.js';
 
 /**
  * The shared plan-apply pipeline: connection gating, TOCTOU re-observe,
@@ -800,6 +801,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     if (capability === 'database.provision') {
       return createDatabase(ctx, applyProject, envName, action);
+    }
+    if (
+      capability === 'database.availability.configure'
+      || capability === 'database.backup-policy.configure'
+      || capability === 'database.replica.provision'
+      || capability === 'database.replica.destroy'
+    ) {
+      return applyDatabaseResilienceAction({
+        ctx,
+        project: applyProject,
+        environmentName: envName,
+        environmentSpec: envSpec,
+        action,
+      });
     }
     if (capability === 'database.seed') {
       return applyDatabaseSeed(ctx, applyProject, envName, action);
@@ -1575,6 +1590,16 @@ async function createDatabase(
       type: action.resource.name,
       bindings: bindingsToStore,
       externalId: provisioned.component.externalId ?? undefined,
+    });
+  }
+  const primaryExternalId = provisioned.component.externalId
+    ?? stringField(newBindings, 'instanceId');
+  if (primaryExternalId) {
+    ctx.repos.environments.updatePlatformBindings(environment.id, {
+      databaseTopology: {
+        primary: { provider: action.resource.provider, externalId: primaryExternalId },
+        replicas: {},
+      },
     });
   }
 

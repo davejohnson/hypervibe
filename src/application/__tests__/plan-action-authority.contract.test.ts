@@ -24,6 +24,7 @@ import { HOSTING_ENV_REMOVE_OPERATION } from '../../domain/services/hosting-env.
 import { PROVIDER_NATIVE_SOURCE_DISCONNECT_OPERATION } from '../../domain/services/provider-native-deploy-source.service.js';
 import { CACHE_OPERATIONS } from '../../domain/services/cache-plan.service.js';
 import { GITHUB_ACTIONS_ROLLBACK_OPERATION } from '../../domain/services/ci-rollback.contract.js';
+import { DATABASE_RESILIENCE_OPERATIONS } from '../../domain/services/database-resilience-plan.service.js';
 import {
   resolvePlanActionAuthority,
   type PlanMutationCapability,
@@ -354,6 +355,42 @@ const authorized: AuthorizedCase[] = [
     action: action({ id: 'database:railway', type: 'create', kind: 'database', name: 'postgres' }),
   },
   {
+    label: 'database availability configure',
+    capability: 'database.availability.configure',
+    action: action({
+      id: 'database:cloudsql:availability', type: 'update', kind: 'database', name: 'postgres', provider: 'cloudsql',
+      operation: DATABASE_RESILIENCE_OPERATIONS.availabilityConfigure,
+      metadata: { primaryExternalId: 'primary-1', availability: 'regional' },
+    }),
+  },
+  {
+    label: 'database backup policy configure',
+    capability: 'database.backup-policy.configure',
+    action: action({
+      id: 'database:cloudsql:backup-policy', type: 'update', kind: 'database', name: 'postgres', provider: 'cloudsql',
+      operation: DATABASE_RESILIENCE_OPERATIONS.backupPolicyConfigure,
+      metadata: { primaryExternalId: 'primary-1', retainedBackups: 8, pitrRetentionDays: 7 },
+    }),
+  },
+  {
+    label: 'database replica provision',
+    capability: 'database.replica.provision',
+    action: action({
+      id: 'database:cloudsql:replica:analytics', type: 'create', kind: 'database', name: 'analytics', provider: 'cloudsql',
+      operation: DATABASE_RESILIENCE_OPERATIONS.replicaProvision,
+      metadata: { primaryExternalId: 'primary-1', replicaName: 'analytics' },
+    }),
+  },
+  {
+    label: 'database replica destroy',
+    capability: 'database.replica.destroy',
+    action: action({
+      id: 'database:cloudsql:replica:analytics:destroy', type: 'destroy', kind: 'database', name: 'analytics', provider: 'cloudsql',
+      operation: DATABASE_RESILIENCE_OPERATIONS.replicaDestroy,
+      metadata: { primaryExternalId: 'primary-1', replicaName: 'analytics', replicaExternalId: 'replica-1' },
+    }),
+  },
+  {
     label: 'database seed',
     capability: 'database.seed',
     action: action({
@@ -440,7 +477,7 @@ describe('plan action mutation-authority contract', () => {
   });
 
   it.each(authorized.filter(({ capability, action: candidate }) =>
-    candidate.metadata?.operation && capability !== 'database.seed'
+    candidate.metadata?.operation && !capability.startsWith('database.')
   ))(
     'rejects $label when its operation is attached to a database resource',
     ({ action: candidate }) => {

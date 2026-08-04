@@ -81,6 +81,39 @@ export const providerIdSchema = z.string().regex(
   'provider ids must be lowercase slugs starting with a letter'
 );
 
+const databaseReplicaNameSchema = z.string().regex(
+  /^[a-z][a-z0-9-]{0,30}$/,
+  'replica names must be lowercase slugs starting with a letter (maximum 31 characters)'
+);
+
+const databaseBackupPolicySchema = z.object({
+  retainedBackups: z.number().int().min(1).max(365).default(8),
+  pitrRetentionDays: z.number().int().min(1).max(35).default(7),
+}).strict().superRefine((policy, ctx) => {
+  if (policy.retainedBackups <= policy.pitrRetentionDays) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'retainedBackups must be greater than pitrRetentionDays so a daily backup remains outside the PITR window',
+      path: ['retainedBackups'],
+    });
+  }
+});
+
+const databaseResilienceSchema = z.object({
+  /** Zonal uses one zone; regional provisions a synchronous standby. */
+  availability: z.enum(['zonal', 'regional']).optional(),
+  /** Provider-managed backups and point-in-time recovery retention. */
+  backups: databaseBackupPolicySchema.optional(),
+  /** Provider-managed asynchronous read replicas keyed by stable logical name. */
+  replicas: z.record(
+    databaseReplicaNameSchema,
+    z.object({
+      region: z.string().min(1).optional(),
+      tier: z.string().min(1).optional(),
+    }).strict()
+  ).optional(),
+}).strict();
+
 export const databaseSpecSchema = z.object({
   provider: providerIdSchema,
   engine: z.literal('postgres').default('postgres'),
@@ -91,7 +124,8 @@ export const databaseSpecSchema = z.object({
    * it does not run again unless changed.
    */
   seedCommand: z.string().min(1).optional(),
-});
+  resilience: databaseResilienceSchema.optional(),
+}).strict();
 
 export const cacheSpecSchema = z.object({
   provider: providerIdSchema,
@@ -938,6 +972,37 @@ export const environmentSpecSchema = z.object({
     });
   }
   const databaseAliasKeys = new Set<string>();
+  const replicaRuntimeKeys = new Set(environment.database?.resilience
+    ? [
+      'DATABASE_READ_URL',
+      ...Object.keys(environment.database.resilience.replicas ?? {}).map((name) =>
+        `DATABASE_READ_URL_${name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`
+      ),
+    ]
+    : []);
+  for (const key of replicaRuntimeKeys) {
+    if (key in environment.envVars) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable "${key}" is managed by database read-replica wiring`,
+        path: ['envVars', key],
+      });
+    }
+    if (environment.envFile?.include.includes(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable "${key}" is managed by database read-replica wiring`,
+        path: ['envFile', 'include'],
+      });
+    }
+    if (environment.removeEnvVars?.includes(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `environment variable "${key}" must be removed by changing database.resilience.replicas`,
+        path: ['removeEnvVars'],
+      });
+    }
+  }
   for (const [serviceName, service] of Object.entries(environment.services)) {
     for (const [alias, source] of Object.entries(service.databaseEnvAliases ?? {})) {
       databaseAliasKeys.add(alias);
@@ -948,7 +1013,7 @@ export const environmentSpecSchema = z.object({
           path: ['services', serviceName, 'databaseEnvAliases'],
         });
       }
-      if ((DATABASE_ENV_ALIAS_SOURCES as readonly string[]).includes(alias)) {
+      if ((DATABASE_ENV_ALIAS_SOURCES as readonly string[]).includes(alias) || replicaRuntimeKeys.has(alias)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `database alias "${alias}" cannot replace a canonical managed database variable`,

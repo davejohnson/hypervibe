@@ -15,6 +15,14 @@ import type {
   ProvisionableType,
 } from '../../../domain/ports/database.port.js';
 import type { IObservableDatabase, ObservedDatabase } from '../../../domain/ports/observe.port.js';
+import type {
+  DatabaseAvailability,
+  DatabaseBackupPolicy,
+  DatabaseReplicaBinding,
+  DatabaseReplicaConfig,
+  DatabaseReplicaProvisionResult,
+  IDatabaseResilienceAdapter,
+} from '../../../domain/ports/database-resilience.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { buildDatabaseEnvVarsFromComponent } from '../../../domain/services/database-env.js';
 
@@ -40,6 +48,26 @@ interface CloudSqlInstance {
     commonName: string;
     expirationTime: string;
   };
+  region?: string;
+  connectionName?: string;
+  masterInstanceName?: string;
+  replicaNames?: string[];
+  settings?: {
+    tier?: string;
+    availabilityType?: string;
+    edition?: string;
+    userLabels?: Record<string, string>;
+    backupConfiguration?: {
+      startTime?: string;
+      enabled?: boolean;
+      pointInTimeRecoveryEnabled?: boolean;
+      transactionLogRetentionDays?: number;
+      backupRetentionSettings?: {
+        retentionUnit?: string;
+        retainedBackups?: number;
+      };
+    };
+  };
 }
 
 interface CloudSqlOperation {
@@ -57,7 +85,7 @@ interface ServiceAccountCredentials {
   client_email: string;
 }
 
-export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
+export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, IDatabaseResilienceAdapter {
   readonly name = 'cloudsql';
 
   readonly capabilities: DatabaseCapabilities = {
@@ -601,6 +629,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
         externalId: instance.name || component.externalId,
         name: instance.name || component.externalId,
         status: this.normalizedInstanceStatus(instance.state),
+        resilience: await this.observeResilience(instance, component),
       };
     }
 
@@ -618,13 +647,374 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase {
         externalId: instance.name || instanceName,
         name: instance.name || instanceName,
         status: this.normalizedInstanceStatus(instance.state),
+        resilience: await this.observeResilience(instance, component),
       };
     }
 
     return null;
   }
 
+  async configureAvailability(
+    _environment: Environment,
+    component: Component,
+    availability: DatabaseAvailability
+  ): Promise<Receipt> {
+    const instanceName = this.componentInstanceName(component);
+    if (!this.credentials || !instanceName) {
+      return { success: false, message: 'Cannot configure Cloud SQL availability', error: 'Connection or primary instance identity is missing.' };
+    }
+    try {
+      const token = await this.getAccessToken();
+      const desired = availability === 'regional' ? 'REGIONAL' : 'ZONAL';
+      if (availability === 'regional') {
+        const current = await this.getInstance(instanceName);
+        const backup = current?.settings?.backupConfiguration;
+        if (!backup?.enabled || !backup.pointInTimeRecoveryEnabled) {
+          throw new Error('Regional Cloud SQL availability requires backups and PITR. Declare database.resilience.backups and apply that action first.');
+        }
+      }
+      await this.patchInstance({
+        token,
+        instanceName,
+        body: { settings: { availabilityType: desired } },
+        description: 'availability update',
+      });
+      const observed = await this.getInstance(instanceName);
+      if (observed?.settings?.availabilityType !== desired) {
+        throw new Error(`Cloud SQL returned ${observed?.settings?.availabilityType ?? 'unknown'} after requesting ${desired}.`);
+      }
+      return {
+        success: true,
+        message: `Configured Cloud SQL availability as ${availability}`,
+        data: { instanceName, availability },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to configure Cloud SQL availability',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async configureBackupPolicy(
+    _environment: Environment,
+    component: Component,
+    policy: DatabaseBackupPolicy
+  ): Promise<Receipt> {
+    const instanceName = this.componentInstanceName(component);
+    if (!this.credentials || !instanceName) {
+      return { success: false, message: 'Cannot configure Cloud SQL backup policy', error: 'Connection or primary instance identity is missing.' };
+    }
+    if (policy.pitrRetentionDays > 7) {
+      return {
+        success: false,
+        message: 'Cloud SQL PITR retention is not supported by the current database class',
+        error: 'Hypervibe currently provisions Cloud SQL Enterprise instances, which support at most 7 PITR days.',
+      };
+    }
+    try {
+      const token = await this.getAccessToken();
+      const current = await this.getInstance(instanceName);
+      if (!current) throw new Error(`Primary Cloud SQL instance ${instanceName} is absent.`);
+      await this.patchInstance({
+        token,
+        instanceName,
+        body: {
+          settings: {
+            backupConfiguration: {
+              startTime: current.settings?.backupConfiguration?.startTime ?? '03:00',
+              enabled: true,
+              pointInTimeRecoveryEnabled: true,
+              transactionLogRetentionDays: policy.pitrRetentionDays,
+              backupRetentionSettings: {
+                retentionUnit: 'COUNT',
+                retainedBackups: policy.retainedBackups,
+              },
+            },
+          },
+        },
+        description: 'backup policy update',
+      });
+      const observed = (await this.getInstance(instanceName))?.settings?.backupConfiguration;
+      if (
+        !observed?.enabled
+        || !observed.pointInTimeRecoveryEnabled
+        || observed.transactionLogRetentionDays !== policy.pitrRetentionDays
+        || observed.backupRetentionSettings?.retainedBackups !== policy.retainedBackups
+      ) {
+        throw new Error('Cloud SQL did not report the requested backup/PITR policy after the update completed.');
+      }
+      return {
+        success: true,
+        message: `Configured ${policy.retainedBackups} retained backups and ${policy.pitrRetentionDays} PITR days`,
+        data: { instanceName, ...policy },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to configure Cloud SQL backup policy',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async provisionReadReplica(
+    _environment: Environment,
+    component: Component,
+    name: string,
+    config: DatabaseReplicaConfig
+  ): Promise<DatabaseReplicaProvisionResult> {
+    const primaryName = this.componentInstanceName(component);
+    if (!this.credentials || !primaryName) {
+      return {
+        receipt: { success: false, message: 'Cannot provision Cloud SQL read replica', error: 'Connection or primary instance identity is missing.' },
+      };
+    }
+    try {
+      const token = await this.getAccessToken();
+      const primary = await this.getInstance(primaryName);
+      if (!primary) throw new Error(`Primary Cloud SQL instance ${primaryName} is absent.`);
+      const instanceName = this.sanitizeName(`${primaryName}-rr-${name}`);
+      let replica = await this.getInstance(instanceName);
+      if (replica) {
+        if (!this.isReplicaOf(replica, primaryName) || replica.settings?.userLabels?.['hypervibe-replica'] !== name) {
+          throw new Error(`Cloud SQL instance "${instanceName}" already exists and is not the reviewed Hypervibe replica. Use hv_import or choose another replica name.`);
+        }
+      } else {
+        const region = config.region ?? primary.region ?? this.credentials.region;
+        const tier = config.tier ?? primary.settings?.tier ?? 'db-f1-micro';
+        const response = await fetch(
+          `https://sqladmin.googleapis.com/v1/projects/${this.credentials.projectId}/instances`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              name: instanceName,
+              region,
+              databaseVersion: primary.databaseVersion,
+              masterInstanceName: primaryName,
+              settings: {
+                tier,
+                ipConfiguration: { ipv4Enabled: true },
+                userLabels: {
+                  'hypervibe-managed': 'true',
+                  'hypervibe-replica': name,
+                },
+              },
+            }),
+          }
+        );
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(`Cloud SQL replica create failed: ${response.status} ${body}`);
+        }
+        const operation = await response.json() as CloudSqlOperation;
+        if (operation.name) await this.waitForOperation(token, operation.name, 'read replica create');
+        replica = await this.getInstance(instanceName);
+      }
+      if (!replica || !this.isReplicaOf(replica, primaryName) || replica.state !== 'RUNNABLE') {
+        throw new Error(`Cloud SQL replica ${instanceName} was not RUNNABLE with primary ${primaryName} after creation.`);
+      }
+      const binding = this.replicaBinding(component, replica);
+      return {
+        replica: binding,
+        receipt: {
+          success: true,
+          message: `Provisioned Cloud SQL read replica "${name}" (${replica.name})`,
+          data: { replicaName: name, externalId: replica.name, region: binding.region, tier: binding.tier },
+        },
+      };
+    } catch (error) {
+      return {
+        receipt: {
+          success: false,
+          message: `Failed to provision Cloud SQL read replica "${name}"`,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  async destroyReadReplica(
+    _environment: Environment,
+    component: Component,
+    name: string,
+    replicaBinding: DatabaseReplicaBinding
+  ): Promise<Receipt> {
+    const primaryName = this.componentInstanceName(component);
+    if (!this.credentials || !primaryName) {
+      return { success: false, message: 'Cannot delete Cloud SQL read replica', error: 'Connection or primary instance identity is missing.' };
+    }
+    try {
+      const token = await this.getAccessToken();
+      const replica = await this.getInstance(replicaBinding.externalId);
+      if (!replica) {
+        return { success: true, message: `Cloud SQL read replica is already absent: ${replicaBinding.externalId}` };
+      }
+      if (!this.isReplicaOf(replica, primaryName) || replica.settings?.userLabels?.['hypervibe-replica'] !== name) {
+        throw new Error(`Refusing to delete ${replicaBinding.externalId}: its primary or Hypervibe ownership label does not match the reviewed replica.`);
+      }
+      const response = await fetch(
+        `https://sqladmin.googleapis.com/v1/projects/${this.credentials.projectId}/instances/${encodeURIComponent(replicaBinding.externalId)}`,
+        { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (response.status !== 404) {
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(`Cloud SQL replica delete failed: ${response.status} ${body}`);
+        }
+        const operation = await response.json() as CloudSqlOperation;
+        if (operation.name) await this.waitForOperation(token, operation.name, 'read replica delete');
+      }
+      const attempts = Number(process.env.HYPERVIBE_CLOUDSQL_DELETE_ATTEMPTS ?? 60);
+      const delayMs = Number(process.env.HYPERVIBE_CLOUDSQL_DELETE_DELAY_MS ?? 1000);
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (!await this.getInstance(replicaBinding.externalId)) {
+          return { success: true, message: `Deleted Cloud SQL read replica "${name}" (${replicaBinding.externalId})` };
+        }
+        if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+      return {
+        success: false,
+        message: `Cloud SQL accepted deletion of read replica "${name}" but it is still present`,
+        error: `Replica ${replicaBinding.externalId} remained observable after ${attempts} checks.`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Failed to delete Cloud SQL read replica "${name}"`,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   // Helper methods
+
+  private componentInstanceName(component: Component): string | undefined {
+    const bindings = component.bindings as Record<string, unknown>;
+    return component.externalId
+      ?? (typeof bindings.instanceId === 'string' && bindings.instanceId.length > 0
+        ? bindings.instanceId
+        : undefined);
+  }
+
+  private async observeResilience(
+    primary: CloudSqlInstance,
+    component?: Component | null
+  ): Promise<NonNullable<ObservedDatabase['resilience']>> {
+    const bindings = component?.bindings as Record<string, unknown> | undefined;
+    const resilience = bindings?.resilience && typeof bindings.resilience === 'object' && !Array.isArray(bindings.resilience)
+      ? bindings.resilience as Record<string, unknown>
+      : {};
+    const boundReplicas = resilience.replicas && typeof resilience.replicas === 'object' && !Array.isArray(resilience.replicas)
+      ? resilience.replicas as Record<string, Record<string, unknown>>
+      : {};
+    const boundNameByExternalId = new Map(
+      Object.entries(boundReplicas).flatMap(([name, binding]) =>
+        typeof binding.externalId === 'string' ? [[binding.externalId, name] as const] : []
+      )
+    );
+    const replicas = [] as NonNullable<NonNullable<ObservedDatabase['resilience']>['replicas']>;
+    for (const replicaName of primary.replicaNames ?? []) {
+      const replica = await this.getInstance(replicaName);
+      if (!replica) {
+        throw new Error(`Cloud SQL listed read replica ${replicaName}, but its exact identity could not be observed.`);
+      }
+      const logicalName = replica.settings?.userLabels?.['hypervibe-replica']
+        ?? boundNameByExternalId.get(replica.name);
+      replicas.push({
+        ...(logicalName ? { name: logicalName } : {}),
+        externalId: replica.name,
+        status: this.normalizedInstanceStatus(replica.state),
+        ...(replica.region ? { region: replica.region } : {}),
+        ...(replica.settings?.tier ? { tier: replica.settings.tier } : {}),
+        ...(this.instanceConnectionName(replica) ? { connectionName: this.instanceConnectionName(replica) } : {}),
+      });
+    }
+    const backup = primary.settings?.backupConfiguration;
+    const availability = primary.settings?.availabilityType === 'REGIONAL'
+      ? 'regional'
+      : primary.settings?.availabilityType === 'ZONAL'
+        ? 'zonal'
+        : 'unknown';
+    return {
+      availability,
+      backupPolicy: {
+        enabled: backup?.enabled === true,
+        pitrEnabled: backup?.pointInTimeRecoveryEnabled === true,
+        ...(typeof backup?.backupRetentionSettings?.retainedBackups === 'number'
+          ? { retainedBackups: backup.backupRetentionSettings.retainedBackups }
+          : {}),
+        ...(typeof backup?.transactionLogRetentionDays === 'number'
+          ? { pitrRetentionDays: backup.transactionLogRetentionDays }
+          : {}),
+      },
+      replicas,
+    };
+  }
+
+  private async patchInstance(params: {
+    token: string;
+    instanceName: string;
+    body: Record<string, unknown>;
+    description: string;
+  }): Promise<void> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const response = await fetch(
+      `https://sqladmin.googleapis.com/v1/projects/${this.credentials.projectId}/instances/${encodeURIComponent(params.instanceName)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${params.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(params.body),
+      }
+    );
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Cloud SQL ${params.description} failed: ${response.status} ${body}`);
+    }
+    const operation = await response.json() as CloudSqlOperation;
+    if (operation.name) await this.waitForOperation(params.token, operation.name, params.description);
+  }
+
+  private isReplicaOf(instance: CloudSqlInstance, primaryName: string): boolean {
+    const master = instance.masterInstanceName ?? '';
+    return master === primaryName || master.endsWith(`:${primaryName}`) || master.endsWith(`/instances/${primaryName}`);
+  }
+
+  private instanceConnectionName(instance: CloudSqlInstance): string | undefined {
+    if (instance.connectionName) return instance.connectionName;
+    if (!this.credentials || !instance.region || !instance.name) return undefined;
+    return `${this.credentials.projectId}:${instance.region}:${instance.name}`;
+  }
+
+  private replicaBinding(component: Component, instance: CloudSqlInstance): DatabaseReplicaBinding {
+    const bindings = component.bindings as Record<string, unknown>;
+    const username = typeof bindings.username === 'string' ? bindings.username : undefined;
+    const password = typeof bindings.password === 'string' ? bindings.password : undefined;
+    const database = typeof bindings.database === 'string' ? bindings.database : undefined;
+    const port = typeof bindings.port === 'number' || typeof bindings.port === 'string'
+      ? String(bindings.port)
+      : '5432';
+    const publicIp = instance.ipAddresses?.find((address) => address.type === 'PRIMARY')?.ipAddress;
+    const connectionUrl = username && password && database && publicIp
+      ? `postgresql://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${publicIp}:${port}/${encodeURIComponent(database)}`
+      : undefined;
+    return {
+      externalId: instance.name,
+      ...(instance.region ? { region: instance.region } : {}),
+      ...(instance.settings?.tier ? { tier: instance.settings.tier } : {}),
+      ...(this.instanceConnectionName(instance) ? { connectionName: this.instanceConnectionName(instance) } : {}),
+      ...(connectionUrl ? { connectionUrl } : {}),
+      createdAt: new Date().toISOString(),
+    };
+  }
 
   private async getAccessToken(): Promise<string> {
     if (this.accessToken && this.tokenExpiry && new Date() < this.tokenExpiry) {
@@ -870,6 +1260,11 @@ providerRegistry.register({
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     lifecycle: {
       databaseEngines: ['postgres'],
+      databaseResilience: {
+        availabilityModes: ['zonal', 'regional'],
+        backups: { maxRetainedBackups: 365, maxPitrRetentionDays: 7 },
+        readReplicas: true,
+      },
     },
   },
   factory: (credentials) => {

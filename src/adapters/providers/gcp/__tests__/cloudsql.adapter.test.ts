@@ -229,6 +229,31 @@ describe('CloudSqlAdapter', () => {
           name: 'production-postgres',
           state: 'RUNNABLE',
           databaseVersion: 'POSTGRES_15',
+          region: 'us-central1',
+          replicaNames: ['production-postgres-rr-analytics'],
+          settings: {
+            availabilityType: 'REGIONAL',
+            backupConfiguration: {
+              enabled: true,
+              pointInTimeRecoveryEnabled: true,
+              transactionLogRetentionDays: 7,
+              backupRetentionSettings: { retentionUnit: 'COUNT', retainedBackups: 8 },
+            },
+          },
+        });
+      }
+      if (url.endsWith('/instances/production-postgres-rr-analytics') && method === 'GET') {
+        return Response.json({
+          name: 'production-postgres-rr-analytics',
+          state: 'RUNNABLE',
+          databaseVersion: 'POSTGRES_15',
+          region: 'us-west1',
+          connectionName: 'gcp-project:us-west1:production-postgres-rr-analytics',
+          masterInstanceName: 'production-postgres',
+          settings: {
+            tier: 'db-custom-2-7680',
+            userLabels: { 'hypervibe-replica': 'analytics' },
+          },
         });
       }
 
@@ -254,6 +279,23 @@ describe('CloudSqlAdapter', () => {
       externalId: 'production-postgres',
       name: 'production-postgres',
       status: 'running',
+      resilience: {
+        availability: 'regional',
+        backupPolicy: {
+          enabled: true,
+          pitrEnabled: true,
+          retainedBackups: 8,
+          pitrRetentionDays: 7,
+        },
+        replicas: [{
+          name: 'analytics',
+          externalId: 'production-postgres-rr-analytics',
+          status: 'running',
+          region: 'us-west1',
+          tier: 'db-custom-2-7680',
+          connectionName: 'gcp-project:us-west1:production-postgres-rr-analytics',
+        }],
+      },
     });
   });
 
@@ -295,6 +337,144 @@ describe('CloudSqlAdapter', () => {
     };
 
     await expect(adapter.observeDatabase(environment)).resolves.toBeNull();
+  });
+
+  it('patches and verifies the provider-managed backup policy', async () => {
+    const adapter = await connectedAdapter();
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/instances/primary-1') && method === 'PATCH') {
+        return Response.json({ name: 'backup-op' });
+      }
+      if (url.endsWith('/operations/backup-op') && method === 'GET') {
+        return Response.json({ name: 'backup-op', status: 'DONE' });
+      }
+      if (url.endsWith('/instances/primary-1') && method === 'GET') {
+        return Response.json({
+          name: 'primary-1', state: 'RUNNABLE', databaseVersion: 'POSTGRES_15',
+          settings: {
+            backupConfiguration: {
+              enabled: true,
+              pointInTimeRecoveryEnabled: true,
+              transactionLogRetentionDays: 7,
+              backupRetentionSettings: { retentionUnit: 'COUNT', retainedBackups: 8 },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const now = new Date();
+    const component: Component = {
+      id: 'component-1', environmentId: 'env-1', type: 'postgres', externalId: 'primary-1',
+      bindings: { provider: 'cloudsql', instanceId: 'primary-1' }, createdAt: now, updatedAt: now,
+    };
+    const environment: Environment = {
+      id: 'env-1', projectId: 'project-1', name: 'production', platformBindings: {}, createdAt: now, updatedAt: now,
+    };
+
+    const receipt = await adapter.configureBackupPolicy(environment, component, {
+      retainedBackups: 8,
+      pitrRetentionDays: 7,
+    });
+
+    expect(receipt.success).toBe(true);
+    const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+    expect(JSON.parse(String(patchCall?.[1]?.body))).toMatchObject({
+      settings: {
+        backupConfiguration: {
+          enabled: true,
+          pointInTimeRecoveryEnabled: true,
+          transactionLogRetentionDays: 7,
+          backupRetentionSettings: { retainedBackups: 8 },
+        },
+      },
+    });
+  });
+
+  it('provisions a labelled read replica and returns only its durable binding', async () => {
+    const adapter = await connectedAdapter();
+    let targetReads = 0;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/instances/primary-1') && method === 'GET') {
+        return Response.json({
+          name: 'primary-1', state: 'RUNNABLE', databaseVersion: 'POSTGRES_15', region: 'us-central1', settings: { tier: 'db-custom-1-3840' },
+        });
+      }
+      if (url.endsWith('/instances/primary-1-rr-analytics') && method === 'GET') {
+        targetReads += 1;
+        if (targetReads === 1) return new Response('missing', { status: 404 });
+        return Response.json({
+          name: 'primary-1-rr-analytics', state: 'RUNNABLE', databaseVersion: 'POSTGRES_15', region: 'us-west1',
+          connectionName: 'gcp-project:us-west1:primary-1-rr-analytics', masterInstanceName: 'primary-1',
+          ipAddresses: [{ type: 'PRIMARY', ipAddress: '203.0.113.10' }],
+          settings: { tier: 'db-custom-2-7680', userLabels: { 'hypervibe-managed': 'true', 'hypervibe-replica': 'analytics' } },
+        });
+      }
+      if (url.endsWith('/instances') && method === 'POST') return Response.json({ name: 'replica-op' });
+      if (url.endsWith('/operations/replica-op') && method === 'GET') return Response.json({ name: 'replica-op', status: 'DONE' });
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const now = new Date();
+    const component: Component = {
+      id: 'component-1', environmentId: 'env-1', type: 'postgres', externalId: 'primary-1',
+      bindings: { provider: 'cloudsql', instanceId: 'primary-1', username: 'app', password: 'secret', database: 'app', port: 5432 },
+      createdAt: now, updatedAt: now,
+    };
+    const environment: Environment = {
+      id: 'env-1', projectId: 'project-1', name: 'production', platformBindings: {}, createdAt: now, updatedAt: now,
+    };
+
+    const result = await adapter.provisionReadReplica(environment, component, 'analytics', {
+      region: 'us-west1', tier: 'db-custom-2-7680',
+    });
+
+    expect(result.receipt.success).toBe(true);
+    expect(result.replica).toMatchObject({
+      externalId: 'primary-1-rr-analytics', region: 'us-west1', tier: 'db-custom-2-7680',
+      connectionName: 'gcp-project:us-west1:primary-1-rr-analytics',
+    });
+    const createCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+    expect(JSON.parse(String(createCall?.[1]?.body))).toMatchObject({
+      name: 'primary-1-rr-analytics',
+      masterInstanceName: 'primary-1',
+      settings: { userLabels: { 'hypervibe-managed': 'true', 'hypervibe-replica': 'analytics' } },
+    });
+  });
+
+  it('refuses to delete a replica when provider ownership identity does not match', async () => {
+    const adapter = await connectedAdapter();
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/instances/replica-1') && method === 'GET') {
+        return Response.json({
+          name: 'replica-1', state: 'RUNNABLE', databaseVersion: 'POSTGRES_15', masterInstanceName: 'different-primary',
+          settings: { userLabels: { 'hypervibe-replica': 'analytics' } },
+        });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const now = new Date();
+    const component: Component = {
+      id: 'component-1', environmentId: 'env-1', type: 'postgres', externalId: 'primary-1',
+      bindings: { provider: 'cloudsql', instanceId: 'primary-1' }, createdAt: now, updatedAt: now,
+    };
+    const environment: Environment = {
+      id: 'env-1', projectId: 'project-1', name: 'production', platformBindings: {}, createdAt: now, updatedAt: now,
+    };
+
+    const receipt = await adapter.destroyReadReplica(environment, component, 'analytics', { externalId: 'replica-1' });
+
+    expect(receipt.success).toBe(false);
+    expect(receipt.error).toContain('Refusing to delete');
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
   });
 
   it('propagates Cloud SQL observation errors instead of treating them as absence', async () => {
