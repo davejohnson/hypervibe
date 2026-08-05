@@ -177,6 +177,12 @@ ordinary single-service domain/DNS action is mutually exclusive while the
 load-balancer spec is present. Teardown reverses the dependency order and must
 confirm terminal absence before clearing each binding.
 
+Opt-in live load-balancer conformance exercises that same desired-state path
+against disposable provider resources. Test cleanup removes the public
+hostname, then pool, then monitor before deleting origins. A failed cleanup
+preserves Hypervibe state and reports only non-secret durable identities; it
+must not fall back to direct provider deletion.
+
 ## Plan Honesty
 
 Plan honesty beats optimistic UX. `hv_apply`, `hv_deploy`, CI helpers, and provider task runners must not report success unless provider receipts, health checks, logs, or a follow-up observe prove the intended state.
@@ -619,6 +625,14 @@ inspectable for the declared short retention period; later runs garbage collect
 only instances with the generated prefix and matching drill/source labels. A
 failure before ownership labeling may delete only the exact unique target
 created by that same run. Workflow runs are observed through `hv_ci_status`.
+
+Opt-in live recovery conformance provisions backup policy and a read replica
+through ordinary plan/apply, publishes the drill workflow through reviewed
+GitHub infrastructure, dispatches it through Hypervibe, and requires explicit
+non-secret evidence for generated-target creation and provider-terminal
+deletion. If a run is non-terminal, a failed clone is retained, or terminal
+cleanup evidence is missing, teardown stops before removing the workflow, replica, or
+primary so the recorded lifecycle remains recoverable.
 
 Cloud SQL is the first resilience adapter. It observes and verifies HA,
 backup/PITR policy, and replica topology through the SQL Admin API. Its restore

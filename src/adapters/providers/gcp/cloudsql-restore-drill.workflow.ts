@@ -55,6 +55,13 @@ function mask(value) {
   process.stdout.write('::add-mask::' + value + '\n');
 }
 
+function reportResource(disposition) {
+  assertGeneratedTarget(targetName);
+  process.stdout.write(
+    'HYPERVIBE_DRILL_RESOURCE target=' + targetName + ' disposition=' + disposition + '\n'
+  );
+}
+
 function shortError(error) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -158,11 +165,11 @@ async function deleteOwned(instance, description) {
 }
 
 async function cleanupCurrentRunBeforeOwnership() {
-  if (!cloneRequested || !targetName) return;
+  if (!cloneRequested || !targetName) return false;
   assertGeneratedTarget(targetName);
   const instance = await getInstance(targetName);
-  if (!instance) return;
-  if (hasOwnership(instance)) return;
+  if (!instance) return false;
+  if (hasOwnership(instance)) return false;
   const operation = await googleJson(
     apiBase + '/instances/' + encodeURIComponent(targetName),
     { method: 'DELETE', headers: { Authorization: 'Bearer ' + token } },
@@ -170,6 +177,7 @@ async function cleanupCurrentRunBeforeOwnership() {
   );
   await waitOperation(operation, 'current-run unlabeled clone cleanup');
   await waitForAbsence(targetName);
+  return true;
 }
 
 async function listInstances() {
@@ -309,6 +317,7 @@ try {
     'Cloud SQL point-in-time clone'
   );
   await waitOperation(cloneOperation, 'Cloud SQL point-in-time clone');
+  reportResource('created');
   let clone = await getInstance(targetName);
   if (!clone || clone.state !== 'RUNNABLE') throw new Error('The restored Cloud SQL clone is not RUNNABLE.');
   clone = await patchOwnership(clone);
@@ -320,6 +329,7 @@ try {
   summary.push('- Restored "' + config.sourceInstanceId + '" to isolated instance "' + targetName + '".');
   summary.push('- Verification query completed in a read-only transaction (row count: ' + rowCount + ').');
   await deleteOwned(await getInstance(targetName), 'successful restore-drill cleanup');
+  reportResource('deleted');
   summary.push('- Deleted the verified temporary instance after provider-confirmed terminal absence.');
   summary.push('', 'Result: **passed**');
 } catch (error) {
@@ -328,12 +338,17 @@ try {
   try {
     const current = targetName && token ? await getInstance(targetName) : null;
     if (current && hasOwnership(current)) {
+      reportResource('retained');
       summary.push('- Retained failed drill instance "' + targetName + '" for inspection; the next run removes it after the declared retention period.');
     } else {
-      await cleanupCurrentRunBeforeOwnership();
-      if (current) summary.push('- Removed the current run\'s unlabeled temporary clone after the failure.');
+      const deleted = await cleanupCurrentRunBeforeOwnership();
+      if (deleted) {
+        reportResource('deleted');
+        summary.push('- Removed the current run\'s unlabeled temporary clone after the failure.');
+      }
     }
   } catch (cleanupError) {
+    if (targetName) reportResource('cleanup-failed');
     summary.push('- Cleanup also failed: ' + shortError(cleanupError));
   }
   summary.push('', 'Result: **failed**');
