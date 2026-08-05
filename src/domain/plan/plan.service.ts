@@ -72,7 +72,10 @@ import {
   stripeManagedEnvKeys,
 } from '../services/stripe-env.service.js';
 import { planEmailSetup } from '../services/email-plan.service.js';
-import { planProviderNativeDeploySources } from '../services/provider-native-deploy-source.service.js';
+import {
+  isProviderNativeDeploySourceAction,
+  planProviderNativeDeploySources,
+} from '../services/provider-native-deploy-source.service.js';
 import {
   LOAD_BALANCER_OPERATIONS,
   planLoadBalancer,
@@ -880,7 +883,7 @@ export class PlanService {
       environmentSpec,
       observed,
       providerDisplayName: hostingMetadata?.displayName ?? environmentSpec.hosting.provider,
-      ciModeSourcePolicy: hostingMetadata?.orchestration?.nativeBranchDeploy?.ciModeSourcePolicy,
+      nonNativeSourcePolicy: hostingMetadata?.orchestration?.nativeBranchDeploy?.nonNativeSourcePolicy,
     });
     const blocked = [
       ...this.preflight(environmentSpec, environmentName),
@@ -1246,6 +1249,25 @@ export class PlanService {
       actions.push(appliedSpecHash.action);
     }
 
+    // Deployment ownership is a safety stage of its own. A stale native
+    // source must be removed (or explicitly blocked) before a plan asks for
+    // unrelated billable resources, environment changes, or releases. This
+    // also lets operators repair the trigger without confirming later work.
+    if (nativeDeploySources.actions.length > 0) {
+      const sourceActionIds = new Set(nativeDeploySources.actions.map((action) => action.id));
+      actions = actions
+        .filter(isProviderNativeDeploySourceAction)
+        .map((action) => {
+          const dependencies = action.dependsOn?.filter((dependency) => sourceActionIds.has(dependency));
+          return dependencies?.length
+            ? { ...action, dependsOn: dependencies }
+            : { ...action, dependsOn: undefined };
+        });
+      nativeDeploySources.warnings.push(
+        'This plan is limited to provider-native deploy-source reconciliation. Re-run hv_plan after it converges to review remaining infrastructure drift.'
+      );
+    }
+
     const filterWarnings: string[] = [];
     if (serviceFilter) {
       // A filtered plan is an honest "deploy these services" plan: keep the
@@ -1260,7 +1282,13 @@ export class PlanService {
         if (action.resource.kind === 'database' || action.resource.kind === 'cache') {
           return action.type === 'create' || action.type === 'noop';
         }
-        if (action.resource.kind === 'service') return keep.has(action.resource.name);
+        if (action.resource.kind === 'service') {
+          // Deployment ownership is environment-wide. A partial service
+          // deploy must not leave another desired service's native trigger
+          // connected while proceeding with selected-service mutations.
+          if (isProviderNativeDeploySourceAction(action)) return true;
+          return keep.has(action.resource.name);
+        }
         return false;
       });
       const retainedActionIds = new Set(actions.map((action) => action.id));

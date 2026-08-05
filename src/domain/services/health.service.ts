@@ -2,8 +2,10 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { serviceWorkloadKind } from '../entities/service.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
+import type { Project } from '../entities/project.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import { parseHostingBindings } from '../ports/hosting.port.js';
+import { adapterFactory } from './adapter.factory.js';
 
 const envRepo = new EnvironmentRepository();
 const serviceRepo = new ServiceRepository();
@@ -27,6 +29,152 @@ type HealthCheckResult = {
   bodyTruncated?: boolean;
   error?: string;
 };
+
+export type DeploymentHealthState = 'healthy' | 'failed' | 'unknown';
+
+export type ProjectDeploymentHealth = {
+  state: DeploymentHealthState;
+  environments: Array<{
+    environment: string;
+    provider: string;
+    state: DeploymentHealthState;
+    services: Array<{
+      service: string;
+      state: DeploymentHealthState;
+      status: string;
+      url?: string;
+    }>;
+    reason?: string;
+  }>;
+  failures: Array<{
+    environment: string;
+    provider: string;
+    service: string;
+    status: string;
+  }>;
+};
+
+const FAILED_DEPLOYMENT_STATUSES = new Set([
+  'canceled',
+  'cancelled',
+  'crash',
+  'crashed',
+  'error',
+  'failed',
+  'failure',
+  'update_failed',
+]);
+
+const HEALTHY_DEPLOYMENT_STATUSES = new Set([
+  'active',
+  'deployed',
+  'live',
+  'ready',
+  'running',
+  'success',
+  'succeeded',
+]);
+
+export function classifyDeploymentStatus(status: string): DeploymentHealthState {
+  const normalized = status.trim().toLowerCase();
+  if (FAILED_DEPLOYMENT_STATUSES.has(normalized)) return 'failed';
+  if (HEALTHY_DEPLOYMENT_STATUSES.has(normalized)) return 'healthy';
+  return 'unknown';
+}
+
+/**
+ * Observe the latest bound deployment for every service/environment without
+ * turning unsupported reads or provider failures into healthy state.
+ */
+export async function collectProjectDeploymentHealth(params: {
+  project: Project;
+  environments: Environment[];
+}): Promise<ProjectDeploymentHealth> {
+  const environmentResults: ProjectDeploymentHealth['environments'] = [];
+
+  for (const environment of [...params.environments].sort((a, b) => a.name.localeCompare(b.name))) {
+    const bindings = parseHostingBindings(environment);
+    const provider = bindings.provider ?? params.project.defaultPlatform ?? 'cloudrun';
+    const boundServices = Object.entries(bindings.services ?? {})
+      .filter(([, binding]) => Boolean(binding.serviceId))
+      .sort(([a], [b]) => a.localeCompare(b));
+    if (boundServices.length === 0) {
+      environmentResults.push({
+        environment: environment.name,
+        provider,
+        state: 'unknown',
+        services: [],
+        reason: 'No bound services are available for deployment observation.',
+      });
+      continue;
+    }
+
+    const resolved = await adapterFactory.getHostingAdapterByName(provider, params.project);
+    if (!resolved.success || !resolved.adapter || typeof resolved.adapter.getDeployStatus !== 'function') {
+      environmentResults.push({
+        environment: environment.name,
+        provider,
+        state: 'unknown',
+        services: [],
+        reason: resolved.success
+          ? `${provider} does not support deployment-status observation.`
+          : `No verified ${provider} hosting connection is available for deployment-status observation.`,
+      });
+      continue;
+    }
+
+    const services = [] as ProjectDeploymentHealth['environments'][number]['services'];
+    for (const [service, binding] of boundServices) {
+      const serviceId = binding.serviceId;
+      if (!serviceId) continue;
+      try {
+        const observed = await resolved.adapter.getDeployStatus(environment, serviceId);
+        const state = classifyDeploymentStatus(observed.status);
+        services.push({
+          service,
+          state,
+          status: observed.status,
+          ...(observed.url ? { url: observed.url } : {}),
+        });
+      } catch {
+        services.push({ service, state: 'unknown', status: 'unknown' });
+      }
+    }
+
+    environmentResults.push({
+      environment: environment.name,
+      provider,
+      state: services.some((service) => service.state === 'failed')
+        ? 'failed'
+        : services.every((service) => service.state === 'healthy')
+          ? 'healthy'
+          : 'unknown',
+      services,
+    });
+  }
+
+  const failures = environmentResults.flatMap((environment) =>
+    environment.services
+      .filter((service) => service.state === 'failed')
+      .map((service) => ({
+        environment: environment.environment,
+        provider: environment.provider,
+        service: service.service,
+        status: service.status,
+      }))
+  );
+
+  return {
+    state: failures.length > 0
+      ? 'failed'
+      : environmentResults.length > 0
+        && environmentResults.every((environment) => environment.state === 'healthy')
+        ? 'healthy'
+        : 'unknown',
+    environments: environmentResults,
+    failures,
+  };
+}
 
 export function resolveHealthEnvironment(projectId: string, environmentName?: string): Environment | null {
   if (environmentName) {

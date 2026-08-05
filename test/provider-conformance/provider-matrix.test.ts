@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import '../../src/application/providers.js';
 import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
+import { planProviderNativeDeploySources } from '../../src/domain/services/provider-native-deploy-source.service.js';
+import { environmentSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import {
   cacheProviderContracts,
   databaseProviderContracts,
@@ -24,6 +26,66 @@ describe('provider conformance matrix', () => {
       'Microsoft Azure',
       'Vercel',
     ]);
+  });
+
+  it('declares and enforces non-native source ownership for every applicable hosting provider', () => {
+    const expectedPolicies = {
+      railway: 'disconnect',
+      digitalocean: 'block',
+      'azure-container-apps': 'disconnect',
+      vercel: 'block',
+    } as const;
+
+    for (const contract of hostingProviderContracts) {
+      const metadata = providerRegistry.getMetadata(contract.provider);
+      const policy = metadata?.orchestration?.nativeBranchDeploy?.nonNativeSourcePolicy;
+      const expected = expectedPolicies[contract.provider as keyof typeof expectedPolicies];
+      expect(policy, contract.provider).toBe(expected);
+      if (!expected) continue;
+
+      const result = planProviderNativeDeploySources({
+        environmentSpec: environmentSpecSchema.parse({
+          hosting: { provider: contract.provider },
+          services: { web: {} },
+          deploy: { strategy: 'manual' },
+        }),
+        observed: {
+          provider: contract.provider,
+          observedAt: '2026-08-04T00:00:00.000Z',
+          projectExists: true,
+          services: [{
+            name: 'web',
+            externalId: `${contract.provider}-web`,
+            workloadKind: 'web',
+            customDomains: [],
+            config: {},
+            source: { repo: 'example/app', branch: 'main' },
+            sourceState: 'connected',
+            envVarKeys: [],
+            envVarHashes: {},
+            status: 'running',
+          }],
+          databases: [],
+          completeness: { services: 'complete' },
+          partial: false,
+          warnings: [],
+        },
+        providerDisplayName: metadata?.displayName ?? contract.provider,
+        nonNativeSourcePolicy: policy,
+      });
+
+      expect(result.actions).toHaveLength(1);
+      expect(result.actions[0]).toMatchObject({
+        resource: { provider: contract.provider },
+        metadata: {
+          operation: 'providerNativeDeploySourceDisconnect',
+          desiredDeployMode: 'manual',
+          ...(expected === 'block'
+            ? { blockedReason: 'provider_native_deploy_source_requires_manual_disconnect' }
+            : {}),
+        },
+      });
+    }
   });
 
   it('covers the retained PostgreSQL providers', () => {

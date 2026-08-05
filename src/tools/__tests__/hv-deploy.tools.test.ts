@@ -219,6 +219,122 @@ describe('hv_deploy', () => {
     await t.close();
   });
 
+  it('reconciles manual-mode native sources without implicitly deploying application code', async () => {
+    const project = new ProjectRepository().create({
+      name: 'manual-source-deploy-app',
+      defaultPlatform: 'railway',
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project',
+        environmentId: 'rail-production',
+        services: {
+          web: {
+            serviceId: 'rail-web',
+            source: { repo: 'dave/billforge', branch: 'main' },
+          },
+        },
+      },
+    });
+    new ServiceRepository().create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { workloadKind: 'web' },
+      envVarSpec: {},
+    });
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: { workloadKind: 'web' } },
+          deploy: { strategy: 'manual' },
+        },
+      },
+    });
+    seedVerifiedConnection('railway');
+
+    const observed = {
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rail-project',
+      environmentId: 'rail-production',
+      services: [{
+        name: 'web',
+        externalId: 'rail-web',
+        workloadKind: 'web' as const,
+        customDomains: [],
+        config: {},
+        source: { repo: 'dave/billforge', branch: 'main' },
+        sourceState: 'connected' as const,
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running' as const,
+      }],
+      databases: [],
+      completeness: {
+        project: 'complete' as const,
+        environment: 'complete' as const,
+        services: 'complete' as const,
+        databases: 'complete' as const,
+        storage: 'complete' as const,
+      },
+      partial: false,
+      warnings: [],
+    };
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'railway',
+        capabilities: { supportsObserve: true },
+        observe: async () => observed,
+      } as never,
+    });
+    const disconnectDeploySource = vi.fn(async () => ({
+      success: true,
+      message: 'disconnected',
+      data: { serviceId: 'rail-web' },
+    }));
+    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'railway',
+        disconnectDeploySource,
+      } as never,
+    });
+    const deploy = vi.fn();
+    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+      success: true,
+      adapter: { name: 'railway', deploy } as never,
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_deploy', {
+      project: project.name,
+      env: 'production',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      status: 'pending',
+      environment: 'production',
+      message: expect.stringContaining('application deployment has not started'),
+    });
+    expect(result.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'service:web:deploy-source',
+      status: 'succeeded',
+    }));
+    expect(disconnectDeploySource).toHaveBeenCalledWith({ serviceId: 'rail-web' });
+    expect(deploy).not.toHaveBeenCalled();
+    expect(result.next).toEqual(['hv_deploy']);
+    await t.close();
+  });
+
   it('fails when provider status is deployed but the configured web health endpoint is not serving', async () => {
     const project = new ProjectRepository().create({ name: 'rail-health-app', defaultPlatform: 'railway' });
     new EnvironmentRepository().create({

@@ -4486,7 +4486,7 @@ providerRegistry.register({
       nativeBranchDeploy: {
         needsGitHubAppAccess: true,
         githubAppInstallUrl: 'https://github.com/apps/railway-app/installations/new',
-        ciModeSourcePolicy: 'disconnect',
+        nonNativeSourcePolicy: 'disconnect',
       },
     },
   },

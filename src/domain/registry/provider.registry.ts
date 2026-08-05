@@ -84,10 +84,11 @@ export interface ProviderOrchestrationMetadata {
     needsGitHubAppAccess?: boolean;
     githubAppInstallUrl?: string;
     /**
-     * Reconciliation policy when the desired trigger is CI but a live
-     * provider-native repository source is still connected.
+     * Reconciliation policy when desired deployment ownership is not native
+     * (manual promotion or Hypervibe-managed CI) but a live provider-native
+     * repository source is still connected.
      */
-    ciModeSourcePolicy?: 'disconnect' | 'block';
+    nonNativeSourcePolicy?: 'disconnect' | 'block';
   };
 }
 

@@ -48,20 +48,28 @@ function observedServiceGroups(observed: ObservedState): Map<string, ObservedSer
 
 /**
  * Reconcile the provider-native repository link independently from service
- * configuration. A CI-owned environment is safe only when the source is
- * provider-confirmed disconnected; unknown observation blocks apply.
+ * configuration. Manual and CI-owned environments are safe only when the
+ * source is provider-confirmed disconnected; unknown observation blocks.
  */
 export function planProviderNativeDeploySources(params: {
   environmentSpec: EnvironmentSpec;
   observed: ObservedState | null;
   providerDisplayName: string;
-  ciModeSourcePolicy?: 'disconnect' | 'block';
+  nonNativeSourcePolicy?: 'disconnect' | 'block';
 }): { actions: PlanAction[]; warnings: string[] } {
-  const { environmentSpec, observed, providerDisplayName, ciModeSourcePolicy } = params;
+  const { environmentSpec, observed, providerDisplayName, nonNativeSourcePolicy } = params;
+  const deployStrategy = environmentSpec.deploy?.strategy ?? 'manual';
+  const deployTrigger = deployStrategy === 'branch'
+    ? environmentSpec.deploy?.trigger ?? 'ci'
+    : undefined;
+  const nativeOwned = deployStrategy === 'branch' && deployTrigger === 'native';
+  const desiredMode = deployStrategy === 'manual' ? 'manual' : 'ci';
+  const ownershipLabel = desiredMode === 'manual'
+    ? 'manual deployment ownership'
+    : 'CI-only deployment ownership';
   if (
-    environmentSpec.deploy?.strategy !== 'branch'
-    || environmentSpec.deploy.trigger !== 'ci'
-    || !ciModeSourcePolicy
+    nativeOwned
+    || !nonNativeSourcePolicy
     || observed === null
   ) {
     return { actions: [], warnings: [] };
@@ -69,6 +77,11 @@ export function planProviderNativeDeploySources(params: {
 
   const provider = environmentSpec.hosting.provider;
   const servicesKnown = observed.completeness?.services !== 'unknown';
+  const providerTargetConfirmedAbsent = observed.projectExists === false
+    || (
+      observed.completeness?.environment === 'complete'
+      && !observed.environmentId
+    );
   const groups = observedServiceGroups(observed);
   const actions: PlanAction[] = [];
   const warnings: string[] = [];
@@ -81,7 +94,7 @@ export function planProviderNativeDeploySources(params: {
         providerDisplayName,
         serviceName,
         verified: true,
-        reason: `Cannot verify CI-only deployment for "${serviceName}" because multiple live ${providerDisplayName} services match it`,
+        reason: `Cannot verify ${ownershipLabel} for "${serviceName}" because multiple live ${providerDisplayName} services match it`,
         blockedReason: 'ambiguous_provider_native_deploy_source_identity',
         metadata: {
           externalIds: candidates.map((candidate) => candidate.externalId).sort(),
@@ -92,13 +105,13 @@ export function planProviderNativeDeploySources(params: {
 
     const live = candidates[0];
     if (!live) {
-      if (!servicesKnown) {
+      if (!servicesKnown && !providerTargetConfirmedAbsent) {
         actions.push(blockedAction({
           provider,
           providerDisplayName,
           serviceName,
           verified: false,
-          reason: `Cannot verify whether ${providerDisplayName} has a provider-native deploy source for "${serviceName}"; CI-only deployment is not proven`,
+          reason: `Cannot verify whether ${providerDisplayName} has a provider-native deploy source for "${serviceName}"; ${ownershipLabel} is not proven`,
           blockedReason: 'provider_native_deploy_source_observation_unknown',
         }));
       }
@@ -114,7 +127,7 @@ export function planProviderNativeDeploySources(params: {
           providerDisplayName,
           serviceName,
           verified: false,
-          reason: `Cannot verify whether ${providerDisplayName} has a provider-native deploy source for "${serviceName}"; CI-only deployment is not proven`,
+          reason: `Cannot verify whether ${providerDisplayName} has a provider-native deploy source for "${serviceName}"; ${ownershipLabel} is not proven`,
           blockedReason: 'provider_native_deploy_source_observation_unknown',
           metadata: { serviceId: live.externalId },
         }));
@@ -125,8 +138,11 @@ export function planProviderNativeDeploySources(params: {
     const sourceLabel = live.source?.repo
       ? `${live.source.repo}${live.source.branch ? `@${live.source.branch}` : ''}`
       : 'a repository';
-    const reason = `${providerDisplayName} service "${serviceName}" is linked to ${sourceLabel}; provider-native pushes can bypass the CI deployment workflow`;
-    if (ciModeSourcePolicy === 'block') {
+    const risk = desiredMode === 'manual'
+      ? 'provider-native pushes can deploy without explicit promotion'
+      : 'provider-native pushes can bypass the managed CI deployment workflow';
+    const reason = `${providerDisplayName} service "${serviceName}" is linked to ${sourceLabel}; ${risk}`;
+    if (nonNativeSourcePolicy === 'block') {
       actions.push(blockedAction({
         provider,
         providerDisplayName,
@@ -138,6 +154,7 @@ export function planProviderNativeDeploySources(params: {
           serviceId: live.externalId,
           ...(live.source?.repo ? { sourceRepo: live.source.repo } : {}),
           ...(live.source?.branch ? { sourceBranch: live.source.branch } : {}),
+          desiredDeployMode: desiredMode,
         },
       }));
     } else {
@@ -146,7 +163,9 @@ export function planProviderNativeDeploySources(params: {
         type: 'update',
         resource: { kind: 'service', name: serviceName, provider },
         verified: true,
-        reason: `${reason}; disconnect it so deploy.trigger="ci" is the only push-to-deploy path`,
+        reason: desiredMode === 'manual'
+          ? `${reason}; disconnect it so deploys require explicit promotion`
+          : `${reason}; disconnect it so managed CI is the only push-to-deploy path`,
         diff: [{
           field: 'deploySource',
           from: sourceLabel,
@@ -157,6 +176,7 @@ export function planProviderNativeDeploySources(params: {
           serviceId: live.externalId,
           ...(live.source?.repo ? { sourceRepo: live.source.repo } : {}),
           ...(live.source?.branch ? { sourceBranch: live.source.branch } : {}),
+          desiredDeployMode: desiredMode,
         },
       });
     }
@@ -164,7 +184,7 @@ export function planProviderNativeDeploySources(params: {
 
   if (actions.length > 0) {
     warnings.push(
-      `${providerDisplayName} provider-native deploy-source reconciliation is required before this environment can be considered CI-only.`
+      `${providerDisplayName} provider-native deploy-source reconciliation is required before this environment has ${ownershipLabel}.`
     );
   }
   return { actions, warnings };
@@ -196,7 +216,7 @@ export async function applyProviderNativeDeploySourceAction(params: {
     };
   }
 
-  const hosting = await adapterFactory.getHostingAdapter(project);
+  const hosting = await adapterFactory.getHostingAdapterByName(action.resource.provider, project);
   if (!hosting.success || !hosting.adapter) {
     return {
       success: false,

@@ -897,7 +897,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
 
   // An all-noop plan never reaches the bootstrap fallback; hv_deploy still
   // means "deploy current code now", so force the pass when asked.
-  if (params.alwaysRunBootstrap && !deployBootstrap && result.success && result.applyRunId) {
+  const planIsAllNoop = loaded.document.actions.every((action) => action.type === 'noop');
+  if (
+    params.alwaysRunBootstrap
+    && planIsAllNoop
+    && !deployBootstrap
+    && result.success
+    && result.applyRunId
+  ) {
     const forced = await ensureDeployBootstrap();
     if (!forced.success) {
       result = {

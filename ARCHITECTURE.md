@@ -474,14 +474,26 @@ TestFlight upload, or TestFlight distribution commands.
 
 For push deploys, `deploy.trigger: "ci"` is the portable default. It means Hypervibe manages generated GitHub Actions workflows that call provider APIs directly.
 
-CI ownership is exclusive. Planning must observe any provider-native repository
-source or push trigger that could deploy the same service outside the managed
-workflow. A confirmed native source is explicit drift: providers that expose a
-safe disconnect capability plan a provider-source disconnect action, while
-providers without one block with manual guidance. Unknown source observation
-also blocks; it must never be interpreted as disconnected. The CI workflow and
-applied-spec marker depend on this reconciliation, and a noop action performs
-no provider mutation.
+Deployment ownership is exclusive. Only an explicit `deploy.strategy: "branch"`
+with `deploy.trigger: "native"` may retain a provider-native repository source.
+Manual promotion and Hypervibe-managed CI both require every service source to
+be provider-confirmed disconnected. A confirmed native source is explicit
+drift: providers that expose a safe disconnect capability plan a
+provider-source disconnect action, while providers without one block with
+manual guidance. Unknown source observation also blocks; it must never be
+interpreted as disconnected. Source reconciliation is an isolated plan stage:
+no billable resource, environment-variable, workflow, release, or unrelated
+mutation is included until a later plan confirms that every source is
+disconnected. A noop action performs no provider mutation.
+
+Post-deploy endpoint success does not hide failures elsewhere in the project.
+When provider connections are available, `hv_health` also observes the latest
+bound deployment for every declared environment and service through the hosting
+adapter. Failed deployments are surfaced with their environment, provider,
+service, and status; permission failures, unsupported reads, missing bindings,
+and pending states remain `unknown`, never healthy. The requested endpoint and
+target environment retain their own result, so an unrelated production failure
+is reported without falsifying a successful staging HTTP check.
 
 The standard team workflow is:
 

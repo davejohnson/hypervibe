@@ -671,8 +671,17 @@ describe('hv_plan / hv_status / hv_apply', () => {
   }
 
   function mockObserved(observed: ObservedState | null) {
+    const normalizedObserved = observed
+      ? {
+        ...observed,
+        services: observed.services.map((service) => ({
+          ...service,
+          sourceState: service.sourceState ?? (service.source ? 'connected' : 'disconnected'),
+        })),
+      }
+      : null;
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue(
-      observed
+      normalizedObserved
         ? {
           success: true,
           adapter: {
@@ -688,7 +697,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
             ensureComponent: async () => { throw new Error('unused'); },
             deploy: async () => { throw new Error('unused'); },
             setEnvVars: async () => ({ success: true, message: 'ok' }),
-            observe: async () => observed,
+            observe: async () => normalizedObserved,
           },
         }
         : { success: false, error: 'no adapter' }
@@ -1501,6 +1510,78 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('reports a connected native source as drift for manual deployment ownership', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec_set', {
+      spec: {
+        project: 'manual-source-status-app',
+        environments: {
+          production: {
+            hosting: { provider: 'railway' },
+            services: { web: { startCommand: 'npm start' } },
+            envVars: {},
+            deploy: { strategy: 'manual' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    const project = new ProjectRepository().findByName('manual-source-status-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-production',
+        services: {
+          web: {
+            serviceId: 'svc-web',
+            source: { repo: 'dave/billforge', branch: 'main' },
+          },
+        },
+      },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-production',
+      services: [{
+        name: 'web',
+        externalId: 'svc-web',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        source: { repo: 'dave/billforge', branch: 'main' },
+        sourceState: 'connected',
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const status = await t.call('hv_status', {
+      project: project.name,
+      env: 'production',
+    });
+
+    expect(status.ok).toBe(true);
+    expect(status.data.inSync).toBe(false);
+    expect(status.data.drift).toContainEqual(expect.objectContaining({
+      id: 'service:web:deploy-source',
+      metadata: expect.objectContaining({
+        operation: 'providerNativeDeploySourceDisconnect',
+        desiredDeployMode: 'manual',
+      }),
+    }));
+    await t.close();
+  });
+
   it('does not report in sync when a declared managed database alias is missing', async () => {
     const t = await makeClient();
     await t.call('hv_spec_set', {
@@ -1999,6 +2080,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         workloadKind: 'web',
         customDomains: [],
         config: { startCommand: 'npm start' },
+        sourceState: 'disconnected',
         envVarKeys: ['NODE_ENV', 'OLD_API_TOKEN'],
         envVarHashes: { NODE_ENV: hashEnvValue('staging') },
         status: 'running',
@@ -2093,12 +2175,14 @@ describe('hv_plan / hv_status / hv_apply', () => {
         {
           name: 'web', externalId: 's-web', workloadKind: 'web', customDomains: [],
           config: { startCommand: 'npm start' },
+          sourceState: 'disconnected',
           envVarKeys: ['NODE_ENV'], envVarHashes: { NODE_ENV: hashEnvValue('staging') },
           status: 'running',
         },
         {
           name: 'daily', externalId: 's-daily', workloadKind: 'cron', customDomains: [],
           config: { startCommand: 'npm run cron', cronSchedule: '0 8 * * *' },
+          sourceState: 'disconnected',
           envVarKeys: ['NODE_ENV'], envVarHashes: { NODE_ENV: hashEnvValue('staging') },
           status: 'running',
         },
@@ -2195,12 +2279,14 @@ describe('hv_plan / hv_status / hv_apply', () => {
         {
           name: 'web', externalId: 's-web', workloadKind: 'web', customDomains: [],
           config: { startCommand: 'npm start' },
+          sourceState: 'disconnected',
           envVarKeys: ['NODE_ENV'], envVarHashes: { NODE_ENV: hashEnvValue('production') },
           status: 'running',
         },
         {
           name: 'hv-task-123', externalId: 'task-svc-1', workloadKind: 'worker', customDomains: [],
           config: {},
+          sourceState: 'disconnected',
           envVarKeys: [], envVarHashes: {},
           status: 'unknown',
         },
@@ -2456,6 +2542,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         workloadKind: 'web',
         customDomains: [],
         config: { startCommand: 'npm start' },
+        sourceState: 'disconnected',
         envVarKeys: ['NODE_ENV'],
         envVarHashes: { NODE_ENV: hashEnvValue('production') },
         status: 'running',
@@ -2484,6 +2571,13 @@ describe('hv_plan / hv_status / hv_apply', () => {
           supportsObserve: true,
         },
         connect: async () => {}, verify: async () => ({ success: true }),
+        observe: async () => ({
+          ...observedState,
+          services: observedState.services.map((entry) => ({
+            ...entry,
+            sourceState: entry.sourceState ?? 'disconnected',
+          })),
+        }),
         runJob: async (_environment: unknown, taskService: { name: string }, taskCommand: string) => ({
           jobId: 'job-1',
           status: 'completed',
@@ -2631,6 +2725,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       services: [{
         name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
         config: { startCommand: 'npm start' },
+        sourceState: 'disconnected',
         envVarKeys: [], envVarHashes: {},
         status: 'running',
       }],
@@ -2733,9 +2828,24 @@ describe('hv_plan / hv_status / hv_apply', () => {
         services: { web: { serviceId: 'gcp-project-web' } },
       },
     });
-    // No observation: the plan falls back to local state and emits the
-    // provider-switch replace actions unverified.
-    mockObserved(null);
+    // Provider-confirmed target absence lets the plan emit the provider-switch
+    // replace actions without guessing about an existing Railway service.
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: false,
+      services: [],
+      databases: [],
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: 'complete',
+        databases: 'complete',
+        storage: 'complete',
+      },
+      partial: false,
+      warnings: [],
+    });
     const fakeRailway = {
       name: 'railway',
       capabilities: {
