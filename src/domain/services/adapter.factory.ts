@@ -34,7 +34,19 @@ export class AdapterFactory {
    */
   async getHostingAdapter(project: Project): Promise<AdapterResult<IHostingAdapter>> {
     const platform = project.defaultPlatform || 'cloudrun';
-    return this.getAdapter<IHostingAdapter>(platform, 'deployment', getProjectScopeHints(project));
+    return this.getHostingAdapterByName(platform, project);
+  }
+
+  /** Resolve the exact hosting provider named by a reviewed environment/action. */
+  async getHostingAdapterByName(
+    providerName: string,
+    project?: Project
+  ): Promise<AdapterResult<IHostingAdapter>> {
+    return this.getAdapter<IHostingAdapter>(
+      providerName,
+      'deployment',
+      project ? getProjectScopeHints(project) : undefined
+    );
   }
 
   /**

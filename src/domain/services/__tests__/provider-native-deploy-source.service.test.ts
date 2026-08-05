@@ -58,7 +58,7 @@ function plan(state: ObservedState) {
     environmentSpec,
     observed: state,
     providerDisplayName: 'Railway',
-    ciModeSourcePolicy: 'disconnect',
+    nonNativeSourcePolicy: 'disconnect',
   });
 }
 
@@ -83,7 +83,7 @@ describe('provider-native deploy-source planning', () => {
         }),
       }),
     ]);
-    expect(result.actions[0]?.reason).toContain('bypass the CI deployment workflow');
+    expect(result.actions[0]?.reason).toContain('bypass the managed CI deployment workflow');
   });
 
   it('plans no mutation when Railway confirms the native source is disconnected', () => {
@@ -152,10 +152,60 @@ describe('provider-native deploy-source planning', () => {
         })],
       }),
       providerDisplayName: 'Railway',
-      ciModeSourcePolicy: 'disconnect',
+      nonNativeSourcePolicy: 'disconnect',
     });
 
     expect(result.actions).toEqual([]);
+  });
+
+  it('plans an explicit disconnect for manual deployment ownership', () => {
+    const manualSpec = environmentSpecSchema.parse({
+      ...environmentSpec,
+      deploy: { strategy: 'manual' },
+    });
+    const result = planProviderNativeDeploySources({
+      environmentSpec: manualSpec,
+      observed: observed({
+        services: [observedService({
+          source: { repo: 'dave/invoice-perfect', branch: 'main' },
+          sourceState: 'connected',
+        })],
+      }),
+      providerDisplayName: 'Railway',
+      nonNativeSourcePolicy: 'disconnect',
+    });
+
+    expect(result.actions[0]).toMatchObject({
+      id: 'service:web:deploy-source',
+      type: 'update',
+      metadata: {
+        operation: PROVIDER_NATIVE_SOURCE_DISCONNECT_OPERATION,
+        serviceId: 'svc-web',
+        desiredDeployMode: 'manual',
+      },
+    });
+    expect(result.actions[0]?.reason).toContain('without explicit promotion');
+  });
+
+  it('treats omitted deploy configuration as manual ownership', () => {
+    const implicitManualSpec = environmentSpecSchema.parse({
+      hosting: { provider: 'railway' },
+      services: { web: { startCommand: 'npm start' } },
+    });
+    const result = planProviderNativeDeploySources({
+      environmentSpec: implicitManualSpec,
+      observed: observed({
+        services: [observedService({
+          source: { repo: 'dave/invoice-perfect', branch: 'main' },
+          sourceState: 'connected',
+        })],
+      }),
+      providerDisplayName: 'Railway',
+      nonNativeSourcePolicy: 'disconnect',
+    });
+
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]?.metadata?.desiredDeployMode).toBe('manual');
   });
 
   it('blocks instead of mutating when provider metadata declares manual source cleanup', () => {
@@ -168,7 +218,7 @@ describe('provider-native deploy-source planning', () => {
         })],
       }),
       providerDisplayName: 'Example Hosting',
-      ciModeSourcePolicy: 'block',
+      nonNativeSourcePolicy: 'block',
     });
 
     expect(result.actions[0]).toMatchObject({
@@ -231,7 +281,7 @@ describe('provider-native deploy-source apply', () => {
       message: 'disconnected',
       data: { serviceId: 'svc-web' },
     }));
-    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
       success: true,
       adapter: {
         name: 'railway',
@@ -248,6 +298,7 @@ describe('provider-native deploy-source apply', () => {
     });
 
     expect(result.success).toBe(true);
+    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('railway', project);
     expect(disconnectDeploySource).toHaveBeenCalledTimes(1);
     expect(disconnectDeploySource).toHaveBeenCalledWith({ serviceId: 'svc-web' });
     expect(updateBindings).toHaveBeenCalledTimes(1);
@@ -262,7 +313,7 @@ describe('provider-native deploy-source apply', () => {
   });
 
   it('does not alter bindings when the provider fails to disconnect the source', async () => {
-    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
       success: true,
       adapter: {
         name: 'railway',
@@ -291,7 +342,7 @@ describe('provider-native deploy-source apply', () => {
   });
 
   it('blocks without mutation when the hosting adapter lacks source disconnection', async () => {
-    vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({
+    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
       success: true,
       adapter: {
         name: 'railway',

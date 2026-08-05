@@ -864,6 +864,15 @@ Fine-grained PATs can work for some GitHub API operations when granted the permi
 
 `deploy.strategy: "branch"` defaults to `deploy.trigger: "ci"`. Hypervibe sets up push deploys by writing GitHub Actions workflows that call provider APIs directly; it does not install or depend on provider CLIs.
 
+Provider-native source ownership is exclusive. Only an explicit
+`deploy.trigger: "native"` may keep a repository connected at the hosting
+provider. Manual and CI modes stage source reconciliation before every other
+mutation: Railway and Azure Container Apps disconnect through their provider
+APIs, while Vercel and DigitalOcean block with manual-disconnect guidance.
+Unknown source observation blocks for all four providers. After the source-only
+plan converges, run `hv_plan` again to review storage, variable, workflow, or
+deployment work separately.
+
 Typical setup:
 
 - Define the environment with `deploy: { strategy: "branch", branch: "main" }` or an explicit `trigger: "ci"`.
@@ -891,6 +900,11 @@ contract stops before image build until the exact commit is reconciled:
    marker advances.
 4. Trigger that commit with `hv_ci_trigger`, inspect it with `hv_ci_status`,
    and verify it with `hv_health`.
+
+For project-backed checks, `hv_health` keeps the requested HTTP result separate
+and also reports the latest bound deployment status for every declared
+environment and service. This lets a healthy staging endpoint surface a failed
+production build; provider read failures and pending states remain unknown.
 
 The marker is environment-specific: production-only desired-state changes do
 not block staging. Production workflows remain manual and enforce the same

@@ -20,6 +20,7 @@ import {
   joinUrl,
   resolveServiceBaseUrl,
   runHttpCheck,
+  collectProjectDeploymentHealth,
 } from '../domain/services/health.service.js';
 import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
@@ -129,7 +130,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
 
   commands.register(
     'hv_health',
-    'HTTP health-check a deployed service or an explicit URL. Service resolution uses repo-backed spec/bindings when present, so public endpoint checks do not require provider credentials; this proves reachability, not provider drift or convergence.',
+    'HTTP health-check a deployed service or an explicit URL. Project-backed checks also surface latest deployment failures across every bound environment when provider connections are available; unknown provider observations never count as healthy.',
     {
       project: projectField,
       env: envField,
@@ -142,11 +143,13 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
       let baseUrl: string;
       let healthPath = path;
       let resolvedService: string | undefined;
+      let resolvedProject: ReturnType<CommandContext['resolveProjectOrThrow']> | undefined;
 
       if (url) {
         baseUrl = normalizeBaseUrl(url);
       } else {
         const project = ctx.resolveProjectOrThrow({ project: projectRef });
+        resolvedProject = project;
         const environment = env
           ? ctx.resolveEnvironmentOrThrow(project, env)
           : resolveHealthEnvironment(project.id);
@@ -194,9 +197,39 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         bodyPreviewBytes: 2048,
       });
 
+      const specEnvironmentNames = resolvedProject
+        ? Object.keys(new SpecStore().get(resolvedProject)?.spec.environments ?? {})
+        : [];
+      const deploymentHealth = resolvedProject
+        ? await collectProjectDeploymentHealth({
+          project: resolvedProject,
+          environments: ctx.repos.environments
+            .findByProjectId(resolvedProject.id)
+            .filter((environment) => specEnvironmentNames.includes(environment.name)),
+        })
+        : undefined;
+      const deploymentFailure = deploymentHealth?.failures[0];
+      const unknownEnvironments = deploymentHealth?.environments
+        .filter((environment) => environment.state === 'unknown')
+        .map((environment) => environment.environment) ?? [];
+
       return commandSuccess(
-        { service: resolvedService, baseUrl, check },
-        { hint: check.ok ? undefined : 'Check hv_logs source="service" errorsOnly=true for the failing service.' }
+        {
+          service: resolvedService,
+          baseUrl,
+          check,
+          ...(deploymentHealth ? { deploymentHealth } : {}),
+        },
+        {
+          hint: !check.ok
+            ? 'Check hv_logs source="service" errorsOnly=true for the failing service.'
+            : deploymentFailure
+              ? `Latest deployment failure: ${deploymentFailure.environment}/${deploymentFailure.service} on ${deploymentFailure.provider} (${deploymentFailure.status}). Inspect that environment with hv_logs source="deployments" and source="build" where supported.`
+              : undefined,
+          warnings: unknownEnvironments.length > 0
+            ? [`Deployment status is unknown for: ${unknownEnvironments.join(', ')}.`]
+            : undefined,
+        }
       );
     })
   );

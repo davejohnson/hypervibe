@@ -1114,7 +1114,7 @@ providerRegistry.register({
         buildGitHubActionsSteps: buildVercelGitHubActionsSteps,
       },
       nativeBranchDeploy: {
-        ciModeSourcePolicy: 'block',
+        nonNativeSourcePolicy: 'block',
       },
     },
   },

@@ -187,8 +187,8 @@ export interface IHostingAdapter {
   ): Promise<Receipt>;
 
   /**
-   * Disconnect a provider-native repository source so pushes cannot bypass a
-   * CI-owned deployment workflow.
+   * Disconnect a provider-native repository source so pushes cannot bypass
+   * manual promotion or a Hypervibe-owned CI deployment workflow.
    */
   disconnectDeploySource?(params: { serviceId: string }): Promise<Receipt>;
 

@@ -1444,7 +1444,7 @@ describe('PlanService.plan', () => {
     expect(ids.indexOf('ci:github-actions:production:deploy-branch')).toBeLessThan(ids.indexOf('domain:apreskeys.com'));
   });
 
-  it('makes CI workflow convergence depend on disconnecting a live Railway native deploy source', async () => {
+  it('stages a live Railway native-source disconnect before CI workflow convergence', async () => {
     project = new ProjectRepository().update(project.id, {
       gitRemoteUrl: 'git@github.com:dave/invoice-perfect.git',
     })!;
@@ -1517,13 +1517,120 @@ describe('PlanService.plan', () => {
       metadata: {
         operation: 'providerNativeDeploySourceDisconnect',
         serviceId: 'svc-web',
+        desiredDeployMode: 'ci',
       },
     });
-    expect(ciAction?.dependsOn).toContain('service:web:deploy-source');
-    expect(markerAction?.dependsOn).toContain('service:web:deploy-source');
+    expect(ciAction).toBeUndefined();
+    expect(markerAction).toBeUndefined();
+    expect(plan.actions).toHaveLength(1);
     expect(plan.warnings).toContain(
-      'Railway provider-native deploy-source reconciliation is required before this environment can be considered CI-only.'
+      'Railway provider-native deploy-source reconciliation is required before this environment has CI-only deployment ownership.'
     );
+    expect(plan.warnings).toContain(
+      'This plan is limited to provider-native deploy-source reconciliation. Re-run hv_plan after it converges to review remaining infrastructure drift.'
+    );
+  });
+
+  it('stages manual production source disconnects before storage and environment drift', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: {
+            web: { startCommand: 'npm start' },
+            worker: { workloadKind: 'worker', startCommand: 'npm run worker' },
+          },
+          envVars: { RELEASE_CHANNEL: 'production' },
+          storage: {
+            documents: {
+              provider: 'railway',
+              type: 'bucket',
+              region: 'sjc',
+              injectInto: ['web', 'worker'],
+            },
+          },
+          deploy: { strategy: 'manual' },
+        },
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'rail-production',
+        services: {
+          web: {
+            serviceId: 'svc-web',
+            source: { repo: 'dave/billforge', branch: 'main' },
+          },
+          worker: {
+            serviceId: 'svc-worker',
+            source: { repo: 'dave/billforge', branch: 'main' },
+          },
+        },
+      },
+    });
+    for (const name of ['web', 'worker']) {
+      new ServiceRepository().create({
+        projectId: project.id,
+        name,
+        buildConfig: {},
+        envVarSpec: {},
+      });
+    }
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'rail-production',
+      services: ['web', 'worker'].map((name) => ({
+        name,
+        externalId: `svc-${name}`,
+        workloadKind: name === 'worker' ? 'worker' : 'web',
+        customDomains: [],
+        config: {},
+        source: { repo: 'dave/billforge', branch: 'main' },
+        sourceState: 'connected' as const,
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running' as const,
+      })),
+      databases: [],
+      storage: [],
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: 'complete',
+        databases: 'complete',
+        storage: 'complete',
+      },
+      partial: false,
+      warnings: [],
+    });
+
+    const result = await new PlanService().plan(project, 'production');
+    const plan = result as Exclude<typeof result, { error: string }>;
+
+    expect(plan.actions.map((action) => action.id)).toEqual([
+      'service:web:deploy-source',
+      'service:worker:deploy-source',
+    ]);
+    expect(plan.actions.every((action) => action.billable !== true)).toBe(true);
+    expect(plan.actions.every((action) => action.metadata?.operation === 'providerNativeDeploySourceDisconnect')).toBe(true);
+
+    const filteredResult = await new PlanService().plan(project, 'production', {
+      serviceFilter: ['web'],
+    });
+    const filteredPlan = filteredResult as Exclude<typeof filteredResult, { error: string }>;
+    expect(filteredPlan.actions.map((action) => action.id)).toEqual([
+      'service:web:deploy-source',
+      'service:worker:deploy-source',
+    ]);
   });
 
   it('updates the CI workflow after creating a newly declared worker', async () => {

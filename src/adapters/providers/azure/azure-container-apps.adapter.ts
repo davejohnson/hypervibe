@@ -1527,7 +1527,7 @@ providerRegistry.register({
           buildAzureContainerAppsGitHubActionsSteps,
       },
       nativeBranchDeploy: {
-        ciModeSourcePolicy: 'disconnect',
+        nonNativeSourcePolicy: 'disconnect',
       },
     },
   },

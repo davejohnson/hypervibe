@@ -7,6 +7,8 @@ import { ProjectRepository } from '../../../adapters/db/repositories/project.rep
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
 import {
+  classifyDeploymentStatus,
+  collectProjectDeploymentHealth,
   joinUrl,
   normalizeBaseUrl,
   resolveHealthEnvironment,
@@ -14,6 +16,7 @@ import {
   resolveServiceBaseUrl,
   runHttpCheck,
 } from '../health.service.js';
+import { adapterFactory } from '../adapter.factory.js';
 
 const DEFAULT_CHECK = {
   method: 'GET' as const,
@@ -176,5 +179,104 @@ describe('health.service', () => {
   it('normalizes hosts and joins paths', () => {
     expect(normalizeBaseUrl('web.example.run.app/')).toBe('https://web.example.run.app');
     expect(joinUrl('https://web.example.run.app', 'api/health')).toBe('https://web.example.run.app/api/health');
+  });
+
+  it('classifies provider deployment statuses without treating pending or absent as healthy', () => {
+    expect(classifyDeploymentStatus('SUCCESS')).toBe('healthy');
+    expect(classifyDeploymentStatus('deployed')).toBe('healthy');
+    expect(classifyDeploymentStatus('CRASHED')).toBe('failed');
+    expect(classifyDeploymentStatus('update_failed')).toBe('failed');
+    expect(classifyDeploymentStatus('deploying')).toBe('unknown');
+    expect(classifyDeploymentStatus('absent')).toBe('unknown');
+  });
+
+  it('surfaces failed deployments across providers and environments', async () => {
+    const project = new ProjectRepository().create({
+      name: 'cross-environment-health',
+      defaultPlatform: 'railway',
+    });
+    const environments = [
+      new EnvironmentRepository().create({
+        projectId: project.id,
+        name: 'production',
+        platformBindings: {
+          provider: 'railway',
+          services: {
+            web: { serviceId: 'production-web' },
+            worker: { serviceId: 'production-worker' },
+          },
+        },
+      }),
+      new EnvironmentRepository().create({
+        projectId: project.id,
+        name: 'staging',
+        platformBindings: {
+          provider: 'azure-container-apps',
+          services: { web: { serviceId: 'staging-web' } },
+        },
+      }),
+    ];
+    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockImplementation(async (provider) => ({
+      success: true,
+      adapter: {
+        name: provider,
+        getDeployStatus: async (_environment: unknown, serviceId: string) => ({
+          status: serviceId === 'production-web'
+            ? 'CRASHED'
+            : serviceId === 'production-worker'
+              ? 'FAILED'
+              : 'deployed',
+        }),
+      } as never,
+    }));
+
+    const result = await collectProjectDeploymentHealth({ project, environments });
+
+    expect(result.state).toBe('failed');
+    expect(result.failures).toEqual([
+      { environment: 'production', provider: 'railway', service: 'web', status: 'CRASHED' },
+      { environment: 'production', provider: 'railway', service: 'worker', status: 'FAILED' },
+    ]);
+    expect(result.environments).toContainEqual(expect.objectContaining({
+      environment: 'staging',
+      provider: 'azure-container-apps',
+      state: 'healthy',
+    }));
+    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('railway', project);
+    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('azure-container-apps', project);
+  });
+
+  it('preserves unknown deployment state when a provider cannot be observed', async () => {
+    const project = new ProjectRepository().create({
+      name: 'unknown-deployment-health',
+      defaultPlatform: 'vercel',
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'vercel',
+        services: { web: { serviceId: 'vercel-web' } },
+      },
+    });
+    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
+      success: false,
+      error: 'permission denied',
+    });
+
+    const result = await collectProjectDeploymentHealth({
+      project,
+      environments: [environment],
+    });
+
+    expect(result).toMatchObject({
+      state: 'unknown',
+      failures: [],
+      environments: [{
+        environment: 'production',
+        provider: 'vercel',
+        state: 'unknown',
+      }],
+    });
   });
 });

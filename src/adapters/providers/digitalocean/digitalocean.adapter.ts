@@ -1124,6 +1124,9 @@ providerRegistry.register({
         },
         buildGitHubActionsSteps: buildDigitalOceanGitHubActionsSteps,
       },
+      nativeBranchDeploy: {
+        nonNativeSourcePolicy: 'block',
+      },
     },
     lifecycle: {
       databaseEngines: ['postgres'],

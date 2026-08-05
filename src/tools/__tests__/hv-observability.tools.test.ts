@@ -15,6 +15,7 @@ import { createToolContext } from '../context.js';
 import { registerHvObservabilityTools } from '../hv-observability.tools.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
+import { adapterFactory } from '../../domain/services/adapter.factory.js';
 
 let tempDir: string;
 
@@ -232,6 +233,73 @@ describe('hv_health', () => {
     expect(result.ok).toBe(true);
     expect(result.data.baseUrl).toBe('https://staging.example.com');
     expect(result.data.check.url).toBe('https://staging.example.com/healthz');
+    await t.close();
+  });
+
+  it('surfaces production deployment failures after a successful staging endpoint check', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('ok', { status: 200 })));
+    const project = new ProjectRepository().create({
+      name: 'cross-environment-health',
+      defaultPlatform: 'railway',
+    });
+    for (const environment of ['staging', 'production']) {
+      new EnvironmentRepository().create({
+        projectId: project.id,
+        name: environment,
+        platformBindings: {
+          provider: 'railway',
+          services: {
+            web: {
+              serviceId: `${environment}-web`,
+              url: `https://${environment}.example.com`,
+            },
+            worker: { serviceId: `${environment}-worker` },
+          },
+        },
+      });
+    }
+    new SpecStore().replace(project, projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      environments: Object.fromEntries(['staging', 'production'].map((environment) => [
+        environment,
+        {
+          hosting: { provider: 'railway' },
+          services: {
+            web: { workloadKind: 'web', public: true, healthCheckPath: '/health' },
+            worker: { workloadKind: 'worker' },
+          },
+          deploy: environment === 'production'
+            ? { strategy: 'manual' }
+            : { strategy: 'branch', trigger: 'ci', branch: 'main' },
+        },
+      ])),
+    }));
+    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'railway',
+        getDeployStatus: async (_environment: unknown, serviceId: string) => ({
+          status: serviceId.startsWith('production-') ? 'CRASHED' : 'deployed',
+        }),
+      } as never,
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_health', {
+      project: project.name,
+      env: 'staging',
+      service: 'web',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.check.ok).toBe(true);
+    expect(result.data.deploymentHealth.state).toBe('failed');
+    expect(result.data.deploymentHealth.failures).toEqual([
+      { environment: 'production', provider: 'railway', service: 'web', status: 'CRASHED' },
+      { environment: 'production', provider: 'railway', service: 'worker', status: 'CRASHED' },
+    ]);
+    expect(result.hint).toContain('production/web');
     await t.close();
   });
 });

@@ -35,6 +35,7 @@ function observed(): ObservedState {
       workloadKind: 'web',
       customDomains: [],
       config: {},
+      sourceState: 'disconnected',
       envVarKeys: [],
       envVarHashes: {},
       status: 'running',

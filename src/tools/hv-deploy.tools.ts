@@ -7,6 +7,7 @@ import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { executeRollback, ROLLBACK_NOTE } from '../domain/services/rollback.service.js';
 import { CI_ROLLBACK_NOTE } from '../domain/services/ci-rollback.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
+import { isProviderNativeDeploySourceAction } from '../domain/services/provider-native-deploy-source.service.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { CommandContext } from '../application/context.js';
@@ -122,6 +123,8 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       if ('error' in planned) {
         return commandError('VALIDATION', planned.error, { next: ['hv_spec_set'] });
       }
+      const deploySourceStage = planned.actions.length > 0
+        && planned.actions.every(isProviderNativeDeploySourceAction);
 
       const outcome = await executePlanApply(ctx, {
         project,
@@ -129,8 +132,8 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         specRevision: specResult.revision,
         planId: planned.planRunId,
         confirmActions: [],
-        verifyHttpHealth: true,
-        alwaysRunBootstrap: true,
+        verifyHttpHealth: !deploySourceStage,
+        alwaysRunBootstrap: !deploySourceStage,
       });
       if (outcome.kind === 'plan_not_found' || outcome.kind === 'env_missing') {
         return commandError('INTERNAL', 'Deploy plan could not be applied immediately after planning.', {
@@ -167,6 +170,24 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
             : 'Create and inspect a fresh plan before retrying the deployment.',
           next: conflict && conflict.kind !== 'already_applied' ? ['hv_runs'] : ['hv_plan'],
         });
+      }
+
+      if (deploySourceStage && outcome.result.success) {
+        return commandSuccess(
+          {
+            planId: planned.planRunId,
+            applyRunId: outcome.result.applyRunId,
+            status: 'pending',
+            environment: envName,
+            receipts: outcome.result.receipts,
+            message: 'Provider-native deploy sources were reconciled; application deployment has not started.',
+          },
+          {
+            hint: 'Re-run hv_deploy. The fresh plan will verify that every native source is disconnected before authorizing application or infrastructure mutations.',
+            warnings: outcome.actionScopedWarnings,
+            next: ['hv_deploy'],
+          }
+        );
       }
 
       const summary = outcome.bootstrapSummary ?? {};
