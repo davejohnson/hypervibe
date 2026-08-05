@@ -167,6 +167,7 @@ describe('GitHub infrastructure compiler', () => {
 
     const infrastructure = await runFor([
       { filename: '.hypervibe/spec.json' },
+      { filename: '.github/hypervibe/cloudsql-restore-drill.mjs' },
       { filename: '.github/workflows/deploy-railway-staging.yml' },
     ]);
     expect(infrastructure.core.setOutput).toHaveBeenCalledWith('run_expensive', 'false');

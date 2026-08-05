@@ -575,7 +575,9 @@ means Hypervibe does not manage resilience settings. Within a declared block:
 
 - `availability` owns the provider's zonal/regional HA mode;
 - `backups` owns automated-backup count and PITR log retention; and
-- `replicas` owns named provider read replicas. Removing a named replica is an
+- `replicas` owns named provider read replicas; and
+- `restoreDrill` owns a scheduled isolated point-in-time restore verification.
+  Removing a named replica is an
   explicit, confirm-gated deletion. Removing the whole resilience block stops
   management and does not silently reduce protection or delete replicas.
 
@@ -596,10 +598,34 @@ every bound service, then verify provider-terminal absence before pruning the
 binding. A noop action performs no provider mutation, and immutable replica
 region/tier drift blocks until an explicit replacement lifecycle is supported.
 
+A restore drill is repository-managed operational infrastructure, not a restore
+of the primary in place. V1 supports one drill on the GitHub canonical
+environment. Hypervibe compiles a provider-owned scheduled workflow and runtime
+through the existing review-gated GitHub infrastructure plan action. Initial or
+changed drill workflow publication is billable and requires exact action-id
+confirmation because each future run creates a temporary database instance.
+The workflow is not proposed until the declared repository credential secret is
+provider-observed by name; the credential value never enters specs, plans,
+bindings, workflow files, receipts, or output.
+
+Each run freezes the bound primary provider id in non-secret workflow config,
+clones that exact primary to a unique `hv-drill-*` instance at the declared PITR
+offset, applies source-specific ownership labels, changes only the clone's
+temporary `postgres` password, and executes one declared query inside a
+read-only transaction. Application services are never repointed. Successful
+runs delete the labeled clone, wait for provider-confirmed terminal absence,
+and publish evidence to the GitHub step summary. Failed labeled clones remain
+inspectable for the declared short retention period; later runs garbage collect
+only instances with the generated prefix and matching drill/source labels. A
+failure before ownership labeling may delete only the exact unique target
+created by that same run. Workflow runs are observed through `hv_ci_status`.
+
 Cloud SQL is the first resilience adapter. It observes and verifies HA,
-backup/PITR policy, and replica topology through the SQL Admin API. Restore
-drills, provider-to-provider database migration, replica promotion/failover,
-and replica replacement are separate future lifecycle slices.
+backup/PITR policy, and replica topology through the SQL Admin API. Its restore
+drill uses `instances.clone` with an explicit point-in-time to create a new
+instance, never a destructive restore onto the primary. Provider-to-provider
+database migration, replica promotion/failover, replica replacement, and
+multi-environment restore-drill scheduling are separate future lifecycle slices.
 
 ## Database Tasks And Seed Data
 

@@ -62,6 +62,7 @@ import {
   planGitHubCollaboration,
 } from '../services/repo-collaboration.service.js';
 import {
+  GITHUB_INFRASTRUCTURE_OPERATION,
   githubInfrastructureConnectionBlock,
   planGitHubInfrastructure,
 } from '../services/github-infrastructure.service.js';
@@ -1197,6 +1198,26 @@ export class PlanService {
       spec: specResult.spec,
       environmentName,
     });
+    if (environmentSpec.database?.resilience?.restoreDrill) {
+      const restorePrerequisites = actions
+        .filter((action) =>
+          action.type !== 'noop'
+          && action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.backupPolicyConfigure
+        )
+        .map((action) => action.id);
+      for (const action of githubInfrastructure.actions) {
+        if (
+          action.type !== 'noop'
+          && action.metadata?.operation === GITHUB_INFRASTRUCTURE_OPERATION
+          && restorePrerequisites.length > 0
+        ) {
+          action.dependsOn = Array.from(new Set([
+            ...(action.dependsOn ?? []),
+            ...restorePrerequisites,
+          ]));
+        }
+      }
+    }
     const githubConfirmationActions = githubInfrastructure.actions.filter((action) => action.requiresConfirm);
     actions.push(...githubInfrastructure.actions.filter((action) => !action.requiresConfirm));
     blocked.push(...githubInfrastructure.blocked);

@@ -15,8 +15,10 @@ import type {
   ProjectRuntimeSpec,
   ProjectSpec,
 } from '../spec/spec.schema.js';
+import type { DatabaseRestoreDrillFile } from '../ports/database-restore-drill.port.js';
 import { effectiveGitHubCheckRuntimeVersion } from '../spec/project-runtime.js';
 import { adapterFactory } from './adapter.factory.js';
+import { compileDatabaseRestoreDrillFiles } from './database-restore-drill.service.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { getGitHubAdapter } from './github-ops.service.js';
 
@@ -230,6 +232,7 @@ function pullRequestChangeClassifier(): string[] {
     '              ".hypervibe/spec.json",',
     '              ".hypervibe/bindings.json",',
     '              ".github/hypervibe/manifest.json",',
+    '              ".github/hypervibe/cloudsql-restore-drill.mjs",',
     '              ".github/pull_request_template.md",',
     '              ".github/ISSUE_TEMPLATE/task.yml",',
     '              ".github/dependabot.yml",',
@@ -932,7 +935,8 @@ export function githubSpecNeedsOpenAI(github: GitHubSpec): boolean {
 
 export function compileManagedGitHubFiles(
   github: GitHubSpec,
-  projectRuntime?: ProjectRuntimeSpec
+  projectRuntime?: ProjectRuntimeSpec,
+  databaseRestoreDrillFiles: DatabaseRestoreDrillFile[] = []
 ): ManagedGitHubFile[] {
   const files: ManagedGitHubFile[] = [];
   if (github.collaboration.issues.enabled && github.collaboration.issues.templates) {
@@ -976,6 +980,9 @@ export function compileManagedGitHubFiles(
         details: ['Uses the package types, folders, and schedule declared in the Hypervibe project setup.'],
       }
     ));
+  }
+  for (const file of databaseRestoreDrillFiles) {
+    files.push(managedFile(file.path, file.content, file.review));
   }
 
   const manifest = {
@@ -1060,6 +1067,7 @@ function infrastructureAction(params: {
   verified: boolean;
   drift: string[];
   blockedReason?: string;
+  billable?: boolean;
 }): PlanAction {
   return {
     id: GITHUB_INFRASTRUCTURE_ACTION_ID,
@@ -1072,6 +1080,7 @@ function infrastructureAction(params: {
     ...(params.drift.length > 0
       ? { diff: params.drift.map((path) => ({ field: `file:${path}`, from: 'drift', to: 'desired' })) }
       : {}),
+    ...(params.billable ? { billable: true } : {}),
     metadata: {
       operation: GITHUB_INFRASTRUCTURE_OPERATION,
       repository: params.repository,
@@ -1120,7 +1129,8 @@ export async function planGitHubInfrastructure(params: {
   if (!parts) return { actions: [], warnings: [`Could not parse GitHub repository ${repository}.`], blocked: [] };
 
   const artifactContractIssues = autofixArtifactContractIssues(params.spec.github);
-  const files = compileManagedGitHubFiles(params.spec.github, params.spec.runtime);
+  const restoreDrills = compileDatabaseRestoreDrillFiles({ project: params.project, spec: params.spec });
+  const files = compileManagedGitHubFiles(params.spec.github, params.spec.runtime, restoreDrills.files);
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
     return {
@@ -1134,13 +1144,17 @@ export async function planGitHubInfrastructure(params: {
       })],
       warnings: [
         ...artifactContractIssues,
+        ...restoreDrills.issues.map((issue) => issue.message),
         `Cannot observe GitHub infrastructure for ${repository}: ${adapterResult.error}`,
       ],
       blocked: [],
     };
   }
 
-  const warnings: string[] = [...artifactContractIssues];
+  const warnings: string[] = [
+    ...artifactContractIssues,
+    ...restoreDrills.issues.map((issue) => issue.message),
+  ];
   let verified = true;
   const drift: string[] = [];
   for (const file of files) {
@@ -1153,15 +1167,37 @@ export async function planGitHubInfrastructure(params: {
       warnings.push(`Cannot read ${file.path}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  let restoreDrillBlockedReason: string | undefined = restoreDrills.issues[0]?.code;
+  if (restoreDrills.requiredSecrets.length > 0) {
+    try {
+      const repositorySecrets = await adapterResult.adapter.listRepositorySecrets(parts.owner, parts.repo);
+      const missingSecrets = restoreDrills.requiredSecrets.filter((secret) => !repositorySecrets.includes(secret));
+      if (missingSecrets.length > 0) {
+        restoreDrillBlockedReason = 'github_restore_drill_secret_missing';
+        for (const secret of missingSecrets) {
+          warnings.push(
+            `Database restore drill requires GitHub Actions secret ${secret}. Set it without exposing the value: hv_secrets_set target="github" repo="${repository}" key="${secret}" secretRef="env:${secret}".`
+          );
+        }
+      }
+    } catch (error) {
+      verified = false;
+      restoreDrillBlockedReason = 'github_restore_drill_secret_observation_unknown';
+      warnings.push(`Cannot observe restore-drill GitHub Actions secret names: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const infrastructureBlockedReason = artifactContractIssues.length > 0
+    ? 'github_autofix_artifact_contract_incomplete'
+    : restoreDrillBlockedReason;
+  const restoreDrillPaths = new Set(restoreDrills.files.map((file) => file.path));
   const actions: PlanAction[] = [infrastructureAction({
     repository,
     files,
-    type: drift.length > 0 || artifactContractIssues.length > 0 ? 'update' : 'noop',
+    type: drift.length > 0 || Boolean(infrastructureBlockedReason) ? 'update' : 'noop',
     verified,
     drift,
-    ...(artifactContractIssues.length > 0
-      ? { blockedReason: 'github_autofix_artifact_contract_incomplete' }
-      : {}),
+    billable: !infrastructureBlockedReason && drift.some((path) => restoreDrillPaths.has(path)),
+    ...(infrastructureBlockedReason ? { blockedReason: infrastructureBlockedReason } : {}),
   })];
   const blocked: GitHubInfrastructureConnectionBlock[] = [];
 

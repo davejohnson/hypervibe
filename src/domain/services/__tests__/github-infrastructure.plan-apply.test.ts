@@ -4,6 +4,10 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
+import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
+import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
+import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import {
   GitHubAdapter,
   type GitHubPullRequestSummary,
@@ -164,6 +168,81 @@ describe('GitHub infrastructure plan/apply', () => {
       (file) => file.path.endsWith('hypervibe-fix.yml')
     )?.content;
     expect(workflow).toContain('hypervibe-no-evidence-artifact-match');
+  });
+
+  it('blocks restore-drill workflow reconciliation until its named credential secret exists', async () => {
+    const drillProject = new ProjectRepository().create({
+      name: 'restore-drill-example',
+      defaultPlatform: 'cloudrun',
+      gitRemoteUrl: `https://github.com/${REPOSITORY}.git`,
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: drillProject.id,
+      name: 'production',
+    });
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      externalId: 'production-postgres',
+      bindings: {
+        provider: 'cloudsql',
+        instanceId: 'production-postgres',
+        connectionName: 'gcp-project:us-central1:production-postgres',
+        database: 'app',
+      },
+    });
+    const drillSpec = projectSpecSchema.parse({
+      version: 1,
+      project: 'restore-drill-example',
+      github: {},
+      environments: {
+        production: {
+          hosting: { provider: 'cloudrun' },
+          services: { web: {} },
+          database: {
+            provider: 'cloudsql',
+            resilience: {
+              backups: { retainedBackups: 8, pitrRetentionDays: 7 },
+              restoreDrill: { schedule: { cron: '0 4 * * 1' } },
+            },
+          },
+        },
+      },
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    const secrets = vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets').mockResolvedValue([]);
+
+    const result = await planGitHubInfrastructure({
+      project: drillProject,
+      spec: drillSpec,
+      environmentName: 'production',
+    });
+
+    expect(result.actions[0]).toMatchObject({
+      id: GITHUB_INFRASTRUCTURE_ACTION_ID,
+      type: 'update',
+      metadata: { blockedReason: 'github_restore_drill_secret_missing' },
+    });
+    expect(result.actions[0].metadata?.desiredFiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: '.github/hypervibe/cloudsql-restore-drill.mjs' }),
+      expect.objectContaining({ path: '.github/workflows/hypervibe-db-restore-drill-production.yml' }),
+    ]));
+    expect(result.warnings).toContainEqual(expect.stringContaining(
+      'hv_secrets_set target="github"'
+    ));
+
+    secrets.mockResolvedValue(['HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS']);
+    const ready = await planGitHubInfrastructure({
+      project: drillProject,
+      spec: drillSpec,
+      environmentName: 'production',
+    });
+    expect(ready.actions[0]).toMatchObject({
+      id: GITHUB_INFRASTRUCTURE_ACTION_ID,
+      type: 'update',
+      billable: true,
+    });
+    expect(ready.actions[0].metadata?.blockedReason).toBeUndefined();
   });
 
   it('plans action-scoped OpenAI and native settings only after files are merged', async () => {

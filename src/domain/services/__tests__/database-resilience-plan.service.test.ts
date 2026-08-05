@@ -11,6 +11,7 @@ const capabilities = {
   availabilityModes: ['zonal', 'regional'] as Array<'zonal' | 'regional'>,
   backups: { maxRetainedBackups: 365, maxPitrRetentionDays: 7 },
   readReplicas: true,
+  restoreDrills: true,
 };
 
 function fixture(params: {
@@ -158,5 +159,33 @@ describe('planDatabaseResilience', () => {
     const plan = planDatabaseResilience({ ...fixture({ provider }), capabilities: undefined });
     expect(plan.actions.every((action) => action.type === 'update')).toBe(true);
     expect(plan.actions.every((action) => action.metadata?.blockedReason === 'database_resilience_unsupported')).toBe(true);
+  });
+
+  it('blocks a restore-drill declaration when the provider has no compiler capability', () => {
+    const plan = planDatabaseResilience({
+      ...fixture({
+        resilience: {
+          backups: { retainedBackups: 8, pitrRetentionDays: 7 },
+          restoreDrill: { schedule: { cron: '0 4 * * 1' } },
+        },
+        observedResilience: {
+          availability: 'zonal',
+          backupPolicy: { enabled: true, pitrEnabled: true, retainedBackups: 8, pitrRetentionDays: 7 },
+          replicas: [],
+        },
+      }),
+      capabilities: { ...capabilities, restoreDrills: false },
+    });
+
+    expect(plan.actions).toContainEqual(expect.objectContaining({
+      id: 'database:cloudsql:resilience:restore-drills',
+      metadata: {
+        operation: DATABASE_RESILIENCE_OPERATIONS.restoreDrillSchedule,
+        blockedReason: 'database_resilience_unsupported',
+        engine: 'postgres',
+        primaryExternalId: 'primary-1',
+        feature: 'restore-drills',
+      },
+    }));
   });
 });
