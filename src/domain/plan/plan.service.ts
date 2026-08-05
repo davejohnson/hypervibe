@@ -29,6 +29,7 @@ import {
 } from '../services/database-env.js';
 import { buildCacheEnvVarsFromComponent, CACHE_ENV_KEYS } from '../services/cache-env.js';
 import { planCache } from '../services/cache-plan.service.js';
+import { planDatabaseResilience, DATABASE_RESILIENCE_OPERATIONS } from '../services/database-resilience-plan.service.js';
 import {
   addDomainRegistrationDependency,
   cloudflareRegistrarCredentialProblem,
@@ -862,6 +863,13 @@ export class PlanService {
         ? [`project:${environmentSpec.hosting.provider}`]
         : undefined,
     });
+    const databaseResilience = planDatabaseResilience({
+      environmentSpec,
+      observed,
+      local,
+      capabilities: providerRegistry.getMetadata(environmentSpec.database?.provider ?? '')
+        ?.lifecycle?.databaseResilience,
+    });
     const nativeDeploySources = planProviderNativeDeploySources({
       environmentSpec,
       observed,
@@ -880,6 +888,11 @@ export class PlanService {
       ...nativeDeploySources.actions,
       ...diff.actions,
     ];
+    if (databaseResilience.actions.length > 0) {
+      const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
+      if (firstServiceIndex === -1) actions.push(...databaseResilience.actions);
+      else actions.splice(firstServiceIndex, 0, ...databaseResilience.actions);
+    }
     if (cache.actions.length > 0) {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
       if (firstServiceIndex === -1) actions.push(...cache.actions);
@@ -898,6 +911,22 @@ export class PlanService {
         serviceAction.dependsOn = Array.from(new Set([
           ...(serviceAction.dependsOn ?? []),
           cache.serviceDependency,
+        ]));
+      }
+    }
+    if (databaseResilience.serviceDependencies.length > 0) {
+      for (const serviceAction of actions.filter((action) =>
+        action.resource.kind === 'service'
+        && action.type !== 'destroy'
+        && action.metadata?.operation !== 'hostingEnvRemove'
+      )) {
+        if (serviceAction.type === 'noop') {
+          serviceAction.type = 'update';
+          serviceAction.reason = `${serviceAction.reason}; wire the newly created database read replica`;
+        }
+        serviceAction.dependsOn = Array.from(new Set([
+          ...(serviceAction.dependsOn ?? []),
+          ...databaseResilience.serviceDependencies,
         ]));
       }
     }
@@ -1077,6 +1106,7 @@ export class PlanService {
       ? actions.filter((action) =>
         action.type !== 'noop'
         && action.metadata?.operation !== 'hostingEnvRemove'
+        && action.metadata?.operation !== DATABASE_RESILIENCE_OPERATIONS.replicaDestroy
         && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'queue', 'secret', 'payment', 'email']
           .includes(action.resource.kind)
       )
@@ -1163,6 +1193,7 @@ export class PlanService {
       const unfilteredActionIds = new Set(actions.map((action) => action.id));
       actions = actions.filter((action) => {
         if (action.type === 'destroy') return false;
+        if (action.metadata?.operation === 'hostingEnvRemove') return false;
         if (action.resource.kind === 'project' || action.resource.kind === 'environment') return true;
         if (action.resource.kind === 'database' || action.resource.kind === 'cache') {
           return action.type === 'create' || action.type === 'noop';
@@ -1268,8 +1299,8 @@ export class PlanService {
         ? { integrationFingerprints: { stripe: stripeSync.fingerprint } }
         : {}),
       actions,
-      unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...storage.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...filterWarnings],
+      unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...filterWarnings],
       ...(delegatedSecrets.inputRequired.length > 0 ? { inputRequired: delegatedSecrets.inputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };
@@ -1295,7 +1326,7 @@ export class PlanService {
       verified: observed !== null && !observed.partial,
       observed,
       actions,
-      unmanaged: [...diff.unmanaged, ...storage.unmanaged],
+      unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
       warnings: document.warnings ?? [],
       inputRequired: delegatedSecrets.inputRequired,
       blocked,

@@ -24,6 +24,7 @@ export const DATABASE_ENV_KEYS = [
   'DATABASE_NAME',
   'DB_NAME',
   'PGDATABASE',
+  'DATABASE_READ_URL',
 ] as const;
 
 export type DatabaseEnvAliasSource = 'DATABASE_URL' | 'DIRECT_URL';
@@ -77,6 +78,18 @@ function socketDatabaseUrl(params: {
   return `postgresql://${encodeURIComponent(params.username)}:${encodeURIComponent(params.password)}@/${encodeURIComponent(params.database)}?host=${encodeURIComponent(params.socketHost)}`;
 }
 
+export function databaseReplicaEnvKey(name: string): string {
+  return `DATABASE_READ_URL_${name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
+}
+
+function replicaBindings(bindings: Record<string, unknown>): Record<string, Record<string, unknown>> {
+  const resilience = bindings.resilience;
+  if (!resilience || typeof resilience !== 'object' || Array.isArray(resilience)) return {};
+  const replicas = (resilience as Record<string, unknown>).replicas;
+  if (!replicas || typeof replicas !== 'object' || Array.isArray(replicas)) return {};
+  return replicas as Record<string, Record<string, unknown>>;
+}
+
 export function buildDatabaseEnvVarsFromComponent(component: Component): { envVars: Record<string, string>; connectionUrl?: string } {
   const bindings = component.bindings as Record<string, unknown>;
   const envVars: Record<string, string> = {};
@@ -109,14 +122,34 @@ export function buildDatabaseEnvVarsFromComponent(component: Component): { envVa
       envVars.DATABASE_URL = url;
       envVars.DIRECT_URL = url;
     }
+    const replicas = Object.entries(replicaBindings(bindings)).sort(([left], [right]) => left.localeCompare(right));
+    const replicaConnectionNames = replicas
+      .map(([, replica]) => stringBinding(replica, 'connectionName'))
+      .filter((value): value is string => Boolean(value));
     if (connectionName) {
-      envVars.CLOUD_SQL_CONNECTION_NAME = connectionName;
-      envVars.INSTANCE_CONNECTION_NAME = connectionName;
+      const connectionNames = [connectionName, ...replicaConnectionNames].join(',');
+      envVars.CLOUD_SQL_CONNECTION_NAME = connectionNames;
+      envVars.INSTANCE_CONNECTION_NAME = connectionNames;
     }
     if (socketHost) {
       envVars.DATABASE_HOST = socketHost;
       envVars.DB_HOST = socketHost;
       envVars.PGHOST = socketHost;
+    }
+    for (const [name, replica] of replicas) {
+      const replicaConnectionName = stringBinding(replica, 'connectionName');
+      const replicaUrl = replicaConnectionName
+        ? socketDatabaseUrl({
+          username,
+          password,
+          database,
+          socketHost: `/cloudsql/${replicaConnectionName}`,
+        })
+        : stringBinding(replica, 'connectionUrl');
+      if (replicaUrl) {
+        envVars[databaseReplicaEnvKey(name)] = replicaUrl;
+        if (replicas.length === 1) envVars.DATABASE_READ_URL = replicaUrl;
+      }
     }
   } else {
     if (connectionUrl) {

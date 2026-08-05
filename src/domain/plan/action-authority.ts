@@ -33,6 +33,10 @@ import { isHostingEnvRemovalAction } from '../services/hosting-env.service.js';
 import { isProviderNativeDeploySourceAction } from '../services/provider-native-deploy-source.service.js';
 import { CACHE_OPERATIONS, isCacheAction } from '../services/cache-plan.service.js';
 import { GITHUB_ACTIONS_ROLLBACK_OPERATION } from '../services/ci-rollback.contract.js';
+import {
+  DATABASE_RESILIENCE_OPERATIONS,
+  isDatabaseResilienceAction,
+} from '../services/database-resilience-plan.service.js';
 
 export type PlanMutationCapability =
   | 'hosting.environment.ensure'
@@ -57,6 +61,10 @@ export type PlanMutationCapability =
   | 'cache.env.remove'
   | 'cache.destroy'
   | 'database.provision'
+  | 'database.availability.configure'
+  | 'database.backup-policy.configure'
+  | 'database.replica.provision'
+  | 'database.replica.destroy'
   | 'database.seed'
   | 'database.destroy'
   | 'hosting.task-service.destroy'
@@ -393,6 +401,39 @@ export function resolvePlanActionAuthority(
     return null;
   }
   if (exactResource(action, 'database')) {
+    if (isDatabaseResilienceAction(action) && metadataString(action, 'primaryExternalId')) {
+      if (
+        action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.availabilityConfigure
+        && action.type === 'update'
+        && ['zonal', 'regional'].includes(metadataString(action, 'availability') ?? '')
+      ) {
+        return authority(action, 'database.availability.configure');
+      }
+      if (
+        action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.backupPolicyConfigure
+        && action.type === 'update'
+        && metadataPositiveInteger(action, 'retainedBackups')
+        && metadataPositiveInteger(action, 'pitrRetentionDays')
+      ) {
+        return authority(action, 'database.backup-policy.configure');
+      }
+      if (
+        action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.replicaProvision
+        && action.type === 'create'
+        && metadataString(action, 'replicaName') === action.resource.name
+      ) {
+        return authority(action, 'database.replica.provision');
+      }
+      if (
+        action.metadata?.operation === DATABASE_RESILIENCE_OPERATIONS.replicaDestroy
+        && action.type === 'destroy'
+        && metadataString(action, 'replicaName') === action.resource.name
+        && metadataString(action, 'replicaExternalId')
+      ) {
+        return authority(action, 'database.replica.destroy');
+      }
+      return null;
+    }
     if (
       action.metadata?.operation === 'databaseSeed'
       && action.type === 'update'

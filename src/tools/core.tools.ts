@@ -12,6 +12,7 @@ import { diffEnvironment } from '../domain/plan/diff.engine.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import { planIos } from '../domain/services/appstore-plan.service.js';
 import { planCache } from '../domain/services/cache-plan.service.js';
+import { planDatabaseResilience } from '../domain/services/database-resilience-plan.service.js';
 import { planQueues } from '../domain/services/queue-plan.service.js';
 import { planStorage } from '../domain/services/storage-plan.service.js';
 import {
@@ -343,7 +344,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     'Create or update desired state for a project, including runtime configuration and infrastructure. New runtime keys must cover every non-local environment with matching services unless envVarExceptions explicitly documents that a key does not apply. Hypervibe never copies values between environments. This is the source of truth that hv_plan diffs against live infrastructure. When run inside a git worktree, Hypervibe writes .hypervibe/spec.json. Merges by default; pass replace=true to overwrite or null to delete a key.',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Canonical shape: { gitRemoteUrl?, github?: { repository?, canonicalEnvironment?, actions?: { <id>: typed check|autofix|pull-request-review|code-audit }, dependencies?, security?, collaboration? }, secrets?: { <ENV_KEY>: delegated-secret declaration }, environments: { <env>: { hosting, services, database?, cache?, storage?, queues?, domain?, email?, envVars?, envVarExceptions?, deploy?, migrations?, ios? } } }. New runtime keys must be declared in every non-local environment sharing a desired service, with separately chosen values or secret references; use envVarExceptions only for intentional absence. database.engine is postgres; cache.engine is redis. Services may declare databaseEnvAliases such as { POSTGRES_DB_URL: "DATABASE_URL" } without storing the resolved value. github actions use typed behavior plus triggers/schedules; a schedule is five-field POSIX cron with an optional IANA timezone. GitHub workflow files and repository settings are planned and applied through the desired-state loop, with generated infrastructure delivered through a reviewable PR. GitHub and OpenAI connections are required only for their corresponding GitHub actions and do not block unrelated providers. The deprecated top-level collaboration field remains readable and is moved to github.collaboration on the next write. Delegated secrets declare ownership and targets but never values; pass values to hv_plan with secretRefs. database.seedCommand is a visible, receipt-backed one-shot bootstrap. Schema migrations run during container startup or a durable declared predeploy/release command; database moves and resets must be modeled as desired-state lifecycle actions. deploy.trigger="ci" is the portable branch-deploy default; trigger="native" is provider-specific and confirmation-gated. Under ios.release, projects own the build command and artifact path while Hypervibe can prepare Match signing assets read-only and owns the isolated TestFlight submission runtime.'),
+      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Canonical shape: { gitRemoteUrl?, github?: { repository?, canonicalEnvironment?, actions?: { <id>: typed check|autofix|pull-request-review|code-audit }, dependencies?, security?, collaboration? }, secrets?: { <ENV_KEY>: delegated-secret declaration }, environments: { <env>: { hosting, services, database?, cache?, storage?, queues?, domain?, email?, envVars?, envVarExceptions?, deploy?, migrations?, ios? } } }. New runtime keys must be declared in every non-local environment sharing a desired service, with separately chosen values or secret references; use envVarExceptions only for intentional absence. database.engine is postgres; database.resilience may declare provider-managed availability (zonal|regional), backup/PITR retention, and named read replicas; cache.engine is redis. Services may declare databaseEnvAliases such as { POSTGRES_DB_URL: "DATABASE_URL" } without storing the resolved value. github actions use typed behavior plus triggers/schedules; a schedule is five-field POSIX cron with an optional IANA timezone. GitHub workflow files and repository settings are planned and applied through the desired-state loop, with generated infrastructure delivered through a reviewable PR. GitHub and OpenAI connections are required only for their corresponding GitHub actions and do not block unrelated providers. The deprecated top-level collaboration field remains readable and is moved to github.collaboration on the next write. Delegated secrets declare ownership and targets but never values; pass values to hv_plan with secretRefs. database.seedCommand is a visible, receipt-backed one-shot bootstrap. Schema migrations run during container startup or a durable declared predeploy/release command; database moves and resets must be modeled as desired-state lifecycle actions. deploy.trigger="ci" is the portable branch-deploy default; trigger="native" is provider-specific and confirmation-gated. Under ios.release, projects own the build command and artifact path while Hypervibe can prepare Match signing assets read-only and owns the isolated TestFlight submission runtime.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external app access such as the Railway GitHub App.'),
     },
@@ -663,6 +664,14 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         local,
       });
       const cacheDrift = cache.actions.filter((action) => action.type !== 'noop');
+      const databaseResilience = planDatabaseResilience({
+        environmentSpec: envSpec,
+        observed,
+        local,
+        capabilities: providerRegistry.getMetadata(envSpec.database?.provider ?? '')
+          ?.lifecycle?.databaseResilience,
+      });
+      const databaseResilienceDrift = databaseResilience.actions.filter((action) => action.type !== 'noop');
 
       const expectedSource = planService.expectedDeploySource(projectForStatus, envName, envSpec);
       const observedSources = Object.fromEntries(
@@ -818,11 +827,22 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               }),
             }
             : {}),
-          inSync: !observationIncomplete && drift.length === 0 && cacheDrift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0,
+          inSync: !observationIncomplete && drift.length === 0 && cacheDrift.length === 0 && databaseResilienceDrift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0,
           runtimeHealth: runtimeHealthSummary(observed),
-          summary: summarizeActions([...diff.actions, ...cache.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...(emailAction ? [emailAction] : [])]),
-          drift: [...drift, ...cacheDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift],
-          unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...storage.unmanaged],
+          summary: summarizeActions([...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...(emailAction ? [emailAction] : [])]),
+          drift: [...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift],
+          unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
+          ...(envSpec.database?.resilience
+            ? {
+              databaseResilience: observed?.databases.find((database) => {
+                const component = local.components.find((candidate) => candidate.type === envSpec.database?.engine);
+                const boundExternalId = component?.externalId
+                  ?? (typeof component?.bindings.instanceId === 'string' ? component.bindings.instanceId : undefined);
+                return database.provider === envSpec.database?.provider
+                  && (!boundExternalId || database.externalId === boundExternalId);
+              })?.resilience ?? { status: 'unknown' },
+            }
+            : {}),
           inputRequired: delegatedSecrets.inputRequired.length > 0 ? delegatedSecrets.inputRequired : undefined,
           blocked,
           ...(blocked.length > 0 ? connectionRecoveryDetails(blocked) : {}),
@@ -839,7 +859,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           },
         },
         {
-          warnings: [...warnings, ...diff.warnings, ...cache.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings],
+          warnings: [...warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings],
           hint: blocked.length > 0
             ? connectionRecoveryHint(blocked, {
               after: 'After the connection verifies, rerun hv_status or hv_plan. Do not ask to run hv_plan for DNS/domain drift until the required connection is verified.',
@@ -850,7 +870,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
               : delegatedSecrets.inputRequired.length > 0
                 ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
-              : drift.length > 0 || cacheDrift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 || emailDrift.length > 0
+              : drift.length > 0 || cacheDrift.length > 0 || databaseResilienceDrift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 || emailDrift.length > 0
                 ? 'Run hv_plan to get an executable plan for this drift.'
                 : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_errors/hv_logs for workers.',
           next: blocked.length > 0 ? ['hv_connect'] : undefined,

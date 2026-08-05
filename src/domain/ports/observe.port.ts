@@ -56,6 +56,24 @@ export interface ObservedDatabase {
   externalId: string;
   name?: string;
   status: string;
+  resilience?: {
+    availability?: 'zonal' | 'regional' | 'unknown';
+    backupPolicy?: {
+      enabled: boolean;
+      pitrEnabled: boolean;
+      retainedBackups?: number;
+      pitrRetentionDays?: number;
+    };
+    replicas?: Array<{
+      /** Stable spec key when the provider identity is Hypervibe-managed. */
+      name?: string;
+      externalId: string;
+      status: string;
+      region?: string;
+      tier?: string;
+      connectionName?: string;
+    }>;
+  };
 }
 
 export interface ObservedCache {

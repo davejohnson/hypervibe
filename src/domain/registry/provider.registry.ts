@@ -25,6 +25,15 @@ export interface ProviderMetadata {
     databaseEngines?: string[];
     /** Engines this provider can reconcile through its cache adapter. */
     cacheEngines?: string[];
+    /** Declarative database resilience features implemented by the adapter. */
+    databaseResilience?: {
+      availabilityModes?: Array<'zonal' | 'regional'>;
+      backups?: {
+        maxRetainedBackups: number;
+        maxPitrRetentionDays: number;
+      };
+      readReplicas?: boolean;
+    };
   };
 }
 
