@@ -14,7 +14,7 @@ Treat the desired-state loop as the product center:
 
 When adding capabilities that create, mutate, purchase, migrate, deploy, schedule, or destroy infrastructure, default to modeling them in the spec and plan/apply flow. Use separate imperative tools only for read-only inspection, explicit operational actions, or narrow escape hatches; they should not become the primary path for lifecycle-managed infrastructure.
 
-Domain, DNS, registrar, hosting, database, object storage, queues, deploy-source, CI deploy, and recurring job changes are lifecycle infrastructure. Do not hide those mutations inside CI, diagnostics, or helper tools; add them to desired state, compute them in `hv_plan`, and converge them in `hv_apply`.
+Domain, DNS, registrar, hosting, load balancers, database, object storage, queues, deploy-source, CI deploy, and recurring job changes are lifecycle infrastructure. Do not hide those mutations inside CI, diagnostics, or helper tools; add them to desired state, compute them in `hv_plan`, and converge them in `hv_apply`.
 
 Read-only provider forensics belong in `hv_inspect`. Adoption of already-existing provider infrastructure into Hypervibe local/repo state belongs in `hv_import` and must be explicit, mapping-driven, and confirmation-gated. Do not use `hv_import` as a generic read tool.
 
@@ -166,6 +166,16 @@ Environments store provider bindings in `platformBindings` using generic keys on
 ```
 
 Provider-specific legacy binding names such as `railwayProjectId` and `railwayEnvironmentId` were migrated away in SQLite migration 7.
+
+Provider-managed edge load balancers use a separate generic
+`platformBindings.loadBalancer` topology. The public hostname, provider scope,
+and each monitor/pool/load-balancer provider id are durable identities. The
+monitor, pool, and public hostname are distinct plan actions with explicit
+dependencies; apply must never create all three from a single convenience
+handler. A load-balancer hostname owns routing for `environment.domain`, so the
+ordinary single-service domain/DNS action is mutually exclusive while the
+load-balancer spec is present. Teardown reverses the dependency order and must
+confirm terminal absence before clearing each binding.
 
 ## Plan Honesty
 

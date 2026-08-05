@@ -1,12 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CloudflareAdapter } from '../cloudflare.adapter.js';
 
-function cfResponse<T>(result: T, init?: { success?: boolean; errors?: Array<{ code: number; message: string }>; status?: number }) {
+function cfResponse<T>(result: T, init?: {
+  success?: boolean;
+  errors?: Array<{ code: number; message: string }>;
+  status?: number;
+  resultInfo?: { page: number; per_page: number; total_count: number; total_pages: number };
+}) {
   return Response.json({
     success: init?.success ?? true,
     errors: init?.errors ?? [],
     messages: [],
     result,
+    ...(init?.resultInfo ? { result_info: init.resultInfo } : {}),
   }, { status: init?.status ?? 200 });
 }
 
@@ -455,5 +461,108 @@ describe('CloudflareAdapter Registrar token routing', () => {
     await expect(adapter.checkRegistrarDomains('account-1', ['apreskeys.com']))
       .rejects.toThrow(/registrarApiToken\/CLOUDFLARE_REGISTRAR_API_TOKEN/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('CloudflareAdapter load-balancer lifecycle', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('creates an origin pool with HTTPS host-header overrides', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      expect(href).toContain('/accounts/account-1/load_balancers/pools');
+      expect(init?.method).toBe('POST');
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(body).toMatchObject({
+        name: 'hv-production-pool',
+        monitor: 'monitor-1',
+        enabled: true,
+        origin_steering: { policy: 'random' },
+        origins: [
+          {
+            name: 'web-a', address: 'a.up.railway.app', enabled: true,
+            header: { Host: ['a.up.railway.app'] },
+          },
+          {
+            name: 'web-b', address: 'b.up.railway.app', enabled: true,
+            header: { Host: ['b.up.railway.app'] },
+          },
+        ],
+      });
+      return cfResponse({
+        id: 'pool-1', name: 'hv-production-pool', monitor: 'monitor-1', enabled: true,
+        origin_steering: { policy: 'random' }, origins: (body.origins as unknown[]),
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_load_balancer', accountId: 'account-1' });
+
+    const result = await adapter.ensurePool('account-1', {
+      name: 'hv-production-pool', monitorId: 'monitor-1', enabled: true, steering: 'random',
+      origins: [
+        { name: 'web-a', address: 'a.up.railway.app', hostHeader: 'a.up.railway.app', enabled: true },
+        { name: 'web-b', address: 'b.up.railway.app', hostHeader: 'b.up.railway.app', enabled: true },
+      ],
+    });
+
+    expect(result.created).toBe(true);
+    expect(result.resource).toMatchObject({ id: 'pool-1', monitorId: 'monitor-1', steering: 'random' });
+  });
+
+  it('treats only provider-confirmed 404 as absence', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(cfResponse(null, {
+        success: false, status: 404, errors: [{ code: 1000, message: 'not found' }],
+      }))
+      .mockResolvedValueOnce(cfResponse(null, {
+        success: false, status: 403, errors: [{ code: 1001, message: 'forbidden' }],
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_load_balancer', accountId: 'account-1' });
+
+    await expect(adapter.getMonitor('account-1', 'missing')).resolves.toBeNull();
+    await expect(adapter.getMonitor('account-1', 'unknown')).rejects.toThrow('forbidden');
+  });
+
+  it('reads every result page before deciding a named pool is absent', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const page = new URL(String(url)).searchParams.get('page');
+      return page === '1'
+        ? cfResponse([{ id: 'pool-other', name: 'other' }], {
+          resultInfo: { page: 1, per_page: 100, total_count: 2, total_pages: 2 },
+        })
+        : cfResponse([{ id: 'pool-match', name: 'wanted' }], {
+          resultInfo: { page: 2, per_page: 100, total_count: 2, total_pages: 2 },
+        });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_load_balancer', accountId: 'account-1' });
+
+    await expect(adapter.findPoolsByName('account-1', 'wanted')).resolves.toEqual([
+      expect.objectContaining({ id: 'pool-match', name: 'wanted' }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('verifies terminal absence after deleting the public load balancer', async () => {
+    const methods: string[] = [];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      methods.push(init?.method ?? 'GET');
+      if (init?.method === 'DELETE') return cfResponse({ id: 'lb-1' });
+      return cfResponse(null, {
+        success: false, status: 404, errors: [{ code: 1000, message: 'not found' }],
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_load_balancer', accountId: 'account-1' });
+
+    await expect(adapter.deleteLoadBalancer('zone-1', 'lb-1')).resolves.toBeUndefined();
+    expect(methods).toEqual(['DELETE', 'GET']);
   });
 });

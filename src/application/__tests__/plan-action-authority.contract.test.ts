@@ -25,6 +25,7 @@ import { PROVIDER_NATIVE_SOURCE_DISCONNECT_OPERATION } from '../../domain/servic
 import { CACHE_OPERATIONS } from '../../domain/services/cache-plan.service.js';
 import { GITHUB_ACTIONS_ROLLBACK_OPERATION } from '../../domain/services/ci-rollback.contract.js';
 import { DATABASE_RESILIENCE_OPERATIONS } from '../../domain/services/database-resilience-plan.service.js';
+import { LOAD_BALANCER_OPERATIONS } from '../../domain/services/load-balancer-plan.service.js';
 import {
   resolvePlanActionAuthority,
   type PlanMutationCapability,
@@ -259,6 +260,52 @@ const authorized: AuthorizedCase[] = [
       },
     }),
   })),
+  ...Object.values(LOAD_BALANCER_OPERATIONS).map((operation): AuthorizedCase => {
+    const monitor = operation === LOAD_BALANCER_OPERATIONS.monitorEnsure
+      || operation === LOAD_BALANCER_OPERATIONS.monitorDestroy;
+    const pool = operation === LOAD_BALANCER_OPERATIONS.poolEnsure
+      || operation === LOAD_BALANCER_OPERATIONS.poolDestroy;
+    const destroy = operation === LOAD_BALANCER_OPERATIONS.destroy
+      || operation === LOAD_BALANCER_OPERATIONS.poolDestroy
+      || operation === LOAD_BALANCER_OPERATIONS.monitorDestroy;
+    const id = operation === LOAD_BALANCER_OPERATIONS.monitorEnsure
+      ? 'load-balancer:monitor'
+      : operation === LOAD_BALANCER_OPERATIONS.poolEnsure
+        ? 'load-balancer:pool'
+        : operation === LOAD_BALANCER_OPERATIONS.ensure
+          ? 'load-balancer:app.example.com'
+          : operation === LOAD_BALANCER_OPERATIONS.destroy
+            ? 'load-balancer:app.example.com:destroy'
+            : operation === LOAD_BALANCER_OPERATIONS.poolDestroy
+              ? 'load-balancer:pool:destroy'
+              : 'load-balancer:monitor:destroy';
+    return {
+      label: operation,
+      capability: monitor
+        ? 'load-balancer.monitor.mutate'
+        : pool
+          ? 'load-balancer.pool.mutate'
+          : 'load-balancer.mutate',
+      action: action({
+        id,
+        type: destroy ? 'destroy' : 'create',
+        kind: 'load-balancer',
+        name: 'app.example.com',
+        provider: 'cloudflare',
+        operation,
+        metadata: {
+          hostname: 'app.example.com',
+          accountId: 'account-1',
+          zoneId: 'zone-1',
+          configHash: 'config-hash',
+          ...(!destroy && monitor ? { externalName: 'monitor-name' } : {}),
+          ...(!destroy && pool ? { externalName: 'pool-name', services: ['web-a', 'web-b'] } : {}),
+          ...(!destroy && !monitor && !pool ? { services: ['web-a', 'web-b'] } : {}),
+          ...(destroy ? { externalId: 'external-1' } : {}),
+        },
+      }),
+    };
+  }),
   {
     label: 'delegated secret sync',
     capability: 'hosting.delegated-secret.sync',
@@ -491,6 +538,7 @@ describe('plan action mutation-authority contract', () => {
   it.each([
     ['queue metadata name', authorized.find((entry) => entry.label === QUEUE_OPERATIONS.ensure)!.action, { queueName: 'other' }],
     ['storage metadata name', authorized.find((entry) => entry.label === STORAGE_OPERATIONS.ensure)!.action, { storageName: 'other' }],
+    ['load-balancer hostname', authorized.find((entry) => entry.label === LOAD_BALANCER_OPERATIONS.ensure)!.action, { hostname: 'other.example.com' }],
     ['GitHub repository', authorized.find((entry) => entry.label === 'GitHub infrastructure')!.action, { repository: 'other/repo' }],
     ['Stripe service', authorized.find((entry) => entry.label === 'Stripe hosting env sync')!.action, { service: 'worker' }],
     ['iOS bundle id', authorized.find((entry) => entry.label === IOS_OPERATIONS.bundleIdRegister)!.action, { bundleId: 'com.other.app' }],
@@ -508,6 +556,11 @@ describe('plan action mutation-authority contract', () => {
       expect(resolvePlanActionAuthority({ ...candidate, type: invalidType })).toBeNull();
     }
   );
+
+  it('rejects a load-balancer operation under a different action id', () => {
+    const candidate = authorized.find((entry) => entry.label === LOAD_BALANCER_OPERATIONS.ensure)!.action;
+    expect(resolvePlanActionAuthority({ ...candidate, id: 'load-balancer:other.example.com' })).toBeNull();
+  });
 
   it('grants no mutation authority to noop or unknown actions', () => {
     expect(resolvePlanActionAuthority(action({ type: 'noop' }))).toBeNull();

@@ -7,6 +7,7 @@ import type { IHostingAdapter } from '../ports/hosting.port.js';
 import type { IDatabaseAdapter } from '../ports/database.port.js';
 import type { ICacheAdapter } from '../ports/cache.port.js';
 import type { IStorageAdapter } from '../ports/storage.port.js';
+import type { ILoadBalancerAdapter } from '../ports/load-balancer.port.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 
@@ -76,6 +77,18 @@ export class AdapterFactory {
       return this.getDerivedAdapter<IStorageAdapter>(providerName, 'storage', project);
     }
     return this.getAdapter<IStorageAdapter>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined);
+  }
+
+  async getLoadBalancerAdapter(
+    providerName: string,
+    project?: Project,
+    scopeHints?: string[]
+  ): Promise<AdapterResult<ILoadBalancerAdapter>> {
+    return this.getAdapter<ILoadBalancerAdapter>(
+      providerName,
+      undefined,
+      scopeHints ?? (project ? getProjectScopeHints(project) : undefined)
+    );
   }
 
   /**

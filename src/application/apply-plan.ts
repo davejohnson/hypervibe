@@ -75,6 +75,7 @@ import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import {
   applyProviderNativeDeploySourceAction,
 } from '../domain/services/provider-native-deploy-source.service.js';
+import { applyLoadBalancerAction } from '../domain/services/load-balancer-plan.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
 import { resolvePlanActionAuthority } from '../domain/plan/action-authority.js';
@@ -535,6 +536,18 @@ export async function executePlanApply(ctx: CommandContext, params: {
 
     if (capability === 'hosting.environment.ensure') {
       return ensureHostingEnvironment(ctx, applyProject, envName, action);
+    }
+    if (
+      capability === 'load-balancer.monitor.mutate'
+      || capability === 'load-balancer.pool.mutate'
+      || capability === 'load-balancer.mutate'
+    ) {
+      return applyLoadBalancerAction({
+        project: applyProject,
+        envName,
+        environmentSpec: envSpec,
+        action,
+      });
     }
     if (capability === 'domain.registration.mutate') {
       const expectedDomain = envSpec.domain?.trim().replace(/\.$/, '').toLowerCase();

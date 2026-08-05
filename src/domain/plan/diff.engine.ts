@@ -656,7 +656,7 @@ export function diffEnvironment(input: {
   }
 
   // ---- domain ---------------------------------------------------------------
-  if (spec.domain) {
+  if (spec.domain && !spec.loadBalancer) {
     const id = `domain:${spec.domain}`;
     const attachedService = observed
       ? observed.services.find((s) => s.customDomains.includes(spec.domain!))

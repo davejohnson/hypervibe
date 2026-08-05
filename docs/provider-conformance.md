@@ -122,6 +122,17 @@ can now prove create/release/noop/update/terminal teardown. Promotion to
 `supported` still requires one successful opt-in run in an isolated AWS
 account with all external prerequisites.
 
+Cloudflare provides the first provider-managed edge load-balancer lifecycle.
+An environment may declare one load balancer at its existing `domain`, with at
+least two public web services as HTTPS origins. Hypervibe owns and observes one
+account-scoped health monitor, one account-scoped equal-weight origin pool, and
+one zone-scoped proxied hostname load balancer. Each resource has a separate
+plan/apply action and durable provider id. Same-name unbound resources block
+(load-balancer adoption is outside V1); non-404 observation failures preserve state; teardown removes
+the hostname before the pool and monitor and verifies terminal absence after
+each provider deletion. V1 does not create AWS ALBs, private origins, weighted
+steering, geo steering, session affinity, or cross-environment origins.
+
 Azure Container Apps is the hosting side of the Azure adapter slice. The Azure
 subscription, resource group, Microsoft Entra service principal, and Azure
 Container Registry are externally owned. Hypervibe owns one managed environment
