@@ -54,7 +54,10 @@ review-gated scheduled PITR clone workflow. The drill workflow must prove exact
 source identity, generated-target isolation, ownership-label-gated cleanup,
 read-only SQL verification, secret-free files and receipts, and terminal clone
 absence. Live restore drills remain opt-in and billable; ordinary provider
-conformance does not schedule or create drill clones.
+conformance does not schedule or create drill clones. The infrastructure live
+profile now proves backup-policy convergence, replica lifecycle, reviewed
+workflow publication, manual dispatch, terminal clone cleanup evidence, and
+dependency-ordered teardown in an isolated project/repository.
 
 Neon is the first newly implemented database slice. Its registry, credential
 schema, provider adapter, connection guidance, and mocked create/observe/destroy
@@ -139,7 +142,10 @@ one zone-scoped proxied hostname load balancer. Each resource has a separate
 plan/apply action and durable provider id. Same-name unbound resources block
 (load-balancer adoption is outside V1); non-404 observation failures preserve state; teardown removes
 the hostname before the pool and monitor and verifies terminal absence after
-each provider deletion. V1 does not create AWS ALBs, private origins, weighted
+each provider deletion. Its infrastructure live profile creates two disposable
+Railway HTTPS origins, verifies public Cloudflare health and in-place monitor
+updates, then proves load-balancer-first cleanup before origin deletion. V1
+does not create AWS ALBs, private origins, weighted
 steering, geo steering, session affinity, or cross-environment origins.
 
 Azure Container Apps is the hosting side of the Azure adapter slice. The Azure
@@ -318,6 +324,136 @@ mode-`0600` temporary credential object. Hypervibe consumes it through
 verification. Values are never passed as CLI arguments or printed. The test
 removes its services, databases, and caches through spec/plan/apply, and its
 `afterAll` repeats that desired-state cleanup after a partial test failure.
+
+## Running recovery and load-balancer live tests
+
+The infrastructure live runner proves the two provider-managed lifecycle
+contracts that need more than an ordinary single-resource fixture. Select
+exactly one contract:
+
+```sh
+HYPERVIBE_LIVE_INFRASTRUCTURE=cloudsql-recovery npm run test:providers:infrastructure-live
+HYPERVIBE_LIVE_INFRASTRUCTURE=cloudflare-load-balancer npm run test:providers:infrastructure-live
+```
+
+Both contracts are billable and destructive. They confirm every exact action
+id automatically only inside an explicitly selected live run. Ordinary tests
+skip the file. Cleanup uses only Hypervibe spec/plan/apply; it never calls a
+provider API or provider CLI directly. When cleanup cannot be proven, the
+runner preserves its data directory and prints only action ids, resource
+names, and sanitized durable bindings needed for a retry.
+
+### Cloud SQL recovery
+
+Use a clean disposable checkout of a dedicated GitHub repository and an
+absolute persistent Hypervibe data directory. Commit this bootstrap spec before
+running, replacing the project and repository:
+
+```json
+{
+  "version": 1,
+  "project": "hypervibe-recovery-live",
+  "gitRemoteUrl": "https://github.com/OWNER/REPOSITORY.git",
+  "environments": {
+    "production": {
+      "hosting": { "provider": "cloudrun" },
+      "services": {},
+      "database": {
+        "provider": "cloudsql",
+        "resilience": {
+          "backups": { "retainedBackups": 8, "pitrRetentionDays": 7 },
+          "replicas": { "live": {} }
+        }
+      },
+      "email": { "enabled": false },
+      "envVars": {},
+      "deploy": { "strategy": "manual" }
+    }
+  }
+}
+```
+
+The GCP credential is a service-account JSON key created at
+`https://console.cloud.google.com/iam-admin/serviceaccounts` and scoped to one
+isolated project. Grant `roles/cloudsql.admin` for instance, backup-policy,
+replica, clone, user, and deletion lifecycle; `roles/cloudsql.client` for the
+connector; the Cloud Run verification roles documented by `hv_connect`; and
+enable `sqladmin.googleapis.com`. The GitHub credential is a token scoped to
+the one disposable repository with Contents, Pull requests, Actions, Variables,
+and Secrets read/write permissions as described by the GitHub connection
+guidance. Connect both through file/dotenv references, never raw command values.
+
+Before the run, put a separate minimal-role drill service-account JSON into the
+repository secret without printing it. It needs the exact clone/connect/delete/
+get/list/update and user-update permissions documented in the restore-drill
+section of the README, not the broader lifecycle administrator role:
+
+```text
+hv_secrets_set project="hypervibe-recovery-live" target="github" repo="OWNER/REPOSITORY" key="HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS" secretRef="env:HYPERVIBE_TEST_GCP_DRILL_SERVICE_ACCOUNT_JSON"
+```
+
+Then export:
+
+```text
+HYPERVIBE_LIVE_REPOSITORY_WORKTREE=/absolute/path/to/disposable-checkout
+HYPERVIBE_LIVE_DATA_DIR=/absolute/path/to/persistent-hypervibe-state
+HYPERVIBE_TEST_GITHUB_REPOSITORY=OWNER/REPOSITORY
+HYPERVIBE_TEST_GITHUB_API_TOKEN=...
+HYPERVIBE_TEST_GCP_PROJECT_ID=...
+HYPERVIBE_TEST_GCP_SERVICE_ACCOUNT_JSON=...
+HYPERVIBE_TEST_GCP_DRILL_SERVICE_ACCOUNT_JSON=... # used only to pre-seed the repository secret
+HYPERVIBE_TEST_GCP_REGION=us-central1 # optional
+```
+
+The runner first converges backup/PITR policy and one read replica. It then
+adds the restore drill through the managed GitHub infrastructure action,
+prints the review URL, and waits for a human merge. It dispatches the workflow
+through `hv_ci_trigger`, observes it only through `hv_ci_status`, and requires
+safe log markers proving that one generated `hv-drill-*` clone was created and
+provider-confirmed absent after verification. Cleanup first removes the
+scheduled workflow through a second reviewed PR, then deletes the replica, and
+only then deletes the primary. A non-terminal run, retained clone, failed clone
+cleanup, or missing terminal marker stops teardown and preserves the workflow,
+primary, bindings, and local state for inspected recovery.
+
+### Cloudflare load balancing
+
+Use a Cloudflare Account API Token created at
+`https://dash.cloudflare.com/?to=/:account/api-tokens` (or a User API Token
+from `https://dash.cloudflare.com/profile/api-tokens`) and scope it to one
+isolated existing zone. It needs Zone Read, Load Balancers Read/Write on that
+zone, Load Balancing Monitors and Pools Read/Write on the owning account, and
+Account Settings Read when `accountId` is not supplied. Use the token value,
+not its name/id or a Global API Key. A safe connection example is:
+
+```text
+hv_connect provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}
+```
+
+The test also needs an isolated Railway workspace token through the existing
+`HYPERVIBE_TEST_RAILWAY_TOKEN`/optional workspace-id live profile. Export:
+
+```text
+HYPERVIBE_TEST_CLOUDFLARE_API_TOKEN=...
+HYPERVIBE_TEST_CLOUDFLARE_ACCOUNT_ID=... # optional when uniquely observable
+HYPERVIBE_TEST_CLOUDFLARE_LOAD_BALANCER_HOSTNAME=hv-conformance-UNIQUE.example.com
+HYPERVIBE_TEST_RAILWAY_TOKEN=...
+HYPERVIBE_TEST_RAILWAY_WORKSPACE_ID=... # optional
+```
+
+The required hostname prefix prevents accidentally targeting an ordinary
+application hostname. Hypervibe creates two HTTPS Railway origins, then a
+Cloudflare monitor, pool, and public load balancer as three separately
+authorized actions. The contract verifies public health, noop convergence, and
+an in-place monitor update. Teardown removes the public hostname before the
+pool and monitor, proves there are no unmanaged load-balancer resources, and
+only then removes the two origins.
+
+If that cleanup fails, rerun with the printed absolute paths as
+`HYPERVIBE_LIVE_REPOSITORY_WORKTREE` and `HYPERVIBE_LIVE_DATA_DIR`. The runner
+reuses the original project identity and bindings, converges the leftover edge
+resources to absent before creating anything new, and leaves the
+caller-provided workspace intact after success.
 
 ## Running a managed-workflow live test
 

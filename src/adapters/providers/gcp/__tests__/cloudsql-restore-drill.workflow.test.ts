@@ -71,6 +71,11 @@ describe('Cloud SQL restore-drill workflow', () => {
     expect(script).toContain('Retained failed drill instance');
     expect(script).toContain('current-run unlabeled clone cleanup');
     expect(script).toContain("process.stdout.write('::add-mask::'");
+    expect(script).toContain("'HYPERVIBE_DRILL_RESOURCE target='");
+    expect(script).toContain("reportResource('created')");
+    expect(script).toContain("reportResource('deleted')");
+    expect(script).toContain("reportResource('retained')");
+    expect(script).toContain("reportResource('cleanup-failed')");
     expect(script).toContain("mode: 0o600");
     expect(script).toContain("delete process.env.HYPERVIBE_DRILL_CREDENTIALS");
   });
