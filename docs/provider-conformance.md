@@ -47,6 +47,15 @@ and Azure Managed Redis. Railway is the first implemented
 adapter slice. It is `ready-for-live`, not `supported`, until the opt-in live
 teardown contract passes.
 
+Cloud SQL is the first database-resilience and restore-drill slice. Its mocked
+contract pins tri-state HA/backup/replica observation, action-scoped mutations,
+read-replica wiring and terminal deletion, plus deterministic compilation of a
+review-gated scheduled PITR clone workflow. The drill workflow must prove exact
+source identity, generated-target isolation, ownership-label-gated cleanup,
+read-only SQL verification, secret-free files and receipts, and terminal clone
+absence. Live restore drills remain opt-in and billable; ordinary provider
+conformance does not schedule or create drill clones.
+
 Neon is the first newly implemented database slice. Its registry, credential
 schema, provider adapter, connection guidance, and mocked create/observe/destroy
 contract are green. It is `ready-for-live`, not `supported`, until the opt-in

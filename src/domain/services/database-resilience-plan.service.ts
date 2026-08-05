@@ -10,6 +10,7 @@ export const DATABASE_RESILIENCE_OPERATIONS = {
   backupPolicyConfigure: 'databaseBackupPolicyConfigure',
   replicaProvision: 'databaseReplicaProvision',
   replicaDestroy: 'databaseReplicaDestroy',
+  restoreDrillSchedule: 'databaseRestoreDrillSchedule',
 } as const;
 
 const DATABASE_RESILIENCE_OPERATION_SET = new Set<string>(Object.values(DATABASE_RESILIENCE_OPERATIONS));
@@ -18,6 +19,7 @@ export interface DatabaseResilienceCapabilities {
   availabilityModes?: Array<'zonal' | 'regional'>;
   backups?: { maxRetainedBackups: number; maxPitrRetentionDays: number };
   readReplicas?: boolean;
+  restoreDrills?: boolean;
 }
 
 export interface DatabaseResiliencePlanResult {
@@ -288,6 +290,10 @@ export function planDatabaseResilience(params: {
         metadata: { ...commonMetadata, availability: 'regional' },
       });
     }
+  }
+
+  if (desired.restoreDrill && !capabilities?.restoreDrills) {
+    unsupported('restore-drills', DATABASE_RESILIENCE_OPERATIONS.restoreDrillSchedule);
   }
 
   const desiredReplicas = desired.replicas ?? {};

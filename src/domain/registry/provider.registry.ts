@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
+import type { ProviderDatabaseRestoreDrillMetadata } from '../ports/database-restore-drill.port.js';
 import type { Project } from '../entities/project.entity.js';
 
 export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'tunnel' | 'local' | 'security' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
@@ -33,6 +34,8 @@ export interface ProviderMetadata {
         maxPitrRetentionDays: number;
       };
       readReplicas?: boolean;
+      /** Scheduled isolated restore verification can be compiled for this provider. */
+      restoreDrills?: boolean;
     };
   };
 }
@@ -76,6 +79,7 @@ export interface ProviderOrchestrationMetadata {
     build?: boolean;
   };
   ci?: ProviderCiDeployMetadata;
+  databaseRestoreDrill?: ProviderDatabaseRestoreDrillMetadata;
   nativeBranchDeploy?: {
     needsGitHubAppAccess?: boolean;
     githubAppInstallUrl?: string;

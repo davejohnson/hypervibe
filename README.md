@@ -592,6 +592,76 @@ from removing the old value before compatible code is running. A confirmed
 removal may reconcile or redeploy the provider's already-compatible current
 image, so do not collapse these two releases into one.
 
+### Database resilience and restore drills
+
+Cloud SQL can manage regional availability, backup/PITR retention, named read
+replicas, and a scheduled isolated restore drill through normal desired state:
+
+```json
+{
+  "github": { "canonicalEnvironment": "production" },
+  "environments": {
+    "production": {
+      "hosting": { "provider": "cloudrun" },
+      "services": { "web": {} },
+      "database": {
+        "provider": "cloudsql",
+        "resilience": {
+          "availability": "regional",
+          "backups": { "retainedBackups": 8, "pitrRetentionDays": 7 },
+          "replicas": { "analytics": { "region": "us-west1" } },
+          "restoreDrill": {
+            "schedule": { "cron": "30 4 * * 1", "timezone": "America/Vancouver" },
+            "credentialsSecret": "HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS",
+            "verificationQuery": "SELECT count(*) FROM users",
+            "restoreLagMinutes": 10,
+            "retainFailedInstanceDays": 3
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The first restore-drill slice supports one GitHub canonical environment per
+repository. It generates a reviewed scheduled workflow that clones the exact
+bound primary at the declared point in time, runs the SQL check in a read-only
+transaction, and deletes the successful clone only after confirming its
+ownership labels. Failed labeled clones remain briefly for inspection and are
+collected by a later run. Application database bindings never change.
+
+Use a dedicated GCP service-account JSON key, created or reviewed at
+`https://console.cloud.google.com/iam-admin/serviceaccounts`, and store it in
+the repository Actions secret named by `credentialsSecret`. Scope it to the
+single GCP project containing the source instance. The recommended custom role
+contains only:
+
+```text
+cloudsql.instances.clone
+cloudsql.instances.connect
+cloudsql.instances.delete
+cloudsql.instances.get
+cloudsql.instances.list
+cloudsql.instances.update
+cloudsql.users.update
+```
+
+`roles/cloudsql.admin` also works but is broader than the drill needs.
+Cloud SQL Admin API must be enabled. The connector still needs a network path;
+this V1 workflow targets Hypervibe-provisioned Cloud SQL instances with public
+IP connectivity. Put the JSON key into GitHub without pasting it into chat:
+
+```text
+hv_secrets_set project="example" target="github" repo="owner/example" key="HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS" secretRef="file:/absolute/path/cloudsql-drill-service-account.json"
+```
+
+`hv_plan` blocks while the secret name cannot be observed. Once present, the
+GitHub infrastructure action is billable and confirmation-gated because each
+scheduled run creates a temporary Cloud SQL instance. After the generated PR
+is merged, use `hv_ci_status` to inspect `Hypervibe / db-restore-drill-production`
+runs and their bounded logs.
+
 ### Database data operations
 
 Do not temporarily change a service `releaseCommand` just to seed or import production data. Application containers should converge schema during startup. When startup migration is not appropriate, a release command is durable desired deploy configuration for repeatable schema work, such as `migrations: { "mode": "releaseCommand", "command": "npm run db:migrate" }`.

@@ -81,6 +81,48 @@ export const providerIdSchema = z.string().regex(
   'provider ids must be lowercase slugs starting with a letter'
 );
 
+const fiveFieldCronSchema = z.string().superRefine((value, ctx) => {
+  const fields = value.trim().split(/\s+/);
+  if (fields.length !== 5) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'schedule.cron must use five-field POSIX cron: minute hour day-of-month month day-of-week',
+    });
+    return;
+  }
+  const allowed = /^[0-9A-Za-z*?,\/-]+$/;
+  if (fields.some((field) => !allowed.test(field)) || fields.some((field) => /[?]/.test(field))) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'schedule.cron contains syntax GitHub Actions does not support; use POSIX numbers/names with *, comma, dash, and slash',
+    });
+  }
+  if (/^@(yearly|monthly|weekly|daily|hourly|reboot)$/i.test(value.trim())) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'GitHub Actions does not support cron aliases such as @daily; use five fields',
+    });
+  }
+});
+
+const ianaTimezoneSchema = z.string().min(1).superRefine((value, ctx) => {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value }).format();
+  } catch {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'schedule.timezone must be a valid IANA timezone such as UTC or America/Vancouver',
+    });
+  }
+});
+
+export const githubScheduleSpecSchema = z.object({
+  /** GitHub Actions uses five-field POSIX cron. */
+  cron: fiveFieldCronSchema,
+  /** GitHub Actions evaluates this IANA timezone natively. Defaults to UTC. */
+  timezone: ianaTimezoneSchema.default('UTC'),
+}).strict();
+
 const databaseReplicaNameSchema = z.string().regex(
   /^[a-z][a-z0-9-]{0,30}$/,
   'replica names must be lowercase slugs starting with a letter (maximum 31 characters)'
@@ -99,6 +141,26 @@ const databaseBackupPolicySchema = z.object({
   }
 });
 
+const databaseRestoreDrillSchema = z.object({
+  /** Managed GitHub Actions schedule for the isolated restore verification. */
+  schedule: githubScheduleSpecSchema,
+  /** Existing repository secret containing a minimal-role GCP service-account JSON key. */
+  credentialsSecret: z.string().regex(
+    /^[A-Z_][A-Z0-9_]*$/,
+    'restore-drill credentialsSecret must be a valid uppercase GitHub Actions secret name'
+  ).default('HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS'),
+  /** One read-only SQL statement executed against the restored temporary instance. */
+  verificationQuery: z.string().min(1).max(4096)
+    .refine((value) => !value.includes('${{'), 'verificationQuery cannot contain GitHub expression interpolation')
+    .refine((value) => /^(select|with)\b/i.test(value.trim()), 'verificationQuery must begin with SELECT or WITH')
+    .refine((value) => !value.trim().replace(/;\s*$/, '').includes(';'), 'verificationQuery must contain one SQL statement')
+    .default('SELECT 1'),
+  /** Restore far enough behind now that the PITR log has reached durable storage. */
+  restoreLagMinutes: z.number().int().min(5).max(1440).default(5),
+  /** Failed labeled drill instances remain inspectable until a later run collects them. */
+  retainFailedInstanceDays: z.number().int().min(1).max(14).default(3),
+}).strict();
+
 const databaseResilienceSchema = z.object({
   /** Zonal uses one zone; regional provisions a synchronous standby. */
   availability: z.enum(['zonal', 'regional']).optional(),
@@ -112,7 +174,17 @@ const databaseResilienceSchema = z.object({
       tier: z.string().min(1).optional(),
     }).strict()
   ).optional(),
-}).strict();
+  /** Scheduled restore into an isolated temporary instance, followed by SQL verification. */
+  restoreDrill: databaseRestoreDrillSchema.optional(),
+}).strict().superRefine((resilience, ctx) => {
+  if (resilience.restoreDrill && !resilience.backups) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'restoreDrill requires a declared backups policy with point-in-time recovery',
+      path: ['restoreDrill'],
+    });
+  }
+});
 
 export const databaseSpecSchema = z.object({
   provider: providerIdSchema,
@@ -195,48 +267,6 @@ const automationIdSchema = z.string().regex(
   /^[a-z][a-z0-9-]{0,62}$/,
   'automation ids must be lowercase slugs starting with a letter'
 );
-
-const fiveFieldCronSchema = z.string().superRefine((value, ctx) => {
-  const fields = value.trim().split(/\s+/);
-  if (fields.length !== 5) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'schedule.cron must use five-field POSIX cron: minute hour day-of-month month day-of-week',
-    });
-    return;
-  }
-  const allowed = /^[0-9A-Za-z*?,\/-]+$/;
-  if (fields.some((field) => !allowed.test(field)) || fields.some((field) => /[?]/.test(field))) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'schedule.cron contains syntax GitHub Actions does not support; use POSIX numbers/names with *, comma, dash, and slash',
-    });
-  }
-  if (/^@(yearly|monthly|weekly|daily|hourly|reboot)$/i.test(value.trim())) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'GitHub Actions does not support cron aliases such as @daily; use five fields',
-    });
-  }
-});
-
-const ianaTimezoneSchema = z.string().min(1).superRefine((value, ctx) => {
-  try {
-    new Intl.DateTimeFormat('en', { timeZone: value }).format();
-  } catch {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'schedule.timezone must be a valid IANA timezone such as UTC or America/Vancouver',
-    });
-  }
-});
-
-export const githubScheduleSpecSchema = z.object({
-  /** GitHub Actions uses five-field POSIX cron. */
-  cron: fiveFieldCronSchema,
-  /** IANA timezone used by the workflow's schedule guard. Defaults to UTC. */
-  timezone: ianaTimezoneSchema.default('UTC'),
-}).strict();
 
 const githubAutomationTriggersSchema = z.object({
   pullRequest: z.boolean().default(false),
@@ -1305,6 +1335,34 @@ export const projectSpecSchema = z.object({
       message: `github.canonicalEnvironment targets unknown environment "${spec.github.canonicalEnvironment}"`,
       path: ['github', 'canonicalEnvironment'],
     });
+  }
+  const restoreDrillEnvironments = Object.entries(spec.environments)
+    .filter(([, environment]) => Boolean(environment.database?.resilience?.restoreDrill))
+    .map(([environmentName]) => environmentName);
+  if (restoreDrillEnvironments.length > 0 && (!spec.github || spec.github.enabled === false)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'database restoreDrill requires enabled top-level github desired state for its managed scheduled workflow',
+      path: ['github'],
+    });
+  }
+  if (restoreDrillEnvironments.length > 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'the first restore-drill slice supports one canonical environment per repository',
+      path: ['environments'],
+    });
+  }
+  if (restoreDrillEnvironments.length === 1) {
+    const canonicalEnvironment = spec.github?.canonicalEnvironment
+      ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0]);
+    if (restoreDrillEnvironments[0] !== canonicalEnvironment) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `database restoreDrill must target the GitHub canonical environment "${canonicalEnvironment}" in the first slice`,
+        path: ['environments', restoreDrillEnvironments[0], 'database', 'resilience', 'restoreDrill'],
+      });
+    }
   }
   for (const [key, secret] of Object.entries(spec.secrets)) {
     const seen = new Set<string>();

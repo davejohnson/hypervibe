@@ -25,6 +25,7 @@ import type {
 } from '../../../domain/ports/database-resilience.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { buildDatabaseEnvVarsFromComponent } from '../../../domain/services/database-env.js';
+import { buildCloudSqlRestoreDrillWorkflow } from './cloudsql-restore-drill.workflow.js';
 
 // Credentials schema for self-registration
 export const CloudSqlCredentialsSchema = z.object({
@@ -1264,6 +1265,12 @@ providerRegistry.register({
         availabilityModes: ['zonal', 'regional'],
         backups: { maxRetainedBackups: 365, maxPitrRetentionDays: 7 },
         readReplicas: true,
+        restoreDrills: true,
+      },
+    },
+    orchestration: {
+      databaseRestoreDrill: {
+        buildWorkflow: buildCloudSqlRestoreDrillWorkflow,
       },
     },
   },
