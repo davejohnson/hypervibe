@@ -537,15 +537,21 @@ describe('hv_connections', () => {
       expect.objectContaining({
         name: 'cloudflare',
         displayName: 'Cloudflare',
-        setupHelpUrl: 'https://dash.cloudflare.com/profile/api-tokens',
+        setupHelpUrl: expect.stringContaining(
+          'https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys='
+        ),
         setupHelpUrls: expect.arrayContaining([
           expect.objectContaining({
-            label: expect.stringContaining('Account API Tokens'),
-            url: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
+            label: expect.stringContaining('Account API Token'),
+            url: expect.stringContaining(
+              'https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys='
+            ),
           }),
           expect.objectContaining({
-            label: expect.stringContaining('User API Tokens'),
-            url: 'https://dash.cloudflare.com/profile/api-tokens',
+            label: expect.stringContaining('User API Token'),
+            url: expect.stringContaining(
+              'https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys='
+            ),
           }),
         ]),
         tokenType: expect.stringContaining('Cloudflare Account API Token'),
@@ -556,8 +562,8 @@ describe('hv_connections', () => {
           expect.stringContaining('Registrar write permissions'),
         ]),
         notes: expect.arrayContaining([
-          expect.stringContaining('Cloudflare Dashboard -> Manage Account -> Account API Tokens'),
-          expect.stringContaining('https://dash.cloudflare.com/profile/api-tokens'),
+          expect.stringContaining('Both links pre-fill the token name'),
+          expect.stringContaining('narrow resources to the intended account and zone'),
           expect.stringContaining('cfut_'),
         ]),
       })

@@ -150,6 +150,7 @@ describe('CloudflareAdapter.verify', () => {
     expect(result.error).toContain('requires a Cloudflare User API Token');
     expect(result.error).toContain('registrarApiToken');
     expect(result.error).toContain('https://dash.cloudflare.com/profile/api-tokens');
+    expect(result.error).toContain('permissionGroupKeys=');
   });
 
   it('falls back to account token verification for unprefixed tokens when accountId is present', async () => {
@@ -196,6 +197,7 @@ describe('CloudflareAdapter.verify', () => {
     expect(result.error).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
     expect(result.error).toContain('My Profile > API Tokens');
     expect(result.error).toContain('https://dash.cloudflare.com/profile/api-tokens');
+    expect(result.error).toContain('permissionGroupKeys=');
     expect(result.error).toContain('cfat_');
     expect(result.error).toContain('CLOUDFLARE_ACCOUNT_ID');
     expect(result.error).toContain('Zone > Zone > Read');

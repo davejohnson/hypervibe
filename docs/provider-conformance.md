@@ -421,13 +421,13 @@ primary, bindings, and local state for inspected recovery.
 
 ### Cloudflare load balancing
 
-Use a Cloudflare Account API Token created at
-`https://dash.cloudflare.com/?to=/:account/api-tokens` (or a User API Token
-from `https://dash.cloudflare.com/profile/api-tokens`) and scope it to one
-isolated existing zone. It needs Zone Read, Load Balancers Read/Write on that
-zone, Load Balancing Monitors and Pools Read/Write on the owning account, and
-Account Settings Read when `accountId` is not supplied. Use the token value,
-not its name/id or a Global API Key. A safe connection example is:
+Use the
+[pre-filled Cloudflare Account API Token template](https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D&name=Hypervibe%20DNS%20and%20domains) (or the
+[pre-filled User API Token template](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=Hypervibe%20DNS%20and%20domains)) and scope it to one isolated
+existing zone. The links preselect Hypervibe's base DNS permissions; add Load
+Balancers Read/Write on that zone and Load Balancing Monitors and Pools
+Read/Write on the owning account for this profile. Use the token value, not its
+name/id or a Global API Key. A safe connection example is:
 
 ```text
 hv_connections provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}

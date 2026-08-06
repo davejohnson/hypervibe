@@ -124,6 +124,8 @@ Generic command names imply generic provider routing. `hv_inspect`, `hv_import`,
 
 Whenever a GitHub PAT is required, provide a role-specific pre-filled creation URL with its name/description and required scopes or fine-grained permissions already selected. Never send users only to a generic GitHub token settings page; keep every PAT role covered by regression tests.
 
+Whenever a provider officially documents credential-template URLs, use them with the known required name and least-privilege permissions pre-filled. Do not reverse-engineer undocumented dashboard parameters; call out any optional permissions the official template cannot represent.
+
 ## The spec → plan → apply loop
 
 The core workflow is terraform-style:

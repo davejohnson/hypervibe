@@ -1,5 +1,19 @@
 import { z } from 'zod';
 
+const CLOUDFLARE_DNS_TOKEN_PERMISSIONS = [
+  { key: 'zone', type: 'read' },
+  { key: 'zone_settings', type: 'read' },
+  { key: 'dns', type: 'edit' },
+  { key: 'account_settings', type: 'read' },
+];
+const CLOUDFLARE_DNS_PERMISSION_QUERY = encodeURIComponent(JSON.stringify(CLOUDFLARE_DNS_TOKEN_PERMISSIONS));
+
+/** Official Cloudflare template URLs with Hypervibe's base DNS permissions pre-selected. */
+export const CLOUDFLARE_TOKEN_URLS = {
+  user: `https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=${CLOUDFLARE_DNS_PERMISSION_QUERY}&accountId=%2A&zoneId=all&name=Hypervibe%20DNS%20and%20domains`,
+  account: `https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=${CLOUDFLARE_DNS_PERMISSION_QUERY}&name=Hypervibe%20DNS%20and%20domains`,
+} as const;
+
 /** Pre-filled GitHub PAT creation URLs, one per token role. */
 export const GITHUB_TOKEN_URLS = {
   /** apiToken: workflow/secrets management. */
@@ -312,26 +326,27 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     provider: 'cloudflare',
     displayName: 'Cloudflare',
     tokenType: 'Cloudflare User API Token as apiToken for simple DNS, custom domains, load balancing, email routing, and Registrar/domain purchase; or Cloudflare Account API Token as apiToken for durable DNS, custom domains, load balancing, and email routing automation, with a separate User API Token only when that account-token setup also buys domains',
-    setupUrl: 'https://dash.cloudflare.com/profile/api-tokens',
+    setupUrl: CLOUDFLARE_TOKEN_URLS.user,
     setupUrls: [
       {
-        label: 'User API Tokens for Registrar/domain purchase',
-        url: 'https://dash.cloudflare.com/profile/api-tokens',
+        label: 'Create pre-filled User API Token for DNS/custom domains; add optional Registrar, email, or load-balancer permissions below',
+        url: CLOUDFLARE_TOKEN_URLS.user,
       },
       {
-        label: 'Account API Tokens for DNS/custom domains/email routing',
-        url: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
+        label: 'Create pre-filled Account API Token for durable DNS/custom-domain automation; add optional email or load-balancer permissions below',
+        url: CLOUDFLARE_TOKEN_URLS.account,
       },
     ],
     permissions: [
-      'For the simplest setup, create a Cloudflare User API Token in Cloudflare Dashboard -> My Profile -> API Tokens at https://dash.cloudflare.com/profile/api-tokens and map it as apiToken/CLOUDFLARE_API_TOKEN. That one token can manage DNS, custom domains, and email routing, and when granted Registrar permissions it can also register domains.',
-      'For durable team/service automation that should not be tied to one user, create a Cloudflare Account API Token in Cloudflare Dashboard -> Manage Account -> Account API Tokens at https://dash.cloudflare.com/?to=/:account/api-tokens and map it as apiToken/CLOUDFLARE_API_TOKEN plus accountId/CLOUDFLARE_ACCOUNT_ID.',
+      `For the simplest setup, create a Cloudflare User API Token from the pre-filled Hypervibe template at ${CLOUDFLARE_TOKEN_URLS.user} and map it as apiToken/CLOUDFLARE_API_TOKEN. That one token can manage DNS and custom domains; add the optional permissions below for email routing, load balancing, or Registrar.`,
+      `For durable team/service automation that should not be tied to one user, create a Cloudflare Account API Token from the pre-filled Hypervibe template at ${CLOUDFLARE_TOKEN_URLS.account} and map it as apiToken/CLOUDFLARE_API_TOKEN plus accountId/CLOUDFLARE_ACCOUNT_ID.`,
       'For DNS/custom domains with either token type: grant Zone -> Zone -> Read.',
       'For DNS/custom domains with either token type: grant Zone -> DNS -> Edit.',
       'For Railway/custom-domain verification and some zone lookups: grant Zone -> Zone Settings -> Read or Edit.',
       'For environments declaring loadBalancer: grant the Cloudflare API token Load Balancers Read and Load Balancers Write on the target zone.',
       'For environments declaring loadBalancer: grant Load Balancing: Monitors and Pools Read and Load Balancing: Monitors and Pools Write on the owning account.',
       'For DNS/custom domains with either token type: Zone Resources must be Include -> Specific zone -> the target domain, for example hlspropertycare.com.',
+      'For account-scoped permissions: Account Resources must be Include -> Specific account -> the target account. The user-token template initially selects all accounts/zones because Cloudflare template URLs accept ids, not domain names; narrow both selectors before creating the token.',
       'For email routing only: grant Zone -> Email Routing Rules -> Edit.',
       'For email routing only: grant Account -> Email Routing Addresses -> Edit.',
       'For accountId auto-resolution: grant Account -> Account Settings -> Read; otherwise pass accountId/CLOUDFLARE_ACCOUNT_ID explicitly.',
@@ -339,11 +354,11 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'single User API Token: hv_connections provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}; account-token setup that also buys domains: hv_connections provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID","registrarApiToken":"CLOUDFLARE_REGISTRAR_API_TOKEN"}',
     notes: [
-      'Create user tokens in Cloudflare Dashboard -> My Profile -> API Tokens at https://dash.cloudflare.com/profile/api-tokens; create account tokens in Cloudflare Dashboard -> Manage Account -> Account API Tokens at https://dash.cloudflare.com/?to=/:account/api-tokens.',
+      `Create user tokens with ${CLOUDFLARE_TOKEN_URLS.user}; create account tokens with ${CLOUDFLARE_TOKEN_URLS.account}. Both links pre-fill the token name plus Zone Read, Zone Settings Read, DNS Edit, and Account Settings Read.`,
       'User API Tokens are fine for DNS, custom domains, and email routing, and are the simplest path when Hypervibe may also register domains. New user tokens use the documented cfut_ prefix.',
       'Account API Tokens are for durable service-principal style automation that should survive an individual user leaving the account. New account tokens use the documented cfat_ prefix (older tokens are unprefixed and still work). Cloudflare lists Registrar as NOT supported by Account API Tokens, so account-token setups need a User API Token only for Registrar/domain purchase.',
       'If the spec does not purchase/register domains, omit registrarApiToken. If apiToken is a User API Token with Registrar permissions, omit registrarApiToken even when registering domains.',
-      'For either token type, use Create Token, start from the Edit zone DNS template when available, then confirm the permissions above for the target zone. Add both zone load-balancer and account monitor/pool permissions when loadBalancer is declared. Cloudflare token verification only proves the token is active, not that it has these permissions — missing permissions surface at plan/apply time.',
+      'For either token type, review the pre-filled permissions and narrow resources to the intended account and zone before creating it. Cloudflare does not document template keys for Hypervibe\'s optional Email Routing, Load Balancing, or Registrar permissions, so add those manually only when the spec needs them. Cloudflare token verification only proves the token is active, not that it has these permissions — missing permissions surface at plan/apply time.',
       'Use the token secret itself as apiToken/CLOUDFLARE_API_TOKEN; do not use the token name or token id. Do not use the legacy Global API Key.',
     ],
   },

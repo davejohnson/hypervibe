@@ -938,12 +938,11 @@ Typical team flow:
 
 Recommended default for DNS, custom domains, and email routing: use a **Cloudflare Account API Token** plus `accountId`. Cloudflare recommends Account API Tokens for automation credentials that are not associated with a specific user.
 
-Create the recommended Account API Token here:
-
-```text
-Cloudflare dashboard -> Manage Account -> Account API Tokens
-https://dash.cloudflare.com/?to=/:account/api-tokens
-```
+Create it from the
+[pre-filled Hypervibe Account API Token template](https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D&name=Hypervibe%20DNS%20and%20domains).
+The link preselects Zone Read, Zone Settings Read, DNS Edit, and Account
+Settings Read. Choose the target account and narrow the zone resources before
+creating the token.
 
 Set these permissions and resources:
 
@@ -974,10 +973,11 @@ Hypervibe accepts either a raw token or a copied authorization value such as `Be
 
 If Hypervibe needs Cloudflare Registrar/domain purchase, use a **User API Token** instead because Cloudflare Registrar is not compatible with Account API Tokens. Create it under `My Profile -> API Tokens -> Create Token -> Edit zone DNS`, add the same zone permissions above, and connect it without `accountId`:
 
-```text
-Cloudflare dashboard -> My Profile -> API Tokens
-https://dash.cloudflare.com/profile/api-tokens
-```
+[Open the pre-filled Hypervibe User API Token template](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=Hypervibe%20DNS%20and%20domains),
+narrow its account and zone selectors, and add Registrar write before creating
+it. Cloudflare's documented template keys cover Hypervibe's base DNS
+permissions but not the optional Registrar, Email Routing, or Load Balancing
+permissions, so add only the optional capabilities the spec uses.
 
 ```text
 hv_connections provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"

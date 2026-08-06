@@ -13,6 +13,7 @@ import type { Project } from '../entities/project.entity.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import type { ActionResult } from '../plan/converge.executor.js';
+import { CLOUDFLARE_TOKEN_URLS } from './connection-guidance.js';
 
 const OPERATION = 'cloudflareRegistrarRegistration';
 
@@ -78,7 +79,7 @@ export function cloudflareRegistrarCredentialProblem(domain: string): string | n
   const registrarToken = credentials.registrarApiToken?.trim();
   if (registrarToken) {
     if (cloudflareTokenKind(registrarToken) === 'account') {
-      return `Cloudflare domain registration for ${domain} requires a Cloudflare User API Token (usually cfut_), but the stored registrarApiToken is an Account API Token (usually cfat_). Create a User API Token at https://dash.cloudflare.com/profile/api-tokens with Registrar write permissions. Then either use it as apiToken/CLOUDFLARE_API_TOKEN for a single-token setup, or keep the Account API Token as apiToken and store the User API Token as registrarApiToken/CLOUDFLARE_REGISTRAR_API_TOKEN.`;
+      return `Cloudflare domain registration for ${domain} requires a Cloudflare User API Token (usually cfut_), but the stored registrarApiToken is an Account API Token (usually cfat_). Start from the pre-filled Hypervibe User API Token template at ${CLOUDFLARE_TOKEN_URLS.user}, narrow it to the target account/zone, and add Registrar write permissions before creating it. Then either use it as apiToken/CLOUDFLARE_API_TOKEN for a single-token setup, or keep the Account API Token as apiToken and store the User API Token as registrarApiToken/CLOUDFLARE_REGISTRAR_API_TOKEN.`;
     }
     return null;
   }
@@ -87,7 +88,7 @@ export function cloudflareRegistrarCredentialProblem(domain: string): string | n
     credentials.apiToken
     && (cloudflareTokenKind(credentials.apiToken) === 'account' || credentials.apiTokenKind === 'account')
   ) {
-    return `Cloudflare domain registration for ${domain} cannot use the stored apiToken because it is an Account API Token (usually cfat_). Account API Tokens are correct for durable DNS/custom-domain/email automation, but Cloudflare Registrar requires a User API Token (usually cfut_). Create it at https://dash.cloudflare.com/profile/api-tokens with Registrar write permissions. Then either use it as apiToken/CLOUDFLARE_API_TOKEN for a single-token setup, or keep the Account API Token as apiToken and store the User API Token as registrarApiToken/CLOUDFLARE_REGISTRAR_API_TOKEN.`;
+    return `Cloudflare domain registration for ${domain} cannot use the stored apiToken because it is an Account API Token (usually cfat_). Account API Tokens are correct for durable DNS/custom-domain/email automation, but Cloudflare Registrar requires a User API Token (usually cfut_). Start from the pre-filled Hypervibe User API Token template at ${CLOUDFLARE_TOKEN_URLS.user}, narrow it to the target account/zone, and add Registrar write permissions before creating it. Then either use it as apiToken/CLOUDFLARE_API_TOKEN for a single-token setup, or keep the Account API Token as apiToken and store the User API Token as registrarApiToken/CLOUDFLARE_REGISTRAR_API_TOKEN.`;
   }
 
   return null;

@@ -4,6 +4,7 @@ import '../../../server.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import { secretManagerRegistry } from '../../registry/secretmanager.registry.js';
 import {
+  CLOUDFLARE_TOKEN_URLS,
   credentialFieldsFromSchema,
   formatConnectionGuidance,
   GITHUB_TOKEN_URLS,
@@ -68,9 +69,10 @@ describe('connection guidance', () => {
     expect(guidance).toContain('CLOUDFLARE_REGISTRAR_API_TOKEN');
     expect(guidance).toContain('DNS, custom domains, and email routing');
     expect(guidance).toContain('Registrar/domain purchase');
-    expect(guidance).toContain('Account API Tokens for DNS/custom domains/email routing');
+    expect(guidance).toContain('Create pre-filled Account API Token');
     expect(guidance).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
-    expect(guidance).toContain('User API Tokens for Registrar/domain purchase');
+    expect(guidance).toContain('permissionGroupKeys=');
+    expect(guidance).toContain('Create pre-filled User API Token');
     expect(guidance).toContain('https://dash.cloudflare.com/profile/api-tokens');
     expect(guidance).toContain('cfat_');
     expect(guidance).toContain('cfut_');
@@ -82,10 +84,35 @@ describe('connection guidance', () => {
     expect(guidance).toContain('Email Routing Addresses');
     expect(guidance).toContain('Registrar write permissions');
     expect(guidance).toContain('Account API Tokens cannot be used for Registrar');
+    expect(guidance).toContain('narrow both selectors before creating the token');
     expect(guidance).toContain('scope="invoiceperfect.com"');
     expect(guidance).not.toContain('scope="example.com"');
     expect(guidance).toContain('accountId');
     expect(guidance).toContain('Do not use the legacy Global API Key');
+  });
+
+  it('pre-fills Cloudflare base DNS permissions for user and account tokens', () => {
+    const expectedPermissions = [
+      { key: 'zone', type: 'read' },
+      { key: 'zone_settings', type: 'read' },
+      { key: 'dns', type: 'edit' },
+      { key: 'account_settings', type: 'read' },
+    ];
+
+    for (const [kind, value] of Object.entries(CLOUDFLARE_TOKEN_URLS)) {
+      const url = new URL(value);
+      expect(JSON.parse(url.searchParams.get('permissionGroupKeys') ?? 'null'), kind).toEqual(expectedPermissions);
+      expect(url.searchParams.get('name'), kind).toBe('Hypervibe DNS and domains');
+    }
+
+    const user = new URL(CLOUDFLARE_TOKEN_URLS.user);
+    expect(user.searchParams.get('accountId')).toBe('*');
+    expect(user.searchParams.get('zoneId')).toBe('all');
+
+    const account = new URL(CLOUDFLARE_TOKEN_URLS.account);
+    expect(account.searchParams.get('to')).toBe('/:account/api-tokens');
+    expect(account.searchParams.has('accountId')).toBe(false);
+    expect(account.searchParams.has('zoneId')).toBe(false);
   });
 
   it('includes GitHub package permissions for CI image deploys', () => {

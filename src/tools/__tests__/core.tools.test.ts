@@ -465,8 +465,8 @@ describe('hv_spec', () => {
     expect(set.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
     expect(set.hint).toContain('Cloudflare User API Token');
     expect(set.hint).toContain('https://dash.cloudflare.com/profile/api-tokens');
-    expect(set.hint).toContain('Cloudflare Dashboard -> Manage Account -> Account API Tokens');
-    expect(set.hint).toContain('My Profile -> API Tokens');
+    expect(set.hint).toContain('permissionGroupKeys=');
+    expect(set.hint).toContain('narrow both selectors before creating the token');
     expect(set.hint).toContain('Zone -> Zone Settings -> Read or Edit');
     expect(set.hint).toContain('Zone -> DNS -> Edit.');
     expect(set.hint).toContain('scope="connection-check-app.com"');
@@ -814,6 +814,9 @@ describe('hv_plan / hv_status / hv_apply', () => {
     }));
     expect(plan.data.blocked).toContainEqual(expect.objectContaining({
       reason: expect.stringContaining('https://dash.cloudflare.com/profile/api-tokens'),
+    }));
+    expect(plan.data.blocked).toContainEqual(expect.objectContaining({
+      reason: expect.stringContaining('permissionGroupKeys='),
     }));
     await t.close();
   });
@@ -1499,6 +1502,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.hint).toContain('Cloudflare User API Token');
     expect(apply.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
     expect(apply.hint).toContain('https://dash.cloudflare.com/profile/api-tokens');
+    expect(apply.hint).toContain('permissionGroupKeys=');
     expect(apply.hint).toContain('Zone -> Zone -> Read');
     expect(apply.hint).toContain('Zone -> DNS -> Edit');
     expect(apply.hint).toContain('Zone Resources must be Include -> Specific zone');
