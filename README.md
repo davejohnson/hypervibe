@@ -994,8 +994,9 @@ infrastructure PR flow—see
 [GitHub infrastructure for beginners](docs/github-infrastructure.md).
 
 Recommended for a one-token setup: create a classic PAT with `repo`,
-`workflow`, and `read:packages`, then export it under npm's required variable
-name:
+`workflow`, and `read:packages` from the
+[pre-filled combined-token link](https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys),
+then export it under npm's required variable name:
 
 ```bash
 export NODE_AUTH_TOKEN=ghp_...
@@ -1039,10 +1040,13 @@ Connect it like this:
 hv_connections provider=github scope="owner/repo" credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN"
 ```
 
-For least privilege, use two classic PATs:
+For split credentials, create the repository-management token from the
+[pre-filled fine-grained link](https://github.com/settings/personal-access-tokens/new?name=Hypervibe%20repository&description=Manage%20one%20repository%20with%20Hypervibe&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write) (or the
+[pre-filled classic API link](https://github.com/settings/tokens/new?scopes=repo,workflow&description=Hypervibe%20GitHub%20API)), and create the classic package token
+from the [pre-filled `read:packages` link](https://github.com/settings/tokens/new?scopes=read:packages&description=Hypervibe%20GHCR%20pull):
 
 ```text
-HYPERVIBE_GITHUB_TOKEN=ghp_...             # scopes: repo, workflow
+HYPERVIBE_GITHUB_TOKEN=github_pat_...      # fine-grained repository permissions above
 HYPERVIBE_GITHUB_PACKAGES_TOKEN=ghp_...    # scopes: read:packages
 ```
 

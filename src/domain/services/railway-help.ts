@@ -1,3 +1,5 @@
+import { GITHUB_TOKEN_URLS } from './connection-guidance.js';
+
 export interface RailwayGitHubRepoAccessHelp {
   code: 'railway_github_repo_access';
   helpTool: 'railway_setup_help';
@@ -59,7 +61,7 @@ export function buildRailwayGitHubRepoAccessHelp(repo?: string): RailwayGitHubRe
       'If GitHub shows pending permission updates for the Railway GitHub App, accept them.',
       'After changing access, wait a few minutes for Railway caches to refresh, then rerun hv_status or hv_plan.',
       'If Railway still cannot see the repo, disconnect and reconnect the Railway service source, refresh Add -> GitHub Repository in Railway, or reinstall the Railway GitHub App.',
-      `A Hypervibe GitHub token is not required for native Railway push autodeploys. Default Hypervibe branch deploys use GitHub Actions/provider APIs instead; this help applies when deploy.trigger is "native". If you want Hypervibe to manage selected-repository app scope later, provide a classic GitHub PAT with repo scope and repo admin access (create: https://github.com/settings/tokens/new?scopes=repo&description=Hypervibe%20Railway%20app%20scope).`,
+      `A Hypervibe GitHub token is not required for native Railway push autodeploys. Default Hypervibe branch deploys use GitHub Actions/provider APIs instead; this help applies when deploy.trigger is "native". If you want Hypervibe to manage selected-repository app scope later, provide a classic GitHub PAT with repo scope and repo admin access (create: ${GITHUB_TOKEN_URLS.railwayAppScope}).`,
     ],
     credentials: {
       provider: 'github',
@@ -127,7 +129,7 @@ If the Railway GitHub App is already installed but limited to **Only select repo
 
 Native Railway push autodeploys do **not** need a Hypervibe GitHub token. If you want Hypervibe to manage the Railway GitHub App's selected-repository scope later:
 
-1. Create a **classic** GitHub PAT with the \`repo\` scope: https://github.com/settings/tokens/new?scopes=repo&description=Hypervibe%20Railway%20app%20scope
+1. Create a **classic** GitHub PAT with the \`repo\` scope: ${GITHUB_TOKEN_URLS.railwayAppScope}
 2. Make sure the PAT belongs to a user with **admin access** to the repository
 3. Recommended: export it or reference the existing \`.env\` file directly, then save and verify it in Hypervibe. If the user intentionally wants to enter the token in chat, raw credentials are still accepted.
 

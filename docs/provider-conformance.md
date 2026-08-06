@@ -378,7 +378,8 @@ The GCP credential is a service-account JSON key created at
 isolated project. Grant `roles/cloudsql.admin` for instance, backup-policy,
 replica, clone, user, and deletion lifecycle; `roles/cloudsql.client` for the
 connector; the Cloud Run verification roles documented by `hv_connections`; and
-enable `sqladmin.googleapis.com`. The GitHub credential is a token scoped to
+enable `sqladmin.googleapis.com`. The GitHub credential is a
+[pre-filled fine-grained token](https://github.com/settings/personal-access-tokens/new?name=Hypervibe%20repository&description=Manage%20one%20repository%20with%20Hypervibe&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write) scoped to
 the one disposable repository with Contents, Pull requests, Actions, Variables,
 and Secrets read/write permissions as described by the GitHub connection
 guidance. Connect both through file/dotenv references, never raw command values.
@@ -591,7 +592,7 @@ HYPERVIBE_LIVE_MANAGED_HOSTING=digitalocean npm run test:providers:managed-live
 ```
 
 The recommended GitHub credential is a
-[fine-grained repository PAT](https://github.com/settings/personal-access-tokens/new)
+[pre-filled fine-grained repository PAT](https://github.com/settings/personal-access-tokens/new?name=Hypervibe%20repository&description=Manage%20one%20repository%20with%20Hypervibe&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write)
 whose selected repository is only the isolated fixture. Grant Metadata read
 plus Administration, Actions, Contents, Pull requests, Secrets, and Workflows
 read/write. A classic PAT with `repo` and `workflow` also works but cannot be

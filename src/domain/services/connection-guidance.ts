@@ -1,13 +1,17 @@
 import { z } from 'zod';
 
-/** Pre-filled GitHub classic PAT creation URLs, one per token role. */
+/** Pre-filled GitHub PAT creation URLs, one per token role. */
 export const GITHUB_TOKEN_URLS = {
   /** apiToken: workflow/secrets management. */
   api: 'https://github.com/settings/tokens/new?scopes=repo,workflow&description=Hypervibe%20GitHub%20API',
+  /** apiToken: repository-scoped workflow/secrets management. */
+  fineGrained: 'https://github.com/settings/personal-access-tokens/new?name=Hypervibe%20repository&description=Manage%20one%20repository%20with%20Hypervibe&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write',
   /** packageReadToken: durable GHCR image pulls. */
   packageRead: 'https://github.com/settings/tokens/new?scopes=read:packages&description=Hypervibe%20GHCR%20pull',
   /** Single-token setup covering both roles. */
   combined: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
+  /** Classic-only access for changing a GitHub App installation's repositories. */
+  railwayAppScope: 'https://github.com/settings/tokens/new?scopes=repo&description=Hypervibe%20Railway%20app%20scope',
 } as const;
 
 export interface ConnectionGuidance {
@@ -503,7 +507,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     setupUrl: GITHUB_TOKEN_URLS.combined,
     setupUrls: [
       { label: 'Create recommended combined classic token', url: GITHUB_TOKEN_URLS.combined },
-      { label: 'Create recommended fine-grained repository token', url: 'https://github.com/settings/personal-access-tokens/new' },
+      { label: 'Create pre-filled fine-grained repository token', url: GITHUB_TOKEN_URLS.fineGrained },
       { label: 'Create optional classic GHCR package token', url: GITHUB_TOKEN_URLS.packageRead },
       { label: 'GitHub fine-grained permission reference', url: 'https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens' },
     ],
@@ -518,6 +522,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN are accepted as aliases when resolving GitHub credentials. Use NODE_AUTH_TOKEN when npm also needs the token.',
       'An explicitly referenced variable wins. If it is absent and multiple aliases contain different values, Hypervibe blocks instead of guessing.',
       'A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.',
+      'The fine-grained creation link pre-fills the token name, 90-day expiry, and core repository permissions. You must still choose the resource owner and only the repositories Hypervibe should manage.',
       'Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.',
       `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
     ],

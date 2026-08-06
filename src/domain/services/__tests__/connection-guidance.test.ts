@@ -6,6 +6,7 @@ import { secretManagerRegistry } from '../../registry/secretmanager.registry.js'
 import {
   credentialFieldsFromSchema,
   formatConnectionGuidance,
+  GITHUB_TOKEN_URLS,
   getConnectionGuidance,
 } from '../connection-guidance.js';
 
@@ -94,7 +95,7 @@ describe('connection guidance', () => {
 
     expect(guidance).toContain('classic GitHub personal access token');
     expect(guidance).toContain('fine-grained repository token');
-    expect(guidance).toContain('https://github.com/settings/personal-access-tokens/new');
+    expect(guidance).toContain(GITHUB_TOKEN_URLS.fineGrained);
     expect(guidance).toContain('Contents read/write');
     expect(guidance).toContain('Workflows read/write');
     expect(guidance).toContain('read:packages');
@@ -108,6 +109,32 @@ describe('connection guidance', () => {
     expect(guidance).toContain('NODE_AUTH_TOKEN');
     expect(guidance).toContain('HYPERVIBE_GITHUB_TOKEN');
     expect(guidance).toContain('HYPERVIBE_GITHUB_PACKAGES_TOKEN');
+  });
+
+  it('keeps every GitHub PAT creation link pre-filled for its role', () => {
+    for (const [role, value] of Object.entries(GITHUB_TOKEN_URLS)) {
+      const url = new URL(value);
+      expect(url.pathname, role).toMatch(/\/new$/);
+      expect(url.searchParams.size, role).toBeGreaterThan(1);
+      expect(url.searchParams.get('description'), role).toContain('Hypervibe');
+    }
+
+    const fineGrained = new URL(GITHUB_TOKEN_URLS.fineGrained);
+    expect(fineGrained.searchParams.get('name')).toBe('Hypervibe repository');
+    expect(fineGrained.searchParams.get('expires_in')).toBe('90');
+    expect(fineGrained.searchParams.get('actions')).toBe('write');
+    expect(fineGrained.searchParams.get('administration')).toBe('write');
+    expect(fineGrained.searchParams.get('contents')).toBe('write');
+    expect(fineGrained.searchParams.get('environments')).toBe('write');
+    expect(fineGrained.searchParams.get('pull_requests')).toBe('write');
+    expect(fineGrained.searchParams.get('secrets')).toBe('write');
+    expect(fineGrained.searchParams.get('actions_variables')).toBe('write');
+    expect(fineGrained.searchParams.get('workflows')).toBe('write');
+
+    expect(new URL(GITHUB_TOKEN_URLS.api).searchParams.get('scopes')).toBe('repo,workflow');
+    expect(new URL(GITHUB_TOKEN_URLS.packageRead).searchParams.get('scopes')).toBe('read:packages');
+    expect(new URL(GITHUB_TOKEN_URLS.combined).searchParams.get('scopes')).toBe('repo,workflow,read:packages');
+    expect(new URL(GITHUB_TOKEN_URLS.railwayAppScope).searchParams.get('scopes')).toBe('repo');
   });
 
   it('explains where every Twilio credential and optional provider id comes from', () => {

@@ -267,6 +267,7 @@ When adding or changing token guidance, include all of these details:
 
 - The exact credential kind, including distinctions that matter operationally, such as user token vs account token, classic PAT vs fine-grained PAT, service account JSON vs access token, or read token vs API-management token.
 - The official URL where the user creates or reviews that credential. If there are multiple valid token types, include the URL for each and say which use case needs which token.
+- GitHub PAT creation URLs must be role-specific and pre-filled with the token name/description plus the required classic scopes or fine-grained permissions. A generic GitHub token settings URL is not actionable connection guidance.
 - The exact scopes, roles, IAM permissions, or product permission toggles required, including resource scoping such as repo, zone, project, account, team, or organization.
 - The expected shape, prefix, or caveats when helpful, such as token prefixes, one-time-download keys, required companion ids like `accountId`, package-read tokens, or credentials that cannot support a feature.
 - A safe `hv_connections` example using `credentialsRef` (`env:...`, `dotenv:/absolute/path/.env#KEY`, `file:/absolute/path`, or a secret-manager ref). Use `credentialsMap` when a provider needs multiple fields.
