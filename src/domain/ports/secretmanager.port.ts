@@ -1,15 +1,14 @@
 import { z } from 'zod';
 
-// Secret manager provider types
-export type SecretManagerProvider =
-  | 'vault'
-  | 'aws-secrets'
-  | 'gcp-secrets'
-  | 'azure-keyvault'
-  | '1password'
-  | 'bitwarden'
-  | 'doppler'
-  | 'infisical';
+export const SECRET_MANAGER_PROVIDERS = [
+  'vault',
+  'aws-secrets',
+  'doppler',
+  '1password',
+  'bitwarden',
+] as const;
+
+export type SecretManagerProvider = (typeof SECRET_MANAGER_PROVIDERS)[number];
 
 // Secret reference format: provider://path/to/secret[#key][@version]
 export interface SecretReference {
@@ -29,6 +28,9 @@ export function parseSecretRef(ref: string): SecretReference | null {
   }
 
   const [, provider, pathPart, key, version] = match;
+  if (!SECRET_MANAGER_PROVIDERS.includes(provider as SecretManagerProvider)) {
+    return null;
+  }
   return {
     provider: provider as SecretManagerProvider,
     path: pathPart,
@@ -36,18 +38,6 @@ export function parseSecretRef(ref: string): SecretReference | null {
     version,
     raw: ref,
   };
-}
-
-// Build a secret reference string from components
-export function buildSecretRef(ref: Omit<SecretReference, 'raw'>): string {
-  let result = `${ref.provider}://${ref.path}`;
-  if (ref.key) {
-    result += `#${ref.key}`;
-  }
-  if (ref.version) {
-    result += `@${ref.version}`;
-  }
-  return result;
 }
 
 // Resolved secret from a secret manager
@@ -68,53 +58,11 @@ export interface SecretListItem {
   updatedAt?: Date;
 }
 
-// Receipt for write operations
-export interface SecretReceipt {
-  success: boolean;
-  path: string;
-  version?: string;
-  error?: string;
-}
-
-// Rotation result
-export interface RotationResult {
-  success: boolean;
-  path: string;
-  oldVersion?: string;
-  newVersion?: string;
-  rotatedAt: Date;
-  error?: string;
-}
-
-// Audit log entry
-export interface SecretAuditEntry {
-  id: string;
-  timestamp: Date;
-  action: 'read' | 'write' | 'delete' | 'rotate' | 'list';
-  provider: SecretManagerProvider;
-  secretPath: string;
-  projectId?: string;
-  environmentName?: string;
-  success: boolean;
-  error?: string;
-}
-
-// Capabilities that secret managers may support
-export interface SecretManagerCapabilities {
-  supportsVersioning: boolean;
-  supportsMultipleKeys: boolean; // Single secret can have multiple key-value pairs
-  supportsRotation: boolean;
-  supportsAuditLog: boolean;
-  supportsDynamicSecrets: boolean; // Secrets that are generated on-demand
-  maxSecretSize?: number; // In bytes
-}
-
 // Verify result from connect/verify
 export interface SecretManagerVerifyResult {
   success: boolean;
   error?: string;
   identity?: string; // Account/user identity if available
-  capabilities?: Partial<SecretManagerCapabilities>;
 }
 
 /**
@@ -124,9 +72,6 @@ export interface SecretManagerVerifyResult {
 export interface ISecretManagerAdapter {
   /** Provider name (e.g., 'vault', 'aws-secrets') */
   readonly name: SecretManagerProvider;
-
-  /** Capabilities supported by this provider */
-  readonly capabilities: SecretManagerCapabilities;
 
   /**
    * Connect to the secret manager with credentials.
@@ -148,38 +93,9 @@ export interface ISecretManagerAdapter {
   getSecret(path: string, key?: string, version?: string): Promise<ResolvedSecret>;
 
   /**
-   * Get multiple secrets at once (batch operation).
-   * More efficient than multiple getSecret calls.
-   */
-  getSecrets(references: SecretReference[]): Promise<Map<string, ResolvedSecret>>;
-
-  /**
-   * Set a secret value.
-   * @param path Path to the secret
-   * @param values Key-value pairs to store
-   */
-  setSecret(path: string, values: Record<string, string>): Promise<SecretReceipt>;
-
-  /**
-   * Delete a secret.
-   */
-  deleteSecret(path: string): Promise<SecretReceipt>;
-
-  /**
    * List secrets at a path or prefix.
    */
   listSecrets(pathPrefix?: string): Promise<SecretListItem[]>;
-
-  /**
-   * Rotate a secret (optional - check capabilities.supportsRotation).
-   * Uses native rotation if available, otherwise generates new value.
-   */
-  rotateSecret?(path: string): Promise<RotationResult>;
-
-  /**
-   * Get audit log for secrets (optional - check capabilities.supportsAuditLog).
-   */
-  getAuditLog?(secretPath?: string, limit?: number): Promise<SecretAuditEntry[]>;
 }
 
 // Zod schema for validating secret references in MCP tool inputs
@@ -209,20 +125,6 @@ export const AwsSecretsCredentialsSchema = z.object({
   // If not provided, uses default credential chain
 });
 
-export const GcpSecretsCredentialsSchema = z.object({
-  projectId: z.string(),
-  keyFilePath: z.string().optional(),
-  // If keyFilePath not provided, uses default credentials
-});
-
-export const AzureKeyVaultCredentialsSchema = z.object({
-  vaultUrl: z.string().url('Vault URL must be valid'),
-  tenantId: z.string().optional(),
-  clientId: z.string().optional(),
-  clientSecret: z.string().optional(),
-  // If not provided, uses default Azure credential chain
-});
-
 export const OnePasswordCredentialsSchema = z.object({
   /** 1Password service account token (ops_...) — create one scoped to the vault(s) the project should read. */
   serviceAccountToken: z.string().min(1, 'Service account token required'),
@@ -243,21 +145,8 @@ export const DopplerCredentialsSchema = z.object({
   config: z.string().optional(),
 });
 
-export const InfisicalCredentialsSchema = z.object({
-  siteUrl: z.string().url().default('https://app.infisical.com'),
-  serviceToken: z.string().optional(),
-  clientId: z.string().optional(),
-  clientSecret: z.string().optional(),
-}).refine(
-  (data) => data.serviceToken || (data.clientId && data.clientSecret),
-  'Either serviceToken or clientId+clientSecret is required'
-);
-
 export type VaultCredentials = z.infer<typeof VaultCredentialsSchema>;
 export type AwsSecretsCredentials = z.infer<typeof AwsSecretsCredentialsSchema>;
-export type GcpSecretsCredentials = z.infer<typeof GcpSecretsCredentialsSchema>;
-export type AzureKeyVaultCredentials = z.infer<typeof AzureKeyVaultCredentialsSchema>;
 export type OnePasswordCredentials = z.infer<typeof OnePasswordCredentialsSchema>;
 export type BitwardenCredentials = z.infer<typeof BitwardenCredentialsSchema>;
 export type DopplerCredentials = z.infer<typeof DopplerCredentialsSchema>;
-export type InfisicalCredentials = z.infer<typeof InfisicalCredentialsSchema>;

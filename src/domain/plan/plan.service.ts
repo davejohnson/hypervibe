@@ -6,8 +6,13 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { adapterFactory } from '../services/adapter.factory.js';
 import { providerRegistry } from '../registry/provider.registry.js';
-import { SpecStore } from '../spec/spec.store.js';
-import type { ProjectSpec, EnvironmentSpec } from '../spec/spec.schema.js';
+import { SpecStore, type SpecResult } from '../spec/spec.store.js';
+import {
+  EMAIL_MANAGED_ENV_KEYS,
+  MESSAGING_MANAGED_ENV_KEYS,
+  type ProjectSpec,
+  type EnvironmentSpec,
+} from '../spec/spec.schema.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
@@ -52,7 +57,7 @@ import { formatConnectionGuidance } from '../services/connection-guidance.js';
 import { loadDeployEnvFile } from '../services/deploy-env-file.js';
 import { cloudflareScopeHintsForDomain } from '../services/domain-scope.js';
 import {
-  delegatedSecretsForEnvironment,
+  delegatedSecretInputsForEnvironment,
   planDelegatedSecrets,
   type DelegatedSecretInputRequirement,
 } from '../services/delegated-secret.service.js';
@@ -64,6 +69,7 @@ import {
 import {
   GITHUB_INFRASTRUCTURE_OPERATION,
   githubInfrastructureConnectionBlock,
+  shouldPlanGitHubInfrastructure,
   planGitHubInfrastructure,
 } from '../services/github-infrastructure.service.js';
 import {
@@ -71,7 +77,8 @@ import {
   stripeEnvironmentName,
   stripeManagedEnvKeys,
 } from '../services/stripe-env.service.js';
-import { planEmailSetup } from '../services/email-plan.service.js';
+import { planEmail } from '../services/email-plan.service.js';
+import { planTwilioMessaging } from '../services/twilio-messaging.service.js';
 import {
   isProviderNativeDeploySourceAction,
   planProviderNativeDeploySources,
@@ -491,6 +498,7 @@ export class PlanService {
       required.push({ provider: 'cloudflare', scopeHints: cloudflareScopeHintsForDomain(environmentSpec.domain) });
     }
     if (environmentSpec.email.enabled) required.push({ provider: 'sendgrid' });
+    if (environmentSpec.messaging) required.push({ provider: 'twilio' });
     if (environmentUsesGitHubActionsDeploy(environmentSpec)) required.push({ provider: 'github' });
     if (environmentSpec.ios) {
       required.push({
@@ -628,6 +636,80 @@ export class PlanService {
     return [];
   }
 
+  private async planRepositoryInfrastructure(
+    project: Project,
+    environmentName: string,
+    specResult: SpecResult,
+    options?: PlanOptions
+  ): Promise<EnvironmentPlan | { error: string }> {
+    if (
+      options?.serviceFilter?.length
+      || Object.keys(options?.envVarOverrides ?? {}).length > 0
+      || options?.envFile
+      || options?.includeEnvFile === false
+      || Object.keys(options?.secretRefs ?? {}).length > 0
+    ) {
+      return {
+        error: 'The repository project plan does not accept service, environment-variable, env-file, or secret inputs.',
+      };
+    }
+
+    const projectForPlan = projectWithSpecGitRemoteUrl(project, specResult.spec);
+    const github = await planGitHubInfrastructure({
+      project: projectForPlan,
+      spec: specResult.spec,
+      environmentName,
+    });
+    const actions = github.actions;
+    try {
+      orderActions(actions);
+    } catch (error) {
+      return {
+        error: `Hypervibe generated an invalid repository action graph. No plan was saved or provider mutation authorized. ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    const specWarnings = specResult.adopted && specResult.source?.kind === 'repo'
+      ? [`${specResult.source.path} changed outside hypervibe; recorded as revision ${specResult.revision}.`]
+      : [];
+    const document: PlanRunDocument = {
+      kind: 'hv_plan',
+      environmentName,
+      specRevision: specResult.revision,
+      observedFingerprint: null,
+      actions,
+      unmanaged: [],
+      warnings: [...specWarnings, ...github.warnings],
+      ...(github.inputRequired.length > 0 ? { inputRequired: github.inputRequired } : {}),
+    };
+    const environment = this.envRepo.findByProjectAndName(project.id, environmentName)
+      ?? this.envRepo.create({ projectId: project.id, name: environmentName });
+    const run = this.runRepo.create({
+      projectId: project.id,
+      environmentId: environment.id,
+      type: 'plan',
+      plan: document as unknown as Record<string, unknown>,
+    });
+    this.runRepo.updateStatus(run.id, 'succeeded');
+
+    return {
+      planRunId: run.id,
+      specRevision: specResult.revision,
+      specSource: specResult.source ?? { kind: 'local' },
+      environmentName,
+      verified: actions.every((action) => action.verified),
+      observed: null,
+      actions,
+      unmanaged: [],
+      warnings: document.warnings ?? [],
+      inputRequired: github.inputRequired,
+      blocked: [
+        ...this.projectPreflight(projectForPlan, specResult.spec, environmentName),
+        ...github.blocked,
+      ],
+    };
+  }
+
   async plan(
     project: Project,
     environmentName: string,
@@ -635,17 +717,19 @@ export class PlanService {
   ): Promise<EnvironmentPlan | { error: string }> {
     const specResult = this.specStore.get(project);
     if (!specResult) {
-      return { error: `Project "${project.name}" has no spec. Set one with hv_spec_set.` };
+      return { error: `Project "${project.name}" has no spec. Set one with hv_spec.` };
     }
     const projectForPlan = projectWithSpecGitRemoteUrl(project, specResult.spec);
     const environmentSpec = specResult.spec.environments[environmentName];
     if (!environmentSpec) {
+      if (shouldPlanGitHubInfrastructure(specResult.spec, environmentName)) {
+        return this.planRepositoryInfrastructure(project, environmentName, specResult, options);
+      }
       const available = Object.keys(specResult.spec.environments);
       return {
         error: `Spec has no environment "${environmentName}". Available: ${available.join(', ') || '(none)'}.`,
       };
     }
-
     const serviceFilter = options?.serviceFilter?.length ? options.serviceFilter : undefined;
     if (serviceFilter) {
       const unknown = serviceFilter.filter((name) => !environmentSpec.services[name]);
@@ -655,7 +739,7 @@ export class PlanService {
         };
       }
     }
-    const delegatedSecretSlots = new Map(delegatedSecretsForEnvironment(specResult.spec, environmentName));
+    const delegatedSecretSlots = new Map(delegatedSecretInputsForEnvironment(specResult.spec, environmentName));
     const requestedSecretRefs = options?.secretRefs && Object.keys(options.secretRefs).length > 0
       ? options.secretRefs
       : undefined;
@@ -680,6 +764,24 @@ export class PlanService {
     if (stripeOverrideCollisions.length > 0) {
       return {
         error: `Stripe-managed keys cannot be passed through envVars: ${stripeOverrideCollisions.join(', ')}. Configure environments.${environmentName}.payments.stripe instead.`,
+      };
+    }
+    const emailOverrideCollisions = environmentSpec.email.enabled
+      ? Object.keys(envVarOverrides ?? {})
+        .filter((key) => (EMAIL_MANAGED_ENV_KEYS as readonly string[]).includes(key))
+      : [];
+    if (emailOverrideCollisions.length > 0) {
+      return {
+        error: `Email-managed keys cannot be passed through envVars: ${emailOverrideCollisions.join(', ')}. Configure environments.${environmentName}.email instead.`,
+      };
+    }
+    const messagingOverrideCollisions = environmentSpec.messaging
+      ? Object.keys(envVarOverrides ?? {})
+        .filter((key) => (MESSAGING_MANAGED_ENV_KEYS as readonly string[]).includes(key))
+      : [];
+    if (messagingOverrideCollisions.length > 0) {
+      return {
+        error: `Messaging-managed keys cannot be passed through envVars: ${messagingOverrideCollisions.join(', ')}. Configure environments.${environmentName}.messaging instead.`,
       };
     }
     const delegatedOverrideCollisions = Object.keys(envVarOverrides ?? {}).filter((key) => delegatedSecretSlots.has(key));
@@ -804,6 +906,8 @@ export class PlanService {
       ...Object.keys(managedQueueEnvVars ?? {}),
       ...delegatedSecretSlots.keys(),
       ...stripeManagedEnvKeys(environmentSpec),
+      ...(environmentSpec.email.enabled ? EMAIL_MANAGED_ENV_KEYS : []),
+      ...(environmentSpec.messaging ? MESSAGING_MANAGED_ENV_KEYS : []),
       ...(environmentSpec.database ? DATABASE_ENV_KEYS : []),
       ...(environmentSpec.cache ? CACHE_ENV_KEYS : []),
       ...(environmentSpec.queues && Object.keys(environmentSpec.queues).length > 0
@@ -1007,19 +1111,35 @@ export class PlanService {
         ...(domainRegistration.action ? { dependsOn: [domainRegistration.action.id] } : {}),
       });
     }
-    const emailAction = planEmailSetup({
-      environmentName,
-      environmentSpec,
-      environment,
-      observed,
-      dependsOn: [
-        ...actions
+    const email = serviceFilter
+      ? { actions: [], warnings: [], fingerprint: undefined }
+      : await planEmail({
+        project: projectForPlan,
+        environmentName,
+        environmentSpec,
+        environment,
+        observed,
+        serviceDependencies: [
+          ...actions
+            .filter((action) => action.resource.kind === 'service' && action.type !== 'noop' && action.type !== 'destroy')
+            .map((action) => action.id),
+        ],
+        domainDependencies: domainRegistration.action ? [domainRegistration.action.id] : [],
+      });
+    actions.push(...email.actions);
+    const messaging = serviceFilter
+      ? { actions: [], warnings: [], fingerprint: undefined }
+      : await planTwilioMessaging({
+        project: projectForPlan,
+        environmentName,
+        environmentSpec,
+        environment,
+        observed,
+        serviceDependencies: actions
           .filter((action) => action.resource.kind === 'service' && action.type !== 'noop' && action.type !== 'destroy')
           .map((action) => action.id),
-        ...(domainRegistration.action ? [domainRegistration.action.id] : []),
-      ],
-    });
-    if (emailAction) actions.push(emailAction);
+      });
+    actions.push(...messaging.actions);
     const queues = await planQueues({ project: projectForPlan, environmentSpec, environment });
     if (queues.actions.length > 0) {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
@@ -1152,7 +1272,7 @@ export class PlanService {
         action.type !== 'noop'
         && action.metadata?.operation !== 'hostingEnvRemove'
         && action.metadata?.operation !== DATABASE_RESILIENCE_OPERATIONS.replicaDestroy
-        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'queue', 'secret', 'payment', 'email']
+        && ['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'queue', 'secret', 'payment', 'email', 'messaging']
           .includes(action.resource.kind)
       )
       : [];
@@ -1166,7 +1286,7 @@ export class PlanService {
     // prerequisites for CI setup — an unconfirmed destroy must not block the
     // workflow sync.
     const ciDependsOn = actions
-      .filter((action) => action.type !== 'noop' && action.type !== 'destroy' && ['project', 'environment', 'service', 'payment', 'email'].includes(action.resource.kind))
+      .filter((action) => action.type !== 'noop' && action.type !== 'destroy' && ['project', 'environment', 'service', 'payment', 'email', 'messaging'].includes(action.resource.kind))
       .map((action) => action.id);
     const ciBindingsWillChange = actions.some((action) =>
       action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace')
@@ -1200,7 +1320,12 @@ export class PlanService {
       project: projectForPlan,
       spec: specResult.spec,
       environmentName,
+      suppliedSecretValues: delegatedSecretValues,
     });
+    const secretInputRequired = [
+      ...delegatedSecrets.inputRequired,
+      ...githubInfrastructure.inputRequired,
+    ];
     if (environmentSpec.database?.resilience?.restoreDrill) {
       const restorePrerequisites = actions
         .filter((action) =>
@@ -1385,13 +1510,19 @@ export class PlanService {
       environmentName,
       specRevision: specResult.revision,
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
-      ...(stripeSync.fingerprint
-        ? { integrationFingerprints: { stripe: stripeSync.fingerprint } }
+      ...((stripeSync.fingerprint || email.fingerprint || messaging.fingerprint)
+        ? {
+          integrationFingerprints: {
+            ...(stripeSync.fingerprint ? { stripe: stripeSync.fingerprint } : {}),
+            ...(email.fingerprint ? { email: email.fingerprint } : {}),
+            ...(messaging.fingerprint ? { messaging: messaging.fingerprint } : {}),
+          },
+        }
         : {}),
       actions,
       unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged, ...loadBalancer.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...filterWarnings],
-      ...(delegatedSecrets.inputRequired.length > 0 ? { inputRequired: delegatedSecrets.inputRequired } : {}),
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
+      ...(secretInputRequired.length > 0 ? { inputRequired: secretInputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };
 
@@ -1418,7 +1549,7 @@ export class PlanService {
       actions,
       unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
       warnings: document.warnings ?? [],
-      inputRequired: delegatedSecrets.inputRequired,
+      inputRequired: secretInputRequired,
       blocked,
     };
   }

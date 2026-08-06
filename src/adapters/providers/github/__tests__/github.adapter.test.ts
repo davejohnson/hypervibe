@@ -116,6 +116,30 @@ describe('GitHub Actions environment secrets', () => {
 });
 
 describe('GitHub Actions release evidence', () => {
+  it('uses a workflow filename as the encoded route id for run reads and dispatches', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(response({ total_count: 0, workflow_runs: [] }))
+      .mockResolvedValueOnce(response(undefined, 204));
+    const adapter = connectedAdapter();
+
+    await adapter.listWorkflowRuns('dave', 'app', '.github/workflows/hypervibe pages.yml');
+    await adapter.triggerWorkflow('dave', 'app', '.github/workflows/hypervibe pages.yml', 'main');
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'https://api.github.com/repos/dave/app/actions/workflows/hypervibe%20pages.yml/runs',
+      expect.objectContaining({ method: 'GET' })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'https://api.github.com/repos/dave/app/actions/workflows/hypervibe%20pages.yml/dispatches',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ ref: 'main', inputs: {} }),
+      })
+    );
+  });
+
   it('scopes artifact reads to the exact workflow run', async () => {
     const payload = {
       total_count: 1,

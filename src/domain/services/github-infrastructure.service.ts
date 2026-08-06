@@ -8,7 +8,9 @@ import type {
 import type { OpenAIAdapter } from '../../adapters/providers/openai/openai.adapter.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import type { Project } from '../entities/project.entity.js';
+import type { Environment } from '../entities/environment.entity.js';
 import type { PlanAction } from '../plan/plan.types.js';
+import { hashEnvValue } from '../ports/observe.port.js';
 import type {
   GitHubAutomationSpec,
   GitHubSpec,
@@ -21,6 +23,15 @@ import { adapterFactory } from './adapter.factory.js';
 import { compileDatabaseRestoreDrillFiles } from './database-restore-drill.service.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { getGitHubAdapter } from './github-ops.service.js';
+import {
+  delegatedGitHubSecretsForEnvironment,
+  type DelegatedSecretInputRequirement,
+} from './delegated-secret.service.js';
+import {
+  compileGitHubPagesWorkflow,
+  GITHUB_PAGES_WORKFLOW_PATH,
+  planGitHubPages,
+} from './github-pages.service.js';
 
 export const GITHUB_INFRASTRUCTURE_OPERATION = 'githubInfrastructurePullRequest';
 export const GITHUB_INFRASTRUCTURE_BRANCH = 'hypervibe/github-infrastructure';
@@ -36,8 +47,10 @@ export const GITHUB_SECURITY_SETTINGS_ACTION_ID = 'repo:github-security-settings
 export const GITHUB_CODE_SCANNING_ACTION_ID = 'repo:github-code-scanning';
 export const GITHUB_ACTIONS_PR_PERMISSION_ACTION_ID = 'repo:github-actions-pr-permission';
 export const GITHUB_COLLABORATION_SETTINGS_ACTION_ID = 'repo:github-collaboration-settings';
+export const GITHUB_DELEGATED_SECRET_OPERATION = 'githubDelegatedSecretSync';
+export const GITHUB_DELEGATED_SECRET_DESTROY_OPERATION = 'githubDelegatedSecretDestroy';
 
-const MANAGED_HEADER = '# Managed by Hypervibe. Change desired state with hv_spec_set; manual edits will be reconciled.';
+const MANAGED_HEADER = '# Managed by Hypervibe. Change desired state with hv_spec; manual edits will be reconciled.';
 
 const DEFAULT_COLLABORATION_LABELS = [
   { name: 'agent-ready', color: '0e8a16', description: 'Scoped work ready for a coding agent' },
@@ -969,6 +982,18 @@ export function compileManagedGitHubFiles(
       automationReview(id, automation)
     ));
   }
+  if (github.pages?.enabled) {
+    files.push(managedFile(
+      GITHUB_PAGES_WORKFLOW_PATH,
+      compileGitHubPagesWorkflow(github.pages),
+      {
+        title: 'GitHub Pages deployment',
+        summary: `Publishes ${github.pages.sourcePath} to GitHub Pages from ${github.pages.branch}.`,
+        details: ['Uploads a static artifact and deploys it through GitHub’s supported Pages Actions workflow.'],
+        mergeEffect: 'The workflow can publish only after this pull request is reviewed and merged.',
+      }
+    ));
+  }
   const dependabot = dependabotContent(github);
   if (dependabot) {
     files.push(managedFile(
@@ -1022,7 +1047,7 @@ export function githubCanonicalEnvironment(spec: ProjectSpec): string | undefine
   if (!spec.github || spec.github.enabled === false) return undefined;
   if (spec.github.canonicalEnvironment) return spec.github.canonicalEnvironment;
   if (spec.environments.production) return 'production';
-  return Object.keys(spec.environments).sort()[0];
+  return Object.keys(spec.environments).sort()[0] ?? 'repository';
 }
 
 export function shouldPlanGitHubInfrastructure(spec: ProjectSpec, environmentName: string): boolean {
@@ -1105,17 +1130,206 @@ export function isGitHubNativeSettingAction(action: PlanAction): boolean {
     .includes(String(action.metadata?.operation ?? ''));
 }
 
+type GitHubSecretTarget = { scope: 'repository' } | { scope: 'environment'; environment: string };
+
+interface GitHubDelegatedBinding {
+  name: string;
+  target: string;
+  principal: string;
+  valueHash: string;
+  actionId: string;
+  syncedAt: string;
+}
+
+function githubSecretTargetKey(target: GitHubSecretTarget): string {
+  return target.scope === 'repository' ? 'repository' : `environment:${target.environment}`;
+}
+
+export function githubDelegatedSecretActionId(name: string, target: GitHubSecretTarget): string {
+  return `secret:github:${githubSecretTargetKey(target)}:${name}`;
+}
+
+function githubSecretTargets(
+  secret: ProjectSpec['secrets'][string]
+): GitHubSecretTarget[] {
+  return [
+    ...(secret.githubActions?.repository ? [{ scope: 'repository' as const }] : []),
+    ...(secret.githubActions?.environments ?? [])
+      .map((environment) => ({ scope: 'environment' as const, environment })),
+  ];
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function parseGitHubDelegatedBindings(environment: Environment | null): GitHubDelegatedBinding[] {
+  const github = asObject(environment?.platformBindings.github);
+  const raw = github?.delegatedActionsBindings;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((value) => {
+    const record = asObject(value);
+    if (!record) return [];
+    const fields = ['name', 'target', 'principal', 'valueHash', 'actionId', 'syncedAt'] as const;
+    if (fields.some((field) => typeof record[field] !== 'string' || !(record[field] as string).length)) return [];
+    return [{
+      name: record.name as string,
+      target: record.target as string,
+      principal: record.principal as string,
+      valueHash: record.valueHash as string,
+      actionId: record.actionId as string,
+      syncedAt: record.syncedAt as string,
+    }];
+  });
+}
+
+async function planGitHubDelegatedSecrets(params: {
+  adapter: GitHubAdapter;
+  owner: string;
+  repo: string;
+  spec: ProjectSpec;
+  environmentName: string;
+  environment: Environment | null;
+  suppliedValues: Record<string, string>;
+}): Promise<{ actions: PlanAction[]; warnings: string[]; inputRequired: DelegatedSecretInputRequirement[] }> {
+  const slots = delegatedGitHubSecretsForEnvironment(params.spec, params.environmentName);
+  const bindings = parseGitHubDelegatedBindings(params.environment);
+  const bindingByIdentity = new Map(bindings.map((binding) => [`${binding.target}\0${binding.name}`, binding]));
+  const desiredIdentities = new Set<string>();
+  const actions: PlanAction[] = [];
+  const warnings: string[] = [];
+  const inputRequired: DelegatedSecretInputRequirement[] = [];
+  const observedNames = new Map<string, { status: 'known'; names: Set<string> } | { status: 'unknown'; error: string }>();
+
+  const observeTarget = async (target: GitHubSecretTarget) => {
+    const key = githubSecretTargetKey(target);
+    const existing = observedNames.get(key);
+    if (existing) return existing;
+    try {
+      const names = target.scope === 'repository'
+        ? await params.adapter.listRepositorySecrets(params.owner, params.repo)
+        : await params.adapter.listEnvironmentSecrets(params.owner, params.repo, target.environment);
+      const result = { status: 'known' as const, names: new Set(names) };
+      observedNames.set(key, result);
+      return result;
+    } catch (error) {
+      const result = { status: 'unknown' as const, error: error instanceof Error ? error.message : String(error) };
+      observedNames.set(key, result);
+      return result;
+    }
+  };
+
+  for (const [name, slot] of slots) {
+    for (const target of githubSecretTargets(slot)) {
+      const targetKey = githubSecretTargetKey(target);
+      desiredIdentities.add(`${targetKey}\0${name}`);
+      const actionId = githubDelegatedSecretActionId(name, target);
+      const binding = bindingByIdentity.get(`${targetKey}\0${name}`);
+      const supplied = params.suppliedValues[name];
+      const suppliedHash = supplied === undefined ? undefined : hashEnvValue(supplied);
+      const observation = await observeTarget(target);
+      const present = observation.status === 'known' && observation.names.has(name);
+      const bindingMatches = binding?.principal === slot.principal
+        && (suppliedHash === undefined || binding.valueHash === suppliedHash);
+      let type: PlanAction['type'] = 'update';
+      let verified = observation.status === 'known';
+      let reason: string;
+      let blockedReason: string | undefined;
+      if (supplied !== undefined) {
+        if (present && bindingMatches) {
+          type = 'noop';
+          reason = `GitHub Actions secret ${name} is accepted for ${slot.principal}`;
+        } else {
+          reason = `Sync GitHub Actions secret ${name} from explicit plan input`;
+        }
+      } else if (present && bindingMatches) {
+        type = 'noop';
+        reason = `Preserve accepted GitHub Actions secret ${name}`;
+      } else if (observation.status === 'unknown' && bindingMatches) {
+        type = 'noop';
+        verified = false;
+        reason = `Preserve accepted GitHub Actions secret ${name} because observation is unknown`;
+        warnings.push(`Could not verify GitHub Actions secret ${name} at ${targetKey}: ${observation.error}`);
+      } else if (!slot.required && !present && !binding) {
+        type = 'noop';
+        reason = `Optional GitHub Actions secret ${name} has not been supplied`;
+      } else {
+        reason = binding && binding.principal !== slot.principal
+          ? `GitHub Actions secret ${name} must be re-accepted for ${slot.principal}`
+          : present
+            ? `GitHub Actions secret ${name} exists but has not been accepted for ${slot.principal}`
+            : `GitHub Actions secret ${name} has not been supplied by ${slot.principal}`;
+        inputRequired.push({ key: name, principal: slot.principal, reason: `${reason} (${targetKey})` });
+        warnings.push(`${reason}. Supply secretRefs["${name}"] when planning the canonical GitHub environment.`);
+        if (observation.status === 'unknown') blockedReason = 'github_secret_observation_unknown';
+      }
+      actions.push({
+        id: actionId,
+        type,
+        resource: { kind: 'secret', name, provider: 'github' },
+        verified,
+        reason,
+        metadata: {
+          operation: GITHUB_DELEGATED_SECRET_OPERATION,
+          repository: `${params.owner}/${params.repo}`,
+          principal: slot.principal,
+          targetScope: target.scope,
+          ...(target.scope === 'environment' ? { targetEnvironment: target.environment } : {}),
+          inputProvided: supplied !== undefined,
+          ...(blockedReason ? { blockedReason } : {}),
+        },
+      });
+    }
+  }
+
+  for (const binding of bindings) {
+    if (desiredIdentities.has(`${binding.target}\0${binding.name}`)) continue;
+    const target: GitHubSecretTarget = binding.target === 'repository'
+      ? { scope: 'repository' }
+      : { scope: 'environment', environment: binding.target.replace(/^environment:/, '') };
+    const observation = await observeTarget(target);
+    actions.push({
+      id: `${binding.actionId}:destroy`,
+      type: 'destroy',
+      resource: { kind: 'secret', name: binding.name, provider: 'github' },
+      verified: observation.status === 'known',
+      reason: `Delete formerly managed GitHub Actions secret ${binding.name} from ${binding.target}`,
+      requiresConfirm: true,
+      metadata: {
+        operation: GITHUB_DELEGATED_SECRET_DESTROY_OPERATION,
+        repository: `${params.owner}/${params.repo}`,
+        targetScope: target.scope,
+        ...(target.scope === 'environment' ? { targetEnvironment: target.environment } : {}),
+        bindingActionId: binding.actionId,
+        ...(observation.status === 'unknown' ? { blockedReason: 'github_secret_observation_unknown' } : {}),
+      },
+    });
+  }
+  return { actions, warnings, inputRequired };
+}
+
+export function isGitHubDelegatedSecretAction(action: PlanAction): boolean {
+  return action.resource.kind === 'secret'
+    && action.resource.provider === 'github'
+    && [GITHUB_DELEGATED_SECRET_OPERATION, GITHUB_DELEGATED_SECRET_DESTROY_OPERATION]
+      .includes(String(action.metadata?.operation));
+}
+
 export async function planGitHubInfrastructure(params: {
   project: Project;
   spec: ProjectSpec;
   environmentName: string;
+  suppliedSecretValues?: Record<string, string>;
 }): Promise<{
   actions: PlanAction[];
   warnings: string[];
   blocked: GitHubInfrastructureConnectionBlock[];
+  inputRequired: DelegatedSecretInputRequirement[];
 }> {
   if (!shouldPlanGitHubInfrastructure(params.spec, params.environmentName) || !params.spec.github) {
-    return { actions: [], warnings: [], blocked: [] };
+    return { actions: [], warnings: [], blocked: [], inputRequired: [] };
   }
   const repository = resolveGitHubInfrastructureRepository(params.project, params.spec);
   if (!repository) {
@@ -1123,10 +1337,11 @@ export async function planGitHubInfrastructure(params: {
       actions: [],
       warnings: ['spec.github is enabled, but github.repository is unset and the project has no GitHub gitRemoteUrl.'],
       blocked: [],
+      inputRequired: [],
     };
   }
   const parts = repoParts(repository);
-  if (!parts) return { actions: [], warnings: [`Could not parse GitHub repository ${repository}.`], blocked: [] };
+  if (!parts) return { actions: [], warnings: [`Could not parse GitHub repository ${repository}.`], blocked: [], inputRequired: [] };
 
   const artifactContractIssues = autofixArtifactContractIssues(params.spec.github);
   const restoreDrills = compileDatabaseRestoreDrillFiles({ project: params.project, spec: params.spec });
@@ -1148,6 +1363,7 @@ export async function planGitHubInfrastructure(params: {
         `Cannot observe GitHub infrastructure for ${repository}: ${adapterResult.error}`,
       ],
       blocked: [],
+      inputRequired: [],
     };
   }
 
@@ -1176,7 +1392,7 @@ export async function planGitHubInfrastructure(params: {
         restoreDrillBlockedReason = 'github_restore_drill_secret_missing';
         for (const secret of missingSecrets) {
           warnings.push(
-            `Database restore drill requires GitHub Actions secret ${secret}. Set it without exposing the value: hv_secrets_set target="github" repo="${repository}" key="${secret}" secretRef="env:${secret}".`
+            `Database restore drill requires GitHub Actions secret ${secret}. Declare spec.secrets.${secret}.githubActions.repository=true, then plan with secretRefs["${secret}"]="env:${secret}".`
           );
         }
       }
@@ -1200,6 +1416,29 @@ export async function planGitHubInfrastructure(params: {
     ...(infrastructureBlockedReason ? { blockedReason: infrastructureBlockedReason } : {}),
   })];
   const blocked: GitHubInfrastructureConnectionBlock[] = [];
+  const environment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
+  const delegatedSecrets = await planGitHubDelegatedSecrets({
+    adapter: adapterResult.adapter,
+    owner: parts.owner,
+    repo: parts.repo,
+    spec: params.spec,
+    environmentName: params.environmentName,
+    environment,
+    suppliedValues: params.suppliedSecretValues ?? {},
+  });
+  actions.push(...delegatedSecrets.actions);
+  warnings.push(...delegatedSecrets.warnings);
+
+  if (drift.length === 0 && params.spec.github.pages) {
+    const pages = await planGitHubPages({
+      spec: params.spec,
+      repository,
+      adapter: adapterResult.adapter,
+    });
+    actions.push(...pages.actions);
+    warnings.push(...pages.warnings);
+    blocked.push(...pages.blocked);
+  }
 
   // Secrets/settings are a second stage. A file PR must merge before Hypervibe
   // exposes an AI key to the newly reviewed workflows.
@@ -1442,6 +1681,7 @@ export async function planGitHubInfrastructure(params: {
           }),
     warnings,
     blocked,
+    inputRequired: delegatedSecrets.inputRequired,
   };
 }
 
@@ -2072,6 +2312,125 @@ export async function applyGitHubOpenAISecret(params: {
     message: `Synced ${OPENAI_ACTIONS_SECRET} for OpenAI-backed GitHub automations`,
     data: { repository, secretName: OPENAI_ACTIONS_SECRET },
   };
+}
+
+export async function applyGitHubDelegatedSecret(params: {
+  project: Project;
+  spec: ProjectSpec;
+  environmentName: string;
+  action: PlanAction;
+  value?: string;
+}): Promise<{ success: boolean; status?: 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
+  const repository = typeof params.action.metadata?.repository === 'string'
+    ? params.action.metadata.repository
+    : undefined;
+  const parts = repository ? repoParts(repository) : null;
+  const targetScope = params.action.metadata?.targetScope;
+  const targetEnvironment = typeof params.action.metadata?.targetEnvironment === 'string'
+    ? params.action.metadata.targetEnvironment
+    : undefined;
+  const target: GitHubSecretTarget | undefined = targetScope === 'repository'
+    ? { scope: 'repository' }
+    : targetScope === 'environment' && targetEnvironment
+      ? { scope: 'environment', environment: targetEnvironment }
+      : undefined;
+  if (!repository || !parts || !target || params.action.resource.provider !== 'github') {
+    return { success: false, status: 'blocked', message: 'GitHub secret action is invalid', error: 'Repository or target metadata is missing.' };
+  }
+  const adapterResult = getGitHubAdapter(repository);
+  if ('error' in adapterResult) {
+    return { success: false, status: 'blocked', message: 'GitHub connection is unavailable', error: adapterResult.error };
+  }
+  const adapter = adapterResult.adapter;
+  const environments = new EnvironmentRepository();
+  const environment = environments.findByProjectAndName(params.project.id, params.environmentName);
+  if (!environment) {
+    return { success: false, status: 'blocked', message: 'Canonical environment is not tracked locally', error: `No local environment "${params.environmentName}" exists.` };
+  }
+  const bindings = parseGitHubDelegatedBindings(environment);
+  const targetKey = githubSecretTargetKey(target);
+  const identity = `${targetKey}\0${params.action.resource.name}`;
+  const operation = params.action.metadata?.operation;
+  const existingBinding = bindings.find((binding) => `${binding.target}\0${binding.name}` === identity);
+
+  if (operation === GITHUB_DELEGATED_SECRET_DESTROY_OPERATION) {
+    const bindingActionId = typeof params.action.metadata?.bindingActionId === 'string'
+      ? params.action.metadata.bindingActionId
+      : undefined;
+    if (
+      !existingBinding
+      || existingBinding.actionId !== bindingActionId
+      || params.action.id !== `${bindingActionId}:destroy`
+      || delegatedGitHubSecretsForEnvironment(params.spec, params.environmentName)
+        .some(([name, slot]) => name === params.action.resource.name
+          && githubSecretTargets(slot).some((candidate) => githubSecretTargetKey(candidate) === targetKey))
+    ) {
+      return { success: false, status: 'blocked', message: 'GitHub secret deletion authority is stale', error: 'Re-run hv_plan.' };
+    }
+    try {
+      if (target.scope === 'repository') {
+        await adapter.deleteSecret(parts.owner, parts.repo, params.action.resource.name);
+      } else {
+        await adapter.deleteEnvironmentSecret(parts.owner, parts.repo, target.environment, params.action.resource.name);
+      }
+    } catch (error) {
+      if (!(error instanceof Error) || !/404|not found/i.test(error.message)) throw error;
+    }
+    const remaining = target.scope === 'repository'
+      ? await adapter.listRepositorySecrets(parts.owner, parts.repo)
+      : await adapter.listEnvironmentSecrets(parts.owner, parts.repo, target.environment);
+    if (remaining.includes(params.action.resource.name)) {
+      return { success: false, message: `GitHub did not delete Actions secret ${params.action.resource.name}`, error: 'Provider read-back still contains the secret.' };
+    }
+    const next = bindings.filter((binding) => `${binding.target}\0${binding.name}` !== identity);
+    const github = asObject(environment.platformBindings.github) ?? {};
+    environments.updatePlatformBindings(environment.id, {
+      github: { ...github, delegatedActionsBindings: next },
+    });
+    return { success: true, message: `Deleted GitHub Actions secret ${params.action.resource.name} from ${targetKey}`, data: { repository, secretName: params.action.resource.name, target: targetKey } };
+  }
+
+  const slot = delegatedGitHubSecretsForEnvironment(params.spec, params.environmentName)
+    .find(([name, candidate]) => name === params.action.resource.name
+      && githubSecretTargets(candidate).some((item) => githubSecretTargetKey(item) === targetKey));
+  if (
+    operation !== GITHUB_DELEGATED_SECRET_OPERATION
+    || !slot
+    || !params.value
+    || params.action.id !== githubDelegatedSecretActionId(params.action.resource.name, target)
+    || params.action.metadata?.principal !== slot[1].principal
+    || params.action.metadata?.inputProvided !== true
+  ) {
+    return { success: false, status: 'blocked', message: `GitHub Actions secret ${params.action.resource.name} lacks current plan input authority`, error: 'Re-run hv_plan with the declared secretRef.' };
+  }
+  if (target.scope === 'repository') {
+    await adapter.setRepositorySecret(parts.owner, parts.repo, params.action.resource.name, params.value);
+  } else {
+    await adapter.setEnvironmentSecret(parts.owner, parts.repo, target.environment, params.action.resource.name, params.value);
+  }
+  const names = target.scope === 'repository'
+    ? await adapter.listRepositorySecrets(parts.owner, parts.repo)
+    : await adapter.listEnvironmentSecrets(parts.owner, parts.repo, target.environment);
+  if (!names.includes(params.action.resource.name)) {
+    return { success: false, message: `GitHub did not verify Actions secret ${params.action.resource.name}`, error: 'Provider read-back did not contain the secret name.' };
+  }
+  const nextBinding: GitHubDelegatedBinding = {
+    name: params.action.resource.name,
+    target: targetKey,
+    principal: slot[1].principal,
+    valueHash: hashEnvValue(params.value),
+    actionId: params.action.id,
+    syncedAt: new Date().toISOString(),
+  };
+  const next = [
+    ...bindings.filter((binding) => `${binding.target}\0${binding.name}` !== identity),
+    nextBinding,
+  ].sort((left, right) => `${left.target}:${left.name}`.localeCompare(`${right.target}:${right.name}`));
+  const github = asObject(environment.platformBindings.github) ?? {};
+  environments.updatePlatformBindings(environment.id, {
+    github: { ...github, delegatedActionsBindings: next },
+  });
+  return { success: true, message: `Synced GitHub Actions secret ${params.action.resource.name} to ${targetKey}`, data: { repository, secretName: params.action.resource.name, target: targetKey } };
 }
 
 export async function applyGitHubNativeSetting(params: {

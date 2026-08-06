@@ -7,7 +7,7 @@ It is not a loose collection of imperative provider functions.
 
 Treat the desired-state loop as the product center:
 
-1. `hv_spec_set` defines infrastructure intent.
+1. `hv_spec` defines infrastructure intent.
 2. `hv_plan` observes live provider state, checks required connections, computes drift, orders dependencies, and surfaces warnings or blocked work.
 3. `hv_apply` converges from a specific plan, rejects stale plans, records receipts, and confirm-gates destructive or billable actions.
 4. `hv_status` verifies convergence and reports drift.
@@ -269,19 +269,19 @@ When adding or changing token guidance, include all of these details:
 - The official URL where the user creates or reviews that credential. If there are multiple valid token types, include the URL for each and say which use case needs which token.
 - The exact scopes, roles, IAM permissions, or product permission toggles required, including resource scoping such as repo, zone, project, account, team, or organization.
 - The expected shape, prefix, or caveats when helpful, such as token prefixes, one-time-download keys, required companion ids like `accountId`, package-read tokens, or credentials that cannot support a feature.
-- A safe `hv_connect` example using `credentialsRef` (`env:...`, `dotenv:/absolute/path/.env#KEY`, `file:/absolute/path`, or a secret-manager ref). Use `credentialsMap` when a provider needs multiple fields.
+- A safe `hv_connections` example using `credentialsRef` (`env:...`, `dotenv:/absolute/path/.env#KEY`, `file:/absolute/path`, or a secret-manager ref). Use `credentialsMap` when a provider needs multiple fields.
 
 Tests should fail if new provider guidance omits these basics. Update `src/domain/services/__tests__/connection-guidance.test.ts` and add provider-specific verification-error assertions for ambiguous or commonly miscreated tokens.
 
-## Delegated Runtime Secrets
+## Delegated Secrets
 
-Delegated runtime secrets are lifecycle-managed slots, not ordinary environment variables and not provider connections:
+Delegated secrets are lifecycle-managed slots, not ordinary environment variables and not provider connections:
 
-- `ProjectSpec.secrets` declares the environment-variable name, responsible principal, target environments, required/optional behavior, and preserve-only drift policy. It never contains a value.
+- `ProjectSpec.secrets` declares the name, responsible principal, runtime environments and/or GitHub Actions destinations, required/optional behavior, and preserve-only drift policy. It never contains a value.
 - `hv_plan secretRefs={...}` is the only write input. References are resolved locally, values are encrypted into that specific plan, and the plan action/preview contains only key names and non-secret metadata.
 - Declared keys are excluded from deploy env files and rejected from ordinary `envVars` overrides. An owner's local `.env` must never silently become the desired value for a delegated slot.
 - Missing, unaccepted, drifted, or newly reassigned required slots produce `inputRequired`. The plan remains inspectable but `hv_apply` must reject it before connection checks or provider mutations.
-- A successful provider receipt records `delegatedEnvBindings` metadata in environment bindings: key name, principal, SHA-256 value hash, timestamp, apply run id, and action id. The value itself is never stored in repo bindings or receipts.
+- A successful provider receipt records value-free binding metadata (`delegatedEnvBindings` for hosting and `delegatedActionsBindings` for GitHub): key name, destination, principal, SHA-256 value hash, timestamp, and action id. The value itself is never stored in repo bindings or receipts.
 - Live observation compares provider hashes against the accepted hash. Matching values are preserved without needing the secret locally. Drift is reported and preserved until a new explicit plan input is supplied.
 
 `.hypervibe/spec.json` and the sanitized `.hypervibe/bindings.json` make this state reconstructible after a local database or checkout is lost. Provider connections and encrypted in-flight plans remain local and must be recreated.
@@ -291,6 +291,13 @@ In the no-service model, `principal` is declarative attribution, not authenticat
 ## Deploy Env Files
 
 Local `.env` files are deploy input candidates, not a raw publish list. Prefer `.env.<environment>` over `.env` when present. When an environment deploy/plan uses the default repo convention and `.env` exists but `.env.<environment>` does not, Hypervibe creates `.env.<environment>` from `.env` before loading deploy vars. When both files exist, Hypervibe may copy newly added base `.env` keys into `.env.<environment>`, but it must preserve environment-specific values instead of overwriting them.
+
+Repo-backed spec writes create or non-destructively extend `.env.example` with
+the value-free product convention `RECAPTCHA_SITE_KEY=` and
+`RECAPTCHA_SECRET_KEY=`. The template is never a deploy input. Hypervibe does
+not own a reCAPTCHA provider connection; actual per-environment values remain
+ordinary `.env.<environment>` inputs and reach hosting only through a persisted
+plan and apply.
 
 Keep env-file handling policy-driven through the environment spec (`envFile.mode`, `include`, `exclude`):
 
@@ -366,7 +373,7 @@ Hypervibe never copies values between environments.
 An environment may list a key in `envVarExceptions` only to document that the
 shared key intentionally does not apply there. Retirement tombstones also make
 absence explicit. Mixed ordinary/delegated handling for the same key is
-invalid. `hv_spec_set` blocks newly introduced gaps and gaps created by adding
+invalid. `hv_spec` blocks newly introduced gaps and gaps created by adding
 a matching environment or service. Pre-existing gaps remain readable and do
 not block unrelated spec changes, but are reported until repaired or explicitly
 excepted. Provider observation and AI are not required for this guardrail;
@@ -422,6 +429,58 @@ Stripe-managed runtime keys cannot also come from ordinary `envVars`, env-file
 includes, delegated secret slots, overrides, or removal tombstones. Removing
 or renaming a catalog key is part of its reviewed catalog lifecycle; ordinary
 unrelated runtime variables continue to use the two-release retirement process.
+
+## Email Desired State
+
+SendGrid email configuration lives under each environment's `email` desired
+state. It owns one optional sender identity and one optional Inbound Parse route
+per environment. The inbound route names a public web service and relative path;
+its provider URL is derived from that service's durable hosting binding. Alias
+local parts are application routing intent because SendGrid delivers all mail
+for one parse hostname to one endpoint.
+
+Email reconciliation uses separate action authorities for hosting runtime
+variables, SendGrid sender/domain authorization, Cloudflare DNS records,
+SendGrid inbound parsing and delivery events, Cloudflare mailbox forwarding,
+and final domain validation. A service or deploy
+bootstrap must never configure email as a side effect. Inbound route replacement
+is confirmation-gated because SendGrid replaces it through delete/create.
+Matching unmanaged provider identities are explicit adoption actions;
+duplicates and observation failures block instead of selecting or creating.
+
+Domain authentication is preferred when `environment.domain` exists. A sender
+declared without a domain uses single-sender verification and returns a pending
+receipt until the external verification email is accepted. Inbound parsing owns
+the `mx.sendgrid.net` MX record for its declared subdomain. The account-level
+SendGrid delivery-event webhook can be declared by only one environment.
+Cloudflare forwarding destinations, routing DNS, aliases, and the catch-all are
+explicit actions with destination-verification dependencies; provider-global
+destination addresses are never deleted implicitly.
+
+## Messaging Desired State
+
+Twilio messaging configuration lives under each environment's `messaging`
+desired state. It owns one Messaging Service, optional inbound-message and
+delivery-status callbacks, an explicit list of application services receiving
+the runtime contract, and optionally one existing Twilio phone-number SID.
+Callback URLs are derived from durable public hosting bindings; webhook targets
+must also receive the runtime contract so they can validate Twilio signatures.
+
+Messaging reconciliation separates Messaging Service configuration, sender-pool
+attachment, and hosting runtime variables into distinct reviewed actions. It
+resolves the persisted Messaging Service SID before considering exact-name
+adoption, blocks duplicate names and unknown observations, and verifies provider
+read-back before recording a binding. Moving an existing phone number between
+sender pools is confirmation-gated. A noop action performs no Twilio or hosting
+mutation.
+
+Hypervibe does not purchase or release phone numbers, synthesize webhook
+handlers, or manage Voice, Verify, WhatsApp, A2P registration, campaigns, or
+message sending. Those concerns remain application/account setup until their
+lifecycle can be modeled without weakening the plan authorization boundary.
+Twilio credentials are accepted only through the connection boundary and are
+projected solely to services named by `messaging.services`; secrets and runtime
+values never enter specs, plans, bindings, receipts, or tool output.
 
 ## iOS Release Desired State
 
@@ -583,6 +642,21 @@ the manifest into the same infrastructure pull request. Dependent secrets,
 bindings, repository settings, and the applied-spec marker remain deferred
 until the reviewed commit is present on the default branch.
 
+Static GitHub Pages publishing is project-level desired state under
+`github.pages`; it is not a synthetic hosting environment. A GitHub-only
+project uses the reserved canonical environment name `repository`. The Pages
+Actions workflow is a managed repository file and must merge through the same
+reviewable infrastructure pull request before any provider settings change.
+After merge, planning emits separate GitHub Pages and Cloudflare DNS actions,
+with explicit dependency order, provider snapshots, and confirmation for DNS
+replacement or teardown. Apply may mutate only the reviewed provider action.
+Certificate provisioning is asynchronous and returns pending until GitHub
+reports a ready certificate; HTTPS enforcement is a later verified converge
+step. Disabling Pages removes the reviewed workflow first, then confirm-gates
+site deletion and removal of only the exact Pages address records Hypervibe
+recognizes. Mail, verification, and unrelated DNS records are never part of
+the Pages mutation boundary.
+
 `hv_ci_status` is the authoritative observation path for Hypervibe-managed GitHub Actions deploys. Agents should use it to inspect workflows, runs, jobs, and bounded log tails, then use `hv_health` after a successful run. They must not bypass it with `gh`, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls; a blocked `hv_ci_status` result should surface its connection/error guidance and stop the stage.
 
 ## Database Resilience
@@ -692,5 +766,13 @@ New provider support needs a full contract, not a name in an enum. Add or confir
 ## Tool And CLI Policy
 
 The Hypervibe CLI is a supported interface to the same command registry, state store, plan/apply engine, provider adapters, and audit history as MCP. It is not a provider-CLI bypass.
+
+Generic command ids are provider-neutral contracts. A command such as
+`hv_inspect` or `hv_import` must accept registered provider names and dispatch
+through provider capabilities or provider-owned drivers; it must not default to
+one provider, narrow its schema to one provider, expose provider-prefixed ids,
+or contain provider API/mapping logic in the command module. Providers without
+the requested capability return explicit `UNSUPPORTED`. Contract tests scan the
+registered command surface for these regressions.
 
 Do not introduce dependencies on provider CLIs for infrastructure operations. Hypervibe should use its provider adapters and recorded connections so state, audit history, and drift detection stay coherent. When an MCP client already has Hypervibe tools, agents should call them directly rather than spawning the Hypervibe CLI.

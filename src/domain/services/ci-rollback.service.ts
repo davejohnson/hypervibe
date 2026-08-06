@@ -13,7 +13,6 @@ import {
   getGitHubAdapter,
   resolveBranchDeployTargets,
 } from './github-ops.service.js';
-import { syncProjectIntent } from './intent.service.js';
 import { GITHUB_ACTIONS_ROLLBACK_OPERATION } from './ci-rollback.contract.js';
 
 const runRepo = new RunRepository();
@@ -87,7 +86,6 @@ export type CiRollbackResult = {
   selection: RollbackSelection;
   receipts: Awaited<ReturnType<ConvergeExecutor['execute']>>['receipts'];
   errors?: string[];
-  intent: ReturnType<typeof syncProjectIntent>;
 };
 
 function safeEnvironmentName(name: string): string {
@@ -527,6 +525,5 @@ export async function executeManagedCiRollback(params: {
     selection: planned.selection,
     receipts: converge.receipts,
     ...(errors.length > 0 ? { errors } : {}),
-    intent: syncProjectIntent(params.project.id),
   };
 }

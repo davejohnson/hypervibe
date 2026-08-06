@@ -5,7 +5,7 @@ import type {
 
 export const CLOUDSQL_RESTORE_DRILL_SCRIPT_PATH = '.github/hypervibe/cloudsql-restore-drill.mjs';
 
-const MANAGED_HEADER = '# Managed by Hypervibe. Change desired state with hv_spec_set; manual edits will be reconciled.';
+const MANAGED_HEADER = '# Managed by Hypervibe. Change desired state with hv_spec; manual edits will be reconciled.';
 
 function yamlString(value: string): string {
   return JSON.stringify(value);

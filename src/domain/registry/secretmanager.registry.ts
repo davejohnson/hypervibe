@@ -2,7 +2,6 @@ import { z } from 'zod';
 import type {
   SecretManagerProvider,
   ISecretManagerAdapter,
-  SecretManagerCapabilities,
 } from '../ports/secretmanager.port.js';
 
 export interface SecretManagerMetadata {
@@ -18,8 +17,6 @@ export interface SecretManagerMetadata {
 export interface RegisteredSecretManager {
   metadata: SecretManagerMetadata;
   factory: (credentials: unknown) => ISecretManagerAdapter;
-  /** Default capabilities (adapter may override after connect) */
-  defaultCapabilities: SecretManagerCapabilities;
 }
 
 /**
@@ -100,12 +97,6 @@ class SecretManagerRegistry {
     return this.providers.get(name as SecretManagerProvider)?.metadata;
   }
 
-  /**
-   * Get default capabilities for a provider
-   */
-  getCapabilities(name: string): SecretManagerCapabilities | undefined {
-    return this.providers.get(name as SecretManagerProvider)?.defaultCapabilities;
-  }
 }
 
 // Export singleton instance

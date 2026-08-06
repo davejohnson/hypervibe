@@ -70,7 +70,7 @@ async function makeClient() {
   };
 }
 
-describe('hv_connect', () => {
+describe('hv_connections', () => {
   it('add stores credentials and auto-verifies in one call', async () => {
     vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
     vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({
@@ -80,7 +80,7 @@ describe('hv_connect', () => {
     });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'railway',
       credentials: { apiToken: 'token-123' },
     });
@@ -100,7 +100,7 @@ describe('hv_connect', () => {
     vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'railway',
       credentialsRef: 'env:HV_TEST_RAILWAY_TOKEN',
       credentialsKey: 'apiToken',
@@ -128,7 +128,7 @@ describe('hv_connect', () => {
     vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'railway',
       credentialsRef: `dotenv:${envPath}#HYPERVIBE_RAILWAY_TOKEN`,
     });
@@ -156,7 +156,7 @@ describe('hv_connect', () => {
     });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'github',
       credentialsRef: `dotenv:${envPath}`,
       credentialsMap: {
@@ -185,7 +185,7 @@ describe('hv_connect', () => {
     });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'github',
       credentialsRef: 'env:HYPERVIBE_GITHUB_TOKEN',
     });
@@ -212,7 +212,7 @@ describe('hv_connect', () => {
     });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'github',
       credentialsRef: `dotenv:${envPath}`,
       credentialsMap: {
@@ -238,7 +238,7 @@ describe('hv_connect', () => {
     process.env.HYPERVIBE_GITHUB_PACKAGES_TOKEN = 'gh-package-token';
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'github',
       credentialsRef: 'env:NODE_AUTH_TOKEN',
     });
@@ -260,7 +260,7 @@ describe('hv_connect', () => {
     });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'github',
       credentials: { apiToken: 'gh-token' },
     });
@@ -285,7 +285,7 @@ describe('hv_connect', () => {
     });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'github',
       scope: 'davejohnson/apreskeys.com',
       credentials: { apiToken: 'gh-package-only-token' },
@@ -306,7 +306,7 @@ describe('hv_connect', () => {
     });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'github',
       scope: 'davejohnson/apreskeys.com',
       credentials: {
@@ -330,7 +330,7 @@ describe('hv_connect', () => {
     });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'cloudflare',
       scope: 'apreskeys.com',
       credentials: { apiToken: 'cf-token' },
@@ -355,7 +355,7 @@ describe('hv_connect', () => {
     });
 
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'railway',
       credentials: { apiToken: 'bad-token' },
     });
@@ -376,13 +376,13 @@ describe('hv_connect', () => {
   it('rejects add without credentials and rejects invalid credential shapes', async () => {
     const t = await makeClient();
 
-    const missing = await t.call('hv_connect', { provider: 'railway' });
+    const missing = await t.call('hv_connections', { provider: 'railway' });
     expect(missing.ok).toBe(false);
     expect(missing.error.code).toBe('VALIDATION');
     expect(missing.hint).toContain('Railway Account API token');
     expect(missing.hint).toContain('https://railway.com/account/tokens');
 
-    const invalid = await t.call('hv_connect', { provider: 'railway', credentials: { nope: true } });
+    const invalid = await t.call('hv_connections', { provider: 'railway', credentials: { nope: true } });
     expect(invalid.ok).toBe(false);
     expect(invalid.error.code).toBe('VALIDATION');
     expect(invalid.hint).toContain('Railway Account API token');
@@ -391,7 +391,7 @@ describe('hv_connect', () => {
 
   it('verify returns NOT_FOUND when no connection exists', async () => {
     const t = await makeClient();
-    const result = await t.call('hv_connect', { provider: 'railway', action: 'verify' });
+    const result = await t.call('hv_connections', { provider: 'railway', action: 'verify' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('NOT_FOUND');
     expect(result.hint).toContain('Railway Account API token');
@@ -401,7 +401,7 @@ describe('hv_connect', () => {
 
   it('verify returns structured Cloudflare setup details when the scoped connection is missing', async () => {
     const t = await makeClient();
-    const result = await t.call('hv_connect', {
+    const result = await t.call('hv_connections', {
       provider: 'cloudflare',
       scope: 'hlspropertycare.com',
       action: 'verify',
@@ -434,29 +434,38 @@ describe('hv_connect', () => {
     vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
 
     const t = await makeClient();
-    await t.call('hv_connect', { provider: 'railway', credentials: { apiToken: 'token-123' } });
+    await t.call('hv_connections', { provider: 'railway', credentials: { apiToken: 'token-123' } });
 
-    const removed = await t.call('hv_connect', { provider: 'railway', action: 'remove' });
+    const removed = await t.call('hv_connections', { provider: 'railway', action: 'remove' });
     expect(removed.ok).toBe(true);
     expect(removed.data.removed).toBe(true);
     expect(new ConnectionRepository().findByProvider('railway')).toBeNull();
 
-    const again = await t.call('hv_connect', { provider: 'railway', action: 'remove' });
+    const again = await t.call('hv_connections', { provider: 'railway', action: 'remove' });
     expect(again.ok).toBe(false);
     expect(again.error.code).toBe('NOT_FOUND');
     await t.close();
   });
 });
 
-describe('hv_connections_list', () => {
+describe('hv_connections', () => {
+  it('lists only when no operation parameters are supplied', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { action: 'verify' });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('provider is required');
+    await t.close();
+  });
+
   it('returns connections without credentials plus providers grouped by category', async () => {
     vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
     vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true, email: 'dev@example.com' });
 
     const t = await makeClient();
-    await t.call('hv_connect', { provider: 'railway', credentials: { apiToken: 'token-123' } });
+    await t.call('hv_connections', { provider: 'railway', credentials: { apiToken: 'token-123' } });
 
-    const result = await t.call('hv_connections_list', {});
+    const result = await t.call('hv_connections', {});
     expect(result.ok).toBe(true);
     expect(result.hint).toContain('credential discovery only');
     expect(result.hint).toContain('credentials the user already controls');

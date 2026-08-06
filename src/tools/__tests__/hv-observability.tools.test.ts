@@ -85,36 +85,6 @@ describe('hv_logs', () => {
   });
 });
 
-describe('hv_errors', () => {
-  it.each([
-    ['list', { totalFound: 0, errors: [] }],
-    ['summary', {
-      summary: { totalServices: 0, totalErrors: 0, failedDeployments: 0, healthyServices: 0 },
-      services: [],
-    }],
-  ] as const)('keeps provider-neutral runtime error %s visibility', async (action, expected) => {
-    const project = new ProjectRepository().create({ name: `errors-${action}-app` });
-    new EnvironmentRepository().create({
-      projectId: project.id,
-      name: 'production',
-      platformBindings: { provider: 'railway', services: {} },
-    });
-    const t = await makeClient();
-    const result = await t.call('hv_errors', {
-      project: project.name,
-      env: 'production',
-      action,
-    });
-    expect(result.ok).toBe(true);
-    expect(result.data).toMatchObject({
-      environment: 'production',
-      provider: 'railway',
-      ...expected,
-    });
-    await t.close();
-  });
-});
-
 describe('hv_health', () => {
   it('checks an explicit URL with mocked fetch', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('ok', { status: 200 })));

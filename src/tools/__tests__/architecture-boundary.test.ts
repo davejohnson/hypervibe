@@ -16,7 +16,6 @@ const registeredCommandModules = [
   'hv-db',
   'hv-deploy',
   'hv-devx',
-  'hv-email',
   'hv-observability',
   'hv-secrets',
   'lifecycle',
@@ -54,6 +53,20 @@ describe('provider boundary architecture', () => {
       expect(source, `${label} must not import MCP`).not.toContain('@modelcontextprotocol');
       expect(source, `${label} must register commands, not MCP-shaped tools`).not.toContain('server.tool(');
     }
+  });
+
+  it('keeps Railway implementation details out of the registered command surface', () => {
+    for (const [label, url] of registeredCommandModules) {
+      const source = readFileSync(url, 'utf8');
+      expect(source, `${label} must route providers through capabilities, not Railway shortcuts`).not.toMatch(/railway/i);
+    }
+  });
+
+  it('keeps generic lifecycle selectors and routing provider-neutral', () => {
+    const source = readFileSync(new URL('../lifecycle.tools.ts', import.meta.url), 'utf8');
+    expect(source).not.toContain('/adapters/providers/');
+    expect(source).not.toMatch(/railwayProjectId|cloudrunProjectId|githubRepositoryId/i);
+    expect(source).not.toMatch(/provider:\s*z\.(?:enum|literal)\(/);
   });
 
   it('keeps interface adapters free of provider implementations and command orchestration', () => {

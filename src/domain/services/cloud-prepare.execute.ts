@@ -43,7 +43,7 @@ interface IamPolicy {
  * One-time cloud account preparation. For Cloud Run this enables required
  * GCP APIs and grants the deploy service account required roles using
  * one-time admin credentials (never stored). Returns a plain payload;
- * exposed via hv_connect action="prepare".
+ * exposed via hv_connections action="prepare".
  */
 export async function runCloudPrepare(params: {
   project: Project;
@@ -146,8 +146,8 @@ export async function runCloudPrepare(params: {
       existingRoles: iamResult.existingRoles,
       preparation: updatedProject?.policies.cloudPreparation,
       nextSteps: [
-        'hv_connect provider="cloudrun" action="verify"',
-        'hv_connect provider="cloudsql" action="verify"',
+        'hv_connections provider="cloudrun" action="verify"',
+        'hv_connections provider="cloudsql" action="verify"',
         'hv_plan, then hv_apply',
       ],
     };

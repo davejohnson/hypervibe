@@ -59,21 +59,6 @@ describe('BitwardenAdapter', () => {
     expect(secretsGet).toHaveBeenCalledWith(SECRET_ID);
   });
 
-  it('returns per-reference errors from getSecrets', async () => {
-    secretsList.mockResolvedValue({ data: [{ id: SECRET_ID, key: 'KNOWN' }] });
-    secretsGet.mockResolvedValue({ id: SECRET_ID, key: 'KNOWN', value: 'v' });
-
-    const adapter = new BitwardenAdapter();
-    await adapter.connect(CREDS);
-    const results = await adapter.getSecrets([
-      { provider: 'bitwarden', path: 'KNOWN', raw: 'bitwarden://KNOWN' },
-      { provider: 'bitwarden', path: 'MISSING', raw: 'bitwarden://MISSING' },
-    ]);
-
-    expect(results.get('bitwarden://KNOWN')).toEqual({ value: 'v' });
-    expect(results.get('bitwarden://MISSING')?.metadata?.error).toContain('No Bitwarden secret named "MISSING"');
-  });
-
   it('verify lists org secrets and reports identity', async () => {
     secretsList.mockResolvedValue({ data: [] });
 
@@ -85,11 +70,9 @@ describe('BitwardenAdapter', () => {
     expect(result.identity).toContain('org-1');
   });
 
-  it('rejects writes with a resolve-only explanation', async () => {
+  it('does not expose secret mutation methods', async () => {
     const adapter = new BitwardenAdapter();
-    await adapter.connect(CREDS);
-    const receipt = await adapter.setSecret('ANY', { x: 'y' });
-    expect(receipt.success).toBe(false);
-    expect(receipt.error).toContain('resolve-only');
+    expect('setSecret' in adapter).toBe(false);
+    expect('deleteSecret' in adapter).toBe(false);
   });
 });

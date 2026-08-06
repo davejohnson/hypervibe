@@ -54,7 +54,7 @@ describe('spec bootstrap env vars', () => {
 });
 
 describe('service action bootstrap authority', () => {
-  it('cannot provision databases, attach domains, configure email, or deploy sibling workloads', () => {
+  it('cannot provision databases, attach domains, or deploy sibling workloads', () => {
     const scoped = scopeBootstrapParamsToService({
       projectName: 'safe-app',
       environmentName: 'staging',
@@ -67,7 +67,6 @@ describe('service action bootstrap authority', () => {
       },
       databaseProvider: 'railway',
       domain: 'example.com',
-      setupEmail: true,
       envVarsByService: {
         web: { BUCKET: 'web' },
         worker: { BUCKET: 'worker' },
@@ -76,7 +75,6 @@ describe('service action bootstrap authority', () => {
 
     expect(scoped).toMatchObject({
       services: ['worker'],
-      setupEmail: false,
       ensureHostingProject: false,
       serviceConfig: { worker: { workloadKind: 'worker' } },
       envVarsByService: { worker: { BUCKET: 'worker' } },

@@ -12,6 +12,8 @@ describe('deploy-env-file', () => {
     const envPath = path.join(root, '.env');
     writeFileSync(envPath, [
       'SENDGRID_API_KEY=SG.runtime',
+      'RECAPTCHA_SITE_KEY=site-key',
+      'RECAPTCHA_SECRET_KEY=secret-key',
       'SESSION_SECRET=session-runtime',
       'SENTRY_DSN=https://public@example.ingest.sentry.io/1',
       'WEBHOOK_URL=http://localhost:4040/webhook',
@@ -31,6 +33,8 @@ describe('deploy-env-file', () => {
     expect(loadDeployEnvFile({ startDir: path.join(root, 'app') })).toEqual({
       path: envPath,
       vars: {
+        RECAPTCHA_SECRET_KEY: 'secret-key',
+        RECAPTCHA_SITE_KEY: 'site-key',
         SENDGRID_API_KEY: 'SG.runtime',
         SENTRY_DSN: 'https://public@example.ingest.sentry.io/1',
         SESSION_SECRET: 'session-runtime',

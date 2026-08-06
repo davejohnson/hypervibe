@@ -3,7 +3,6 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import type {
   CloudflareCredentials,
-  CloudflareEmailRoutingAddress,
   CloudflareEmailRoutingRule,
   CloudflareZone,
 } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
@@ -57,22 +56,6 @@ export async function resolveCloudflareEmailContext(domain: string): Promise<Clo
   };
 }
 
-export function normalizeDomain(domain: string): string {
-  return domain.trim().toLowerCase().replace(/^@/, '');
-}
-
-export function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
-export function normalizeAlias(address: string, domain: string): string {
-  const trimmed = address.trim().toLowerCase();
-  if (trimmed.includes('@')) {
-    return trimmed;
-  }
-  return `${trimmed.replace(/^@/, '')}@${domain}`;
-}
-
 export function routingRuleForAddress(rule: CloudflareEmailRoutingRule, address: string): boolean {
   return rule.matchers.some((matcher) =>
     matcher.type === 'literal'
@@ -85,30 +68,6 @@ export function forwardedTo(rule: CloudflareEmailRoutingRule): string[] {
   return rule.actions
     .filter((action) => action.type === 'forward')
     .flatMap((action) => action.value ?? []);
-}
-
-export function isVerifiedDestination(address: CloudflareEmailRoutingAddress): boolean {
-  return Boolean(address.verified);
-}
-
-export function summarizeDestination(address: CloudflareEmailRoutingAddress) {
-  return {
-    id: address.id,
-    email: address.email,
-    verified: isVerifiedDestination(address),
-    verifiedAt: address.verified,
-  };
-}
-
-export function summarizeRule(rule: CloudflareEmailRoutingRule) {
-  return {
-    id: rule.id,
-    name: rule.name,
-    enabled: rule.enabled,
-    forwardsTo: forwardedTo(rule),
-    matchers: rule.matchers,
-    actions: rule.actions,
-  };
 }
 
 export function rulePayload(address: string, forwardTo: string) {
@@ -136,33 +95,4 @@ export function catchAllPayload(action: 'drop' | 'forward', forwardTo: string | 
       ? [{ type: 'forward' as const, value: [forwardTo!] }]
       : [{ type: 'drop' as const }],
   };
-}
-
-export async function ensureDestination(
-  adapter: CloudflareAdapter,
-  accountId: string,
-  forwardTo: string,
-  confirm: boolean
-): Promise<{
-  destination?: CloudflareEmailRoutingAddress;
-  destinationCreated?: boolean;
-  plannedDestination?: { action: 'create_destination'; email: string };
-}> {
-  const addresses = await adapter.listEmailRoutingAddresses(accountId);
-  const existing = addresses.find((address) => address.email.toLowerCase() === forwardTo.toLowerCase());
-  if (existing) {
-    return { destination: existing, destinationCreated: false };
-  }
-
-  if (!confirm) {
-    return {
-      plannedDestination: {
-        action: 'create_destination',
-        email: forwardTo,
-      },
-    };
-  }
-
-  const created = await adapter.createEmailRoutingAddress(accountId, forwardTo);
-  return { destination: created, destinationCreated: true };
 }

@@ -1,12 +1,8 @@
 import {
   type ISecretManagerAdapter,
-  type SecretManagerCapabilities,
   type SecretManagerVerifyResult,
   type ResolvedSecret,
-  type SecretReference,
   type SecretListItem,
-  type SecretReceipt,
-  type RotationResult,
   type VaultCredentials,
   VaultCredentialsSchema,
 } from '../../../domain/ports/secretmanager.port.js';
@@ -47,15 +43,6 @@ interface VaultListResponse {
 export class VaultAdapter implements ISecretManagerAdapter {
   readonly name = 'vault' as const;
 
-  readonly capabilities: SecretManagerCapabilities = {
-    supportsVersioning: true,
-    supportsMultipleKeys: true,
-    supportsRotation: false, // Vault has rotation but requires specific setup
-    supportsAuditLog: true, // Via Vault's audit log, not our adapter
-    supportsDynamicSecrets: true,
-    maxSecretSize: 1024 * 1024, // 1MB
-  };
-
   private credentials: VaultCredentials | null = null;
   private token: string | null = null;
 
@@ -90,7 +77,6 @@ export class VaultAdapter implements ISecretManagerAdapter {
       return {
         success: true,
         identity: response.data.display_name || response.data.id,
-        capabilities: this.capabilities,
       };
     } catch (error) {
       return {
@@ -144,70 +130,6 @@ export class VaultAdapter implements ISecretManagerAdapter {
     };
   }
 
-  async getSecrets(references: SecretReference[]): Promise<Map<string, ResolvedSecret>> {
-    const results = new Map<string, ResolvedSecret>();
-
-    // Vault doesn't have a batch API, so we fetch in parallel
-    const promises = references.map(async (ref) => {
-      try {
-        const secret = await this.getSecret(ref.path, ref.key, ref.version);
-        results.set(ref.raw, secret);
-      } catch (error) {
-        // Store error as a special value
-        results.set(ref.raw, {
-          value: '',
-          metadata: {
-            error: error instanceof Error ? error.message : String(error),
-          },
-        });
-      }
-    });
-
-    await Promise.all(promises);
-    return results;
-  }
-
-  async setSecret(path: string, values: Record<string, string>): Promise<SecretReceipt> {
-    try {
-      const apiPath = this.toKv2Path(path, 'data');
-      const response = await this.request<{ data: { version: number } }>(
-        'POST',
-        apiPath,
-        { data: values }
-      );
-
-      return {
-        success: true,
-        path,
-        version: response.data.version.toString(),
-      };
-    } catch (error) {
-      return {
-        success: false,
-        path,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
-  async deleteSecret(path: string): Promise<SecretReceipt> {
-    try {
-      const apiPath = this.toKv2Path(path, 'metadata');
-      await this.request('DELETE', apiPath);
-
-      return {
-        success: true,
-        path,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        path,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
   async listSecrets(pathPrefix?: string): Promise<SecretListItem[]> {
     try {
       const basePath = pathPrefix || '';
@@ -256,7 +178,7 @@ export class VaultAdapter implements ISecretManagerAdapter {
       throw new Error('Not connected. Call connect() first.');
     }
 
-    const url = `${this.credentials.address}/${VAULT_API_VERSION}${path}`;
+    const url = `${this.credentials.address}/${VAULT_API_VERSION}/${path.replace(/^\/+/, '')}`;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -284,7 +206,10 @@ export class VaultAdapter implements ISecretManagerAdapter {
       options.body = JSON.stringify(body);
     }
 
-    const response = await fetch(url, options);
+    const response = await fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(15_000),
+    });
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -318,13 +243,5 @@ secretManagerRegistry.register({
     const adapter = new VaultAdapter();
     // connect() is async, will be called separately
     return adapter;
-  },
-  defaultCapabilities: {
-    supportsVersioning: true,
-    supportsMultipleKeys: true,
-    supportsRotation: false,
-    supportsAuditLog: true,
-    supportsDynamicSecrets: true,
-    maxSecretSize: 1024 * 1024,
   },
 });

@@ -24,7 +24,7 @@ export interface SaveConnectionOutcome {
 }
 
 /**
- * Validate, encrypt, and upsert provider credentials for hv_connect.
+ * Validate, encrypt, and upsert provider credentials for hv_connections.
  * Runs provider dependency
  * installation hooks and writes an audit entry.
  */
@@ -93,7 +93,7 @@ export type VerifyConnectionOutcome =
 
 /**
  * Verify a stored provider connection by instantiating its adapter and
- * calling verify() for hv_connect action="verify". Updates the
+ * calling verify() for hv_connections action="verify". Updates the
  * connection status and writes audit entries.
  */
 export async function verifyConnection(provider: string, scope?: string): Promise<VerifyConnectionOutcome> {
@@ -298,7 +298,7 @@ export interface DeleteConnectionOutcome {
   error?: string;
 }
 
-/** Delete a stored provider connection (shared by connection_delete and hv_connect). */
+/** Delete a stored provider connection (shared by connection_delete and hv_connections). */
 export function deleteConnection(provider: string, scope?: string): DeleteConnectionOutcome {
   scope = normalizeConnectionScope(scope) ?? undefined;
   const connection = connectionRepo.findByProviderAndScope(provider, scope || null);

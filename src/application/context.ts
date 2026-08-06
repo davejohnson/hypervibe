@@ -5,7 +5,6 @@ import { ComponentRepository } from '../adapters/db/repositories/component.repos
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
 import { IntegrationRepository } from '../adapters/db/repositories/integration.repository.js';
-import { SecretMappingRepository } from '../adapters/db/repositories/secret-mapping.repository.js';
 import { AuditRepository } from '../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
@@ -25,7 +24,6 @@ export interface Repos {
   connections: ConnectionRepository;
   runs: RunRepository;
   integrations: IntegrationRepository;
-  secretMappings: SecretMappingRepository;
   audit: AuditRepository;
 }
 
@@ -58,7 +56,6 @@ export function createCommandContext(): CommandContext {
     connections: new ConnectionRepository(),
     runs: new RunRepository(),
     integrations: new IntegrationRepository(),
-    secretMappings: new SecretMappingRepository(),
     audit: new AuditRepository(),
   };
 
@@ -199,7 +196,7 @@ export function createCommandContext(): CommandContext {
       const all = repos.projects.findAll();
       if (all.length === 0) {
         throw new HvError('NOT_FOUND', 'No projects found.', {
-          hint: 'Create one with hv_spec_set, or inspect existing provider infrastructure with hv_inspect and adopt it with hv_import.',
+          hint: 'Create one with hv_spec, or inspect existing provider infrastructure with hv_inspect and adopt it with hv_import.',
         });
       }
       throw new HvError('AMBIGUOUS_PROJECT', 'Could not resolve a project from this directory.', {

@@ -162,17 +162,13 @@ export async function parseCliInvocation(
       inputSource = value;
       continue;
     }
-    if (flag === 'file' && command?.id === 'hv_spec_set') {
+    if (flag === 'file' && command?.id === 'hv_spec') {
       if (typeof value !== 'string') throw new Error('--file requires a desired-state JSON path.');
       specFile = value;
       continue;
     }
 
-    const field = flag === 'confirm-action'
-      ? 'confirmActions'
-      : flag === 'confirm-destroy'
-        ? 'confirmDestroy'
-        : camelCaseFlag(flag);
+    const field = flag === 'confirm-action' ? 'confirmActions' : camelCaseFlag(flag);
     const existing = rawFlags.get(field) ?? [];
     existing.push(value);
     rawFlags.set(field, existing);
@@ -238,15 +234,11 @@ export function commandHelp(command: CommandDefinition): string {
   ];
   for (const [field, schema] of Object.entries(command.inputShape)) {
     if (SENSITIVE_LITERAL_FIELDS.has(field)) continue;
-    const flag = field === 'confirmActions'
-      ? 'confirm-action'
-      : field === 'confirmDestroy'
-        ? 'confirm-destroy'
-        : kebabCaseField(field);
+    const flag = field === 'confirmActions' ? 'confirm-action' : kebabCaseField(field);
     const description = schema.description ? `  ${schema.description}` : '';
     lines.push(`  --${flag}${optionValue(schema)}${description}`);
   }
-  if (command.id === 'hv_spec_set') {
+  if (command.id === 'hv_spec') {
     lines.push('  --file <path>  Read the desired-state spec from a JSON file.');
   }
   lines.push(

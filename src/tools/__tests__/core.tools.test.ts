@@ -12,6 +12,7 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
+import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
@@ -24,6 +25,7 @@ import { applyDatabaseSeed } from '../../application/apply-plan.js';
 import { createToolContext } from '../context.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
+import type { PlanAction } from '../../domain/plan/plan.types.js';
 
 let tempDir: string;
 
@@ -138,15 +140,15 @@ describe('bootstrap action receipt mapping', () => {
   });
 });
 
-describe('hv_spec_set / hv_spec_get', () => {
+describe('hv_spec', () => {
   it('creates a project, stores the spec, and bumps revisions on merge', async () => {
     const t = await makeClient();
-    const set = await t.call('hv_spec_set', { spec: SPEC });
+    const set = await t.call('hv_spec', { spec: SPEC });
     expect(set.ok).toBe(true);
     expect(set.data.revision).toBe(1);
     expect(set.next).toContain('hv_plan');
 
-    const merge = await t.call('hv_spec_set', {
+    const merge = await t.call('hv_spec', {
       project: 'core-spec-app',
       spec: { environments: { staging: { services: { worker: { workloadKind: 'worker' } } } } },
     });
@@ -168,29 +170,17 @@ describe('hv_spec_set / hv_spec_get', () => {
       },
     });
 
-    const get = await t.call('hv_spec_get', { project: 'core-spec-app' });
+    const get = await t.call('hv_spec', { project: 'core-spec-app' });
     expect(get.ok).toBe(true);
-    expect(get.data.environments.staging.services).toEqual(['web', 'worker']);
-    expect(get.data.environments.staging.serviceDetails).toEqual([
-      expect.objectContaining({
-        name: 'web',
-        workloadKind: 'web',
-        public: true,
-        boundUrl: 'https://app.example.com',
-      }),
-      expect.objectContaining({
-        name: 'worker',
-        workloadKind: 'worker',
-        public: false,
-      }),
-    ]);
+    expect(Object.keys(get.data.spec.environments.staging.services)).toEqual(['web', 'worker']);
+    expect(get.data).not.toHaveProperty('environments');
     await t.close();
   });
 
   it('persists top-level gitRemoteUrl into project metadata', async () => {
     const t = await makeClient();
     const gitRemoteUrl = 'git@github.com:davejohnson/apreskeys.com.git';
-    const set = await t.call('hv_spec_set', {
+    const set = await t.call('hv_spec', {
       spec: {
         ...SPEC,
         project: 'remote-spec-app',
@@ -201,20 +191,19 @@ describe('hv_spec_set / hv_spec_get', () => {
     expect(set.data.project.gitRemoteUrl).toBe(gitRemoteUrl);
     expect(new ProjectRepository().findByName('remote-spec-app')!.gitRemoteUrl).toBe(gitRemoteUrl);
 
-    const get = await t.call('hv_spec_get', { project: 'remote-spec-app' });
+    const get = await t.call('hv_spec', { project: 'remote-spec-app' });
     expect(get.ok).toBe(true);
     expect(get.data.project.gitRemoteUrl).toBe(gitRemoteUrl);
-    expect(get.data.projectMeta.gitRemoteUrl).toBe(gitRemoteUrl);
     expect(get.data.spec.gitRemoteUrl).toBe(gitRemoteUrl);
     await t.close();
   });
 
   it('syncs gitRemoteUrl from a merge patch into an existing project', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', { spec: SPEC });
+    await t.call('hv_spec', { spec: SPEC });
     const gitRemoteUrl = 'https://github.com/davejohnson/apreskeys.com.git';
 
-    const merge = await t.call('hv_spec_set', {
+    const merge = await t.call('hv_spec', {
       project: 'core-spec-app',
       spec: { gitRemoteUrl },
     });
@@ -226,7 +215,7 @@ describe('hv_spec_set / hv_spec_get', () => {
 
   it('rejects invalid specs with field-level details', async () => {
     const t = await makeClient();
-    const bad = await t.call('hv_spec_set', {
+    const bad = await t.call('hv_spec', {
       spec: {
         project: 'bad-app',
         environments: { staging: { hosting: { provider: 'railway' }, services: { job: { workloadKind: 'cron' } } } },
@@ -240,7 +229,7 @@ describe('hv_spec_set / hv_spec_get', () => {
 
   it('blocks a new runtime key that is missing from a matching release environment', async () => {
     const t = await makeClient();
-    const result = await t.call('hv_spec_set', {
+    const result = await t.call('hv_spec', {
       spec: {
         project: 'coverage-block-app',
         environments: {
@@ -271,7 +260,7 @@ describe('hv_spec_set / hv_spec_get', () => {
 
   it('accepts separate values, delegated slots, and explicit environment exceptions', async () => {
     const t = await makeClient();
-    const result = await t.call('hv_spec_set', {
+    const result = await t.call('hv_spec', {
       spec: {
         project: 'coverage-complete-app',
         secrets: {
@@ -307,7 +296,7 @@ describe('hv_spec_set / hv_spec_get', () => {
 
   it('blocks adding a matching environment until existing runtime keys are covered', async () => {
     const t = await makeClient();
-    const initial = await t.call('hv_spec_set', {
+    const initial = await t.call('hv_spec', {
       spec: {
         project: 'coverage-expansion-app',
         environments: {
@@ -321,7 +310,7 @@ describe('hv_spec_set / hv_spec_get', () => {
     });
     expect(initial.ok).toBe(true);
 
-    const expanded = await t.call('hv_spec_set', {
+    const expanded = await t.call('hv_spec', {
       project: 'coverage-expansion-app',
       spec: {
         environments: {
@@ -352,7 +341,7 @@ describe('hv_spec_set / hv_spec_get', () => {
       },
     }));
     const t = await makeClient();
-    const unrelated = await t.call('hv_spec_set', {
+    const unrelated = await t.call('hv_spec', {
       project: project.name,
       spec: { gitRemoteUrl: 'git@github.com:davejohnson/legacy-coverage-app.git' },
     });
@@ -366,7 +355,7 @@ describe('hv_spec_set / hv_spec_get', () => {
 
   it('rejects unknown hosting providers with the available list', async () => {
     const t = await makeClient();
-    const bad = await t.call('hv_spec_set', {
+    const bad = await t.call('hv_spec', {
       spec: {
         project: 'bad-provider-app',
         environments: { staging: { hosting: { provider: 'definitely-not-real' }, services: {} } },
@@ -380,7 +369,7 @@ describe('hv_spec_set / hv_spec_get', () => {
 
   it('requires confirmation before switching branch deploys to provider-native integrations', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'native-switch-app',
         gitRemoteUrl: 'git@github.com:davejohnson/native-switch-app.git',
@@ -394,7 +383,7 @@ describe('hv_spec_set / hv_spec_get', () => {
       },
     });
 
-    const bad = await t.call('hv_spec_set', {
+    const bad = await t.call('hv_spec', {
       project: 'native-switch-app',
       spec: {
         environments: {
@@ -413,14 +402,14 @@ describe('hv_spec_set / hv_spec_get', () => {
     }));
     expect(bad.hint).toContain('Do not switch from trigger="ci" to trigger="native"');
 
-    const get = await t.call('hv_spec_get', { project: 'native-switch-app' });
+    const get = await t.call('hv_spec', { project: 'native-switch-app' });
     expect(get.data.spec.environments.production.deploy.trigger).toBe('ci');
     await t.close();
   });
 
   it('allows provider-native branch deploys when explicitly confirmed', async () => {
     const t = await makeClient();
-    const set = await t.call('hv_spec_set', {
+    const set = await t.call('hv_spec', {
       confirmNativeDeploy: true,
       spec: {
         project: 'native-confirmed-app',
@@ -443,7 +432,7 @@ describe('hv_spec_set / hv_spec_get', () => {
 
   it('returns required connection setup immediately from the desired spec', async () => {
     const t = await makeClient();
-    const set = await t.call('hv_spec_set', {
+    const set = await t.call('hv_spec', {
       spec: {
         project: 'connection-check-app',
         gitRemoteUrl: 'git@github.com:davejohnson/connection-check-app.git',
@@ -489,7 +478,36 @@ describe('hv_spec_set / hv_spec_get', () => {
     expect(set.hint).toContain('SendGrid API key (Restricted Access for least privilege');
     expect(set.hint).toContain('mail.send');
     expect(set.hint).toContain('credentialsRef="dotenv:/absolute/path/.env#KEY"');
-    expect(set.next).toEqual(['hv_connect', 'hv_plan']);
+    expect(set.next).toEqual(['hv_connections', 'hv_plan']);
+    await t.close();
+  });
+
+  it('treats repository-only Pages as project desired state and defaults planning to repository', async () => {
+    const t = await makeClient();
+    const set = await t.call('hv_spec', {
+      spec: {
+        project: 'pages-only-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/pages-only-app.git',
+        github: {
+          canonicalEnvironment: 'repository',
+          pages: { sourcePath: 'apps/website', customDomain: 'pages-only-app.dev' },
+        },
+        environments: {},
+      },
+    });
+
+    expect(set.ok).toBe(true);
+    expect(set.data.connections.missing).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: 'cloudflare', scope: 'pages-only-app.dev', environments: ['repository'] }),
+      expect.objectContaining({ provider: 'github', scope: 'davejohnson/pages-only-app', environments: ['repository'] }),
+    ]));
+
+    const plan = await t.call('hv_plan', { project: 'pages-only-app' });
+    expect(plan.ok).toBe(true);
+    expect(plan.data.environment).toBe('repository');
+    expect(plan.data.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'repo:github-infrastructure-pr', type: 'update' }),
+    ]));
     await t.close();
   });
 
@@ -503,7 +521,7 @@ describe('hv_spec_set / hv_spec_get', () => {
     repo.updateStatus(otherZone.id, 'verified');
 
     const t = await makeClient();
-    const set = await t.call('hv_spec_set', {
+    const set = await t.call('hv_spec', {
       spec: {
         project: 'wrong-zone-app',
         environments: {
@@ -567,7 +585,7 @@ describe('hv_spec_set / hv_spec_get', () => {
       process.chdir(repoDir);
       t = await makeClient();
 
-      const get = await t.call('hv_spec_get', {});
+      const get = await t.call('hv_spec', {});
       expect(get.ok).toBe(true);
       expect(get.data.project.name).toBe('team-shared-app');
       expect(get.data.project.gitRemoteUrl).toBe('git@github.com:davejohnson/team-shared-app.git');
@@ -604,7 +622,7 @@ describe('hv_spec_set / hv_spec_get', () => {
       });
       await t.close();
       t = await makeClient();
-      await t.call('hv_spec_get', {});
+      await t.call('hv_spec', {});
       expect(
         new EnvironmentRepository()
           .findByProjectAndName(project.id, 'production')!
@@ -634,10 +652,10 @@ describe('hv_spec_set / hv_spec_get', () => {
         },
       }, null, 2)}\n`, 'utf8');
 
-      const updated = await t.call('hv_spec_get', {});
+      const updated = await t.call('hv_spec', {});
       expect(updated.ok).toBe(true);
       expect(updated.data.revision).toBe(2);
-      expect(updated.data.environments.production.services).toEqual(['web', 'daily']);
+      expect(Object.keys(updated.data.spec.environments.production.services)).toEqual(['web', 'daily']);
       expect(updated.data.spec.environments.production.services.daily).toMatchObject({
         workloadKind: 'cron',
         cronSchedule: '0 8 * * *',
@@ -658,6 +676,11 @@ describe('hv_spec_set / hv_spec_get', () => {
 describe('hv_plan / hv_status / hv_apply', () => {
   function sha256(value: string) {
     return createHash('sha256').update(value, 'utf8').digest('hex');
+  }
+
+  function storedPlanAction(planId: string, actionId: string): PlanAction | undefined {
+    const plan = new RunRepository().findById(planId)?.plan as { actions?: PlanAction[] } | undefined;
+    return plan?.actions?.find((action) => action.id === actionId);
   }
 
   function verifyConnection(provider: string, credentials: Record<string, unknown> = { apiToken: `${provider}-token` }) {
@@ -706,7 +729,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('plans creates for a fresh environment and blocks without connections', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', { spec: SPEC });
+    await t.call('hv_spec', { spec: SPEC });
     mockObserved(null);
 
     const plan = await t.call('hv_plan', { project: 'core-spec-app', env: 'staging' });
@@ -714,13 +737,13 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.data.verified).toBe(false);
     expect(plan.data.summary.create).toBeGreaterThan(0);
     expect(plan.data.blocked).toContainEqual(expect.objectContaining({ provider: 'railway' }));
-    expect(plan.hint).toContain('hv_connect');
+    expect(plan.hint).toContain('hv_connections');
     await t.close();
   });
 
   it('plans Cloudflare domain registration from desired state as a confirm-gated action', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'domain-plan-app',
         environments: {
@@ -755,7 +778,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
       requiresConfirm: true,
       billable: true,
     });
-    expect(JSON.stringify(register.metadata)).toContain('10.00');
+    expect(register.metadata).toBeUndefined();
+    expect(JSON.stringify(storedPlanAction(plan.data.planId, register.id)?.metadata)).toContain('10.00');
     const attach = plan.data.actions.find((action: { id: string }) => action.id === 'domain:apreskeys.com');
     expect(attach.dependsOn).toContain('domain:apreskeys.com:register');
     expect(plan.hint).toContain('confirmActions');
@@ -764,7 +788,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('blocks Cloudflare domain registration early when only an account API token is connected', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'domain-account-token-app',
         environments: {
@@ -796,7 +820,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('applies Cloudflare domain registration only when the plan action is explicitly confirmed', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'domain-apply-app',
         environments: {
@@ -890,7 +914,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('keeps Cloudflare domain registration pending while the Registrar workflow is in progress', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'domain-pending-app',
         environments: {
@@ -992,7 +1016,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('does not treat an existing Cloudflare DNS zone as completed domain registration', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'domain-zone-app',
         environments: {
@@ -1039,7 +1063,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
   it('plans and applies iOS bundle ID, capabilities, and TestFlight actions end to end', async () => {
     const BUNDLE = 'com.example.app';
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'ios-e2e-app',
         environments: {
@@ -1111,7 +1135,6 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(ids).toEqual(expect.arrayContaining([
       `ios:bundle-id:${BUNDLE}`,
       `ios:capabilities:${BUNDLE}`,
-      `ios:app:${BUNDLE}`,
       'ios:group:Beta',
       'ios:testers:Beta',
     ]));
@@ -1120,7 +1143,10 @@ describe('hv_plan / hv_status / hv_apply', () => {
       resource: { kind: 'ios', name: BUNDLE, provider: 'appstoreconnect' },
     });
     // The app record already exists, so its action is a noop.
-    expect(plan.data.actions.find((action: { id: string }) => action.id === `ios:app:${BUNDLE}`)).toMatchObject({ type: 'noop' });
+    expect(plan.data.actions.find((action: { id: string }) => action.id === `ios:app:${BUNDLE}`)).toBeUndefined();
+    expect(storedPlanAction(plan.data.planId, `ios:app:${BUNDLE}`)).toMatchObject({ type: 'noop' });
+    expect(plan.data.totalActionCount).toBe(plan.data.pendingActionCount + plan.data.noopActionCount);
+    expect(plan.data.noopActionCount).toBeGreaterThan(0);
 
     const apply = await t.call('hv_apply', { project: 'ios-e2e-app', planId: plan.data.planId });
     expect(apply.ok).toBe(true);
@@ -1164,7 +1190,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('plans and applies GitHub Actions deploy workflow setup from deploy.trigger="ci"', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'ci-plan-app',
         gitRemoteUrl: 'git@github.com:davejohnson/ci-plan-app.git',
@@ -1247,7 +1273,10 @@ describe('hv_plan / hv_status / hv_apply', () => {
       type: 'create',
       resource: { kind: 'ci', name: 'deploy-branch:production', provider: 'github' },
     });
-    expect(ci.metadata.workflow.path).toBe('.github/workflows/deploy-railway-production.yml');
+    expect(ci.metadata).toBeUndefined();
+    expect(storedPlanAction(plan.data.planId, ci.id)?.metadata?.workflow).toMatchObject({
+      path: '.github/workflows/deploy-railway-production.yml',
+    });
 
     const apply = await t.call('hv_apply', { project: 'ci-plan-app', planId: plan.data.planId });
     expect(apply.ok).toBe(true);
@@ -1293,7 +1322,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('fails CI workflow apply when Railway image pull credentials are missing', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'ci-missing-image-token-app',
         gitRemoteUrl: 'git@github.com:davejohnson/ci-missing-image-token-app.git',
@@ -1350,13 +1379,14 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const plan = await t.call('hv_plan', { project: 'ci-missing-image-token-app', env: 'production' });
     expect(plan.ok).toBe(true);
     const ci = plan.data.actions.find((action: { id: string }) => action.id === 'ci:github-actions:production:deploy-branch');
-    expect(ci.metadata.missingProviderSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
+    expect(ci.metadata).toBeUndefined();
+    expect(storedPlanAction(plan.data.planId, ci.id)?.metadata?.missingProviderSecrets).toEqual(['IMAGE_REGISTRY_USERNAME', 'IMAGE_REGISTRY_TOKEN']);
     expect(plan.data.actionScopedBlocked).toContainEqual(expect.objectContaining({
       provider: 'github',
       reason: expect.stringContaining('repo/workflow API access plus packageReadToken'),
     }));
     expect(plan.warnings).toContainEqual(expect.stringContaining('GitHub apiToken needs repo + workflow'));
-    expect(plan.next).toEqual(['hv_connect', 'hv_plan']);
+    expect(plan.next).toEqual(['hv_connections', 'hv_plan']);
 
     const apply = await t.call('hv_apply', { project: 'ci-missing-image-token-app', planId: plan.data.planId });
     expect(apply.ok).toBe(false);
@@ -1384,7 +1414,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.hint).toContain('HYPERVIBE_GITHUB_PACKAGES_TOKEN');
     expect(apply.hint).toContain('credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}');
     expect(apply.hint).toContain('credentialsRef="file:/absolute/path/github.json"');
-    expect(apply.next).toEqual(['hv_connect', 'hv_plan', 'hv_apply']);
+    expect(apply.next).toEqual(['hv_connections', 'hv_plan', 'hv_apply']);
     expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'RAILWAY_API_TOKEN', 'railway-token');
     expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'IMAGE_REGISTRY_TOKEN', expect.any(String));
     await t.close();
@@ -1392,7 +1422,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('blocks apply before independent actions when a full plan is missing Cloudflare for domain convergence', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'ci-domain-soft-block-app',
         gitRemoteUrl: 'git@github.com:davejohnson/ci-domain-soft-block-app.git',
@@ -1451,7 +1481,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.ok).toBe(true);
     expect(plan.data.blocked).toContainEqual(expect.objectContaining({ provider: 'cloudflare' }));
     expect(plan.data.actionScopedBlocked).toBeUndefined();
-    expect(plan.next).toEqual(['hv_connect', 'hv_plan']);
+    expect(plan.next).toEqual(['hv_connections', 'hv_plan']);
     expect(plan.hint).toContain('Do not run hv_apply until these connections verify');
 
     const apply = await t.call('hv_apply', { project: 'ci-domain-soft-block-app', planId: plan.data.planId });
@@ -1480,7 +1510,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('reports drift via hv_status against observed state', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', { spec: SPEC });
+    await t.call('hv_spec', { spec: SPEC });
     verifyRailwayConnection();
     const { ProjectRepository } = await import('../../adapters/db/repositories/project.repository.js');
     const project = new ProjectRepository().findByName('core-spec-app')!;
@@ -1512,7 +1542,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('reports a connected native source as drift for manual deployment ownership', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'manual-source-status-app',
         environments: {
@@ -1584,7 +1614,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('does not report in sync when a declared managed database alias is missing', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'database-alias-status-app',
         environments: {
@@ -1677,7 +1707,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('exposes sanitized observed service endpoints via hv_status', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', { spec: SPEC });
+    await t.call('hv_spec', { spec: SPEC });
     verifyRailwayConnection();
     const { ProjectRepository } = await import('../../adapters/db/repositories/project.repository.js');
     const project = new ProjectRepository().findByName('core-spec-app')!;
@@ -1726,7 +1756,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('uses provider metadata in hv_status so Railway web and worker kinds do not drift permanently', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'railway-worker-status-app',
         environments: {
@@ -1782,7 +1812,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('tells agents to connect Cloudflare before planning domain DNS drift', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'domain-status-missing-connection-app',
         environments: {
@@ -1853,13 +1883,13 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(status.hint).toContain('stop and offer two concrete paths');
     expect(status.hint).toContain('prepare a value-free handoff');
     expect(status.hint).toContain('do not run hv_plan');
-    expect(status.next).toEqual(['hv_connect']);
+    expect(status.next).toEqual(['hv_connections']);
     await t.close();
   });
 
   it('reports declared queues as drift when the provider cannot converge them', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'queue-status-app',
         environments: {
@@ -1918,7 +1948,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('reports synced production GitHub Actions deploy workflows as manual promotion, not push-to-deploy', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'ci-status-app',
         gitRemoteUrl: 'git@github.com:davejohnson/ci-status-app.git',
@@ -2000,7 +2030,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('rejects hv_apply when the spec changed after planning', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', { spec: SPEC });
+    await t.call('hv_spec', { spec: SPEC });
     verifyRailwayConnection();
     mockObserved(null);
 
@@ -2008,7 +2038,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.ok).toBe(true);
 
     // Supersede the spec
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       project: 'core-spec-app',
       spec: { environments: { staging: { envVars: { EXTRA: '1' } } } },
     });
@@ -2021,7 +2051,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('refuses to apply without verified connections', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', { spec: SPEC });
+    await t.call('hv_spec', { spec: SPEC });
     mockObserved(null);
     const plan = await t.call('hv_plan', { project: 'core-spec-app', env: 'staging' });
 
@@ -2030,13 +2060,13 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.error.code).toBe('MISSING_CONNECTION');
     expect(apply.hint).toContain('Railway Account API token');
     expect(apply.hint).toContain('https://railway.com/account/tokens');
-    expect(apply.next).toEqual(['hv_connect', 'hv_plan', 'hv_apply']);
+    expect(apply.next).toEqual(['hv_connections', 'hv_plan', 'hv_apply']);
     await t.close();
   });
 
   it('applies an explicitly confirmed environment-variable tombstone through the hosting adapter', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'env-retirement-app',
         environments: {
@@ -2140,7 +2170,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('destroys a locally managed provider service that was removed from the spec', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', { spec: SPEC });
+    await t.call('hv_spec', { spec: SPEC });
     verifyRailwayConnection();
 
     const { ProjectRepository } = await import('../../adapters/db/repositories/project.repository.js');
@@ -2242,7 +2272,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('deletes leftover Hypervibe task services without requiring a local binding', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'task-cleanup-app',
         environments: {
@@ -2321,11 +2351,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.data.actions).toContainEqual(expect.objectContaining({
       id: 'service:hv-task-123:destroy',
       type: 'destroy',
-      metadata: {
-        operation: 'taskServiceCleanup',
-        externalId: 'task-svc-1',
-      },
     }));
+    expect(storedPlanAction(plan.data.planId, 'service:hv-task-123:destroy')?.metadata).toEqual({
+      operation: 'taskServiceCleanup',
+      externalId: 'task-svc-1',
+    });
 
     const apply = await t.call('hv_apply', { project: 'task-cleanup-app', planId: plan.data.planId });
     expect(apply.ok).toBe(true);
@@ -2339,7 +2369,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('creates a replacement database without deploying or destroying the old database in the same apply', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'core-spec-app',
         environments: {
@@ -2487,7 +2517,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
   it('runs a declarative database seedCommand once through hv_apply and records completion', async () => {
     const t = await makeClient();
     const command = 'true';
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'seed-apply-app',
         environments: {
@@ -2617,10 +2647,13 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(seedRecord.seededAt).toEqual(expect.any(String));
 
     const nextPlan = await t.call('hv_plan', { project: 'seed-apply-app', env: 'production' });
-    expect(nextPlan.data.actions).toContainEqual(expect.objectContaining({
+    expect(nextPlan.data.actions).not.toContainEqual(expect.objectContaining({
+      id: 'database:railway:seed',
+    }));
+    expect(storedPlanAction(nextPlan.data.planId, 'database:railway:seed')).toMatchObject({
       id: 'database:railway:seed',
       type: 'noop',
-    }));
+    });
     await t.close();
   });
 
@@ -2686,7 +2719,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('tears down abandoned-provider services only when confirmed and prunes the previousHosting stash', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'previous-teardown-app',
         environments: {
@@ -2806,7 +2839,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
   it('stashes the abandoned provider bindings as previousHosting when the hosting provider switches', async () => {
     const t = await makeClient();
-    await t.call('hv_spec_set', {
+    await t.call('hv_spec', {
       spec: {
         project: 'provider-switch-stash-app',
         environments: {

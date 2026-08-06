@@ -38,10 +38,16 @@ import {
 } from '../domain/services/repo-collaboration.service.js';
 import {
   applyGitHubInfrastructure,
+  applyGitHubDelegatedSecret,
   applyGitHubNativeSetting,
   applyGitHubOpenAISecret,
   resolveGitHubInfrastructureRepository,
+  shouldPlanGitHubInfrastructure,
 } from '../domain/services/github-infrastructure.service.js';
+import {
+  applyGitHubPages,
+  applyGitHubPagesDns,
+} from '../domain/services/github-pages.service.js';
 import { setupCustomDomain } from '../domain/services/domain.service.js';
 import {
   connectionSetupDetails,
@@ -70,8 +76,16 @@ import {
 import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
 import type { CacheEngine } from '../domain/ports/cache.port.js';
 import type { DatabaseType } from '../domain/ports/database.port.js';
-import { setupBootstrapEmail } from '../domain/services/bootstrap-email.js';
-import { getProjectScopeHints } from '../domain/services/project-scope.js';
+import { applyEmailAction } from '../domain/services/email-apply.service.js';
+import {
+  emailIntegrationFingerprint,
+  resolveEmailIntegrationState,
+} from '../domain/services/email-plan.service.js';
+import {
+  applyTwilioMessagingAction,
+  resolveTwilioMessagingState,
+  twilioMessagingFingerprint,
+} from '../domain/services/twilio-messaging.service.js';
 import {
   applyProviderNativeDeploySourceAction,
 } from '../domain/services/provider-native-deploy-source.service.js';
@@ -159,7 +173,7 @@ export function connectionRecoveryHint(
     ? ` For GitHub Actions image deploys, the GitHub connection must include both GitHub API access and GHCR package-read access: apiToken needs repo + workflow (create: ${GITHUB_TOKEN_URLS.api}), while packageReadToken needs read:packages for durable image pulls (create: ${GITHUB_TOKEN_URLS.packageRead}). A read:packages-only token is not enough as apiToken. For a one-token setup, export NODE_AUTH_TOKEN with a classic PAT that has repo + workflow + read:packages, then use credentialsRef="env:NODE_AUTH_TOKEN"; Hypervibe also accepts HYPERVIBE_GITHUB_TOKEN and HYPERVIBE_GITHUB_PACKAGES_TOKEN as aliases when only one distinct value is available. For split credentials, use credentialsRef="dotenv:/absolute/path/.env" with credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}, or credentialsRef="file:/absolute/path/github.json" containing apiToken plus packageReadToken.`
     : '';
   const after = options.after ? ` ${options.after}` : '';
-  return `This task needs provider access that is not connected on this Mac (${providers}). Hypervibe can store and verify credentials the user already controls with hv_connect. ${commands}.${packageReadHint} Prefer exported env vars, existing .env files via credentialsRef="dotenv:/absolute/path/.env#KEY", or local JSON for structured credentials; raw credentials={...} is still accepted if the user intentionally wants chat entry. If no usable credential reference is already available, stop and offer two concrete paths: help connect credentials the user already has, or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume the user should be added to the provider, and do not run hv_plan, hv_apply, or hv_deploy as a workaround.${after}`;
+  return `This task needs provider access that is not connected on this Mac (${providers}). Hypervibe can store and verify credentials the user already controls with hv_connections. ${commands}.${packageReadHint} Prefer exported env vars, existing .env files via credentialsRef="dotenv:/absolute/path/.env#KEY", or local JSON for structured credentials; raw credentials={...} is still accepted if the user intentionally wants chat entry. If no usable credential reference is already available, stop and offer two concrete paths: help connect credentials the user already has, or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume the user should be added to the provider, and do not run hv_plan, hv_apply, or hv_deploy as a workaround.${after}`;
 }
 
 export function connectionRecoveryDetails(blocks: ConnectionBlock[]): {
@@ -311,6 +325,90 @@ export type PlanApplyOutcome =
     actionScopedWarnings: string[];
   };
 
+async function executeRepositoryPlanApply(
+  ctx: CommandContext,
+  params: {
+    project: Project;
+    spec: ProjectSpec;
+    specRevision: number;
+    planId: string;
+    confirmActions: string[];
+    envName: string;
+    actions: PlanAction[];
+  }
+): Promise<PlanApplyOutcome> {
+  const projectForApply = syncProjectGitRemoteUrl(ctx, params.project, params.spec);
+  const planService = new PlanService();
+  const blocked = planService.projectPreflight(projectForApply, params.spec, params.envName);
+  const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, params.actions);
+  const applyBlocked = [
+    ...hardBlocked,
+    ...actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked),
+  ];
+  if (applyBlocked.length > 0) return { kind: 'blocked', applyBlocked };
+
+  const expectedRepository = resolveGitHubInfrastructureRepository(projectForApply, params.spec);
+  const handler = async (action: PlanAction): Promise<ActionResult> => {
+    const authority = resolvePlanActionAuthority(action);
+    if (!authority) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Action ${action.id} has no valid mutation authority`,
+        error: 'Re-run hv_plan.',
+      };
+    }
+    if (action.resource.name !== expectedRepository && authority.capability !== 'github.pages-dns.sync') {
+      return blockedActionIdentity(
+        action,
+        `Reviewed repository is ${action.resource.name}; desired state currently targets ${expectedRepository ?? 'no repository'}.`
+      );
+    }
+    switch (authority.capability) {
+      case 'github.infrastructure.sync':
+        return applyGitHubInfrastructure({ action });
+      case 'github.collaboration.sync':
+        return applyGitHubCollaboration({
+          project: projectForApply,
+          spec: params.spec,
+          environmentName: params.envName,
+        });
+      case 'github.setting.sync':
+        return applyGitHubNativeSetting({ action });
+      case 'github.pages.sync':
+        return applyGitHubPages({ spec: params.spec, action });
+      case 'github.pages-dns.sync':
+        if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
+          return blockedActionIdentity(action, `Reviewed DNS action must belong to ${expectedRepository ?? 'a configured repository'}.`);
+        }
+        return applyGitHubPagesDns({
+          spec: params.spec,
+          action,
+        });
+      default:
+        return {
+          success: false,
+          status: 'blocked',
+          message: `Action ${action.id} is not valid for a repository-only plan`,
+          error: 'Re-run hv_plan.',
+        };
+    }
+  };
+
+  const result = await new ConvergeExecutor().execute({
+    planRunId: params.planId,
+    confirmActions: params.confirmActions,
+    currentSpecRevision: params.specRevision,
+    handler,
+  });
+  return {
+    kind: 'executed',
+    envName: params.envName,
+    result,
+    actionScopedWarnings: actionScopedBlocksAllowedDuringApply(actionScopedBlocked).map((entry) => entry.reason ?? ''),
+  };
+}
+
 export async function executePlanApply(ctx: CommandContext, params: {
   project: Project;
   spec: ProjectSpec;
@@ -334,16 +432,26 @@ export async function executePlanApply(ctx: CommandContext, params: {
     return { kind: 'plan_not_found', error: loaded.error };
   }
   const envName = loaded.document.environmentName;
-  const envSpec = spec.environments[envName];
-  if (!envSpec) {
-    return { kind: 'env_missing', envName };
-  }
   if (loaded.document.inputRequired?.length) {
     return {
       kind: 'input_required',
       envName,
       requirements: loaded.document.inputRequired,
     };
+  }
+  const envSpec = spec.environments[envName];
+  if (!envSpec) {
+    return shouldPlanGitHubInfrastructure(spec, envName)
+      ? executeRepositoryPlanApply(ctx, {
+          project,
+          spec,
+          specRevision: params.specRevision,
+          planId,
+          confirmActions: params.confirmActions,
+          envName,
+          actions: loaded.document.actions,
+        })
+      : { kind: 'env_missing', envName };
   }
 
   const projectForPreflight = spec.gitRemoteUrl
@@ -382,6 +490,32 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     freshIntegrationFingerprints = {
       stripe: stripeIntegrationFingerprint(stripeResolution),
+    };
+  }
+  if (envSpec.email.enabled || loaded.document.integrationFingerprints?.email) {
+    const emailState = await resolveEmailIntegrationState({
+      project: projectForPreflight,
+      environmentSpec: envSpec,
+    });
+    freshIntegrationFingerprints = {
+      ...(freshIntegrationFingerprints ?? {}),
+      email: emailIntegrationFingerprint(emailState),
+    };
+  }
+  if (envSpec.messaging || loaded.document.integrationFingerprints?.messaging) {
+    if (!envSpec.messaging) {
+      return {
+        kind: 'blocked',
+        applyBlocked: [{ provider: 'twilio', reason: 'Twilio messaging desired state changed after planning.', policy: 'hard' }],
+      };
+    }
+    const messagingState = await resolveTwilioMessagingState({
+      project: projectForPreflight,
+      spec: envSpec.messaging,
+    });
+    freshIntegrationFingerprints = {
+      ...(freshIntegrationFingerprints ?? {}),
+      messaging: twilioMessagingFingerprint(messagingState),
     };
   }
   const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
@@ -506,7 +640,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
         ...bootstrapParams,
         databaseProvider: undefined,
         domain: undefined,
-        setupEmail: false,
         ensureHostingProject: false,
       });
     }
@@ -620,6 +753,26 @@ export async function executePlanApply(ctx: CommandContext, params: {
       }
       return applyGitHubInfrastructure({ action });
     }
+    if (capability === 'github.pages.sync') {
+      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
+      if (action.resource.name !== expectedRepository) {
+        return blockedActionIdentity(
+          action,
+          `Reviewed repository is ${action.resource.name}; GitHub Pages currently targets ${expectedRepository ?? 'no repository'}.`
+        );
+      }
+      return applyGitHubPages({ spec, action });
+    }
+    if (capability === 'github.pages-dns.sync') {
+      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
+      if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
+        return blockedActionIdentity(
+          action,
+          `Reviewed DNS action must belong to ${expectedRepository ?? 'a configured repository'}.`
+        );
+      }
+      return applyGitHubPagesDns({ spec, action });
+    }
     if (capability === 'github.openai-secret.sync') {
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
       if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
@@ -629,6 +782,15 @@ export async function executePlanApply(ctx: CommandContext, params: {
         );
       }
       return applyGitHubOpenAISecret({ project: applyProject, environmentName: envName, action });
+    }
+    if (capability === 'github.delegated-secret.sync') {
+      return applyGitHubDelegatedSecret({
+        project: applyProject,
+        spec,
+        environmentName: envName,
+        action,
+        value: delegatedSecretEnvVars?.[action.resource.name],
+      });
     }
     if (capability === 'github.setting.sync') {
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
@@ -847,8 +1009,32 @@ export async function executePlanApply(ctx: CommandContext, params: {
     if (capability === 'domain.configure') {
       return applyDomain(ctx, applyProject, envName, envSpec, action);
     }
-    if (capability === 'email.configure') {
-      return applyEmailSetup(ctx, applyProject, envName, envSpec, action);
+    if (
+      capability === 'email.runtime.sync'
+      || capability === 'email.authorization.mutate'
+      || capability === 'email.dns.sync'
+      || capability === 'email.inbound.mutate'
+      || capability === 'email.delivery-events.mutate'
+      || capability === 'email.forwarding.mutate'
+    ) {
+      return applyEmailAction({
+        project: applyProject,
+        environmentName: envName,
+        environmentSpec: envSpec,
+        action,
+      });
+    }
+    if (
+      capability === 'messaging.service.mutate'
+      || capability === 'messaging.sender.mutate'
+      || capability === 'messaging.runtime.sync'
+    ) {
+      return applyTwilioMessagingAction({
+        project: applyProject,
+        environmentName: envName,
+        environmentSpec: envSpec,
+        action,
+      });
     }
     if (capability === 'local.environment.record') {
       const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
@@ -937,102 +1123,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
       ? { bootstrapSummary: (deployBootstrap as { summary: Record<string, unknown> }).summary }
       : {}),
     actionScopedWarnings,
-  };
-}
-
-async function applyEmailSetup(
-  ctx: CommandContext,
-  project: Project,
-  envName: string,
-  environmentSpec: EnvironmentSpec,
-  action: PlanAction
-): Promise<ActionResult> {
-  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-  if (!environment) {
-    return { success: false, message: 'Environment not found locally', error: `No local environment "${envName}"` };
-  }
-  const declaredServices = stringArrayField(asRecord(action.metadata), 'services');
-  const expectedServices = Object.keys(environmentSpec.services).sort();
-  const declaredDomain = stringField(asRecord(action.metadata), 'domain');
-  const expectedDomain = environmentSpec.domain;
-  if (
-    action.resource.provider !== 'sendgrid'
-    || action.resource.name !== (expectedDomain ?? envName)
-    || JSON.stringify([...declaredServices].sort()) !== JSON.stringify(expectedServices)
-    || declaredDomain !== expectedDomain
-  ) {
-    return {
-      success: false,
-      status: 'blocked',
-      message: `Email action ${action.id} does not match its declared environment targets`,
-      error: 'Re-run hv_plan so the SendGrid domain and service destinations are frozen into one current action.',
-    };
-  }
-  const workloads = declaredServices
-    .map((name) => ctx.repos.services.findByProjectAndName(project.id, name))
-    .filter((service): service is NonNullable<typeof service> => Boolean(service));
-  if (workloads.length !== declaredServices.length) {
-    return {
-      success: false,
-      message: 'Cannot configure email before every declared service is tracked locally',
-      error: 'Apply the service actions first, then re-run hv_plan.',
-    };
-  }
-  const hosting = await adapterFactory.getHostingAdapter(project);
-  if (!hosting.success || !hosting.adapter) {
-    return { success: false, message: 'Hosting adapter unavailable for email setup', error: hosting.error };
-  }
-  if (hosting.adapter.name !== environmentSpec.hosting.provider) {
-    return {
-      success: false,
-      status: 'blocked',
-      message: 'Hosting adapter does not match the reviewed email action',
-      error: `Environment uses ${environmentSpec.hosting.provider}, but resolved ${hosting.adapter.name}.`,
-    };
-  }
-  const summary: Record<string, unknown> = {};
-  const setup = await setupBootstrapEmail({
-    domain: declaredDomain,
-    workloads,
-    environment,
-    hostingAdapter: hosting.adapter,
-    scopeHints: getProjectScopeHints(project),
-    summary,
-  });
-  if (setup.failure) {
-    return {
-      success: false,
-      message: 'SendGrid setup failed',
-      error: bootstrapGeneralError(setup.failure.summary),
-      data: setup.failure.summary,
-    };
-  }
-  const apiKeySynced = summary.sendgridApiKeySynced === true;
-  const dnsSynced = !declaredDomain || summary.sendgridDnsSynced === true;
-  if (!apiKeySynced || !dnsSynced) {
-    return {
-      success: false,
-      message: 'SendGrid setup was incomplete',
-      error: bootstrapGeneralError(summary),
-      data: summary,
-    };
-  }
-  ctx.repos.environments.updatePlatformBindings(environment.id, {
-    email: {
-      enabled: true,
-      provider: 'sendgrid',
-      domain: declaredDomain ?? null,
-      services: workloads.map((service) => service.name).sort(),
-      configuredAt: new Date().toISOString(),
-    },
-  });
-  return {
-    success: true,
-    message: `Configured SendGrid for ${workloads.length} service(s)`,
-    data: {
-      services: workloads.map((service) => service.name).sort(),
-      domainAuthenticationConfigured: Boolean(environmentSpec.domain),
-    },
   };
 }
 

@@ -38,7 +38,7 @@ It does not:
 | Live infrastructure | Provider APIs observed by `hv_status` / `hv_plan` | Display the latest response with freshness |
 | Public endpoint reachability | The bound public URL plus `hv_health` | Check directly and display separately from provider drift |
 | Plans, runs, receipts | Hypervibe SQLite | Read through `hv_runs` |
-| Credentials and encrypted plan inputs | Hypervibe secret/plan storage | Accept only in an in-memory form, send once to `hv_connect`, then discard |
+| Credentials and encrypted plan inputs | Hypervibe secret/plan storage | Accept only in an in-memory form, send once to `hv_connections`, then discard |
 | Repositories watched on this Mac | Companion app | Store repo bookmarks/paths |
 | UI preferences and acknowledgements | Companion app | Store locally |
 | Last sanitized UI snapshot | Companion app | Disposable cache only |
@@ -71,9 +71,9 @@ The companion cache can always be deleted and rebuilt. Losing it must not change
 ┌───────────────────────────────────────┐
 │ Existing Hypervibe MCP + Node runtime │
 │ bundled inside the app                │
-│ hv_upgrade / hv_spec_get / hv_status  │
-│ hv_runs / hv_connections_list         │
-│ hv_connect (connection management)    │
+│ hv_spec / hv_status / hv_health       │
+│ hv_runs / hv_connections         │
+│ hv_connections (connection management)    │
 └───────────────┬───────────────┬───────┘
                 │               │
                 ▼               ▼
@@ -88,8 +88,8 @@ repository as `cwd` and its configured `HYPERVIBE_DATA_DIR`, if any. The
 launcher and repo arguments are absolute paths; nothing is resolved through a
 GUI process's assumed shell `PATH`, and the app never runs `@latest`.
 
-The bundled MCP reports the version from its copied `package.json` in both the
-MCP initialize handshake and `hv_upgrade`. The Companion's MCP client identity
+The bundled MCP reports the version from its copied `package.json` in the MCP
+initialize handshake. The Companion's MCP client identity
 comes from the app bundle's `CFBundleShortVersionString`. The current combined
 release pipeline intentionally assigns both artifacts the same `vX.Y.Z`
 release number, but neither runtime identity is hardcoded or borrowed from the
@@ -142,7 +142,7 @@ automatically. The user chooses a repository and Claude and/or Codex in one
 flow. Hypervibe registers the repo even when no spec exists, updates the
 selected host configuration, and ends with a restart instruction and starter
 prompt. The first chat determines the user's actual task; it may inspect an
-existing spec or initialize one with `hv_spec_set`.
+existing spec or initialize one with `hv_spec`.
 
 There is no operator/contributor role picker. Provider access is
 operation-scoped, not a permanent UI identity. Solo users retain the complete
@@ -226,7 +226,7 @@ It never stores:
 - arbitrary run metadata or receipts.
 
 The app may also show the provider, scope, status, and last-verification time
-returned by `hv_connections_list`. Those connection summaries and the safe
+returned by `hv_connections`. Those connection summaries and the safe
 provider form catalog are session-only and are not written to the snapshot
 cache.
 
@@ -241,13 +241,14 @@ The app derives its view from current Hypervibe responses rather than mirroring 
 On launch and after executable changes:
 
 1. Start Hypervibe in the configured repo and data-directory context.
-2. Complete the MCP initialize handshake.
-3. Call `hv_upgrade action="status"` to confirm package/schema readiness.
-4. If no repo spec exists, mark the project ready for chat and stop the status
+2. Complete the MCP initialize handshake, which confirms the package version;
+   SQLite migrations have already run during server startup.
+3. If no repo spec exists, mark the project ready for chat and stop the status
    refresh without treating it as an error.
-5. Otherwise call `hv_spec_get`, `hv_status`, `hv_health`, `hv_runs`, and
-   `hv_connections_list`.
-6. Disable refresh actions if the executable or local schema is incompatible.
+4. Otherwise call `hv_spec`, `hv_status`, `hv_health`, `hv_runs`, and
+   `hv_connections`.
+5. Disable refresh actions if startup, the handshake, or status inspection
+   reports an incompatibility.
 
 ### Provider connection management
 
@@ -256,13 +257,13 @@ use a different `HYPERVIBE_DATA_DIR` and therefore a different Hypervibe
 connection store. The companion opens a short MCP stdio session in that exact
 project context for each list, add, verify, or remove operation.
 
-`hv_connections_list` returns provider guidance plus a provider-neutral
+`hv_connections` returns provider guidance plus a provider-neutral
 credential-field description derived from each adapter's Zod schema. The app
 uses that description to render forms without provider-name branches. Older
 executables that do not return field descriptions fall back to
 `credentialsRef` entry.
 
-All mutations call the existing `hv_connect` tool:
+All mutations call the existing `hv_connections` tool:
 
 - add passes either an in-memory credentials object or a `credentialsRef`;
 - verify rechecks the stored provider connection;
@@ -278,16 +279,15 @@ can replace, verify, or delete it.
 
 ### Topology
 
-Call `hv_spec_get` and map only its summary fields:
+Call `hv_spec` and map only canonical desired-state fields:
 
 - environment;
 - hosting provider;
-- services, workload kind, public/private intent, health path, and sanitized
-  bound public origin;
+- services, workload kind, public/private intent, and health path;
 - database provider;
 - storage names;
 - domain;
-- delegated-secret key names.
+- delegated-secret declarations.
 
 This is enough to render relationships such as:
 
@@ -302,11 +302,13 @@ staging
     └── injected into api
 ```
 
-The first version may infer conventional relationships from the desired spec summary. If users need exact dependency edges, Hypervibe can later expose additional sanitized summary fields from `hv_spec_get`; that is preferable to reading internal bindings.
+The companion infers conventional relationships from the desired spec. Live
+service URLs and provider status come from `hv_status`; `hv_spec` does not
+duplicate observed infrastructure or local bindings.
 
 ### Public endpoint health
 
-For every public service with a repo-backed URL binding, call `hv_health` and
+For every public service with a live URL reported by `hv_status`, call `hv_health` and
 retain only service name, sanitized URL, success, status, latency, and check
 time. Discard response bodies, headers, cookies, and arbitrary error payloads.
 
@@ -368,7 +370,7 @@ Changing a database from one service/provider to another can involve:
 That belongs in the existing desired-state loop:
 
 ```text
-chat intent → hv_spec_set → hv_plan → review → hv_apply → hv_status
+chat intent → hv_spec → hv_plan → review → hv_apply → hv_status
 ```
 
 The companion may offer **Change provider…**, but the action should copy or hand off a structured request to chat, for example:

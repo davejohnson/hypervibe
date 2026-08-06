@@ -288,7 +288,7 @@ describe('hv_ci_status', () => {
       jobName: 'deploy',
     }));
     expect(res.data.diagnostics[0].summary).toContain('Railway will show no new deploy attempt');
-    expect(res.data.diagnostics[0].next).toContainEqual(expect.stringContaining('hv_secrets_set target="github"'));
+    expect(res.data.diagnostics[0].next).toContainEqual(expect.stringContaining('hv_plan with secretRefs'));
     await t.close();
   });
 

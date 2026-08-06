@@ -1,11 +1,8 @@
 import {
   type ISecretManagerAdapter,
-  type SecretManagerCapabilities,
   type SecretManagerVerifyResult,
   type ResolvedSecret,
-  type SecretReference,
   type SecretListItem,
-  type SecretReceipt,
   type BitwardenCredentials,
   BitwardenCredentialsSchema,
 } from '../../../domain/ports/secretmanager.port.js';
@@ -33,14 +30,6 @@ interface BwClient {
  */
 export class BitwardenAdapter implements ISecretManagerAdapter {
   readonly name = 'bitwarden' as const;
-
-  readonly capabilities: SecretManagerCapabilities = {
-    supportsVersioning: false,
-    supportsMultipleKeys: false, // Each Bitwarden secret is a single key/value
-    supportsRotation: false,
-    supportsAuditLog: true, // Bitwarden event logs
-    supportsDynamicSecrets: false,
-  };
 
   private credentials: BitwardenCredentials | null = null;
   private client: BwClient | null = null;
@@ -83,7 +72,6 @@ export class BitwardenAdapter implements ISecretManagerAdapter {
       return {
         success: true,
         identity: `Bitwarden Secrets Manager (org ${this.credentials!.organizationId})`,
-        capabilities: this.capabilities,
       };
     } catch (error) {
       return {
@@ -98,53 +86,6 @@ export class BitwardenAdapter implements ISecretManagerAdapter {
     const id = await this.resolveSecretId(client, path);
     const secret = await client.secrets().get(id);
     return { value: secret.value };
-  }
-
-  async getSecrets(references: SecretReference[]): Promise<Map<string, ResolvedSecret>> {
-    const results = new Map<string, ResolvedSecret>();
-    if (references.length === 0) return results;
-
-    let client: BwClient;
-    try {
-      client = await this.getClient();
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      for (const ref of references) {
-        results.set(ref.raw, { value: '', metadata: { error: errorMsg } });
-      }
-      return results;
-    }
-
-    for (const ref of references) {
-      try {
-        const id = await this.resolveSecretId(client, ref.path);
-        const secret = await client.secrets().get(id);
-        results.set(ref.raw, { value: secret.value });
-      } catch (error) {
-        results.set(ref.raw, {
-          value: '',
-          metadata: { error: error instanceof Error ? error.message : String(error) },
-        });
-      }
-    }
-
-    return results;
-  }
-
-  async setSecret(path: string, _values: Record<string, string>): Promise<SecretReceipt> {
-    return {
-      success: false,
-      path,
-      error: 'The Bitwarden integration is resolve-only. Create or edit secrets in Bitwarden Secrets Manager, then reference them with bitwarden://<name-or-id>.',
-    };
-  }
-
-  async deleteSecret(path: string): Promise<SecretReceipt> {
-    return {
-      success: false,
-      path,
-      error: 'The Bitwarden integration is resolve-only. Delete secrets in Bitwarden Secrets Manager directly.',
-    };
   }
 
   async listSecrets(_pathPrefix?: string): Promise<SecretListItem[]> {
@@ -163,11 +104,4 @@ secretManagerRegistry.register({
     setupHelpUrl: 'https://bitwarden.com/help/access-tokens/',
   },
   factory: () => new BitwardenAdapter(),
-  defaultCapabilities: {
-    supportsVersioning: false,
-    supportsMultipleKeys: false,
-    supportsRotation: false,
-    supportsAuditLog: true,
-    supportsDynamicSecrets: false,
-  },
 });

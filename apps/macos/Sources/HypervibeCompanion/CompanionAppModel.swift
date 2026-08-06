@@ -202,7 +202,7 @@ final class CompanionAppModel: ObservableObject {
             await refreshCatalogAfterSuccessfulMutation(result, project: project)
             return result
         } catch let mutationError {
-            // hv_connect deliberately keeps a saved connection when verification
+            // hv_connections deliberately keeps a saved connection when verification
             // fails. Re-read the catalog so the failed row is immediately visible.
             do {
                 try await reloadConnectionCatalog(project: project)
@@ -279,17 +279,6 @@ final class CompanionAppModel: ObservableObject {
         return try await mcpClient.hostingVariables(
             project: project,
             targets: targets
-        )
-    }
-
-    func setHostingVariable(
-        projectID: UUID,
-        request: HostingVariableRequest
-    ) async throws -> HostingVariableMutationResult {
-        let project = try connectionProject(id: projectID)
-        return try await mcpClient.setHostingVariable(
-            project: project,
-            request: request
         )
     }
 

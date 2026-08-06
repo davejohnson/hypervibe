@@ -10,10 +10,17 @@ import {
 import { isGitHubCollaborationAction } from '../services/repo-collaboration.service.js';
 import {
   isGitHubInfrastructureAction,
+  isGitHubDelegatedSecretAction,
+  GITHUB_DELEGATED_SECRET_DESTROY_OPERATION,
+  GITHUB_DELEGATED_SECRET_OPERATION,
   isGitHubNativeSettingAction,
   isGitHubOpenAISecretAction,
   OPENAI_ACTIONS_SECRET,
 } from '../services/github-infrastructure.service.js';
+import {
+  isGitHubPagesAction,
+  isGitHubPagesDnsAction,
+} from '../services/github-pages.service.js';
 import { IOS_OPERATIONS, isIosAction } from '../services/appstore-plan.service.js';
 import { QUEUE_OPERATIONS, isQueueAction } from '../services/queue-plan.service.js';
 import { STORAGE_OPERATIONS, isStorageAction } from '../services/storage-plan.service.js';
@@ -41,6 +48,8 @@ import {
   isLoadBalancerAction,
   LOAD_BALANCER_OPERATIONS,
 } from '../services/load-balancer-plan.service.js';
+import { EMAIL_OPERATIONS } from '../services/email-plan.service.js';
+import { MESSAGING_OPERATIONS } from '../services/twilio-messaging.service.js';
 
 export type PlanMutationCapability =
   | 'hosting.environment.ensure'
@@ -51,7 +60,10 @@ export type PlanMutationCapability =
   | 'github.collaboration.sync'
   | 'github.infrastructure.sync'
   | 'github.openai-secret.sync'
+  | 'github.delegated-secret.sync'
   | 'github.setting.sync'
+  | 'github.pages.sync'
+  | 'github.pages-dns.sync'
   | 'appstore.mutate'
   | 'queue.mutate'
   | 'storage.mutate'
@@ -78,7 +90,15 @@ export type PlanMutationCapability =
   | 'hosting.previous-service.destroy'
   | 'hosting.service.destroy'
   | 'domain.configure'
-  | 'email.configure'
+  | 'email.runtime.sync'
+  | 'email.authorization.mutate'
+  | 'email.dns.sync'
+  | 'email.inbound.mutate'
+  | 'email.delivery-events.mutate'
+  | 'email.forwarding.mutate'
+  | 'messaging.service.mutate'
+  | 'messaging.sender.mutate'
+  | 'messaging.runtime.sync'
   | 'local.environment.record'
   | 'hosting.project.ensure'
   | 'hosting.service.converge'
@@ -134,6 +154,11 @@ function metadataStringArray(action: PlanAction, key: string): string[] | undefi
     return undefined;
   }
   return value;
+}
+
+function metadataBoolean(action: PlanAction, key: string): boolean | undefined {
+  const value = action.metadata?.[key];
+  return typeof value === 'boolean' ? value : undefined;
 }
 
 function metadataPositiveInteger(action: PlanAction, key: string): number | undefined {
@@ -298,12 +323,47 @@ export function resolvePlanActionAuthority(
     return authority(action, 'github.openai-secret.sync');
   }
   if (
+    isGitHubDelegatedSecretAction(action)
+    && exactResource(action, 'secret', 'github')
+    && (
+      (action.metadata?.operation === GITHUB_DELEGATED_SECRET_OPERATION && action.type === 'update')
+      || (action.metadata?.operation === GITHUB_DELEGATED_SECRET_DESTROY_OPERATION && action.type === 'destroy')
+    )
+    && metadataString(action, 'repository')
+    && metadataString(action, 'targetScope')
+  ) {
+    return authority(action, 'github.delegated-secret.sync');
+  }
+  if (
     isGitHubNativeSettingAction(action)
     && exactResource(action, 'repo', 'github')
     && action.type === 'update'
     && action.resource.name === metadataString(action, 'repository')
   ) {
     return authority(action, 'github.setting.sync');
+  }
+  if (
+    isGitHubPagesAction(action)
+    && exactResource(action, 'repo', 'github')
+    && (
+      (metadataBoolean(action, 'enabled') === true && hasType(action, 'create', 'update'))
+      || (metadataBoolean(action, 'enabled') === false && action.type === 'destroy')
+    )
+    && action.resource.name === metadataString(action, 'repository')
+  ) {
+    return authority(action, 'github.pages.sync');
+  }
+  if (
+    isGitHubPagesDnsAction(action)
+    && exactResource(action, 'domain', 'cloudflare')
+    && (
+      (metadataBoolean(action, 'enabled') === true && action.type === 'update')
+      || (metadataBoolean(action, 'enabled') === false && action.type === 'destroy')
+    )
+    && metadataString(action, 'repository')
+    && Array.isArray(action.metadata?.desiredRecords)
+  ) {
+    return authority(action, 'github.pages-dns.sync');
   }
   if (
     isIosAction(action)
@@ -539,13 +599,89 @@ export function resolvePlanActionAuthority(
     return authority(action, 'domain.configure');
   }
   if (
-    exactResource(action, 'email', 'sendgrid')
-    && action.metadata?.operation === 'emailSetup'
+    exactResource(action, 'email')
+    && action.metadata?.operation === EMAIL_OPERATIONS.runtimeSync
     && action.type === 'update'
     && metadataStringArray(action, 'services')
-  ) {
-    return authority(action, 'email.configure');
+  ) return authority(action, 'email.runtime.sync');
+  if (
+    exactResource(action, 'email', 'sendgrid')
+    && (
+      action.metadata?.operation === EMAIL_OPERATIONS.authorizationEnsure
+      || action.metadata?.operation === EMAIL_OPERATIONS.authorizationAdopt
+      || action.metadata?.operation === EMAIL_OPERATIONS.authorizationVerify
+    )
+    && hasType(action, 'create', 'update')
+  ) return authority(action, 'email.authorization.mutate');
+  if (
+    exactResource(action, 'domain', 'cloudflare')
+    && (
+      action.metadata?.operation === EMAIL_OPERATIONS.dnsSync
+      || action.metadata?.operation === EMAIL_OPERATIONS.dnsAdopt
+    )
+    && action.type === 'update'
+  ) return authority(action, 'email.dns.sync');
+  if (
+    exactResource(action, 'email', 'sendgrid')
+    && (
+      action.metadata?.operation === EMAIL_OPERATIONS.inboundEnsure
+      || action.metadata?.operation === EMAIL_OPERATIONS.inboundAdopt
+      || action.metadata?.operation === EMAIL_OPERATIONS.inboundReplace
+    )
+    && hasType(action, 'create', 'update', 'replace')
+  ) return authority(action, 'email.inbound.mutate');
+  if (
+    exactResource(action, 'email', 'sendgrid')
+    && (
+      action.metadata?.operation === EMAIL_OPERATIONS.deliveryEventsEnsure
+      || action.metadata?.operation === EMAIL_OPERATIONS.deliveryEventsAdopt
+    )
+    && action.id === 'email:sendgrid:delivery-events'
+    && hasType(action, 'update', 'replace')
+  ) return authority(action, 'email.delivery-events.mutate');
+  if (action.resource.provider === 'cloudflare') {
+    const forwardingOperation = action.metadata?.operation;
+    const forwardingTypeIsValid =
+      ((forwardingOperation === EMAIL_OPERATIONS.forwardingDnsEnsure
+        || forwardingOperation === EMAIL_OPERATIONS.forwardingDnsAdopt
+        || forwardingOperation === EMAIL_OPERATIONS.forwardingDestinationAdopt
+        || forwardingOperation === EMAIL_OPERATIONS.forwardingRuleAdopt
+        || forwardingOperation === EMAIL_OPERATIONS.forwardingCatchAllEnsure
+        || forwardingOperation === EMAIL_OPERATIONS.forwardingCatchAllAdopt)
+        && action.type === 'update')
+      || ((forwardingOperation === EMAIL_OPERATIONS.forwardingDestinationEnsure
+        || forwardingOperation === EMAIL_OPERATIONS.forwardingRuleEnsure)
+        && hasType(action, 'create', 'update'))
+      || (forwardingOperation === EMAIL_OPERATIONS.forwardingRuleDestroy && action.type === 'destroy');
+    if (forwardingTypeIsValid) return authority(action, 'email.forwarding.mutate');
   }
+  if (
+    exactResource(action, 'messaging', 'twilio')
+    && (
+      action.metadata?.operation === MESSAGING_OPERATIONS.serviceEnsure
+      || action.metadata?.operation === MESSAGING_OPERATIONS.serviceAdopt
+    )
+    && hasType(action, 'create', 'update')
+    && metadataString(action, 'configHash')
+  ) return authority(action, 'messaging.service.mutate');
+  if (
+    exactResource(action, 'messaging', 'twilio')
+    && (
+      action.metadata?.operation === MESSAGING_OPERATIONS.senderAttach
+      || action.metadata?.operation === MESSAGING_OPERATIONS.senderMove
+    )
+    && hasType(action, 'create', 'replace')
+    && metadataString(action, 'phoneNumberSid') === action.resource.name
+    && metadataString(action, 'serviceName')
+    && metadataString(action, 'configHash')
+  ) return authority(action, 'messaging.sender.mutate');
+  if (
+    exactResource(action, 'messaging')
+    && action.metadata?.operation === MESSAGING_OPERATIONS.runtimeSync
+    && action.type === 'update'
+    && metadataString(action, 'configHash')
+    && metadataStringArray(action, 'services')
+  ) return authority(action, 'messaging.runtime.sync');
   if (
     exactResource(action, 'environment')
     && hasType(action, 'create', 'update')

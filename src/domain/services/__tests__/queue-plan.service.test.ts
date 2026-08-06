@@ -247,7 +247,7 @@ describe('queue-plan.service', () => {
         action: ensureAction('email-jobs'),
       });
       expect(result.success).toBe(false);
-      expect(result.error).toContain('Re-run hv_connect');
+      expect(result.error).toContain('Re-run hv_connections');
       expect(result.error).toContain('prepare');
     });
 

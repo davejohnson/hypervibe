@@ -181,7 +181,7 @@ describe('hv_deploy', () => {
     const result = await t.call('hv_deploy', { project: 'specless-app', env: 'staging' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('NOT_FOUND');
-    expect(result.hint).toContain('hv_spec_set');
+    expect(result.hint).toContain('hv_spec');
     await t.close();
   });
 

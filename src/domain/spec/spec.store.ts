@@ -165,6 +165,7 @@ export interface SpecResult {
   spec: ProjectSpec;
   revision: number;
   source?: { kind: 'repo'; path: string } | { kind: 'local' };
+  envTemplate?: { path: string; addedKeys: string[] };
   /**
    * True when `.hypervibe/spec.json` changed outside hypervibe (or was seen
    * for the first time) and was just recorded as a new revision. Callers
@@ -235,6 +236,7 @@ export class SpecStore {
       spec: converted,
       revision: row.revision,
       source: written ? { kind: 'repo', path: written.path } : { kind: 'local' },
+      ...(written ? { envTemplate: written.envTemplate } : {}),
     };
   }
 
@@ -255,6 +257,7 @@ export class SpecStore {
       spec: parsed,
       revision: row.revision,
       source: written ? { kind: 'repo', path: written.path } : { kind: 'local' },
+      ...(written ? { envTemplate: written.envTemplate } : {}),
     };
   }
 

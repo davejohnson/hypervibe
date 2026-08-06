@@ -68,6 +68,11 @@ export const SENDGRID_SCOPE_REQUIREMENTS = {
   domainAuthentication: ['whitelabel.read', 'whitelabel.create', 'whitelabel.update'],
   senderVerification: ['user.email.read', 'user.email.create', 'user.email.update'],
   eventWebhook: ['user.webhooks.event.settings.read', 'user.webhooks.event.settings.update'],
+  inboundParse: [
+    'user.webhooks.parse.settings.read',
+    'user.webhooks.parse.settings.create',
+    'user.webhooks.parse.settings.delete',
+  ],
 } as const;
 
 export type SendGridScopeCapability = keyof typeof SENDGRID_SCOPE_REQUIREMENTS;
@@ -78,6 +83,7 @@ export interface SendGridPermissionAudit {
   canManageDomainAuthentication: boolean;
   canManageSenderVerification: boolean;
   canConfigureEventWebhook: boolean;
+  canConfigureInboundParse: boolean;
   setupReady: boolean;
   missingScopes: Record<SendGridScopeCapability, string[]>;
   requiredAuthorizationPaths: Array<'domainAuthentication' | 'senderVerification'>;
@@ -156,12 +162,14 @@ export function assessSendGridScopes(scopes: string[]): SendGridPermissionAudit 
     domainAuthentication: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.domainAuthentication),
     senderVerification: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.senderVerification),
     eventWebhook: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.eventWebhook),
+    inboundParse: missingSendGridScopes(scopes, SENDGRID_SCOPE_REQUIREMENTS.inboundParse),
   };
 
   const hasMailSend = missingScopes.mailSend.length === 0;
   const canManageDomainAuthentication = missingScopes.domainAuthentication.length === 0;
   const canManageSenderVerification = missingScopes.senderVerification.length === 0;
   const canConfigureEventWebhook = missingScopes.eventWebhook.length === 0;
+  const canConfigureInboundParse = missingScopes.inboundParse.length === 0;
   const setupReady = hasMailSend && (canManageDomainAuthentication || canManageSenderVerification);
 
   return {
@@ -170,6 +178,7 @@ export function assessSendGridScopes(scopes: string[]): SendGridPermissionAudit 
     canManageDomainAuthentication,
     canManageSenderVerification,
     canConfigureEventWebhook,
+    canConfigureInboundParse,
     setupReady,
     missingScopes,
     requiredAuthorizationPaths: ['domainAuthentication', 'senderVerification'],
@@ -273,8 +282,15 @@ export class SendGridAdapter {
         success: true,
         scopes,
         permissions,
-        ...(!permissions.canConfigureEventWebhook && {
-          warning: `SendGrid API key cannot configure event webhooks. Add ${SENDGRID_SCOPE_REQUIREMENTS.eventWebhook.join(', ')} if Hypervibe should set webhook URLs automatically.`,
+        ...((!permissions.canConfigureEventWebhook || !permissions.canConfigureInboundParse) && {
+          warning: [
+            ...(!permissions.canConfigureEventWebhook
+              ? [`SendGrid API key cannot configure delivery-event webhooks. Add ${SENDGRID_SCOPE_REQUIREMENTS.eventWebhook.join(', ')} for that capability.`]
+              : []),
+            ...(!permissions.canConfigureInboundParse
+              ? [`SendGrid API key cannot configure Inbound Parse. Add ${SENDGRID_SCOPE_REQUIREMENTS.inboundParse.join(', ')} when environment.email.inbound is declared.`]
+              : []),
+          ].join(' '),
         }),
       };
     } catch (error) {

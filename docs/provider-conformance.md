@@ -6,7 +6,7 @@ the normal desired-state loop.
 
 Catalog and blueprint work is intentionally separate from this contract.
 The active provider scope deliberately excludes Heroku, Render, and Fly.
-Supabase, Neon, and reCAPTCHA remain in scope.
+Supabase and Neon remain in scope.
 
 ## Contract families
 
@@ -377,19 +377,21 @@ The GCP credential is a service-account JSON key created at
 `https://console.cloud.google.com/iam-admin/serviceaccounts` and scoped to one
 isolated project. Grant `roles/cloudsql.admin` for instance, backup-policy,
 replica, clone, user, and deletion lifecycle; `roles/cloudsql.client` for the
-connector; the Cloud Run verification roles documented by `hv_connect`; and
+connector; the Cloud Run verification roles documented by `hv_connections`; and
 enable `sqladmin.googleapis.com`. The GitHub credential is a token scoped to
 the one disposable repository with Contents, Pull requests, Actions, Variables,
 and Secrets read/write permissions as described by the GitHub connection
 guidance. Connect both through file/dotenv references, never raw command values.
 
-Before the run, put a separate minimal-role drill service-account JSON into the
-repository secret without printing it. It needs the exact clone/connect/delete/
+Before the run, declare a repository target under
+`spec.secrets.HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS.githubActions`, then supply a
+separate minimal-role drill service-account JSON through `hv_plan secretRefs`
+without printing it. It needs the exact clone/connect/delete/
 get/list/update and user-update permissions documented in the restore-drill
 section of the README, not the broader lifecycle administrator role:
 
 ```text
-hv_secrets_set project="hypervibe-recovery-live" target="github" repo="OWNER/REPOSITORY" key="HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS" secretRef="env:HYPERVIBE_TEST_GCP_DRILL_SERVICE_ACCOUNT_JSON"
+hv_plan project="hypervibe-recovery-live" env="production" secretRefs={"HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS":"env:HYPERVIBE_TEST_GCP_DRILL_SERVICE_ACCOUNT_JSON"}
 ```
 
 Then export:
@@ -427,7 +429,7 @@ Account Settings Read when `accountId` is not supplied. Use the token value,
 not its name/id or a Global API Key. A safe connection example is:
 
 ```text
-hv_connect provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}
+hv_connections provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}
 ```
 
 The test also needs an isolated Railway workspace token through the existing
@@ -643,7 +645,7 @@ role assignments remain externally owned and are not removed by the test.
 The same service-principal values are stored as separate verified
 `azure-postgres` and `azure-managed-redis` connections by the harness. At the
 resource group, grant the PostgreSQL ARM permissions and Azure Managed Redis
-Contributor role documented by `hv_connections_list`. The test owns and
+Contributor role documented by `hv_connections`. The test owns and
 removes its Flexible Server, Azure-services firewall rule, logical database,
 Managed Redis cluster, and default Redis database.
 

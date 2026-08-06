@@ -37,7 +37,7 @@ describe('connection guidance', () => {
       expect(guidance.displayName.trim().length, provider).toBeGreaterThan(0);
       expect(guidance.tokenType.trim().length, provider).toBeGreaterThan(0);
       expect(guidance.permissions.length, provider).toBeGreaterThan(0);
-      expect(guidance.credentialExample, provider).toContain('hv_connect provider=');
+      expect(guidance.credentialExample, provider).toContain('hv_connections provider=');
       expect(
         guidance.credentialExample.includes('credentialsRef=')
         || guidance.credentialExample.includes('credentials='),
@@ -110,6 +110,40 @@ describe('connection guidance', () => {
     expect(guidance).toContain('HYPERVIBE_GITHUB_PACKAGES_TOKEN');
   });
 
+  it('explains where every Twilio credential and optional provider id comes from', () => {
+    const guidance = formatConnectionGuidance('twilio');
+
+    expect(guidance).toContain('Console Dashboard -> Account Info');
+    expect(guidance).toContain('AC...');
+    expect(guidance).toContain('SK...');
+    expect(guidance).toContain('Twilio displays the secret only once');
+    expect(guidance).toContain('primary Auth Token');
+    expect(guidance).toContain('twilio/messaging/services/list');
+    expect(guidance).toContain('twilio/messaging/services.phonenumbers/create');
+    expect(guidance).toContain('twilio/messaging/messages/create');
+    expect(guidance).toContain('Numbers & Senders -> Phone Numbers');
+    expect(guidance).toContain('PN... SID');
+    expect(guidance).toContain('Use the SID, not the +E.164 phone number');
+    expect(guidance).toContain('Do not add TWILIO_MESSAGING_SERVICE_SID');
+    expect(guidance).toContain('same account');
+
+    const schema = providerRegistry.get('twilio')!.metadata.credentialsSchema;
+    expect(credentialFieldsFromSchema(schema)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'accountSid',
+        description: expect.stringContaining('Console Dashboard -> Account Info'),
+      }),
+      expect.objectContaining({
+        name: 'apiKeySecret',
+        description: expect.stringContaining('displayed once'),
+      }),
+      expect.objectContaining({
+        name: 'authToken',
+        description: expect.stringContaining('X-Twilio-Signature'),
+      }),
+    ]));
+  });
+
   it('keeps provider-specific token guidance actionable', () => {
     const expectations: Record<string, string[]> = {
       railway: [
@@ -122,6 +156,16 @@ describe('connection guidance', () => {
         'mail.send',
         'whitelabel.read',
         'Full Access',
+      ],
+      twilio: [
+        'https://console.twilio.com/us1/account/keys-credentials/api-keys',
+        'https://console.twilio.com/us1/develop/phone-numbers/manage/incoming',
+        'Restricted API Key',
+        'twilio/messaging/services.phonenumbers/list',
+        'twilio/messaging/messages/create',
+        'X-Twilio-Signature',
+        'credentialsRef="dotenv:/absolute/path/.env"',
+        'Hypervibe does not buy phone numbers',
       ],
       cloudrun: [
         'https://console.cloud.google.com/iam-admin/serviceaccounts',
@@ -236,8 +280,8 @@ describe('connection guidance', () => {
       ],
       doppler: [
         'https://docs.doppler.com/docs/service-tokens',
-        'service token',
-        'read/write',
+        'read-only service token',
+        'project/config',
       ],
       bitwarden: [
         'https://bitwarden.com/help/access-tokens/',

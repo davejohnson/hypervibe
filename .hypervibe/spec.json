@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "project": "hypervibe",
+  "gitRemoteUrl": "git@github.com:davejohnson/hypervibe.git",
+  "github": {
+    "repository": "davejohnson/hypervibe",
+    "canonicalEnvironment": "repository",
+    "collaboration": {
+      "issues": {
+        "enabled": false,
+        "templates": false
+      },
+      "pullRequests": {
+        "requirePr": false
+      }
+    },
+    "pages": {
+      "enabled": true,
+      "sourcePath": "apps/website",
+      "branch": "main",
+      "customDomain": "hypervibe.dev",
+      "dnsProvider": "cloudflare"
+    }
+  },
+  "environments": {}
+}

@@ -8,12 +8,17 @@ import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter
 import type { RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import type { RailwayCredentials } from '../entities/connection.entity.js';
-import type { ComponentType } from '../entities/component.entity.js';
 import type { HostingBindings } from '../ports/hosting.port.js';
 import { projectSpecSchema, type ProjectSpec, type ServiceSpec } from '../spec/spec.schema.js';
 import { SpecStore } from '../spec/spec.store.js';
 import { detectGitRemoteUrl } from '../../lib/git-remote.js';
-import { syncProjectIntent } from './intent.service.js';
+import {
+  inspectRailwayProject,
+  type ImportComponentSummary,
+  type ImportServiceSummary,
+} from '../../adapters/providers/railway/railway-inspection.driver.js';
+
+export { inspectRailwayProject } from '../../adapters/providers/railway/railway-inspection.driver.js';
 
 const projectRepo = new ProjectRepository();
 const envRepo = new EnvironmentRepository();
@@ -21,49 +26,6 @@ const serviceRepo = new ServiceRepository();
 const componentRepo = new ComponentRepository();
 const connectionRepo = new ConnectionRepository();
 const auditRepo = new AuditRepository();
-
-export interface ImportCandidate {
-  name: string;
-  railwayId: string;
-  environmentCount: number;
-  serviceCount: number;
-}
-
-export interface ImportServiceSummary {
-  name: string;
-  railwayId: string;
-  repo: string | null;
-  branch: string | null;
-  hasGitHubDeploy: boolean;
-  datastoreEngine?: 'postgres' | 'redis';
-  instancesByEnv: Record<string, {
-    domains: string[];
-    customDomains: string[];
-    startCommand?: string;
-    releaseCommand?: string;
-    healthcheckPath?: string;
-    cronSchedule?: string;
-    numReplicas?: number;
-    sleepApplication?: boolean;
-  }>;
-}
-
-export interface ImportComponentSummary {
-  type: ComponentType;
-  railwayId: string;
-  name: string;
-}
-
-export interface RailwayProjectInspection {
-  details: RailwayProjectDetails;
-  environments: Array<{ name: string; railwayId: string }>;
-  services: ImportServiceSummary[];
-  components: ImportComponentSummary[];
-  storage: Array<{ name: string; railwayId: string; environments: Array<{ name: string; region?: string }> }>;
-  envVarNames: string[];
-  autoDetected: Record<string, string>;
-  needsMapping: string[];
-}
 
 export type ImportResult =
   | { status: 'already_exists' }
@@ -75,7 +37,6 @@ export type ImportResult =
     components: Array<{ type: string; environmentId: string; railwayId: string }>;
     spec: ProjectSpec;
     specRevision: number;
-    intent: unknown;
   };
 
 export interface ImportRailwayProjectOptions {
@@ -85,29 +46,6 @@ export interface ImportRailwayProjectOptions {
   databaseMappings?: Record<string, 'postgres'>;
   /** Explicit service-backed cache adoption: Railway service id -> engine. */
   cacheMappings?: Record<string, 'redis'>;
-}
-
-export function mapPluginToComponentType(pluginName: string): ComponentType {
-  const normalized = pluginName.toLowerCase();
-  if (normalized.includes('postgres')) return 'postgres';
-  if (normalized.includes('redis') || normalized.includes('valkey')) return 'redis';
-  return pluginName;
-}
-
-export function classifyRailwayDatastoreEngine(name: string): 'postgres' | 'redis' | undefined {
-  const normalized = name.toLowerCase();
-  if (normalized.includes('postgres')) return 'postgres';
-  if (normalized.includes('redis') || normalized.includes('valkey')) return 'redis';
-  return undefined;
-}
-
-function normalizeRailwayPreDeployCommand(value: unknown): string | undefined {
-  if (typeof value === 'string') return value.trim() || undefined;
-  if (!Array.isArray(value)) return undefined;
-  const commands = value.filter(
-    (command): command is string => typeof command === 'string' && command.trim().length > 0
-  );
-  return commands.length > 0 ? commands.join(' && ') : undefined;
 }
 
 function importedGitRemoteUrl(services: ImportServiceSummary[]): string | undefined {
@@ -226,113 +164,6 @@ export async function connectRailwayForImport(): Promise<RailwayAdapter | null> 
   const adapter = new RailwayAdapter();
   await adapter.connect(credentials);
   return adapter;
-}
-
-/** List Railway projects available to import, with environment/service counts. */
-export async function listRailwayImportCandidates(adapter: RailwayAdapter): Promise<ImportCandidate[]> {
-  const projects = await adapter.listProjects();
-  return Promise.all(
-    projects.map(async (p) => {
-      const details = await adapter.getProjectDetails(p.id);
-      return {
-        name: p.name,
-        railwayId: p.id,
-        environmentCount: details?.environments.edges.length ?? 0,
-        serviceCount: details?.services.edges.length ?? 0,
-      };
-    })
-  );
-}
-
-/**
- * Fetch full details for a Railway project and reshape into raw data for the
- * agent to interpret (environments, services, components, env var names, plus
- * auto-detected environment mappings). Returns null when details cannot be
- * fetched.
- */
-export async function inspectRailwayProject(
-  adapter: RailwayAdapter,
-  railwayProjectId: string
-): Promise<RailwayProjectInspection | null> {
-  const details = await adapter.getProjectDetails(railwayProjectId);
-  if (!details) return null;
-
-  const environments = details.environments.edges.map((e) => ({
-    name: e.node.name,
-    railwayId: e.node.id,
-  }));
-
-  const services: ImportServiceSummary[] = details.services.edges.map((e) => {
-    const instances = e.node.serviceInstances?.edges ?? [];
-    const instancesByEnv: ImportServiceSummary['instancesByEnv'] = {};
-
-    for (const inst of instances) {
-      const envId = inst.node.environmentId;
-      instancesByEnv[envId] = {
-        domains: inst.node.domains?.serviceDomains?.map((d) => d.domain) ?? [],
-        customDomains: inst.node.domains?.customDomains?.map((d) => d.domain) ?? [],
-        startCommand: inst.node.startCommand,
-        releaseCommand: normalizeRailwayPreDeployCommand(inst.node.preDeployCommand),
-        healthcheckPath: inst.node.healthcheckPath,
-        cronSchedule: inst.node.cronSchedule,
-        numReplicas: inst.node.numReplicas,
-        sleepApplication: inst.node.sleepApplication,
-      };
-    }
-
-    return {
-      name: e.node.name,
-      railwayId: e.node.id,
-      repo: e.node.repoTriggers.edges[0]?.node.repository ?? null,
-      branch: e.node.repoTriggers.edges[0]?.node.branch ?? null,
-      hasGitHubDeploy: e.node.repoTriggers.edges.length > 0,
-      ...(classifyRailwayDatastoreEngine(e.node.name)
-        ? { datastoreEngine: classifyRailwayDatastoreEngine(e.node.name) }
-        : {}),
-      instancesByEnv,
-    };
-  });
-
-  const components: ImportComponentSummary[] = details.plugins.edges.map((e) => ({
-    type: mapPluginToComponentType(e.node.name),
-    railwayId: e.node.id,
-    name: e.node.name,
-  }));
-  const storage = (details.buckets?.edges ?? []).map((edge) => ({
-    name: edge.node.name,
-    railwayId: edge.node.id,
-    environments: details.environments.edges.flatMap((environment) => {
-      const instance = environment.node.config?.buckets?.[edge.node.id];
-      return instance && instance.isDeleted !== true ? [{ name: environment.node.name, region: instance.region }] : [];
-    }),
-  }));
-
-  // Fetch environment variable names (raw data for the agent to interpret),
-  // sampled from the first environment's first service.
-  let envVarNames: string[] = [];
-  if (environments.length > 0 && services.length > 0) {
-    const sampleVars = await adapter.getServiceVariables(
-      details.id,
-      services[0].railwayId,
-      environments[0].railwayId
-    );
-    envVarNames = Object.keys(sampleVars);
-  }
-
-  // Auto-detect exact-match environment names; anything else is raw data for
-  // the agent to classify.
-  const autoDetected: Record<string, string> = {};
-  const needsMapping: string[] = [];
-  for (const env of environments) {
-    const normalized = env.name.toLowerCase();
-    if (normalized === 'production' || normalized === 'staging' || normalized === 'development') {
-      autoDetected[env.name] = normalized;
-    } else {
-      needsMapping.push(env.name);
-    }
-  }
-
-  return { details, environments, services, components, storage, envVarNames, autoDetected, needsMapping };
 }
 
 /**
@@ -609,6 +440,5 @@ export async function importRailwayProject(
     components: createdComponents,
     spec: storedSpec.spec,
     specRevision: storedSpec.revision,
-    intent: syncProjectIntent(project.id),
   };
 }

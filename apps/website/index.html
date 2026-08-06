@@ -1,627 +1,502 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>hypervibe — desired-state infrastructure from your terminal or an AI agent</title>
-<meta name="description" content="Hypervibe is a desired-state infrastructure orchestrator with two interfaces over one engine: a CLI and an MCP server for Claude and Codex.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=VT323&family=IBM+Plex+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --bg: #050805;
-    --bg-panel: #0a120a;
-    --green: #33ff66;
-    --green-dim: #1d9c44;
-    --green-dark: #0f4d24;
-    --amber: #ffb000;
-    --cyan: #4df0ff;
-    --red: #ff5555;
-    --text: #b8e6c4;
-    --text-dim: #5c8a68;
-    --border: #164a26;
-    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-    --display: "VT323", "IBM Plex Mono", monospace;
-  }
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>hypervibe — infrastructure control loop, in progress</title>
+  <meta name="description" content="Hypervibe is a pre-release desired-state infrastructure orchestrator with one command core shared by its CLI and MCP server.">
+  <style>
+    :root {
+      --bg: #080b0d;
+      --panel: #0d1215;
+      --panel-raised: #10171b;
+      --line: #26333a;
+      --line-soft: #182228;
+      --text: #c8d1d6;
+      --muted: #829098;
+      --green: #79d98b;
+      --cyan: #78c8dd;
+      --amber: #d8b15b;
+      --red: #df7f7f;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
 
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+    * { box-sizing: border-box; }
 
-  html { scroll-behavior: smooth; }
+    html { scroll-behavior: smooth; }
 
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--mono);
-    font-size: 15px;
-    line-height: 1.6;
-    overflow-x: hidden;
-  }
+    body {
+      margin: 0;
+      background:
+        linear-gradient(rgba(121, 217, 139, 0.022) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(121, 217, 139, 0.018) 1px, transparent 1px),
+        var(--bg);
+      background-size: 32px 32px;
+      color: var(--text);
+      font: 14px/1.65 var(--mono);
+      overflow-x: hidden;
+    }
 
-  /* ── CRT overlay ─────────────────────────────── */
-  body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 100;
-    background: repeating-linear-gradient(
-      0deg,
-      rgba(0, 0, 0, 0.18) 0px,
-      rgba(0, 0, 0, 0.18) 1px,
-      transparent 1px,
-      transparent 3px
-    );
-  }
-  body::after {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 101;
-    background: radial-gradient(ellipse at center, transparent 55%, rgba(0, 0, 0, 0.55) 100%);
-  }
+    ::selection { background: #294f35; color: #f4fff6; }
 
-  @keyframes flicker {
-    0%, 97%, 100% { opacity: 1; }
-    98% { opacity: 0.92; }
-    99% { opacity: 0.97; }
-  }
-  .crt { animation: flicker 7s infinite; }
+    a { color: var(--cyan); text-decoration: none; }
+    a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-  ::selection { background: var(--green-dark); color: var(--green); }
+    code, pre { font: inherit; }
 
-  a { color: var(--cyan); text-decoration: none; }
-  a:hover { text-decoration: underline; text-shadow: 0 0 8px rgba(77, 240, 255, 0.6); }
+    .shell { width: min(1080px, calc(100% - 40px)); margin: 0 auto; }
 
-  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px; }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--line-soft);
+      background: rgba(8, 11, 13, 0.92);
+      backdrop-filter: blur(12px);
+    }
 
-  /* ── top bar ─────────────────────────────────── */
-  nav {
-    border-bottom: 1px solid var(--border);
-    background: rgba(5, 8, 5, 0.9);
-    backdrop-filter: blur(4px);
-    position: sticky;
-    top: 0;
-    z-index: 50;
-  }
-  nav .wrap {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: 52px;
-  }
-  .nav-brand {
-    color: var(--green);
-    font-weight: 700;
-    text-shadow: 0 0 10px rgba(51, 255, 102, 0.5);
-  }
-  .nav-brand::before { content: "▸ "; color: var(--amber); }
-  .nav-links { display: flex; gap: 22px; font-size: 13px; }
-  .nav-links a { color: var(--text-dim); }
-  .nav-links a:hover { color: var(--green); text-decoration: none; text-shadow: 0 0 8px rgba(51, 255, 102, 0.6); }
+    .topbar .shell {
+      min-height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
 
-  /* ── hero ────────────────────────────────────── */
-  header { padding: 64px 0 40px; text-align: center; }
+    .brand { color: var(--text); font-weight: 700; letter-spacing: -0.03em; }
+    .brand::after { content: "_"; color: var(--green); animation: blink 1.1s steps(1) infinite; }
 
-  .ascii-logo {
-    font-family: var(--mono);
-    font-size: clamp(6px, 1.55vw, 15px);
-    line-height: 1.15;
-    color: var(--green);
-    text-shadow: 0 0 14px rgba(51, 255, 102, 0.45), 0 0 2px rgba(51, 255, 102, 0.9);
-    white-space: pre;
-    display: inline-block;
-    text-align: left;
-    margin-bottom: 22px;
-  }
+    .nav { display: flex; align-items: center; gap: 22px; font-size: 12px; }
+    .nav a { color: var(--muted); }
+    .nav a:hover { color: var(--text); text-decoration: none; }
 
-  .tagline {
-    font-family: var(--display);
-    font-size: clamp(22px, 3.4vw, 34px);
-    color: var(--text);
-    letter-spacing: 0.5px;
-  }
-  .tagline em { font-style: normal; color: var(--amber); text-shadow: 0 0 10px rgba(255, 176, 0, 0.5); }
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--amber);
+    }
 
-  .subline {
-    margin-top: 12px;
-    color: var(--text-dim);
-    font-size: 14px;
-    max-width: 640px;
-    margin-left: auto;
-    margin-right: auto;
-  }
+    .status-chip::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 9px currentColor;
+    }
 
-  .badges { margin-top: 22px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-size: 12px; }
-  .badge {
-    border: 1px solid var(--border);
-    padding: 3px 10px;
-    color: var(--text-dim);
-    background: var(--bg-panel);
-  }
-  .badge b { color: var(--green); font-weight: 500; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 0.85fr) minmax(520px, 1.15fr);
+      gap: 56px;
+      align-items: center;
+      min-height: 700px;
+      padding: 86px 0 72px;
+    }
 
-  .cta-row { margin-top: 30px; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-  .btn {
-    font-family: var(--mono);
-    font-size: 14px;
-    padding: 10px 22px;
-    border: 1px solid var(--green-dim);
-    background: transparent;
-    color: var(--green);
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .btn:hover {
-    background: var(--green-dark);
-    text-shadow: 0 0 8px rgba(51, 255, 102, 0.8);
-    box-shadow: 0 0 18px rgba(51, 255, 102, 0.25);
-    text-decoration: none;
-  }
-  .btn.primary { background: var(--green-dark); border-color: var(--green); }
-  .btn.ghost { border-color: var(--border); color: var(--text-dim); }
-  .btn.ghost:hover { color: var(--green); }
+    .hero > * { min-width: 0; }
 
-  /* ── terminal window ─────────────────────────── */
-  .term {
-    margin: 48px auto 0;
-    max-width: 780px;
-    text-align: left;
-    border: 1px solid var(--border);
-    background: var(--bg-panel);
-    box-shadow: 0 0 40px rgba(51, 255, 102, 0.08), inset 0 0 60px rgba(0, 0, 0, 0.5);
-  }
-  .term-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-    background: rgba(22, 74, 38, 0.15);
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-  .dot { width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--border); }
-  .dot.r { background: #3a1515; } .dot.y { background: #3a3115; } .dot.g { background: #153a1f; }
-  .term-title { margin-left: 8px; }
+    .eyebrow, .section-label {
+      color: var(--green);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
 
-  .term-body {
-    padding: 18px 20px 22px;
-    min-height: 320px;
-    font-size: 13.5px;
-    line-height: 1.7;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
+    h1 {
+      margin: 18px 0 20px;
+      max-width: 700px;
+      color: #e2e8eb;
+      font-size: clamp(38px, 5.4vw, 68px);
+      font-weight: 600;
+      line-height: 1.03;
+      letter-spacing: -0.055em;
+    }
 
-  .t-prompt { color: var(--amber); }
-  .t-cmd { color: var(--green); }
-  .t-you { color: var(--cyan); }
-  .t-dim { color: var(--text-dim); }
-  .t-ok { color: var(--green); }
-  .t-add { color: var(--cyan); }
-  .t-chg { color: var(--amber); }
-  .t-url { color: var(--cyan); text-decoration: underline; }
+    .lede { max-width: 620px; margin: 0; color: var(--muted); font-size: 15px; }
+    .lede strong { color: var(--text); font-weight: 500; }
 
-  .cursor {
-    display: inline-block;
-    width: 8px;
-    height: 15px;
-    background: var(--green);
-    vertical-align: text-bottom;
-    animation: blink 1s steps(1) infinite;
-    box-shadow: 0 0 8px rgba(51, 255, 102, 0.8);
-  }
-  @keyframes blink { 50% { opacity: 0; } }
+    .hero-actions { display: flex; gap: 12px; margin-top: 30px; flex-wrap: wrap; }
 
-  /* ── sections ────────────────────────────────── */
-  section { padding: 64px 0 8px; }
+    .button {
+      display: inline-flex;
+      min-height: 40px;
+      align-items: center;
+      padding: 0 15px;
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: var(--panel);
+      font-size: 12px;
+    }
 
-  .sec-head {
-    font-family: var(--mono);
-    color: var(--text-dim);
-    margin-bottom: 28px;
-    font-size: 14px;
-  }
-  .sec-head .t-prompt { color: var(--amber); }
-  .sec-head .cmd { color: var(--green); text-shadow: 0 0 8px rgba(51, 255, 102, 0.4); }
+    .button:hover { border-color: var(--green); text-decoration: none; }
+    .button.primary { border-color: #3a7047; color: var(--green); }
 
-  /* loop diagram */
-  .loop {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 14px;
-  }
-  .loop-step {
-    border: 1px solid var(--border);
-    background: var(--bg-panel);
-    padding: 18px 16px;
-    position: relative;
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-  .loop-step:hover { border-color: var(--green-dim); box-shadow: 0 0 20px rgba(51, 255, 102, 0.12); }
-  .loop-step .n { color: var(--text-dim); font-size: 11px; }
-  .loop-step .cmd { color: var(--green); font-weight: 700; display: block; margin: 4px 0 8px; font-size: 15px; }
-  .loop-step p { font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
-  .loop-step:not(:last-child)::after {
-    content: "→";
-    position: absolute;
-    right: -14px;
-    top: 50%;
-    transform: translateY(-50%);
-    color: var(--green-dim);
-    z-index: 2;
-  }
+    .facts { display: flex; gap: 8px 18px; flex-wrap: wrap; margin: 30px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 11px; }
+    .facts li::before { content: "+ "; color: var(--green); }
 
-  .loop-note { margin-top: 18px; font-size: 13px; color: var(--text-dim); }
-  .loop-note b { color: var(--amber); font-weight: 500; }
+    .terminal {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      background: #090d0f;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.32);
+    }
 
-  /* features */
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 14px;
-  }
-  .card {
-    border: 1px solid var(--border);
-    background: var(--bg-panel);
-    padding: 20px 18px;
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
-  .card:hover { border-color: var(--green-dim); box-shadow: 0 0 20px rgba(51, 255, 102, 0.12); }
-  .card h3 { color: var(--green); font-size: 14px; font-weight: 700; margin-bottom: 8px; }
-  .card h3::before { content: "[*] "; color: var(--amber); font-weight: 400; }
-  .card p { font-size: 12.5px; color: var(--text-dim); line-height: 1.6; }
-  .card code { color: var(--text); background: rgba(22, 74, 38, 0.25); padding: 0 4px; font-size: 12px; }
+    .terminal-bar {
+      min-height: 38px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 13px;
+      border-bottom: 1px solid var(--line-soft);
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 10px;
+    }
 
-  /* providers */
-  .providers {
-    border: 1px solid var(--border);
-    background: var(--bg-panel);
-    padding: 22px 24px;
-    font-size: 13px;
-    overflow-x: auto;
-  }
-  .prov-row { display: flex; border-bottom: 1px dashed var(--green-dark); padding: 9px 0; gap: 16px; }
-  .prov-row:last-child { border-bottom: none; }
-  .prov-cat { flex: 0 0 150px; color: var(--amber); }
-  .prov-list { color: var(--text); }
-  .prov-list span { color: var(--text-dim); }
+    .terminal-dot { width: 7px; height: 7px; border: 1px solid #40505a; border-radius: 50%; }
+    .terminal-title { margin-left: 5px; }
+    .terminal-mode { margin-left: auto; overflow: hidden; color: var(--amber); text-overflow: ellipsis; white-space: nowrap; }
 
-  /* quickstart */
-  .qs-step { margin-bottom: 26px; }
-  .qs-step h3 { color: var(--text); font-size: 14px; font-weight: 500; margin-bottom: 10px; }
-  .qs-step h3 .n { color: var(--amber); }
-  .codeblock {
-    position: relative;
-    border: 1px solid var(--border);
-    background: var(--bg-panel);
-    padding: 14px 16px;
-    font-size: 13px;
-    overflow-x: auto;
-    white-space: pre;
-    color: var(--text);
-  }
-  .codeblock .t-prompt { user-select: none; }
-  .copy-btn {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    font-family: var(--mono);
-    font-size: 11px;
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    padding: 2px 8px;
-    cursor: pointer;
-  }
-  .copy-btn:hover { color: var(--green); border-color: var(--green-dim); }
+    .terminal-body {
+      min-height: 466px;
+      margin: 0;
+      padding: 20px;
+      color: var(--text);
+      font-size: 11.5px;
+      line-height: 1.66;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
 
-  .chat-sample { border-left: 2px solid var(--green-dark); padding-left: 14px; margin-top: 10px; font-size: 13px; }
-  .chat-sample .t-you { color: var(--cyan); }
-  .chat-sample .t-claude { color: var(--green); }
+    .prompt { color: var(--amber); }
+    .command, .ok { color: var(--green); }
+    .info, .url { color: var(--cyan); }
+    .muted { color: var(--muted); }
+    .warn { color: var(--amber); }
 
-  /* footer */
-  footer {
-    margin-top: 80px;
-    border-top: 1px solid var(--border);
-    padding: 32px 0 48px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: 12.5px;
-  }
-  footer .sig { margin-top: 10px; }
-  footer .sig span { color: var(--green-dim); }
+    .cursor {
+      display: inline-block;
+      width: 7px;
+      height: 13px;
+      margin-left: 1px;
+      vertical-align: -2px;
+      background: var(--green);
+      animation: blink 1.1s steps(1) infinite;
+    }
 
-  @media (max-width: 820px) {
-    .loop { grid-template-columns: 1fr 1fr; }
-    .loop-step:nth-child(2)::after { display: none; }
-    .grid { grid-template-columns: 1fr 1fr; }
-  }
-  @media (max-width: 560px) {
-    .loop, .grid { grid-template-columns: 1fr; }
-    .loop-step::after { display: none !important; }
-    .prov-cat { flex-basis: 110px; }
-    .nav-links { gap: 14px; }
-  }
-</style>
+    @keyframes blink { 50% { opacity: 0; } }
+
+    section { padding: 88px 0; border-top: 1px solid var(--line-soft); }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: 0.65fr 1.35fr;
+      gap: 56px;
+      margin-bottom: 38px;
+    }
+
+    h2 { margin: 0; color: #e2e8eb; font-size: clamp(25px, 3.3vw, 38px); font-weight: 500; line-height: 1.2; letter-spacing: -0.035em; }
+    .section-copy { max-width: 650px; margin: 0; color: var(--muted); }
+
+    .loop { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); background: var(--panel); }
+    .loop-step { min-height: 186px; padding: 21px; border-right: 1px solid var(--line); }
+    .loop-step:last-child { border-right: 0; }
+    .loop-number { color: var(--muted); font-size: 10px; }
+    .loop-command { display: block; margin: 17px 0 10px; color: var(--green); font-size: 15px; }
+    .loop-command::before { content: "$ "; color: var(--amber); }
+    .loop-step p { margin: 0; color: var(--muted); font-size: 12px; }
+
+    .boundary-note {
+      margin-top: 16px;
+      padding-left: 14px;
+      border-left: 2px solid var(--amber);
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .ledger { border: 1px solid var(--line); background: var(--panel); }
+    .ledger-row {
+      display: grid;
+      grid-template-columns: 170px 115px 1fr;
+      gap: 18px;
+      padding: 15px 18px;
+      border-bottom: 1px solid var(--line-soft);
+      align-items: baseline;
+    }
+    .ledger-row:last-child { border-bottom: 0; }
+    .ledger-area { color: var(--text); }
+    .ledger-state { font-size: 11px; }
+    .ledger-state.live { color: var(--green); }
+    .ledger-state.narrow { color: var(--amber); }
+    .ledger-detail { color: var(--muted); font-size: 12px; }
+
+    .principles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; border: 1px solid var(--line); background: var(--line); }
+    .principle { min-height: 145px; padding: 22px; background: var(--panel); }
+    .principle h3 { margin: 0 0 10px; color: var(--text); font-size: 13px; font-weight: 500; }
+    .principle h3::before { content: "! "; color: var(--red); }
+    .principle p { margin: 0; color: var(--muted); font-size: 12px; }
+
+    .release {
+      display: grid;
+      grid-template-columns: 0.72fr 1.28fr;
+      gap: 56px;
+      align-items: start;
+    }
+
+    .release-state { border: 1px solid var(--line); background: var(--panel); }
+    .release-state > div { display: flex; justify-content: space-between; gap: 20px; padding: 13px 16px; border-bottom: 1px solid var(--line-soft); font-size: 12px; }
+    .release-state > div:last-child { border-bottom: 0; }
+    .release-state dt { color: var(--muted); }
+    .release-state dd { margin: 0; color: var(--text); text-align: right; }
+    .release-state .pending { color: var(--amber); }
+
+    .release-copy h2 { margin-bottom: 18px; }
+    .release-copy p { max-width: 630px; margin: 0 0 20px; color: var(--muted); }
+
+    footer { padding: 30px 0 44px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 11px; }
+    footer .shell { display: flex; justify-content: space-between; gap: 24px; }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; min-height: 0; padding-top: 72px; }
+      .terminal { max-width: 720px; }
+      .section-head, .release { grid-template-columns: 1fr; gap: 22px; }
+      .loop { grid-template-columns: repeat(2, 1fr); }
+      .loop-step:nth-child(2) { border-right: 0; }
+      .loop-step:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+    }
+
+    @media (max-width: 640px) {
+      .shell { width: min(100% - 28px, 1080px); }
+      .nav a:not(.status-chip) { display: none; }
+      .hero { gap: 42px; padding: 58px 0; }
+      h1 { font-size: 42px; }
+      .terminal-body { min-height: 500px; padding: 15px; font-size: 10.5px; }
+      section { padding: 64px 0; }
+      .loop { grid-template-columns: 1fr; }
+      .loop-step { min-height: 0; border-right: 0; border-bottom: 1px solid var(--line); }
+      .loop-step:nth-child(3) { border-bottom: 1px solid var(--line); }
+      .ledger-row { grid-template-columns: 1fr auto; gap: 6px 14px; }
+      .ledger-detail { grid-column: 1 / -1; }
+      .principles { grid-template-columns: 1fr; }
+      footer .shell { display: block; }
+      footer .right { margin-top: 8px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .brand::after, .cursor { animation: none; }
+    }
+  </style>
 </head>
-<body class="crt">
-
-<nav>
-  <div class="wrap">
-    <div class="nav-brand">hypervibe</div>
-    <div class="nav-links">
-      <a href="#loop">loop</a>
-      <a href="#features">features</a>
-      <a href="#providers">providers</a>
-      <a href="#install">install</a>
-      <a href="https://github.com/davejohnson/hypervibe">github</a>
-    </div>
-  </div>
-</nav>
-
-<header>
-  <div class="wrap">
-<div class="ascii-logo">██╗  ██╗██╗   ██╗██████╗ ███████╗██████╗ ██╗   ██╗██╗██████╗ ███████╗
-██║  ██║╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗██║   ██║██║██╔══██╗██╔════╝
-███████║ ╚████╔╝ ██████╔╝█████╗  ██████╔╝██║   ██║██║██████╔╝█████╗
-██╔══██║  ╚██╔╝  ██╔═══╝ ██╔══╝  ██╔══██╗╚██╗ ██╔╝██║██╔══██╗██╔══╝
-██║  ██║   ██║   ██║     ███████╗██║  ██║ ╚████╔╝ ██║██████╔╝███████╗
-╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚═════╝ ╚══════╝</div>
-    <div class="tagline">desired-state infrastructure. <em>from your terminal or an AI agent.</em></div>
-    <p class="subline">One engine, two interfaces: a human-friendly CLI and an MCP server for Claude and Codex.
-    Same specs, reviewed plans, provider adapters, receipts, and audit history — whichever way you drive it.</p>
-
-    <div class="badges">
-      <span class="badge">license <b>Apache-2.0</b></span>
-      <span class="badge">node <b>20+</b></span>
-      <span class="badge">protocol <b>MCP</b></span>
-      <span class="badge">yaml <b>none</b></span>
-    </div>
-
-    <div class="cta-row">
-      <a class="btn primary" href="#install">$ install</a>
-      <a class="btn ghost" href="https://github.com/davejohnson/hypervibe">view source</a>
-    </div>
-
-    <div class="term">
-      <div class="term-bar">
-        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-        <span class="term-title">hypervibe — 80×24</span>
-      </div>
-      <div class="term-body" id="demo"><span class="cursor"></span></div>
-    </div>
-  </div>
-</header>
-
-<section id="loop">
-  <div class="wrap">
-    <div class="sec-head"><span class="t-prompt">$</span> <span class="cmd">hypervibe --explain-loop</span></div>
-    <div class="loop">
-      <div class="loop-step">
-        <span class="n">01</span>
-        <span class="cmd">spec set</span>
-        <p>Declare the desired state — services, databases, storage, domains, email, env vars — as a revisioned spec committed with your repo.</p>
-      </div>
-      <div class="loop-step">
-        <span class="n">02</span>
-        <span class="cmd">plan</span>
-        <p>Observe live infrastructure, diff against the spec, and get an executable plan. No surprises: every action is listed before anything runs.</p>
-      </div>
-      <div class="loop-step">
-        <span class="n">03</span>
-        <span class="cmd">apply</span>
-        <p>Converge. Stale plans are rejected. Destroying data-bearing resources requires explicit per-action confirmation.</p>
-      </div>
-      <div class="loop-step">
-        <span class="n">04</span>
-        <span class="cmd">status</span>
-        <p>Read-only drift view. See exactly where live infrastructure has wandered from desired state, at any time.</p>
+<body>
+  <nav class="topbar" aria-label="Primary navigation">
+    <div class="shell">
+      <a class="brand" href="#top" aria-label="Hypervibe home">hypervibe</a>
+      <div class="nav">
+        <a href="#model">model</a>
+        <a href="#build">current build</a>
+        <a href="#limits">limits</a>
+        <a class="status-chip" href="#release">pre-release</a>
       </div>
     </div>
-    <p class="loop-note">Terraform-style discipline, <b>zero YAML</b>. The persisted plan is an authorization boundary — an apply can only touch what its reviewed actions name.</p>
-  </div>
-</section>
+  </nav>
 
-<section id="features">
-  <div class="wrap">
-    <div class="sec-head"><span class="t-prompt">$</span> <span class="cmd">hypervibe features --all</span></div>
-    <div class="grid">
-      <div class="card">
-        <h3>CLI ⇄ MCP parity</h3>
-        <p>Every command works from your shell or from Claude / Codex as an <code>hv_*</code> tool. Human-readable output by default, stable redacted JSON with <code>--json</code>.</p>
+  <main id="top">
+    <header class="shell hero">
+      <div>
+        <div class="eyebrow">v0.1.9 / active development</div>
+        <h1>Desired state in. Reviewed provider actions out.</h1>
+        <p class="lede"><strong>Hypervibe is an infrastructure control loop.</strong> A CLI and an MCP server share one command core, one persisted plan boundary, and one redacted result contract. It is being built in public, but it is not ready to pretend everything works.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="https://github.com/davejohnson/hypervibe/blob/main/ARCHITECTURE.md">read the architecture</a>
+          <a class="button" href="https://github.com/davejohnson/hypervibe">browse source</a>
+        </div>
+        <ul class="facts" aria-label="Project facts">
+          <li>19 shared commands</li>
+          <li>repo-backed JSON intent</li>
+          <li>Apache-2.0</li>
+          <li>no public release yet</li>
+        </ul>
       </div>
-      <div class="card">
-        <h3>Auto-wiring</h3>
-        <p>Provision a Postgres and <code>DATABASE_URL</code> lands in the right services automatically. Queues, buckets, and webhook secrets wire themselves the same way.</p>
+
+      <div class="terminal" aria-label="Illustrative Hypervibe terminal session">
+        <div class="terminal-bar">
+          <span class="terminal-dot"></span><span class="terminal-dot"></span><span class="terminal-dot"></span>
+          <span class="terminal-title">~/serious-api</span>
+          <span class="terminal-mode">illustrative session / gcp</span>
+        </div>
+        <pre class="terminal-body" id="demo"><span class="cursor"></span></pre>
       </div>
-      <div class="card">
-        <h3>Team-shared state</h3>
-        <p>Desired state lives in <code>.hypervibe/spec.json</code>, committed with the app. Teammates clone, plan, and converge the same resources — no private local state.</p>
+    </header>
+
+    <section id="model">
+      <div class="shell">
+        <div class="section-head">
+          <div class="section-label">00 / the control loop</div>
+          <div>
+            <h2>Intent is cheap. Mutation needs a receipt.</h2>
+            <p class="section-copy">Hypervibe observes live infrastructure, computes drift, persists an executable plan, and applies only the actions that plan authorized. MCP and CLI are adapters over that same lifecycle.</p>
+          </div>
+        </div>
+
+        <div class="loop">
+          <div class="loop-step">
+            <span class="loop-number">01 / intent</span>
+            <span class="loop-command">hypervibe spec</span>
+            <p>Write or inspect desired services, data, deploys, domains, email, and environment contracts.</p>
+          </div>
+          <div class="loop-step">
+            <span class="loop-number">02 / observation</span>
+            <span class="loop-command">hypervibe plan</span>
+            <p>Compare desired state with provider-confirmed state and persist the exact proposed actions.</p>
+          </div>
+          <div class="loop-step">
+            <span class="loop-number">03 / mutation</span>
+            <span class="loop-command">hypervibe apply</span>
+            <p>Converge the reviewed plan. Billable, destructive, and data-bearing work has explicit gates.</p>
+          </div>
+          <div class="loop-step">
+            <span class="loop-number">04 / evidence</span>
+            <span class="loop-command">hypervibe status</span>
+            <p>Re-observe drift. Configuration sync is separate from runtime health and deploy evidence.</p>
+          </div>
+        </div>
+        <div class="boundary-note">A timeout is not absence. A noop is not permission to repair. A persisted plan is the mutation boundary.</div>
       </div>
-      <div class="card">
-        <h3>Secrets done right</h3>
-        <p>Vault, AWS Secrets Manager, Doppler, 1Password, Bitwarden. Rotate once, propagate everywhere. Values never appear in specs, plans, or tool output.</p>
+    </section>
+
+    <section id="build">
+      <div class="shell">
+        <div class="section-head">
+          <div class="section-label">01 / current build</div>
+          <div>
+            <h2>A build ledger, not a feature wall.</h2>
+            <p class="section-copy">These are the surfaces currently represented in the codebase. Support still varies by provider and lifecycle contract; pre-release means the sharp edges are real.</p>
+          </div>
+        </div>
+
+        <div class="ledger" role="table" aria-label="Current Hypervibe capability ledger">
+          <div class="ledger-row" role="row"><span class="ledger-area">command core</span><span class="ledger-state live">implemented</span><span class="ledger-detail">19 commands registered once and routed through both CLI and MCP.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">hosting</span><span class="ledger-state live">implemented</span><span class="ledger-detail">Railway and Google Cloud Run adapters behind the lifecycle boundary.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">postgres</span><span class="ledger-state live">implemented</span><span class="ledger-detail">Railway, Cloud SQL, Supabase, and RDS lifecycle paths.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">dns + domains</span><span class="ledger-state live">implemented</span><span class="ledger-detail">Cloudflare-backed desired state, planning, and verification.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">email</span><span class="ledger-state live">implemented</span><span class="ledger-detail">SendGrid sender identities, aliases, domain authentication, and inbound parsing declarations.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">secret input</span><span class="ledger-state narrow">read boundary</span><span class="ledger-detail">Environment files and lazy secret-manager references resolve values without exposing them in output.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">deploy automation</span><span class="ledger-state live">implemented</span><span class="ledger-detail">GitHub Actions workflows are generated as reviewed repository infrastructure.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">public release</span><span class="ledger-state narrow">not yet</span><span class="ledger-detail">Development build only. The public quickstart waits for a smaller, proven surface.</span></div>
+        </div>
       </div>
-      <div class="card">
-        <h3>CI push deploys</h3>
-        <p>Generated GitHub Actions workflows call provider APIs directly. Failed deploys leave redacted evidence artifacts for autofix agents to consume.</p>
+    </section>
+
+    <section id="limits">
+      <div class="shell">
+        <div class="section-head">
+          <div class="section-label">02 / non-goals</div>
+          <div>
+            <h2>Not a bag of cloud shortcuts.</h2>
+            <p class="section-copy">Provider differences are real. Hypervibe tries to make the safety model consistent without flattening those differences into an interface that lies.</p>
+          </div>
+        </div>
+
+        <div class="principles">
+          <div class="principle"><h3>No provider CLI backdoors</h3><p>Infrastructure mutations flow through adapters and recorded connections so state, drift, and audit history remain coherent.</p></div>
+          <div class="principle"><h3>No optimistic observation</h3><p>Permissions, malformed responses, timeouts, and unsupported reads stay unknown or blocked. They do not quietly become “not found.”</p></div>
+          <div class="principle"><h3>No implied cross-resource work</h3><p>A service action cannot silently create a database, attach unrelated infrastructure, or clean up a dependency outside its plan edge.</p></div>
+          <div class="principle"><h3>No secrets in the interface</h3><p>Specs declare ownership and references. Results, logs, plans, snapshots, CLI JSON, and MCP structured output stay on the same redacted boundary.</p></div>
+        </div>
       </div>
-      <div class="card">
-        <h3>Environments</h3>
-        <p>Staging, production, PR previews. Migrations via Prisma / Drizzle / TypeORM. Local parity with generated Docker Compose.</p>
+    </section>
+
+    <section id="release">
+      <div class="shell release">
+        <dl class="release-state">
+          <div><dt>version</dt><dd>0.1.9</dd></div>
+          <div><dt>channel</dt><dd class="pending">development</dd></div>
+          <div><dt>public package</dt><dd class="pending">pending</dd></div>
+          <div><dt>spec format</dt><dd>JSON</dd></div>
+          <div><dt>interfaces</dt><dd>CLI / MCP</dd></div>
+        </dl>
+        <div class="release-copy">
+          <div class="section-label">03 / coming soon</div>
+          <h2>The small, reliable version ships first.</h2>
+          <p>Hypervibe is still being reduced and hardened: fewer commands, declarative resource lifecycles, typed provider boundaries, and tests that prove a noop cannot mutate anything. There is no fake waitlist and no public install command yet.</p>
+          <div class="hero-actions">
+            <a class="button primary" href="https://github.com/davejohnson/hypervibe#readme">follow the repository</a>
+            <a class="button" href="https://github.com/davejohnson/hypervibe/blob/main/docs/TOOLS.md">inspect the command catalog</a>
+          </div>
+        </div>
       </div>
-      <div class="card">
-        <h3>DB diagnostics</h3>
-        <p>Query managed Postgres without exposing it permanently — temporary proxies and scoped ingress that Hypervibe creates and cleans up itself.</p>
-      </div>
-      <div class="card">
-        <h3>iOS releases</h3>
-        <p>Gated TestFlight releases in GitHub Actions: server deploy evidence, SHA-matched builds, App Store credentials scoped to a single reviewed step.</p>
-      </div>
-      <div class="card">
-        <h3>Fuzzy stuff → LLM</h3>
-        <p>Tools return raw data; your agent interprets it. No hardcoded pattern matching — Claude figures out that <code>prod-us-east</code> means production.</p>
-      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">
+      <div>hypervibe / work in progress / Apache-2.0</div>
+      <div class="right">desired state → observed drift → reviewed actions → receipts</div>
     </div>
-  </div>
-</section>
+  </footer>
 
-<section id="providers">
-  <div class="wrap">
-    <div class="sec-head"><span class="t-prompt">$</span> <span class="cmd">hypervibe providers list</span></div>
-    <div class="providers">
-      <div class="prov-row"><span class="prov-cat">hosting</span><span class="prov-list">Railway · Google Cloud Run</span></div>
-      <div class="prov-row"><span class="prov-cat">databases</span><span class="prov-list">Railway Postgres · Cloud SQL · Supabase · Amazon RDS</span></div>
-      <div class="prov-row"><span class="prov-cat">dns / domains</span><span class="prov-list">Cloudflare</span></div>
-      <div class="prov-row"><span class="prov-cat">payments</span><span class="prov-list">Stripe <span>— products, prices, webhooks as desired state</span></span></div>
-      <div class="prov-row"><span class="prov-cat">email</span><span class="prov-list">SendGrid <span>— domain auth &amp; verification</span></span></div>
-      <div class="prov-row"><span class="prov-cat">secrets</span><span class="prov-list">Vault · AWS Secrets Manager · Doppler · 1Password · Bitwarden</span></div>
-      <div class="prov-row"><span class="prov-cat">ci</span><span class="prov-list">GitHub Actions</span></div>
-      <div class="prov-row"><span class="prov-cat">mobile</span><span class="prov-list">App Store Connect · TestFlight</span></div>
-      <div class="prov-row"><span class="prov-cat">misc</span><span class="prov-list">reCAPTCHA · S3-compatible storage · Pub/Sub &amp; pg-boss queues</span></div>
-    </div>
-  </div>
-</section>
+  <script>
+    const demo = document.querySelector('#demo');
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const tokens = [
+      ['prompt', '$ '], ['command', 'hypervibe spec --file .hypervibe/spec.json\n'],
+      ['ok', '✓ desired state saved'], ['muted', '  serious-api / staging\n\n'],
+      ['prompt', '$ '], ['command', 'hypervibe plan --project serious-api --env staging\n'],
+      ['muted', 'observing cloud-run + cloud-sql ...\n'],
+      ['info', '+ cloud-run service api       create\n'],
+      ['info', '+ cloud-sql postgres primary  create  [confirmation required]\n'],
+      ['info', '+ api DATABASE_URL            attach\n'],
+      ['muted', 'plan '], ['warn', 'plan_7f3a'], ['muted', ' persisted / 3 actions / nothing executed\n\n'],
+      ['prompt', '$ '], ['command', 'hypervibe apply --plan-id plan_7f3a \\\n  --confirm-action db_primary_create\n'],
+      ['ok', '✓ cloud-sql primary provisioned\n'],
+      ['ok', '✓ DATABASE_URL attached without disclosure\n'],
+      ['ok', '✓ cloud-run api converged\n\n'],
+      ['prompt', '$ '], ['command', 'hypervibe status --project serious-api --env staging\n'],
+      ['ok', 'in sync'], ['muted', '  configuration converged / runtime health unverified\n\n'],
+      ['prompt', '$ '], ['command', 'hypervibe health --project serious-api --env staging --service api\n'],
+      ['ok', 'healthy'], ['muted', '  HTTP 200  '], ['url', 'https://api-4k3uuc.a.run.app\n']
+    ];
 
-<section id="install">
-  <div class="wrap">
-    <div class="sec-head"><span class="t-prompt">$</span> <span class="cmd">hypervibe --quick-start</span></div>
+    const cursor = document.createElement('span');
+    cursor.className = 'cursor';
 
-    <div class="qs-step">
-      <h3><span class="n">[1]</span> install the CLI</h3>
-      <div class="codeblock"><button class="copy-btn">copy</button><span class="t-prompt">$</span> npm install -g @davejohnson/hypervibe@latest
-<span class="t-prompt">$</span> hypervibe --help</div>
-    </div>
-
-    <div class="qs-step">
-      <h3><span class="n">[2]</span> or add it to Claude Code as an MCP server</h3>
-      <div class="codeblock"><button class="copy-btn">copy</button>{
-  "mcpServers": {
-    "hypervibe": {
-      "command": "npx",
-      "args": ["-y", "@davejohnson/hypervibe@latest"]
+    function renderAll() {
+      demo.replaceChildren();
+      for (const [className, text] of tokens) {
+        const span = document.createElement('span');
+        span.className = className;
+        span.textContent = text;
+        demo.append(span);
+      }
+      demo.append(cursor);
     }
-  }
-}</div>
-    </div>
 
-    <div class="qs-step">
-      <h3><span class="n">[3]</span> or add it to Codex</h3>
-      <div class="codeblock"><button class="copy-btn">copy</button><span class="t-prompt">$</span> codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest</div>
-    </div>
-
-    <div class="qs-step">
-      <h3><span class="n">[4]</span> connect providers &amp; ship</h3>
-      <div class="chat-sample">
-<div><span class="t-you">You:</span> "Connect to Railway"</div>
-<div><span class="t-claude">Claude:</span> Opens browser for Railway OAuth, saves credentials securely.</div>
-<div style="margin-top:8px"><span class="t-you">You:</span> "Deploy my app to staging with a postgres database"</div>
-<div><span class="t-claude">Claude:</span> Creates the project, provisions Postgres, wires DATABASE_URL,<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; deploys your code, sets up health checks, returns the URL.</div>
-      </div>
-    </div>
-
-    <p style="font-size:12.5px;color:var(--text-dim);margin-top:6px">
-      Hypervibe is currently distributed as a private package via GitHub Packages —
-      see the <a href="https://github.com/davejohnson/hypervibe#quick-start">README</a> for token setup.
-      All state stays local: SQLite in <code style="color:var(--text)">~/.hypervibe</code>, secrets encrypted at rest.
-      Nothing is sent anywhere except the providers you connect.
-    </p>
-  </div>
-</section>
-
-<footer>
-  <div class="wrap">
-    <div>Apache 2.0 · Built for <a href="https://claude.ai/code">Claude Code</a> · Powered by <a href="https://modelcontextprotocol.io/">MCP</a></div>
-    <div class="sig"><span>~ let LLMs handle the fuzzy stuff ~</span></div>
-  </div>
-</footer>
-
-<script>
-// ── animated terminal demo ─────────────────────────
-const scenes = [
-  [
-    { t: "$ ", c: "t-prompt" }, { t: "hypervibe plan --env staging\n", c: "t-cmd", type: true },
-    { t: "● observing live infrastructure...\n", c: "t-dim", d: 500 },
-    { t: "✓ railway  project my-app · env staging\n", c: "t-ok", d: 350 },
-    { t: "\n", d: 150 },
-    { t: "  + ", c: "t-add" }, { t: "database postgres          ", c: "" }, { t: "create\n", c: "t-add", d: 220 },
-    { t: "  + ", c: "t-add" }, { t: "env DATABASE_URL → api     ", c: "" }, { t: "auto-wired\n", c: "t-add", d: 220 },
-    { t: "  ~ ", c: "t-chg" }, { t: "service api                ", c: "" }, { t: "image drift\n", c: "t-chg", d: 220 },
-    { t: "\n", d: 150 },
-    { t: "plan ", c: "t-dim" }, { t: "7f3a…e2", c: "t-chg" }, { t: " created · 3 actions · nothing executed yet\n\n", c: "t-dim", d: 700 },
-
-    { t: "$ ", c: "t-prompt" }, { t: "hypervibe apply --plan-id 7f3a…e2\n", c: "t-cmd", type: true },
-    { t: "✓ postgres provisioned         [railway]\n", c: "t-ok", d: 600 },
-    { t: "✓ DATABASE_URL injected        [api]\n", c: "t-ok", d: 400 },
-    { t: "✓ api deployed · healthy\n", c: "t-ok", d: 700 },
-    { t: "→ ", c: "t-dim" }, { t: "https://my-app-staging.up.railway.app\n", c: "t-url", d: 400 },
-  ],
-  [
-    { t: "You: ", c: "t-you" }, { t: "\"Deploy my app to staging with a postgres database\"\n\n", c: "", type: true },
-    { t: "Claude ", c: "t-ok" }, { t: "→ hv_spec_set\n", c: "t-dim", d: 450 },
-    { t: "       ", c: "" }, { t: "→ hv_plan      ", c: "t-dim" }, { t: "3 actions, reviewed\n", c: "", d: 450 },
-    { t: "       ", c: "" }, { t: "→ hv_apply     ", c: "t-dim" }, { t: "converged ✓\n\n", c: "t-ok", d: 600 },
-    { t: "Claude: ", c: "t-ok" }, { t: "Created the Railway project, provisioned Postgres,\nwired DATABASE_URL, deployed, health checks passing.\n", c: "", d: 300 },
-    { t: "→ ", c: "t-dim" }, { t: "https://my-app-staging.up.railway.app\n\n", c: "t-url", d: 500 },
-    { t: "You: ", c: "t-you" }, { t: "\"Add a custom domain api.myapp.com\"\n", c: "", type: true },
-    { t: "Claude ", c: "t-ok" }, { t: "→ hv_plan → hv_apply   ", c: "t-dim" }, { t: "DNS + TLS configured ✓\n", c: "t-ok", d: 600 },
-  ],
-];
-
-const demo = document.getElementById("demo");
-let scene = 0;
-
-function playScene(parts, done) {
-  demo.innerHTML = "";
-  const cursor = document.createElement("span");
-  cursor.className = "cursor";
-  demo.appendChild(cursor);
-  let i = 0;
-
-  function next() {
-    if (i >= parts.length) { done(); return; }
-    const p = parts[i++];
-    const span = document.createElement("span");
-    if (p.c) span.className = p.c;
-    demo.insertBefore(span, cursor);
-    if (p.type) {
-      let j = 0;
-      const iv = setInterval(() => {
-        span.textContent += p.t[j++];
-        if (j >= p.t.length) { clearInterval(iv); setTimeout(next, p.d || 120); }
-      }, 34);
-    } else {
-      span.textContent = p.t;
-      setTimeout(next, p.d || 60);
+    async function renderAnimated() {
+      demo.replaceChildren(cursor);
+      for (const [className, text] of tokens) {
+        const span = document.createElement('span');
+        span.className = className;
+        demo.insertBefore(span, cursor);
+        const typed = className === 'command';
+        if (typed) {
+          for (const character of text) {
+            span.textContent += character;
+            await new Promise((resolve) => setTimeout(resolve, 18));
+          }
+        } else {
+          span.textContent = text;
+          await new Promise((resolve) => setTimeout(resolve, text === '\n' ? 40 : 105));
+        }
+      }
     }
-  }
-  setTimeout(next, 400);
-}
 
-function loop() {
-  playScene(scenes[scene], () => {
-    scene = (scene + 1) % scenes.length;
-    setTimeout(loop, 4200);
-  });
-}
-loop();
-
-// ── copy buttons ───────────────────────────────────
-document.querySelectorAll(".copy-btn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    const block = btn.parentElement.cloneNode(true);
-    block.querySelector(".copy-btn").remove();
-    block.querySelectorAll(".t-prompt").forEach((p) => p.remove());
-    const text = block.textContent.replace(/^\s*\n/gm, "").replace(/^ /gm, "").trim();
-    navigator.clipboard.writeText(text).then(() => {
-      btn.textContent = "copied!";
-      setTimeout(() => (btn.textContent = "copy"), 1500);
-    });
-  });
-});
-</script>
+    if (reducedMotion) renderAll();
+    else renderAnimated();
+  </script>
 </body>
 </html>

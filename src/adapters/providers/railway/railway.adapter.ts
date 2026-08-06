@@ -28,6 +28,7 @@ import {
   providerDnsRecordsAreConfigured,
   type NormalizedDnsRecord,
 } from '../../../domain/services/domain-dns-records.js';
+import { inspectRailwayResources } from './railway-inspection.driver.js';
 
 // Credentials schema for self-registration
 export const RailwayCredentialsSchema = z.object({
@@ -1718,7 +1719,7 @@ export class RailwayAdapter implements IProviderAdapter {
       `Not authorized to create ${type} on Railway project ${projectId}.`,
       'Use an Account token or a Workspace token with write access to this workspace/project.',
       'If you are using OAuth, ensure project/workspace member scopes were granted.',
-      'Then run hv_connect provider="railway" action="verify" again to refresh connection context.',
+      'Then run hv_connections provider="railway" action="verify" again to refresh connection context.',
     ].join(' ');
   }
 
@@ -4497,6 +4498,11 @@ providerRegistry.register({
     adapter.connect(credentials);
     return adapter;
   },
+  inspection: {
+    resources: ['project', 'environment'],
+    inspect: (adapter, request) => inspectRailwayResources(adapter as RailwayAdapter, request),
+  },
+  adoption: { project: true },
   derivedAdapters: {
     database: async (adapter, context) => {
       const [{ createRailwayDatabaseAdapter }, { EnvironmentRepository }] = await Promise.all([

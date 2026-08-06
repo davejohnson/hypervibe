@@ -125,7 +125,7 @@ export class SecretStore {
       console.error(
         `[hypervibe] WARNING: ${this.keyFile} was missing but ${this.dataDir}/hypervibe.db exists. `
         + 'A new encryption key was generated: previously encrypted connections and bindings are unrecoverable. '
-        + 'Restore .secret-key from backup (or set HYPERVIBE_SECRET_KEY) and restart, or reconnect providers with hv_connect.'
+        + 'Restore .secret-key from backup (or set HYPERVIBE_SECRET_KEY) and restart, or reconnect providers with hv_connections.'
       );
     }
 
@@ -158,7 +158,7 @@ export class SecretStore {
       throw new Error(
         'Failed to decrypt: authentication failed. The encryption key has likely changed '
         + '(.secret-key was regenerated or HYPERVIBE_SECRET_KEY differs from the key that encrypted this data). '
-        + 'Restore the original key, or reconnect the affected providers with hv_connect.'
+        + 'Restore the original key, or reconnect the affected providers with hv_connections.'
       );
     }
 

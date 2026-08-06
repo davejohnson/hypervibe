@@ -20,8 +20,16 @@ struct HypervibeResponseMapperTests {
                     "staging": {
                       "hosting": { "provider": "railway" },
                       "services": {
-                        "api": { "startCommand": "npm start" },
-                        "worker": { "startCommand": "npm run worker" }
+                        "api": {
+                          "startCommand": "npm start",
+                          "workloadKind": "web",
+                          "public": true,
+                          "healthCheckPath": "/healthz"
+                        },
+                        "worker": {
+                          "startCommand": "npm run worker",
+                          "workloadKind": "worker"
+                        }
                       },
                       "database": { "provider": "supabase" },
                       "storage": {
@@ -36,24 +44,6 @@ struct HypervibeResponseMapperTests {
                       "deploy": { "strategy": "branch" },
                       "ios": { "bundleId": "com.example.invoice" }
                     }
-                  }
-                },
-                "environments": {
-                  "staging": {
-                    "serviceDetails": [
-                      {
-                        "name": "api",
-                        "workloadKind": "web",
-                        "public": true,
-                        "healthCheckPath": "/healthz",
-                        "boundUrl": "https://api.example.com/private?token=sentinel"
-                      },
-                      {
-                        "name": "worker",
-                        "workloadKind": "worker",
-                        "public": false
-                      }
-                    ]
                   }
                 }
               }
@@ -100,7 +90,7 @@ struct HypervibeResponseMapperTests {
         #expect(api.workloadKind == "web")
         #expect(api.isPublic == true)
         #expect(api.healthCheckPath == "/healthz")
-        #expect(api.boundURL?.absoluteString == "https://api.example.com")
+        #expect(api.boundURL == nil)
         #expect(
             environment.resources.first { $0.id == "service:worker" }?
                 .isPublic == false
@@ -559,79 +549,6 @@ struct HypervibeResponseMapperTests {
     }
 
     @Test
-    func hostingVariableMutationMapsOnlySafeReceiptFields() throws {
-        let data = Data(
-            """
-            {
-              "ok": true,
-              "data": {
-                "environment": "staging",
-                "service": "worker",
-                "destinations": [
-                  { "environment": "staging", "service": "worker" },
-                  { "environment": "production", "service": "worker" }
-                ],
-                "variables": ["API_KEY"],
-                "valueSource": "dotenv",
-                "providerReceipt": { "value": "sentinel-secret-value" }
-              },
-              "warnings": ["sentinel-secret-value"]
-            }
-            """.utf8
-        )
-
-        let result = try HypervibeResponseMapper.decodeHostingVariableMutation(data)
-
-        #expect(result.destinations == [
-            HostingVariableTarget(environment: "staging", service: "worker"),
-            HostingVariableTarget(environment: "production", service: "worker")
-        ])
-        #expect(result.variables == ["API_KEY"])
-        #expect(result.valueSource == "dotenv")
-        #expect(!String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
-            .contains("sentinel-secret-value"))
-    }
-
-    @Test
-    func hostingVariableRequestBuildsDirectReferenceAndGeneratedArguments() {
-        let direct = HostingVariableRequest(
-            destinations: [
-                HostingVariableTarget(environment: "production", service: "web"),
-                HostingVariableTarget(environment: "staging", service: "worker"),
-            ],
-            key: " SESSION_SECRET ",
-            source: .direct("secret value")
-        ).toolArguments(projectName: "invoice-perfect")
-        #expect(direct["project"]?.stringValue == "invoice-perfect")
-        #expect(direct["target"]?.stringValue == "hosting")
-        #expect(direct["key"]?.stringValue == "SESSION_SECRET")
-        #expect(direct["value"]?.stringValue == "secret value")
-        #expect(direct["env"] == nil)
-        #expect(direct["service"] == nil)
-        #expect(direct["destinations"]?.arrayValue?.count == 2)
-
-        let reference = HostingVariableRequest(
-            destinations: [
-                HostingVariableTarget(environment: "staging", service: "worker")
-            ],
-            key: "API_KEY",
-            source: .reference(" dotenv:/tmp/.env#API_KEY ")
-        ).toolArguments(projectName: "invoice-perfect")
-        #expect(reference["secretRef"]?.stringValue == "dotenv:/tmp/.env#API_KEY")
-        #expect(reference["value"] == nil)
-
-        let generated = HostingVariableRequest(
-            destinations: [
-                HostingVariableTarget(environment: "staging", service: "web")
-            ],
-            key: "SESSION_SECRET",
-            source: .generated(length: 64)
-        ).toolArguments(projectName: "invoice-perfect")
-        #expect(generated["generate"]?.boolValue == true)
-        #expect(generated["generateLength"]?.intValue == 64)
-    }
-
-    @Test
     func hostingVariableInventoryBuildsAProjectWideKeyCatalogWithMissingSlots() {
         let staging = HostingVariableTarget(environment: "staging", service: "web")
         let production = HostingVariableTarget(environment: "production", service: "web")
@@ -661,21 +578,4 @@ struct HypervibeResponseMapperTests {
         #expect(inventory.variable(named: "STAGING_ONLY", at: production) == nil)
     }
 
-    @Test
-    func upgradeStatusBlocksPendingMigrations() {
-        let data = Data(
-            """
-            {
-              "ok": true,
-              "data": {
-                "sqlite": { "needsMigration": true }
-              }
-            }
-            """.utf8
-        )
-
-        #expect(throws: HypervibeClientError.schemaMigrationRequired) {
-            try HypervibeResponseMapper.decodeUpgradeStatus(data)
-        }
-    }
 }

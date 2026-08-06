@@ -18,6 +18,7 @@ import type { PlanAction } from '../../plan/plan.types.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import {
   applyGitHubInfrastructure,
+  applyGitHubDelegatedSecret,
   compileManagedGitHubFiles,
   GITHUB_INFRASTRUCTURE_ACTION_ID,
   GITHUB_INFRASTRUCTURE_BRANCH,
@@ -228,7 +229,7 @@ describe('GitHub infrastructure plan/apply', () => {
       expect.objectContaining({ path: '.github/workflows/hypervibe-db-restore-drill-production.yml' }),
     ]));
     expect(result.warnings).toContainEqual(expect.stringContaining(
-      'hv_secrets_set target="github"'
+      'githubActions.repository=true'
     ));
 
     secrets.mockResolvedValue(['HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS']);
@@ -275,6 +276,64 @@ describe('GitHub infrastructure plan/apply', () => {
       type: 'update', billable: true, requiresConfirm: true,
     });
     expect(result.actions.find((action) => action.id === 'repo:github-actions-pr-permission')?.type).toBe('update');
+  });
+
+  it('plans and applies declared GitHub Actions secrets from encrypted plan input', async () => {
+    const storedProject = new ProjectRepository().create({
+      name: 'declared-secret-example',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: `https://github.com/${REPOSITORY}.git`,
+    });
+    new EnvironmentRepository().create({ projectId: storedProject.id, name: 'production' });
+    const declared = projectSpecSchema.parse({
+      version: 1,
+      project: storedProject.name,
+      github: {},
+      secrets: {
+        CI_TOKEN: {
+          principal: 'github:owner',
+          githubActions: { repository: true },
+        },
+      },
+      environments: {
+        production: { hosting: { provider: 'railway' }, services: {} },
+      },
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    const list = vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets')
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(['CI_TOKEN']);
+    const set = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+    const planned = await planGitHubInfrastructure({
+      project: storedProject,
+      spec: declared,
+      environmentName: 'production',
+      suppliedSecretValues: { CI_TOKEN: 'never-return-this-value' },
+    });
+    const action = planned.actions.find((candidate) => candidate.resource.name === 'CI_TOKEN')!;
+    expect(action).toMatchObject({
+      type: 'update',
+      resource: { kind: 'secret', provider: 'github' },
+      metadata: { operation: 'githubDelegatedSecretSync', inputProvided: true },
+    });
+    expect(planned.inputRequired).toEqual([]);
+
+    const applied = await applyGitHubDelegatedSecret({
+      project: storedProject,
+      spec: declared,
+      environmentName: 'production',
+      action,
+      value: 'never-return-this-value',
+    });
+    expect(applied.success).toBe(true);
+    expect(set).toHaveBeenCalledWith('owner', 'example', 'CI_TOKEN', 'never-return-this-value');
+    expect(JSON.stringify(applied)).not.toContain('never-return-this-value');
+    expect(list).toHaveBeenCalledTimes(2);
+    const environment = new EnvironmentRepository().findByProjectAndName(storedProject.id, 'production')!;
+    expect(JSON.stringify(environment.platformBindings)).not.toContain('never-return-this-value');
+    expect(environment.platformBindings.github).toMatchObject({
+      delegatedActionsBindings: [expect.objectContaining({ name: 'CI_TOKEN', target: 'repository' })],
+    });
   });
 
   it('creates a deterministic infrastructure branch and returns a pending PR receipt', async () => {

@@ -120,12 +120,14 @@ Legacy `*.tools.ts` files that still exist but are not registered in `server.ts`
 
 Provider-specific lifecycle behavior belongs behind the provider boundary. Do not add provider-name branches or direct adapter imports in generic plan/apply/services/tools code to express hosting behavior. Add provider-owned code under `src/adapters/providers/<provider>/...` and expose it through adapter capabilities or `providerRegistry` metadata. Opinionated product surfaces such as SendGrid email or Stripe payments can stay provider-specific when they are not part of generic infrastructure reconciliation.
 
+Generic command names imply generic provider routing. `hv_inspect`, `hv_import`, and future provider-selecting commands must accept registered provider names instead of a one-provider enum/default, use flat provider-neutral selectors (`scope`, `resource`, `id`, `name`), and dispatch through capabilities or provider-owned application drivers. Never expose fields such as `railwayProjectId` or put provider API/mapping logic in `src/tools`. When only one provider implements a capability, keep the command generic and return explicit `UNSUPPORTED` for the others; add a command-surface contract test so a provider-specific shortcut cannot return.
+
 ## The spec → plan → apply loop
 
 The core workflow is terraform-style:
-1. `hv_spec_set` — write the desired state (single source of truth, revisioned)
+1. `hv_spec` — write the desired state (single source of truth, revisioned)
 2. `hv_plan` — observe live infrastructure (Railway/Cloud Run support observe; others fall back to local state marked `verified: false`), diff, persist the plan as a run → `planId`
-3. `hv_apply planId=...` — rejects stale plans (spec revision advanced, live state changed, plan expired/already applied); data-bearing destroys run only with explicit `confirmDestroy` action ids
+3. `hv_apply planId=...` — rejects stale plans (spec revision advanced, live state changed, plan expired/already applied); data-bearing destroys run only with exact action ids in `confirmActions`
 4. `hv_status` — read-only drift view
 
 There is no approval workflow: the human gate is MCP client tool-call approval plus explicit `confirm` flags.

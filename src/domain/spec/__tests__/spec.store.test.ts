@@ -6,6 +6,7 @@ import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { SpecStore, desiredStateToSpec, deepMergeSpec } from '../spec.store.js';
 import { projectSpecSchema } from '../spec.schema.js';
+import { writeRepoSpecFile } from '../repo-spec-file.js';
 import type { Project } from '../../entities/project.entity.js';
 
 function freshDb() {
@@ -163,8 +164,15 @@ describe('SpecStore', () => {
       });
 
       const specPath = path.join(repoDir, '.hypervibe', 'spec.json');
+      const envTemplatePath = path.join(repoDir, '.env.example');
       expect(v1.source).toEqual({ kind: 'repo', path: specPath });
+      expect(v1.envTemplate).toEqual({
+        path: envTemplatePath,
+        addedKeys: ['RECAPTCHA_SITE_KEY', 'RECAPTCHA_SECRET_KEY'],
+      });
       expect(JSON.parse(readFileSync(specPath, 'utf8')).project).toBe(project.name);
+      expect(readFileSync(envTemplatePath, 'utf8')).toContain('RECAPTCHA_SITE_KEY=');
+      expect(readFileSync(envTemplatePath, 'utf8')).toContain('RECAPTCHA_SECRET_KEY=');
 
       const edited = {
         ...v1.spec,
@@ -202,6 +210,47 @@ describe('SpecStore', () => {
       // Invalid JSON gets its own clear error.
       writeFileSync(specPath, '{not json', 'utf8');
       expect(() => store.get(project)).toThrow(/is not valid JSON/);
+    } finally {
+      process.chdir(oldCwd);
+      if (oldDisable === undefined) {
+        delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      } else {
+        process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
+      }
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves existing env template content and adds only missing reCAPTCHA slots', () => {
+    const oldCwd = process.cwd();
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const repoDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'hypervibe-env-template-')));
+    mkdirSync(path.join(repoDir, '.git'));
+    const envTemplatePath = path.join(repoDir, '.env.example');
+    writeFileSync(envTemplatePath, 'CUSTOM_RUNTIME_KEY=\n# RECAPTCHA_SITE_KEY=\n', 'utf8');
+
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      process.chdir(repoDir);
+      const spec = projectSpecSchema.parse({
+        version: 1,
+        project: 'env-template-app',
+        environments: {},
+      });
+      const first = writeRepoSpecFile(spec)!;
+      const afterFirst = readFileSync(envTemplatePath, 'utf8');
+
+      expect(first.envTemplate).toEqual({
+        path: envTemplatePath,
+        addedKeys: ['RECAPTCHA_SECRET_KEY'],
+      });
+      expect(afterFirst).toContain('CUSTOM_RUNTIME_KEY=');
+      expect(afterFirst.match(/RECAPTCHA_SITE_KEY=/g)).toHaveLength(1);
+      expect(afterFirst).toContain('RECAPTCHA_SECRET_KEY=');
+
+      const second = writeRepoSpecFile(spec)!;
+      expect(second.envTemplate.addedKeys).toEqual([]);
+      expect(readFileSync(envTemplatePath, 'utf8')).toBe(afterFirst);
     } finally {
       process.chdir(oldCwd);
       if (oldDisable === undefined) {

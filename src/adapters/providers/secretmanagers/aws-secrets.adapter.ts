@@ -1,12 +1,8 @@
 import {
   type ISecretManagerAdapter,
-  type SecretManagerCapabilities,
   type SecretManagerVerifyResult,
   type ResolvedSecret,
-  type SecretReference,
   type SecretListItem,
-  type SecretReceipt,
-  type RotationResult,
   type AwsSecretsCredentials,
   AwsSecretsCredentialsSchema,
 } from '../../../domain/ports/secretmanager.port.js';
@@ -144,15 +140,6 @@ interface AwsSecretList {
 export class AwsSecretsAdapter implements ISecretManagerAdapter {
   readonly name = 'aws-secrets' as const;
 
-  readonly capabilities: SecretManagerCapabilities = {
-    supportsVersioning: true,
-    supportsMultipleKeys: true, // Via JSON in SecretString
-    supportsRotation: true,
-    supportsAuditLog: false, // Via CloudTrail, not accessible here
-    supportsDynamicSecrets: false,
-    maxSecretSize: 64 * 1024, // 64KB
-  };
-
   private credentials: AwsSecretsCredentials | null = null;
 
   async connect(credentials: unknown): Promise<void> {
@@ -177,7 +164,6 @@ export class AwsSecretsAdapter implements ISecretManagerAdapter {
       return {
         success: true,
         identity: `AWS (${this.credentials?.region || 'us-east-1'})`,
-        capabilities: this.capabilities,
       };
     } catch (error) {
       return {
@@ -237,88 +223,6 @@ export class AwsSecretsAdapter implements ISecretManagerAdapter {
     };
   }
 
-  async getSecrets(references: SecretReference[]): Promise<Map<string, ResolvedSecret>> {
-    const results = new Map<string, ResolvedSecret>();
-
-    // AWS Secrets Manager has BatchGetSecretValue but it's relatively new
-    // For broader compatibility, we fetch in parallel
-    const promises = references.map(async (ref) => {
-      try {
-        const secret = await this.getSecret(ref.path, ref.key, ref.version);
-        results.set(ref.raw, secret);
-      } catch (error) {
-        results.set(ref.raw, {
-          value: '',
-          metadata: {
-            error: error instanceof Error ? error.message : String(error),
-          },
-        });
-      }
-    });
-
-    await Promise.all(promises);
-    return results;
-  }
-
-  async setSecret(path: string, values: Record<string, string>): Promise<SecretReceipt> {
-    try {
-      // Check if secret exists
-      let exists = false;
-      try {
-        await this.request('DescribeSecret', { SecretId: path });
-        exists = true;
-      } catch {
-        // Secret doesn't exist
-      }
-
-      const secretString = JSON.stringify(values);
-
-      if (exists) {
-        const response = await this.request<{ ARN: string; VersionId: string }>(
-          'PutSecretValue',
-          { SecretId: path, SecretString: secretString }
-        );
-        return {
-          success: true,
-          path,
-          version: response.VersionId,
-        };
-      } else {
-        const response = await this.request<{ ARN: string; VersionId: string }>(
-          'CreateSecret',
-          { Name: path, SecretString: secretString }
-        );
-        return {
-          success: true,
-          path,
-          version: response.VersionId,
-        };
-      }
-    } catch (error) {
-      return {
-        success: false,
-        path,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
-  async deleteSecret(path: string): Promise<SecretReceipt> {
-    try {
-      await this.request('DeleteSecret', {
-        SecretId: path,
-        ForceDeleteWithoutRecovery: false, // 30-day recovery window
-      });
-      return { success: true, path };
-    } catch (error) {
-      return {
-        success: false,
-        path,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
   async listSecrets(pathPrefix?: string): Promise<SecretListItem[]> {
     const secrets: SecretListItem[] = [];
     let nextToken: string | undefined;
@@ -349,29 +253,6 @@ export class AwsSecretsAdapter implements ISecretManagerAdapter {
     return secrets;
   }
 
-  async rotateSecret(path: string): Promise<RotationResult> {
-    try {
-      const response = await this.request<{ ARN: string; VersionId: string }>(
-        'RotateSecret',
-        { SecretId: path }
-      );
-
-      return {
-        success: true,
-        path,
-        newVersion: response.VersionId,
-        rotatedAt: new Date(),
-      };
-    } catch (error) {
-      return {
-        success: false,
-        path,
-        rotatedAt: new Date(),
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
   private async request<T>(action: string, params: Record<string, unknown>): Promise<T> {
     if (!this.credentials || !this.credentials.accessKeyId) {
       throw new Error('Not connected. Call connect() first.');
@@ -388,6 +269,7 @@ export class AwsSecretsAdapter implements ISecretManagerAdapter {
       method: 'POST',
       headers,
       body,
+      signal: AbortSignal.timeout(15_000),
     });
 
     const responseText = await response.text();
@@ -422,13 +304,5 @@ secretManagerRegistry.register({
   factory: (credentials) => {
     const adapter = new AwsSecretsAdapter();
     return adapter;
-  },
-  defaultCapabilities: {
-    supportsVersioning: true,
-    supportsMultipleKeys: true,
-    supportsRotation: true,
-    supportsAuditLog: false,
-    supportsDynamicSecrets: false,
-    maxSecretSize: 64 * 1024,
   },
 });

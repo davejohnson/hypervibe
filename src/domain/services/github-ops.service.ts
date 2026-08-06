@@ -26,13 +26,6 @@ const connectionRepo = new ConnectionRepository();
 const envRepo = new EnvironmentRepository();
 const projectSpecRepo = new ProjectSpecRepository();
 
-// GitHub Pages IP addresses for A records (apex domain)
-export const GITHUB_PAGES_IPS = [
-  '185.199.108.153',
-  '185.199.109.153',
-  '185.199.110.153',
-  '185.199.111.153',
-];
 
 /**
  * Get a GitHub adapter, using scoped connection if available.
@@ -52,21 +45,6 @@ export function getGitHubAdapter(scopeHint?: string): { adapter: GitHubAdapter }
   return { adapter };
 }
 
-export function isApexDomain(domain: string): boolean {
-  // Simple check: apex domain has only one dot (e.g., example.com)
-  // Subdomain has multiple dots (e.g., www.example.com, blog.example.com)
-  const parts = domain.split('.');
-  return parts.length === 2;
-}
-
-export function getApexDomain(domain: string): string {
-  const parts = domain.split('.');
-  if (parts.length <= 2) {
-    return domain;
-  }
-  // Return last two parts for apex domain
-  return parts.slice(-2).join('.');
-}
 
 export type {
   BranchDeployEnvironmentKind,

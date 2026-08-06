@@ -13,7 +13,6 @@ import {
 export interface McpToolResponse {
   content: Array<{ type: 'text'; text: string }>;
   structuredContent: Record<string, unknown>;
-  _meta: { hypervibeEnvelope: CommandEnvelope };
   isError?: boolean;
   [key: string]: unknown;
 }
@@ -22,7 +21,6 @@ export function toMcpToolResponse(envelope: CommandEnvelope): McpToolResponse {
   return {
     content: [{ type: 'text', text: formatCommandEnvelope(envelope) }],
     structuredContent: envelope as unknown as Record<string, unknown>,
-    _meta: { hypervibeEnvelope: envelope },
     ...(envelope.ok ? {} : { isError: true }),
   };
 }

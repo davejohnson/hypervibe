@@ -26,23 +26,21 @@ afterEach(() => {
 /** The pinned tool surface. Changing it is a deliberate, reviewed act. */
 const EXPECTED_TOOLS = [
   // Core spec/plan/apply loop
-  'hv_spec_set', 'hv_spec_get', 'hv_plan', 'hv_apply', 'hv_status', 'hv_inspect', 'hv_import', 'hv_destroy',
+  'hv_spec', 'hv_plan', 'hv_apply', 'hv_status', 'hv_inspect', 'hv_import', 'hv_destroy',
   // Connections
-  'hv_connect', 'hv_connections_list',
+  'hv_connections',
   // Deploy + observability
-  'hv_deploy', 'hv_rollback', 'hv_logs', 'hv_errors', 'hv_health',
+  'hv_deploy', 'hv_rollback', 'hv_logs', 'hv_health',
   // Database
-  'hv_db_query', 'hv_db_url',
+  'hv_db_query',
   // Secrets
-  'hv_secrets_set', 'hv_secrets_get', 'hv_secrets_list', 'hv_secrets_sync',
-  // Email
-  'hv_email_setup', 'hv_email_forwarding',
+  'hv_secrets',
   // CI
   'hv_ci_status', 'hv_ci_trigger',
   // App Store / iOS
   'hv_appstore_status', 'hv_appstore_submit',
   // DevX
-  'hv_upgrade', 'hv_tunnel', 'hv_local_bootstrap', 'hv_visualize', 'hv_runs',
+  'hv_runs',
 ].sort();
 
 async function makeClient() {
@@ -65,12 +63,12 @@ describe('server tool surface', () => {
     await server.close();
   });
 
-  it('registers exactly the 32 pinned hv_* tools', async () => {
+  it('registers exactly the 19 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
-    expect(names).toHaveLength(32);
+    expect(names).toHaveLength(19);
     expect(tools.find((tool) => tool.name === 'hv_ci_status')?.description).toContain(
       'Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls.'
     );
@@ -86,8 +84,10 @@ describe('server tool surface', () => {
     const cliPaths = definitions.map((definition) => definition.cliPath.join(' '));
 
     expect(ids).toEqual(EXPECTED_TOOLS);
-    expect(new Set(cliPaths).size).toBe(32);
-    expect(registry.get('hv_spec_set')?.cliPath).toEqual(['spec', 'set']);
+    expect(new Set(cliPaths).size).toBe(19);
+    expect(registry.get('hv_spec')?.cliPath).toEqual(['spec']);
+    expect(registry.get('hv_connections')?.cliPath).toEqual(['connections']);
+    expect(registry.get('hv_secrets')?.cliPath).toEqual(['secrets']);
     expect(registry.get('hv_plan')?.cliPath).toEqual(['plan']);
     expect(registry.get('hv_db_query')?.cliPath).toEqual(['db', 'query']);
     expect(registry.get('hv_db_migrate')).toBeUndefined();
@@ -95,10 +95,10 @@ describe('server tool surface', () => {
 
   it('returns the same structured envelope through the registry and MCP', async () => {
     const registry = createCommandRegistry(createCommandContext());
-    const direct = await registry.execute('hv_spec_get', { project: 'does-not-exist' });
+    const direct = await registry.execute('hv_spec', { project: 'does-not-exist' });
     const { client, server } = await makeClient();
     const overMcp = parseToolEnvelope(await client.callTool({
-      name: 'hv_spec_get',
+      name: 'hv_spec',
       arguments: { project: 'does-not-exist' },
     }));
 
@@ -124,12 +124,11 @@ describe('server tool surface', () => {
     const { client, server } = await makeClient();
     // Representative spread across files: each must return the ok/error envelope, not a protocol error.
     const probes: Array<{ name: string; args: Record<string, unknown> }> = [
-      { name: 'hv_spec_get', args: { project: 'does-not-exist' } },
+      { name: 'hv_spec', args: { project: 'does-not-exist' } },
       { name: 'hv_plan', args: { project: 'does-not-exist' } },
       { name: 'hv_deploy', args: { project: 'does-not-exist' } },
-      { name: 'hv_db_url', args: { project: 'does-not-exist' } },
-      { name: 'hv_secrets_sync', args: { project: 'does-not-exist' } },
-      { name: 'hv_email_setup', args: { domain: 'example.com' } },
+      { name: 'hv_db_query', args: { project: 'does-not-exist', sql: 'SELECT 1' } },
+      { name: 'hv_secrets', args: { project: 'does-not-exist', env: 'production' } },
       { name: 'hv_runs', args: { project: 'does-not-exist' } },
     ];
     for (const probe of probes) {
