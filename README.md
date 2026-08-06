@@ -512,10 +512,48 @@ hv_connections provider="stripe" scope="staging" credentialsRef="dotenv:/absolut
 
 Repeat with `scope="development"` for a development sandbox and
 `scope="production"` for Stripe live mode. Sandbox keys begin with `sk_test_`
-and `pk_test_`; production keys begin with `sk_live_` and `pk_live_`. Open the
-intended sandbox before revealing its API keys because each Stripe sandbox has
-its own isolated key pair and objects. See [Stripe sandbox management](https://docs.stripe.com/sandboxes/dashboard/manage)
+or `rk_test_` and `pk_test_`; production server keys begin with `sk_live_` or
+`rk_live_`. Restricted `rk_` keys are preferred and are accepted in the
+`secretKey` connection field. Open the intended sandbox before revealing its
+API keys because each Stripe sandbox has its own isolated key pair and objects.
+See [Stripe sandbox management](https://docs.stripe.com/sandboxes/dashboard/manage)
 and [sandbox API-key access](https://docs.stripe.com/sandboxes/dashboard/manage-access).
+
+#### Fast fresh development sandboxes
+
+Stripe sandbox creation itself is a short Dashboard step because an ordinary
+sandbox API key cannot create another sandbox or its keys. Everything after
+that stays in Hypervibe's desired-state loop:
+
+1. In Stripe's account picker choose **Switch to sandbox → Create sandbox**.
+   Name it for the project or workflow and open it. Copy a restricted `rk_test_`
+   key (or an unrestricted `sk_test_` key) and the optional `pk_test_` key into
+   a gitignored `.env.stripe.development`.
+2. Connect that exact sandbox:
+
+   ```text
+   hv_connections provider="stripe" scope="development" credentialsRef="dotenv:/absolute/path/.env.stripe.development" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}
+   ```
+
+3. Declare `payments.stripe.environment: "development"`, catalog prices,
+   runtime credential projection, and webhooks; run `hv_plan` and `hv_apply`,
+   then verify the managed CI release with `hv_ci_status` and `hv_health`.
+4. In the following desired-state revision, add a versioned application seed
+   such as `npm run db:seed:personas -- --dataset=invoice-perfect-v1`. The seed
+   owns paired application rows and Stripe test customers/subscriptions;
+   Hypervibe owns only their prerequisites and execution receipt.
+
+For a clean reset, create another named sandbox, replace the two local dotenv
+values, and run the same scoped `hv_connections` call. `hv_plan` then reviews
+recreation of products, prices, environment projection, and webhooks against
+the empty target. The old sandbox is untouched and can be deleted in Stripe
+after the replacement and fixtures are verified.
+
+Application seeds must use stored provider IDs and deterministic Stripe
+metadata as durable fixture identity. Stripe idempotency keys protect immediate
+retries but expire; they do not replace reconciliation. Keep baseline personas
+stable. Add test-clock personas later as disposable fixtures because deleting a
+test clock also deletes its associated Stripe test objects.
 
 Then declare the Stripe catalog Hypervibe owns and which hosting services
 receive its runtime values. Products and recurring prices are lifecycle
@@ -841,6 +879,13 @@ For fresh environments, declare seed/bootstrap data on the database. This is pro
 ```
 
 `hv_plan` emits a visible one-shot database seed action. `hv_apply` runs it after the database exists as a one-off command inside the deployed service environment, then records the command hash plus `seededAt` on the database component. The command does not run again unless the command changes.
+
+When the same CI-owned plan introduces Stripe runtime variables or creates a
+webhook signing secret, Hypervibe converges those resources and unlocks the
+reviewed release first, then reports the seed as pending. After that release is
+healthy, re-run `hv_plan`/`hv_apply`; the unchanged seed command remains planned
+and runs against the newly deployed image. This keeps webhook-producing fixture
+creation on the application side without racing the Stripe/application boundary.
 
 Hypervibe does not expose an imperative database migration command. Schema
 migrations belong in application startup or durable declared release

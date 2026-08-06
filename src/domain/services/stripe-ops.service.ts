@@ -1,6 +1,6 @@
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
-import { StripeAdapter } from '../../adapters/providers/stripe/stripe.adapter.js';
+import { StripeAdapter, stripeApiKeyMode } from '../../adapters/providers/stripe/stripe.adapter.js';
 import type { StripeCredentials, StripeMode } from '../../adapters/providers/stripe/stripe.adapter.js';
 import type { Connection } from '../entities/connection.entity.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
@@ -12,7 +12,7 @@ export function stripeModeForEnvironment(
   credentials: StripeCredentials
 ): StripeMode {
   if (credentials.secretKey) {
-    return credentials.secretKey.startsWith('sk_live_') ? 'live' : 'sandbox';
+    return stripeApiKeyMode(credentials.secretKey) ?? 'sandbox';
   }
   return ['live', 'production', 'prod'].includes(environment.trim().toLowerCase())
     ? 'live'

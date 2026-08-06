@@ -1917,6 +1917,18 @@ export async function applyDatabaseSeed(
     };
   }
 
+  if (asRecord(action.metadata)?.deferUntilNextPlan === true) {
+    return {
+      success: false,
+      status: 'pending',
+      message: `Database seed is waiting for the reviewed Stripe-aware deploy for ${project.name}/${envName}`,
+      data: {
+        pendingDeploy: true,
+        hint: 'Let the managed CI release finish, verify it with hv_ci_status and hv_health, then re-run hv_plan/hv_apply. The seed remains planned until it completes.',
+      },
+    };
+  }
+
   const result = await runEnvironmentTask({
     project,
     environment,

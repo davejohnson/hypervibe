@@ -674,16 +674,25 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   stripe: {
     provider: 'stripe',
     displayName: 'Stripe',
-    tokenType: 'Stripe environment key pair: secretKey (sk_test_... for a named sandbox, sk_live_... for production) and optional publishableKey (pk_test_.../pk_live_...). Legacy global sandboxSecretKey/liveSecretKey fields remain supported. Restricted keys (rk_...) are not accepted',
+    tokenType: 'Stripe server API key for one environment: a restricted key (rk_test_... for a named sandbox or rk_live_... for production) is preferred; unrestricted sk_test_.../sk_live_... keys also work. Pass it in secretKey with the optional matching publishableKey (pk_test_.../pk_live_...). Legacy global sandboxSecretKey/liveSecretKey fields remain supported',
     setupUrl: 'https://dashboard.stripe.com/apikeys',
+    setupUrls: [
+      { label: 'Create or replace a named development sandbox', url: 'https://dashboard.stripe.com/' },
+      { label: 'Create the selected sandbox API key', url: 'https://dashboard.stripe.com/apikeys' },
+      { label: 'Stripe sandbox setup guide', url: 'https://docs.stripe.com/sandboxes/dashboard/manage' },
+    ],
     permissions: [
-      'The key must be able to read the account, read/write Products and Prices, read/write Customers, and read/write Webhook Endpoints. A standard secret key covers all of these.',
+      'For Hypervibe reconciliation, a restricted key needs Accounts: Read plus Products, Prices, and Webhook Endpoints: Write. Write includes read. An unrestricted secret key is a broader fallback.',
+      'If the same key is projected to an application seed that creates development fixtures, also grant only the resources that seed uses—normally Customers and Subscriptions: Write, plus Payment Methods or Test Clocks: Write when those workflows are declared by the application.',
       'Create a separate scoped connection for each isolated Stripe sandbox and for production; the scope should match payments.stripe.environment (normally development, staging, or production).',
     ],
-    credentialExample: 'hv_connections provider="stripe" scope="staging" credentialsRef="file:/absolute/path/stripe-staging.json" where the JSON is {"secretKey":"<sk_test_...>","publishableKey":"<pk_test_...>"}',
+    credentialExample: 'hv_connections provider="stripe" scope="development" credentialsRef="dotenv:/absolute/path/.env.stripe.development" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}',
     notes: [
-      'Open the intended named sandbox first, then create/reveal its keys in the Stripe Dashboard (https://dashboard.stripe.com/test/apikeys). Stripe sandbox access/key guidance: https://docs.stripe.com/sandboxes/dashboard/manage-access. Keys are isolated to that sandbox.',
-      'For an existing dotenv file, use credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}; omit publishableKey from both the spec credential projection and credentialsMap if it is unavailable.',
+      'Fresh development workflow: in the Stripe account picker choose Switch to sandbox -> Create sandbox, name it for the project or workflow, open it, create its API key, save the key pair in a gitignored .env.stripe.development file, then run the scoped hv_connections example. Ordinary sandbox keys cannot create another sandbox.',
+      'To reset development later, create a new named sandbox, replace the two local dotenv values, and run the same hv_connections call again. hv_plan will observe an empty Stripe target and review recreation of the catalog and webhooks; the old sandbox remains untouched until you delete it in Stripe.',
+      'Keep customer, subscription, persona, and entitlement fixtures in the application database.seedCommand. First converge Stripe infrastructure and deploy the receiving service; add or version the seed command in the following desired-state revision.',
+      'Stripe idempotency keys are retry protection, not durable fixture identity. The application seed should reconcile stored Stripe IDs and deterministic metadata before creating missing customers or subscriptions.',
+      'Omit publishableKey from both the spec credential projection and credentialsMap when the application does not use it.',
       'A global legacy connection can still carry sandboxSecretKey/sandboxPublishableKey plus liveSecretKey/livePublishableKey, but separate scoped connections are required when development and staging use different Stripe sandboxes.',
     ],
   },
@@ -744,6 +753,8 @@ function credentialExample(guidance: ConnectionGuidance, scope?: string): string
       return guidance.credentialExample.replace('provider="database"', `provider="database" scope="${scope}"`);
     case 'appstoreconnect':
       return guidance.credentialExample.replace('provider="appstoreconnect"', `provider="appstoreconnect" scope="${scope}"`);
+    case 'stripe':
+      return guidance.credentialExample.replace('scope="development"', `scope="${scope}"`);
     default:
       return guidance.credentialExample;
   }

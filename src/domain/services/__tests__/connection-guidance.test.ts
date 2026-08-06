@@ -144,6 +144,19 @@ describe('connection guidance', () => {
     ]));
   });
 
+  it('explains the fast scoped Stripe sandbox workflow and restricted-key permissions', () => {
+    const guidance = formatConnectionGuidance('stripe', { scope: 'development-personas' });
+
+    expect(guidance).toContain('Switch to sandbox -> Create sandbox');
+    expect(guidance).toContain('rk_test_');
+    expect(guidance).toContain('Products, Prices, and Webhook Endpoints: Write');
+    expect(guidance).toContain('Customers and Subscriptions: Write');
+    expect(guidance).toContain('database.seedCommand');
+    expect(guidance).toContain('scope="development-personas"');
+    expect(guidance).not.toContain('scope="development"');
+    expect(guidance).toContain('.env.stripe.development');
+  });
+
   it('keeps provider-specific token guidance actionable', () => {
     const expectations: Record<string, string[]> = {
       railway: [
@@ -270,6 +283,8 @@ describe('connection guidance', () => {
         'https://dashboard.stripe.com/apikeys',
         'sk_test_',
         'sk_live_',
+        'rk_test_',
+        'rk_live_',
         'Webhook Endpoints',
       ],
       appstoreconnect: [

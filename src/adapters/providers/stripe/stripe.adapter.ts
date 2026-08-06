@@ -2,8 +2,16 @@ import { z } from 'zod';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 
 const STRIPE_API_URL = 'https://api.stripe.com/v1';
+const STRIPE_REQUEST_TIMEOUT_MS = 20_000;
 
 export type StripeMode = 'sandbox' | 'live';
+
+/** Stripe secret and restricted server keys encode their target mode. */
+export function stripeApiKeyMode(key: string): StripeMode | null {
+  if (key.startsWith('sk_test_') || key.startsWith('rk_test_')) return 'sandbox';
+  if (key.startsWith('sk_live_') || key.startsWith('rk_live_')) return 'live';
+  return null;
+}
 
 export interface StripeProduct {
   id: string;
@@ -44,10 +52,13 @@ export interface StripeWebhookEndpoint {
   metadata: Record<string, string>;
 }
 
+export type StripeApiErrorKind = 'http' | 'timeout' | 'network' | 'malformed_response';
+
 export class StripeApiError extends Error {
   constructor(
     message: string,
-    readonly status: number
+    readonly status: number,
+    readonly kind: StripeApiErrorKind = 'http'
   ) {
     super(message);
     this.name = 'StripeApiError';
@@ -61,25 +72,25 @@ export const StripeCredentialsSchema = z.object({
    * (hv_connections provider="stripe" scope="staging" ...).
    */
   secretKey: z.string().optional().refine(
-    (key) => !key || key.startsWith('sk_test_') || key.startsWith('sk_live_'),
-    'Secret key must start with sk_test_ or sk_live_'
-  ),
+    (key) => !key || stripeApiKeyMode(key) !== null,
+    'Stripe server API key must start with sk_test_, sk_live_, rk_test_, or rk_live_'
+  ).describe('Server-side key for exactly one Stripe sandbox or live account. Restricted rk_test_/rk_live_ keys are preferred; sk_test_/sk_live_ keys also work.'),
   publishableKey: z.string().optional().refine(
     (key) => !key || key.startsWith('pk_test_') || key.startsWith('pk_live_'),
     'Publishable key must start with pk_test_ or pk_live_'
-  ),
+  ).describe('Optional publishable key from the same Stripe sandbox or live account as secretKey.'),
   /** Legacy global connection fields retained for compatibility. */
   sandboxSecretKey: z.string().optional().refine(
-    (key) => !key || key.startsWith('sk_test_'),
-    'Sandbox secret key must start with sk_test_'
+    (key) => !key || stripeApiKeyMode(key) === 'sandbox',
+    'Sandbox server API key must start with sk_test_ or rk_test_'
   ),
   sandboxPublishableKey: z.string().optional().refine(
     (key) => !key || key.startsWith('pk_test_'),
     'Sandbox publishable key must start with pk_test_'
   ),
   liveSecretKey: z.string().optional().refine(
-    (key) => !key || key.startsWith('sk_live_'),
-    'Live secret key must start with sk_live_'
+    (key) => !key || stripeApiKeyMode(key) === 'live',
+    'Live server API key must start with sk_live_ or rk_live_'
   ),
   livePublishableKey: z.string().optional().refine(
     (key) => !key || key.startsWith('pk_live_'),
@@ -93,7 +104,7 @@ export const StripeCredentialsSchema = z.object({
     });
   }
   if (data.publishableKey && data.secretKey) {
-    const secretIsLive = data.secretKey.startsWith('sk_live_');
+    const secretIsLive = stripeApiKeyMode(data.secretKey) === 'live';
     const publishableIsLive = data.publishableKey.startsWith('pk_live_');
     if (secretIsLive !== publishableIsLive) {
       ctx.addIssue({
@@ -165,7 +176,7 @@ export class StripeAdapter {
     return {
       secretKey,
       ...(publishableKey ? { publishableKey } : {}),
-      mode: secretKey.startsWith('sk_live_') ? 'live' : 'sandbox',
+      mode: stripeApiKeyMode(secretKey) ?? mode,
     };
   }
 
@@ -189,23 +200,55 @@ export class StripeAdapter {
     const fetchOptions: RequestInit = {
       method,
       headers,
+      signal: AbortSignal.timeout(STRIPE_REQUEST_TIMEOUT_MS),
     };
 
     if (body && method === 'POST') {
       fetchOptions.body = this.encodeFormData(body);
     }
 
-    const response = await fetch(`${STRIPE_API_URL}${endpoint}`, fetchOptions);
-    const data = (await response.json()) as T & { error?: { message?: string } };
+    let response: Response;
+    try {
+      response = await fetch(`${STRIPE_API_URL}${endpoint}`, fetchOptions);
+    } catch (error) {
+      const name = error instanceof Error ? error.name : '';
+      const timedOut = name === 'AbortError' || name === 'TimeoutError';
+      throw new StripeApiError(
+        timedOut
+          ? `Stripe API request timed out after ${STRIPE_REQUEST_TIMEOUT_MS}ms`
+          : 'Stripe API request failed before a response was received',
+        0,
+        timedOut ? 'timeout' : 'network'
+      );
+    }
+
+    let data: unknown;
+    try {
+      data = JSON.parse(await response.text()) as unknown;
+    } catch {
+      throw new StripeApiError(
+        `Stripe API returned a malformed response (${response.status})`,
+        response.status,
+        'malformed_response'
+      );
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new StripeApiError(
+        `Stripe API returned an invalid response shape (${response.status})`,
+        response.status,
+        'malformed_response'
+      );
+    }
+    const payload = data as T & { error?: { message?: string } };
 
     if (!response.ok) {
       throw new StripeApiError(
-        data.error?.message || `Stripe API error: ${response.status}`,
+        payload.error?.message || `Stripe API error: ${response.status}`,
         response.status
       );
     }
 
-    return data;
+    return payload;
   }
 
   private encodeFormData(obj: Record<string, unknown>, prefix = ''): string {
@@ -242,7 +285,12 @@ export class StripeAdapter {
     // sandbox-only connection by always reaching for the live key.
     const resolvedMode: StripeMode = modeOrScope === 'live' || modeOrScope === 'sandbox'
       ? modeOrScope
-      : (this.credentials?.secretKey?.startsWith('sk_live_') || this.credentials?.liveSecretKey ? 'live' : 'sandbox');
+      : (
+        (this.credentials?.secretKey && stripeApiKeyMode(this.credentials.secretKey) === 'live')
+        || this.credentials?.liveSecretKey
+          ? 'live'
+          : 'sandbox'
+      );
     try {
       const result = await this.request<{ id: string }>(resolvedMode, 'GET', '/account');
       return { success: true, accountId: result.id };

@@ -15,6 +15,7 @@ import { ComponentRepository } from '../../../adapters/db/repositories/component
 import { SpecStore } from '../../spec/spec.store.js';
 import { adapterFactory } from '../../services/adapter.factory.js';
 import { PlanService } from '../plan.service.js';
+import { orderActions } from '../converge.executor.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../../adapters/providers/github/github.adapter.js';
 import { AppStoreConnectAdapter } from '../../../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
@@ -24,7 +25,7 @@ import type { Project } from '../../entities/project.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
 import { buildBranchDeployWorkflow } from '../../services/github-ops.service.js';
 import { StripeAdapter } from '../../../adapters/providers/stripe/stripe.adapter.js';
-import { executePlanApply } from '../../../application/apply-plan.js';
+import { applyDatabaseSeed, executePlanApply } from '../../../application/apply-plan.js';
 import { createToolContext } from '../../../tools/context.js';
 
 let project: Project;
@@ -396,6 +397,180 @@ describe('PlanService.plan', () => {
     const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
     expect(document.integrationFingerprints).toMatchObject({ stripe: expect.any(String) });
     expect(JSON.stringify(document)).not.toContain('sk_test_staging');
+  });
+
+  it('stages Stripe-backed fixture seeding after the reviewed CI release', async () => {
+    project = new ProjectRepository().update(project.id, {
+      gitRemoteUrl: 'https://github.com/dave/plan-test',
+    })!;
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+          database: {
+            provider: 'railway',
+            engine: 'postgres',
+            seedCommand: 'npm run db:seed:personas -- --dataset=invoice-perfect-v1',
+          },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          payments: {
+            stripe: {
+              environment: 'staging',
+              services: ['web'],
+              credentials: { secretKeyEnvVar: 'STRIPE_SECRET_KEY' },
+              catalog: {
+                products: {
+                  starter: {
+                    name: 'Invoice Perfect Starter',
+                    prices: {
+                      monthly: {
+                        unitAmount: 4900,
+                        currency: 'cad',
+                        interval: 'month',
+                        envVar: 'STRIPE_STARTER_MONTHLY_PRICE_ID',
+                      },
+                    },
+                  },
+                },
+              },
+              webhooks: {
+                billing: {
+                  url: 'https://development.example.com/webhooks/stripe',
+                  service: 'web',
+                  envVar: 'STRIPE_WEBHOOK_SECRET',
+                  events: ['customer.subscription.updated'],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: { web: { serviceId: 's-1' } },
+      },
+    });
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      externalId: 'db-1',
+      bindings: { provider: 'railway' },
+    });
+    new ServiceRepository().create({ projectId: project.id, name: 'web' });
+    const connectionRepo = new ConnectionRepository();
+    for (const input of [
+      { provider: 'railway', credentials: { apiToken: 'railway-token' }, scope: undefined },
+      { provider: 'stripe', credentials: { secretKey: 'rk_test_staging' }, scope: 'staging' },
+    ]) {
+      const connection = connectionRepo.create({
+        provider: input.provider,
+        scope: input.scope,
+        credentialsEncrypted: getSecretStore().encryptObject(input.credentials),
+      });
+      connectionRepo.updateStatus(connection.id, 'verified');
+    }
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 're-1',
+      services: [{
+        name: 'web',
+        externalId: 's-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: { startCommand: 'npm start' },
+        envVarKeys: [],
+        envVarHashes: {},
+        status: 'running',
+      }],
+      databases: [{
+        provider: 'railway',
+        engine: 'postgres',
+        externalId: 'db-1',
+        status: 'running',
+      }],
+      partial: false,
+      warnings: [],
+    });
+    vi.spyOn(StripeAdapter.prototype, 'listProducts').mockResolvedValue([]);
+    vi.spyOn(StripeAdapter.prototype, 'listPrices').mockResolvedValue([]);
+    vi.spyOn(StripeAdapter.prototype, 'listWebhookEndpoints').mockResolvedValue([]);
+
+    const result = await new PlanService().plan(project, 'staging');
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    const seed = plan.actions.find((action) => action.metadata?.operation === 'databaseSeed');
+
+    expect(seed).toMatchObject({
+      type: 'update',
+      metadata: { deferUntilNextPlan: true },
+      dependsOn: expect.arrayContaining([
+        'payment:stripe:staging:catalog:product:starter',
+        'payment:stripe:staging:catalog:price:starter:monthly',
+        'payment:stripe:staging:hosting-env:web',
+        'payment:stripe:staging:webhook:billing',
+        'ci:github-actions:staging:deploy-branch',
+        'ci:github-actions:staging:applied-spec-hash',
+      ]),
+    });
+    const appliedSpecHash = plan.actions.find((action) =>
+      action.id === 'ci:github-actions:staging:applied-spec-hash'
+    );
+    expect(appliedSpecHash?.dependsOn).not.toContain(seed?.id);
+    const orderedIds = orderActions(plan.actions).map((action) => action.id);
+    expect(orderedIds.indexOf(appliedSpecHash!.id)).toBeLessThan(orderedIds.indexOf(seed!.id));
+    expect(plan.warnings).toContainEqual(expect.stringContaining(
+      'Database seeding is staged after this apply'
+    ));
+  });
+
+  it('returns a pending seed receipt without starting an environment task before release', async () => {
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 're-1' },
+    });
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: 'postgres',
+      externalId: 'db-1',
+      bindings: { provider: 'railway' },
+    });
+    const getProviderAdapter = vi.spyOn(adapterFactory, 'getProviderAdapter');
+
+    const result = await applyDatabaseSeed(createToolContext(), project, 'staging', {
+      id: 'database:railway:seed',
+      type: 'update',
+      resource: { kind: 'database', name: 'seed', provider: 'railway' },
+      verified: true,
+      reason: 'Seed application and Stripe fixtures after release',
+      metadata: {
+        operation: 'databaseSeed',
+        engine: 'postgres',
+        command: 'npm run db:seed:personas -- --dataset=invoice-perfect-v1',
+        commandHash: 'hash-v1',
+        deferUntilNextPlan: true,
+      },
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'pending',
+      data: { pendingDeploy: true },
+    });
+    expect(getProviderAdapter).not.toHaveBeenCalled();
   });
 
   it('plans bound Stripe webhook deletion before destroying its hosting service', async () => {
