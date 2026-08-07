@@ -41,7 +41,7 @@ export interface CloudflareAccount {
 export interface CloudflareDnsRecord {
   id: string;
   zone_id: string;
-  zone_name: string;
+  zone_name?: string;
   name: string;
   type: string;
   content: string;
@@ -1111,8 +1111,30 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
     return response.result;
   }
 
-  private dnsRecordMatchesName(record: CloudflareDnsRecord, desiredName: string): boolean {
-    return canonicalDnsName(record.name, record.zone_name) === canonicalDnsName(desiredName, record.zone_name);
+  private dnsRecordMatchesName(
+    record: CloudflareDnsRecord,
+    desiredName: string,
+    fallbackZoneName?: string
+  ): boolean {
+    const zoneName = record.zone_name || fallbackZoneName;
+    return canonicalDnsName(record.name, zoneName) === canonicalDnsName(desiredName, zoneName);
+  }
+
+  private async findDnsRecordByName(
+    zoneId: string,
+    records: CloudflareDnsRecord[],
+    desiredName: string
+  ): Promise<CloudflareDnsRecord | undefined> {
+    const matched = records.find((record) => this.dnsRecordMatchesName(record, desiredName));
+    if (matched || records.length === 0 || records.every((record) => record.zone_name)) {
+      return matched;
+    }
+
+    const knownZoneName = records.find((record) => record.zone_name)?.zone_name;
+    const zoneName = knownZoneName ?? (
+      await this.request<CloudflareZone>('GET', `/zones/${encodeURIComponent(zoneId)}`)
+    ).result.name;
+    return records.find((record) => this.dnsRecordMatchesName(record, desiredName, zoneName));
   }
 
   private dnsRecordNeedsUpdate(
@@ -1165,7 +1187,7 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
   ): Promise<{ record: CloudflareDnsRecord; action: 'created' | 'updated' }> {
     // Find existing record by name and type
     const records = await this.listDnsRecords(zoneId, type);
-    const existing = records.find((record) => this.dnsRecordMatchesName(record, name));
+    const existing = await this.findDnsRecordByName(zoneId, records, name);
 
     if (existing) {
       return this.finishDnsRecordUpsert(zoneId, existing, type, content, options);
@@ -1187,7 +1209,7 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
       }
 
       const refreshed = await this.listDnsRecords(zoneId, type);
-      const recovered = refreshed.find((record) => this.dnsRecordMatchesName(record, name));
+      const recovered = await this.findDnsRecordByName(zoneId, refreshed, name);
       if (!recovered) {
         throw error;
       }

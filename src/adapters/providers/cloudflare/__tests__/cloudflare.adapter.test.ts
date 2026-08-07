@@ -334,6 +334,47 @@ describe('CloudflareAdapter.upsertDnsRecord', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it('recognizes a relative desired name when Cloudflare omits zone_name', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes('/dns_records?page=')) {
+        return cfResponse([cfDnsRecord({
+          zone_name: undefined,
+          name: '_railway-verify.apreskeys.com',
+          type: 'TXT',
+          content: 'railway-verify=token',
+        })]);
+      }
+      if (href.endsWith('/zones/zone-1')) {
+        return cfResponse({
+          id: 'zone-1',
+          name: 'apreskeys.com',
+          status: 'active',
+          paused: false,
+          type: 'full',
+          name_servers: [],
+        });
+      }
+      throw new Error(`unexpected ${init?.method ?? 'GET'} ${href}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_dns' });
+
+    const result = await adapter.upsertDnsRecord(
+      'zone-1',
+      '_railway-verify',
+      'TXT',
+      'railway-verify=token',
+      { proxied: false }
+    );
+
+    expect(result.action).toBe('updated');
+    expect(result.record.id).toBe('record-1');
+    expect(fetchMock.mock.calls.map((call) => (call[1] as RequestInit | undefined)?.method ?? 'GET')).toEqual(['GET', 'GET']);
+  });
+
   it('recovers when a create races an existing DNS record', async () => {
     let listCount = 0;
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
