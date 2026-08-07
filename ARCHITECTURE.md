@@ -250,6 +250,8 @@ delete retry. The current audit and repair queue is tracked in
 
 Provider credentials and required external connections should be discovered as early as possible from the spec and reported before apply. Prefer `credentialsRef` with exported environment variables, `dotenv:` references, local JSON files, or secret-manager refs; raw credentials in chat are still accepted when the user intentionally chooses that path.
 
+`project` on `hv_connections` and `hv_secrets` selects and validates command context; it does not redefine provider credential scope or make locally stored credentials project-owned. Provider `scope` remains the durable resource boundary. A project-only `hv_connections` call lists connections in that explicit context, and an unknown explicit project must fail instead of being silently ignored.
+
 Secrets never cross output boundaries. Secret values may be accepted through `credentialsRef`, encrypted into plans, or stored as verified connections, but they must not be printed in tool output, committed specs, warnings, logs, receipts, or test snapshots.
 
 Provider-declared environment-variable aliases may simplify local credential

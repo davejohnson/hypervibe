@@ -19,6 +19,7 @@ import type { CommandContext } from '../application/context.js';
 import { projectField, confirmField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler } from '../application/results.js';
 import { splitFragment } from '../utils/split-fragment.js';
+import type { Project } from '../domain/entities/project.entity.js';
 
 function resolveEnvironmentCredential(
   provider: string,
@@ -195,7 +196,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
   commands.register(
     'hv_connections',
-    'List provider connections and available providers by default. Pass provider to manage one: action="add" (default) stores and verifies credentials, action="verify" re-verifies, action="remove" deletes, and action="prepare" performs confirm-gated cloud account preparation. Credentials are encrypted at rest and never returned; credentialsRef is preferred.',
+    'List provider connections and available providers by default. Pass project to select and validate project context while listing. Pass provider to manage one: action="add" (default) stores and verifies credentials, action="verify" re-verifies, action="remove" deletes, and action="prepare" performs confirm-gated cloud account preparation. Credentials are encrypted at rest and never returned; credentialsRef is preferred.',
     {
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
       action: z.enum(['add', 'verify', 'remove', 'prepare']).optional().describe('With provider: operation to perform (default: "add")'),
@@ -237,7 +238,6 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || credentialsKey !== undefined
           || credentialsMap !== undefined
           || scope !== undefined
-          || projectRef !== undefined
           || gcpProjectId !== undefined
           || deployServiceAccountEmail !== undefined
           || adminCredentialsJson !== undefined
@@ -250,7 +250,10 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
             hint: 'Omit all parameters to list connections, or pass provider to add, verify, remove, or prepare one.',
           });
         }
-        return listConnections();
+        const project = projectRef
+          ? ctx.resolveProjectOrThrow({ project: projectRef })
+          : null;
+        return listConnections(project);
       }
 
       const requestedAction = action ?? 'add';
@@ -260,9 +263,15 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           hint: `Available providers: ${providerNames.join(', ')}`,
         });
       }
+      const project = projectRef
+        ? ctx.resolveProjectOrThrow({ project: projectRef })
+        : null;
+      const projectContext = project
+        ? { project: { id: project.id, name: project.name } }
+        : {};
 
       if (requestedAction === 'prepare') {
-        const project = ctx.resolveProjectOrThrow({ project: projectRef });
+        const targetProject = project ?? ctx.resolveProjectOrThrow();
         const resolvedAdminCredentialsJson = adminCredentialsJsonRef
           ? resolveLocalSecretRef(adminCredentialsJsonRef)
           : adminCredentialsJson;
@@ -270,7 +279,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           ? resolveLocalSecretRef(adminAccessTokenRef)
           : adminAccessToken;
         const payload = await runCloudPrepare({
-          project,
+          project: targetProject,
           provider,
           gcpProjectId,
           deployServiceAccountEmail,
@@ -281,7 +290,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         if (!payload.success) {
           return commandError('PROVIDER_ERROR', String(payload.error ?? 'Cloud preparation failed'), { details: payload });
         }
-        return commandSuccess(payload, payload.mode === 'preview'
+        return commandSuccess({ ...projectContext, ...payload }, payload.mode === 'preview'
           ? { hint: 'Recommended: export admin tokens or save service-account JSON to a local file, then re-run with confirm=true plus adminCredentialsJsonRef or adminAccessTokenRef. If the user intentionally wants to enter credentials in chat, adminCredentialsJson/adminAccessToken are still accepted.' }
           : { next: ['hv_plan'] });
       }
@@ -291,7 +300,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         if (!result.success) {
           return commandError('NOT_FOUND', result.error!);
         }
-        return commandSuccess({ provider, scope: scope || 'global', removed: true });
+        return commandSuccess({ ...projectContext, provider, scope: scope || 'global', removed: true });
       }
 
       if (requestedAction === 'add') {
@@ -307,9 +316,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
         let credentialsToSave: Record<string, unknown>;
         try {
-          const projectForSecretRef = projectRef
-            ? ctx.resolveProject({ project: projectRef })
-            : ctx.resolveProject({});
+          const projectForSecretRef = project ?? ctx.resolveProject({});
           credentialsToSave = credentialsRef
             ? await parseCredentialRef(provider, credentialsRef, credentialsKey, credentialsMap, {
               ...(projectForSecretRef ? { projectId: projectForSecretRef.id } : {}),
@@ -340,6 +347,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         }
 
         const data = {
+          ...projectContext,
           provider,
           scope: scope || 'global',
           status: 'verified',
@@ -358,6 +366,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         case 'verified':
         {
           const data = {
+            ...projectContext,
             provider,
             scope: scope || 'global',
             status: 'verified',
@@ -382,7 +391,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
     })
   );
 
-  async function listConnections() {
+  async function listConnections(project: Project | null) {
       const connections = ctx.repos.connections.findAll().map((c) => ({
         provider: c.provider,
         scope: c.scope ?? 'global',
@@ -448,7 +457,11 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
       const discoveryHint = 'This list is credential discovery only. If a concrete task is blocked, use hv_connections with provider only when a safe credentialsRef is already available. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
       return commandSuccess(
-        { connections, availableProviders },
+        {
+          ...(project ? { project: { id: project.id, name: project.name } } : {}),
+          connections,
+          availableProviders,
+        },
         {
           hint: connections.length === 0
             ? `No connections yet. Recommended: hv_connections provider="<name>" credentialsRef="env:NAME", credentialsRef="dotenv:/absolute/path/.env#KEY", or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if the user intentionally wants chat entry. ${discoveryHint}`
