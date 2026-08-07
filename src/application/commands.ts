@@ -88,6 +88,7 @@ const READ_ONLY_COMMANDS = new Set([
   'hv_ci_status',
   'hv_appstore_status',
   'hv_runs',
+  'hv_secrets',
 ]);
 
 const ROOT_COMMANDS = new Set([

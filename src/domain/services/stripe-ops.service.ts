@@ -68,3 +68,60 @@ export function getStripeAdapter(
 
   return { adapter, credentials, connection, mode };
 }
+
+export type StripeWebhookStatusRead =
+  | {
+    success: true;
+    mode: StripeMode;
+    webhooks: Array<{
+      id: string;
+      url: string;
+      status: string;
+      enabledEvents: number;
+      description?: string | null;
+    }>;
+  }
+  | {
+    success: false;
+    code: 'MISSING_CONNECTION' | 'VALIDATION' | 'PROVIDER_ERROR';
+    error: string;
+  };
+
+/** Read webhook status through the same environment-scoped Stripe connection as reconciliation. */
+export async function fetchStripeWebhookStatuses(
+  environment: string,
+  requestedMode?: StripeMode
+): Promise<StripeWebhookStatusRead> {
+  const stripe = getStripeAdapter(environment, { verifiedOnly: true });
+  if ('error' in stripe) {
+    return { success: false, code: 'MISSING_CONNECTION', error: stripe.error };
+  }
+  if (requestedMode && requestedMode !== stripe.mode) {
+    return {
+      success: false,
+      code: 'VALIDATION',
+      error: `Stripe environment "${environment}" uses ${stripe.mode} mode, not requested ${requestedMode} mode.`,
+    };
+  }
+
+  try {
+    const webhooks = await stripe.adapter.listWebhookEndpoints(stripe.mode);
+    return {
+      success: true,
+      mode: stripe.mode,
+      webhooks: webhooks.map((webhook) => ({
+        id: webhook.id,
+        url: webhook.url,
+        status: webhook.status,
+        enabledEvents: webhook.enabled_events.length,
+        description: webhook.description,
+      })),
+    };
+  } catch (error) {
+    return {
+      success: false,
+      code: 'PROVIDER_ERROR',
+      error: `Stripe webhook inspection failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}

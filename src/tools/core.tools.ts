@@ -396,10 +396,25 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         }, extras);
       }
 
+      const specProject = typeof spec.project === 'string' && spec.project.trim()
+        ? spec.project.trim()
+        : undefined;
       let project = ctx.resolveProject({ project: projectRef });
+      if (project && specProject && specProject !== project.name) {
+        throw new HvError('VALIDATION', `Spec project "${specProject}" does not match selected project "${project.name}".`, {
+          details: { selectedProject: project.name, specProject },
+          hint: 'Remove spec.project from the patch or make it match the selected Hypervibe project.',
+        });
+      }
       if (!project) {
-        const name = (typeof spec.project === 'string' && spec.project.trim())
-          || projectRef?.trim();
+        const requestedProject = projectRef?.trim();
+        if (requestedProject && specProject && requestedProject !== specProject) {
+          throw new HvError('VALIDATION', `Spec project "${specProject}" does not match selected project "${requestedProject}".`, {
+            details: { selectedProject: requestedProject, specProject },
+            hint: 'Use the same project name in project and spec.project.',
+          });
+        }
+        const name = specProject || requestedProject;
         if (!name) {
           throw new HvError('NOT_FOUND', 'No project found and no name provided.', {
             hint: 'Pass project (or spec.project) to create a new project.',

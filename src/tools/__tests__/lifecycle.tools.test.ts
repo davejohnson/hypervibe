@@ -16,6 +16,7 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter, type RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
+import { NeonAdapter } from '../../adapters/providers/neon/neon.adapter.js';
 import type { ObservedService, ObservedState } from '../../domain/ports/observe.port.js';
 import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { registerLifecycleTools } from '../lifecycle.tools.js';
@@ -289,6 +290,81 @@ describe('hv_inspect / hv_import', () => {
       expect.objectContaining({ provider: 'cloudflare', resources: expect.arrayContaining(['zone', 'dns']) }),
       expect.objectContaining({ provider: 'railway', resources: expect.arrayContaining(['project', 'environment']) }),
     ]));
+    await t.close();
+  });
+
+  it('hv_inspect rejects selectors that would otherwise be silently ignored', async () => {
+    const project = new ProjectRepository().create({ name: 'inspect-selector-app' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
+    const t = await makeClient();
+
+    const missingProvider = await t.call('hv_inspect', { project: project.name });
+    expect(missingProvider.ok).toBe(false);
+    expect(missingProvider.error.code).toBe('VALIDATION');
+    expect(missingProvider.error.details.selectors).toEqual(['project']);
+
+    const untypedSelector = await t.call('hv_inspect', {
+      provider: 'railway',
+      project: project.name,
+      env: 'staging',
+      id: 'provider-id',
+    });
+    expect(untypedSelector.ok).toBe(false);
+    expect(untypedSelector.error.code).toBe('VALIDATION');
+    expect(untypedSelector.error.details.invalid).toEqual(['id']);
+
+    const mixedModes = await t.call('hv_inspect', {
+      provider: 'railway',
+      project: project.name,
+      env: 'staging',
+      resource: 'project',
+    });
+    expect(mixedModes.ok).toBe(false);
+    expect(mixedModes.error.code).toBe('VALIDATION');
+
+    const connectionWithEnv = await t.call('hv_inspect', {
+      provider: 'railway',
+      project: project.name,
+      env: 'staging',
+      resource: 'connection',
+    });
+    expect(connectionWithEnv.ok).toBe(false);
+    expect(connectionWithEnv.error.code).toBe('VALIDATION');
+    expect(connectionWithEnv.error.details.invalid).toEqual(['env']);
+
+    const neonConnection = new ConnectionRepository().create({
+      provider: 'neon',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'neon-token' }),
+    });
+    new ConnectionRepository().updateStatus(neonConnection.id, 'verified');
+    vi.spyOn(NeonAdapter.prototype, 'connect').mockResolvedValue();
+    const observeDatabase = vi.spyOn(NeonAdapter.prototype, 'observeDatabase').mockResolvedValue({
+      provider: 'neon',
+      engine: 'postgres',
+      externalId: 'neon-project-1',
+      name: 'selected-db',
+      status: 'ready',
+    });
+    const selectedDatabase = await t.call('hv_inspect', {
+      provider: 'neon',
+      project: project.name,
+      env: 'staging',
+      resource: 'database',
+      name: 'selected-db',
+    });
+    expect(selectedDatabase.ok).toBe(true);
+    expect(selectedDatabase.data).toMatchObject({
+      provider: 'neon',
+      mode: 'database',
+      project: project.name,
+      environment: 'staging',
+      observed: { externalId: 'neon-project-1', name: 'selected-db' },
+    });
+    expect(observeDatabase).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'staging' }),
+      null,
+      { resourceName: 'selected-db' }
+    );
     await t.close();
   });
 

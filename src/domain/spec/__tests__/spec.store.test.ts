@@ -145,6 +145,18 @@ describe('SpecStore', () => {
     expect(store.getRevision(project.id, 1)!.gitRemoteUrl).toBe('git@github.com:davejohnson/spec-one.git');
   });
 
+  it('refuses to store a spec under a different project identity', () => {
+    const project = makeProject();
+    const store = new SpecStore();
+
+    expect(() => store.replace(project, {
+      version: 1,
+      project: 'different-project',
+      environments: {},
+    })).toThrow(`Spec project "different-project" does not match target project "${project.name}".`);
+    expect(store.get(project)).toBeNull();
+  });
+
   it('writes repo-backed specs and imports file edits as new local revisions', () => {
     const oldCwd = process.cwd();
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
