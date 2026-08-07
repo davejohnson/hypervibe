@@ -68,6 +68,21 @@ describe('reduced secret command surface', () => {
 });
 
 describe('secret reads', () => {
+  it('validates explicit project context for manager reads', async () => {
+    new ProjectRepository().create({ name: 'known-project', defaultPlatform: 'railway' });
+    const client = await makeClient();
+
+    const result = await client.call('hv_secrets', {
+      project: 'does-not-exist',
+      provider: 'vault',
+      path: 'apps/prod',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('AMBIGUOUS_PROJECT');
+    await client.close();
+  });
+
   it('fully redacts hosting values', async () => {
     const project = new ProjectRepository().create({ name: 'hosting-read-app', defaultPlatform: 'railway' });
     new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });

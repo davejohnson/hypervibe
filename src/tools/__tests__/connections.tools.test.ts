@@ -9,6 +9,7 @@ import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 // Importing adapters registers providers in the registry.
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
@@ -71,6 +72,24 @@ async function makeClient() {
 }
 
 describe('hv_connections', () => {
+  it('accepts explicit project context for add and returns it without changing provider scope', async () => {
+    const project = new ProjectRepository().create({ name: 'connection-app', defaultPlatform: 'railway' });
+    vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({ success: true });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connections', {
+      project: project.name,
+      provider: 'railway',
+      credentials: { apiToken: 'token-123' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.project).toEqual({ id: project.id, name: project.name });
+    expect(result.data.scope).toBe('global');
+    await t.close();
+  });
+
   it('add stores credentials and auto-verifies in one call', async () => {
     vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
     vi.spyOn(RailwayAdapter.prototype, 'verify').mockResolvedValue({
@@ -449,6 +468,20 @@ describe('hv_connections', () => {
 });
 
 describe('hv_connections', () => {
+  it('lists in explicit project context and rejects an unknown project', async () => {
+    const project = new ProjectRepository().create({ name: 'connection-list-app', defaultPlatform: 'railway' });
+    const t = await makeClient();
+
+    const listed = await t.call('hv_connections', { project: project.name });
+    expect(listed.ok).toBe(true);
+    expect(listed.data.project).toEqual({ id: project.id, name: project.name });
+
+    const unknown = await t.call('hv_connections', { project: 'does-not-exist' });
+    expect(unknown.ok).toBe(false);
+    expect(unknown.error.code).toBe('AMBIGUOUS_PROJECT');
+    await t.close();
+  });
+
   it('lists only when no operation parameters are supplied', async () => {
     const t = await makeClient();
     const result = await t.call('hv_connections', { action: 'verify' });

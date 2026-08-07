@@ -189,6 +189,8 @@ Hypervibe exposes the same focused operations as canonical `hv_*` MCP tools and 
 
 Around that core: connections (`hv_connections`), deploy/rollback, logs/errors/health, bounded database diagnostics, secrets, domains/DNS, email, payments, CI, App Store/TestFlight, and local dev tools.
 
+`hv_connections` and `hv_secrets` both accept `project="name-or-id"` to select and validate project context. Provider `scope` remains separate: it identifies the actual repository, domain, account, or environment covered by a credential.
+
 - Full generated MCP/CLI catalog: `docs/TOOLS.md`
 - Regenerate after tool changes: `npm run build && npm run docs:tools`
 

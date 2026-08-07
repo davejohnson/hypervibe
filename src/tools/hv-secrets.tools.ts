@@ -78,7 +78,7 @@ function resolveHostingService(
 export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_secrets',
-    'List secret sources by default. Pass provider to list that manager, provider plus path to check a manager value, include=["github"] to list GitHub Actions secret names, or project/environment/service selectors to inspect hosting variables. Values are never returned.',
+    'List secret sources by default. Pass project to select and validate project context. Pass provider to list that manager, provider plus path to check a manager value, include=["github"] to list GitHub Actions secret names, or project/environment/service selectors to inspect hosting variables. Values are never returned.',
     {
       project: projectField,
       env: envField,
@@ -92,6 +92,9 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       repo: z.string().optional().describe('GitHub owner/name; defaults to the project git remote'),
     },
     wrapCommandHandler(async ({ project: projectRef, env, key, provider, path, version, service, pathPrefix, include, repo }) => {
+      const selectedProject = projectRef
+        ? ctx.resolveProjectOrThrow({ project: projectRef })
+        : null;
       const managerLookup = path !== undefined || version !== undefined || (provider !== undefined && key !== undefined);
       if (managerLookup) {
         if (pathPrefix !== undefined || include !== undefined || repo !== undefined) {
@@ -108,7 +111,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       }
 
       if (provider || pathPrefix !== undefined || include !== undefined || repo !== undefined) {
-        return listSecrets({ projectRef, provider, pathPrefix, include, repo });
+        return listSecrets({ selectedProject, provider, pathPrefix, include, repo });
       }
 
       const hostingLookup = projectRef !== undefined || env !== undefined || key !== undefined || service !== undefined;
@@ -127,7 +130,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
         });
       }
 
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      const project = selectedProject ?? ctx.resolveProjectOrThrow();
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
       const targetService = resolveHostingService(ctx, project, environment.name, service);
       const result = await readHostingEnvVars({ project, environment, service: targetService });
@@ -147,13 +150,13 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
   );
 
   async function listSecrets({
-    projectRef,
+    selectedProject,
     provider,
     pathPrefix,
     include,
     repo,
   }: {
-    projectRef?: string;
+    selectedProject: Project | null;
     provider?: (typeof SECRET_MANAGER_PROVIDERS)[number];
     pathPrefix?: string;
     include?: 'github'[];
@@ -172,7 +175,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
         };
       }
       if (include?.includes('github')) {
-        const project = ctx.resolveProjectOrThrow({ project: projectRef });
+        const project = selectedProject ?? ctx.resolveProjectOrThrow();
         const { owner, repo: repoName } = githubRepoForProject(project, repo);
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
         if ('error' in gh) {
