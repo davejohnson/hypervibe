@@ -42,6 +42,7 @@ export interface LocalCredentials {
 
 export interface StripeCredentials {
   /** Preferred shape for a connection scoped to one named Stripe environment. */
+  /** `secretKey` may contain either an sk_ secret key or an rk_ restricted server key. */
   secretKey?: string;
   publishableKey?: string;
   /** Legacy global connection fields. */

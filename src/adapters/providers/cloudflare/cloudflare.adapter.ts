@@ -12,10 +12,11 @@ import type {
   LoadBalancerScope,
   ManagedLoadBalancer,
 } from '../../../domain/ports/load-balancer.port.js';
+import { CLOUDFLARE_TOKEN_URLS } from '../../../domain/services/connection-guidance.js';
 
 const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4';
-const CLOUDFLARE_USER_TOKEN_URL = 'https://dash.cloudflare.com/profile/api-tokens';
-const CLOUDFLARE_ACCOUNT_TOKEN_URL = 'https://dash.cloudflare.com/?to=/:account/api-tokens';
+const CLOUDFLARE_USER_TOKEN_URL = CLOUDFLARE_TOKEN_URLS.user;
+const CLOUDFLARE_ACCOUNT_TOKEN_URL = CLOUDFLARE_TOKEN_URLS.account;
 const CLOUDFLARE_DNS_PERMISSIONS = 'Zone > Zone > Read, Zone > Zone Settings > Read or Edit, and Zone > DNS > Edit/Write';
 const CLOUDFLARE_REGISTRAR_PERMISSIONS = 'Registrar write permissions on the target account';
 

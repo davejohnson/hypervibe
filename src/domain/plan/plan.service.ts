@@ -73,6 +73,8 @@ import {
   planGitHubInfrastructure,
 } from '../services/github-infrastructure.service.js';
 import {
+  isStripeHostingEnvSyncAction,
+  isStripeWebhookAction,
   planStripeEnvironmentSync,
   stripeEnvironmentName,
   stripeManagedEnvKeys,
@@ -1259,6 +1261,46 @@ export class PlanService {
       }
     }
     actions.push(...stripeSync.actions);
+    const databaseSeedAction = actions.find((action) =>
+      action.type !== 'noop'
+      && action.metadata?.operation === 'databaseSeed'
+    );
+    if (databaseSeedAction) {
+      const stripeSeedPrerequisites = stripeSync.actions
+        .filter((action) => action.type !== 'noop' && action.type !== 'destroy')
+        .map((action) => action.id);
+      if (stripeSeedPrerequisites.length > 0) {
+        databaseSeedAction.dependsOn = Array.from(new Set([
+          ...(databaseSeedAction.dependsOn ?? []),
+          ...stripeSeedPrerequisites,
+        ]));
+      }
+
+      const stripeRuntimeReleaseRequired = stripeSync.actions.some((action) =>
+        action.type !== 'noop'
+        && (
+          isStripeHostingEnvSyncAction(action)
+          || (
+            isStripeWebhookAction(action)
+            && (action.type === 'create' || action.type === 'replace')
+          )
+        )
+      );
+      if (
+        stripeRuntimeReleaseRequired
+        && environmentSpec.deploy?.strategy === 'branch'
+        && environmentSpec.deploy.trigger === 'ci'
+      ) {
+        databaseSeedAction.metadata = {
+          ...(databaseSeedAction.metadata ?? {}),
+          deferUntilNextPlan: true,
+          deferReason: 'Stripe runtime variables or a webhook signing secret must reach the deployed application before fixture creation.',
+        };
+        stripeSync.warnings.push(
+          'Database seeding is staged after this apply: Stripe catalog, runtime variables, and webhooks will converge first. Let the reviewed CI release finish, verify it with hv_ci_status and hv_health, then re-run hv_plan/hv_apply to create application and Stripe fixtures.'
+        );
+      }
+    }
     for (const stripeBlock of stripeSync.blocked) {
       if (!blocked.some((entry) => entry.provider === 'stripe' && entry.scope === stripeBlock.scope)) {
         blocked.push(stripeBlock);
@@ -1356,11 +1398,17 @@ export class PlanService {
     actions.push(...ios.actions);
     actions.push(...githubConfirmationActions);
 
-    // The applied-spec marker is the final release dependency. A changed
-    // contract must not unlock GitHub Actions until every planned action,
-    // including explicitly confirmed work, has completed.
+    // The applied-spec marker is the final release dependency. A seed that
+    // explicitly waits for this release is excluded to avoid a dependency
+    // cycle, then ordered after the workflow/marker so it reports pending only
+    // after the new deployment contract has been unlocked.
+    const deferredSeedAction = actions.find((action) =>
+      action.type !== 'noop'
+      && action.metadata?.operation === 'databaseSeed'
+      && action.metadata.deferUntilNextPlan === true
+    );
     const appliedSpecHashDependsOn = actions
-      .filter((action) => action.type !== 'noop')
+      .filter((action) => action.type !== 'noop' && action.id !== deferredSeedAction?.id)
       .map((action) => action.id);
     const appliedSpecHash = await planGitHubActionsAppliedSpecHash({
       project: projectForPlan,
@@ -1372,6 +1420,13 @@ export class PlanService {
     });
     if (appliedSpecHash.action) {
       actions.push(appliedSpecHash.action);
+    }
+    if (deferredSeedAction) {
+      deferredSeedAction.dependsOn = Array.from(new Set([
+        ...(deferredSeedAction.dependsOn ?? []),
+        ...(ciDeploy.action ? [ciDeploy.action.id] : []),
+        ...(appliedSpecHash.action ? [appliedSpecHash.action.id] : []),
+      ]));
     }
 
     // Deployment ownership is a safety stage of its own. A stale native

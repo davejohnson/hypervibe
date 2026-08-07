@@ -512,10 +512,48 @@ hv_connections provider="stripe" scope="staging" credentialsRef="dotenv:/absolut
 
 Repeat with `scope="development"` for a development sandbox and
 `scope="production"` for Stripe live mode. Sandbox keys begin with `sk_test_`
-and `pk_test_`; production keys begin with `sk_live_` and `pk_live_`. Open the
-intended sandbox before revealing its API keys because each Stripe sandbox has
-its own isolated key pair and objects. See [Stripe sandbox management](https://docs.stripe.com/sandboxes/dashboard/manage)
+or `rk_test_` and `pk_test_`; production server keys begin with `sk_live_` or
+`rk_live_`. Restricted `rk_` keys are preferred and are accepted in the
+`secretKey` connection field. Open the intended sandbox before revealing its
+API keys because each Stripe sandbox has its own isolated key pair and objects.
+See [Stripe sandbox management](https://docs.stripe.com/sandboxes/dashboard/manage)
 and [sandbox API-key access](https://docs.stripe.com/sandboxes/dashboard/manage-access).
+
+#### Fast fresh development sandboxes
+
+Stripe sandbox creation itself is a short Dashboard step because an ordinary
+sandbox API key cannot create another sandbox or its keys. Everything after
+that stays in Hypervibe's desired-state loop:
+
+1. In Stripe's account picker choose **Switch to sandbox → Create sandbox**.
+   Name it for the project or workflow and open it. Copy a restricted `rk_test_`
+   key (or an unrestricted `sk_test_` key) and the optional `pk_test_` key into
+   a gitignored `.env.stripe.development`.
+2. Connect that exact sandbox:
+
+   ```text
+   hv_connections provider="stripe" scope="development" credentialsRef="dotenv:/absolute/path/.env.stripe.development" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}
+   ```
+
+3. Declare `payments.stripe.environment: "development"`, catalog prices,
+   runtime credential projection, and webhooks; run `hv_plan` and `hv_apply`,
+   then verify the managed CI release with `hv_ci_status` and `hv_health`.
+4. In the following desired-state revision, add a versioned application seed
+   such as `npm run db:seed:personas -- --dataset=invoice-perfect-v1`. The seed
+   owns paired application rows and Stripe test customers/subscriptions;
+   Hypervibe owns only their prerequisites and execution receipt.
+
+For a clean reset, create another named sandbox, replace the two local dotenv
+values, and run the same scoped `hv_connections` call. `hv_plan` then reviews
+recreation of products, prices, environment projection, and webhooks against
+the empty target. The old sandbox is untouched and can be deleted in Stripe
+after the replacement and fixtures are verified.
+
+Application seeds must use stored provider IDs and deterministic Stripe
+metadata as durable fixture identity. Stripe idempotency keys protect immediate
+retries but expire; they do not replace reconciliation. Keep baseline personas
+stable. Add test-clock personas later as disposable fixtures because deleting a
+test clock also deletes its associated Stripe test objects.
 
 Then declare the Stripe catalog Hypervibe owns and which hosting services
 receive its runtime values. Products and recurring prices are lifecycle
@@ -842,6 +880,13 @@ For fresh environments, declare seed/bootstrap data on the database. This is pro
 
 `hv_plan` emits a visible one-shot database seed action. `hv_apply` runs it after the database exists as a one-off command inside the deployed service environment, then records the command hash plus `seededAt` on the database component. The command does not run again unless the command changes.
 
+When the same CI-owned plan introduces Stripe runtime variables or creates a
+webhook signing secret, Hypervibe converges those resources and unlocks the
+reviewed release first, then reports the seed as pending. After that release is
+healthy, re-run `hv_plan`/`hv_apply`; the unchanged seed command remains planned
+and runs against the newly deployed image. This keeps webhook-producing fixture
+creation on the application side without racing the Stripe/application boundary.
+
 Hypervibe does not expose an imperative database migration command. Schema
 migrations belong in application startup or durable declared release
 configuration. Provider-to-provider data moves and database resets must be
@@ -893,12 +938,11 @@ Typical team flow:
 
 Recommended default for DNS, custom domains, and email routing: use a **Cloudflare Account API Token** plus `accountId`. Cloudflare recommends Account API Tokens for automation credentials that are not associated with a specific user.
 
-Create the recommended Account API Token here:
-
-```text
-Cloudflare dashboard -> Manage Account -> Account API Tokens
-https://dash.cloudflare.com/?to=/:account/api-tokens
-```
+Create it from the
+[pre-filled Hypervibe Account API Token template](https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D&name=Hypervibe%20DNS%20and%20domains).
+The link preselects Zone Read, Zone Settings Read, DNS Edit, and Account
+Settings Read. Choose the target account and narrow the zone resources before
+creating the token.
 
 Set these permissions and resources:
 
@@ -929,10 +973,11 @@ Hypervibe accepts either a raw token or a copied authorization value such as `Be
 
 If Hypervibe needs Cloudflare Registrar/domain purchase, use a **User API Token** instead because Cloudflare Registrar is not compatible with Account API Tokens. Create it under `My Profile -> API Tokens -> Create Token -> Edit zone DNS`, add the same zone permissions above, and connect it without `accountId`:
 
-```text
-Cloudflare dashboard -> My Profile -> API Tokens
-https://dash.cloudflare.com/profile/api-tokens
-```
+[Open the pre-filled Hypervibe User API Token template](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=Hypervibe%20DNS%20and%20domains),
+narrow its account and zone selectors, and add Registrar write before creating
+it. Cloudflare's documented template keys cover Hypervibe's base DNS
+permissions but not the optional Registrar, Email Routing, or Load Balancing
+permissions, so add only the optional capabilities the spec uses.
 
 ```text
 hv_connections provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"
@@ -949,8 +994,9 @@ infrastructure PR flow—see
 [GitHub infrastructure for beginners](docs/github-infrastructure.md).
 
 Recommended for a one-token setup: create a classic PAT with `repo`,
-`workflow`, and `read:packages`, then export it under npm's required variable
-name:
+`workflow`, and `read:packages` from the
+[pre-filled combined-token link](https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys),
+then export it under npm's required variable name:
 
 ```bash
 export NODE_AUTH_TOKEN=ghp_...
@@ -994,10 +1040,13 @@ Connect it like this:
 hv_connections provider=github scope="owner/repo" credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN"
 ```
 
-For least privilege, use two classic PATs:
+For split credentials, create the repository-management token from the
+[pre-filled fine-grained link](https://github.com/settings/personal-access-tokens/new?name=Hypervibe%20repository&description=Manage%20one%20repository%20with%20Hypervibe&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write) (or the
+[pre-filled classic API link](https://github.com/settings/tokens/new?scopes=repo,workflow&description=Hypervibe%20GitHub%20API)), and create the classic package token
+from the [pre-filled `read:packages` link](https://github.com/settings/tokens/new?scopes=read:packages&description=Hypervibe%20GHCR%20pull):
 
 ```text
-HYPERVIBE_GITHUB_TOKEN=ghp_...             # scopes: repo, workflow
+HYPERVIBE_GITHUB_TOKEN=github_pat_...      # fine-grained repository permissions above
 HYPERVIBE_GITHUB_PACKAGES_TOKEN=ghp_...    # scopes: read:packages
 ```
 

@@ -1,13 +1,31 @@
 import { z } from 'zod';
 
-/** Pre-filled GitHub classic PAT creation URLs, one per token role. */
+const CLOUDFLARE_DNS_TOKEN_PERMISSIONS = [
+  { key: 'zone', type: 'read' },
+  { key: 'zone_settings', type: 'read' },
+  { key: 'dns', type: 'edit' },
+  { key: 'account_settings', type: 'read' },
+];
+const CLOUDFLARE_DNS_PERMISSION_QUERY = encodeURIComponent(JSON.stringify(CLOUDFLARE_DNS_TOKEN_PERMISSIONS));
+
+/** Official Cloudflare template URLs with Hypervibe's base DNS permissions pre-selected. */
+export const CLOUDFLARE_TOKEN_URLS = {
+  user: `https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=${CLOUDFLARE_DNS_PERMISSION_QUERY}&accountId=%2A&zoneId=all&name=Hypervibe%20DNS%20and%20domains`,
+  account: `https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=${CLOUDFLARE_DNS_PERMISSION_QUERY}&name=Hypervibe%20DNS%20and%20domains`,
+} as const;
+
+/** Pre-filled GitHub PAT creation URLs, one per token role. */
 export const GITHUB_TOKEN_URLS = {
   /** apiToken: workflow/secrets management. */
   api: 'https://github.com/settings/tokens/new?scopes=repo,workflow&description=Hypervibe%20GitHub%20API',
+  /** apiToken: repository-scoped workflow/secrets management. */
+  fineGrained: 'https://github.com/settings/personal-access-tokens/new?name=Hypervibe%20repository&description=Manage%20one%20repository%20with%20Hypervibe&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write',
   /** packageReadToken: durable GHCR image pulls. */
   packageRead: 'https://github.com/settings/tokens/new?scopes=read:packages&description=Hypervibe%20GHCR%20pull',
   /** Single-token setup covering both roles. */
   combined: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys',
+  /** Classic-only access for changing a GitHub App installation's repositories. */
+  railwayAppScope: 'https://github.com/settings/tokens/new?scopes=repo&description=Hypervibe%20Railway%20app%20scope',
 } as const;
 
 export interface ConnectionGuidance {
@@ -308,26 +326,27 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     provider: 'cloudflare',
     displayName: 'Cloudflare',
     tokenType: 'Cloudflare User API Token as apiToken for simple DNS, custom domains, load balancing, email routing, and Registrar/domain purchase; or Cloudflare Account API Token as apiToken for durable DNS, custom domains, load balancing, and email routing automation, with a separate User API Token only when that account-token setup also buys domains',
-    setupUrl: 'https://dash.cloudflare.com/profile/api-tokens',
+    setupUrl: CLOUDFLARE_TOKEN_URLS.user,
     setupUrls: [
       {
-        label: 'User API Tokens for Registrar/domain purchase',
-        url: 'https://dash.cloudflare.com/profile/api-tokens',
+        label: 'Create pre-filled User API Token for DNS/custom domains; add optional Registrar, email, or load-balancer permissions below',
+        url: CLOUDFLARE_TOKEN_URLS.user,
       },
       {
-        label: 'Account API Tokens for DNS/custom domains/email routing',
-        url: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
+        label: 'Create pre-filled Account API Token for durable DNS/custom-domain automation; add optional email or load-balancer permissions below',
+        url: CLOUDFLARE_TOKEN_URLS.account,
       },
     ],
     permissions: [
-      'For the simplest setup, create a Cloudflare User API Token in Cloudflare Dashboard -> My Profile -> API Tokens at https://dash.cloudflare.com/profile/api-tokens and map it as apiToken/CLOUDFLARE_API_TOKEN. That one token can manage DNS, custom domains, and email routing, and when granted Registrar permissions it can also register domains.',
-      'For durable team/service automation that should not be tied to one user, create a Cloudflare Account API Token in Cloudflare Dashboard -> Manage Account -> Account API Tokens at https://dash.cloudflare.com/?to=/:account/api-tokens and map it as apiToken/CLOUDFLARE_API_TOKEN plus accountId/CLOUDFLARE_ACCOUNT_ID.',
+      `For the simplest setup, create a Cloudflare User API Token from the pre-filled Hypervibe template at ${CLOUDFLARE_TOKEN_URLS.user} and map it as apiToken/CLOUDFLARE_API_TOKEN. That one token can manage DNS and custom domains; add the optional permissions below for email routing, load balancing, or Registrar.`,
+      `For durable team/service automation that should not be tied to one user, create a Cloudflare Account API Token from the pre-filled Hypervibe template at ${CLOUDFLARE_TOKEN_URLS.account} and map it as apiToken/CLOUDFLARE_API_TOKEN plus accountId/CLOUDFLARE_ACCOUNT_ID.`,
       'For DNS/custom domains with either token type: grant Zone -> Zone -> Read.',
       'For DNS/custom domains with either token type: grant Zone -> DNS -> Edit.',
       'For Railway/custom-domain verification and some zone lookups: grant Zone -> Zone Settings -> Read or Edit.',
       'For environments declaring loadBalancer: grant the Cloudflare API token Load Balancers Read and Load Balancers Write on the target zone.',
       'For environments declaring loadBalancer: grant Load Balancing: Monitors and Pools Read and Load Balancing: Monitors and Pools Write on the owning account.',
       'For DNS/custom domains with either token type: Zone Resources must be Include -> Specific zone -> the target domain, for example hlspropertycare.com.',
+      'For account-scoped permissions: Account Resources must be Include -> Specific account -> the target account. The user-token template initially selects all accounts/zones because Cloudflare template URLs accept ids, not domain names; narrow both selectors before creating the token.',
       'For email routing only: grant Zone -> Email Routing Rules -> Edit.',
       'For email routing only: grant Account -> Email Routing Addresses -> Edit.',
       'For accountId auto-resolution: grant Account -> Account Settings -> Read; otherwise pass accountId/CLOUDFLARE_ACCOUNT_ID explicitly.',
@@ -335,11 +354,11 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'single User API Token: hv_connections provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}; account-token setup that also buys domains: hv_connections provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID","registrarApiToken":"CLOUDFLARE_REGISTRAR_API_TOKEN"}',
     notes: [
-      'Create user tokens in Cloudflare Dashboard -> My Profile -> API Tokens at https://dash.cloudflare.com/profile/api-tokens; create account tokens in Cloudflare Dashboard -> Manage Account -> Account API Tokens at https://dash.cloudflare.com/?to=/:account/api-tokens.',
+      `Create user tokens with ${CLOUDFLARE_TOKEN_URLS.user}; create account tokens with ${CLOUDFLARE_TOKEN_URLS.account}. Both links pre-fill the token name plus Zone Read, Zone Settings Read, DNS Edit, and Account Settings Read.`,
       'User API Tokens are fine for DNS, custom domains, and email routing, and are the simplest path when Hypervibe may also register domains. New user tokens use the documented cfut_ prefix.',
       'Account API Tokens are for durable service-principal style automation that should survive an individual user leaving the account. New account tokens use the documented cfat_ prefix (older tokens are unprefixed and still work). Cloudflare lists Registrar as NOT supported by Account API Tokens, so account-token setups need a User API Token only for Registrar/domain purchase.',
       'If the spec does not purchase/register domains, omit registrarApiToken. If apiToken is a User API Token with Registrar permissions, omit registrarApiToken even when registering domains.',
-      'For either token type, use Create Token, start from the Edit zone DNS template when available, then confirm the permissions above for the target zone. Add both zone load-balancer and account monitor/pool permissions when loadBalancer is declared. Cloudflare token verification only proves the token is active, not that it has these permissions — missing permissions surface at plan/apply time.',
+      'For either token type, review the pre-filled permissions and narrow resources to the intended account and zone before creating it. Cloudflare does not document template keys for Hypervibe\'s optional Email Routing, Load Balancing, or Registrar permissions, so add those manually only when the spec needs them. Cloudflare token verification only proves the token is active, not that it has these permissions — missing permissions surface at plan/apply time.',
       'Use the token secret itself as apiToken/CLOUDFLARE_API_TOKEN; do not use the token name or token id. Do not use the legacy Global API Key.',
     ],
   },
@@ -503,7 +522,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     setupUrl: GITHUB_TOKEN_URLS.combined,
     setupUrls: [
       { label: 'Create recommended combined classic token', url: GITHUB_TOKEN_URLS.combined },
-      { label: 'Create recommended fine-grained repository token', url: 'https://github.com/settings/personal-access-tokens/new' },
+      { label: 'Create pre-filled fine-grained repository token', url: GITHUB_TOKEN_URLS.fineGrained },
       { label: 'Create optional classic GHCR package token', url: GITHUB_TOKEN_URLS.packageRead },
       { label: 'GitHub fine-grained permission reference', url: 'https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens' },
     ],
@@ -518,6 +537,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN are accepted as aliases when resolving GitHub credentials. Use NODE_AUTH_TOKEN when npm also needs the token.',
       'An explicitly referenced variable wins. If it is absent and multiple aliases contain different values, Hypervibe blocks instead of guessing.',
       'A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.',
+      'The fine-grained creation link pre-fills the token name, 90-day expiry, and core repository permissions. You must still choose the resource owner and only the repositories Hypervibe should manage.',
       'Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.',
       `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
     ],
@@ -674,16 +694,25 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   stripe: {
     provider: 'stripe',
     displayName: 'Stripe',
-    tokenType: 'Stripe environment key pair: secretKey (sk_test_... for a named sandbox, sk_live_... for production) and optional publishableKey (pk_test_.../pk_live_...). Legacy global sandboxSecretKey/liveSecretKey fields remain supported. Restricted keys (rk_...) are not accepted',
+    tokenType: 'Stripe server API key for one environment: a restricted key (rk_test_... for a named sandbox or rk_live_... for production) is preferred; unrestricted sk_test_.../sk_live_... keys also work. Pass it in secretKey with the optional matching publishableKey (pk_test_.../pk_live_...). Legacy global sandboxSecretKey/liveSecretKey fields remain supported',
     setupUrl: 'https://dashboard.stripe.com/apikeys',
+    setupUrls: [
+      { label: 'Create or replace a named development sandbox', url: 'https://dashboard.stripe.com/' },
+      { label: 'Create the selected sandbox API key', url: 'https://dashboard.stripe.com/apikeys' },
+      { label: 'Stripe sandbox setup guide', url: 'https://docs.stripe.com/sandboxes/dashboard/manage' },
+    ],
     permissions: [
-      'The key must be able to read the account, read/write Products and Prices, read/write Customers, and read/write Webhook Endpoints. A standard secret key covers all of these.',
+      'For Hypervibe reconciliation, a restricted key needs Accounts: Read plus Products, Prices, and Webhook Endpoints: Write. Write includes read. An unrestricted secret key is a broader fallback.',
+      'If the same key is projected to an application seed that creates development fixtures, also grant only the resources that seed uses—normally Customers and Subscriptions: Write, plus Payment Methods or Test Clocks: Write when those workflows are declared by the application.',
       'Create a separate scoped connection for each isolated Stripe sandbox and for production; the scope should match payments.stripe.environment (normally development, staging, or production).',
     ],
-    credentialExample: 'hv_connections provider="stripe" scope="staging" credentialsRef="file:/absolute/path/stripe-staging.json" where the JSON is {"secretKey":"<sk_test_...>","publishableKey":"<pk_test_...>"}',
+    credentialExample: 'hv_connections provider="stripe" scope="development" credentialsRef="dotenv:/absolute/path/.env.stripe.development" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}',
     notes: [
-      'Open the intended named sandbox first, then create/reveal its keys in the Stripe Dashboard (https://dashboard.stripe.com/test/apikeys). Stripe sandbox access/key guidance: https://docs.stripe.com/sandboxes/dashboard/manage-access. Keys are isolated to that sandbox.',
-      'For an existing dotenv file, use credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}; omit publishableKey from both the spec credential projection and credentialsMap if it is unavailable.',
+      'Fresh development workflow: in the Stripe account picker choose Switch to sandbox -> Create sandbox, name it for the project or workflow, open it, create its API key, save the key pair in a gitignored .env.stripe.development file, then run the scoped hv_connections example. Ordinary sandbox keys cannot create another sandbox.',
+      'To reset development later, create a new named sandbox, replace the two local dotenv values, and run the same hv_connections call again. hv_plan will observe an empty Stripe target and review recreation of the catalog and webhooks; the old sandbox remains untouched until you delete it in Stripe.',
+      'Keep customer, subscription, persona, and entitlement fixtures in the application database.seedCommand. First converge Stripe infrastructure and deploy the receiving service; add or version the seed command in the following desired-state revision.',
+      'Stripe idempotency keys are retry protection, not durable fixture identity. The application seed should reconcile stored Stripe IDs and deterministic metadata before creating missing customers or subscriptions.',
+      'Omit publishableKey from both the spec credential projection and credentialsMap when the application does not use it.',
       'A global legacy connection can still carry sandboxSecretKey/sandboxPublishableKey plus liveSecretKey/livePublishableKey, but separate scoped connections are required when development and staging use different Stripe sandboxes.',
     ],
   },
@@ -744,6 +773,8 @@ function credentialExample(guidance: ConnectionGuidance, scope?: string): string
       return guidance.credentialExample.replace('provider="database"', `provider="database" scope="${scope}"`);
     case 'appstoreconnect':
       return guidance.credentialExample.replace('provider="appstoreconnect"', `provider="appstoreconnect" scope="${scope}"`);
+    case 'stripe':
+      return guidance.credentialExample.replace('scope="development"', `scope="${scope}"`);
     default:
       return guidance.credentialExample;
   }

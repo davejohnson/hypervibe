@@ -267,6 +267,8 @@ When adding or changing token guidance, include all of these details:
 
 - The exact credential kind, including distinctions that matter operationally, such as user token vs account token, classic PAT vs fine-grained PAT, service account JSON vs access token, or read token vs API-management token.
 - The official URL where the user creates or reviews that credential. If there are multiple valid token types, include the URL for each and say which use case needs which token.
+- GitHub PAT creation URLs must be role-specific and pre-filled with the token name/description plus the required classic scopes or fine-grained permissions. A generic GitHub token settings URL is not actionable connection guidance.
+- When a provider officially supports credential-template URLs, guidance must use them with the known required name and least-privilege permissions pre-filled. Do not depend on undocumented dashboard parameters; identify optional permissions that the supported template cannot represent.
 - The exact scopes, roles, IAM permissions, or product permission toggles required, including resource scoping such as repo, zone, project, account, team, or organization.
 - The expected shape, prefix, or caveats when helpful, such as token prefixes, one-time-download keys, required companion ids like `accountId`, package-read tokens, or credentials that cannot support a feature.
 - A safe `hv_connections` example using `credentialsRef` (`env:...`, `dotenv:/absolute/path/.env#KEY`, `file:/absolute/path`, or a secret-manager ref). Use `credentialsMap` when a provider needs multiple fields.
@@ -389,8 +391,15 @@ ids. Model the relationship explicitly through
   to the Hypervibe environment name, so development, staging, and production
   can use distinct Stripe sandboxes/live mode.
 - Scoped Stripe connections use `secretKey` plus optional `publishableKey`.
-  Legacy global sandbox/live credentials remain a compatibility fallback, but
-  cannot represent distinct development and staging sandboxes.
+  The server-side field accepts a least-privilege restricted `rk_` key or an
+  unrestricted `sk_` key and derives sandbox/live mode from its prefix. Legacy
+  global sandbox/live credentials remain a compatibility fallback, but cannot
+  represent distinct development and staging sandboxes.
+- Creating and deleting the named Stripe sandbox and issuing its keys remain
+  Stripe Dashboard operations. Replacing the verified connection at the same
+  Hypervibe scope intentionally retargets that environment; the next plan must
+  observe the empty/new target and review explicit catalog and webhook
+  recreation. It never mutates the old sandbox through the new connection.
 - Runtime credential projection is explicit through
   `payments.stripe.credentials`. Hypervibe-owned products and recurring prices
   are declared under `payments.stripe.catalog.products`; each price declares
@@ -424,6 +433,18 @@ ids. Model the relationship explicitly through
   variable and local binding. Noop actions make no Stripe or hosting calls.
 - For CI-triggered branch deploys, supported adapters defer code deployment so
   the exact-SHA workflow remains the release boundary.
+- Stripe customers, subscriptions, subscription items, personas, entitlements,
+  and test-clock scenarios are application fixture/data state, not Hypervibe
+  infrastructure resources. A versioned `database.seedCommand` may reconcile
+  both sides after catalog, credential, webhook, and deployment prerequisites
+  converge. Stored provider ids and metadata are durable identity; Stripe
+  idempotency keys provide retry safety only.
+- When a CI-owned plan changes Stripe runtime values or creates/replaces a
+  webhook signing value, its non-noop database seed depends on the reviewed
+  Stripe actions and is staged after the applied-spec marker. Apply reports the
+  seed pending without starting an environment task. After the managed release
+  succeeds and health is verified, the next plan runs the still-uncompleted
+  seed against the deployed image.
 
 Stripe-managed runtime keys cannot also come from ordinary `envVars`, env-file
 includes, delegated secret slots, overrides, or removal tombstones. Removing
@@ -586,8 +607,11 @@ Generated provider CI workflow steps belong under provider-owned modules and are
 Generated workflows must gate image deployment on the environment-scoped
 `HYPERVIBE_APPLIED_SPEC_HASH` GitHub Actions variable. The desired hash covers
 only that environment plus its applicable delegated-secret declarations.
-`hv_plan` models updating this marker as the final dependency and `hv_apply`
-updates it only after every preceding action completes. This preserves
+`hv_plan` models updating this marker as the final release dependency and
+`hv_apply` updates it only after every preceding infrastructure action
+completes. A post-release database seed may explicitly depend on the marker and
+remain pending until the next plan; it is excluded from the marker's own
+dependencies to avoid a cycle. This preserves
 automatic code-only staging deploys while preventing a changed desired-state
 contract from deploying before reconciliation. Missing, failed, pending, or
 unconfirmed dependencies must leave the previous marker intact.
@@ -736,7 +760,7 @@ containers should converge schema during startup, or the spec may declare a
 durable provider predeploy/release command when startup migration is not
 appropriate.
 
-Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`. It should plan a visible one-shot seed action, run through the provider-neutral environment task runner during `hv_apply`, and record completion on the database component only after terminal success.
+Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`. It should plan a visible one-shot seed action, run through the provider-neutral environment task runner during `hv_apply`, and record completion on the database component only after terminal success. Integrations whose changes require a deferred CI release must be explicit seed dependencies; the seed stays pending until a later plan rather than running an older image or racing newly issued webhook credentials.
 
 `hv_db_migrate` must not exist in the command registry, MCP surface, or CLI.
 Provider-to-provider data moves are lifecycle operations and must be modeled as

@@ -216,9 +216,13 @@ access token with `repo`, `workflow`, and `read:packages`. Create it with the
 [combined Hypervibe scopes](https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages&description=Hypervibe%20CI%20deploys).
 
 For least privilege, use a
-[fine-grained GitHub personal access token](https://github.com/settings/personal-access-tokens/new)
+[pre-filled fine-grained GitHub personal access token](https://github.com/settings/personal-access-tokens/new?name=Hypervibe%20repository&description=Manage%20one%20repository%20with%20Hypervibe&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write)
 for repository management and a separate classic `read:packages` token. Choose
 the repository owner and select only the repositories Hypervibe should manage.
+The link pre-fills a 90-day expiry and the core permissions below; GitHub still
+requires you to choose the resource owner and repositories. Create the package
+token from the
+[pre-filled GHCR package-read link](https://github.com/settings/tokens/new?scopes=read:packages&description=Hypervibe%20GHCR%20pull).
 For the full `github` feature set, grant the fine-grained token:
 
 - Metadata: read (GitHub adds this automatically)

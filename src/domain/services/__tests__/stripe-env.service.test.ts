@@ -172,6 +172,14 @@ describe('Stripe hosting environment sync', () => {
       secretKey: 'sk_test_staging',
       liveSecretKey: 'sk_live_production',
     }).success).toBe(false);
+    expect(StripeCredentialsSchema.safeParse({
+      secretKey: 'rk_test_staging',
+      publishableKey: 'pk_test_staging',
+    }).success).toBe(true);
+    expect(StripeCredentialsSchema.safeParse({
+      secretKey: 'rk_live_production',
+      publishableKey: 'pk_test_staging',
+    }).success).toBe(false);
   });
 
   it('refuses to treat a single unscoped key as both Stripe modes', async () => {
@@ -424,6 +432,61 @@ describe('Stripe hosting environment sync', () => {
       metadata: { priceId: 'price_starter_month', replacement: true },
     });
     expect(archive?.dependsOn).toEqual(expect.arrayContaining([replace!.id, hosting!.id]));
+  });
+
+  it('reviews explicit catalog recreation when a scoped connection points at a fresh sandbox', async () => {
+    vi.spyOn(StripeAdapter.prototype, 'listProducts').mockResolvedValue([]);
+    vi.spyOn(StripeAdapter.prototype, 'listPrices').mockResolvedValue([]);
+    const spec = environmentSpec();
+    const observed: ObservedState = {
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      services: [{
+        name: 'web',
+        externalId: 'web-1',
+        workloadKind: 'web',
+        customDomains: [],
+        config: {},
+        envVarKeys: ['STRIPE_STARTER_MONTHLY_PRICE_ID'],
+        envVarHashes: {
+          STRIPE_STARTER_MONTHLY_PRICE_ID: hashEnvValue('price_starter_month'),
+        },
+        status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    };
+
+    const result = await planStripeEnvironmentSync({
+      projectName: 'billing-app',
+      environmentName: 'staging',
+      environmentSpec: spec,
+      environment: { platformBindings: stripeCatalogBindings() } as never,
+      observed,
+    });
+    const product = result.actions.find((action) =>
+      action.metadata?.operation === 'stripeCatalogProductEnsure'
+    );
+    const price = result.actions.find((action) =>
+      action.metadata?.operation === 'stripeCatalogPriceEnsure'
+    );
+
+    expect(product).toMatchObject({
+      type: 'replace',
+      requiresConfirm: true,
+      reason: expect.stringContaining('absent; recreate it'),
+    });
+    expect(price).toMatchObject({
+      type: 'replace',
+      requiresConfirm: true,
+      dependsOn: [product?.id],
+    });
+    expect(result.actions.find((action) =>
+      action.metadata?.operation === 'stripeHostingEnvSync'
+      && action.resource.name === 'web'
+    )?.dependsOn).toEqual(expect.arrayContaining([product!.id, price!.id]));
   });
 
   it('creates catalog resources with action-id idempotency and persists durable identities only', async () => {

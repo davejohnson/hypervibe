@@ -4,8 +4,10 @@ import '../../../server.js';
 import { providerRegistry } from '../../registry/provider.registry.js';
 import { secretManagerRegistry } from '../../registry/secretmanager.registry.js';
 import {
+  CLOUDFLARE_TOKEN_URLS,
   credentialFieldsFromSchema,
   formatConnectionGuidance,
+  GITHUB_TOKEN_URLS,
   getConnectionGuidance,
 } from '../connection-guidance.js';
 
@@ -67,9 +69,10 @@ describe('connection guidance', () => {
     expect(guidance).toContain('CLOUDFLARE_REGISTRAR_API_TOKEN');
     expect(guidance).toContain('DNS, custom domains, and email routing');
     expect(guidance).toContain('Registrar/domain purchase');
-    expect(guidance).toContain('Account API Tokens for DNS/custom domains/email routing');
+    expect(guidance).toContain('Create pre-filled Account API Token');
     expect(guidance).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
-    expect(guidance).toContain('User API Tokens for Registrar/domain purchase');
+    expect(guidance).toContain('permissionGroupKeys=');
+    expect(guidance).toContain('Create pre-filled User API Token');
     expect(guidance).toContain('https://dash.cloudflare.com/profile/api-tokens');
     expect(guidance).toContain('cfat_');
     expect(guidance).toContain('cfut_');
@@ -81,10 +84,35 @@ describe('connection guidance', () => {
     expect(guidance).toContain('Email Routing Addresses');
     expect(guidance).toContain('Registrar write permissions');
     expect(guidance).toContain('Account API Tokens cannot be used for Registrar');
+    expect(guidance).toContain('narrow both selectors before creating the token');
     expect(guidance).toContain('scope="invoiceperfect.com"');
     expect(guidance).not.toContain('scope="example.com"');
     expect(guidance).toContain('accountId');
     expect(guidance).toContain('Do not use the legacy Global API Key');
+  });
+
+  it('pre-fills Cloudflare base DNS permissions for user and account tokens', () => {
+    const expectedPermissions = [
+      { key: 'zone', type: 'read' },
+      { key: 'zone_settings', type: 'read' },
+      { key: 'dns', type: 'edit' },
+      { key: 'account_settings', type: 'read' },
+    ];
+
+    for (const [kind, value] of Object.entries(CLOUDFLARE_TOKEN_URLS)) {
+      const url = new URL(value);
+      expect(JSON.parse(url.searchParams.get('permissionGroupKeys') ?? 'null'), kind).toEqual(expectedPermissions);
+      expect(url.searchParams.get('name'), kind).toBe('Hypervibe DNS and domains');
+    }
+
+    const user = new URL(CLOUDFLARE_TOKEN_URLS.user);
+    expect(user.searchParams.get('accountId')).toBe('*');
+    expect(user.searchParams.get('zoneId')).toBe('all');
+
+    const account = new URL(CLOUDFLARE_TOKEN_URLS.account);
+    expect(account.searchParams.get('to')).toBe('/:account/api-tokens');
+    expect(account.searchParams.has('accountId')).toBe(false);
+    expect(account.searchParams.has('zoneId')).toBe(false);
   });
 
   it('includes GitHub package permissions for CI image deploys', () => {
@@ -94,7 +122,7 @@ describe('connection guidance', () => {
 
     expect(guidance).toContain('classic GitHub personal access token');
     expect(guidance).toContain('fine-grained repository token');
-    expect(guidance).toContain('https://github.com/settings/personal-access-tokens/new');
+    expect(guidance).toContain(GITHUB_TOKEN_URLS.fineGrained);
     expect(guidance).toContain('Contents read/write');
     expect(guidance).toContain('Workflows read/write');
     expect(guidance).toContain('read:packages');
@@ -108,6 +136,32 @@ describe('connection guidance', () => {
     expect(guidance).toContain('NODE_AUTH_TOKEN');
     expect(guidance).toContain('HYPERVIBE_GITHUB_TOKEN');
     expect(guidance).toContain('HYPERVIBE_GITHUB_PACKAGES_TOKEN');
+  });
+
+  it('keeps every GitHub PAT creation link pre-filled for its role', () => {
+    for (const [role, value] of Object.entries(GITHUB_TOKEN_URLS)) {
+      const url = new URL(value);
+      expect(url.pathname, role).toMatch(/\/new$/);
+      expect(url.searchParams.size, role).toBeGreaterThan(1);
+      expect(url.searchParams.get('description'), role).toContain('Hypervibe');
+    }
+
+    const fineGrained = new URL(GITHUB_TOKEN_URLS.fineGrained);
+    expect(fineGrained.searchParams.get('name')).toBe('Hypervibe repository');
+    expect(fineGrained.searchParams.get('expires_in')).toBe('90');
+    expect(fineGrained.searchParams.get('actions')).toBe('write');
+    expect(fineGrained.searchParams.get('administration')).toBe('write');
+    expect(fineGrained.searchParams.get('contents')).toBe('write');
+    expect(fineGrained.searchParams.get('environments')).toBe('write');
+    expect(fineGrained.searchParams.get('pull_requests')).toBe('write');
+    expect(fineGrained.searchParams.get('secrets')).toBe('write');
+    expect(fineGrained.searchParams.get('actions_variables')).toBe('write');
+    expect(fineGrained.searchParams.get('workflows')).toBe('write');
+
+    expect(new URL(GITHUB_TOKEN_URLS.api).searchParams.get('scopes')).toBe('repo,workflow');
+    expect(new URL(GITHUB_TOKEN_URLS.packageRead).searchParams.get('scopes')).toBe('read:packages');
+    expect(new URL(GITHUB_TOKEN_URLS.combined).searchParams.get('scopes')).toBe('repo,workflow,read:packages');
+    expect(new URL(GITHUB_TOKEN_URLS.railwayAppScope).searchParams.get('scopes')).toBe('repo');
   });
 
   it('explains where every Twilio credential and optional provider id comes from', () => {
@@ -142,6 +196,19 @@ describe('connection guidance', () => {
         description: expect.stringContaining('X-Twilio-Signature'),
       }),
     ]));
+  });
+
+  it('explains the fast scoped Stripe sandbox workflow and restricted-key permissions', () => {
+    const guidance = formatConnectionGuidance('stripe', { scope: 'development-personas' });
+
+    expect(guidance).toContain('Switch to sandbox -> Create sandbox');
+    expect(guidance).toContain('rk_test_');
+    expect(guidance).toContain('Products, Prices, and Webhook Endpoints: Write');
+    expect(guidance).toContain('Customers and Subscriptions: Write');
+    expect(guidance).toContain('database.seedCommand');
+    expect(guidance).toContain('scope="development-personas"');
+    expect(guidance).not.toContain('scope="development"');
+    expect(guidance).toContain('.env.stripe.development');
   });
 
   it('keeps provider-specific token guidance actionable', () => {
@@ -270,6 +337,8 @@ describe('connection guidance', () => {
         'https://dashboard.stripe.com/apikeys',
         'sk_test_',
         'sk_live_',
+        'rk_test_',
+        'rk_live_',
         'Webhook Endpoints',
       ],
       appstoreconnect: [

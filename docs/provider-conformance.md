@@ -378,7 +378,8 @@ The GCP credential is a service-account JSON key created at
 isolated project. Grant `roles/cloudsql.admin` for instance, backup-policy,
 replica, clone, user, and deletion lifecycle; `roles/cloudsql.client` for the
 connector; the Cloud Run verification roles documented by `hv_connections`; and
-enable `sqladmin.googleapis.com`. The GitHub credential is a token scoped to
+enable `sqladmin.googleapis.com`. The GitHub credential is a
+[pre-filled fine-grained token](https://github.com/settings/personal-access-tokens/new?name=Hypervibe%20repository&description=Manage%20one%20repository%20with%20Hypervibe&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write) scoped to
 the one disposable repository with Contents, Pull requests, Actions, Variables,
 and Secrets read/write permissions as described by the GitHub connection
 guidance. Connect both through file/dotenv references, never raw command values.
@@ -420,13 +421,13 @@ primary, bindings, and local state for inspected recovery.
 
 ### Cloudflare load balancing
 
-Use a Cloudflare Account API Token created at
-`https://dash.cloudflare.com/?to=/:account/api-tokens` (or a User API Token
-from `https://dash.cloudflare.com/profile/api-tokens`) and scope it to one
-isolated existing zone. It needs Zone Read, Load Balancers Read/Write on that
-zone, Load Balancing Monitors and Pools Read/Write on the owning account, and
-Account Settings Read when `accountId` is not supplied. Use the token value,
-not its name/id or a Global API Key. A safe connection example is:
+Use the
+[pre-filled Cloudflare Account API Token template](https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D&name=Hypervibe%20DNS%20and%20domains) (or the
+[pre-filled User API Token template](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D&accountId=%2A&zoneId=all&name=Hypervibe%20DNS%20and%20domains)) and scope it to one isolated
+existing zone. The links preselect Hypervibe's base DNS permissions; add Load
+Balancers Read/Write on that zone and Load Balancing Monitors and Pools
+Read/Write on the owning account for this profile. Use the token value, not its
+name/id or a Global API Key. A safe connection example is:
 
 ```text
 hv_connections provider="cloudflare" scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}
@@ -591,7 +592,7 @@ HYPERVIBE_LIVE_MANAGED_HOSTING=digitalocean npm run test:providers:managed-live
 ```
 
 The recommended GitHub credential is a
-[fine-grained repository PAT](https://github.com/settings/personal-access-tokens/new)
+[pre-filled fine-grained repository PAT](https://github.com/settings/personal-access-tokens/new?name=Hypervibe%20repository&description=Manage%20one%20repository%20with%20Hypervibe&expires_in=90&actions=write&administration=write&contents=write&environments=write&issues=write&pull_requests=write&secrets=write&actions_variables=write&workflows=write)
 whose selected repository is only the isolated fixture. Grant Metadata read
 plus Administration, Actions, Contents, Pull requests, Secrets, and Workflows
 read/write. A classic PAT with `repo` and `workflow` also works but cannot be

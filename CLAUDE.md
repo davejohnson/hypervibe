@@ -122,6 +122,10 @@ Provider-specific lifecycle behavior belongs behind the provider boundary. Do no
 
 Generic command names imply generic provider routing. `hv_inspect`, `hv_import`, and future provider-selecting commands must accept registered provider names instead of a one-provider enum/default, use flat provider-neutral selectors (`scope`, `resource`, `id`, `name`), and dispatch through capabilities or provider-owned application drivers. Never expose fields such as `railwayProjectId` or put provider API/mapping logic in `src/tools`. When only one provider implements a capability, keep the command generic and return explicit `UNSUPPORTED` for the others; add a command-surface contract test so a provider-specific shortcut cannot return.
 
+Whenever a GitHub PAT is required, provide a role-specific pre-filled creation URL with its name/description and required scopes or fine-grained permissions already selected. Never send users only to a generic GitHub token settings page; keep every PAT role covered by regression tests.
+
+Whenever a provider officially documents credential-template URLs, use them with the known required name and least-privilege permissions pre-filled. Do not reverse-engineer undocumented dashboard parameters; call out any optional permissions the official template cannot represent.
+
 ## The spec → plan → apply loop
 
 The core workflow is terraform-style:
