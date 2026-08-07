@@ -216,6 +216,7 @@ describe('RailwayAdapter observe', () => {
     );
 
     expect(result.services[0]?.customDomainStatus?.['usebillforge.com']).toMatchObject({
+      providerVerified: false,
       dnsConfigured: false,
       dnsRecords: [
         { name: 'usebillforge.com', type: 'CNAME', value: 'web-production.up.railway.app' },
@@ -262,6 +263,7 @@ describe('RailwayAdapter observe', () => {
     );
 
     expect(result.services[0]?.customDomainStatus?.['usebillforge.com']).toMatchObject({
+      providerVerified: true,
       dnsConfigured: true,
       dnsRecords: [
         { name: 'usebillforge.com', type: 'CNAME', value: 'web-production.up.railway.app' },

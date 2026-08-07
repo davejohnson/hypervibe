@@ -131,6 +131,16 @@ export function fingerprintObservedState(observed: ObservedState): string {
         externalId: s.externalId,
         workloadKind: s.workloadKind,
         customDomains: [...s.customDomains].sort(),
+        customDomainStatus: Object.fromEntries(
+          Object.entries(s.customDomainStatus ?? {})
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([domain, status]) => [domain, {
+              providerVerified: status.providerVerified ?? null,
+              dnsConfigured: status.dnsConfigured ?? null,
+              dnsRecords: [...(status.dnsRecords ?? [])]
+                .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+            }])
+        ),
         config: s.config,
         source: s.source ?? null,
         sourceState: s.sourceState ?? null,
