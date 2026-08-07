@@ -61,12 +61,12 @@ function pageConfig(overrides: Partial<GitHubPagesConfig> = {}): GitHubPagesConf
   };
 }
 
-function dnsRecord(id: string, type: string, content: string): CloudflareDnsRecord {
+function dnsRecord(id: string, type: string, content: string, name = 'hypervibe.dev'): CloudflareDnsRecord {
   return {
     id,
     zone_id: 'zone-1',
     zone_name: 'hypervibe.dev',
-    name: 'hypervibe.dev',
+    name,
     type,
     content,
     proxied: false,
@@ -131,7 +131,10 @@ describe('declarative GitHub Pages lifecycle', () => {
       id: 'zone-1', name: 'hypervibe.dev', status: 'active', paused: false, type: 'full', name_servers: [],
     });
     vi.spyOn(CloudflareAdapter.prototype, 'listDnsRecords').mockResolvedValue(
-      PAGES_IPS.map((ip, index) => dnsRecord(`pages-${index}`, 'A', ip))
+      [
+        ...PAGES_IPS.map((ip, index) => dnsRecord(`pages-${index}`, 'A', ip)),
+        dnsRecord('pages-www', 'CNAME', 'owner.github.io', 'www.hypervibe.dev'),
+      ]
     );
     vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig')
       .mockResolvedValueOnce(null)
@@ -173,6 +176,50 @@ describe('declarative GitHub Pages lifecycle', () => {
     expect(dnsDelete).not.toHaveBeenCalled();
   });
 
+  it('adds the recommended www CNAME for an apex domain without replacement confirmation', async () => {
+    const project = new ProjectRepository().create({ name: 'pages-www' });
+    const desiredSpec = spec(project.name);
+    const connection = new ConnectionRepository().create({
+      provider: 'cloudflare',
+      scope: 'hypervibe.dev',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'cloudflare-token' }),
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
+
+    const records = PAGES_IPS.map((ip, index) => dnsRecord(`pages-${index}`, 'A', ip));
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1', name: 'hypervibe.dev', status: 'active', paused: false, type: 'full', name_servers: [],
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'listDnsRecords').mockImplementation(async () => [...records]);
+    vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig').mockResolvedValue(pageConfig({ https_enforced: true }));
+    const adapter = new GitHubAdapter();
+    adapter.connect({ apiToken: 'github-token' });
+
+    const planned = await planGitHubPages({ spec: desiredSpec, repository: REPOSITORY, adapter });
+    const dnsAction = planned.actions.find((action) => action.metadata?.operation === GITHUB_PAGES_DNS_OPERATION)!;
+    expect(dnsAction).toMatchObject({ type: 'update' });
+    expect(dnsAction.requiresConfirm).toBeUndefined();
+
+    const remove = vi.spyOn(CloudflareAdapter.prototype, 'deleteDnsRecord');
+    const create = vi.spyOn(CloudflareAdapter.prototype, 'createDnsRecord').mockImplementation(async (_zone, input) => {
+      const created = dnsRecord(`new-${records.length}`, input.type, input.content, input.name);
+      records.push(created);
+      return created;
+    });
+
+    const applied = await applyGitHubPagesDns({ spec: desiredSpec, action: dnsAction });
+
+    expect(applied.success).toBe(true);
+    expect(remove).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith('zone-1', {
+      name: 'www.hypervibe.dev',
+      type: 'CNAME',
+      content: 'owner.github.io',
+      proxied: false,
+    });
+  });
+
   it('confirmation-gates replacement records and preserves non-address DNS records', async () => {
     const project = new ProjectRepository().create({ name: 'pages-dns' });
     const desiredSpec = spec(project.name);
@@ -198,7 +245,7 @@ describe('declarative GitHub Pages lifecycle', () => {
     const dnsAction = planned.actions.find((action) => action.metadata?.operation === GITHUB_PAGES_DNS_OPERATION)!;
     expect(dnsAction).toMatchObject({ type: 'update', requiresConfirm: true });
     expect(dnsAction.metadata?.observedRecords).toEqual([
-      { id: 'old-address', type: 'A', content: '192.0.2.10', proxied: false },
+      { id: 'old-address', name: 'hypervibe.dev', type: 'A', content: '192.0.2.10', proxied: false },
     ]);
 
     const remove = vi.spyOn(CloudflareAdapter.prototype, 'deleteDnsRecord').mockImplementation(async (_zone, id) => {
@@ -206,7 +253,7 @@ describe('declarative GitHub Pages lifecycle', () => {
       return { id };
     });
     vi.spyOn(CloudflareAdapter.prototype, 'createDnsRecord').mockImplementation(async (_zone, input) => {
-      const created = dnsRecord(`new-${records.length}`, input.type, input.content);
+      const created = dnsRecord(`new-${records.length}`, input.type, input.content, input.name);
       records.push(created);
       return created;
     });
@@ -220,6 +267,51 @@ describe('declarative GitHub Pages lifecycle', () => {
     expect(remove).toHaveBeenCalledOnce();
     expect(remove).toHaveBeenCalledWith('zone-1', 'old-address');
     expect(records.find((record) => record.id === 'mail')).toBeDefined();
+  });
+
+  it('removes only exact Hypervibe-managed apex and www records during teardown', async () => {
+    const project = new ProjectRepository().create({ name: 'pages-teardown' });
+    const enabledSpec = spec(project.name);
+    const desiredSpec = projectSpecSchema.parse({
+      ...enabledSpec,
+      github: {
+        ...enabledSpec.github,
+        pages: { ...enabledSpec.github!.pages, enabled: false },
+      },
+    });
+    const connection = new ConnectionRepository().create({
+      provider: 'cloudflare',
+      scope: 'hypervibe.dev',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'cloudflare-token' }),
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
+
+    const records = [
+      ...PAGES_IPS.map((ip, index) => dnsRecord(`pages-${index}`, 'A', ip)),
+      dnsRecord('pages-www', 'CNAME', 'owner.github.io', 'www.hypervibe.dev'),
+      dnsRecord('mail', 'MX', 'mail.example.net'),
+    ];
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1', name: 'hypervibe.dev', status: 'active', paused: false, type: 'full', name_servers: [],
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'listDnsRecords').mockImplementation(async () => [...records]);
+    vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig').mockResolvedValue(pageConfig({ https_enforced: true }));
+    const adapter = new GitHubAdapter();
+    adapter.connect({ apiToken: 'github-token' });
+
+    const planned = await planGitHubPages({ spec: desiredSpec, repository: REPOSITORY, adapter });
+    const dnsAction = planned.actions.find((action) => action.metadata?.operation === GITHUB_PAGES_DNS_OPERATION)!;
+    expect(dnsAction).toMatchObject({ type: 'destroy', requiresConfirm: true });
+
+    const remove = vi.spyOn(CloudflareAdapter.prototype, 'deleteDnsRecord').mockImplementation(async (_zone, id) => {
+      records.splice(records.findIndex((record) => record.id === id), 1);
+      return { id };
+    });
+    const applied = await applyGitHubPagesDns({ spec: desiredSpec, action: dnsAction });
+
+    expect(applied.success).toBe(true);
+    expect(remove).toHaveBeenCalledTimes(5);
+    expect(records).toEqual([expect.objectContaining({ id: 'mail', type: 'MX' })]);
   });
 
   it('orders DNS before Pages configuration so certificate-pending work cannot strand DNS', async () => {

@@ -35,7 +35,8 @@ type ConnectionBlock = {
   actionIds: string[];
 };
 
-type DnsRecordSnapshot = Pick<CloudflareDnsRecord, 'id' | 'type' | 'content' | 'proxied'>;
+type DesiredDnsRecord = Pick<CloudflareDnsRecord, 'name' | 'type' | 'content' | 'proxied'>;
+type DnsRecordSnapshot = Pick<CloudflareDnsRecord, 'id' | 'name' | 'type' | 'content' | 'proxied'>;
 
 function yamlString(value: string): string {
   return JSON.stringify(value);
@@ -114,14 +115,22 @@ function isApex(domain: string): boolean {
   return dnsZoneScopeForDomain(domain) === domain;
 }
 
-function desiredDnsRecords(domain: string, owner: string): Array<{ type: string; content: string; proxied: false }> {
+function desiredDnsRecords(domain: string, owner: string): DesiredDnsRecord[] {
   return isApex(domain)
-    ? GITHUB_PAGES_IPV4.map((content) => ({ type: 'A', content, proxied: false as const }))
-    : [{ type: 'CNAME', content: `${owner}.github.io`, proxied: false as const }];
+    ? [
+        ...GITHUB_PAGES_IPV4.map((content) => ({ name: domain, type: 'A', content, proxied: false as const })),
+        { name: `www.${domain}`, type: 'CNAME', content: `${owner}.github.io`, proxied: false as const },
+      ]
+    : [{ name: domain, type: 'CNAME', content: `${owner}.github.io`, proxied: false as const }];
 }
 
-function recordAtName(record: CloudflareDnsRecord, domain: string): boolean {
-  return record.name.replace(/\.$/, '').toLowerCase() === domain;
+function normalizedDnsValue(value: string): string {
+  return value.replace(/\.$/, '').toLowerCase();
+}
+
+function recordAtManagedName(record: CloudflareDnsRecord, desired: DesiredDnsRecord[]): boolean {
+  const name = normalizedDnsValue(record.name);
+  return desired.some((candidate) => normalizedDnsValue(candidate.name) === name);
 }
 
 function isAddressRecord(record: CloudflareDnsRecord): boolean {
@@ -130,15 +139,44 @@ function isAddressRecord(record: CloudflareDnsRecord): boolean {
 
 function dnsSnapshot(records: CloudflareDnsRecord[]): DnsRecordSnapshot[] {
   return records
-    .map(({ id, type, content, proxied }) => ({ id, type, content, proxied }))
-    .sort((a, b) => `${a.type}:${a.content}:${a.id}`.localeCompare(`${b.type}:${b.content}:${b.id}`));
+    .map(({ id, name, type, content, proxied }) => ({ id, name, type, content, proxied }))
+    .sort((a, b) => `${a.name}:${a.type}:${a.content}:${a.id}`.localeCompare(`${b.name}:${b.type}:${b.content}:${b.id}`));
 }
 
-function dnsInSync(current: DnsRecordSnapshot[], desired: Array<{ type: string; content: string; proxied: false }>): boolean {
-  const tuples = (values: Array<{ type: string; content: string; proxied: boolean }>) => values
-    .map((record) => `${record.type}:${record.content.replace(/\.$/, '').toLowerCase()}:${record.proxied}`)
+function recordTuple(record: DesiredDnsRecord, includeProxy = true): string {
+  return [
+    normalizedDnsValue(record.name),
+    record.type.toUpperCase(),
+    normalizedDnsValue(record.content),
+    ...(includeProxy ? [String(record.proxied)] : []),
+  ].join(':');
+}
+
+function dnsInSync(current: DnsRecordSnapshot[], desired: DesiredDnsRecord[]): boolean {
+  const tuples = (values: DesiredDnsRecord[]) => values
+    .map((record) => recordTuple(record))
     .sort();
   return JSON.stringify(tuples(current)) === JSON.stringify(tuples(desired));
+}
+
+function recordsToDelete(current: DnsRecordSnapshot[], desired: DesiredDnsRecord[], enabled: boolean): DnsRecordSnapshot[] {
+  if (!enabled) {
+    const managed = new Set(desired.map((record) => recordTuple(record, false)));
+    return current.filter((record) => managed.has(recordTuple(record, false)));
+  }
+
+  const remaining = new Map<string, number>();
+  for (const record of desired) {
+    const key = recordTuple(record);
+    remaining.set(key, (remaining.get(key) ?? 0) + 1);
+  }
+  return current.filter((record) => {
+    const key = recordTuple(record);
+    const count = remaining.get(key) ?? 0;
+    if (count === 0) return true;
+    remaining.set(key, count - 1);
+    return false;
+  });
 }
 
 function cloudflareAdapter(domain: string): { adapter: CloudflareAdapter } | { error: string } {
@@ -223,15 +261,14 @@ async function planPagesDns(params: {
       };
     }
     const current = dnsSnapshot((await result.adapter.listDnsRecords(zone.id)).filter((record) => (
-      recordAtName(record, domain) && isAddressRecord(record)
+      recordAtManagedName(record, desired) && isAddressRecord(record)
     )));
     const matchingPagesRecords = current.filter((record) => desired.some((candidate) => (
-      candidate.type === record.type
-      && candidate.content.toLowerCase() === record.content.replace(/\.$/, '').toLowerCase()
+      recordTuple(candidate, false) === recordTuple(record, false)
     )));
     const enabled = params.pages.enabled;
     const inSync = enabled ? dnsInSync(current, desired) : matchingPagesRecords.length === 0;
-    const replacingExisting = enabled && current.length > 0 && !inSync;
+    const replacingExisting = enabled && recordsToDelete(current, desired, true).length > 0;
     return {
       actions: [{
         id,
@@ -492,13 +529,14 @@ function parseRecordArray(value: unknown): DnsRecordSnapshot[] | null {
     const record = item as Record<string, unknown>;
     if (
       typeof record.id !== 'string'
+      || typeof record.name !== 'string'
       || typeof record.type !== 'string'
       || typeof record.content !== 'string'
       || typeof record.proxied !== 'boolean'
     ) return null;
-    records.push({ id: record.id, type: record.type, content: record.content, proxied: record.proxied });
+    records.push({ id: record.id, name: record.name, type: record.type, content: record.content, proxied: record.proxied });
   }
-  return records.sort((a, b) => `${a.type}:${a.content}:${a.id}`.localeCompare(`${b.type}:${b.content}:${b.id}`));
+  return records.sort((a, b) => `${a.name}:${a.type}:${a.content}:${a.id}`.localeCompare(`${b.name}:${b.type}:${b.content}:${b.id}`));
 }
 
 export async function applyGitHubPagesDns(params: {
@@ -522,51 +560,36 @@ export async function applyGitHubPagesDns(params: {
   if (!zoneId || !observed) {
     return { success: false, status: 'blocked', message: 'GitHub Pages DNS was not safely observed during planning', error: 'Re-run hv_plan.' };
   }
+  const desired = desiredDnsRecords(domain, parts.owner);
   const current = dnsSnapshot((await result.adapter.listDnsRecords(zoneId)).filter((record) => (
-    recordAtName(record, domain) && isAddressRecord(record)
+    recordAtManagedName(record, desired) && isAddressRecord(record)
   )));
   if (!sameJson(current, observed)) {
     return { success: false, status: 'blocked', message: `DNS for ${domain} changed after planning`, error: 'Re-run hv_plan.' };
   }
-  const desired = desiredDnsRecords(domain, parts.owner);
-  const keep = pages.enabled ? desired : [];
-  for (const record of current) {
-    const matches = keep.some((candidate) => (
-      candidate.type === record.type
-      && candidate.content.toLowerCase() === record.content.replace(/\.$/, '').toLowerCase()
-      && record.proxied === false
-    ));
-    const managedPagesRecord = desired.some((candidate) => (
-      candidate.type === record.type
-      && candidate.content.toLowerCase() === record.content.replace(/\.$/, '').toLowerCase()
-    ));
-    if ((!pages.enabled && managedPagesRecord) || (pages.enabled && !matches)) {
-      await result.adapter.deleteDnsRecord(zoneId, record.id);
-    }
+  for (const record of recordsToDelete(current, desired, pages.enabled)) {
+    await result.adapter.deleteDnsRecord(zoneId, record.id);
   }
   if (pages.enabled) {
     const remaining = dnsSnapshot((await result.adapter.listDnsRecords(zoneId)).filter((record) => (
-      recordAtName(record, domain) && isAddressRecord(record)
+      recordAtManagedName(record, desired) && isAddressRecord(record)
     )));
     for (const record of desired) {
       const exists = remaining.some((candidate) => (
-        candidate.type === record.type
-        && candidate.content.replace(/\.$/, '').toLowerCase() === record.content.toLowerCase()
-        && candidate.proxied === false
+        recordTuple(candidate) === recordTuple(record)
       ));
       if (!exists) {
-        await result.adapter.createDnsRecord(zoneId, { name: domain, ...record });
+        await result.adapter.createDnsRecord(zoneId, record);
       }
     }
   }
   const finalRecords = dnsSnapshot((await result.adapter.listDnsRecords(zoneId)).filter((record) => (
-    recordAtName(record, domain) && isAddressRecord(record)
+    recordAtManagedName(record, desired) && isAddressRecord(record)
   )));
   const success = pages.enabled
     ? dnsInSync(finalRecords, desired)
     : finalRecords.every((record) => !desired.some((candidate) => (
-      candidate.type === record.type
-      && candidate.content.toLowerCase() === record.content.replace(/\.$/, '').toLowerCase()
+      recordTuple(candidate, false) === recordTuple(record, false)
     )));
   if (!success) {
     return { success: false, message: `GitHub Pages DNS for ${domain} was not verified`, error: 'Provider read-back differs from desired state.' };
