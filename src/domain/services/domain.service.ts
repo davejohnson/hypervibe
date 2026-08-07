@@ -18,6 +18,7 @@ import {
 } from './domain-attach-policy.js';
 import {
   normalizeProviderDnsRecord,
+  providerDnsRecordShouldBeProxied,
   type NormalizedDnsRecord,
   type ProviderDnsRecord,
 } from './domain-dns-records.js';
@@ -159,8 +160,11 @@ export async function setupCustomDomain(params: {
       const normalizedRecords = providerDnsRecords
         .map(normalizeProviderDnsRecord)
         .filter((record): record is NormalizedDnsRecord => Boolean(record));
-      for (const { name, type, value } of normalizedRecords) {
-        const upsert = await cfAdapter.upsertDnsRecord(zone.id, name, type, value, { proxied: false });
+      for (const record of normalizedRecords) {
+        const { name, type, value } = record;
+        const upsert = await cfAdapter.upsertDnsRecord(zone.id, name, type, value, {
+          proxied: providerDnsRecordShouldBeProxied(record),
+        });
         dnsResults.push({ name, type, target: value, action: upsert.action });
       }
       result.dnsConfigured = dnsResults.length > 0 && dnsResults.length === normalizedRecords.length;
