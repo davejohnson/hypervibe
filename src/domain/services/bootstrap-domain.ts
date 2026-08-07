@@ -11,7 +11,11 @@ import {
   supportsCustomDomainAttach,
   type DomainAttachCapableAdapter,
 } from './domain-attach-policy.js';
-import { normalizeProviderDnsRecord, type NormalizedDnsRecord } from './domain-dns-records.js';
+import {
+  normalizeProviderDnsRecord,
+  providerDnsRecordShouldBeProxied,
+  type NormalizedDnsRecord,
+} from './domain-dns-records.js';
 import { cloudflareScopeHintsForDomain, dnsZoneScopeForDomain, normalizeDomainName } from './domain-scope.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Service } from '../entities/service.entity.js';
@@ -103,9 +107,10 @@ export async function attachBootstrapDomain(args: {
               .map(normalizeProviderDnsRecord)
               .filter((record): record is NormalizedDnsRecord => Boolean(record));
             const results: Array<{ name: string; type: string; target: string; action: string }> = [];
-            for (const { name, type, value } of normalizedRecords) {
+            for (const record of normalizedRecords) {
+              const { name, type, value } = record;
               const upsert = await cfAdapter.upsertDnsRecord(zone.id, name, type, value, {
-                proxied: false,
+                proxied: providerDnsRecordShouldBeProxied(record),
               });
               results.push({ name, type, target: value, action: upsert.action });
             }

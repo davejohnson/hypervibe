@@ -177,8 +177,18 @@ describe('setupCustomDomain', () => {
         domain: 'app.example.com',
         customDomainId: 'cd_123',
         dnsRecords: [
-          { name: 'app.example.com', type: 'DNS_RECORD_TYPE_CNAME', value: 'web-production.up.railway.app.' },
-          { name: '_railway.app.example.com', type: 'DNS_RECORD_TYPE_TXT', value: 'verify-token' },
+          {
+            name: 'app.example.com',
+            type: 'DNS_RECORD_TYPE_CNAME',
+            value: 'web-production.up.railway.app.',
+            purpose: 'DNS_RECORD_PURPOSE_TRAFFIC_ROUTE',
+          },
+          {
+            name: '_railway.app.example.com',
+            type: 'DNS_RECORD_TYPE_TXT',
+            value: 'verify-token',
+            purpose: 'verification',
+          },
         ],
       },
     }));
@@ -227,7 +237,7 @@ describe('setupCustomDomain', () => {
 
     expect(result.success).toBe(true);
     expect(upsertDnsRecord.mock.calls).toEqual([
-      ['zone-1', 'app.example.com', 'CNAME', 'web-production.up.railway.app', { proxied: false }],
+      ['zone-1', 'app.example.com', 'CNAME', 'web-production.up.railway.app', { proxied: true }],
       ['zone-1', '_railway.app.example.com', 'TXT', 'verify-token', { proxied: false }],
     ]);
   });
