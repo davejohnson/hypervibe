@@ -250,6 +250,9 @@ export class SpecStore {
   /** Replace the spec wholesale. Returns the new revision. */
   replace(project: Project, spec: unknown): SpecResult {
     const parsed = projectSpecSchema.parse(spec);
+    if (parsed.project !== project.name) {
+      throw new Error(`Spec project "${parsed.project}" does not match target project "${project.name}".`);
+    }
     const latest = this.repo.findLatest(project.id);
     const row = this.repo.insert(project.id, (latest?.revision ?? 0) + 1, parsed);
     const written = writeRepoSpecFile(parsed);

@@ -5,12 +5,13 @@ import {
   fetchProviderLogs,
   fetchProviderDeployments,
   fetchProviderBuildLogs,
-  fetchStripeWebhookStatuses,
   supportsLogsDeploymentsProvider,
   supportsLogsBuildProvider,
   logsDeploymentsUnsupportedMessage,
   logsBuildUnsupportedMessage,
 } from '../domain/services/provider-logs.service.js';
+import { fetchStripeWebhookStatuses } from '../domain/services/stripe-ops.service.js';
+import { stripeEnvironmentName } from '../domain/services/stripe-env.service.js';
 import {
   resolveHealthEnvironment,
   resolveHealthService,
@@ -45,12 +46,59 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
       limit: z.number().int().min(1).max(500).optional().describe('Max entries (default 100 for service logs, 10 for deployments)'),
       errorsOnly: z.boolean().optional().describe('source=service only: return only error-like lines'),
       deploymentId: z.string().optional().describe('source=build only: specific deployment (defaults to latest)'),
-      mode: z.enum(['sandbox', 'live']).optional().describe('source=stripe-webhooks only (default sandbox)'),
+      mode: z.enum(['sandbox', 'live']).optional().describe('source=stripe-webhooks only: optional assertion against the selected environment-scoped connection mode'),
     },
     wrapCommandHandler(async ({ project: projectRef, env, service, source, limit, errorsOnly, deploymentId, mode }) => {
       if (source === 'stripe-webhooks') {
-        const webhooks = await fetchStripeWebhookStatuses(mode ?? 'sandbox');
-        return commandSuccess({ source, mode: mode ?? 'sandbox', webhooks });
+        if (!projectRef || !env) {
+          throw new HvError('VALIDATION', 'Stripe webhook inspection requires explicit project and env selectors.', {
+            hint: 'Pass the Hypervibe project and environment whose payments.stripe connection should be inspected.',
+          });
+        }
+        const invalid = [
+          service !== undefined ? 'service' : undefined,
+          limit !== undefined ? 'limit' : undefined,
+          errorsOnly !== undefined ? 'errorsOnly' : undefined,
+          deploymentId !== undefined ? 'deploymentId' : undefined,
+        ].filter((field): field is string => Boolean(field));
+        if (invalid.length > 0) {
+          throw new HvError('VALIDATION', 'Stripe webhook inspection received selectors for another log source.', {
+            details: { invalid },
+            hint: 'Use only project, env, source="stripe-webhooks", and optional mode.',
+          });
+        }
+        const { project, environment } = resolveEnvOrThrow(ctx, projectRef, env);
+        const environmentSpec = new SpecStore().get(project)?.spec.environments[environment.name];
+        const stripeEnvironment = environmentSpec?.payments?.stripe
+          ? stripeEnvironmentName(environment.name, environmentSpec.payments.stripe)
+          : environment.name;
+        const result = await fetchStripeWebhookStatuses(stripeEnvironment, mode);
+        if (!result.success) {
+          throw new HvError(result.code, result.error, {
+            next: result.code === 'MISSING_CONNECTION' ? ['hv_connections'] : undefined,
+          });
+        }
+        return commandSuccess({
+          source,
+          project: project.name,
+          environment: environment.name,
+          stripeEnvironment,
+          mode: result.mode,
+          webhooks: result.webhooks,
+        });
+      }
+
+      const invalid = source === 'service'
+        ? [deploymentId !== undefined ? 'deploymentId' : undefined, mode !== undefined ? 'mode' : undefined]
+        : source === 'build'
+          ? [limit !== undefined ? 'limit' : undefined, errorsOnly !== undefined ? 'errorsOnly' : undefined, mode !== undefined ? 'mode' : undefined]
+          : [errorsOnly !== undefined ? 'errorsOnly' : undefined, deploymentId !== undefined ? 'deploymentId' : undefined, mode !== undefined ? 'mode' : undefined];
+      const invalidFields = invalid.filter((field): field is string => Boolean(field));
+      if (invalidFields.length > 0) {
+        throw new HvError('VALIDATION', `${source} logs received selectors for another log source.`, {
+          details: { invalid: invalidFields },
+          hint: 'Remove the listed selectors or choose the matching source.',
+        });
       }
 
       const { project, environment, bindings, provider } = resolveEnvOrThrow(ctx, projectRef, env);

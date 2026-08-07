@@ -18,6 +18,8 @@ export interface InspectProviderInput {
   limit?: number;
 }
 
+const ENVIRONMENT_INSPECTION_RESOURCES = new Set(['environment', 'database', 'cache', 'storage']);
+
 function advertisedResources(providerName: string): string[] {
   const registered = providerRegistry.get(providerName);
   if (!registered) return [];
@@ -98,7 +100,18 @@ export async function inspectProvider(
   ctx: CommandContext,
   input: InspectProviderInput
 ): Promise<Record<string, unknown>> {
-  if (!input.provider) return listProviders(ctx);
+  if (!input.provider) {
+    const selectors = Object.entries(input)
+      .filter(([field, value]) => field !== 'provider' && value !== undefined)
+      .map(([field]) => field);
+    if (selectors.length > 0) {
+      throw new HvError('VALIDATION', 'provider is required when inspection selectors are supplied.', {
+        details: { selectors },
+        hint: 'Omit every selector to list providers, or pass provider with the bounded inspection request.',
+      });
+    }
+    return listProviders(ctx);
+  }
 
   const providerName = input.provider.trim().toLowerCase();
   const registered = providerRegistry.get(providerName);
@@ -106,6 +119,19 @@ export async function inspectProvider(
     throw new HvError('VALIDATION', `Unknown provider "${input.provider}".`, {
       details: { providers: providerRegistry.names() },
       hint: 'Call hv_inspect without provider to list registered providers and their supported resource reads.',
+    });
+  }
+
+  const resources = advertisedResources(providerName);
+  if (input.resource && !resources.includes(input.resource)) {
+    throw new HvError('UNSUPPORTED', `${registered.metadata.displayName} does not support inspection resource "${input.resource}".`, {
+      details: { resources },
+      hint: `Call hv_inspect provider="${providerName}" without resource selectors to inspect its default resource, or choose one of the advertised resources.`,
+    });
+  }
+  if (input.env && !input.project) {
+    throw new HvError('VALIDATION', 'project is required when env is supplied.', {
+      hint: 'Pass both project and env to inspect a Hypervibe environment.',
     });
   }
 
@@ -126,6 +152,45 @@ export async function inspectProvider(
     });
   }
 
+  if (input.resource === 'connection') {
+    const invalid = [
+      input.env !== undefined ? 'env' : undefined,
+      input.id !== undefined ? 'id' : undefined,
+      input.name !== undefined ? 'name' : undefined,
+      input.limit !== undefined ? 'limit' : undefined,
+    ].filter((field): field is string => Boolean(field));
+    if (invalid.length > 0) {
+      throw new HvError('VALIDATION', 'Connection inspection does not accept resource selectors.', {
+        details: { invalid },
+        hint: 'Use only provider, project, and scope when resource="connection".',
+      });
+    }
+  }
+
+  if (environment && input.resource && !ENVIRONMENT_INSPECTION_RESOURCES.has(input.resource)) {
+    throw new HvError('VALIDATION', `env cannot be combined with provider resource "${input.resource}".`, {
+      hint: 'Remove env for provider-owned resource inspection, or select environment, database, cache, or storage.',
+    });
+  }
+
+  if (environment) {
+    const invalid = input.resource === 'storage'
+      ? []
+      : [
+        input.id !== undefined ? 'id' : undefined,
+        (!input.resource || input.resource === 'environment') && input.name !== undefined ? 'name' : undefined,
+        input.limit !== undefined ? 'limit' : undefined,
+      ].filter((field): field is string => Boolean(field));
+    if (invalid.length > 0) {
+      throw new HvError('VALIDATION', 'Live environment inspection received unsupported selectors.', {
+        details: { invalid },
+        hint: input.resource
+          ? 'Use only selectors supported by the selected environment resource.'
+          : 'Use project and env for a full environment observation, or add an explicit resource before filtering it.',
+      });
+    }
+  }
+
   const projectHints = project ? getProjectScopeHints(project) : [];
   const scopeHints = input.scope
     ? [input.scope, ...projectHints.filter((hint) => hint !== input.scope)]
@@ -144,11 +209,6 @@ export async function inspectProvider(
   }
 
   const adapter = resolved.adapter as unknown as Record<string, unknown>;
-  const hasStandardObservation = Boolean(environment) && [
-    adapter.observe,
-    adapter.observeDatabase,
-    adapter.observeCache,
-  ].some((operation) => typeof operation === 'function');
   const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
   const request: ProviderInspectionRequest = {
     scope: input.scope ?? projectHints.find((hint) => !hint.includes('://') && !hint.includes('github.com/')),
@@ -159,8 +219,19 @@ export async function inspectProvider(
   };
 
   try {
-    if (registered.inspection && input.resource !== 'connection' && !hasStandardObservation) {
-      const inspected = await registered.inspection.inspect(resolved.adapter, request);
+    const providerInspection = registered.inspection;
+    const useProviderInspection = input.resource !== 'connection'
+      && !environment
+      && Boolean(providerInspection)
+      && (!input.resource || providerInspection!.resources.includes(input.resource));
+    if (useProviderInspection && providerInspection) {
+      const inspected = await providerInspection.inspect(resolved.adapter, request);
+      if (input.resource && inspected.resource !== input.resource) {
+        throw new HvError('PROVIDER_ERROR', `${registered.metadata.displayName} returned the wrong inspection resource.`, {
+          details: { requested: input.resource, returned: inspected.resource ?? null },
+          hint: 'Treat this as an adapter contract failure; no provider state was changed.',
+        });
+      }
       if (inspected.observation === 'ambiguous') {
         throw new HvError('VALIDATION', `Multiple ${registered.metadata.displayName} resources matched "${input.name ?? input.id ?? 'the selector'}".`, {
           details: inspected,
@@ -179,8 +250,9 @@ export async function inspectProvider(
     }
 
     if (environment) {
+      const standardResource = input.resource;
       const observe = adapter.observe;
-      if (typeof observe === 'function') {
+      if ((!standardResource || standardResource === 'environment') && typeof observe === 'function') {
         const observed = await (observe as (environment: Environment) => Promise<ObservedState>)
           .call(resolved.adapter, environment);
         return {
@@ -195,7 +267,7 @@ export async function inspectProvider(
 
       const component = componentForProvider(ctx, environment, providerName);
       const observeDatabase = adapter.observeDatabase;
-      if (typeof observeDatabase === 'function') {
+      if ((standardResource === 'database' || !standardResource) && typeof observeDatabase === 'function') {
         const observed = await (observeDatabase as (
           environment: Environment,
           component?: Component | null,
@@ -212,7 +284,7 @@ export async function inspectProvider(
       }
 
       const observeCache = adapter.observeCache;
-      if (typeof observeCache === 'function') {
+      if ((standardResource === 'cache' || !standardResource) && typeof observeCache === 'function') {
         const observed = await (observeCache as (
           environment: Environment,
           component?: Component | null,
@@ -226,6 +298,52 @@ export async function inspectProvider(
           environment: environment.name,
           observed,
         };
+      }
+
+      if (standardResource === 'storage' && typeof observe === 'function') {
+        const observed = await (observe as (environment: Environment) => Promise<ObservedState>)
+          .call(resolved.adapter, environment);
+        const storage = (observed.storage ?? [])
+          .filter((item) => !input.id || item.externalId === input.id)
+          .filter((item) => !input.name || item.name === input.name)
+          .slice(0, limit);
+        return {
+          provider: providerName,
+          category: registered.metadata.category,
+          mode: 'storage',
+          project: project?.name,
+          environment: environment.name,
+          observed: {
+            storage,
+            completeness: observed.completeness?.storage ?? 'unknown',
+            partial: observed.partial,
+            warnings: observed.warnings,
+          },
+        };
+      }
+      throw new HvError('UNSUPPORTED', `${registered.metadata.displayName} cannot inspect a live Hypervibe environment.`, {
+        details: { resources },
+        hint: 'Use one of the advertised provider resources without env, or use hv_status for desired-state drift.',
+      });
+    }
+
+    if (input.resource && input.resource !== 'connection') {
+      throw new HvError('VALIDATION', `resource="${input.resource}" requires project and env for environment observation.`, {
+        hint: 'Pass an existing Hypervibe project and environment, or choose a provider-owned resource advertised by hv_inspect.',
+      });
+    }
+
+    if (!registered.inspection) {
+      const invalid = [
+        input.id !== undefined ? 'id' : undefined,
+        input.name !== undefined ? 'name' : undefined,
+        input.limit !== undefined ? 'limit' : undefined,
+      ].filter((field): field is string => Boolean(field));
+      if (invalid.length > 0) {
+        throw new HvError('VALIDATION', 'Connection inspection does not accept provider resource selectors.', {
+          details: { invalid },
+          hint: 'Remove id, name, and limit, or select an advertised provider resource.',
+        });
       }
     }
 

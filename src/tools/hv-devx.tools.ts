@@ -44,15 +44,32 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
     {
       action: z.enum(['list', 'get', 'audit']).optional().describe('Operation (default: list)'),
       runId: z.string().optional().describe('Run id (required for action="get")'),
-      project: projectField,
-      env: envField.describe('Filter runs by environment name (action="list")'),
-      limit: z.number().int().min(1).optional().describe('Max items to return (default: 20 runs, 50 audit events)'),
+      project: projectField.describe('Filter or constrain runs by project (action="list" or action="get")'),
+      env: envField.describe('Filter or constrain runs by environment name (action="list" or action="get")'),
+      limit: z.number().int().min(1).max(100).optional().describe('Max items to return (default: 20 runs, 50 audit events; maximum 100)'),
       resourceType: z.string().optional().describe('Audit filter: resource type (project, environment, run, ...)'),
       resourceId: z.string().optional().describe('Audit filter: resource id (used with resourceType)'),
       auditAction: z.string().optional().describe('Audit filter: action name (e.g. deploy.started)'),
     },
     wrapCommandHandler(async ({ action = 'list', runId, project: projectRef, env, limit, resourceType, resourceId, auditAction }) => {
       if (action === 'audit') {
+        const invalid = [
+          runId !== undefined ? 'runId' : undefined,
+          projectRef !== undefined ? 'project' : undefined,
+          env !== undefined ? 'env' : undefined,
+        ].filter((field): field is string => Boolean(field));
+        if (invalid.length > 0) {
+          throw new HvError('VALIDATION', 'Audit history does not accept run selectors.', {
+            details: { invalid },
+            hint: 'Use resourceType/resourceId or auditAction to filter audit events.',
+          });
+        }
+        if (Boolean(resourceType) !== Boolean(resourceId)) {
+          throw new HvError('VALIDATION', 'resourceType and resourceId must be supplied together for action="audit".');
+        }
+        if (auditAction && resourceType) {
+          throw new HvError('VALIDATION', 'Choose either auditAction or resourceType/resourceId for action="audit", not both.');
+        }
         const max = limit ?? 50;
         const events = resourceType && resourceId
           ? ctx.repos.audit.findByResource(resourceType, resourceId, max)
@@ -85,6 +102,18 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
       });
 
       if (action === 'get') {
+        const invalid = [
+          limit !== undefined ? 'limit' : undefined,
+          resourceType !== undefined ? 'resourceType' : undefined,
+          resourceId !== undefined ? 'resourceId' : undefined,
+          auditAction !== undefined ? 'auditAction' : undefined,
+        ].filter((field): field is string => Boolean(field));
+        if (invalid.length > 0) {
+          throw new HvError('VALIDATION', 'Run detail received selectors for another action.', {
+            details: { invalid },
+            hint: 'Use runId with optional project and env constraints for action="get".',
+          });
+        }
         if (!runId) {
           throw new HvError('VALIDATION', 'runId is required for action="get".');
         }
@@ -92,12 +121,45 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
         if (!run) {
           return commandError('NOT_FOUND', `Run not found: ${runId}`, { hint: 'List runs with hv_runs action="list".' });
         }
+        if (projectRef) {
+          const project = ctx.resolveProjectOrThrow({ project: projectRef });
+          if (run.projectId !== project.id) {
+            return commandError('NOT_FOUND', `Run not found in project "${project.name}": ${runId}`, {
+              hint: 'List runs for the selected project with hv_runs action="list".',
+            });
+          }
+        }
+        if (env) {
+          const environment = ctx.repos.environments.findById(run.environmentId);
+          if (!environment || environment.name !== env) {
+            return commandError('NOT_FOUND', `Run not found in environment "${env}": ${runId}`, {
+              hint: 'List runs for the selected environment with hv_runs action="list".',
+            });
+          }
+        }
         return commandSuccess({
           run: { ...describeRun(run), plan: redactRunPlan(run.plan), receipts: run.receipts, createdAt: run.createdAt },
         });
       }
 
       // action === 'list'
+      const invalid = [
+        runId !== undefined ? 'runId' : undefined,
+        resourceType !== undefined ? 'resourceType' : undefined,
+        resourceId !== undefined ? 'resourceId' : undefined,
+        auditAction !== undefined ? 'auditAction' : undefined,
+      ].filter((field): field is string => Boolean(field));
+      if (invalid.length > 0) {
+        throw new HvError('VALIDATION', 'Run listing received selectors for another action.', {
+          details: { invalid },
+          hint: 'Use project, env, and limit for action="list".',
+        });
+      }
+      if (env && !projectRef) {
+        throw new HvError('VALIDATION', 'project is required when env filters action="list".', {
+          hint: 'Pass both project and env to list runs for one environment.',
+        });
+      }
       const max = limit ?? 20;
       let runs;
       if (projectRef) {

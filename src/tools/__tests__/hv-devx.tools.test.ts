@@ -14,6 +14,7 @@ import { RunRepository } from '../../adapters/db/repositories/run.repository.js'
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { createToolContext } from '../context.js';
 import { registerHvDevxTools } from '../hv-devx.tools.js';
+import { CommandRegistry } from '../../application/commands.js';
 
 let tempDir: string;
 
@@ -103,6 +104,40 @@ describe('hv_runs', () => {
     await t.close();
   });
 
+  it('constrains run detail to the requested project and environment', async () => {
+    const { older } = await seedRuns();
+    const otherProject = new ProjectRepository().create({ name: 'other-devx-app' });
+    new EnvironmentRepository().create({ projectId: otherProject.id, name: 'production' });
+    const t = await makeClient();
+
+    const wrongProject = await t.call('hv_runs', {
+      action: 'get',
+      runId: older.id,
+      project: otherProject.name,
+    });
+    expect(wrongProject.ok).toBe(false);
+    expect(wrongProject.error.code).toBe('NOT_FOUND');
+
+    const wrongEnvironment = await t.call('hv_runs', {
+      action: 'get',
+      runId: older.id,
+      project: 'devx-app',
+      env: 'production',
+    });
+    expect(wrongEnvironment.ok).toBe(false);
+    expect(wrongEnvironment.error.code).toBe('NOT_FOUND');
+
+    const constrained = await t.call('hv_runs', {
+      action: 'get',
+      runId: older.id,
+      project: 'devx-app',
+      env: 'staging',
+    });
+    expect(constrained.ok).toBe(true);
+    expect(constrained.data.run.id).toBe(older.id);
+    await t.close();
+  });
+
   it('redacts secret-bearing run plan fields', async () => {
     const project = new ProjectRepository().create({ name: 'redacted-runs-app' });
     const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
@@ -150,6 +185,56 @@ describe('hv_runs', () => {
       resourceId: 'run-1',
       details: { foo: 'bar' },
     });
+
+    const projectSelector = await t.call('hv_runs', {
+      action: 'audit',
+      project: 'devx-app',
+    });
+    expect(projectSelector.ok).toBe(false);
+    expect(projectSelector.error.code).toBe('VALIDATION');
+
+    const incompleteResource = await t.call('hv_runs', {
+      action: 'audit',
+      resourceType: 'run',
+    });
+    expect(incompleteResource.ok).toBe(false);
+    expect(incompleteResource.error.code).toBe('VALIDATION');
+
+    const conflictingFilters = await t.call('hv_runs', {
+      action: 'audit',
+      resourceType: 'run',
+      resourceId: 'run-1',
+      auditAction: 'deploy.started',
+    });
+    expect(conflictingFilters.ok).toBe(false);
+    expect(conflictingFilters.error.code).toBe('VALIDATION');
+    await t.close();
+  });
+
+  it('rejects action-specific selectors and unbounded limits', async () => {
+    const t = await makeClient();
+
+    const runIdOnList = await t.call('hv_runs', { action: 'list', runId: 'run-1' });
+    expect(runIdOnList.ok).toBe(false);
+    expect(runIdOnList.error.code).toBe('VALIDATION');
+
+    const environmentWithoutProject = await t.call('hv_runs', { action: 'list', env: 'staging' });
+    expect(environmentWithoutProject.ok).toBe(false);
+    expect(environmentWithoutProject.error.code).toBe('VALIDATION');
+
+    const auditFilterOnGet = await t.call('hv_runs', {
+      action: 'get',
+      runId: 'run-1',
+      auditAction: 'deploy.started',
+    });
+    expect(auditFilterOnGet.ok).toBe(false);
+    expect(auditFilterOnGet.error.code).toBe('VALIDATION');
+
+    const registry = new CommandRegistry();
+    registerHvDevxTools(registry, createToolContext());
+    const excessiveLimit = await registry.execute('hv_runs', { limit: 101 });
+    expect(excessiveLimit.ok).toBe(false);
+    expect(excessiveLimit.error?.code).toBe('VALIDATION');
     await t.close();
   });
 });

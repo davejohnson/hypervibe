@@ -1,14 +1,7 @@
-import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { getSecretStore } from '../../adapters/secrets/secret-store.js';
-import { StripeAdapter } from '../../adapters/providers/stripe/stripe.adapter.js';
-import type { StripeCredentials, StripeMode } from '../../adapters/providers/stripe/stripe.adapter.js';
 import { adapterFactory } from './adapter.factory.js';
-import { formatConnectionGuidance } from './connection-guidance.js';
 import type { Project } from '../entities/project.entity.js';
 import { NotSupportedError } from '../errors/not-supported.error.js';
 import { providerRegistry } from '../registry/provider.registry.js';
-
-const connectionRepo = new ConnectionRepository();
 
 type UnifiedLog = {
   timestamp: string;
@@ -292,32 +285,4 @@ export async function fetchProviderBuildLogs(
 
   const buildLogs = await adapter.getBuildLogs(targetDeploymentId);
   return { deploymentId: targetDeploymentId, buildLogs: buildLogs || 'No build logs available' };
-}
-
-
-/** Check the status of Stripe webhook endpoints. Throws if Stripe is not connected. */
-export async function fetchStripeWebhookStatuses(
-  mode: 'sandbox' | 'live',
-  webhookId?: string
-): Promise<Array<{ id: string; url: string; status: string; enabledEvents: number; description?: string | null }>> {
-  const connection = connectionRepo.findByProvider('stripe');
-  if (!connection) {
-    throw new Error(`No Stripe connection found. ${formatConnectionGuidance('stripe')}`);
-  }
-
-  const secretStore = getSecretStore();
-  const credentials = secretStore.decryptObject<StripeCredentials>(connection.credentialsEncrypted);
-  const adapter = new StripeAdapter();
-  adapter.connect(credentials);
-
-  const webhooks = await adapter.listWebhookEndpoints(mode as StripeMode);
-  return webhooks
-    .filter((w) => !webhookId || w.id === webhookId)
-    .map((w) => ({
-      id: w.id,
-      url: w.url,
-      status: w.status,
-      enabledEvents: w.enabled_events.length,
-      description: w.description,
-    }));
 }

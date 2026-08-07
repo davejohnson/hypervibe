@@ -177,6 +177,33 @@ describe('hv_spec', () => {
     await t.close();
   });
 
+  it('rejects a spec project that contradicts the selected project', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec', { spec: SPEC });
+
+    const existingMismatch = await t.call('hv_spec', {
+      project: 'core-spec-app',
+      spec: { project: 'other-app' },
+    });
+    expect(existingMismatch.ok).toBe(false);
+    expect(existingMismatch.error.code).toBe('VALIDATION');
+    expect(existingMismatch.error.details).toEqual({
+      selectedProject: 'core-spec-app',
+      specProject: 'other-app',
+    });
+    expect(new SpecStore().get(new ProjectRepository().findByName('core-spec-app')!)?.revision).toBe(1);
+
+    const newMismatch = await t.call('hv_spec', {
+      project: 'new-selected-app',
+      spec: { project: 'new-other-app', environments: {} },
+    });
+    expect(newMismatch.ok).toBe(false);
+    expect(newMismatch.error.code).toBe('VALIDATION');
+    expect(new ProjectRepository().findByName('new-selected-app')).toBeNull();
+    expect(new ProjectRepository().findByName('new-other-app')).toBeNull();
+    await t.close();
+  });
+
   it('persists top-level gitRemoteUrl into project metadata', async () => {
     const t = await makeClient();
     const gitRemoteUrl = 'git@github.com:davejohnson/apreskeys.com.git';

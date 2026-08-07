@@ -90,6 +90,7 @@ describe('server tool surface', () => {
     expect(registry.get('hv_secrets')?.cliPath).toEqual(['secrets']);
     expect(registry.get('hv_connections')?.inputShape.project).toBeDefined();
     expect(registry.get('hv_secrets')?.inputShape.project).toBeDefined();
+    expect(registry.get('hv_secrets')?.access).toBe('read');
     expect(registry.get('hv_plan')?.cliPath).toEqual(['plan']);
     expect(registry.get('hv_db_query')?.cliPath).toEqual(['db', 'query']);
     expect(registry.get('hv_db_migrate')).toBeUndefined();

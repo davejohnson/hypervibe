@@ -8,9 +8,12 @@ import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
+import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { StripeAdapter } from '../../adapters/providers/stripe/stripe.adapter.js';
 import { createToolContext } from '../context.js';
 import { registerHvObservabilityTools } from '../hv-observability.tools.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
@@ -81,6 +84,91 @@ describe('hv_logs', () => {
     const result = await t.call('hv_logs', { source: 'stripe-webhooks' });
     expect(result.ok).toBe(false);
     expect(result.error.message).toContain('Stripe');
+    await t.close();
+  });
+
+  it('reads Stripe webhooks through the selected environment-scoped connection', async () => {
+    const project = new ProjectRepository().create({ name: 'stripe-observability-app' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { provider: 'railway', services: {} },
+    });
+    new SpecStore().replace(project, projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { workloadKind: 'web' } },
+          payments: {
+            stripe: {
+              environment: 'production',
+              services: ['web'],
+              credentials: { secretKeyEnvVar: 'STRIPE_SECRET_KEY' },
+            },
+          },
+        },
+      },
+    }));
+
+    const connections = new ConnectionRepository();
+    const global = connections.create({
+      provider: 'stripe',
+      credentialsEncrypted: getSecretStore().encryptObject({ secretKey: 'sk_test_global' }),
+    });
+    connections.updateStatus(global.id, 'verified');
+    const production = connections.create({
+      provider: 'stripe',
+      scope: 'production',
+      credentialsEncrypted: getSecretStore().encryptObject({ secretKey: 'sk_live_production' }),
+    });
+    connections.updateStatus(production.id, 'verified');
+    const listWebhooks = vi.spyOn(StripeAdapter.prototype, 'listWebhookEndpoints').mockResolvedValue([{
+      id: 'we_live',
+      url: 'https://example.com/stripe',
+      status: 'enabled',
+      enabled_events: ['invoice.paid'],
+      created: 1,
+      description: 'Production webhook',
+      metadata: {},
+    }]);
+
+    const t = await makeClient();
+    const result = await t.call('hv_logs', {
+      project: project.name,
+      env: 'staging',
+      source: 'stripe-webhooks',
+      mode: 'live',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      project: project.name,
+      environment: 'staging',
+      stripeEnvironment: 'production',
+      mode: 'live',
+      webhooks: [{ id: 'we_live', enabledEvents: 1 }],
+    });
+    expect(listWebhooks).toHaveBeenCalledWith('live');
+
+    const mismatch = await t.call('hv_logs', {
+      project: project.name,
+      env: 'staging',
+      source: 'stripe-webhooks',
+      mode: 'sandbox',
+    });
+    expect(mismatch.ok).toBe(false);
+    expect(mismatch.error.code).toBe('VALIDATION');
+
+    const foreignSelector = await t.call('hv_logs', {
+      project: project.name,
+      env: 'staging',
+      source: 'stripe-webhooks',
+      service: 'web',
+    });
+    expect(foreignSelector.ok).toBe(false);
+    expect(foreignSelector.error.code).toBe('VALIDATION');
+    expect(foreignSelector.error.details.invalid).toEqual(['service']);
     await t.close();
   });
 });
