@@ -3419,6 +3419,9 @@ export class RailwayAdapter implements IProviderAdapter {
           domain: existing.domain,
           customDomainId: existing.id,
           created: false,
+          ...(typeof existing.status?.verified === 'boolean'
+            ? { providerVerified: existing.status.verified }
+            : {}),
           dnsRecords: this.extractCustomDomainDnsRecords(existing.status),
         },
       };
@@ -3456,6 +3459,9 @@ export class RailwayAdapter implements IProviderAdapter {
           domain: result.customDomainCreate.domain,
           customDomainId: result.customDomainCreate.id,
           created: true,
+          ...(typeof current?.status?.verified === 'boolean'
+            ? { providerVerified: current.status.verified }
+            : {}),
           dnsRecords: this.extractCustomDomainDnsRecords(current?.status),
         },
       };
@@ -4115,6 +4121,9 @@ export class RailwayAdapter implements IProviderAdapter {
             ? domain.status.verified
             : providerDnsRecordsAreConfigured(dnsRecords);
           return [domain.domain, {
+            ...(typeof domain.status?.verified === 'boolean'
+              ? { providerVerified: domain.status.verified }
+              : {}),
             ...(dnsRecords.length > 0 ? { dnsRecords } : {}),
             ...(dnsConfigured !== undefined
               ? { dnsConfigured }

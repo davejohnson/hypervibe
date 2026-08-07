@@ -81,6 +81,7 @@ function boundedObservation(observed: ObservedState): Record<string, unknown> {
       workloadKind: service.workloadKind,
       url: service.url,
       customDomains: service.customDomains,
+      customDomainStatus: service.customDomainStatus,
       source: service.source,
       sourceState: service.sourceState,
       envVarKeys: service.envVarKeys,
@@ -107,7 +108,7 @@ export async function inspectProvider(
     if (selectors.length > 0) {
       throw new HvError('VALIDATION', 'provider is required when inspection selectors are supplied.', {
         details: { selectors },
-        hint: 'Omit every selector to list providers, or pass provider with the bounded inspection request.',
+        hint: 'A parameterless hv_inspect call only lists providers. Pass provider with every bounded request; full live environment inspection requires provider, project, and env.',
       });
     }
     return listProviders(ctx);
@@ -186,7 +187,7 @@ export async function inspectProvider(
         details: { invalid },
         hint: input.resource
           ? 'Use only selectors supported by the selected environment resource.'
-          : 'Use project and env for a full environment observation, or add an explicit resource before filtering it.',
+          : 'Use provider, project, and env for a full environment observation, or add an explicit resource before filtering it.',
       });
     }
   }

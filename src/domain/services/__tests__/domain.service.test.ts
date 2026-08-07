@@ -170,12 +170,14 @@ describe('setupCustomDomain', () => {
       },
     });
 
+    let providerVerified = false;
     const attachCustomDomain = vi.fn(async () => ({
       success: true,
       message: 'Railway custom domain already attached',
       data: {
         domain: 'app.example.com',
         customDomainId: 'cd_123',
+        providerVerified,
         dnsRecords: [
           {
             name: 'app.example.com',
@@ -228,18 +230,37 @@ describe('setupCustomDomain', () => {
         action: 'created',
       });
 
-    const result = await setupCustomDomain({
+    const pending = await setupCustomDomain({
       project,
       environment,
       domain: 'app.example.com',
       serviceName: 'web',
     });
 
-    expect(result.success).toBe(true);
-    expect(upsertDnsRecord.mock.calls).toEqual([
+    expect(pending).toMatchObject({
+      success: false,
+      pending: true,
+      providerVerified: false,
+      verification: { providerVerified: false },
+    });
+    expect(upsertDnsRecord.mock.calls.slice(0, 2)).toEqual([
       ['zone-1', 'app.example.com', 'CNAME', 'web-production.up.railway.app', { proxied: true }],
       ['zone-1', '_railway.app.example.com', 'TXT', 'verify-token', { proxied: false }],
     ]);
+
+    providerVerified = true;
+    const verified = await setupCustomDomain({
+      project,
+      environment,
+      domain: 'app.example.com',
+      serviceName: 'web',
+    });
+    expect(verified).toMatchObject({
+      success: true,
+      pending: false,
+      providerVerified: true,
+      verification: { providerVerified: true },
+    });
   });
 
   it('does not write fallback DNS for managed hosts without domain attach support', async () => {

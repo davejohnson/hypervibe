@@ -43,6 +43,7 @@ export interface DomainDnsRecordResult {
 
 export interface DomainSetupResult {
   success: boolean;
+  pending?: boolean;
   error?: string;
   /** Machine-readable failure reason for error-code mapping. */
   reason?: 'no_connection' | 'no_zone';
@@ -50,6 +51,7 @@ export interface DomainSetupResult {
   hostingProvider?: string;
   service?: string;
   customDomainAttached?: boolean;
+  providerVerified?: boolean;
   customDomainError?: string;
   dnsConfigured?: boolean;
   dnsRecords?: DomainDnsRecordResult[];
@@ -58,6 +60,7 @@ export interface DomainSetupResult {
     zoneStatus: string;
     customDomainAttached: boolean;
     dnsConfigured: boolean;
+    providerVerified?: boolean;
   };
 }
 
@@ -132,6 +135,9 @@ export async function setupCustomDomain(params: {
         });
         if (receipt.success) {
           result.customDomainAttached = true;
+          if (typeof receipt.data?.providerVerified === 'boolean') {
+            result.providerVerified = receipt.data.providerVerified;
+          }
           providerDnsRecords = Array.isArray(receipt.data?.dnsRecords)
             ? (receipt.data.dnsRecords as ProviderDnsRecord[])
             : [];
@@ -204,7 +210,14 @@ export async function setupCustomDomain(params: {
     zoneStatus: zone.status,
     customDomainAttached: result.customDomainAttached ?? false,
     dnsConfigured: result.dnsConfigured ?? false,
+    ...(typeof result.providerVerified === 'boolean'
+      ? { providerVerified: result.providerVerified }
+      : {}),
   };
-  result.success = result.dnsConfigured === true;
+  result.pending = result.dnsConfigured === true
+    && requiresProviderAttach
+    && result.customDomainAttached === true
+    && result.providerVerified !== true;
+  result.success = result.dnsConfigured === true && result.pending !== true;
   return result;
 }

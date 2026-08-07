@@ -155,6 +155,7 @@ describe('RailwayAdapter service instance updates', () => {
                     id: 'cd_123',
                     domain: 'usebillforge.com',
                     status: {
+                      verified: false,
                       dnsRecords: [{
                         fqdn: 'usebillforge.com',
                         hostlabel: '@',
@@ -197,6 +198,7 @@ describe('RailwayAdapter service instance updates', () => {
       domain: 'usebillforge.com',
       customDomainId: 'cd_123',
       created: true,
+      providerVerified: false,
       dnsRecords: [
         {
           name: 'usebillforge.com',

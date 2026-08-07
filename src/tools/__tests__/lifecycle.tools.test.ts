@@ -247,6 +247,8 @@ describe('hv_inspect / hv_import', () => {
     healthCheckPath?: string;
     cronSchedule?: string;
     envVarKeys?: string[];
+    customDomains?: string[];
+    customDomainStatus?: ObservedService['customDomainStatus'];
   }): ObservedService {
     const envVarKeys = input.envVarKeys ?? [];
     return {
@@ -254,7 +256,8 @@ describe('hv_inspect / hv_import', () => {
       externalId: input.id,
       workloadKind: input.workloadKind ?? 'web',
       ...(input.url ? { url: input.url } : {}),
-      customDomains: [],
+      customDomains: input.customDomains ?? [],
+      ...(input.customDomainStatus ? { customDomainStatus: input.customDomainStatus } : {}),
       config: {
         ...(input.startCommand ? { startCommand: input.startCommand } : {}),
         ...(input.releaseCommand ? { releaseCommand: input.releaseCommand } : {}),
@@ -302,6 +305,7 @@ describe('hv_inspect / hv_import', () => {
     expect(missingProvider.ok).toBe(false);
     expect(missingProvider.error.code).toBe('VALIDATION');
     expect(missingProvider.error.details.selectors).toEqual(['project']);
+    expect(missingProvider.hint).toContain('provider, project, and env');
 
     const untypedSelector = await t.call('hv_inspect', {
       provider: 'railway',
@@ -312,6 +316,7 @@ describe('hv_inspect / hv_import', () => {
     expect(untypedSelector.ok).toBe(false);
     expect(untypedSelector.error.code).toBe('VALIDATION');
     expect(untypedSelector.error.details.invalid).toEqual(['id']);
+    expect(untypedSelector.hint).toContain('provider, project, and env');
 
     const mixedModes = await t.call('hv_inspect', {
       provider: 'railway',
@@ -365,6 +370,66 @@ describe('hv_inspect / hv_import', () => {
       null,
       { resourceName: 'selected-db' }
     );
+    await t.close();
+  });
+
+  it('hv_inspect exposes bounded provider domain verification for a selected environment', async () => {
+    const project = new ProjectRepository().create({ name: 'inspect-domain-app' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 'env-prod' },
+    });
+    createRailwayConnection(true);
+    vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(RailwayAdapter.prototype, 'disconnect').mockResolvedValue();
+    vi.spyOn(RailwayAdapter.prototype, 'observe').mockResolvedValue({
+      provider: 'railway',
+      observedAt: '2026-08-07T00:00:00.000Z',
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'env-prod',
+      services: [observedService({
+        id: 'svc-web',
+        name: 'web',
+        url: 'https://web-production.up.railway.app',
+        customDomains: ['example.com'],
+        customDomainStatus: {
+          'example.com': {
+            providerVerified: false,
+            dnsConfigured: false,
+            dnsRecords: [{
+              name: '_railway-verify',
+              type: 'TXT',
+              value: 'railway-verify=public-token',
+              purpose: 'verification',
+            }],
+          },
+        },
+      })],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', {
+      provider: 'railway',
+      project: project.name,
+      env: 'production',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.observed.services[0]).toMatchObject({
+      customDomains: ['example.com'],
+      customDomainStatus: {
+        'example.com': {
+          providerVerified: false,
+          dnsConfigured: false,
+          dnsRecords: [expect.objectContaining({ type: 'TXT', purpose: 'verification' })],
+        },
+      },
+    });
     await t.close();
   });
 

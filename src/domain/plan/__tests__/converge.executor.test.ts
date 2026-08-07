@@ -524,6 +524,24 @@ describe('fingerprintObservedState', () => {
     expect(fingerprintObservedState(withSource)).not.toBe(fingerprintObservedState(withOtherBranch));
   });
 
+  it('changes when provider domain verification changes', () => {
+    const pending: ObservedState = {
+      ...base,
+      services: [{
+        ...base.services[0],
+        customDomainStatus: { 'a.com': { providerVerified: false, dnsConfigured: false } },
+      }],
+    };
+    const verified: ObservedState = {
+      ...pending,
+      services: [{
+        ...pending.services[0],
+        customDomainStatus: { 'a.com': { providerVerified: true, dnsConfigured: true } },
+      }],
+    };
+    expect(fingerprintObservedState(pending)).not.toBe(fingerprintObservedState(verified));
+  });
+
   it('changes when deploy-source observation changes from unknown to disconnected', () => {
     const unknown: ObservedState = {
       ...base,

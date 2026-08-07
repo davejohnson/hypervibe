@@ -1395,6 +1395,14 @@ async function applyDomain(
     environment,
     domain: action.resource.name,
   });
+  if (result.pending) {
+    return {
+      success: true,
+      status: 'pending',
+      message: `Configured DNS for ${action.resource.name}; ${action.resource.provider} domain verification is pending`,
+      data: result as unknown as Record<string, unknown>,
+    };
+  }
   if (result.success) {
     return {
       success: true,
