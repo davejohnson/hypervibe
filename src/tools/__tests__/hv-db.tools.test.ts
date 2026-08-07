@@ -12,7 +12,6 @@ import { ProjectRepository } from '../../adapters/db/repositories/project.reposi
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
-import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
@@ -163,40 +162,6 @@ function seedRdsDbProject() {
       secretAccessKey: 'aws-secret',
       region: 'us-west-2',
     }),
-  });
-  new ConnectionRepository().updateStatus(connection.id, 'verified');
-  return { project, environment };
-}
-
-function seedServiceSpecificRailwayDbProject() {
-  const project = new ProjectRepository().create({ name: 'rail-service-db-app', defaultPlatform: 'railway' });
-  const environment = new EnvironmentRepository().create({
-    projectId: project.id,
-    name: 'production',
-    platformBindings: {
-      provider: 'railway',
-      projectId: 'rail-proj-1',
-      environmentId: 'rail-env-1',
-      services: {
-        web: { serviceId: 'svc-web' },
-        worker: { serviceId: 'svc-worker' },
-      },
-    },
-  });
-  new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
-  new ServiceRepository().create({ projectId: project.id, name: 'worker', buildConfig: {}, envVarSpec: {} });
-  new ComponentRepository().create({
-    environmentId: environment.id,
-    type: 'postgres',
-    externalId: 'rail-db-svc-1',
-    bindings: {
-      provider: 'railway',
-      projectId: 'rail-proj-1',
-    },
-  });
-  const connection = new ConnectionRepository().create({
-    provider: 'railway',
-    credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'railway-token' }),
   });
   new ConnectionRepository().updateStatus(connection.id, 'verified');
   return { project, environment };
@@ -506,71 +471,6 @@ describe('hv_db_query', () => {
     expect(serializedAudit).not.toContain('param-secret');
     expect(serializedAudit).not.toContain('row-secret');
     expect(serializedAudit).not.toContain('url-secret');
-    await t.close();
-  });
-});
-
-describe('hv_db_url', () => {
-  it('masks credentials by default and suppresses raw reveal in tool output', async () => {
-    seedDbProject();
-    const t = await makeClient();
-
-    const masked = await t.call('hv_db_url', { project: 'db-app', env: 'staging' });
-    expect(masked.ok).toBe(true);
-    expect(masked.data.masked).toBe(true);
-    expect(masked.data.databaseUrl).not.toContain('secretpw');
-    expect(masked.data.databaseUrl).toContain('***');
-
-    const revealed = await t.call('hv_db_url', { project: 'db-app', env: 'staging', reveal: true });
-    expect(revealed.data.masked).toBe(true);
-    expect(revealed.data.revealSuppressed).toBe(true);
-    expect(revealed.data.databaseUrl).not.toContain('secretpw');
-    expect(revealed.hint).toContain('Raw database URLs are not returned');
-    await t.close();
-  });
-
-  it('returns NOT_FOUND when no database is resolvable', async () => {
-    const project = new ProjectRepository().create({ name: 'no-db-app' });
-    new EnvironmentRepository().create({ projectId: project.id, name: 'staging' });
-    const t = await makeClient();
-    const result = await t.call('hv_db_url', { project: 'no-db-app', env: 'staging' });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('NOT_FOUND');
-    await t.close();
-  });
-
-  it('does not return provider runtime refs as database URLs', async () => {
-    seedInternalRailwayDbProject();
-    const t = await makeClient();
-    const result = await t.call('hv_db_url', { project: 'rail-db-app', env: 'production' });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('NOT_FOUND');
-    expect(JSON.stringify(result)).not.toContain('${{Postgres.DATABASE_URL}}');
-    expect(result.hint).toContain('internal-only');
-    await t.close();
-  });
-
-  it('uses the requested service binding when resolving from Railway bindings', async () => {
-    seedServiceSpecificRailwayDbProject();
-    const getDatabaseUrl = vi.spyOn(RailwayAdapter.prototype, 'getDatabaseUrl')
-      .mockImplementation(async (_projectId, _environmentId, serviceId) =>
-        serviceId === 'svc-worker'
-          ? 'postgresql://worker:workerpw@worker-db.example.com:5432/app'
-          : 'postgresql://web:webpw@web-db.example.com:5432/app'
-      );
-    const t = await makeClient();
-
-    const result = await t.call('hv_db_url', {
-      project: 'rail-service-db-app',
-      env: 'production',
-      service: 'worker',
-    });
-
-    expect(result.ok).toBe(true);
-    expect(result.data.source).toBe('rail-service-db-app/production/worker');
-    expect(result.data.databaseUrl).toContain('worker-db.example.com');
-    expect(result.data.databaseUrl).not.toContain('workerpw');
-    expect(getDatabaseUrl).toHaveBeenCalledWith('rail-proj-1', 'rail-env-1', 'svc-worker');
     await t.close();
   });
 });

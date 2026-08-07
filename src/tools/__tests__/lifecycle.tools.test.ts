@@ -15,9 +15,12 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter, type RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
+import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import type { ObservedService, ObservedState } from '../../domain/ports/observe.port.js';
+import { providerRegistry } from '../../domain/registry/provider.registry.js';
 import { registerLifecycleTools } from '../lifecycle.tools.js';
 import { createToolContext } from '../context.js';
+import '../../application/providers.js';
 
 let tempDir: string;
 
@@ -267,16 +270,63 @@ describe('hv_inspect / hv_import', () => {
 
   it('hv_inspect returns MISSING_CONNECTION when no Railway connection exists', async () => {
     const t = await makeClient();
-    const result = await t.call('hv_inspect', {});
+    const result = await t.call('hv_inspect', { provider: 'railway' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('MISSING_CONNECTION');
-    expect(result.next).toContain('hv_connect');
+    expect(result.next).toContain('hv_connections');
+    await t.close();
+  });
+
+  it('hv_inspect lists every registered provider and its read capabilities without opening connections', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_inspect', {});
+
+    expect(result.ok).toBe(true);
+    expect(result.data.providers.map((provider: { provider: string }) => provider.provider).sort())
+      .toEqual(providerRegistry.names().sort());
+    expect(result.data.providers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: 'github', resources: expect.arrayContaining(['repository', 'ref', 'pages']) }),
+      expect.objectContaining({ provider: 'cloudflare', resources: expect.arrayContaining(['zone', 'dns']) }),
+      expect.objectContaining({ provider: 'railway', resources: expect.arrayContaining(['project', 'environment']) }),
+    ]));
+    await t.close();
+  });
+
+  it('hv_inspect routes GitHub branch reads through the registered provider inspector', async () => {
+    const repository = new ConnectionRepository();
+    const connection = repository.create({
+      provider: 'github',
+      scope: 'davejohnson/hypervibe',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'token' }),
+    });
+    repository.updateStatus(connection.id, 'verified');
+    vi.spyOn(GitHubAdapter.prototype, 'connect').mockImplementation(() => undefined);
+    vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({
+      ref: 'refs/heads/hypervibe/github-infrastructure',
+      object: { sha: 'abc123' },
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', {
+      provider: 'github',
+      scope: 'davejohnson/hypervibe',
+      resource: 'branch',
+      name: 'hypervibe/github-infrastructure',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      provider: 'github',
+      mode: 'provider-resource',
+      observation: 'present',
+      ref: { name: 'refs/heads/hypervibe/github-infrastructure', sha: 'abc123' },
+    });
     await t.close();
   });
 
   it('hv_import without an adoption target points agents to hv_inspect without opening a provider connection', async () => {
     const t = await makeClient();
-    const result = await t.call('hv_import', {});
+    const result = await t.call('hv_import', { provider: 'railway' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('VALIDATION');
     expect(result.hint).toContain('hv_inspect');
@@ -285,11 +335,11 @@ describe('hv_inspect / hv_import', () => {
   });
 
   it('hv_inspect lists importable Railway projects when no name is given', async () => {
-    createRailwayConnection();
+    createRailwayConnection(true);
     mockAdapter();
     const t = await makeClient();
 
-    const result = await t.call('hv_inspect', {});
+    const result = await t.call('hv_inspect', { provider: 'railway' });
     expect(result.ok).toBe(true);
     expect(result.data.projects).toEqual([
       { name: 'demo-app', railwayId: 'rp-1', environmentCount: 1, serviceCount: 1 },
@@ -298,19 +348,18 @@ describe('hv_inspect / hv_import', () => {
   });
 
   it('hv_inspect returns raw inspection data with auto-detected mappings without writing local state', async () => {
-    createRailwayConnection();
+    createRailwayConnection(true);
     mockAdapter();
     const t = await makeClient();
 
-    const result = await t.call('hv_inspect', { name: 'demo-app' });
+    const result = await t.call('hv_inspect', { provider: 'railway', name: 'demo-app' });
     expect(result.ok).toBe(true);
     expect(result.data.inspected).toBe(true);
     expect(result.data.imported).toBe(false);
     expect(result.data.autoDetected).toEqual({ production: 'production' });
     expect(result.data.needsMapping).toEqual([]);
     expect(result.data.envVarNames).toEqual(['DATABASE_URL']);
-    expect(result.data.components).toEqual([{ type: 'postgres', railwayId: 'plug-1', name: 'Postgres' }]);
-    expect(result.next).toContain('hv_import');
+    expect(result.data.components).toEqual([{ type: 'postgres', id: 'plug-1', name: 'Postgres' }]);
     expect(new ProjectRepository().findByName('demo-app')).toBeNull();
     await t.close();
   });
@@ -320,7 +369,7 @@ describe('hv_inspect / hv_import', () => {
     mockAdapter();
     const t = await makeClient();
 
-    const result = await t.call('hv_import', { name: 'demo-app' });
+    const result = await t.call('hv_import', { provider: 'railway', name: 'demo-app' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('VALIDATION');
     expect(result.error.message).toContain('environmentMappings');
@@ -335,12 +384,13 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
+      provider: 'railway',
       name: 'demo-app',
       environmentMappings: { production: 'production' },
     });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('CONFIRM_REQUIRED');
-    expect(result.error.details.project).toEqual({ name: 'demo-app', railwayId: 'rp-1' });
+    expect(result.error.details.project).toEqual({ name: 'demo-app', id: 'rp-1' });
     expect(new ProjectRepository().findByName('demo-app')).toBeNull();
     await t.close();
   });
@@ -351,6 +401,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
+      provider: 'railway',
       name: 'demo-app',
       environmentMappings: { production: 'production' },
       confirm: true,
@@ -420,7 +471,8 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
-      railwayProjectId: invalidStorageDetails.id,
+      provider: 'railway',
+      id: invalidStorageDetails.id,
       environmentMappings: { production: 'production' },
       storageMappings: { 'bucket-unsupported-region': 'uploads' },
       confirm: true,
@@ -449,7 +501,8 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
-      railwayProjectId: serviceBackedDetails.id,
+      provider: 'railway',
+      id: serviceBackedDetails.id,
       environmentMappings: { production: 'production' },
       confirm: true,
     });
@@ -493,6 +546,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
+      provider: 'railway',
       name: 'demo-app',
       environmentMappings: { production: 'production' },
       databaseMappings: { 'svc-postgres': 'postgres' },
@@ -548,6 +602,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
+      provider: 'railway',
       name: 'demo-app',
       environmentMappings: { production: 'production' },
       cacheMappings: { 'svc-redis': 'redis' },
@@ -774,14 +829,14 @@ describe('hv_inspect / hv_import', () => {
 
     const inspection = await t.call('hv_inspect', {
       provider: 'railway',
-      railwayProjectId: projectDetails.id,
+      id: projectDetails.id,
     });
     expect(inspection.ok).toBe(true);
-    expect(inspection.data.project.railwayId).toBe(projectDetails.id);
+    expect(inspection.data.project.id).toBe(projectDetails.id);
 
     const imported = await t.call('hv_import', {
       provider: 'railway',
-      railwayProjectId: projectDetails.id,
+      id: projectDetails.id,
       environmentMappings: { production: 'production' },
       ...importArgs,
       confirm: true,
@@ -825,6 +880,7 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
+      provider: 'railway',
       name: 'demo-app',
       environmentMappings: { production: 'production' },
       confirm: true,
@@ -836,7 +892,7 @@ describe('hv_inspect / hv_import', () => {
   });
 
   it('hv_inspect does not guess when multiple Railway projects share an import name', async () => {
-    createRailwayConnection();
+    createRailwayConnection(true);
     mockAdapter();
     vi.spyOn(RailwayAdapter.prototype, 'findProjectsByName').mockResolvedValue([
       { id: 'rp-1', name: 'demo-app' },
@@ -844,16 +900,16 @@ describe('hv_inspect / hv_import', () => {
     ]);
     const t = await makeClient();
 
-    const result = await t.call('hv_inspect', { name: 'demo-app' });
+    const result = await t.call('hv_inspect', { provider: 'railway', name: 'demo-app' });
 
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('VALIDATION');
-    expect(result.error.message).toContain('Multiple Railway projects named "demo-app"');
+    expect(result.error.message).toContain('Multiple Railway resources matched');
     expect(result.error.details.projects).toEqual([
-      { name: 'demo-app', railwayId: 'rp-1' },
-      { name: 'demo-app', railwayId: 'rp-2' },
+      { name: 'demo-app', id: 'rp-1' },
+      { name: 'demo-app', id: 'rp-2' },
     ]);
-    expect(result.hint).toContain('railwayProjectId');
+    expect(result.hint).toContain('id');
     await t.close();
   });
 
@@ -869,7 +925,8 @@ describe('hv_inspect / hv_import', () => {
     const t = await makeClient();
 
     const result = await t.call('hv_import', {
-      railwayProjectId: 'rp-1',
+      provider: 'railway',
+      id: 'rp-1',
       force: true,
       environmentMappings: { production: 'production' },
       confirm: true,

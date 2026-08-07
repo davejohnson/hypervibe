@@ -61,8 +61,3 @@ export interface CloudflareCredentials {
 export interface SendGridCredentials {
   apiKey: string;
 }
-
-export interface TunnelCredentials {
-  provider: 'cloudflared' | 'ngrok';
-  ngrokAuthToken?: string;
-}

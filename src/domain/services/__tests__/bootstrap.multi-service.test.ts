@@ -63,7 +63,6 @@ async function applyInfra(args: {
     crons: desired.crons,
     domain: desired.domain,
     databaseProvider: desired.databaseProvider,
-    setupEmail: desired.setupEmail,
     serviceConfig: desired.serviceConfig,
     envVars: desired.envVars,
     deploy: desired.deploy,
@@ -782,7 +781,6 @@ describe('infra_apply multi-service convergence', () => {
       projectName: project.name,
       environmentName: 'production',
       services: ['web'],
-      setupEmail: false,
       deploy: {
         strategy: 'branch',
         trigger: 'ci',
@@ -1645,7 +1643,7 @@ describe('infra_apply multi-service convergence', () => {
     });
 
     expect(payload.success).toBe(false);
-    expect(payload.error).toContain('Run hv_connect provider="cloudrun" action="prepare" confirm=true before applying');
+    expect(payload.error).toContain('Run hv_connections provider="cloudrun" action="prepare" confirm=true before applying');
     expect(payload.summary).toMatchObject({
       action: 'cloud_prepare',
       provider: 'cloudrun',

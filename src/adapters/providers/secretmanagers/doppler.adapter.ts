@@ -1,11 +1,8 @@
 import {
   type ISecretManagerAdapter,
-  type SecretManagerCapabilities,
   type SecretManagerVerifyResult,
   type ResolvedSecret,
-  type SecretReference,
   type SecretListItem,
-  type SecretReceipt,
   type DopplerCredentials,
   DopplerCredentialsSchema,
 } from '../../../domain/ports/secretmanager.port.js';
@@ -25,25 +22,8 @@ interface DopplerSecretsResponse {
   secrets: Record<string, DopplerSecret>;
 }
 
-interface DopplerProjectResponse {
-  project: {
-    id: string;
-    name: string;
-    created_at: string;
-  };
-}
-
 export class DopplerAdapter implements ISecretManagerAdapter {
   readonly name = 'doppler' as const;
-
-  readonly capabilities: SecretManagerCapabilities = {
-    supportsVersioning: false, // Doppler has activity log but not secret versioning
-    supportsMultipleKeys: false, // Each secret is a single key-value
-    supportsRotation: false,
-    supportsAuditLog: true, // Via activity logs
-    supportsDynamicSecrets: false,
-    maxSecretSize: 64 * 1024, // Estimated
-  };
 
   private credentials: DopplerCredentials | null = null;
 
@@ -66,7 +46,6 @@ export class DopplerAdapter implements ISecretManagerAdapter {
       return {
         success: true,
         identity: `Doppler (${this.credentials?.project || 'service token'})`,
-        capabilities: this.capabilities,
       };
     } catch (error) {
       return {
@@ -81,106 +60,15 @@ export class DopplerAdapter implements ISecretManagerAdapter {
     // Optionally with project/config prefix: project/config/SECRET_NAME
     const { project, config, secretName } = this.parsePath(path);
 
-    const endpoint = this.buildEndpoint('/configs/config/secret', project, config);
+    const endpoint = this.buildEndpoint('/configs/config/secret', project, config, { name: secretName });
     const response = await this.request<{ secret: DopplerSecret }>(
       'GET',
-      `${endpoint}&name=${encodeURIComponent(secretName)}`
+      endpoint
     );
 
     return {
       value: response.secret.value.computed,
     };
-  }
-
-  async getSecrets(references: SecretReference[]): Promise<Map<string, ResolvedSecret>> {
-    const results = new Map<string, ResolvedSecret>();
-
-    // Group by project/config to minimize API calls
-    const grouped = new Map<string, { ref: SecretReference; secretName: string }[]>();
-
-    for (const ref of references) {
-      const { project, config, secretName } = this.parsePath(ref.path);
-      const key = `${project || ''}/${config || ''}`;
-
-      if (!grouped.has(key)) {
-        grouped.set(key, []);
-      }
-      grouped.get(key)!.push({ ref, secretName });
-    }
-
-    // Fetch each group
-    for (const [groupKey, items] of grouped) {
-      const [project, config] = groupKey.split('/');
-      try {
-        const endpoint = this.buildEndpoint('/configs/config/secrets', project || undefined, config || undefined);
-        const response = await this.request<DopplerSecretsResponse>('GET', endpoint);
-
-        for (const { ref, secretName } of items) {
-          const secret = response.secrets[secretName];
-          if (secret) {
-            results.set(ref.raw, { value: secret.value.computed });
-          } else {
-            results.set(ref.raw, {
-              value: '',
-              metadata: { error: `Secret '${secretName}' not found` },
-            });
-          }
-        }
-      } catch (error) {
-        // Set error for all items in this group
-        for (const { ref } of items) {
-          results.set(ref.raw, {
-            value: '',
-            metadata: { error: error instanceof Error ? error.message : String(error) },
-          });
-        }
-      }
-    }
-
-    return results;
-  }
-
-  async setSecret(path: string, values: Record<string, string>): Promise<SecretReceipt> {
-    try {
-      const { project, config } = this.parsePath(path);
-
-      // Doppler sets multiple secrets at once
-      const secrets: Record<string, string> = {};
-      for (const [key, value] of Object.entries(values)) {
-        secrets[key] = value;
-      }
-
-      const endpoint = this.buildEndpoint('/configs/config/secrets', project, config);
-      await this.request('POST', endpoint, { secrets });
-
-      return {
-        success: true,
-        path,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        path,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
-  async deleteSecret(path: string): Promise<SecretReceipt> {
-    try {
-      const { project, config, secretName } = this.parsePath(path);
-
-      const endpoint = this.buildEndpoint('/configs/config/secret', project, config);
-      await this.request('DELETE', `${endpoint}&name=${encodeURIComponent(secretName)}`);
-
-      return { success: true, path };
-    } catch (error) {
-      return {
-        success: false,
-        path,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
   }
 
   async listSecrets(pathPrefix?: string): Promise<SecretListItem[]> {
@@ -219,19 +107,24 @@ export class DopplerAdapter implements ISecretManagerAdapter {
     };
   }
 
-  private buildEndpoint(base: string, project?: string, config?: string): string {
+  private buildEndpoint(
+    base: string,
+    project?: string,
+    config?: string,
+    extra: Record<string, string> = {}
+  ): string {
     const params = new URLSearchParams();
     if (project) params.append('project', project);
     if (config) params.append('config', config);
+    for (const [key, value] of Object.entries(extra)) params.append(key, value);
 
     const queryString = params.toString();
     return queryString ? `${base}?${queryString}` : base;
   }
 
   private async request<T>(
-    method: 'GET' | 'POST' | 'DELETE',
-    endpoint: string,
-    body?: Record<string, unknown>
+    method: 'GET',
+    endpoint: string
   ): Promise<T> {
     if (!this.credentials?.token) {
       throw new Error('Not connected. Call connect() first.');
@@ -249,11 +142,10 @@ export class DopplerAdapter implements ISecretManagerAdapter {
       headers,
     };
 
-    if (body) {
-      options.body = JSON.stringify(body);
-    }
-
-    const response = await fetch(url, options);
+    const response = await fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(15_000),
+    });
     const responseText = await response.text();
 
     if (!response.ok) {
@@ -291,13 +183,5 @@ secretManagerRegistry.register({
   factory: (credentials) => {
     const adapter = new DopplerAdapter();
     return adapter;
-  },
-  defaultCapabilities: {
-    supportsVersioning: false,
-    supportsMultipleKeys: false,
-    supportsRotation: false,
-    supportsAuditLog: true,
-    supportsDynamicSecrets: false,
-    maxSecretSize: 64 * 1024,
   },
 });

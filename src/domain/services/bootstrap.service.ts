@@ -8,7 +8,6 @@ import { getProjectScopeHints } from './project-scope.js';
 import { DeployOrchestrator } from './deploy.orchestrator.js';
 import { CloudflareAdapter, type CloudflareCredentials } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import type { GitHubCredentials } from '../../adapters/providers/github/github.adapter.js';
-import { syncProjectIntent } from './intent.service.js';
 import { InfraTransaction } from './infra.transaction.js';
 import { getCloudPrepareProfile, isCloudPrepared } from './cloud-prepare.js';
 import { snapshotEnvironmentBindings } from './local-state.transaction.js';
@@ -27,7 +26,6 @@ import {
 } from './spec.service.js';
 import { resolveGitDeploySource } from './deploy-source.js';
 import { provisionBootstrapDatabase, type DbProvision } from './bootstrap-database.js';
-import { setupBootstrapEmail } from './bootstrap-email.js';
 import { attachBootstrapDomain } from './bootstrap-domain.js';
 
 const projectRepo = new ProjectRepository();
@@ -89,7 +87,6 @@ export async function executeBootstrap(params: {
   domain?: string;
   /** Omit to skip database provisioning entirely. */
   databaseProvider?: string;
-  setupEmail: boolean;
   serviceConfig?: DesiredState['serviceConfig'];
   envVars?: DesiredState['envVars'];
   deploy?: DesiredState['deploy'];
@@ -240,7 +237,7 @@ export async function executeBootstrap(params: {
     return {
       success: false,
       summary: {
-        error: `${cloudPrepareProfile.label} is not prepared for Hypervibe deploys. Run hv_connect provider="${targetPlatform}" action="prepare" confirm=true before applying.`,
+        error: `${cloudPrepareProfile.label} is not prepared for Hypervibe deploys. Run hv_connections provider="${targetPlatform}" action="prepare" confirm=true before applying.`,
         action: 'cloud_prepare',
         provider: targetPlatform,
         requiredVersion: cloudPrepareProfile.version,
@@ -526,20 +523,6 @@ export async function executeBootstrap(params: {
     };
   }
 
-  if (params.setupEmail) {
-    const emailResult = await setupBootstrapEmail({
-      domain: params.domain,
-      workloads,
-      environment,
-      hostingAdapter,
-      scopeHints,
-      summary,
-    });
-    if (emailResult.failure) {
-      return emailResult.failure;
-    }
-  }
-
   if (params.domain) {
     await attachBootstrapDomain({
       domain: params.domain,
@@ -553,6 +536,5 @@ export async function executeBootstrap(params: {
     });
   }
 
-  summary.intent = syncProjectIntent(project.id);
   return { success: deploy.success, summary };
 }

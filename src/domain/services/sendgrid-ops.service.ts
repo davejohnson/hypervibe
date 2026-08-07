@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import {
@@ -35,11 +36,13 @@ export function sendGridPermissionPayload(permissions: SendGridPermissionAudit, 
     canManageDomainAuthentication: permissions.canManageDomainAuthentication,
     canManageSenderVerification: permissions.canManageSenderVerification,
     canConfigureEventWebhook: permissions.canConfigureEventWebhook,
+    canConfigureInboundParse: permissions.canConfigureInboundParse,
     requiredScopes: {
       mailSend: SENDGRID_SCOPE_REQUIREMENTS.mailSend,
       domainAuthentication: SENDGRID_SCOPE_REQUIREMENTS.domainAuthentication,
       senderVerification: SENDGRID_SCOPE_REQUIREMENTS.senderVerification,
       eventWebhook: SENDGRID_SCOPE_REQUIREMENTS.eventWebhook,
+      inboundParse: SENDGRID_SCOPE_REQUIREMENTS.inboundParse,
     },
     missingScopes: missingScopeGroups(permissions, requireWebhook),
     recommendation: permissions.recommendation,
@@ -71,4 +74,14 @@ export function getSendGridAdapter(scopeHints?: string[]): { adapter: SendGridAd
   adapter.connect(credentials);
 
   return { adapter };
+}
+
+/** Resolve only a one-way runtime-key hash for drift detection; never returns the key. */
+export function getSendGridApiKeyHash(scopeHints?: string[]): { hash: string } | { error: string } {
+  const connection = connectionRepo.findBestMatchFromHints('sendgrid', scopeHints);
+  if (!connection) {
+    return { error: `No SendGrid connection found. ${formatConnectionGuidance('sendgrid')}` };
+  }
+  const credentials = getSecretStore().decryptObject<SendGridCredentials>(connection.credentialsEncrypted);
+  return { hash: createHash('sha256').update(credentials.apiKey, 'utf8').digest('hex') };
 }

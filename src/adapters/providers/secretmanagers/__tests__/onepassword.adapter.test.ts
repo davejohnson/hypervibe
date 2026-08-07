@@ -12,7 +12,7 @@ describe('OnePasswordAdapter', () => {
 
   it('resolves a secret via op:// reference with explicit field', async () => {
     const resolve = vi.fn().mockResolvedValue('s3cret');
-    createClient.mockResolvedValue({ secrets: { resolve, resolveAll: vi.fn() } });
+    createClient.mockResolvedValue({ secrets: { resolve } });
 
     const adapter = new OnePasswordAdapter();
     await adapter.connect({ serviceAccountToken: 'ops_token' });
@@ -27,36 +27,13 @@ describe('OnePasswordAdapter', () => {
 
   it('defaults to the password field when no key is given', async () => {
     const resolve = vi.fn().mockResolvedValue('hunter2');
-    createClient.mockResolvedValue({ secrets: { resolve, resolveAll: vi.fn() } });
+    createClient.mockResolvedValue({ secrets: { resolve } });
 
     const adapter = new OnePasswordAdapter();
     await adapter.connect({ serviceAccountToken: 'ops_token' });
     await adapter.getSecret('Production/db');
 
     expect(resolve).toHaveBeenCalledWith('op://Production/db/password');
-  });
-
-  it('batches getSecrets through resolveAll and maps errors per reference', async () => {
-    const resolveAll = vi.fn().mockResolvedValue({
-      individualResponses: {
-        'op://Prod/api/token': { content: { secret: 'tok-123' } },
-        'op://Prod/missing/password': { error: { type: 'fieldNotFound', message: 'no such field' } },
-      },
-    });
-    createClient.mockResolvedValue({ secrets: { resolve: vi.fn(), resolveAll } });
-
-    const adapter = new OnePasswordAdapter();
-    await adapter.connect({ serviceAccountToken: 'ops_token' });
-    const results = await adapter.getSecrets([
-      { provider: '1password', path: 'Prod/api', key: 'token', raw: '1password://Prod/api#token' },
-      { provider: '1password', path: 'Prod/missing', raw: '1password://Prod/missing' },
-    ]);
-
-    expect(results.get('1password://Prod/api#token')).toEqual({ value: 'tok-123' });
-    expect(results.get('1password://Prod/missing')).toEqual({
-      value: '',
-      metadata: { error: 'fieldNotFound: no such field' },
-    });
   });
 
   it('verify reports failure when the client cannot authenticate', async () => {
@@ -72,7 +49,7 @@ describe('OnePasswordAdapter', () => {
 
   it('verify succeeds when the service account can see at least one vault', async () => {
     createClient.mockResolvedValue({
-      secrets: { resolve: vi.fn(), resolveAll: vi.fn() },
+      secrets: { resolve: vi.fn() },
       vaults: { list: vi.fn().mockResolvedValue([{ id: 'v1', title: 'Production' }]) },
       items: { list: vi.fn() },
     });
@@ -87,7 +64,7 @@ describe('OnePasswordAdapter', () => {
 
   it('verify fails with a clear message when the token has no vault access', async () => {
     createClient.mockResolvedValue({
-      secrets: { resolve: vi.fn(), resolveAll: vi.fn() },
+      secrets: { resolve: vi.fn() },
       vaults: { list: vi.fn().mockResolvedValue([]) },
       items: { list: vi.fn() },
     });
@@ -108,7 +85,7 @@ describe('OnePasswordAdapter', () => {
       return [{ id: 'i3', title: 'stripe' }];
     });
     createClient.mockResolvedValue({
-      secrets: { resolve: vi.fn(), resolveAll: vi.fn() },
+      secrets: { resolve: vi.fn() },
       vaults: {
         list: vi.fn().mockResolvedValue([
           { id: 'v1', title: 'Production' },
@@ -135,11 +112,9 @@ describe('OnePasswordAdapter', () => {
     ]);
   });
 
-  it('rejects writes with a resolve-only explanation', async () => {
+  it('does not expose secret mutation methods', async () => {
     const adapter = new OnePasswordAdapter();
-    await adapter.connect({ serviceAccountToken: 'ops_token' });
-    const receipt = await adapter.setSecret('Prod/api', { token: 'x' });
-    expect(receipt.success).toBe(false);
-    expect(receipt.error).toContain('resolve-only');
+    expect('setSecret' in adapter).toBe(false);
+    expect('deleteSecret' in adapter).toBe(false);
   });
 });

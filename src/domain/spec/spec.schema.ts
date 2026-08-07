@@ -409,6 +409,51 @@ const githubCollaborationSpecSchema = z.object({
   }).strict()).default([]),
 }).strict().default({});
 
+const githubPagesSourcePathSchema = z.string().min(1).superRefine((value, ctx) => {
+  if (
+    value.trim() !== value
+    || value.startsWith('/')
+    || value.startsWith('\\')
+    || value.split(/[\\/]/).some((segment) => !segment || segment === '.' || segment === '..')
+    || /[\r\n\0]/.test(value)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'pages.sourcePath must be a normalized repository-relative directory without empty, current, or parent segments',
+    });
+  }
+});
+
+const githubPagesDomainSchema = z.string().min(1).max(253).superRefine((value, ctx) => {
+  const normalized = value.trim().toLowerCase().replace(/\.$/, '');
+  const labels = normalized.split('.');
+  if (
+    value !== normalized
+    || labels.length < 2
+    || labels.some((label) => (
+      label.length === 0
+      || label.length > 63
+      || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+    ))
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'pages.customDomain must be a lowercase hostname without a scheme, path, port, or trailing dot',
+    });
+  }
+});
+
+export const githubPagesSpecSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** Repository directory uploaded as the static Pages artifact. */
+  sourcePath: githubPagesSourcePathSchema,
+  /** Branch whose pushes publish the site. */
+  branch: z.string().min(1).default('main'),
+  /** Optional custom hostname. DNS is managed through Cloudflare as a separate plan action. */
+  customDomain: githubPagesDomainSchema.optional(),
+  dnsProvider: z.literal('cloudflare').default('cloudflare'),
+}).strict();
+
 export const githubSpecSchema = z.object({
   enabled: z.boolean().default(true),
   /** GitHub repository owner/name. Defaults to the project gitRemoteUrl. */
@@ -416,6 +461,8 @@ export const githubSpecSchema = z.object({
   /** Environment whose hv_plan owns project-level GitHub infrastructure. */
   canonicalEnvironment: z.string().min(1).optional(),
   collaboration: githubCollaborationSpecSchema,
+  /** Static GitHub Pages publishing as project-level desired state. */
+  pages: githubPagesSpecSchema.optional(),
   actions: z.record(automationIdSchema, githubAutomationSpecSchema).default({}),
   /** Existing workflow names that autofix may consume but Hypervibe does not own. */
   externalWorkflows: z.record(automationIdSchema, z.object({
@@ -519,13 +566,38 @@ export const delegatedSecretSpecSchema = z.object({
   ownership: z.literal('delegated').default('delegated'),
   /** Non-secret identity that documents who is responsible for supplying and rotating the value. */
   principal: z.string().min(1),
-  /** Environments in which this secret must be injected. */
-  environments: z.array(z.string().min(1)).min(1),
+  /** Runtime environments in which this secret must be injected. */
+  environments: z.array(z.string().min(1)).default([]),
+  /** Optional GitHub Actions destinations managed by the canonical GitHub environment plan. */
+  githubActions: z.object({
+    repository: z.boolean().default(false),
+    environments: z.array(z.string().min(1)).default([]),
+  }).strict().optional(),
   /** Missing or unaccepted values block convergence until the principal supplies a secretRef. */
   required: z.boolean().default(true),
   /** Never replace an accepted live value from a local env file or ordinary envVars input. */
   driftPolicy: z.literal('preserve').default('preserve'),
-}).strict();
+}).strict().superRefine((secret, ctx) => {
+  if (
+    secret.environments.length === 0
+    && !secret.githubActions?.repository
+    && (secret.githubActions?.environments.length ?? 0) === 0
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'delegated secrets require at least one runtime or GitHub Actions destination',
+      path: ['environments'],
+    });
+  }
+  const githubEnvironments = secret.githubActions?.environments ?? [];
+  if (new Set(githubEnvironments).size !== githubEnvironments.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'GitHub Actions environment destinations cannot contain duplicates',
+      path: ['githubActions', 'environments'],
+    });
+  }
+});
 
 export const migrationsSpecSchema = z.object({
   mode: z.enum(['none', 'releaseCommand', 'tool']),
@@ -929,6 +1001,139 @@ export const paymentsSpecSchema = z.object({
   stripe: stripeEnvironmentSyncSpecSchema.optional(),
 }).strict();
 
+const emailAddressSchema = z.string().email('email addresses must be valid RFC-style addresses');
+
+const emailHostnameSchema = z.string().regex(
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i,
+  'email hostnames must be fully-qualified DNS names such as inbound.example.com'
+);
+
+const emailAliasSchema = z.string().regex(
+  /^[a-z0-9](?:[a-z0-9.!#$%&'*+/=?^_`{|}~-]{0,62}[a-z0-9])?$/i,
+  'email aliases must be local parts such as support or replies'
+);
+
+export const emailSenderSpecSchema = z.object({
+  address: emailAddressSchema,
+  name: z.string().trim().min(1).max(128).optional(),
+  replyTo: emailAddressSchema.optional(),
+}).strict();
+
+export const emailInboundSpecSchema = z.object({
+  hostname: emailHostnameSchema,
+  service: z.string().min(1),
+  path: z.string()
+    .regex(/^\/(?!\/)[^?#\s]*$/, 'inbound email paths must begin with one slash and cannot contain a query or fragment')
+    .default('/webhooks/sendgrid/inbound'),
+  aliases: z.array(emailAliasSchema).default([]),
+  spamCheck: z.boolean().default(true),
+  sendRaw: z.boolean().default(false),
+}).strict();
+
+export const SENDGRID_DELIVERY_EVENTS = [
+  'bounce',
+  'click',
+  'deferred',
+  'delivered',
+  'dropped',
+  'group_resubscribe',
+  'group_unsubscribe',
+  'open',
+  'processed',
+  'spam_report',
+  'unsubscribe',
+] as const;
+
+export const emailDeliveryEventsSpecSchema = z.object({
+  service: z.string().min(1),
+  path: z.string()
+    .regex(/^\/(?!\/)[^?#\s]*$/, 'delivery-event paths must begin with one slash and cannot contain a query or fragment')
+    .default('/webhooks/sendgrid/events'),
+  events: z.array(z.enum(SENDGRID_DELIVERY_EVENTS)).min(1).default([...SENDGRID_DELIVERY_EVENTS]),
+}).strict();
+
+export const emailForwardingSpecSchema = z.object({
+  /** Local-part to destination mailbox, for example { support: "owner@example.net" }. */
+  aliases: z.record(emailAliasSchema, emailAddressSchema).default({}),
+  catchAll: z.discriminatedUnion('action', [
+    z.object({ action: z.literal('forward'), destination: emailAddressSchema }).strict(),
+    z.object({ action: z.literal('drop') }).strict(),
+  ]).default({ action: 'drop' }),
+}).strict();
+
+export const emailSpecSchema = z.object({
+  enabled: z.boolean(),
+  sender: emailSenderSpecSchema.optional(),
+  inbound: emailInboundSpecSchema.optional(),
+  deliveryEvents: emailDeliveryEventsSpecSchema.optional(),
+  forwarding: emailForwardingSpecSchema.optional(),
+}).strict().superRefine((email, ctx) => {
+  if (!email.enabled && (email.sender || email.inbound || email.deliveryEvents || email.forwarding)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'email sender, inbound, delivery-event, and forwarding settings require email.enabled=true',
+      path: ['enabled'],
+    });
+  }
+  const seenAliases = new Set<string>();
+  for (const [index, alias] of (email.inbound?.aliases ?? []).entries()) {
+    const normalized = alias.toLowerCase();
+    if (seenAliases.has(normalized)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `inbound email alias "${alias}" is declared more than once`,
+        path: ['inbound', 'aliases', index],
+      });
+    }
+    seenAliases.add(normalized);
+  }
+});
+
+export const EMAIL_MANAGED_ENV_KEYS = [
+  'SENDGRID_API_KEY',
+  'SENDGRID_FROM_EMAIL',
+  'SENDGRID_FROM_NAME',
+  'SENDGRID_REPLY_TO',
+  'SENDGRID_INBOUND_HOSTNAME',
+  'SENDGRID_INBOUND_ALIASES',
+] as const;
+
+const messagingWebhookTargetSchema = z.object({
+  service: z.string().min(1),
+  path: z.string()
+    .regex(/^\/(?!\/)[^?#\s]*$/, 'messaging webhook paths must begin with one slash and cannot contain a query or fragment'),
+}).strict();
+
+export const twilioMessagingSpecSchema = z.object({
+  provider: z.literal('twilio').default('twilio'),
+  /** Application services that receive the Twilio runtime contract. */
+  services: z.array(z.string().min(1)).min(1),
+  service: z.object({
+    name: z.string().trim().min(1).max(64),
+    inbound: messagingWebhookTargetSchema.extend({
+      path: messagingWebhookTargetSchema.shape.path.default('/webhooks/twilio/messages'),
+    }).optional(),
+    deliveryStatus: messagingWebhookTargetSchema.extend({
+      path: messagingWebhookTargetSchema.shape.path.default('/webhooks/twilio/status'),
+    }).optional(),
+  }).strict(),
+  /** Existing Twilio phone number to attach. Hypervibe never purchases numbers. */
+  sender: z.object({
+    phoneNumberSid: z.string()
+      .regex(/^PN[0-9a-fA-F]{32}$/, 'Twilio phone number SID must start with PN and contain 32 hexadecimal characters')
+      .describe('Existing SMS-capable Phone Number SID (PN...) from Twilio Console -> Numbers & Senders -> Phone Numbers; use the SID, not the +E.164 number'),
+  }).strict().optional(),
+}).strict();
+
+export const MESSAGING_MANAGED_ENV_KEYS = [
+  'TWILIO_ACCOUNT_SID',
+  'TWILIO_API_KEY_SID',
+  'TWILIO_API_KEY_SECRET',
+  'TWILIO_AUTH_TOKEN',
+  'TWILIO_MESSAGING_SERVICE_SID',
+  'TWILIO_PHONE_NUMBER_SID',
+] as const;
+
 export const environmentSpecSchema = z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
@@ -941,7 +1146,8 @@ export const environmentSpecSchema = z.object({
   domain: z.string().min(1).optional(),
   loadBalancer: loadBalancerSpecSchema.optional(),
   domainRegistration: domainRegistrationSpecSchema.optional(),
-  email: z.object({ enabled: z.boolean() }).default({ enabled: false }),
+  email: emailSpecSchema.default({ enabled: false }),
+  messaging: twilioMessagingSpecSchema.optional(),
   envVars: z.record(z.string()).default({}),
   /** Explicitly documents that a shared runtime key does not apply here. */
   envVarExceptions: z.array(
@@ -973,7 +1179,7 @@ export const environmentSpecSchema = z.object({
   if (environment.autofix !== undefined) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: 'environments.*.autofix has been removed. Use hv_errors action="list" or action="summary" for live runtime errors; use github.actions.<id> kind="autofix" to repair failed GitHub workflow checks.',
+      message: 'environments.*.autofix has been removed. Use hv_logs source="service" errorsOnly=true for live runtime errors; use github.actions.<id> kind="autofix" to repair failed GitHub workflow checks.',
       path: ['autofix'],
     });
   }
@@ -983,6 +1189,215 @@ export const environmentSpecSchema = z.object({
       message: 'domainRegistration requires domain',
       path: ['domainRegistration'],
     });
+  }
+  if (environment.email.inbound) {
+    const inbound = environment.email.inbound;
+    const service = environment.services[inbound.service];
+    if (!service) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `inbound email targets unknown service "${inbound.service}"`,
+        path: ['email', 'inbound', 'service'],
+      });
+    } else if (service.workloadKind !== 'web' || service.public === false) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `inbound email service "${inbound.service}" must be a public web service`,
+        path: ['email', 'inbound', 'service'],
+      });
+    }
+    if (!environment.domain) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'inbound email requires environment.domain so Hypervibe can manage its MX record',
+        path: ['email', 'inbound', 'hostname'],
+      });
+    } else {
+      const hostname = inbound.hostname.toLowerCase().replace(/\.$/, '');
+      const domain = environment.domain.toLowerCase().replace(/\.$/, '');
+      if (!hostname.endsWith(`.${domain}`)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `inbound email hostname must be a subdomain of ${environment.domain}`,
+          path: ['email', 'inbound', 'hostname'],
+        });
+      }
+    }
+  }
+  if (environment.email.deliveryEvents) {
+    const deliveryEvents = environment.email.deliveryEvents;
+    const service = environment.services[deliveryEvents.service];
+    if (!service) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `delivery events target unknown service "${deliveryEvents.service}"`,
+        path: ['email', 'deliveryEvents', 'service'],
+      });
+    } else if (service.workloadKind !== 'web' || service.public === false) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `delivery-event service "${deliveryEvents.service}" must be a public web service`,
+        path: ['email', 'deliveryEvents', 'service'],
+      });
+    }
+    const uniqueEvents = new Set(deliveryEvents.events);
+    if (uniqueEvents.size !== deliveryEvents.events.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'delivery events cannot contain duplicates',
+        path: ['email', 'deliveryEvents', 'events'],
+      });
+    }
+  }
+  if (environment.email.forwarding) {
+    if (!environment.domain) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'email forwarding requires environment.domain',
+        path: ['email', 'forwarding'],
+      });
+    } else {
+      const domain = environment.domain.toLowerCase().replace(/\.$/, '');
+      for (const [alias, destination] of Object.entries(environment.email.forwarding.aliases)) {
+        if (destination.toLowerCase() === `${alias.toLowerCase()}@${domain}`) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `forwarding alias "${alias}" cannot forward to itself`,
+            path: ['email', 'forwarding', 'aliases', alias],
+          });
+        }
+      }
+    }
+  }
+  if (environment.email.sender && environment.domain) {
+    const senderDomain = environment.email.sender.address.split('@').at(-1)?.toLowerCase();
+    const domain = environment.domain.toLowerCase().replace(/\.$/, '');
+    if (senderDomain !== domain && !senderDomain?.endsWith(`.${domain}`)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `email sender must use ${environment.domain} or one of its subdomains`,
+        path: ['email', 'sender', 'address'],
+      });
+    }
+  }
+  if (environment.email.enabled) {
+    for (const key of EMAIL_MANAGED_ENV_KEYS) {
+      if (key in environment.envVars) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `email-managed environment variable "${key}" cannot also be declared in envVars`,
+          path: ['envVars', key],
+        });
+      }
+      if (environment.envVarExceptions?.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `email-managed environment variable "${key}" cannot also be an environment variable exception`,
+          path: ['envVarExceptions'],
+        });
+      }
+      if (environment.envFile?.include.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `email-managed environment variable "${key}" cannot also be selected through envFile.include`,
+          path: ['envFile', 'include'],
+        });
+      }
+      if (environment.removeEnvVars?.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `email-managed environment variable "${key}" cannot also be retired`,
+          path: ['removeEnvVars'],
+        });
+      }
+    }
+  }
+  if (environment.messaging) {
+    const messaging = environment.messaging;
+    const runtimeServices = new Set<string>();
+    for (const [index, serviceName] of messaging.services.entries()) {
+      if (runtimeServices.has(serviceName)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Twilio runtime service "${serviceName}" is listed more than once`,
+          path: ['messaging', 'services', index],
+        });
+      }
+      runtimeServices.add(serviceName);
+      if (!environment.services[serviceName]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Twilio runtime targets unknown service "${serviceName}"`,
+          path: ['messaging', 'services', index],
+        });
+      }
+    }
+    for (const [name, target] of [
+      ['inbound', messaging.service.inbound],
+      ['deliveryStatus', messaging.service.deliveryStatus],
+    ] as const) {
+      if (!target) continue;
+      const service = environment.services[target.service];
+      if (!service) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Twilio ${name} webhook targets unknown service "${target.service}"`,
+          path: ['messaging', 'service', name, 'service'],
+        });
+      } else if (service.workloadKind !== 'web' || service.public === false) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Twilio ${name} webhook service "${target.service}" must be a public web service`,
+          path: ['messaging', 'service', name, 'service'],
+        });
+      }
+      if (!runtimeServices.has(target.service)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Twilio ${name} webhook service "${target.service}" must also be listed in messaging.services for signature validation`,
+          path: ['messaging', 'service', name, 'service'],
+        });
+      }
+    }
+    const databaseAliasKeys = new Set(Object.values(environment.services)
+      .flatMap((service) => Object.keys(service.databaseEnvAliases ?? {})));
+    for (const key of MESSAGING_MANAGED_ENV_KEYS) {
+      if (databaseAliasKeys.has(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `messaging-managed environment variable "${key}" cannot also be a managed database alias`,
+          path: ['messaging'],
+        });
+      }
+      if (key in environment.envVars) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `messaging-managed environment variable "${key}" cannot also be declared in envVars`,
+          path: ['envVars', key],
+        });
+      }
+      if (environment.envVarExceptions?.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `messaging-managed environment variable "${key}" cannot also be an environment variable exception`,
+          path: ['envVarExceptions'],
+        });
+      }
+      if (environment.envFile?.include.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `messaging-managed environment variable "${key}" cannot also be selected through envFile.include`,
+          path: ['envFile', 'include'],
+        });
+      }
+      if (environment.removeEnvVars?.includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `messaging-managed environment variable "${key}" cannot also be retired`,
+          path: ['removeEnvVars'],
+        });
+      }
+    }
   }
   if (environment.loadBalancer) {
     if (!environment.domain) {
@@ -1329,7 +1744,11 @@ export const projectSpecSchema = z.object({
       path: ['collaboration'],
     });
   }
-  if (spec.github?.canonicalEnvironment && !spec.environments[spec.github.canonicalEnvironment]) {
+  if (
+    spec.github?.canonicalEnvironment
+    && spec.github.canonicalEnvironment !== 'repository'
+    && !spec.environments[spec.github.canonicalEnvironment]
+  ) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: `github.canonicalEnvironment targets unknown environment "${spec.github.canonicalEnvironment}"`,
@@ -1363,6 +1782,26 @@ export const projectSpecSchema = z.object({
         path: ['environments', restoreDrillEnvironments[0], 'database', 'resilience', 'restoreDrill'],
       });
     }
+  }
+  const deliveryEventOwners = Object.entries(spec.environments)
+    .filter(([, environment]) => Boolean(environment.email.deliveryEvents))
+    .map(([environmentName]) => environmentName);
+  if (deliveryEventOwners.length > 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `SendGrid has one account-level delivery-event webhook; declare it in only one environment (currently: ${deliveryEventOwners.join(', ')})`,
+      path: ['environments'],
+    });
+  }
+  const githubSecretKeys = Object.entries(spec.secrets)
+    .filter(([, secret]) => secret.githubActions?.repository || secret.githubActions?.environments.length)
+    .map(([key]) => key);
+  if (githubSecretKeys.length > 0 && (!spec.github || spec.github.enabled === false)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `GitHub Actions secret destinations require enabled top-level github desired state (${githubSecretKeys.join(', ')})`,
+      path: ['github'],
+    });
   }
   for (const [key, secret] of Object.entries(spec.secrets)) {
     const seen = new Set<string>();
@@ -1451,6 +1890,20 @@ export const projectSpecSchema = z.object({
           path: ['secrets', key],
         });
       }
+      if (environment.email.enabled && (EMAIL_MANAGED_ENV_KEYS as readonly string[]).includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" cannot also be managed by email desired state in "${environmentName}"`,
+          path: ['secrets', key],
+        });
+      }
+      if (environment.messaging && (MESSAGING_MANAGED_ENV_KEYS as readonly string[]).includes(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `delegated secret "${key}" cannot also be managed by messaging desired state in "${environmentName}"`,
+          path: ['secrets', key],
+        });
+      }
     }
   }
 });
@@ -1469,6 +1922,12 @@ export type StripeCatalogSpec = z.infer<typeof stripeCatalogSpecSchema>;
 export type StripeWebhookSpec = z.infer<typeof stripeWebhookSpecSchema>;
 export type StripeEnvironmentSyncSpec = z.infer<typeof stripeEnvironmentSyncSpecSchema>;
 export type PaymentsSpec = z.infer<typeof paymentsSpecSchema>;
+export type EmailSenderSpec = z.infer<typeof emailSenderSpecSchema>;
+export type EmailInboundSpec = z.infer<typeof emailInboundSpecSchema>;
+export type EmailDeliveryEventsSpec = z.infer<typeof emailDeliveryEventsSpecSchema>;
+export type EmailForwardingSpec = z.infer<typeof emailForwardingSpecSchema>;
+export type EmailSpec = z.infer<typeof emailSpecSchema>;
+export type TwilioMessagingSpec = z.infer<typeof twilioMessagingSpecSchema>;
 export type IosTestflightGroupSpec = z.infer<typeof iosTestflightGroupSpecSchema>;
 export type DomainRegistrationSpec = z.infer<typeof domainRegistrationSpecSchema>;
 export type EnvFileSpec = z.infer<typeof envFileSpecSchema>;
@@ -1476,6 +1935,7 @@ export type DelegatedSecretSpec = z.infer<typeof delegatedSecretSpecSchema>;
 export type CollaborationSpec = z.infer<typeof collaborationSpecSchema>;
 export type GitHubScheduleSpec = z.infer<typeof githubScheduleSpecSchema>;
 export type GitHubAutomationSpec = z.infer<typeof githubAutomationSpecSchema>;
+export type GitHubPagesSpec = z.infer<typeof githubPagesSpecSchema>;
 export type GitHubSpec = z.infer<typeof githubSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;

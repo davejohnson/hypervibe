@@ -379,22 +379,9 @@ const migrations: Migration[] = [
   },
 ];
 
-export const CURRENT_SCHEMA_VERSION = migrations[migrations.length - 1]?.version ?? 0;
-
-export interface SchemaMigrationStatus {
-  dataDir: string;
-  databasePath: string;
-  currentVersion: number;
-  latestVersion: number;
-  applied: Array<{ version: number; name: string; appliedAt?: string }>;
-  pending: Array<{ version: number; name: string }>;
-  needsMigration: boolean;
-}
-
 export class SqliteAdapter {
   private db: Database.Database;
   private dbPath: string;
-  private dataDir: string;
   private static instance: SqliteAdapter | null = null;
 
   private constructor(dbPath?: string) {
@@ -404,7 +391,6 @@ export class SqliteAdapter {
       : path.dirname(dbPath);
     const finalPath = dbPath ?? path.join(dataDir, 'hypervibe.db');
     this.dbPath = finalPath;
-    this.dataDir = dataDir;
     ensurePrivateDirectory(dataDir, {
       hardenExisting: usesDefaultDataDir,
     });
@@ -435,10 +421,6 @@ export class SqliteAdapter {
     return this.db;
   }
 
-  getDatabasePath(): string {
-    return this.dbPath;
-  }
-
   private hardenDatabaseFiles(): void {
     hardenPrivateFile(this.dbPath);
     hardenPrivateFile(`${this.dbPath}-wal`);
@@ -453,27 +435,6 @@ export class SqliteAdapter {
         applied_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
-  }
-
-  getMigrationStatus(): SchemaMigrationStatus {
-    this.ensureMigrationsTable();
-    const applied = this.db
-      .prepare('SELECT version, name, applied_at as appliedAt FROM schema_migrations ORDER BY version ASC')
-      .all() as Array<{ version: number; name: string; appliedAt?: string }>;
-    const appliedVersions = new Set(applied.map((row) => row.version));
-    const pending = migrations
-      .filter((migration) => !appliedVersions.has(migration.version))
-      .map((migration) => ({ version: migration.version, name: migration.name }));
-
-    return {
-      dataDir: this.dataDir,
-      databasePath: this.dbPath,
-      currentVersion: applied.length > 0 ? Math.max(...applied.map((row) => row.version)) : 0,
-      latestVersion: CURRENT_SCHEMA_VERSION,
-      applied,
-      pending,
-      needsMigration: pending.length > 0,
-    };
   }
 
   migrate(): Migration[] {

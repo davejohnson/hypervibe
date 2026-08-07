@@ -1,11 +1,8 @@
 import {
   type ISecretManagerAdapter,
-  type SecretManagerCapabilities,
   type SecretManagerVerifyResult,
   type ResolvedSecret,
-  type SecretReference,
   type SecretListItem,
-  type SecretReceipt,
   type OnePasswordCredentials,
   OnePasswordCredentialsSchema,
 } from '../../../domain/ports/secretmanager.port.js';
@@ -15,12 +12,6 @@ import { secretManagerRegistry } from '../../../domain/registry/secretmanager.re
 interface OpClient {
   secrets: {
     resolve(secretReference: string): Promise<string>;
-    resolveAll(secretReferences: string[]): Promise<{
-      individualResponses: Record<
-        string,
-        { content?: { secret: string }; error?: { type: string; message?: string } }
-      >;
-    }>;
   };
   vaults: {
     list(): Promise<Array<{ id: string; title: string }>>;
@@ -42,14 +33,6 @@ interface OpClient {
  */
 export class OnePasswordAdapter implements ISecretManagerAdapter {
   readonly name = '1password' as const;
-
-  readonly capabilities: SecretManagerCapabilities = {
-    supportsVersioning: false,
-    supportsMultipleKeys: true, // Items hold multiple fields
-    supportsRotation: false,
-    supportsAuditLog: false,
-    supportsDynamicSecrets: false,
-  };
 
   private credentials: OnePasswordCredentials | null = null;
   private client: OpClient | null = null;
@@ -91,7 +74,6 @@ export class OnePasswordAdapter implements ISecretManagerAdapter {
       return {
         success: true,
         identity: '1Password service account',
-        capabilities: this.capabilities,
       };
     } catch (error) {
       return {
@@ -105,53 +87,6 @@ export class OnePasswordAdapter implements ISecretManagerAdapter {
     const client = await this.getClient();
     const value = await client.secrets.resolve(this.toOpReference(path, key));
     return { value };
-  }
-
-  async getSecrets(references: SecretReference[]): Promise<Map<string, ResolvedSecret>> {
-    const results = new Map<string, ResolvedSecret>();
-    if (references.length === 0) return results;
-
-    try {
-      const client = await this.getClient();
-      const opRefs = new Map(references.map((ref) => [ref.raw, this.toOpReference(ref.path, ref.key)]));
-      const response = await client.secrets.resolveAll([...new Set(opRefs.values())]);
-
-      for (const ref of references) {
-        const opRef = opRefs.get(ref.raw)!;
-        const individual = response.individualResponses[opRef];
-        if (individual?.content) {
-          results.set(ref.raw, { value: individual.content.secret });
-        } else {
-          const error = individual?.error
-            ? `${individual.error.type}${individual.error.message ? `: ${individual.error.message}` : ''}`
-            : 'Secret not found';
-          results.set(ref.raw, { value: '', metadata: { error } });
-        }
-      }
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      for (const ref of references) {
-        results.set(ref.raw, { value: '', metadata: { error: errorMsg } });
-      }
-    }
-
-    return results;
-  }
-
-  async setSecret(path: string, _values: Record<string, string>): Promise<SecretReceipt> {
-    return {
-      success: false,
-      path,
-      error: 'The 1Password integration is resolve-only. Create or edit items in 1Password, then reference them with 1password://<vault>/<item>#<field>.',
-    };
-  }
-
-  async deleteSecret(path: string): Promise<SecretReceipt> {
-    return {
-      success: false,
-      path,
-      error: 'The 1Password integration is resolve-only. Delete items in 1Password directly.',
-    };
   }
 
   async listSecrets(pathPrefix?: string): Promise<SecretListItem[]> {
@@ -184,11 +119,4 @@ secretManagerRegistry.register({
     },
   },
   factory: () => new OnePasswordAdapter(),
-  defaultCapabilities: {
-    supportsVersioning: false,
-    supportsMultipleKeys: true,
-    supportsRotation: false,
-    supportsAuditLog: false,
-    supportsDynamicSecrets: false,
-  },
 });

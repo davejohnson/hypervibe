@@ -1,18 +1,13 @@
 import type { ToolEnvelope } from '../respond.js';
 
-export function parseToolEnvelope(result: {
-  structuredContent?: unknown;
-  _meta?: Record<string, unknown>;
-  content?: unknown;
-}): ToolEnvelope {
-  if (result.structuredContent && typeof result.structuredContent === 'object') {
-    return result.structuredContent as ToolEnvelope;
+export function parseToolEnvelope(result: unknown): ToolEnvelope {
+  const record = result && typeof result === 'object'
+    ? result as { structuredContent?: unknown; content?: unknown }
+    : {};
+  if (record.structuredContent && typeof record.structuredContent === 'object') {
+    return record.structuredContent as ToolEnvelope;
   }
-  const metaEnvelope = result._meta?.hypervibeEnvelope;
-  if (metaEnvelope && typeof metaEnvelope === 'object') {
-    return metaEnvelope as ToolEnvelope;
-  }
-  const content = Array.isArray(result.content) ? result.content : [];
+  const content = Array.isArray(record.content) ? record.content : [];
   const jsonEntry = content.find((entry) =>
     Boolean(entry)
     && typeof entry === 'object'

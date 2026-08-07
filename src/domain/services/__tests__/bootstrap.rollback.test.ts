@@ -57,7 +57,6 @@ async function applyInfra(args: {
     crons: desired.crons,
     domain: desired.domain,
     databaseProvider: desired.databaseProvider,
-    setupEmail: desired.setupEmail,
     serviceConfig: desired.serviceConfig,
     envVars: desired.envVars,
     deploy: desired.deploy,

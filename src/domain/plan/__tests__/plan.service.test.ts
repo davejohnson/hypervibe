@@ -94,7 +94,7 @@ describe('PlanService.plan', () => {
   it('errors when the project has no spec', async () => {
     const bare = new ProjectRepository().create({ name: 'no-spec' });
     const result = await new PlanService().plan(bare, 'staging');
-    expect(result).toMatchObject({ error: expect.stringContaining('hv_spec_set') });
+    expect(result).toMatchObject({ error: expect.stringContaining('hv_spec') });
   });
 
   it('errors when the environment is not in the spec', async () => {

@@ -28,7 +28,7 @@ export function diagnoseRailwayWorkflowLog(text: string): CiWorkflowDiagnostic[]
       next: [
         'Confirm IMAGE_REGISTRY_USERNAME is the GitHub login that owns the package-read token.',
         `Set IMAGE_REGISTRY_TOKEN from a classic GitHub PAT with read:packages (create: ${GITHUB_TOKEN_URLS.packageRead}), and repo when the repo/package is private.`,
-        'Use hv_secrets_set target="github" key="IMAGE_REGISTRY_TOKEN" secretRef="dotenv:/absolute/path/.env#GHCR_TOKEN" to update the GitHub Actions secret without pasting the token into chat.',
+        'Declare IMAGE_REGISTRY_TOKEN under spec.secrets with githubActions.repository=true, then run hv_plan with secretRefs={"IMAGE_REGISTRY_TOKEN":"dotenv:/absolute/path/.env#GHCR_TOKEN"}.',
         'Re-run the workflow with hv_ci_trigger, then inspect logs with hv_ci_status include=["logs"].',
       ],
     });

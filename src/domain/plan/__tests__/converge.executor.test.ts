@@ -95,6 +95,42 @@ describe('ConvergeExecutor staleness', () => {
     expect(result.error).toContain('not found');
   });
 
+  it('rejects malformed persisted actions before reserving an apply', async () => {
+    const plan = runRepo().create({
+      projectId,
+      environmentId,
+      type: 'plan',
+      plan: {
+        kind: 'hv_plan',
+        environmentName: 'staging',
+        specRevision: 1,
+        observedFingerprint: null,
+        actions: [{
+          id: 'service:web',
+          type: 'launch',
+          resource: { kind: 'service', name: 'web', provider: 'railway' },
+          verified: true,
+          reason: 'malformed test action',
+        }],
+      },
+    });
+    const handler = vi.fn();
+
+    const result = await new ConvergeExecutor().execute({
+      planRunId: plan.id,
+      currentSpecRevision: 1,
+      handler,
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: expect.stringContaining('not a valid persisted hv_plan'),
+    });
+    expect(result.error).toContain('Re-run hv_plan');
+    expect(handler).not.toHaveBeenCalled();
+    expect(runRepo().findByEnvironmentId(environmentId).filter((run) => run.type === 'apply')).toEqual([]);
+  });
+
   it('rejects plans against a superseded spec revision', async () => {
     const planId = storePlan([action({ id: 'service:web' })], { specRevision: 1 });
     const result = await new ConvergeExecutor().execute({
@@ -275,7 +311,7 @@ describe('ConvergeExecutor execution', () => {
     const result = await new ConvergeExecutor().execute({
       planRunId: planId,
       currentSpecRevision: 1,
-      confirmDestroy: ['database:railway:destroy'],
+      confirmActions: ['database:railway:destroy'],
       handler,
     });
     expect(result.success).toBe(true);

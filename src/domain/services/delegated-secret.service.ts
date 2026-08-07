@@ -47,6 +47,37 @@ export function delegatedSecretsForEnvironment(
     .sort(([left], [right]) => left.localeCompare(right));
 }
 
+function githubCanonicalEnvironment(spec: ProjectSpec): string | undefined {
+  if (!spec.github || spec.github.enabled === false) return undefined;
+  return spec.github.canonicalEnvironment
+    ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0]);
+}
+
+export function delegatedSecretInputsForEnvironment(
+  spec: ProjectSpec,
+  environmentName: string
+): Array<[string, DelegatedSecretSpec]> {
+  const canonical = githubCanonicalEnvironment(spec);
+  return Object.entries(spec.secrets)
+    .filter(([, secret]) =>
+      secret.environments.includes(environmentName)
+      || (canonical === environmentName && Boolean(
+        secret.githubActions?.repository || secret.githubActions?.environments.length
+      ))
+    )
+    .sort(([left], [right]) => left.localeCompare(right));
+}
+
+export function delegatedGitHubSecretsForEnvironment(
+  spec: ProjectSpec,
+  environmentName: string
+): Array<[string, DelegatedSecretSpec]> {
+  if (githubCanonicalEnvironment(spec) !== environmentName) return [];
+  return Object.entries(spec.secrets)
+    .filter(([, secret]) => secret.githubActions?.repository || secret.githubActions?.environments.length)
+    .sort(([left], [right]) => left.localeCompare(right));
+}
+
 export function parseDelegatedSecretBindings(
   environment: Pick<Environment, 'platformBindings'> | null | undefined
 ): DelegatedSecretBinding[] {

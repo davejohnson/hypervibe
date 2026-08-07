@@ -40,10 +40,16 @@ import {
   syncProjectGitRemoteUrl,
 } from '../application/apply-plan.js';
 import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.js';
-import { githubSpecNeedsOpenAI } from '../domain/services/github-infrastructure.service.js';
+import {
+  githubCanonicalEnvironment,
+  githubSpecNeedsOpenAI,
+  planGitHubInfrastructure,
+  shouldPlanGitHubInfrastructure,
+} from '../domain/services/github-infrastructure.service.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service.js';
-import { planEmailSetup } from '../domain/services/email-plan.service.js';
+import { planEmail } from '../domain/services/email-plan.service.js';
+import { planTwilioMessaging } from '../domain/services/twilio-messaging.service.js';
 import { validateProjectSpecProviders } from '../domain/services/provider-spec-validation.js';
 import { buildManagedDatabaseEnvVars } from '../domain/services/database-env.js';
 import { buildCacheEnvVarsFromComponent } from '../domain/services/cache-env.js';
@@ -117,7 +123,7 @@ function nativeDeployConfirmationHint(changes: Array<{ environment: string; prov
       .filter((value): value is string => Boolean(value))
   ));
   const providerDetail = providerDetails.length ? ` ${providerDetails.join(' ')}` : '';
-  return `Provider-native branch deploys are provider-specific and are not Hypervibe's portable default. Do not switch from trigger="ci" to trigger="native" to avoid GitHub package-read/image credentials.${providerDetail} If the user explicitly wants provider-native deploys, rerun hv_spec_set with confirmNativeDeploy=true.`;
+  return `Provider-native branch deploys are provider-specific and are not Hypervibe's portable default. Do not switch from trigger="ci" to trigger="native" to avoid GitHub package-read/image credentials.${providerDetail} If the user explicitly wants provider-native deploys, rerun hv_spec with confirmNativeDeploy=true.`;
 }
 
 function summarizeActions(actions: PlanAction[]) {
@@ -153,12 +159,12 @@ function runtimeHealthSummary(observed: ObservedState | null) {
     return {
       status: 'failed',
       services: failed,
-      reason: 'The provider reports a failed deployment. Inspect hv_errors and hv_logs before treating the environment as healthy.',
+      reason: 'The provider reports a failed deployment. Inspect deployment/build logs with hv_logs before treating the environment as healthy.',
     };
   }
   return {
     status: 'unverified',
-    reason: 'hv_status verifies desired infrastructure and managed variable attachment, not application behavior. Use hv_health for HTTP services and hv_errors/hv_logs for workers.',
+    reason: 'hv_status verifies desired infrastructure and managed variable attachment, not application behavior. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.',
   };
 }
 
@@ -246,6 +252,14 @@ function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Proje
     : project;
 }
 
+function commandEnvironment(spec: ProjectSpec, requested: string | undefined): string {
+  const explicit = requested?.trim();
+  if (explicit) return explicit;
+  return Object.keys(spec.environments).length === 0
+    ? githubCanonicalEnvironment(spec) ?? 'staging'
+    : 'staging';
+}
+
 function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
   const required = new Map<string, { provider: string; environments: Set<string>; reasons: Set<string>; scopeHints: Set<string> }>();
   const add = (provider: string, environment: string, reason: string, scopeHints: string[] = []) => {
@@ -272,6 +286,7 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
       ]);
     }
     if (envSpec.email.enabled) add('sendgrid', envName, 'transactional email');
+    if (envSpec.messaging) add('twilio', envName, 'programmable messaging');
     if (environmentUsesGitHubActionsDeploy(envSpec)) add('github', envName, 'GitHub Actions deploy workflow');
     if (envSpec.ios) add('appstoreconnect', envName, 'iOS bundle ID / TestFlight', [envSpec.ios.bundleId]);
     if (envSpec.queues && Object.keys(envSpec.queues).length > 0) add(envSpec.hosting.provider, envName, 'queues');
@@ -281,8 +296,13 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
   if (spec.github && spec.github.enabled !== false) {
     const repository = spec.github.repository ?? parseGitHubRepoFromRemote(spec.gitRemoteUrl);
     const environment = spec.github.canonicalEnvironment
-      ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0] ?? 'project');
+      ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0] ?? 'repository');
     add('github', environment, 'GitHub repository infrastructure', repository ? [repository] : []);
+    if (spec.github.pages?.customDomain) {
+      add('cloudflare', environment, 'GitHub Pages custom-domain DNS', [
+        ...cloudflareScopeHintsForDomain(spec.github.pages.customDomain),
+      ]);
+    }
     if (githubSpecNeedsOpenAI(spec.github)) {
       add('openai', environment, 'AI-backed GitHub automations', repository ? [repository] : []);
     }
@@ -341,15 +361,41 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
   const planService = new PlanService();
 
   commands.register(
-    'hv_spec_set',
-    'Create or update desired state for a project, including runtime configuration and infrastructure. New runtime keys must cover every non-local environment with matching services unless envVarExceptions explicitly documents that a key does not apply. Hypervibe never copies values between environments. This is the source of truth that hv_plan diffs against live infrastructure. When run inside a git worktree, Hypervibe writes .hypervibe/spec.json. Merges by default; pass replace=true to overwrite or null to delete a key.',
+    'hv_spec',
+    'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
     {
       project: projectField,
-      spec: z.record(z.unknown()).describe('Full ProjectSpec (replace) or partial patch (merge). Canonical shape: { gitRemoteUrl?, github?: { repository?, canonicalEnvironment?, actions?: { <id>: typed check|autofix|pull-request-review|code-audit }, dependencies?, security?, collaboration? }, secrets?: { <ENV_KEY>: delegated-secret declaration }, environments: { <env>: { hosting, services, database?, cache?, storage?, queues?, domain?, email?, envVars?, envVarExceptions?, deploy?, migrations?, ios? } } }. New runtime keys must be declared in every non-local environment sharing a desired service, with separately chosen values or secret references; use envVarExceptions only for intentional absence. database.engine is postgres; database.resilience may declare provider-managed availability (zonal|regional), backup/PITR retention, and named read replicas; cache.engine is redis. Services may declare databaseEnvAliases such as { POSTGRES_DB_URL: "DATABASE_URL" } without storing the resolved value. github actions use typed behavior plus triggers/schedules; a schedule is five-field POSIX cron with an optional IANA timezone. GitHub workflow files and repository settings are planned and applied through the desired-state loop, with generated infrastructure delivered through a reviewable PR. GitHub and OpenAI connections are required only for their corresponding GitHub actions and do not block unrelated providers. The deprecated top-level collaboration field remains readable and is moved to github.collaboration on the next write. Delegated secrets declare ownership and targets but never values; pass values to hv_plan with secretRefs. database.seedCommand is a visible, receipt-backed one-shot bootstrap. Schema migrations run during container startup or a durable declared predeploy/release command; database moves and resets must be modeled as desired-state lifecycle actions. deploy.trigger="ci" is the portable branch-deploy default; trigger="native" is provider-specific and confirmation-gated. Under ios.release, projects own the build command and artifact path while Hypervibe can prepare Match signing assets read-only and owns the isolated TestFlight submission runtime.'),
+      spec: z.record(z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
-      confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external app access such as the Railway GitHub App.'),
+      confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external repository-app access.'),
     },
     wrapCommandHandler(async ({ project: projectRef, spec, replace, confirmNativeDeploy }) => {
+      if (!spec) {
+        if (replace !== undefined || confirmNativeDeploy !== undefined) {
+          return commandError('VALIDATION', 'replace and confirmNativeDeploy require spec input.', {
+            hint: 'Pass spec to update desired state, or omit mutation fields to read it.',
+          });
+        }
+        const project = ctx.resolveProjectOrThrow({ project: projectRef });
+        const result = specStore.get(project);
+        if (!result) {
+          return commandError('NOT_FOUND', `Project "${project.name}" has no spec yet.`, {
+            hint: 'Define one by calling hv_spec with spec input.',
+          });
+        }
+        const gitRemoteUrl = project.gitRemoteUrl ?? result.spec.gitRemoteUrl ?? null;
+        const extras = result.adopted && result.source?.kind === 'repo'
+          ? { warnings: [`${result.source.path} changed outside hypervibe; recorded as revision ${result.revision}.`] }
+          : undefined;
+        return commandSuccess({
+          project: { id: project.id, name: project.name, gitRemoteUrl },
+          revision: result.revision,
+          specSource: result.source ?? { kind: 'local' },
+          spec: result.spec,
+          connections: requiredConnectionChecklist(ctx, result.spec),
+        }, extras);
+      }
+
       let project = ctx.resolveProject({ project: projectRef });
       if (!project) {
         const name = (typeof spec.project === 'string' && spec.project.trim())
@@ -407,7 +453,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         if (error instanceof z.ZodError) {
           throw new HvError('VALIDATION', 'Spec failed validation.', {
             details: error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
-            hint: 'Fix the listed fields and retry hv_spec_set.',
+            hint: 'Fix the listed fields and retry hv_spec.',
           });
         }
         throw error;
@@ -427,6 +473,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           project: { id: project.id, name: project.name, gitRemoteUrl: project.gitRemoteUrl ?? null },
           revision: result.revision,
           specSource: result.source ?? { kind: 'local' },
+          envTemplate: result.envTemplate ?? null,
           spec: result.spec,
           environmentVariableCoverage: coverageReport,
           connections,
@@ -436,76 +483,15 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ? connectionRecoveryHint(connections.missing, { after: 'Then run hv_plan.' })
             : undefined,
           warnings,
-          next: connections.missing.length > 0 ? ['hv_connect', 'hv_plan'] : ['hv_plan'],
+          next: connections.missing.length > 0 ? ['hv_connections', 'hv_plan'] : ['hv_plan'],
         }
       );
     })
   );
 
   commands.register(
-    'hv_spec_get',
-    'Read the current desired-state spec and revision for a project. If .hypervibe/spec.json exists in the current git worktree, it is treated as the shared desired state and synced into the local cache.',
-    { project: projectField },
-    wrapCommandHandler(async ({ project: projectRef }) => {
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const result = specStore.get(project);
-      if (!result) {
-        return commandError('NOT_FOUND', `Project "${project.name}" has no spec yet.`, {
-          hint: 'Define one with hv_spec_set.',
-        });
-      }
-      const gitRemoteUrl = project.gitRemoteUrl ?? result.spec.gitRemoteUrl ?? null;
-      const connections = requiredConnectionChecklist(ctx, result.spec);
-      const extras = result.adopted && result.source?.kind === 'repo'
-        ? { warnings: [`${result.source.path} changed outside hypervibe; recorded as revision ${result.revision}.`] }
-        : undefined;
-      return commandSuccess({
-        project: { id: project.id, name: project.name, gitRemoteUrl },
-        projectMeta: { gitRemoteUrl },
-        revision: result.revision,
-        specSource: result.source ?? { kind: 'local' },
-        spec: result.spec,
-        connections,
-        delegatedSecrets: Object.keys(result.spec.secrets),
-        environments: Object.fromEntries(
-          Object.entries(result.spec.environments).map(([name, env]) => {
-            const storedEnvironment = ctx.repos.environments.findByProjectAndName(project.id, name);
-            const serviceBindings = asRecord(storedEnvironment?.platformBindings.services) ?? {};
-            const serviceDetails = Object.entries(env.services).map(([serviceName, service]) => {
-              const binding = asRecord(serviceBindings[serviceName]);
-              const customDomains = Array.isArray(binding?.customDomains)
-                ? binding.customDomains.filter((value): value is string => typeof value === 'string')
-                : [];
-              const boundUrl = [
-                typeof binding?.url === 'string' ? binding.url : undefined,
-                ...customDomains,
-              ].map(sanitizeServiceUrl).find((value) => value !== undefined);
-              return {
-                name: serviceName,
-                workloadKind: service.workloadKind,
-                public: service.workloadKind === 'web' && service.public !== false,
-                ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
-                ...(boundUrl ? { boundUrl } : {}),
-              };
-            });
-            return [name, {
-              hosting: env.hosting.provider,
-              services: Object.keys(env.services),
-              serviceDetails,
-              database: env.database?.provider ?? null,
-              storage: Object.keys(env.storage ?? {}),
-              delegatedSecrets: delegatedSecretsForEnvironment(result.spec, name).map(([key]) => key),
-              domain: env.domain ?? null,
-            }];
-          })
-        ),
-      }, extras);
-    })
-  );
-
-  commands.register(
     'hv_plan',
-    'Diff the spec against live infrastructure (observed where the provider supports it) and return an executable plan. Do not call hv_plan as a workaround after hv_status/hv_connections_list reports a missing required connection. Use hv_connect only when a safe credentialsRef is already available; otherwise explain the blocked task and offer to connect credentials the user already controls or prepare a value-free owner handoff. Do not assume provider membership. Repo-backed .hypervibe/spec.json and non-secret .hypervibe/bindings.json are used when present. The returned planId is required by hv_apply. Delegated secret slots declared by the spec accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally, encrypted into that plan, and never returned. Ordinary envVars and env files cannot override delegated keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime": high-confidence app runtime keys are encrypted into the plan and synced to hosting, while provider/control-plane credentials, local-only values, and unselected local junk are skipped with key-name warnings. If repo .env exists and .env.<env> is missing, hv_plan creates it while omitting envFile.exclude and delegated-secret keys. Optional services=[...] produces a partial deploy plan restricted to those spec services; delegated secret inputs require a full plan.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. Missing connections block unsafe work. Delegated values are accepted only through secretRefs and are encrypted into the stored plan, never returned. Optional services restricts the plan to selected services.',
     {
       project: projectField,
       env: envField,
@@ -517,7 +503,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     },
     wrapCommandHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      const result = await planService.plan(project, env?.trim() || 'staging', {
+      const currentSpec = specStore.get(project)?.spec;
+      const result = await planService.plan(project, currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging', {
         ...(services?.length ? { serviceFilter: services } : {}),
         ...(envVars && Object.keys(envVars).length > 0 ? { envVarOverrides: envVars } : {}),
         ...(envFile ? { envFile } : {}),
@@ -525,12 +512,13 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         ...(secretRefs && Object.keys(secretRefs).length > 0 ? { secretRefs } : {}),
       });
       if ('error' in result) {
-        return commandError('VALIDATION', result.error, { next: ['hv_spec_set'] });
+        return commandError('VALIDATION', result.error, { next: ['hv_spec'] });
       }
       const plannedEnvironmentSpec = specStore.get(project)?.spec.environments[result.environmentName];
 
       const confirmIds = result.actions.filter((a) => a.requiresConfirm).map((a) => a.id);
       const pending = result.actions.filter((a) => a.type !== 'noop');
+      const reviewActions = pending.map(({ metadata: _metadata, ...action }) => action);
       const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(result.blocked, result.actions);
       const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
       const softActionScopedBlocked = actionScopedBlocksAllowedDuringApply(actionScopedBlocked);
@@ -565,14 +553,14 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
 
       if (hardBlocked.length > 0) {
-        next = ['hv_connect', 'hv_plan'];
+        next = ['hv_connections', 'hv_plan'];
       } else if (result.inputRequired.length > 0) {
         next = ['hv_plan'];
       } else if (pending.length > 0) {
         next = connectBeforeApply.length > 0
-          ? ['hv_connect', 'hv_plan']
+          ? ['hv_connections', 'hv_plan']
           : softActionScopedBlocked.length > 0
-            ? ['hv_connect', 'hv_apply']
+            ? ['hv_connections', 'hv_apply']
             : ['hv_apply'];
       }
 
@@ -587,7 +575,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           specSource: result.specSource ?? { kind: 'local' },
           verified: result.verified,
           summary: summarizeActions(result.actions),
-          actions: result.actions,
+          totalActionCount: result.actions.length,
+          pendingActionCount: pending.length,
+          noopActionCount: result.actions.length - pending.length,
+          actions: reviewActions,
           unmanaged: result.unmanaged,
           inputRequired: result.inputRequired.length > 0 ? result.inputRequired : undefined,
           blocked: hardBlocked,
@@ -621,11 +612,44 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = specStore.get(project);
       if (!specResult) {
-        return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'Define one with hv_spec_set.' });
+        return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'Define one with hv_spec.' });
       }
-      const envName = env?.trim() || 'staging';
+      const envName = commandEnvironment(specResult.spec, env);
       const envSpec = specResult.spec.environments[envName];
       if (!envSpec) {
+        if (shouldPlanGitHubInfrastructure(specResult.spec, envName)) {
+          const projectForStatus = projectWithSpecGitRemoteUrl(project, specResult.spec);
+          const github = await planGitHubInfrastructure({
+            project: projectForStatus,
+            spec: specResult.spec,
+            environmentName: envName,
+          });
+          const blocked = [
+            ...planService.projectPreflight(projectForStatus, specResult.spec, envName),
+            ...github.blocked,
+          ];
+          const drift = github.actions.filter((action) => action.type !== 'noop');
+          return commandSuccess({
+            environment: envName,
+            specRevision: specResult.revision,
+            specSource: specResult.source ?? { kind: 'local' },
+            verified: github.actions.every((action) => action.verified),
+            inSync: drift.length === 0,
+            summary: summarizeActions(github.actions),
+            drift: drift.map(({ metadata: _metadata, ...action }) => action),
+            unmanaged: [],
+            blocked,
+            ...(blocked.length > 0 ? connectionRecoveryDetails(blocked) : {}),
+          }, {
+            warnings: github.warnings,
+            hint: blocked.length > 0
+              ? connectionRecoveryHint(blocked, { after: 'Then rerun hv_status or hv_plan.' })
+              : drift.length > 0
+                ? 'Run hv_plan to get an executable plan for this drift.'
+                : 'Repository infrastructure is in sync.',
+            next: blocked.length > 0 ? ['hv_connections'] : drift.length > 0 ? ['hv_plan'] : undefined,
+          });
+        }
         return commandError('NOT_FOUND', `Spec has no environment "${envName}".`, {
           details: { available: Object.keys(specResult.spec.environments) },
         });
@@ -688,8 +712,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           .filter((s) => s.source?.repo)
           .map((s) => [s.name, `${s.source!.repo}${s.source!.branch ? `@${s.source!.branch}` : ''}`])
       );
-      // Catches the native Railway "source connected but the Railway GitHub
-      // App cannot see the repo" state, where pushes silently do not deploy.
+      // Catches provider-native source links whose external repository app can
+      // no longer see the repository, where pushes silently do not deploy.
       const sourceWarnings = await planService.checkBranchDeploySource(projectForStatus, envSpec);
       const observedServicesByName = new Map((observed?.services ?? []).map((service) => [service.name, service]));
       const expectedServiceNames = Object.keys(envSpec.services);
@@ -772,13 +796,22 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed,
       });
       const stripeDrift = stripeSync.actions.filter((action) => action.type !== 'noop');
-      const emailAction = planEmailSetup({
+      const email = await planEmail({
+        project: projectForStatus,
         environmentName: envName,
         environmentSpec: envSpec,
         environment,
         observed,
       });
-      const emailDrift = emailAction && emailAction.type !== 'noop' ? [emailAction] : [];
+      const emailDrift = email.actions.filter((action) => action.type !== 'noop');
+      const messaging = await planTwilioMessaging({
+        project: projectForStatus,
+        environmentName: envName,
+        environmentSpec: envSpec,
+        environment,
+        observed,
+      });
+      const messagingDrift = messaging.actions.filter((action) => action.type !== 'noop');
       const observationIncomplete = observed !== null && (
         observed.partial
         || Object.values(observed.completeness ?? {}).includes('unknown')
@@ -836,10 +869,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               }),
             }
             : {}),
-          inSync: !observationIncomplete && drift.length === 0 && cacheDrift.length === 0 && databaseResilienceDrift.length === 0 && nativeDeploySourceDrift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0,
+          inSync: !observationIncomplete && drift.length === 0 && cacheDrift.length === 0 && databaseResilienceDrift.length === 0 && nativeDeploySourceDrift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0 && messagingDrift.length === 0,
           runtimeHealth: runtimeHealthSummary(observed),
-          summary: summarizeActions([...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...(emailAction ? [emailAction] : [])]),
-          drift: [...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift],
+          summary: summarizeActions([...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
+          drift: [...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
           unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
           ...(envSpec.database?.resilience
             ? {
@@ -868,21 +901,21 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           },
         },
         {
-          warnings: [...warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings],
+          warnings: [...warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings],
           hint: blocked.length > 0
             ? connectionRecoveryHint(blocked, {
               after: 'After the connection verifies, rerun hv_status or hv_plan. Do not ask to run hv_plan for DNS/domain drift until the required connection is verified.',
             })
             : sourceWarnings.length > 0
-              ? 'Fix Railway GitHub App repository access and project-member GitHub contributor access, then rerun hv_status or hv_plan.'
+              ? `Fix ${hostingMetadata?.displayName ?? envSpec.hosting.provider} native repository access and contributor permissions, then rerun hv_status or hv_plan.`
               : deployStrategy === 'branch' && deployTrigger === 'ci' && ciNeedsSync
                 ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
               : delegatedSecrets.inputRequired.length > 0
                 ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
-              : nativeDeploySourceDrift.length > 0 || drift.length > 0 || cacheDrift.length > 0 || databaseResilienceDrift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 || emailDrift.length > 0
+              : nativeDeploySourceDrift.length > 0 || drift.length > 0 || cacheDrift.length > 0 || databaseResilienceDrift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 || emailDrift.length > 0 || messagingDrift.length > 0
                 ? 'Run hv_plan to get an executable plan for this drift.'
-                : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_errors/hv_logs for workers.',
-          next: blocked.length > 0 ? ['hv_connect'] : undefined,
+                : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.',
+          next: blocked.length > 0 ? ['hv_connections'] : undefined,
         }
       );
     })
@@ -890,18 +923,17 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_apply',
-    'Apply a plan produced by hv_plan. Rejects stale plans (spec changed, infrastructure changed, plan expired, or already applied). Confirm-gated billable/destructive actions run only when their action ids are passed in confirmActions. Legacy confirmDestroy is still accepted for database destroys.',
+    'Apply a plan produced by hv_plan. Rejects stale plans (spec changed, infrastructure changed, plan expired, or already applied). Confirm-gated billable/destructive actions run only when their action ids are passed in confirmActions.',
     {
       project: projectField,
       planId: z.string().describe('Plan id returned by hv_plan'),
-      confirmActions: z.array(z.string()).optional().describe('Action ids for confirm-gated billable or destructive actions (e.g. ["domain:example.com:register", "database:railway:destroy"])'),
-      confirmDestroy: z.array(z.string()).optional().describe('Action ids of confirm-gated destroys to execute (e.g. ["database:railway:destroy"])'),
+      confirmActions: z.array(z.string()).optional().describe('Action ids for confirm-gated billable or destructive actions (e.g. ["domain:example.com:register", "database:provider:destroy"])'),
     },
-    wrapCommandHandler(async ({ project: projectRef, planId, confirmActions, confirmDestroy }) => {
+    wrapCommandHandler(async ({ project: projectRef, planId, confirmActions }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = specStore.get(project);
       if (!specResult) {
-        return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'hv_spec_set, then hv_plan.' });
+        return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { hint: 'hv_spec, then hv_plan.' });
       }
 
       const outcome = await executePlanApply(ctx, {
@@ -909,7 +941,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         spec: specResult.spec,
         specRevision: specResult.revision,
         planId,
-        confirmActions: Array.from(new Set([...(confirmActions ?? []), ...(confirmDestroy ?? [])])),
+        confirmActions: confirmActions ?? [],
       });
 
       if (outcome.kind === 'plan_not_found') {
@@ -936,7 +968,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ...connectionRecoveryDetails(outcome.applyBlocked),
           },
           hint: connectionRecoveryHint(outcome.applyBlocked, { after: 'Then re-run hv_plan and hv_apply.' }),
-          next: ['hv_connect', 'hv_plan', 'hv_apply'],
+          next: ['hv_connections', 'hv_plan', 'hv_apply'],
         });
       }
 

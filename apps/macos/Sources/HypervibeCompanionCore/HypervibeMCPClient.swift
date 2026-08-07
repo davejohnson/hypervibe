@@ -12,7 +12,6 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
     case launchFailed
     case processExited(Int32)
     case incompatibleTools([String])
-    case schemaMigrationRequired
     case missingStructuredContent(String)
     case malformedResponse(String)
     case tool(code: String, message: String, hint: String?)
@@ -29,8 +28,6 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
             return "Hypervibe exited before the refresh completed (status \(status))."
         case .incompatibleTools(let missing):
             return "This Hypervibe executable is missing: \(missing.joined(separator: ", "))."
-        case .schemaMigrationRequired:
-            return "Hypervibe's local schema needs migration before the companion can refresh."
         case .missingStructuredContent(let tool):
             return "\(tool) returned no structured response."
         case .malformedResponse(let message):
@@ -59,18 +56,18 @@ public actor HypervibeMCPClient {
             .appendingPathComponent(".hypervibe/spec.json", isDirectory: false)
         return try await withSession(
             project: project,
-            requiredTools: ["hv_spec_get", "hv_spec_set"]
+            requiredTools: ["hv_spec"]
         ) { client -> CompanionProjectReadiness in
             // A legacy single-project local cache must not make an unrelated
             // repository look initialized. The repo-backed spec is the shared
-            // project identity; chat can create it with hv_spec_set.
+            // project identity; chat can create it with hv_spec.
             guard FileManager.default.fileExists(atPath: specURL.path) else {
                 return CompanionProjectReadiness.uninitialized
             }
             do {
                 _ = try await self.call(
                     client: client,
-                    tool: "hv_spec_get",
+                    tool: "hv_spec",
                     arguments: [:]
                 )
                 return CompanionProjectReadiness.initialized
@@ -87,16 +84,16 @@ public actor HypervibeMCPClient {
         try await withSession(
             project: project,
             requiredTools: [
-                "hv_spec_get",
+                "hv_spec",
                 "hv_status",
                 "hv_health",
                 "hv_runs",
-                "hv_connections_list",
+                "hv_connections",
             ]
         ) { client in
             let specData = try await self.call(
                 client: client,
-                tool: "hv_spec_get",
+                tool: "hv_spec",
                 arguments: [:]
             )
             let topology = try HypervibeResponseMapper.decodeTopology(specData)
@@ -135,8 +132,12 @@ public actor HypervibeMCPClient {
                 var endpointHealth: [PublicEndpointHealth] = []
                 for resource in environment.resources where
                     resource.kind == .service
-                    && resource.isPublic == true
-                    && resource.boundURL != nil {
+                    && resource.isPublic == true {
+                    guard observation.services?
+                        .first(where: { $0.name == resource.name })?
+                        .preferredURL != nil else {
+                        continue
+                    }
                     do {
                         let healthData = try await self.call(
                             client: client,
@@ -183,7 +184,7 @@ public actor HypervibeMCPClient {
             let runs = try HypervibeResponseMapper.decodeRuns(runsData)
             let connectionsData = try await self.call(
                 client: client,
-                tool: "hv_connections_list",
+                tool: "hv_connections",
                 arguments: [:]
             )
             let connections = try HypervibeResponseMapper.decodeConnections(connectionsData)
@@ -202,10 +203,10 @@ public actor HypervibeMCPClient {
     }
 
     public func connectionCatalog(project: CompanionProject) async throws -> ConnectionCatalog {
-        try await withSession(project: project, requiredTools: ["hv_connections_list"]) { client in
+        try await withSession(project: project, requiredTools: ["hv_connections"]) { client in
             let data = try await self.call(
                 client: client,
-                tool: "hv_connections_list",
+                tool: "hv_connections",
                 arguments: [:]
             )
             return try HypervibeResponseMapper.decodeConnectionCatalog(data)
@@ -248,14 +249,14 @@ public actor HypervibeMCPClient {
         project: CompanionProject,
         targets: [HostingVariableTarget]
     ) async throws -> HostingVariableInventory {
-        try await withSession(project: project, requiredTools: ["hv_secrets_get"]) { client in
+        try await withSession(project: project, requiredTools: ["hv_secrets"]) { client in
             var catalogs: [HostingVariableTarget: HostingVariableCatalog] = [:]
             var failures: [HostingVariableTarget: String] = [:]
             for target in targets {
                 do {
                     let data = try await self.call(
                         client: client,
-                        tool: "hv_secrets_get",
+                        tool: "hv_secrets",
                         arguments: [
                             "project": .string(project.displayName),
                             "env": .string(target.environment),
@@ -271,28 +272,14 @@ public actor HypervibeMCPClient {
         }
     }
 
-    public func setHostingVariable(
-        project: CompanionProject,
-        request: HostingVariableRequest
-    ) async throws -> HostingVariableMutationResult {
-        try await withSession(project: project, requiredTools: ["hv_secrets_set"]) { client in
-            let data = try await self.call(
-                client: client,
-                tool: "hv_secrets_set",
-                arguments: request.toolArguments(projectName: project.displayName)
-            )
-            return try HypervibeResponseMapper.decodeHostingVariableMutation(data)
-        }
-    }
-
     private func connectionMutation(
         project: CompanionProject,
         arguments: [String: Value]
     ) async throws -> ConnectionMutationResult {
-        try await withSession(project: project, requiredTools: ["hv_connect"]) { client in
+        try await withSession(project: project, requiredTools: ["hv_connections"]) { client in
             let data = try await self.call(
                 client: client,
-                tool: "hv_connect",
+                tool: "hv_connections",
                 arguments: arguments
             )
             return try HypervibeResponseMapper.decodeConnectionMutation(data)
@@ -390,17 +377,11 @@ public actor HypervibeMCPClient {
             _ = try await client.connect(transport: transport)
             let (tools, _) = try await client.listTools()
             let names = Set(tools.map(\.name))
-            let missing = (["hv_upgrade"] + requiredTools).filter { !names.contains($0) }
+            let missing = requiredTools.filter { !names.contains($0) }
             if !missing.isEmpty {
                 throw HypervibeClientError.incompatibleTools(missing)
             }
 
-            let upgradeData = try await call(
-                client: client,
-                tool: "hv_upgrade",
-                arguments: ["action": "status"]
-            )
-            try HypervibeResponseMapper.decodeUpgradeStatus(upgradeData)
             let result = try await operation(client)
             await stop(client: client, process: process, input: serverInput, output: serverOutput)
             return result

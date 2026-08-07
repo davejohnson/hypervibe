@@ -1,9 +1,9 @@
 import { createHash } from 'crypto';
+import { z } from 'zod';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { PlanAction } from './plan.types.js';
-import type { DelegatedSecretInputRequirement } from '../services/delegated-secret.service.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -12,36 +12,48 @@ import type { DelegatedSecretInputRequirement } from '../services/delegated-secr
  * applying against a world that has moved.
  */
 
-/** Document stored in runs.plan for type 'plan' runs. */
-export interface PlanRunDocument {
-  kind: 'hv_plan';
-  environmentName: string;
-  specRevision: number;
-  /** Fingerprint of observed state at plan time; null when provider is unobservable. */
-  observedFingerprint: string | null;
-  /** Hash-only fingerprints for additional live integrations observed by the plan. */
-  integrationFingerprints?: Record<string, string>;
-  actions: PlanAction[];
-  unmanaged?: Array<{ kind: string; name: string; detail?: string }>;
-  warnings?: string[];
-  /** A plan with unresolved delegated inputs is inspectable but not executable. */
-  inputRequired?: DelegatedSecretInputRequirement[];
-  /**
-   * One-off deploy overrides frozen into the plan (hv_plan services=/envVars=,
-   * used by hv_deploy). envVar values are SecretStore-encrypted because
-   * hv_runs returns this document verbatim; only the keys are readable.
-   */
-  overrides?: {
-    services?: string[];
-    envFilePath?: string;
-    envFileKeys?: string[];
-    envFileVarsEncrypted?: string;
-    envVarKeys?: string[];
-    envVarsEncrypted?: string;
-    delegatedSecretKeys?: string[];
-    delegatedSecretVarsEncrypted?: string;
-  };
-}
+const planActionSchema: z.ZodType<PlanAction> = z.object({
+  id: z.string().min(1),
+  type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
+  resource: z.object({
+    kind: z.enum(['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'domain', 'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment']),
+    name: z.string().min(1),
+    provider: z.string().min(1),
+  }),
+  verified: z.boolean(),
+  reason: z.string(),
+  diff: z.array(z.object({ field: z.string().min(1), from: z.string().optional(), to: z.string().optional() })).optional(),
+  dataBearing: z.boolean().optional(),
+  billable: z.boolean().optional(),
+  requiresConfirm: z.boolean().optional(),
+  dependsOn: z.array(z.string().min(1)).optional(),
+  metadata: z.record(z.unknown()).optional(),
+}).passthrough();
+
+/** Runtime-validated document stored in runs.plan for type 'plan' runs. */
+export const planRunDocumentSchema = z.object({
+  kind: z.literal('hv_plan'),
+  environmentName: z.string().min(1),
+  specRevision: z.number().int().nonnegative(),
+  observedFingerprint: z.string().nullable(),
+  integrationFingerprints: z.record(z.string()).optional(),
+  actions: z.array(planActionSchema),
+  unmanaged: z.array(z.object({ kind: z.string(), name: z.string(), detail: z.string().optional() })).optional(),
+  warnings: z.array(z.string()).optional(),
+  inputRequired: z.array(z.object({ key: z.string(), principal: z.string(), reason: z.string() })).optional(),
+  overrides: z.object({
+    services: z.array(z.string()).optional(),
+    envFilePath: z.string().optional(),
+    envFileKeys: z.array(z.string()).optional(),
+    envFileVarsEncrypted: z.string().optional(),
+    envVarKeys: z.array(z.string()).optional(),
+    envVarsEncrypted: z.string().optional(),
+    delegatedSecretKeys: z.array(z.string()).optional(),
+    delegatedSecretVarsEncrypted: z.string().optional(),
+  }).passthrough().optional(),
+}).passthrough();
+
+export type PlanRunDocument = z.infer<typeof planRunDocumentSchema>;
 
 export interface ActionResult {
   success: boolean;
@@ -57,8 +69,6 @@ export interface ConvergeParams {
   planRunId: string;
   /** Action ids (requiresConfirm) the caller explicitly confirmed. */
   confirmActions?: string[];
-  /** Legacy alias for confirm-gated destroys; kept for backwards compatibility. */
-  confirmDestroy?: string[];
   /** Latest spec revision for the project (from SpecStore). */
   currentSpecRevision: number;
   /**
@@ -196,11 +206,11 @@ export class ConvergeExecutor {
   loadPlan(planRunId: string): { run: Run; document: PlanRunDocument } | { error: string } {
     const run = this.runRepo.findById(planRunId);
     if (!run) return { error: `Plan ${planRunId} not found. Run hv_plan first.` };
-    const document = run.plan as unknown as PlanRunDocument;
-    if (document?.kind !== 'hv_plan' || !Array.isArray(document.actions)) {
-      return { error: `Run ${planRunId} is not an hv_plan run.` };
+    const parsed = planRunDocumentSchema.safeParse(run.plan);
+    if (run.type !== 'plan' || !parsed.success) {
+      return { error: `Run ${planRunId} is not a valid persisted hv_plan. Re-run hv_plan.` };
     }
-    return { run, document };
+    return { run, document: parsed.data };
   }
 
   async execute(params: ConvergeParams): Promise<ConvergeResult> {
@@ -249,7 +259,7 @@ export class ConvergeExecutor {
       }
     }
 
-    const confirmed = new Set([...(params.confirmActions ?? []), ...(params.confirmDestroy ?? [])]);
+    const confirmed = new Set(params.confirmActions ?? []);
     let ordered: PlanAction[];
     try {
       ordered = orderActions(document.actions);

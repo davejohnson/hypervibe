@@ -139,7 +139,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
               'Cloud SQL Admin API probe failed with 403.',
               `Grant roles/cloudsql.viewer and roles/cloudsql.client to serviceAccount:${this.serviceAccountCreds.client_email} on project ${projectId};`,
               'also grant roles/cloudsql.admin if Hypervibe should provision or delete databases,',
-              'and make sure the sqladmin.googleapis.com API is enabled (hv_connect provider="cloudrun" action="prepare" enables it).',
+              'and make sure the sqladmin.googleapis.com API is enabled (hv_connections provider="cloudrun" action="prepare" enables it).',
               `Original error: ${text}`,
             ].join(' '),
           };

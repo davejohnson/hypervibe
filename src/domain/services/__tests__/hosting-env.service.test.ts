@@ -1,10 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseToolEnvelope } from '../../../tools/__tests__/tool-result.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { createMcpCommandRegistrar } from '../../../interfaces/mcp/adapter.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -19,8 +13,6 @@ import { assessSendGridScopes } from '../../../adapters/providers/sendgrid/sendg
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
 import type { IHostingAdapter } from '../../../domain/ports/hosting.port.js';
-import { createToolContext } from '../../../tools/context.js';
-import { registerHvEmailTools } from '../../../tools/hv-email.tools.js';
 import { getSendGridAdapter, sendGridSetupReady, sendGridPermissionPayload } from '../sendgrid-ops.service.js';
 import { getProjectScopeHints } from '../project-scope.js';
 import {
@@ -28,22 +20,6 @@ import {
   removeHostingEnvVars,
   syncHostingEnvVars,
 } from '../hosting-env.service.js';
-
-type JsonObj = Record<string, unknown>;
-
-async function callTool(client: Client, name: string, args: Record<string, unknown> = {}): Promise<JsonObj> {
-  const result = await client.request(
-    {
-      method: 'tools/call',
-      params: {
-        name,
-        arguments: args,
-      },
-    },
-    CallToolResultSchema
-  );
-  return parseToolEnvelope(result) as unknown as JsonObj;
-}
 
 describe('hosting env var tools', () => {
   let tempDir: string;
@@ -312,57 +288,6 @@ describe('hosting env var tools', () => {
     expect(payload.canAuthorizeSenderEmail).toBe(true);
     expect(payload.canManageSenderVerification).toBe(true);
     expect(payload.canManageDomainAuthentication).toBe(false);
-  });
-
-  it('hv_email_setup sender-verify defaults nickname and reply-to to the sender email', async () => {
-    await setupCloudRunProject();
-    stubCloudRunHostingAdapter();
-    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-      if (url === 'https://api.sendgrid.com/v3/scopes') {
-        return new Response(JSON.stringify({ scopes: ['user.email.read', 'user.email.create', 'user.email.update'] }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        });
-      }
-      if (url === 'https://api.sendgrid.com/v3/verified_senders' && init?.method === 'POST') {
-        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-        expect(body).toEqual({
-          nickname: 'sender@example.com',
-          from_email: 'sender@example.com',
-          reply_to: 'sender@example.com',
-        });
-        return new Response(JSON.stringify({
-          id: 42,
-          nickname: 'sender@example.com',
-          from_email: 'sender@example.com',
-          reply_to: 'sender@example.com',
-          verified: false,
-        }), {
-          status: 201,
-          headers: { 'content-type': 'application/json' },
-        });
-      }
-      throw new Error(`Unexpected SendGrid request: ${url}`);
-    }));
-
-    const server = new McpServer({ name: 'hv-email-test', version: '1.0.0' });
-    registerHvEmailTools(createMcpCommandRegistrar(server), createToolContext());
-    const client = new Client({ name: 'sendgrid-sender-client', version: '1.0.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-
-    const payload = await callTool(client, 'hv_email_setup', {
-      project: 'cloudrun-integrations',
-      action: 'sender-verify',
-      fromEmail: 'sender@example.com',
-    });
-
-    expect(payload.ok).toBe(true);
-    expect((payload.data as JsonObj).sender).toMatchObject({ id: 42 });
-    expect(String(payload.hint)).toContain('verification email');
-
-    await Promise.all([client.close(), server.close()]);
   });
 
   it('syncHostingEnvVars writes vars through the Cloud Run hosting adapter', async () => {

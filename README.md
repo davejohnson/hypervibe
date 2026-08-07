@@ -25,7 +25,8 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 - **Cloudflare** - DNS management, domain configuration
 - **Stripe** - Payment integration, webhooks, products
 - **SendGrid** - Email authentication, domain verification
-- **reCAPTCHA** - Bot protection setup
+- **Twilio** - Messaging Services, webhook callbacks, existing-number attachment
+- **reCAPTCHA convention** - Value-free site/secret key slots in every repo-backed project's `.env.example`
 
 **Secret Managers**
 - **HashiCorp Vault** - KV secrets with versioning
@@ -84,7 +85,7 @@ hypervibe --help
 The core desired-state workflow is:
 
 ```bash
-hypervibe spec set --file .hypervibe/spec.json
+hypervibe spec --file .hypervibe/spec.json
 hypervibe plan --env staging
 hypervibe apply --plan-id <plan-id>
 hypervibe status --env staging
@@ -147,18 +148,15 @@ You: "Add a custom domain api.myapp.com"
 You: "Run database migrations"
 ```
 
-### 6. Manage Secrets (Optional)
+### 6. Supply Secrets (Optional)
 
-Connect a secret manager and let hypervibe inject secrets at deploy time:
+Declare delegated secret slots in the spec, then supply local or secret-manager
+references when planning:
 
 ```
 You: "Connect to Vault at https://vault.mycompany.com"
-You: "Map DATABASE_URL to vault://secret/data/myapp/db#url"
-You: "Deploy to production"
-Claude: Resolves secrets from Vault, injects into Railway, deploys.
-
-You: "Rotate the database secret and sync everywhere"
-Claude: Rotates in Vault, updates all mapped environments.
+You: "Plan production with DATABASE_URL from vault://secret/myapp/db#url"
+Claude: Resolves the value locally, encrypts it into the reviewed plan, and injects it only during hv_apply.
 ```
 
 Secret references use the format: `provider://path[#key][@version]`
@@ -184,12 +182,12 @@ Secret references use the format: `provider://path[#key][@version]`
 
 Hypervibe exposes the same focused operations as canonical `hv_*` MCP tools and friendly CLI commands. The core is a Terraform-style loop:
 
-1. `hv_spec_set` — declare the desired state (services, database, cache, storage, load balancer, domain, email, env vars) as a revisioned spec
+1. `hv_spec` — declare the desired state (services, database, cache, storage, load balancer, domain, email, messaging, env vars) as a revisioned spec
 2. `hv_plan` — observe live infrastructure, diff against the spec, and get an executable plan
 3. `hv_apply planId=...` — converge. Stale plans are rejected; destroying data-bearing resources requires explicit confirmation
 4. `hv_status` — see drift between desired and observed state at any time
 
-Around that core: connections (`hv_connect`), deploy/rollback, logs/errors/health, bounded database diagnostics, secrets, domains/DNS, email, payments, CI, App Store/TestFlight, and local dev tools.
+Around that core: connections (`hv_connections`), deploy/rollback, logs/errors/health, bounded database diagnostics, secrets, domains/DNS, email, payments, CI, App Store/TestFlight, and local dev tools.
 
 - Full generated MCP/CLI catalog: `docs/TOOLS.md`
 - Regenerate after tool changes: `npm run build && npm run docs:tools`
@@ -231,15 +229,161 @@ declared alias is attached to its target service. `inSync` describes
 configuration convergence; `runtimeHealth` remains unverified until HTTP
 health or worker log/error evidence is checked.
 
+### Declarative SendGrid email
+
+Email sender identity, inbound parsing, delivery events, and mailbox forwarding
+belong in the environment spec. One environment may declare one default sender,
+one SendGrid Inbound Parse route, and the account-level delivery-event webhook:
+
+```json
+{
+  "domain": "example.com",
+  "services": {
+    "api": { "workloadKind": "web", "public": true }
+  },
+  "email": {
+    "enabled": true,
+    "sender": {
+      "address": "hello@example.com",
+      "name": "Example",
+      "replyTo": "support@example.com"
+    },
+    "inbound": {
+      "hostname": "inbound.example.com",
+      "service": "api",
+      "path": "/webhooks/sendgrid/inbound",
+      "aliases": ["support", "replies"],
+      "spamCheck": true,
+      "sendRaw": false
+    },
+    "deliveryEvents": {
+      "service": "api",
+      "path": "/webhooks/sendgrid/events",
+      "events": ["processed", "delivered", "bounce", "dropped"]
+    },
+    "forwarding": {
+      "aliases": {
+        "support": "owner@example.net",
+        "billing": "owner@example.net"
+      },
+      "catchAll": { "action": "drop" }
+    }
+  }
+}
+```
+
+`hv_plan` separates runtime-key projection, SendGrid sender/domain
+authorization, Cloudflare DNS, inbound-parse creation, delivery events,
+forwarding destination verification, aliases, catch-all routing, and domain
+validation into reviewable actions. `hv_apply` installs `SENDGRID_API_KEY` plus the
+declared sender defaults on each service; the inbound target also receives
+`SENDGRID_INBOUND_HOSTNAME` and a JSON `SENDGRID_INBOUND_ALIASES` value.
+
+SendGrid routes inbound parsing by hostname, not local-part alias. The target
+service reads the recipient from the parsed request and dispatches aliases such
+as `support@inbound.example.com` itself. Domain authentication authorizes sender
+addresses under `domain`; without a domain, a declared sender uses SendGrid's
+single-sender verification flow and apply remains pending until its verification
+email is accepted. Cloudflare destination creation returns pending until the
+destination mailbox accepts its verification email; forwarding rules run only
+afterward. Because SendGrid exposes one delivery-event webhook per account, the
+project spec may declare `deliveryEvents` in only one environment.
+
+### Declarative Twilio messaging
+
+Twilio support deliberately covers the shared setup most applications need: a
+Messaging Service, optional inbound-message and delivery-status callbacks, the
+runtime credentials, and optional attachment of an existing phone number.
+
+Collect these values from the same Twilio account or subaccount:
+
+| Hypervibe field | Twilio value | Where to find it |
+| --- | --- | --- |
+| `accountSid` | `AC...` Account SID | [Console Dashboard](https://console.twilio.com/) -> Account Info |
+| `apiKeySid` | `SK...` Restricted API Key SID | [Settings -> Account settings -> API keys & auth tokens](https://console.twilio.com/us1/account/keys-credentials/api-keys) |
+| `apiKeySecret` | API Key Secret | Shown once when that key is created; copy it immediately |
+| `authToken` | Primary Account Auth Token | Console Dashboard -> Account Info -> Show, or the Auth Tokens section of API keys & auth tokens |
+| `messaging.sender.phoneNumberSid` | Optional existing `PN...` Phone Number SID | [Numbers & Senders -> Phone Numbers](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming); open the SMS-capable number and copy its SID, not its `+...` phone number |
+
+Do not look for an `MG...` SID before setup. The spec declares a friendly
+`service.name`; Hypervibe creates or explicitly adopts that Messaging Service,
+records its `MG...` SID, and projects `TWILIO_MESSAGING_SERVICE_SID` during
+apply.
+
+```json
+{
+  "services": {
+    "api": { "workloadKind": "web", "public": true }
+  },
+  "messaging": {
+    "provider": "twilio",
+    "services": ["api"],
+    "service": {
+      "name": "example-production",
+      "inbound": {
+        "service": "api",
+        "path": "/webhooks/twilio/messages"
+      },
+      "deliveryStatus": {
+        "service": "api",
+        "path": "/webhooks/twilio/status"
+      }
+    },
+    "sender": {
+      "phoneNumberSid": "PN0123456789abcdef0123456789abcdef"
+    }
+  }
+}
+```
+
+Create a Restricted API key with these exact Twilio permissions:
+
+```text
+twilio/messaging/services/list
+twilio/messaging/services/read
+twilio/messaging/services/create
+twilio/messaging/services/update
+twilio/messaging/services.phonenumbers/list
+twilio/messaging/services.phonenumbers/create
+twilio/messaging/services.phonenumbers/delete
+twilio/messaging/messages/create
+```
+
+Keep the four connection values in a local, gitignored env file:
+
+```dotenv
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_API_KEY_SID=SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_API_KEY_SECRET=replace-with-the-one-time-secret
+TWILIO_AUTH_TOKEN=replace-with-the-primary-auth-token
+```
+
+Connect that file by reference:
+
+```text
+hv_connections provider="twilio" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"accountSid":"TWILIO_ACCOUNT_SID","apiKeySid":"TWILIO_API_KEY_SID","apiKeySecret":"TWILIO_API_KEY_SECRET","authToken":"TWILIO_AUTH_TOKEN"}
+```
+
+`hv_plan` reviews Messaging Service creation/adoption, sender attachment, and
+runtime projection separately. `hv_apply` derives webhook URLs from the target
+service's public binding and projects the Twilio values only to
+`messaging.services`. Moving a number from another sender pool requires exact
+action confirmation. Hypervibe does not buy numbers or manage Voice, Verify,
+WhatsApp, A2P registration, campaigns, or application message sending.
+Complete any A2P 10DLC, toll-free verification, or other regulatory setup in
+Twilio before production sending. The primary Auth Token is still required even
+when API calls use a restricted key because Twilio uses the account token to
+sign inbound and delivery-status webhooks.
+
 ## Team-Shared Desired State
 
-Hypervibe treats infrastructure as a repo-backed definition, not as one user's private local state. When run from a git worktree, `hv_spec_set` writes the desired infrastructure shape to:
+Hypervibe treats infrastructure as a repo-backed definition, not as one user's private local state. When run from a git worktree, `hv_spec` writes the desired infrastructure shape to:
 
 ```text
 .hypervibe/spec.json
 ```
 
-Commit that file with the app. It is the shared source of truth for environments, services, cron jobs, databases, caches, delegated secret ownership, domains, email, env vars, deploy strategy, and migrations. When a teammate clones the repo and runs `hv_spec_get`, `hv_plan`, or `hv_status`, Hypervibe reads this file, creates a local project cache if needed, and reports any missing provider connections before apply. The local `project_specs` table is a revision journal behind this file: if `spec.json` is edited outside Hypervibe (or pulled with new changes), the next read adopts it as a new revision and says so in a warning.
+Commit that file with the app. It is the shared source of truth for environments, services, cron jobs, databases, caches, delegated secret ownership, domains, email, messaging, env vars, deploy strategy, and migrations. When a teammate clones the repo and runs `hv_spec`, `hv_plan`, or `hv_status`, Hypervibe reads this file, creates a local project cache if needed, and reports any missing provider connections before apply. The local `project_specs` table is a revision journal behind this file: if `spec.json` is edited outside Hypervibe (or pulled with new changes), the next read adopts it as a new revision and says so in a warning.
 
 Hypervibe also maintains non-secret provider identity bindings in:
 
@@ -265,9 +409,12 @@ infrastructure owner. It should not assume that every coder belongs in the
 Railway, GCP, or other provider project. This stays local and repo-backed; it
 does not require a new Hypervibe web service or shared drift database.
 
-### Delegated runtime secrets
+### Delegated secrets
 
-Use a delegated secret slot when a collaborator, customer, or app owner should supply and rotate a runtime credential without giving it to the repository owner. The spec records the environment-variable name, responsible principal, and target environments, but never the value:
+Use a delegated secret slot when a collaborator, customer, or app owner should
+supply and rotate a runtime or GitHub Actions credential without giving it to
+the repository owner. The spec records the name, responsible principal, and
+provider destinations, but never the value:
 
 ```json
 {
@@ -276,6 +423,7 @@ Use a delegated secret slot when a collaborator, customer, or app owner should s
       "ownership": "delegated",
       "principal": "github:alice",
       "environments": ["production"],
+      "githubActions": { "repository": true },
       "required": true,
       "driftPolicy": "preserve"
     }
@@ -310,7 +458,7 @@ selects **No workspace**, and uses only the access granted to her Railway
 account:
 
 ```text
-hv_connect provider="railway" credentialsRef="dotenv:/Users/alice/.config/hypervibe/railway.env#HYPERVIBE_RAILWAY_TOKEN"
+hv_connections provider="railway" credentialsRef="dotenv:/Users/alice/.config/hypervibe/railway.env#HYPERVIBE_RAILWAY_TOKEN"
 ```
 
 Then she creates and applies a plan without sending either token through chat:
@@ -327,6 +475,8 @@ If a machine or local Hypervibe database is lost, recloning the committed `.hype
 ### Deploy env from `.env`
 
 When `.env.<environment>` or repo `.env` exists, `hv_plan` considers it as a local deploy input. Environment-specific files such as `.env.production` and `.env.staging` win over `.env`. Hypervibe does **not** blindly publish every key. The default policy is `envFile.mode: "runtime"`: Hypervibe syncs high-confidence app runtime keys such as `SENDGRID_API_KEY`, `SESSION_SECRET`, `*_URL`, `*_TOKEN`, `*_SECRET`, `APP_*`, `VITE_*`, and similar names; it skips provider/control-plane credentials such as `RAILWAY_API_TOKEN`, `GITHUB_TOKEN`, and `CLOUDFLARE_API_TOKEN`; it skips local-looking runtime values such as `localhost`, `127.0.0.1`, `0.0.0.0`, `host.docker.internal`, `.local`, and `.internal`; and it reports ignored key names in the plan.
+
+Every repo-backed spec write also creates or non-destructively extends `.env.example` with `RECAPTCHA_SITE_KEY=` and `RECAPTCHA_SECRET_KEY=`. Hypervibe does not connect to reCAPTCHA or validate/store those values. Put the real environment-specific values in `.env.staging`, `.env.production`, or another selected env file; `hv_plan` encrypts them into the persisted plan and `hv_apply` performs the hosting sync. The site key is public, while the secret key must remain server-side.
 
 Tune this per environment in `.hypervibe/spec.json`:
 
@@ -351,13 +501,13 @@ environment and Stripe; it defaults to the Hypervibe environment name.
 For an existing Stripe dotenv file:
 
 ```text
-hv_connect provider="stripe" scope="staging" credentialsRef="dotenv:/absolute/path/.env.stripe-sync.staging" credentialsMap={"secretKey":"STRIPE_SECRET_KEY"}
+hv_connections provider="stripe" scope="staging" credentialsRef="dotenv:/absolute/path/.env.stripe-sync.staging" credentialsMap={"secretKey":"STRIPE_SECRET_KEY"}
 ```
 
 If the file also contains a publishable key:
 
 ```text
-hv_connect provider="stripe" scope="staging" credentialsRef="dotenv:/absolute/path/.env.stripe-sync.staging" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}
+hv_connections provider="stripe" scope="staging" credentialsRef="dotenv:/absolute/path/.env.stripe-sync.staging" credentialsMap={"secretKey":"STRIPE_SECRET_KEY","publishableKey":"STRIPE_PUBLISHABLE_KEY"}
 ```
 
 Repeat with `scope="development"` for a development sandbox and
@@ -650,10 +800,22 @@ cloudsql.users.update
 `roles/cloudsql.admin` also works but is broader than the drill needs.
 Cloud SQL Admin API must be enabled. The connector still needs a network path;
 this V1 workflow targets Hypervibe-provisioned Cloud SQL instances with public
-IP connectivity. Put the JSON key into GitHub without pasting it into chat:
+IP connectivity. Declare a value-free GitHub Actions destination in
+`spec.secrets`, then supply the local file only to the plan:
+
+```json
+{
+  "secrets": {
+    "HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS": {
+      "principal": "github:infrastructure-owner",
+      "githubActions": { "repository": true }
+    }
+  }
+}
+```
 
 ```text
-hv_secrets_set project="example" target="github" repo="owner/example" key="HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS" secretRef="file:/absolute/path/cloudsql-drill-service-account.json"
+hv_plan project="example" env="production" secretRefs={"HYPERVIBE_CLOUDSQL_DRILL_CREDENTIALS":"file:/absolute/path/cloudsql-drill-service-account.json"}
 ```
 
 `hv_plan` blocks while the secret name cannot be observed. Once present, the
@@ -723,7 +885,7 @@ Typical team flow:
 2. Hypervibe updates `.hypervibe/spec.json` and, after apply, `.hypervibe/bindings.json`.
 3. They commit those files.
 4. Teammates pull, run `hv_plan`, and see the same desired shape and provider bindings.
-5. Each teammate connects their own provider credentials locally with `hv_connect` when needed.
+5. Each teammate connects their own provider credentials locally with `hv_connections` when needed.
 
 ## Provider Credentials
 
@@ -747,7 +909,7 @@ Permissions:
 - Zone -> DNS -> Edit
 - Load Balancers Read and Load Balancers Write on the target zone (for `loadBalancer`)
 - Load Balancing: Monitors and Pools Read and Write on the owning account (for `loadBalancer`)
-- Zone -> Email Routing Rules -> Edit (for hv_email_setup/hv_email_forwarding)
+- Zone -> Email Routing Rules -> Edit (for `email.forwarding`)
 - Account -> Email Routing Addresses -> Edit (to create/verify forwarding destinations)
 - Account -> Account Settings -> Read (lets Hypervibe auto-resolve accountId)
 
@@ -760,7 +922,7 @@ Use the generated token secret itself as `CLOUDFLARE_API_TOKEN`; do not use the 
 Connect without pasting the token into chat. If the values are in an existing `.env` file, reference the keys directly instead of copying them to a temporary file:
 
 ```text
-hv_connect provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}
+hv_connections provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}
 ```
 
 Hypervibe accepts either a raw token or a copied authorization value such as `Bearer <token>` for Cloudflare.
@@ -773,17 +935,18 @@ https://dash.cloudflare.com/profile/api-tokens
 ```
 
 ```text
-hv_connect provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"
+hv_connections provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env#CLOUDFLARE_API_TOKEN"
 ```
 
-If the token is valid but Hypervibe cannot confirm zone access during `hv_connect`, the connection is still saved and verified with a warning; `hv_plan`/`hv_apply` will surface any remaining DNS or registrar-specific blockers.
+If the token is valid but Hypervibe cannot confirm zone access during `hv_connections`, the connection is still saved and verified with a warning; `hv_plan`/`hv_apply` will surface any remaining DNS or registrar-specific blockers.
 
 ### GitHub token permissions
 
 For the current desired-state GitHub model—including generic checks, autofix,
-pull-request review, code audit, dependency/security controls, exact token
-permissions, beginner-safe connection examples, and the infrastructure PR
-flow—see [GitHub infrastructure for beginners](docs/github-infrastructure.md).
+pull-request review, code audit, dependency/security controls, declarative
+GitHub Pages with custom-domain DNS, exact token permissions, and the
+infrastructure PR flow—see
+[GitHub infrastructure for beginners](docs/github-infrastructure.md).
 
 Recommended for a one-token setup: create a classic PAT with `repo`,
 `workflow`, and `read:packages`, then export it under npm's required variable
@@ -793,7 +956,7 @@ name:
 export NODE_AUTH_TOKEN=ghp_...
 ```
 
-Then call `hv_connect provider=github credentialsRef="env:NODE_AUTH_TOKEN"`.
+Then call `hv_connections provider=github credentialsRef="env:NODE_AUTH_TOKEN"`.
 For existing `.env` files, use
 `credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN"`. For JSON
 credentials, save the JSON to a local file and use
@@ -828,7 +991,7 @@ NODE_AUTH_TOKEN=ghp_...
 Connect it like this:
 
 ```text
-hv_connect provider=github scope="owner/repo" credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN"
+hv_connections provider=github scope="owner/repo" credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN"
 ```
 
 For least privilege, use two classic PATs:
@@ -841,7 +1004,7 @@ HYPERVIBE_GITHUB_PACKAGES_TOKEN=ghp_...    # scopes: read:packages
 Then connect:
 
 ```text
-hv_connect provider=github scope="owner/repo" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}
+hv_connections provider=github scope="owner/repo" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}
 ```
 
 A token with only `read:packages` is **not** enough for Hypervibe CI deploy setup. It can be used as `packageReadToken`, but the `apiToken` still needs `repo` + `workflow` for classic PATs so Hypervibe can manage workflows and repository secrets.
@@ -852,7 +1015,7 @@ What hypervibe uses the GitHub token for, and the permission each operation need
 |---|---|---|
 | Propose managed CI/config files through the Hypervibe infrastructure PR | `repo` (+ `workflow` for files under `.github/workflows/`) | Contents: read/write, Pull requests: read/write, Workflows: read/write |
 | List/trigger Actions workflows, read runs/jobs/logs (`hv_ci_status`, `hv_ci_trigger`) | `repo` | Actions: read/write |
-| Set/delete Actions repo secrets (`hv_secrets_set target="github"`) | `repo` | Secrets: read/write |
+| Reconcile declared Actions secrets (`spec.secrets.*.githubActions`) | `repo` | Secrets: read/write |
 | Branch protection (`github.collaboration.pullRequests`) | `repo` + repo admin | Administration: read/write |
 | Generated push deploys (`deploy.trigger: "ci"`) | `repo` + `workflow`; add Secrets read/write if Hypervibe should sync provider API tokens | Contents: read/write, Actions: read/write, Secrets: read/write, Environments: read/write |
 | Manage the Railway GitHub App's repository access for `deploy.trigger: "native"` selected-repos installs | `repo` + repo admin — **classic PAT only**; GitHub's app-installation APIs do not accept fine-grained PATs | not supported |
@@ -877,7 +1040,7 @@ Typical setup:
 
 - Define the environment with `deploy: { strategy: "branch", branch: "main" }` or an explicit `trigger: "ci"`.
 - Run `hv_apply` first so Hypervibe records provider project, environment, and service ID bindings.
-- Declare `deploy.strategy="branch"` and `deploy.trigger="ci"` with `hv_spec_set`, then run `hv_plan` and `hv_apply`.
+- Declare `deploy.strategy="branch"` and `deploy.trigger="ci"` with `hv_spec`, then run `hv_plan` and `hv_apply`.
 - Check the returned `requiredSecrets`, `syncedSecrets`, `manualSecrets`, and `requiredVariables`. Hypervibe syncs provider API credentials to GitHub Actions secrets when the provider connection is verified and the GitHub token can write repo secrets.
 
 Provider workflow behavior:
@@ -951,10 +1114,11 @@ For Railway GHCR deploys, the generated workflow grants `packages: write` and us
 
 When Hypervibe syncs GitHub Actions secrets, it records only secret names plus local one-way value hashes. If the local provider token changes later, `hv_plan` will report the CI deploy action as needing an update and `hv_apply` will resync the GitHub secret value. Raw secret values are never written to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, or tool output.
 
-To repair a stale GitHub Actions secret without pasting the token into chat, point `hv_secrets_set` at the local source of truth:
+To repair a stale declared GitHub Actions secret without pasting the token into
+chat, re-plan from the local source of truth:
 
 ```text
-hv_secrets_set project="apreskeys.com" target="github" repo="davejohnson/apreskeys.com" key="IMAGE_REGISTRY_TOKEN" secretRef="dotenv:/Users/dave/projects/condoshare/.env#GHCR_TOKEN"
+hv_plan project="apreskeys.com" env="production" secretRefs={"IMAGE_REGISTRY_TOKEN":"dotenv:/Users/dave/projects/condoshare/.env#GHCR_TOKEN"}
 ```
 
 For any Hypervibe-managed GitHub Actions deploy, inspect the workflow and logs through Hypervibe itself. Agents should use `hv_ci_status` instead of `gh`, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls so the verified connection, diagnostics, and audit boundary stay coherent:
@@ -975,7 +1139,15 @@ If the logs contain `docker buildx imagetools inspect ... ghcr.io ... 403 Forbid
 
 ### Secret managers
 
-1Password uses a [service account token](https://developer.1password.com/docs/service-accounts/) — grant it only the vault(s) the project should read. Bitwarden Secrets Manager uses a [machine account access token](https://bitwarden.com/help/access-tokens/) plus the organization id. Both integrations are resolve-only: hypervibe reads values at deploy time and never writes them back or stores them locally.
+Vault, AWS Secrets Manager, Doppler, 1Password, and Bitwarden are resolve-only.
+Hypervibe reads a referenced value while building an authorized plan and never
+writes, deletes, or rotates manager data. 1Password uses a [service account token](https://developer.1password.com/docs/service-accounts/) scoped only to required vaults. Bitwarden Secrets Manager uses a [machine account access token](https://bitwarden.com/help/access-tokens/) plus the organization id.
+
+Runtime values from `.env.<environment>` and `.env` are still synchronized to
+hosting through `hv_plan` and `hv_apply`. The environment-specific file wins,
+selected values are encrypted into the reviewed plan, and no plaintext value is
+returned. The removed secret sync command was the separate imperative path that
+mutated hosting without that authorization boundary.
 
 ## Configuration
 
@@ -1003,13 +1175,11 @@ Normal update flow:
 2. In each app repo, pull the latest `.hypervibe/spec.json` and `.hypervibe/bindings.json`, then run `hv_status` or `hv_plan`.
 3. Commit any intended changes Hypervibe makes to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, generated CI workflows, or other repo files.
 
-`hv_upgrade` is a diagnostic/repair tool, not a required user ritual. Use it when something looks stale or after changing the MCP install command; it reports the running package version, local SQLite schema version, pending migrations, repo spec/bindings status, and connection counts. If it reports pending SQLite migrations, run `hv_upgrade action="migrate"` and restart the MCP server once more.
-
-Provider credentials remain local and encrypted. Database component bindings (connection URLs, passwords) are also encrypted at rest. The encryption key lives in `~/.hypervibe/.secret-key` (0600); back it up — regenerating it makes previously encrypted data unrecoverable. Set `HYPERVIBE_SECRET_KEY` (64 hex chars) to supply the key externally (CI, containers). Teammates may still need to run `hv_connect` for their own Railway, GitHub, Cloudflare, SendGrid, AWS, or GCP access after installing Hypervibe, but ordinary Hypervibe package and SQLite schema upgrades should happen on restart.
+Provider credentials remain local and encrypted. Database component bindings (connection URLs, passwords) are also encrypted at rest. The encryption key lives in `~/.hypervibe/.secret-key` (0600); back it up — regenerating it makes previously encrypted data unrecoverable. Set `HYPERVIBE_SECRET_KEY` (64 hex chars) to supply the key externally (CI, containers). Teammates may still need to run `hv_connections` for their own Railway, GitHub, Cloudflare, SendGrid, AWS, or GCP access after installing Hypervibe, but ordinary Hypervibe package and SQLite schema upgrades should happen on restart.
 
 `workloadKind: "job"` was removed from the service spec — it never had run-to-completion deploy semantics. Specs using it fail validation; choose `worker` (always-on, internal-only on Cloud Run with a minimum of one instance — note Cloud Run workers must still listen on `PORT`) or `cron` (scheduled). Railway's observe cannot distinguish `web` from `worker`, so kind drift is not detected there.
 
-The provider catalog is intentionally focused. DigitalOcean, Azure Container Apps, Vercel, and AWS ECS on Fargate pass mocked lifecycle and managed exact-SHA/image workflow contracts, but remain behind the provider-conformance live promotion gate and are not advertised as supported yet. Heroku, Render, and Fly are deliberately out of scope. Supported database providers remain `supabase`, `cloudsql`, `railway`, and `rds`; Azure PostgreSQL, Neon, and DigitalOcean are conformance targets at various pre-support stages. Stored connections for removed providers can still be deleted with `hv_connect action="remove"`.
+The provider catalog is intentionally focused. DigitalOcean, Azure Container Apps, Vercel, and AWS ECS on Fargate pass mocked lifecycle and managed exact-SHA/image workflow contracts, but remain behind the provider-conformance live promotion gate and are not advertised as supported yet. Heroku, Render, and Fly are deliberately out of scope. Supported database providers remain `supabase`, `cloudsql`, `railway`, and `rds`; Azure PostgreSQL, Neon, and DigitalOcean are conformance targets at various pre-support stages. Stored connections for removed providers can still be deleted with `hv_connections action="remove"`.
 
 Redis is a separate cache lifecycle instead of a database component and wires `REDIS_URL`. Railway, DigitalOcean, Azure Managed Redis, and Amazon ElastiCache have adapter or conformance slices; GCP Memorystore's private-IP lifecycle is implemented, but its Cloud Run full-stack profile remains blocked on declarative VPC egress. PostgreSQL is the only database engine in desired state; MongoDB and MySQL are intentionally outside the core lifecycle.
 

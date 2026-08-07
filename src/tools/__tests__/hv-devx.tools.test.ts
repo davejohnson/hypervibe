@@ -12,10 +12,8 @@ import { ProjectRepository } from '../../adapters/db/repositories/project.reposi
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
-import { tunnelManager } from '../../adapters/providers/tunnel/tunnel.manager.js';
 import { createToolContext } from '../context.js';
 import { registerHvDevxTools } from '../hv-devx.tools.js';
-import { HYPERVIBE_VERSION } from '../../version.js';
 
 let tempDir: string;
 
@@ -61,37 +59,6 @@ async function seedRuns() {
   runRepo.updateStatus(newer.id, 'failed', 'boom');
   return { project, environment, older, newer };
 }
-
-describe('hv_upgrade', () => {
-  it('reports package, storage, schema, repo, and local state status', async () => {
-    new ProjectRepository().create({ name: 'upgrade-app' });
-    const t = await makeClient();
-
-    const status = await t.call('hv_upgrade');
-    expect(status.ok).toBe(true);
-    expect(status.data.hypervibe.version).toBe(HYPERVIBE_VERSION);
-    expect(status.data.storage.databasePath).toContain('test.db');
-    expect(status.data.sqlite.needsMigration).toBe(false);
-    expect(status.data.sqlite.currentVersion).toBe(status.data.sqlite.latestVersion);
-    expect(status.data.localState.projects).toBe(1);
-    expect(status.data.repo).toHaveProperty('spec');
-    expect(status.next).toEqual(['hv_status', 'hv_plan']);
-    await t.close();
-  });
-
-  it('can explicitly migrate a stale local database', async () => {
-    SqliteAdapter.resetInstance();
-    SqliteAdapter.getInstance(path.join(tempDir, 'stale.db'));
-    const t = await makeClient();
-
-    const migrated = await t.call('hv_upgrade', { action: 'migrate' });
-    expect(migrated.ok).toBe(true);
-    expect(migrated.data.sqlite.needsMigration).toBe(false);
-    expect(migrated.data.sqlite.currentVersion).toBe(migrated.data.sqlite.latestVersion);
-    expect(migrated.data.sqlite.appliedNow.length).toBeGreaterThan(0);
-    await t.close();
-  });
-});
 
 describe('hv_runs', () => {
   it('lists seeded runs with the latest run surfaced first', async () => {
@@ -183,79 +150,6 @@ describe('hv_runs', () => {
       resourceId: 'run-1',
       details: { foo: 'bar' },
     });
-    await t.close();
-  });
-});
-
-describe('hv_tunnel', () => {
-  it('dispatches start to the tunnel manager and returns the tunnel info', async () => {
-    const start = vi.spyOn(tunnelManager, 'start').mockResolvedValue({
-      id: 'cloudflared-3000',
-      provider: 'cloudflared',
-      localPort: 3000,
-      publicUrl: 'https://test.trycloudflare.com',
-      status: 'running',
-    });
-    const t = await makeClient();
-
-    const res = await t.call('hv_tunnel', { action: 'start', port: 3000 });
-    expect(res.ok).toBe(true);
-    expect(res.data.tunnel.publicUrl).toBe('https://test.trycloudflare.com');
-    expect(res.hint).toContain('https://test.trycloudflare.com');
-    expect(start).toHaveBeenCalledWith(3000, 'cloudflared', { ngrokAuthToken: undefined });
-
-    const noPort = await t.call('hv_tunnel', { action: 'start' });
-    expect(noPort.ok).toBe(false);
-    expect(noPort.error.code).toBe('VALIDATION');
-    await t.close();
-  });
-
-  it('dispatches stop/status/list, deriving tunnelId from port when omitted', async () => {
-    const stop = vi.spyOn(tunnelManager, 'stop').mockResolvedValue(true);
-    vi.spyOn(tunnelManager, 'getStatus').mockReturnValue(null);
-    vi.spyOn(tunnelManager, 'listTunnels').mockReturnValue([{
-      id: 'cloudflared-4000',
-      provider: 'cloudflared',
-      localPort: 4000,
-      publicUrl: 'https://other.trycloudflare.com',
-      status: 'running',
-    }]);
-    const t = await makeClient();
-
-    const stopped = await t.call('hv_tunnel', { action: 'stop', port: 3000 });
-    expect(stopped.ok).toBe(true);
-    expect(stop).toHaveBeenCalledWith('cloudflared-3000');
-
-    const status = await t.call('hv_tunnel', { action: 'status', tunnelId: 'cloudflared-3000' });
-    expect(status.ok).toBe(false);
-    expect(status.error.code).toBe('NOT_FOUND');
-
-    const list = await t.call('hv_tunnel', { action: 'list' });
-    expect(list.ok).toBe(true);
-    expect(list.data.count).toBe(1);
-    expect(list.data.tunnels[0].id).toBe('cloudflared-4000');
-    await t.close();
-  });
-});
-
-describe('hv_local_bootstrap', () => {
-  it('writes compose.yaml/.env.local and registers components, then lists them', async () => {
-    new ProjectRepository().create({ name: 'devx-local-app' });
-    const t = await makeClient();
-
-    const boot = await t.call('hv_local_bootstrap', {
-      project: 'devx-local-app',
-      outputDir: tempDir,
-      components: ['postgres'],
-    });
-    expect(boot.ok).toBe(true);
-    expect(boot.data.components).toEqual(['postgres']);
-    expect(boot.data.files.compose).toBe(path.join(tempDir, 'compose.yaml'));
-
-    const list = await t.call('hv_local_bootstrap', { action: 'components', project: 'devx-local-app', env: 'local' });
-    expect(list.ok).toBe(true);
-    expect(list.data.environments).toHaveLength(1);
-    expect(list.data.environments[0].components.map((c: { type: string }) => c.type).sort()).toEqual(['postgres']);
     await t.close();
   });
 });

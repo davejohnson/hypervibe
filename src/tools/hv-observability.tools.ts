@@ -6,8 +6,6 @@ import {
   fetchProviderDeployments,
   fetchProviderBuildLogs,
   fetchStripeWebhookStatuses,
-  collectRecentErrors,
-  collectErrorsSummary,
   supportsLogsDeploymentsProvider,
   supportsLogsBuildProvider,
   logsDeploymentsUnsupportedMessage,
@@ -97,33 +95,6 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         deploymentStatus,
         count: logs.length,
         logs,
-      });
-    })
-  );
-
-  commands.register(
-    'hv_errors',
-    'Surface production errors: list recent error log lines or summarize error and deployment health per service.',
-    {
-      project: projectField,
-      env: envField,
-      action: z.enum(['list', 'summary']).optional()
-        .describe('list = recent error log lines; summary = per-service error/deploy health. Default list.'),
-      limit: z.number().int().min(1).max(200).optional().describe('Max errors for list (default 20)'),
-    },
-    wrapCommandHandler(async ({ project: projectRef, env, action = 'list', limit = 20 }) => {
-      const { project, environment, provider } = resolveEnvOrThrow(ctx, projectRef, env);
-      if (action === 'summary') {
-        const summary = await collectErrorsSummary(provider, project, environment);
-        return commandSuccess({ environment: environment.name, provider, ...summary });
-      }
-
-      const { errors, totalFound } = await collectRecentErrors(provider, project, environment, limit);
-      return commandSuccess({
-        environment: environment.name,
-        provider,
-        totalFound,
-        errors,
       });
     })
   );

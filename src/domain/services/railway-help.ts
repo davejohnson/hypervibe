@@ -67,8 +67,8 @@ export function buildRailwayGitHubRepoAccessHelp(repo?: string): RailwayGitHubRe
       requiredScopes: ['repo'],
       adminAccessRequired: true,
       note: 'Only needed if Hypervibe will manage the Railway GitHub App selected-repository scope. Native Railway push autodeploys use the Railway GitHub App, not a Hypervibe GitHub token. Default Hypervibe branch deploys use GitHub Actions/provider APIs. Fine-grained PATs are not sufficient for GitHub App installation repository-scope updates.',
-      connectCommand: 'hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"',
-      verifyCommand: 'hv_connect provider=github action="verify"',
+      connectCommand: 'hv_connections provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"',
+      verifyCommand: 'hv_connections provider=github action="verify"',
     },
   };
 }
@@ -88,9 +88,9 @@ export function buildRailwaySetupHelpInstructions(repo?: string): string {
 
 \`\`\`
 export HYPERVIBE_RAILWAY_TOKEN=<railway_token>
-hv_connect provider=railway credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN"
+hv_connections provider=railway credentialsRef="env:HYPERVIBE_RAILWAY_TOKEN"
 # or:
-hv_connect provider=railway credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_RAILWAY_TOKEN"
+hv_connections provider=railway credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_RAILWAY_TOKEN"
 \`\`\`
 
 ## Railway GitHub App for Native Repo-Linked Deploys
@@ -133,10 +133,10 @@ Native Railway push autodeploys do **not** need a Hypervibe GitHub token. If you
 
 \`\`\`
 export HYPERVIBE_GITHUB_TOKEN=ghp_your_classic_pat_here
-hv_connect provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"
+hv_connections provider=github credentialsRef="env:HYPERVIBE_GITHUB_TOKEN"
 # or:
-hv_connect provider=github credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"
-hv_connect provider=github action="verify"
+hv_connections provider=github credentialsRef="dotenv:/absolute/path/.env#HYPERVIBE_GITHUB_TOKEN"
+hv_connections provider=github action="verify"
 \`\`\`
 
 Why classic? GitHub's app-installation repository-scope APIs require a classic PAT with \`repo\` scope. Fine-grained PATs are not sufficient for that specific operation.

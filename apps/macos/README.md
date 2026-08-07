@@ -17,19 +17,17 @@ The current v0 slice contains:
   in-place **Restart and Update** flow for the matching Mac architecture;
 - first-run onboarding that registers any git repository, connects Claude
   and/or Codex, and hands the user into chat even before a spec exists;
-- desired resource topology and safe public endpoint bindings from
-  `hv_spec_get`;
+- desired resource topology from `hv_spec`;
 - live environment health, drift identity, and service endpoints from
   `hv_status`;
 - public endpoint health from `hv_health`, displayed independently from
   credentialed provider drift;
 - recent plan/apply activity from `hv_runs`;
 - memory-only connected-app summaries and provider form metadata from
-  `hv_connections_list`;
+  `hv_connections`;
 - project-scoped provider add, verify, and remove through the existing
-  `hv_connect` MCP tool;
-- masked runtime-variable inventory plus add and replace for deployable
-  services through `hv_secrets_get` and `hv_secrets_set`;
+  `hv_connections` MCP tool;
+- read-only masked runtime-variable inventory through `hv_secrets`;
 - an app-owned project registry and disposable, strictly typed snapshot cache.
 
 The person installing the app does not need Node.js, npm, or a separate
@@ -39,7 +37,7 @@ run a local HTTP server, or replace the Hypervibe MCP with a second server.
 Connected-app summaries include only provider, scope, status, and verification
 time. They are held in memory for the current app session and are not written
 to the snapshot cache. Credentials entered in the connection window remain in
-form memory only, are passed once to `hv_connect`, and are cleared when the
+form memory only, are passed once to `hv_connections`, and are cleared when the
 form succeeds or closes. Hypervibe performs validation, verification,
 encryption, storage, and auditing.
 

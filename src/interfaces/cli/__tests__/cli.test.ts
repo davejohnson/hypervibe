@@ -29,7 +29,7 @@ function makeIo(options: { tty?: boolean; confirm?: boolean; stdin?: string } = 
 function makeRegistry(): CommandRegistry {
   const registry = new CommandRegistry();
   registry.register(
-    'hv_spec_get',
+    'hv_spec',
     'Read a project spec.',
     {
       project: z.string().optional().describe('Project name'),
@@ -50,7 +50,7 @@ function makeRegistry(): CommandRegistry {
       : commandError('CONFIRM_REQUIRED', `Delete ${input.project}?`)
   );
   registry.register(
-    'hv_connect',
+    'hv_connections',
     'Store a provider connection.',
     {
       provider: z.string(),
@@ -75,7 +75,7 @@ describe('Hypervibe CLI', () => {
   it('routes friendly nested commands and coerces schema-backed flags', async () => {
     const output = makeIo();
     const exitCode = await runCli(
-      ['spec', 'get', '--project', 'invoice-perfect', '--include-history', '--tags', 'one', '--tags', 'two', '--json'],
+      ['spec', '--project', 'invoice-perfect', '--include-history', '--tags', 'one', '--tags', 'two', '--json'],
       { registry: makeRegistry(), io: output.io, initialize: false }
     );
 
@@ -94,7 +94,7 @@ describe('Hypervibe CLI', () => {
   it('reads complete command input from stdin', async () => {
     const output = makeIo({ stdin: '{"project":"stdin-project","includeHistory":true}' });
     const exitCode = await runCli(
-      ['spec', 'get', '--input', '-', '--json'],
+      ['spec', '--input', '-', '--json'],
       { registry: makeRegistry(), io: output.io, initialize: false }
     );
 
@@ -128,7 +128,7 @@ describe('Hypervibe CLI', () => {
   it('rejects literal secret flags and points to safe input paths', async () => {
     const output = makeIo();
     const exitCode = await runCli(
-      ['connect', '--provider', 'railway', '--credentials', '{"apiToken":"secret"}'],
+      ['connections', '--provider', 'railway', '--credentials', '{"apiToken":"secret"}'],
       { registry: makeRegistry(), io: output.io, initialize: false }
     );
 
@@ -157,11 +157,11 @@ describe('Hypervibe CLI', () => {
       { registry: makeRegistry(), io: root.io, initialize: false }
     );
     expect(rootCode).toBe(0);
-    expect(root.stdout()).toContain('spec get');
+    expect(root.stdout()).toContain('spec');
 
     const command = makeIo();
     const commandCode = await runCli(
-      ['spec', 'get', '--help'],
+      ['spec', '--help'],
       { registry: makeRegistry(), io: command.io, initialize: false }
     );
     expect(commandCode).toBe(0);

@@ -1,5 +1,8 @@
 import { z } from 'zod';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 import type { IDnsProvider, DnsZone, DnsRecord } from '../../../domain/ports/dns.port.js';
 import type {
   ILoadBalancerAdapter,
@@ -1320,6 +1323,72 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
   }
 }
 
+async function inspectCloudflareResources(
+  adapter: CloudflareAdapter,
+  request: ProviderInspectionRequest
+): Promise<Record<string, unknown>> {
+  const resource = request.resource ?? 'zone';
+  if (resource === 'account') {
+    return {
+      observation: 'present',
+      resource,
+      accounts: (await adapter.listAccounts()).slice(0, request.limit),
+    };
+  }
+
+  const zoneName = request.scope?.trim() || (resource === 'zone' ? request.name?.trim() : undefined);
+  if (resource === 'zone' && !request.id && !zoneName) {
+    return {
+      observation: 'present',
+      resource,
+      zones: (await adapter.listZones()).slice(0, request.limit),
+    };
+  }
+  const zone = request.id
+    ? (await adapter.listZones()).find((candidate) => candidate.id === request.id) ?? null
+    : zoneName
+      ? await adapter.findZoneByName(zoneName)
+      : null;
+  if (!zone) {
+    return {
+      observation: 'absent',
+      resource: 'zone',
+      ...(request.id ? { id: request.id } : { name: zoneName }),
+    };
+  }
+  if (resource === 'zone') {
+    return { observation: 'present', resource, zone };
+  }
+  if (resource === 'dns') {
+    const records = await adapter.listDnsRecords(zone.id);
+    const filtered = request.name
+      ? records.filter((record) => record.name.toLowerCase() === request.name!.toLowerCase())
+      : records;
+    return {
+      observation: 'present',
+      resource,
+      zone: { id: zone.id, name: zone.name },
+      records: filtered.slice(0, request.limit),
+    };
+  }
+  if (resource === 'email-routing') {
+    const [settings, dns, rules] = await Promise.all([
+      adapter.getEmailRoutingSettings(zone.id),
+      adapter.getEmailRoutingDnsSettings(zone.id),
+      adapter.listEmailRoutingRules(zone.id),
+    ]);
+    return {
+      observation: 'present',
+      resource,
+      zone: { id: zone.id, name: zone.name },
+      settings,
+      dns,
+      rules: rules.slice(0, request.limit),
+    };
+  }
+  throw new Error(`Unsupported Cloudflare inspection resource "${resource}".`);
+}
+
 // Self-register with provider registry
 providerRegistry.register({
   metadata: {
@@ -1336,5 +1405,9 @@ providerRegistry.register({
     const adapter = new CloudflareAdapter();
     adapter.connect(credentials);
     return adapter;
+  },
+  inspection: {
+    resources: ['zone', 'dns', 'account', 'email-routing'],
+    inspect: (adapter, request) => inspectCloudflareResources(adapter as CloudflareAdapter, request),
   },
 });

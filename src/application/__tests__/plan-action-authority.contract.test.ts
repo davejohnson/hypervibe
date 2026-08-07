@@ -8,6 +8,11 @@ import {
   GITHUB_OPENAI_SECRET_ACTION_ID,
   OPENAI_ACTIONS_SECRET,
 } from '../../domain/services/github-infrastructure.service.js';
+import {
+  GITHUB_PAGES_ACTION_ID,
+  GITHUB_PAGES_DNS_OPERATION,
+  GITHUB_PAGES_OPERATION,
+} from '../../domain/services/github-pages.service.js';
 import { IOS_OPERATIONS } from '../../domain/services/appstore-plan.service.js';
 import { QUEUE_OPERATIONS } from '../../domain/services/queue-plan.service.js';
 import { STORAGE_OPERATIONS } from '../../domain/services/storage-plan.service.js';
@@ -26,6 +31,7 @@ import { CACHE_OPERATIONS } from '../../domain/services/cache-plan.service.js';
 import { GITHUB_ACTIONS_ROLLBACK_OPERATION } from '../../domain/services/ci-rollback.contract.js';
 import { DATABASE_RESILIENCE_OPERATIONS } from '../../domain/services/database-resilience-plan.service.js';
 import { LOAD_BALANCER_OPERATIONS } from '../../domain/services/load-balancer-plan.service.js';
+import { MESSAGING_OPERATIONS } from '../../domain/services/twilio-messaging.service.js';
 import {
   resolvePlanActionAuthority,
   type PlanMutationCapability,
@@ -165,6 +171,32 @@ const authorized: AuthorizedCase[] = [
       provider: 'github',
       operation: GITHUB_INFRASTRUCTURE_OPERATION,
       metadata: { repository: 'owner/repo' },
+    }),
+  },
+  {
+    label: 'GitHub Pages',
+    capability: 'github.pages.sync',
+    action: action({
+      id: GITHUB_PAGES_ACTION_ID,
+      type: 'create',
+      kind: 'repo',
+      name: 'owner/repo',
+      provider: 'github',
+      operation: GITHUB_PAGES_OPERATION,
+      metadata: { repository: 'owner/repo', enabled: true },
+    }),
+  },
+  {
+    label: 'GitHub Pages DNS',
+    capability: 'github.pages-dns.sync',
+    action: action({
+      id: 'domain:example.com:github-pages-dns',
+      type: 'update',
+      kind: 'domain',
+      name: 'example.com',
+      provider: 'cloudflare',
+      operation: GITHUB_PAGES_DNS_OPERATION,
+      metadata: { repository: 'owner/repo', enabled: true, desiredRecords: [] },
     }),
   },
   {
@@ -316,6 +348,19 @@ const authorized: AuthorizedCase[] = [
       name: 'ANTHROPIC_API_KEY',
       operation: DELEGATED_SECRET_OPERATION,
       metadata: { principal: 'github:alice', services: ['web'] },
+    }),
+  },
+  {
+    label: 'GitHub delegated secret sync',
+    capability: 'github.delegated-secret.sync',
+    action: action({
+      id: 'secret:github:repository:CI_TOKEN',
+      type: 'update',
+      kind: 'secret',
+      name: 'CI_TOKEN',
+      provider: 'github',
+      operation: 'githubDelegatedSecretSync',
+      metadata: { repository: 'owner/repo', targetScope: 'repository' },
     }),
   },
   {
@@ -475,15 +520,114 @@ const authorized: AuthorizedCase[] = [
     action: action({ id: 'domain:example.com', kind: 'domain', name: 'example.com' }),
   },
   {
-    label: 'email configure',
-    capability: 'email.configure',
+    label: 'email runtime sync',
+    capability: 'email.runtime.sync',
     action: action({
-      id: 'email:sendgrid',
+      id: 'email:runtime',
+      kind: 'email',
+      name: 'production',
+      provider: 'railway',
+      operation: 'emailRuntimeSync',
+      metadata: { services: ['web'] },
+    }),
+  },
+  {
+    label: 'email authorization mutate',
+    capability: 'email.authorization.mutate',
+    action: action({
+      id: 'email:sendgrid:authorization',
       kind: 'email',
       name: 'example.com',
       provider: 'sendgrid',
-      operation: 'emailSetup',
-      metadata: { services: ['web'] },
+      operation: 'emailAuthorizationEnsure',
+    }),
+  },
+  {
+    label: 'email dns sync',
+    capability: 'email.dns.sync',
+    action: action({
+      id: 'email:cloudflare:dns',
+      kind: 'domain',
+      name: 'example.com',
+      provider: 'cloudflare',
+      operation: 'emailDnsSync',
+    }),
+  },
+  {
+    label: 'email inbound mutate',
+    capability: 'email.inbound.mutate',
+    action: action({
+      id: 'email:sendgrid:inbound:inbound.example.com',
+      type: 'create',
+      kind: 'email',
+      name: 'inbound.example.com',
+      provider: 'sendgrid',
+      operation: 'emailInboundEnsure',
+    }),
+  },
+  {
+    label: 'email delivery events mutate',
+    capability: 'email.delivery-events.mutate',
+    action: action({
+      id: 'email:sendgrid:delivery-events',
+      kind: 'email',
+      name: 'delivery-events',
+      provider: 'sendgrid',
+      operation: 'emailDeliveryEventsEnsure',
+    }),
+  },
+  {
+    label: 'email forwarding mutate',
+    capability: 'email.forwarding.mutate',
+    action: action({
+      id: 'email:cloudflare:destination:owner@example.net',
+      type: 'create',
+      kind: 'email',
+      name: 'owner@example.net',
+      provider: 'cloudflare',
+      operation: 'emailForwardingDestinationEnsure',
+    }),
+  },
+  {
+    label: 'Twilio Messaging Service mutate',
+    capability: 'messaging.service.mutate',
+    action: action({
+      id: 'messaging:twilio:service',
+      type: 'create',
+      kind: 'messaging',
+      name: 'app-production',
+      provider: 'twilio',
+      operation: MESSAGING_OPERATIONS.serviceEnsure,
+      metadata: { configHash: 'service-config' },
+    }),
+  },
+  {
+    label: 'Twilio sender mutate',
+    capability: 'messaging.sender.mutate',
+    action: action({
+      id: `messaging:twilio:sender:PN${'a'.repeat(32)}`,
+      type: 'create',
+      kind: 'messaging',
+      name: `PN${'a'.repeat(32)}`,
+      provider: 'twilio',
+      operation: MESSAGING_OPERATIONS.senderAttach,
+      metadata: {
+        configHash: 'service-config',
+        phoneNumberSid: `PN${'a'.repeat(32)}`,
+        serviceName: 'app-production',
+      },
+    }),
+  },
+  {
+    label: 'Twilio runtime sync',
+    capability: 'messaging.runtime.sync',
+    action: action({
+      id: 'messaging:twilio:runtime',
+      kind: 'messaging',
+      name: 'production',
+      provider: 'railway',
+      operation: MESSAGING_OPERATIONS.runtimeSync,
+      metadata: { configHash: 'runtime-config', services: ['web'] },
     }),
   },
   {

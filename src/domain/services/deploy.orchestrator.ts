@@ -8,8 +8,6 @@ import { RunRepository } from '../../adapters/db/repositories/run.repository.js'
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
-import { SecretMappingRepository } from '../../adapters/db/repositories/secret-mapping.repository.js';
-import { SecretResolver } from './secret.resolver.js';
 import { InfraTransaction, type InfraTransactionRollbackResult } from './infra.transaction.js';
 import { snapshotEnvironmentBindings } from './local-state.transaction.js';
 
@@ -62,8 +60,6 @@ export class DeployOrchestrator {
   private envRepo = new EnvironmentRepository();
   private serviceRepo = new ServiceRepository();
   private auditRepo = new AuditRepository();
-  private mappingRepo = new SecretMappingRepository();
-  private secretResolver = new SecretResolver();
 
   buildPlan(options: DeployOptions): RunPlan {
     const steps: RunStep[] = [];
@@ -79,25 +75,7 @@ export class DeployOrchestrator {
       });
     }
 
-    // Step 2: Resolve secrets from secret managers
-    // Check if there are any secret mappings for this project/environment
-    const mappings = this.mappingRepo.findByProjectAndEnvironment(
-      options.project.id,
-      options.environment.name
-    );
-    if (mappings.length > 0) {
-      steps.push({
-        name: 'resolve_secrets',
-        action: 'resolveSecrets',
-        params: {
-          projectId: options.project.id,
-          environmentName: options.environment.name,
-          mappingCount: mappings.length,
-        },
-      });
-    }
-
-    // Step 3: Set environment variables if provided. Only key NAMES go into
+    // Set environment variables if provided. Only key NAMES go into
     // the persisted plan — runs.plan is returned verbatim by hv_runs, so
     // values (which include DATABASE_URL and resolved secrets) must never
     // be stored. The step reads the live options.envVars at execution time.
@@ -114,7 +92,7 @@ export class DeployOrchestrator {
       });
     }
 
-    // Step 4: Deploy each workload. Services remain the storage primitive, but
+    // Deploy each workload. Services remain the storage primitive, but
     // workloadKind drives provider behavior and plan semantics.
     const services = options.services ?? this.serviceRepo.findByProjectId(options.project.id);
     for (const service of services) {
@@ -331,41 +309,6 @@ export class DeployOrchestrator {
             status: receipt.success ? 'success' : 'failure',
             result: receipt.data,
             error: receipt.error,
-            timestamp,
-          };
-        }
-
-        case 'resolveSecrets': {
-          // Resolve secret references from secret managers
-          const resolved = await this.secretResolver.resolveForEnvironment({
-            projectId: step.params?.projectId as string,
-            environmentName: step.params?.environmentName as string,
-          });
-
-          if (resolved.failed > 0) {
-            return {
-              step: step.name,
-              status: 'failure',
-              error: `Failed to resolve secrets: ${resolved.errors.map((e) => `${e.envVar}: ${e.error}`).join('; ')}`,
-              result: { resolved: resolved.resolved, failed: resolved.failed },
-              timestamp,
-            };
-          }
-
-          // Merge resolved secrets into envVars for subsequent steps
-          Object.assign(options.envVars ?? {}, resolved.vars);
-          if (!options.envVars) {
-            options.envVars = resolved.vars;
-          }
-
-          return {
-            step: step.name,
-            status: 'success',
-            result: {
-              resolved: resolved.resolved,
-              failed: resolved.failed,
-              errors: resolved.errors,
-            },
             timestamp,
           };
         }

@@ -1,35 +1,26 @@
-import type { CommandRegistrar } from '../application/commands.js';
-import { readFileSync } from 'fs';
-import { randomBytes } from 'crypto';
 import { z } from 'zod';
-import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
-import { SecretResolver } from '../domain/services/secret.resolver.js';
-import { SecretRotator } from '../domain/services/secret.rotator.js';
-import { syncHostingEnvVars, readHostingEnvVars } from '../domain/services/hosting-env.service.js';
-import { SecretAccessLogRepository } from '../adapters/db/repositories/secret-mapping.repository.js';
-import { parseSecretRef, type SecretManagerProvider } from '../domain/ports/secretmanager.port.js';
-import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
-import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
-import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
-import { parseEnvFile } from '../utils/env-parser.js';
 import type { CommandContext } from '../application/context.js';
+import type { CommandRegistrar } from '../application/commands.js';
+import { commandError, commandSuccess, HvError, wrapCommandHandler } from '../application/results.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Service } from '../domain/entities/service.entity.js';
+import {
+  SECRET_MANAGER_PROVIDERS,
+} from '../domain/ports/secretmanager.port.js';
+import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
+import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
+import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
-import { projectField, envField } from './schemas.js';
-import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
-import { splitFragment } from '../utils/split-fragment.js';
-import { resolveSecretValueRef } from '../domain/services/secret-value-ref.js';
+import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { envField, projectField } from './schemas.js';
 
-const SECRET_MANAGERS = ['vault', 'aws-secrets', 'doppler', '1password', 'bitwarden'] as const;
-const accessLogRepo = new SecretAccessLogRepository();
+const REDACTED = '[redacted]';
 
-function maskValue(value: string): string {
-  if (value.length <= 4) return '****';
-  return `${value.slice(0, 2)}${'*'.repeat(Math.min(value.length - 4, 12))}${value.slice(-2)}`;
-}
-
-async function managerAdapter(ctx: CommandContext, provider: (typeof SECRET_MANAGERS)[number]) {
+async function managerAdapter(
+  ctx: CommandContext,
+  provider: (typeof SECRET_MANAGER_PROVIDERS)[number]
+) {
   const connection = ctx.repos.connections.findByProvider(provider);
   if (!connection || connection.status !== 'verified') {
     throw new HvError('MISSING_CONNECTION', `No verified connection for ${provider}.`, {
@@ -54,49 +45,22 @@ function githubRepoForProject(project: Project, repoArg?: string): { owner: stri
   return { owner, repo };
 }
 
-function secretRefKind(ref: string): string {
-  const trimmed = ref.trim();
-  if (trimmed.startsWith('env:')) return 'env';
-  if (trimmed.startsWith('dotenv:')) return 'dotenv';
-  if (trimmed.startsWith('file:')) return 'file';
-  if (parseSecretRef(trimmed)) return 'secret-manager';
-  return 'unknown';
-}
-
-/** Server-side random secret (base64url alphabet) that never enters chat. */
-function generateSecretValue(length: number): string {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-  const bytes = randomBytes(length);
-  let output = '';
-  for (let i = 0; i < length; i++) {
-    output += alphabet[bytes[i] % alphabet.length];
-  }
-  return output;
-}
-
 function resolveHostingService(
   ctx: CommandContext,
   project: Project,
   environmentName: string,
   requestedService?: string
 ): Service {
-  const storedServices = ctx.repos.services.findByProjectId(project.id);
   const requested = requestedService?.trim();
-  const stored = requested
-    ? storedServices.find((candidate) => candidate.name === requested)
-    : storedServices[0];
+  const stored = ctx.repos.services.findByProjectId(project.id)
+    .find((candidate, index) => requested ? candidate.name === requested : index === 0);
   if (stored) return stored;
 
-  // Repo-backed projects can be fully observable on a fresh machine before
-  // their disposable SQLite cache contains service rows. Build the narrow
-  // provider input from desired state without writing or adopting local state.
   const environmentSpec = new SpecStore().get(project)?.spec.environments[environmentName];
   const serviceName = requested || Object.keys(environmentSpec?.services ?? {})[0];
   const serviceSpec = serviceName ? environmentSpec?.services[serviceName] : undefined;
   if (!serviceName || !serviceSpec) {
-    throw new HvError('NOT_FOUND', requested
-      ? `Service not found: ${requested}`
-      : 'No services found.');
+    throw new HvError('NOT_FOUND', requested ? `Service not found: ${requested}` : 'No services found.');
   }
 
   const timestamp = new Date(0);
@@ -111,362 +75,103 @@ function resolveHostingService(
   };
 }
 
-
 export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
-    'hv_secrets_set',
-    'Set secrets and environment variables. NEVER pass sensitive values via value/vars — they appear in the chat transcript; use secretRef (env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref — read locally, never enters chat) or generate=true for a new server-side random secret. target="hosting" (default) sets env vars on the deployed environment; destinations explicitly shares one resolved/generated value across selected environment/service targets. "manager" stores values in a secret manager (vault/aws-secrets/doppler — 1password and bitwarden are resolve-only: manage values there, then use target="mapping"); "mapping" maps a secretRef to an env var resolved at deploy time; "github" sets a GitHub Actions repository secret, or an environment secret when env is provided. remove=true deletes (mapping/github targets).',
+    'hv_secrets',
+    'List secret sources by default. Pass provider to list that manager, provider plus path to check a manager value, include=["github"] to list GitHub Actions secret names, or project/environment/service selectors to inspect hosting variables. Values are never returned.',
     {
       project: projectField,
       env: envField,
-      service: z.string().optional().describe('Service to scope hosting env vars to (default: first service)'),
-      destinations: z.array(z.object({
-        env: z.string().min(1),
-        service: z.string().min(1),
-      })).min(1).optional().describe('target=hosting: explicit environment/service destinations that should receive the same value. Omit to use env/service.'),
-      target: z.enum(['hosting', 'manager', 'mapping', 'github']).optional().describe('Default "hosting"'),
-      key: z.string().optional().describe('Variable/secret name'),
-      value: z.string().optional().describe('Value for key. WARNING: values passed here appear in the chat transcript — prefer secretRef (reads the value locally) or generate=true (server-side random). Only use value when the secret is already exposed or not sensitive.'),
-      generate: z.boolean().optional().describe('Generate a cryptographically random value server-side for key (targets hosting/manager/github). The value is never shown in chat.'),
-      generateLength: z.number().int().min(16).max(128).optional().describe('Length of the generated value (default 48 characters, base64url alphabet)'),
-      vars: z.record(z.string()).optional().describe('Multiple key-value pairs (alternative to key/value). Same chat-transcript warning as value.'),
-      provider: z.enum(SECRET_MANAGERS).optional().describe('target=manager: secret manager provider'),
-      path: z.string().optional().describe('target=manager: secret path'),
-      secretRef: z.string().optional().describe('Chat-safe value source for targets hosting/manager/github: env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path, or a secret-manager ref like 1password://vault/item#field — the value is read locally and never enters chat. For target=mapping: the secret-manager reference to map.'),
-      environments: z.array(z.string()).optional().describe('target=mapping: environments the mapping applies to'),
-      repo: z.string().optional().describe('target=github: "owner/name" (defaults to project git remote); pass env to scope the secret to a GitHub environment'),
-      remove: z.boolean().optional().describe('Delete instead of set (mapping/github)'),
+      key: z.string().optional().describe('Hosting variable name or key within a manager secret'),
+      provider: z.enum(SECRET_MANAGER_PROVIDERS).optional(),
+      path: z.string().optional().describe('Secret-manager path'),
+      version: z.string().optional().describe('Secret-manager version'),
+      service: z.string().optional().describe('Hosting service name'),
+      pathPrefix: z.string().optional().describe('With provider and no path: restrict listed manager paths'),
+      include: z.array(z.literal('github')).optional().describe('Also list GitHub Actions secret names'),
+      repo: z.string().optional().describe('GitHub owner/name; defaults to the project git remote'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, service, destinations, target = 'hosting', key, value, generate, generateLength, vars, provider, path, secretRef, environments, repo, remove }) => {
-      if (destinations && target !== 'hosting') {
-        throw new HvError('VALIDATION', 'destinations is supported only for target="hosting".');
-      }
-      if (destinations && (env !== undefined || service !== undefined)) {
-        throw new HvError('VALIDATION', 'Pass destinations or env/service for target="hosting", not both.');
-      }
-      const hostingDestinations = destinations?.map((destination) => ({
-        env: destination.env.trim(),
-        service: destination.service.trim(),
-      }));
-      if (hostingDestinations?.some((destination) => !destination.env || !destination.service)) {
-        throw new HvError('VALIDATION', 'Every hosting destination requires a non-empty env and service.');
-      }
-      if (hostingDestinations) {
-        const unique = new Set(hostingDestinations.map((destination) => `${destination.env}\u0000${destination.service}`));
-        if (unique.size !== hostingDestinations.length) {
-          throw new HvError('VALIDATION', 'Hosting destinations must be unique.');
+    wrapCommandHandler(async ({ project: projectRef, env, key, provider, path, version, service, pathPrefix, include, repo }) => {
+      const managerLookup = path !== undefined || version !== undefined || (provider !== undefined && key !== undefined);
+      if (managerLookup) {
+        if (pathPrefix !== undefined || include !== undefined || repo !== undefined) {
+          throw new HvError('VALIDATION', 'Manager value lookup cannot be combined with list parameters.');
         }
+        if (!provider || !path) throw new HvError('VALIDATION', 'provider and path must be passed together.');
+        const secret = await (await managerAdapter(ctx, provider)).getSecret(path, key, version);
+        return commandSuccess({
+          secretRef: `${provider}://${path}${key ? `#${key}` : ''}`,
+          value: REDACTED,
+          present: secret.value.length > 0,
+          version: secret.version,
+        });
       }
 
-      // One chat-safe value pipeline for hosting/manager/github: an explicit
-      // value (already in the transcript — warn), a secretRef (read locally),
-      // or generate (server-side random, never shown).
-      const rawValueUsed = value !== undefined || (vars !== undefined && Object.keys(vars).length > 0);
-      const exposureWarning = rawValueUsed && target !== 'mapping'
-        ? 'The secret value was passed through chat and is now in the conversation transcript. If it is sensitive, rotate it (generate=true replaces it with a server-side random value that never appears in chat) or use secretRef next time.'
-        : undefined;
-      if (generate) {
-        if (!key) throw new HvError('VALIDATION', 'key is required with generate=true.');
-        if (value !== undefined || secretRef) {
-          throw new HvError('VALIDATION', 'Pass generate=true alone — not with value or secretRef.');
-        }
-        value = generateSecretValue(generateLength ?? 48);
-      } else if (secretRef && (target === 'hosting' || target === 'manager') && key !== undefined && value === undefined) {
-        // hosting/manager: resolve the ref locally so the value never enters chat.
-        const projectForRef = ctx.resolveProject({ project: projectRef });
-        value = await resolveSecretValueRef(secretRef, {
-          ...(projectForRef ? { projectId: projectForRef.id } : {}),
-          ...(hostingDestinations?.[0]?.env || env
-            ? { environmentName: hostingDestinations?.[0]?.env ?? env }
-            : {}),
-        });
-      }
-      const kv = vars ?? (key !== undefined && value !== undefined ? { [key]: value } : undefined);
-
-      if (target === 'manager') {
-        if (!provider || !path) throw new HvError('VALIDATION', 'provider and path are required for target="manager".');
-        if (!kv) {
-          throw new HvError('VALIDATION', 'Provide key with secretRef/generate=true, or key+value / vars.', {
-            hint: 'Prefer key + secretRef or key + generate=true so the value never enters chat.',
-          });
-        }
-        const adapter = await managerAdapter(ctx, provider);
-        const receipt = await adapter.setSecret(path, kv);
-        accessLogRepo.create({ action: 'write', provider: provider as SecretManagerProvider, secretPath: path, success: true });
-        return commandSuccess(
-          { provider, path: receipt.path, keysStored: Object.keys(kv), valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw' },
-          {
-            hint: `Map to env vars with hv_secrets_set target="mapping" secretRef="${provider}://${path}#<KEY>".`,
-            ...(exposureWarning ? { warnings: [exposureWarning] } : {}),
-          }
-        );
+      if (provider || pathPrefix !== undefined || include !== undefined || repo !== undefined) {
+        return listSecrets({ projectRef, provider, pathPrefix, include, repo });
       }
 
-      if (target === 'github') {
-        const project = ctx.resolveProjectOrThrow({ project: projectRef });
-        const { owner, repo: repoName } = githubRepoForProject(project, repo);
-        const environmentName = env?.trim();
-        if (!key) throw new HvError('VALIDATION', 'key is required for target="github".');
-        const gh = getGitHubAdapter(`${owner}/${repoName}`);
-        if ('error' in gh) {
-          return commandError('MISSING_CONNECTION', gh.error, {
-            details: { connectionSetup: connectionSetupDetails('github', { scope: `${owner}/${repoName}` }) },
-            hint: formatConnectionGuidance('github', { scope: `${owner}/${repoName}` }),
-          });
-        }
-        if (remove) {
-          if (environmentName) {
-            await gh.adapter.deleteEnvironmentSecret(owner, repoName, environmentName, key);
-          } else {
-            await gh.adapter.deleteSecret(owner, repoName, key);
-          }
-          ctx.repos.audit.create({
-            action: 'github.secret_deleted',
-            resourceType: 'github_secret',
-            resourceId: environmentName
-              ? `${owner}/${repoName}/environments/${environmentName}/${key}`
-              : `${owner}/${repoName}/${key}`,
-            details: {
-              secretName: key,
-              ...(environmentName ? { environmentName } : {}),
-            },
-          });
-          return commandSuccess({
-            repository: `${owner}/${repoName}`,
-            ...(environmentName ? { environment: environmentName } : {}),
-            secretName: key,
-            action: 'deleted',
-          });
-        }
-        if (value !== undefined && secretRef) {
-          throw new HvError('VALIDATION', 'Pass either value or secretRef for target="github", not both.');
-        }
-        if (value === undefined && !secretRef) {
-          throw new HvError('VALIDATION', 'value or secretRef is required to set a GitHub secret.', {
-            hint: 'Use secretRef="env:NAME", secretRef="dotenv:/absolute/path/.env#KEY", secretRef="file:/absolute/path", or a secret-manager ref to avoid putting the secret value in chat.',
-          });
-        }
-        const secretValue = value ?? await resolveSecretValueRef(secretRef!, {
-          projectId: project.id,
-          ...(environmentName ? { environmentName } : {}),
+      const hostingLookup = projectRef !== undefined || env !== undefined || key !== undefined || service !== undefined;
+      if (!hostingLookup) {
+        const sources = [...SECRET_MANAGER_PROVIDERS, 'github'].map((source) => {
+          const connections = ctx.repos.connections.findAllByProvider(source);
+          return {
+            source,
+            status: connections.some((connection) => connection.status === 'verified')
+              ? 'verified'
+              : connections.length > 0 ? 'unverified' : 'missing',
+          };
         });
-        if (environmentName) {
-          await gh.adapter.setEnvironmentSecret(owner, repoName, environmentName, key, secretValue);
-        } else {
-          await gh.adapter.setRepositorySecret(owner, repoName, key, secretValue);
-        }
-        ctx.repos.audit.create({
-          action: 'github.secret_set',
-          resourceType: 'github_secret',
-          resourceId: environmentName
-            ? `${owner}/${repoName}/environments/${environmentName}/${key}`
-            : `${owner}/${repoName}/${key}`,
-          details: {
-            secretName: key,
-            ...(environmentName ? { environmentName } : {}),
-          },
+        return commandSuccess({ sources }, {
+          hint: 'Pass provider to list manager paths, include=["github"] plus project/repo to list GitHub names, or project/env/service to inspect masked hosting variables.',
         });
-        return commandSuccess(
-          {
-            repository: `${owner}/${repoName}`,
-            ...(environmentName ? { environment: environmentName } : {}),
-            secretName: key,
-            action: 'set',
-            valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw',
-          },
-          exposureWarning ? { warnings: [exposureWarning] } : undefined
-        );
-      }
-
-      if (target === 'mapping') {
-        const project = ctx.resolveProjectOrThrow({ project: projectRef });
-        if (!key) throw new HvError('VALIDATION', 'key (the env var name) is required for target="mapping".');
-        if (remove) {
-          const deleted = ctx.repos.secretMappings.deleteByProjectAndEnvVar(project.id, key, service ?? null);
-          if (!deleted) return commandError('NOT_FOUND', `No mapping found for ${key}.`);
-          return commandSuccess({ removed: { envVar: key } });
-        }
-        if (!secretRef) throw new HvError('VALIDATION', 'secretRef is required to create a mapping.');
-        if (!parseSecretRef(secretRef)) {
-          throw new HvError('VALIDATION', `Malformed secretRef "${secretRef}".`, {
-            hint: 'Format: provider://path/to/secret#KEY (e.g. "vault://apps/prod#API_KEY").',
-          });
-        }
-        const mapping = ctx.repos.secretMappings.upsert({
-          projectId: project.id,
-          envVar: key,
-          secretRef,
-          environments: environments ?? [],
-          serviceName: service,
-        });
-        return commandSuccess(
-          { mapping: { envVar: mapping.envVar, secretRef: mapping.secretRef, environments: mapping.environments, service: mapping.serviceName } },
-          { next: ['hv_secrets_sync'] }
-        );
-      }
-
-      // target === 'hosting'
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
-      if (!kv) {
-        throw new HvError('VALIDATION', 'Provide key with secretRef/generate=true, or key+value / vars.', {
-          hint: 'Prefer key + secretRef="dotenv:/absolute/path/.env#KEY" (value read locally) or key + generate=true (server-side random) so the value never enters chat.',
-        });
-      }
-      const requestedDestinations = hostingDestinations ?? [{ env, service }];
-      const resolvedDestinations = requestedDestinations.map((destination) => {
-        const environment = ctx.resolveEnvironmentOrThrow(project, destination.env);
-        return {
-          environment,
-          service: resolveHostingService(ctx, project, environment.name, destination.service),
-        };
-      });
-      const applied: Array<{ environment: string; service: string }> = [];
-      for (const destination of resolvedDestinations) {
-        const result = await syncHostingEnvVars({
-          project,
-          environment: destination.environment,
-          service: destination.service,
-          vars: kv,
-        });
-        if (!result.success) {
-          const failed = `${destination.environment.name}/${destination.service.name}`;
-          const progress = applied.length > 0
-            ? ` Applied ${Object.keys(kv).join(', ')} to ${applied.map((entry) => `${entry.environment}/${entry.service}`).join(', ')} before the failure; no later destinations were attempted.`
-            : ' No destinations were changed.';
-          return commandError(
-            'PROVIDER_ERROR',
-            `Could not apply ${Object.keys(kv).join(', ')} to ${failed}: ${result.error || result.message}.${progress}`,
-            {
-              details: {
-                applied,
-                failed: {
-                  environment: destination.environment.name,
-                  service: destination.service.name,
-                },
-              },
-            }
-          );
-        }
-        applied.push({
-          environment: destination.environment.name,
-          service: destination.service.name,
-        });
-      }
-      const first = applied[0];
-      return commandSuccess(
-        {
-          environment: first.environment,
-          service: first.service,
-          destinations: applied,
-          variables: Object.keys(kv),
-          valueSource: generate ? 'generated' : secretRef ? secretRefKind(secretRef) : 'raw',
-        },
-        exposureWarning ? { warnings: [exposureWarning] } : undefined
-      );
-    })
-  );
-
-  commands.register(
-    'hv_secrets_get',
-    'Read a secret (from a secret manager) or a hosting env var. Values are always masked in command output to avoid leaking credentials into transcripts or terminals.',
-    {
-      project: projectField,
-      env: envField,
-      key: z.string().optional().describe('Env var name (hosting read) or secret key within the path'),
-      provider: z.enum(SECRET_MANAGERS).optional().describe('Read from this secret manager instead of hosting'),
-      path: z.string().optional().describe('Secret path (with provider)'),
-      version: z.string().optional().describe('Secret version (manager reads)'),
-      service: z.string().optional().describe('Service to read hosting vars from'),
-      reveal: z.boolean().optional().describe('Deprecated: raw secret values are not returned in command output'),
-    },
-    wrapCommandHandler(async ({ project: projectRef, env, key, provider, path, version, service, reveal }) => {
-      if (provider && path) {
-        const adapter = await managerAdapter(ctx, provider);
-        const secret = await adapter.getSecret(path, key, version);
-        accessLogRepo.create({ action: 'read', provider: provider as SecretManagerProvider, secretPath: path, success: true });
-        let secretRef = `${provider}://${path}`;
-        if (key) secretRef += `#${key}`;
-        return commandSuccess(
-          {
-            secretRef,
-            value: maskValue(secret.value),
-            masked: true,
-            ...(reveal ? { revealSuppressed: true } : {}),
-            version: secret.version,
-          },
-          reveal ? {
-            hint: 'Raw secret values are not returned in command output. Use hv_secrets_sync or retrieve the value directly from its secret manager when a human needs it.',
-          } : undefined
-        );
       }
 
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
       const targetService = resolveHostingService(ctx, project, environment.name, service);
       const result = await readHostingEnvVars({ project, environment, service: targetService });
-      if (!result.success) {
-        return commandError('PROVIDER_ERROR', result.error, {});
-      }
-      const all = result.variables;
-      if (key && !(key in all)) {
+      if (!result.success) return commandError('PROVIDER_ERROR', result.error);
+      if (key && !(key in result.variables)) {
         return commandError('NOT_FOUND', `Variable ${key} not set in ${environment.name}.`, {
-          details: { available: Object.keys(all) },
+          details: { available: Object.keys(result.variables) },
         });
       }
-      const selected = key ? { [key]: all[key] } : all;
-      const varsOut = Object.fromEntries(
-        Object.entries(selected).map(([k, v]) => [k, maskValue(v)])
-      );
-      return commandSuccess(
-        {
-          environment: environment.name,
-          service: targetService.name,
-          masked: true,
-          ...(reveal ? { revealSuppressed: true } : {}),
-          vars: varsOut,
-        },
-        reveal ? {
-          hint: 'Raw environment variable values are not returned in command output. Use hv_secrets_sync or retrieve the value directly from its provider when a human needs it.',
-        } : undefined
-      );
+      const names = key ? [key] : Object.keys(result.variables);
+      return commandSuccess({
+        environment: environment.name,
+        service: targetService.name,
+        vars: Object.fromEntries(names.map((name) => [name, REDACTED])),
+      });
     })
   );
 
-  commands.register(
-    'hv_secrets_list',
-    'List secrets and secret plumbing: secret-manager paths, project mappings, access audit log, and GitHub repo secret names.',
-    {
-      project: projectField,
-      provider: z.enum(SECRET_MANAGERS).optional().describe('List secrets in this manager'),
-      pathPrefix: z.string().optional().describe('Filter manager secrets by path prefix'),
-      include: z.array(z.enum(['mappings', 'audit', 'github'])).optional()
-        .describe('Extra sections to include (default: mappings)'),
-      repo: z.string().optional().describe('GitHub "owner/name" (defaults to project git remote)'),
-      limit: z.number().int().min(1).max(200).optional().describe('Audit entries limit (default 50)'),
-    },
-    wrapCommandHandler(async ({ project: projectRef, provider, pathPrefix, include, repo, limit = 50 }) => {
+  async function listSecrets({
+    projectRef,
+    provider,
+    pathPrefix,
+    include,
+    repo,
+  }: {
+    projectRef?: string;
+    provider?: (typeof SECRET_MANAGER_PROVIDERS)[number];
+    pathPrefix?: string;
+    include?: 'github'[];
+    repo?: string;
+  }) {
+      if (!provider && !include?.includes('github')) {
+        throw new HvError('VALIDATION', 'Pass provider to list manager paths or include=["github"].');
+      }
       const sections: Record<string, unknown> = {};
-
       if (provider) {
-        const adapter = await managerAdapter(ctx, provider);
-        const secrets = await adapter.listSecrets(pathPrefix);
-        accessLogRepo.create({ action: 'list', provider: provider as SecretManagerProvider, secretPath: pathPrefix || '*', success: true });
-        sections.manager = { provider, count: secrets.length, secrets: secrets.map((s) => ({ path: s.path, keys: s.keys })) };
+        const secrets = await (await managerAdapter(ctx, provider)).listSecrets(pathPrefix);
+        sections.manager = {
+          provider,
+          count: secrets.length,
+          secrets: secrets.map(({ path, keys }) => ({ path, keys })),
+        };
       }
-
-      const wanted = new Set(include ?? ['mappings']);
-      if (wanted.has('mappings')) {
-        const project = ctx.resolveProject({ project: projectRef });
-        sections.mappings = project
-          ? ctx.repos.secretMappings.findByProjectId(project.id).map((m) => ({
-            envVar: m.envVar, secretRef: m.secretRef, environments: m.environments, service: m.serviceName,
-          }))
-          : [];
-      }
-      if (wanted.has('audit')) {
-        sections.audit = accessLogRepo.findRecent(limit);
-      }
-      if (wanted.has('github')) {
+      if (include?.includes('github')) {
         const project = ctx.resolveProjectOrThrow({ project: projectRef });
         const { owner, repo: repoName } = githubRepoForProject(project, repo);
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
@@ -476,112 +181,12 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
             hint: formatConnectionGuidance('github', { scope: `${owner}/${repoName}` }),
           });
         }
-        const ghSecrets = await gh.adapter.listSecrets(owner, repoName);
-        sections.github = { repository: `${owner}/${repoName}`, secrets: ghSecrets.secrets.map((s) => s.name) };
-      }
-
-      return commandSuccess(sections);
-    })
-  );
-
-  commands.register(
-    'hv_secrets_sync',
-    'Resolve secret mappings and sync them to hosting environment(s). Optionally rotate a secret first (providers that support rotation) and propagate the new value.',
-    {
-      project: projectField,
-      env: envField,
-      service: z.string().optional().describe('Service to set vars on (default: based on mappings)'),
-      dryRun: z.boolean().optional().describe('Show what would sync without applying'),
-      rotate: z.object({
-        provider: z.enum(SECRET_MANAGERS),
-        path: z.string(),
-      }).optional().describe('Rotate this secret first, then sync mapped environments'),
-    },
-    wrapCommandHandler(async ({ project: projectRef, env, service, dryRun, rotate }) => {
-      const project = ctx.resolveProjectOrThrow({ project: projectRef });
-
-      if (rotate) {
-        const capabilities = secretManagerRegistry.getCapabilities(rotate.provider);
-        if (!capabilities?.supportsRotation) {
-          return commandError('UNSUPPORTED', `Provider '${rotate.provider}' does not support rotation.`, {
-            hint: 'Update the secret value manually, then run hv_secrets_sync.',
-          });
-        }
-        const rotator = new SecretRotator();
-        const result = await rotator.rotateAndSync(rotate.provider as SecretManagerProvider, rotate.path);
-        return commandSuccess({
-          rotation: {
-            path: result.rotation.path,
-            oldVersion: result.rotation.oldVersion,
-            newVersion: result.rotation.newVersion,
-            success: result.rotation.success,
-            error: result.rotation.error,
-          },
-          synced: result.synced,
-        });
-      }
-
-      let environments = ctx.repos.environments.findByProjectId(project.id);
-      if (env) {
-        environments = environments.filter((e) => e.name === env.trim());
-        if (environments.length === 0) {
-          throw new HvError('NOT_FOUND', `Environment not found: ${env}`);
-        }
-      }
-
-      const resolver = new SecretResolver();
-      const results: Array<{ environment: string; resolved: number; failed: number; errors: Array<{ envVar: string; error: string }>; synced: boolean }> = [];
-
-      for (const environment of environments) {
-        const resolved = await resolver.resolveForEnvironment({
-          projectId: project.id,
-          environmentName: environment.name,
-          serviceName: service,
-        });
-        if (resolved.resolved === 0 && resolved.failed === 0) continue;
-
-        const entry = {
-          environment: environment.name,
-          resolved: resolved.resolved,
-          failed: resolved.failed,
-          errors: resolved.errors.map((e) => ({ envVar: e.envVar, error: e.error })),
-          synced: false,
+        const secrets = await gh.adapter.listSecrets(owner, repoName);
+        sections.github = {
+          repository: `${owner}/${repoName}`,
+          secrets: secrets.secrets.map((secret) => secret.name),
         };
-
-        if (!dryRun && resolved.resolved > 0) {
-          let targetService: Service | null = null;
-          try {
-            targetService = resolveHostingService(ctx, project, environment.name, service);
-          } catch (error) {
-            entry.errors.push({
-              envVar: '*',
-              error: error instanceof Error ? error.message : 'No service found to set environment variables on',
-            });
-          }
-          if (targetService) {
-            const syncResult = await syncHostingEnvVars({ project, environment, service: targetService, vars: resolved.vars });
-            entry.synced = syncResult.success;
-            if (!syncResult.success) {
-              entry.errors.push({ envVar: '*', error: syncResult.error || syncResult.message });
-            } else {
-              ctx.repos.audit.create({
-                action: 'secrets.synced',
-                resourceType: 'environment',
-                resourceId: environment.id,
-                details: { varsSet: Object.keys(resolved.vars), count: resolved.resolved },
-              });
-            }
-          }
-        }
-        results.push(entry);
       }
-
-      return commandSuccess({
-        dryRun: dryRun ?? false,
-        environments: results,
-        totalResolved: results.reduce((sum, r) => sum + r.resolved, 0),
-        totalFailed: results.reduce((sum, r) => sum + r.failed, 0),
-      });
-    })
-  );
+      return commandSuccess(sections);
+  }
 }

@@ -19,6 +19,7 @@ describe('toolSuccess', () => {
     expect(rendered(response)).toContain('▸ Id: 1');
     expect(rendered(response)).not.toContain('**');
     expect(rendered(response).trim().startsWith('{')).toBe(false);
+    expect(toMcpToolResponse(response)).not.toHaveProperty('_meta');
   });
 
   it('redacts sensitive fields and credential-looking strings', () => {
@@ -97,11 +98,11 @@ describe('toolSuccess', () => {
 
 describe('toolError', () => {
   it('returns a coded error', () => {
-    const response = toolError('NOT_FOUND', 'no such project', { hint: 'list projects with hv_spec_get' });
+    const response = toolError('NOT_FOUND', 'no such project', { hint: 'list projects with hv_spec' });
     const body = parse(response);
     expect(body.ok).toBe(false);
     expect(body.error).toEqual({ code: 'NOT_FOUND', message: 'no such project' });
-    expect(body.hint).toBe('list projects with hv_spec_get');
+    expect(body.hint).toBe('list projects with hv_spec');
     expect(toMcpToolResponse(response).isError).toBe(true);
     expect(rendered(response)).toContain('🔴 NOT_FOUND');
     expect(rendered(response)).toContain('no such project');
@@ -137,7 +138,7 @@ describe('toolError', () => {
             'For DNS/custom domains: grant Zone -> Zone -> Read.',
             'For DNS/custom domains: grant Zone -> DNS -> Edit.',
           ],
-          credentialExample: 'hv_connect provider="cloudflare" scope="hlspropertycare.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}',
+          credentialExample: 'hv_connections provider="cloudflare" scope="hlspropertycare.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}',
         },
       },
     });
@@ -147,7 +148,7 @@ describe('toolError', () => {
     expect(text).toContain('Token Type: Cloudflare Account API Token for DNS');
     expect(text).toContain('Setup URL: Account API Tokens: https://dash.cloudflare.com/?to=/:account/api-tokens');
     expect(text).toContain('Permission: For DNS/custom domains: grant Zone -> DNS -> Edit.');
-    expect(text).toContain('Connect: hv_connect provider="cloudflare" scope="hlspropertycare.com"');
+    expect(text).toContain('Connect: hv_connections provider="cloudflare" scope="hlspropertycare.com"');
   });
 });
 

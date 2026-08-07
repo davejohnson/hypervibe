@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { requiresProductionConfirm } from '../domain/services/policy.service.js';
-import { syncProjectIntent } from '../domain/services/intent.service.js';
 import { executeRollback, ROLLBACK_NOTE } from '../domain/services/rollback.service.js';
 import { CI_ROLLBACK_NOTE } from '../domain/services/ci-rollback.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
@@ -58,7 +57,7 @@ function ciBranchDeployGuidance(project: Project, envName: string): { branch: st
 export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_deploy',
-    'Deploy services to an environment (staging, production, etc.). Plan-gated: builds a plan from the spec and applies it immediately; the planId and applyRunId are returned for the audit trail. Delegated secret slots accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally and encrypted into the plan. Ordinary envVars and env files cannot override delegated keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime". Requires a spec (hv_spec_set). Protected environments require confirm=true.',
+    'Deploy services to an environment (staging, production, etc.). Plan-gated: builds a plan from the spec and applies it immediately; the planId and applyRunId are returned for the audit trail. Delegated secret slots accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally and encrypted into the plan. Ordinary envVars and env files cannot override delegated keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime". Requires a spec (hv_spec). Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
@@ -76,8 +75,8 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       const specResult = new SpecStore().get(project);
       if (!specResult) {
         return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, {
-          hint: 'Define one with hv_spec_set, or inspect existing provider infrastructure with hv_inspect and adopt it with hv_import, then hv_deploy.',
-          next: ['hv_spec_set', 'hv_inspect', 'hv_import'],
+          hint: 'Define one with hv_spec, or inspect existing provider infrastructure with hv_inspect and adopt it with hv_import, then hv_deploy.',
+          next: ['hv_spec', 'hv_inspect', 'hv_import'],
         });
       }
       const envName = env?.trim() || 'staging';
@@ -85,12 +84,12 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       if (!envSpec) {
         return commandError('VALIDATION', `Spec has no environment "${envName}".`, {
           details: { available: Object.keys(specResult.spec.environments) },
-          next: ['hv_spec_set'],
+          next: ['hv_spec'],
         });
       }
       if (Object.keys(envSpec.services).length === 0) {
         return commandError('NOT_FOUND', 'No services found to deploy.', {
-          hint: 'Create services first (hv_spec_set) or check service names.',
+          hint: 'Create services first (hv_spec) or check service names.',
         });
       }
 
@@ -121,7 +120,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         ...(secretRefs && Object.keys(secretRefs).length > 0 ? { secretRefs } : {}),
       });
       if ('error' in planned) {
-        return commandError('VALIDATION', planned.error, { next: ['hv_spec_set'] });
+        return commandError('VALIDATION', planned.error, { next: ['hv_spec'] });
       }
       const deploySourceStage = planned.actions.length > 0
         && planned.actions.every(isProviderNativeDeploySourceAction);
@@ -158,7 +157,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
             ...connectionRecoveryDetails(outcome.applyBlocked),
           },
           hint: connectionRecoveryHint(outcome.applyBlocked, { after: 'Then re-run hv_deploy.' }),
-          next: ['hv_connect', 'hv_deploy'],
+          next: ['hv_connections', 'hv_deploy'],
         });
       }
       if (!outcome.result.success && !outcome.result.applyRunId) {
@@ -206,7 +205,6 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         createdResources: summary.deploymentCreatedResources ?? [],
         rollback: summary.deploymentRollback,
         receipts: outcome.result.receipts,
-        intent: syncProjectIntent(project.id),
       };
 
       if (!outcome.result.success) {

@@ -7,7 +7,6 @@ import { buildDeploySourceEnvVars } from './deploy-source.js';
 import { buildDatabaseEnvVarsFromComponent } from './database-env.js';
 import { buildCacheEnvVarsFromComponent } from './cache-env.js';
 import { resolveQueueEnvVars } from './queue-env.js';
-import { syncProjectIntent } from './intent.service.js';
 import { SpecStore } from '../spec/spec.store.js';
 import { ConvergeExecutor, type ActionResult, type PlanRunDocument } from '../plan/converge.executor.js';
 import type { PlanAction } from '../plan/plan.types.js';
@@ -48,7 +47,6 @@ export type RollbackSuccess = {
   errors?: string[];
   createdResources: DeployResult['createdResources'];
   rollback: DeployResult['rollback'];
-  intent: ReturnType<typeof syncProjectIntent>;
 };
 
 export const ROLLBACK_OPERATION = 'rollbackRedeploy';
@@ -289,6 +287,5 @@ export async function executeRollback(params: {
     errors: deployed && deployed.errors.length ? deployed.errors : (converge.error ? [converge.error] : undefined),
     createdResources: deployed?.createdResources ?? [],
     rollback: deployed?.rollback,
-    intent: syncProjectIntent(project.id),
   };
 }

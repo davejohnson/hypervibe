@@ -11,7 +11,7 @@ enum HypervibeResponseMapper {
     static func decodeTopology(_ data: Data) throws -> Topology {
         let envelope: ToolEnvelope<SpecToolData> = try decodeEnvelope(data)
         guard let payload = envelope.data else {
-            throw HypervibeClientError.malformedResponse("hv_spec_get returned no data.")
+            throw HypervibeClientError.malformedResponse("hv_spec returned no data.")
         }
 
         let environments = payload.spec.environments
@@ -19,10 +19,7 @@ enum HypervibeResponseMapper {
                 EnvironmentSnapshot(
                     name: name,
                     specRevision: payload.revision,
-                    resources: resources(
-                        for: environment,
-                        serviceDetails: payload.environments?[name]?.serviceDetails ?? []
-                    ),
+                    resources: resources(for: environment),
                     observation: nil
                 )
             }
@@ -189,7 +186,7 @@ enum HypervibeResponseMapper {
         let envelope: ToolEnvelope<ConnectionsToolData> = try decodeEnvelope(data)
         guard let payload = envelope.data else {
             throw HypervibeClientError.malformedResponse(
-                "hv_connections_list returned no data."
+                "hv_connections returned no data."
             )
         }
 
@@ -249,7 +246,7 @@ enum HypervibeResponseMapper {
     static func decodeConnectionMutation(_ data: Data) throws -> ConnectionMutationResult {
         let envelope: ToolEnvelope<ConnectionMutationToolData> = try decodeEnvelope(data)
         guard let payload = envelope.data else {
-            throw HypervibeClientError.malformedResponse("hv_connect returned no data.")
+            throw HypervibeClientError.malformedResponse("hv_connections returned no data.")
         }
         let removed = payload.removed ?? false
         let status = removed
@@ -277,7 +274,7 @@ enum HypervibeResponseMapper {
     static func decodeHostingVariables(_ data: Data) throws -> HostingVariableCatalog {
         let envelope: ToolEnvelope<HostingVariablesToolData> = try decodeEnvelope(data)
         guard let payload = envelope.data else {
-            throw HypervibeClientError.malformedResponse("hv_secrets_get returned no data.")
+            throw HypervibeClientError.malformedResponse("hv_secrets returned no data.")
         }
         let variables = payload.vars.map { name, maskedValue in
             HostingVariableSummary(name: name, maskedValue: maskedValue)
@@ -289,40 +286,6 @@ enum HypervibeResponseMapper {
             service: payload.service,
             variables: variables
         )
-    }
-
-    static func decodeHostingVariableMutation(
-        _ data: Data
-    ) throws -> HostingVariableMutationResult {
-        let envelope: ToolEnvelope<HostingVariableMutationToolData> = try decodeEnvelope(data)
-        guard let payload = envelope.data else {
-            throw HypervibeClientError.malformedResponse("hv_secrets_set returned no data.")
-        }
-        let destinations: [HostingVariableTarget]
-        if let explicit = payload.destinations, !explicit.isEmpty {
-            destinations = explicit
-        } else if let environment = payload.environment, let service = payload.service {
-            destinations = [HostingVariableTarget(environment: environment, service: service)]
-        } else {
-            throw HypervibeClientError.malformedResponse(
-                "hv_secrets_set returned no destination receipt."
-            )
-        }
-        return HostingVariableMutationResult(
-            destinations: destinations,
-            variables: payload.variables.sorted(),
-            valueSource: payload.valueSource
-        )
-    }
-
-    static func decodeUpgradeStatus(_ data: Data) throws {
-        let envelope: ToolEnvelope<UpgradeToolData> = try decodeEnvelope(data)
-        guard let payload = envelope.data else {
-            throw HypervibeClientError.malformedResponse("hv_upgrade returned no data.")
-        }
-        if payload.sqlite.needsMigration {
-            throw HypervibeClientError.schemaMigrationRequired
-        }
     }
 
     private static func decodeEnvelope<Payload: Decodable>(
@@ -356,15 +319,10 @@ enum HypervibeResponseMapper {
         return links
     }
 
-    private static func resources(
-        for environment: DesiredEnvironment,
-        serviceDetails: [SpecToolData.EnvironmentSummary.ServiceDetail]
-    ) -> [ResourceSummary] {
+    private static func resources(for environment: DesiredEnvironment) -> [ResourceSummary] {
         let databaseID = environment.database.map { _ in "database:primary" }
-        let detailsByName = Dictionary(uniqueKeysWithValues: serviceDetails.map { ($0.name, $0) })
         var resources: [ResourceSummary] = environment.services.keys.sorted().map { name in
             let service = environment.services[name]
-            let details = detailsByName[name]
             return ResourceSummary(
                 id: "service:\(name)",
                 kind: .service,
@@ -373,11 +331,9 @@ enum HypervibeResponseMapper {
                 relationships: databaseID.map {
                     [ResourceRelationship(kind: .uses, targetResourceID: $0)]
                 } ?? [],
-                workloadKind: details?.workloadKind ?? service?.workloadKind ?? "web",
-                isPublic: details?.isPublic
-                    ?? ((service?.workloadKind ?? "web") == "web" && service?.isPublic != false),
-                healthCheckPath: details?.healthCheckPath ?? service?.healthCheckPath,
-                boundURL: PublicServiceEndpoint.originURL(from: details?.boundUrl)
+                workloadKind: service?.workloadKind ?? "web",
+                isPublic: (service?.workloadKind ?? "web") == "web" && service?.isPublic != false,
+                healthCheckPath: service?.healthCheckPath
             )
         }
 
@@ -500,37 +456,6 @@ private struct SpecToolData: Decodable {
     let project: ProjectReference
     let revision: Int
     let spec: DesiredProjectSpec
-    let environments: [String: EnvironmentSummary]?
-
-    struct EnvironmentSummary: Decodable {
-        let serviceDetails: [ServiceDetail]
-
-        private enum CodingKeys: String, CodingKey { case serviceDetails }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            serviceDetails = try container.decodeIfPresent(
-                [ServiceDetail].self,
-                forKey: .serviceDetails
-            ) ?? []
-        }
-
-        struct ServiceDetail: Decodable {
-            let name: String
-            let workloadKind: String
-            let isPublic: Bool
-            let healthCheckPath: String?
-            let boundUrl: String?
-
-            private enum CodingKeys: String, CodingKey {
-                case name
-                case workloadKind
-                case isPublic = "public"
-                case healthCheckPath
-                case boundUrl
-            }
-        }
-    }
 }
 
 private struct ProjectReference: Decodable {
@@ -903,14 +828,6 @@ private struct HostingVariablesToolData: Decodable {
     let environment: String
     let service: String
     let vars: [String: String]
-}
-
-private struct HostingVariableMutationToolData: Decodable {
-    let environment: String?
-    let service: String?
-    let destinations: [HostingVariableTarget]?
-    let variables: [String]
-    let valueSource: String
 }
 
 private struct IgnoredObject: Decodable {

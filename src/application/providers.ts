@@ -25,9 +25,7 @@ import '../adapters/providers/digitalocean/digitalocean.adapter.js';
 import '../adapters/providers/stripe/stripe.adapter.js';
 import '../adapters/providers/cloudflare/cloudflare.adapter.js';
 import '../adapters/providers/sendgrid/sendgrid.adapter.js';
-import '../adapters/providers/tunnel/tunnel.manager.js';
-import '../adapters/providers/local/compose.generator.js';
-import '../adapters/providers/recaptcha/recaptcha.adapter.js';
+import '../adapters/providers/twilio/twilio.adapter.js';
 import '../adapters/providers/github/github.adapter.js';
 import '../adapters/providers/openai/openai.adapter.js';
 import '../adapters/providers/database/database.adapter.js';
@@ -39,3 +37,8 @@ import '../adapters/providers/secretmanagers/aws-secrets.adapter.js';
 import '../adapters/providers/secretmanagers/doppler.adapter.js';
 import '../adapters/providers/secretmanagers/onepassword.adapter.js';
 import '../adapters/providers/secretmanagers/bitwarden.adapter.js';
+
+import { registerProviderImport } from './import-provider.js';
+import { importRailwayProvider } from './provider-imports/railway.js';
+
+registerProviderImport('railway', importRailwayProvider);

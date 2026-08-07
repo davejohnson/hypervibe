@@ -109,12 +109,13 @@ export class AdapterFactory {
    */
   async getProviderAdapter(
     providerName: string,
-    project?: Project
+    project?: Project,
+    scopeHints?: string[]
   ): Promise<AdapterResult<IProviderAdapter>> {
     return this.getAdapter<IProviderAdapter>(
       providerName,
       undefined,
-      project ? getProjectScopeHints(project) : undefined
+      scopeHints ?? (project ? getProjectScopeHints(project) : undefined)
     );
   }
 
@@ -186,7 +187,7 @@ export class AdapterFactory {
     if (connection.status !== 'verified') {
       return {
         success: false,
-        error: `Connection for ${providerName} is not verified (status: ${connection.status}). Re-run hv_connect provider="${providerName}" action="verify" after confirming token type and permissions. ${formatConnectionGuidance(providerName)}`,
+        error: `Connection for ${providerName} is not verified (status: ${connection.status}). Re-run hv_connections provider="${providerName}" action="verify" after confirming token type and permissions. ${formatConnectionGuidance(providerName)}`,
       };
     }
 

@@ -3,8 +3,27 @@ import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
 import type { ProviderDatabaseRestoreDrillMetadata } from '../ports/database-restore-drill.port.js';
 import type { Project } from '../entities/project.entity.js';
 
-export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'payment' | 'tunnel' | 'local' | 'security' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
+export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
 export type ProviderLifecycleCapability = 'hosting' | 'database' | 'cache' | 'storage';
+
+export interface ProviderInspectionRequest {
+  /** Provider connection/account/repository/domain scope. */
+  scope?: string;
+  /** Provider-owned resource class, such as project, ref, pages, zone, or dns. */
+  resource?: string;
+  /** Durable provider id when one is known. */
+  id?: string;
+  /** Exact provider resource name when an id is not known. */
+  name?: string;
+  /** Hard output bound for list operations. */
+  limit: number;
+}
+
+export interface ProviderInspectionCapability {
+  /** Bounded resource classes accepted by this provider inspector. */
+  resources: readonly string[];
+  inspect(adapter: unknown, request: ProviderInspectionRequest): Promise<Record<string, unknown>>;
+}
 
 export interface ProviderMetadata {
   name: string;
@@ -97,6 +116,12 @@ export interface RegisteredProvider {
   factory: (credentials: unknown) => unknown;
   /** Optional hook to install CLI tools or other dependencies when a connection is created. */
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
+  /** Optional provider-owned raw forensic reads used by hv_inspect. */
+  inspection?: ProviderInspectionCapability;
+  /** Existing infrastructure can be adopted only when a provider declares and tests this capability. */
+  adoption?: {
+    project: true;
+  };
   /** Provider-owned adapters derived from the connected primary adapter. */
   derivedAdapters?: {
     database?: (adapter: unknown, context: { project?: Project }) => Promise<unknown> | unknown;

@@ -13,10 +13,18 @@ export interface RepoSpecFile {
 export interface RepoSpecWrite {
   root: string;
   path: string;
+  envTemplate: RepoEnvTemplateWrite;
+}
+
+export interface RepoEnvTemplateWrite {
+  path: string;
+  addedKeys: string[];
 }
 
 const HYPERVIBE_DIR = '.hypervibe';
 const SPEC_FILE = 'spec.json';
+const ENV_TEMPLATE_FILE = '.env.example';
+const RECAPTCHA_ENV_KEYS = ['RECAPTCHA_SITE_KEY', 'RECAPTCHA_SECRET_KEY'] as const;
 
 export function repoSpecEnabled(): boolean {
   const disabled = process.env.HYPERVIBE_DISABLE_REPO_SPEC?.trim().toLowerCase();
@@ -48,6 +56,41 @@ export function findRepoRoot(startDir = process.cwd()): string | null {
 
 export function repoSpecPath(root: string): string {
   return path.join(root, HYPERVIBE_DIR, SPEC_FILE);
+}
+
+function envTemplateKeys(content: string): Set<string> {
+  const keys = new Set<string>();
+  for (const line of content.split(/\r?\n/)) {
+    const match = line.match(/^\s*#?\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (match?.[1]) keys.add(match[1]);
+  }
+  return keys;
+}
+
+/**
+ * Keep product-wide, value-free runtime slots in the conventional repo
+ * template. `.env.example` is never a deploy input; real values remain in
+ * `.env.<environment>` and enter provider state only through plan/apply.
+ */
+export function ensureRepoEnvTemplate(root: string): RepoEnvTemplateWrite {
+  const templatePath = path.join(root, ENV_TEMPLATE_FILE);
+  const existing = existsSync(templatePath) ? readFileSync(templatePath, 'utf8') : '';
+  const existingKeys = envTemplateKeys(existing);
+  const addedKeys = RECAPTCHA_ENV_KEYS.filter((key) => !existingKeys.has(key));
+
+  if (addedKeys.length > 0) {
+    const prefix = existing.length > 0 && !existing.endsWith('\n') ? `${existing}\n` : existing;
+    const separator = prefix.trim().length > 0 ? '\n' : '';
+    const block = [
+      '# reCAPTCHA',
+      '# The site key is public; keep the secret key server-side.',
+      ...addedKeys.map((key) => `${key}=`),
+      '',
+    ].join('\n');
+    writeFileSync(templatePath, `${prefix}${separator}${block}`, 'utf8');
+  }
+
+  return { path: templatePath, addedKeys };
 }
 
 export function readRepoSpecFile(startDir = process.cwd()): RepoSpecFile | null {
@@ -97,5 +140,5 @@ export function writeRepoSpecFile(spec: ProjectSpec, startDir = process.cwd()): 
   mkdirSync(dir, { recursive: true });
   const specPath = repoSpecPath(root);
   writeFileSync(specPath, `${JSON.stringify(spec, null, 2)}\n`, 'utf8');
-  return { root, path: specPath };
+  return { root, path: specPath, envTemplate: ensureRepoEnvTemplate(root) };
 }

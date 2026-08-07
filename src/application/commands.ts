@@ -14,7 +14,6 @@ import { registerHvDeployTools } from '../tools/hv-deploy.tools.js';
 import { registerHvObservabilityTools } from '../tools/hv-observability.tools.js';
 import { registerHvDbTools } from '../tools/hv-db.tools.js';
 import { registerHvSecretsTools } from '../tools/hv-secrets.tools.js';
-import { registerHvEmailTools } from '../tools/hv-email.tools.js';
 import { registerHvCiTools } from '../tools/hv-ci.tools.js';
 import { registerHvAppstoreTools } from '../tools/hv-appstore.tools.js';
 import { registerHvDevxTools } from '../tools/hv-devx.tools.js';
@@ -24,7 +23,7 @@ export type CommandAccess = 'read' | 'write';
 export interface CommandDefinition {
   /** Stable command identity. MCP exposes this value unchanged. */
   id: string;
-  /** Human-oriented CLI path, for example ["spec", "set"]. */
+  /** Human-oriented CLI path, for example ["spec"]. */
   cliPath: string[];
   description: string;
   inputShape: ZodRawShape;
@@ -37,7 +36,7 @@ function confirmationFieldForCommand(
   id: string,
   inputShape: ZodRawShape
 ): string | undefined {
-  if (id === 'hv_spec_set' && inputShape.confirmNativeDeploy) {
+  if (id === 'hv_spec' && inputShape.confirmNativeDeploy) {
     return 'confirmNativeDeploy';
   }
   if (id === 'hv_db_query' && inputShape.allowMutations) {
@@ -82,16 +81,10 @@ export interface CommandRegistrar {
 }
 
 const READ_ONLY_COMMANDS = new Set([
-  'hv_spec_get',
   'hv_status',
   'hv_inspect',
-  'hv_connections_list',
   'hv_logs',
-  'hv_errors',
   'hv_health',
-  'hv_db_url',
-  'hv_secrets_get',
-  'hv_secrets_list',
   'hv_ci_status',
   'hv_appstore_status',
   'hv_runs',
@@ -99,10 +92,8 @@ const READ_ONLY_COMMANDS = new Set([
 
 const ROOT_COMMANDS = new Set([
   'apply',
-  'connect',
   'deploy',
   'destroy',
-  'errors',
   'health',
   'import',
   'inspect',
@@ -111,9 +102,6 @@ const ROOT_COMMANDS = new Set([
   'rollback',
   'runs',
   'status',
-  'tunnel',
-  'upgrade',
-  'visualize',
 ]);
 
 export function cliPathForCommand(id: string): string[] {
@@ -203,7 +191,6 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registerHvObservabilityTools(registry, ctx);
   registerHvDbTools(registry, ctx);
   registerHvSecretsTools(registry, ctx);
-  registerHvEmailTools(registry, ctx);
   registerHvCiTools(registry, ctx);
   registerHvAppstoreTools(registry, ctx);
   registerHvDevxTools(registry, ctx);

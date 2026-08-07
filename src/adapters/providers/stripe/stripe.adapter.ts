@@ -58,7 +58,7 @@ export class StripeApiError extends Error {
 export const StripeCredentialsSchema = z.object({
   /**
    * Preferred shape for an environment-scoped Stripe connection
-   * (hv_connect provider="stripe" scope="staging" ...).
+   * (hv_connections provider="stripe" scope="staging" ...).
    */
   secretKey: z.string().optional().refine(
     (key) => !key || key.startsWith('sk_test_') || key.startsWith('sk_live_'),

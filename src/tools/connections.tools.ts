@@ -194,11 +194,11 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
   }
 
   commands.register(
-    'hv_connect',
-    'Manage provider connections. action="add" (default) stores credentials and immediately verifies them; action="verify" re-verifies an existing connection; action="remove" deletes one; action="prepare" runs one-time cloud account preparation (Cloud Run: enables required GCP APIs and grants deploy IAM roles using one-time admin credentials that are never stored — preview first, then pass confirm=true). Credentials are encrypted at rest and never returned. Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. For GitHub, NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN are aliases when only one distinct value is available. Raw credentials={...} is still accepted if the user intentionally wants to enter credentials in chat.',
+    'hv_connections',
+    'List provider connections and available providers by default. Pass provider to manage one: action="add" (default) stores and verifies credentials, action="verify" re-verifies, action="remove" deletes, and action="prepare" performs confirm-gated cloud account preparation. Credentials are encrypted at rest and never returned; credentialsRef is preferred.',
     {
-      provider: z.string().describe(`Provider name (available: ${providerNames.join(', ')}). action="remove" also accepts providers that are no longer registered so stale connections can be deleted.`),
-      action: z.enum(['add', 'verify', 'remove', 'prepare']).optional().describe('What to do (default: "add")'),
+      provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
+      action: z.enum(['add', 'verify', 'remove', 'prepare']).optional().describe('With provider: operation to perform (default: "add")'),
       credentials: z.record(z.unknown()).optional().describe('action="add": provider-specific credentials object. credentialsRef is recommended, but raw credentials are accepted when the user intentionally wants to enter them in chat.'),
       credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, or secret-manager refs like 1password://vault/item#field. The resolved value may be a JSON credentials object or a scalar.'),
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. Optional for common single-token providers.'),
@@ -215,7 +215,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
     },
     wrapCommandHandler(async ({
       provider,
-      action = 'add',
+      action,
       credentials,
       credentialsRef,
       credentialsKey,
@@ -230,14 +230,38 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       adminAccessTokenRef,
       confirm,
     }) => {
+      if (!provider) {
+        const mutationInput = action !== undefined
+          || credentials !== undefined
+          || credentialsRef !== undefined
+          || credentialsKey !== undefined
+          || credentialsMap !== undefined
+          || scope !== undefined
+          || projectRef !== undefined
+          || gcpProjectId !== undefined
+          || deployServiceAccountEmail !== undefined
+          || adminCredentialsJson !== undefined
+          || adminCredentialsJsonRef !== undefined
+          || adminAccessToken !== undefined
+          || adminAccessTokenRef !== undefined
+          || confirm !== undefined;
+        if (mutationInput) {
+          return commandError('VALIDATION', 'provider is required when connection operation parameters are supplied.', {
+            hint: 'Omit all parameters to list connections, or pass provider to add, verify, remove, or prepare one.',
+          });
+        }
+        return listConnections();
+      }
+
+      const requestedAction = action ?? 'add';
       // Stale connections for unregistered providers must stay removable.
-      if (action !== 'remove' && !providerNames.includes(provider)) {
+      if (requestedAction !== 'remove' && !providerNames.includes(provider)) {
         return commandError('VALIDATION', `Unknown provider: ${provider}.`, {
           hint: `Available providers: ${providerNames.join(', ')}`,
         });
       }
 
-      if (action === 'prepare') {
+      if (requestedAction === 'prepare') {
         const project = ctx.resolveProjectOrThrow({ project: projectRef });
         const resolvedAdminCredentialsJson = adminCredentialsJsonRef
           ? resolveLocalSecretRef(adminCredentialsJsonRef)
@@ -262,7 +286,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           : { next: ['hv_plan'] });
       }
 
-      if (action === 'remove') {
+      if (requestedAction === 'remove') {
         const result = deleteConnection(provider, scope);
         if (!result.success) {
           return commandError('NOT_FOUND', result.error!);
@@ -270,7 +294,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         return commandSuccess({ provider, scope: scope || 'global', removed: true });
       }
 
-      if (action === 'add') {
+      if (requestedAction === 'add') {
         if (credentials && credentialsRef) {
           return commandError('VALIDATION', 'Pass either credentials or credentialsRef, not both.');
         }
@@ -311,7 +335,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         if (verified.kind !== 'verified') {
           return commandError('PROVIDER_ERROR', verified.error ?? 'Verification failed.', {
             details: { connection: saved.connection, ...setupDetails(provider, scope) },
-            hint: `The connection was saved but failed verification. Confirm the token type and permissions, then re-run hv_connect action="verify" or action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
+            hint: `The connection was saved but failed verification. Confirm the token type and permissions, then re-run hv_connections provider="${provider}" action="verify" or action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
 
@@ -345,24 +369,20 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         case 'not_found':
           return commandError('NOT_FOUND', verified.error, {
             details: setupDetails(provider, scope),
-            hint: `Add the connection first with hv_connect action="add". ${formatConnectionGuidance(provider, { scope })}`,
+            hint: `Add the connection first with hv_connections provider="${provider}" action="add". ${formatConnectionGuidance(provider, { scope })}`,
           });
         case 'unknown_provider':
           return commandError('UNSUPPORTED', verified.error);
         default:
           return commandError('PROVIDER_ERROR', verified.error, {
             details: setupDetails(provider, scope),
-            hint: `Confirm the token type and permissions, then re-run hv_connect action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
+            hint: `Confirm the token type and permissions, then re-run hv_connections provider="${provider}" action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
       }
     })
   );
 
-  commands.register(
-    'hv_connections_list',
-    'List stored provider connections (provider, scope, status, last verified — never credentials) plus all connectable providers grouped by category.',
-    {},
-    wrapCommandHandler(async () => {
+  async function listConnections() {
       const connections = ctx.repos.connections.findAll().map((c) => ({
         provider: c.provider,
         scope: c.scope ?? 'global',
@@ -426,15 +446,14 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         });
       }
 
-      const discoveryHint = 'hv_connections_list is credential discovery only. If a concrete task is blocked by a missing connection, use hv_connect only when a safe credentialsRef is already available. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
+      const discoveryHint = 'This list is credential discovery only. If a concrete task is blocked, use hv_connections with provider only when a safe credentialsRef is already available. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';
       return commandSuccess(
         { connections, availableProviders },
         {
           hint: connections.length === 0
-            ? `No connections yet. Recommended: hv_connect provider="<name>" credentialsRef="env:NAME", credentialsRef="dotenv:/absolute/path/.env#KEY", or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if the user intentionally wants chat entry. ${discoveryHint}`
+            ? `No connections yet. Recommended: hv_connections provider="<name>" credentialsRef="env:NAME", credentialsRef="dotenv:/absolute/path/.env#KEY", or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if the user intentionally wants chat entry. ${discoveryHint}`
             : discoveryHint,
         }
       );
-    })
-  );
+  }
 }

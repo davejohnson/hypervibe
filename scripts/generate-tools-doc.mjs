@@ -28,16 +28,14 @@ const commands = createCommandRegistry(createCommandContext()).list();
 commands.sort((a, b) => a.id.localeCompare(b.id));
 
 const groups = new Map([
-  ['Core (spec → plan → apply)', /^hv_(spec_|plan$|apply$|status$|inspect$|import$|destroy$)/],
-  ['Connections', /^hv_connect/],
-  ['Deploy & observability', /^hv_(deploy|rollback|logs|errors|health)$/],
+  ['Core (spec → plan → apply)', /^hv_(spec$|plan$|apply$|status$|inspect$|import$|destroy$)/],
+  ['Connections', /^hv_connections/],
+  ['Deploy & observability', /^hv_(deploy|rollback|logs|health)$/],
   ['Database', /^hv_db_/],
   ['Secrets', /^hv_secrets_/],
-  ['Domains & email', /^hv_(domain_|dns_|email_)/],
-  ['Payments', /^hv_(payments_|stripe_)/],
   ['CI', /^hv_ci_/],
-  ['App Store & iOS', /^hv_(appstore_|testflight_|appid_|xcode_)/],
-  ['Developer experience', /^hv_(upgrade|tunnel|local_bootstrap|visualize|runs)$/],
+  ['App Store & iOS', /^hv_appstore_/],
+  ['Developer experience', /^hv_runs$/],
 ]);
 
 let md = '';

@@ -9,8 +9,6 @@ import {
 import {
   isExternallyUsableDatabaseUrl,
   isPostgresDatabaseUrl,
-  resolveExternalDatabaseUrl,
-  maskDatabaseUrl,
 } from '../domain/services/database-ops.service.js';
 import {
   acquireExistingDatabaseAccess,
@@ -46,7 +44,7 @@ function assertManagedEnvironmentUsesPostgres(
   if (!postgres && mongodb) {
     throw new HvError(
       'VALIDATION',
-      `Environment "${environment.name}" uses MongoDB; hv_db_query and hv_db_url support PostgreSQL only.`,
+      `Environment "${environment.name}" uses MongoDB; hv_db_query supports PostgreSQL only.`,
       {
         details: { engine: 'mongodb' },
         hint: 'Use an engine-aware MongoDB operation through the application or provider until Hypervibe exposes a bounded MongoDB command contract.',
@@ -93,39 +91,6 @@ async function resolveConfiguredTarget(
     return { url: creds.connectionUrl, source: `connection: ${opts.connectionName}` };
   }
   return null;
-}
-
-function unavailableExternalDatabaseTarget(project: Project, environment: { name: string; id: string; platformBindings: Record<string, unknown> }): HvError {
-  return new HvError('NOT_FOUND', `Could not resolve an externally reachable Postgres URL for ${project.name}/${environment.name}.`, {
-    details: {
-      source: `${project.name}/${environment.name}`,
-    },
-    hint: 'The managed database may be internal-only or stored as a provider runtime reference. Use hv_db_query for bounded diagnostics with operation-scoped access, or pass connectionUrl/connectionName explicitly.',
-  });
-}
-
-/**
- * Resolve a database URL usable by local Hypervibe tooling:
- * direct URL > named connection > externally reachable project/env database.
- *
- * This intentionally does not return provider runtime refs like
- * ${{Postgres.DATABASE_URL}} or private hosts such as *.railway.internal.
- */
-async function resolveExternalTarget(
-  ctx: CommandContext,
-  opts: { connectionUrl?: string; connectionName?: string; project?: string; env?: string; service?: string }
-): Promise<ResolvedDatabaseTarget> {
-  const configured = await resolveConfiguredTarget(ctx, opts);
-  if (configured) return configured;
-
-  const project = ctx.resolveProjectOrThrow({ project: opts.project });
-  const environment = ctx.resolveEnvironmentOrThrow(project, opts.env);
-  assertManagedEnvironmentUsesPostgres(ctx, environment);
-  const url = await resolveExternalDatabaseUrl(project, environment, opts.service);
-  if (!url) {
-    throw unavailableExternalDatabaseTarget(project, environment);
-  }
-  return { url, source: `${project.name}/${environment.name}${opts.service ? `/${opts.service}` : ''}`, project };
 }
 
 async function resolveTemporaryExternalTarget(
@@ -309,30 +274,4 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
     })
   );
 
-  commands.register(
-    'hv_db_url',
-    'Get the database connection URL for an environment. Values are always masked in command output to avoid leaking credentials into transcripts or terminals.',
-    {
-      project: projectField,
-      env: envField,
-      service: z.string().optional().describe('Service name when resolving from bindings'),
-      reveal: z.boolean().optional().describe('Deprecated: raw URLs are not returned in command output'),
-    },
-    wrapCommandHandler(async ({ project, env, service, reveal }) => {
-      const target = await resolveExternalTarget(ctx, { project, env, service });
-      return commandSuccess(
-        {
-          source: target.source,
-          databaseUrl: maskDatabaseUrl(target.url),
-          masked: true,
-          ...(reveal ? { revealSuppressed: true } : {}),
-        },
-        {
-          hint: reveal
-            ? 'Raw database URLs are not returned in command output. Prefer hv_db_query for bounded diagnostics, or retrieve the credential directly from the provider/secret manager when a human must use it.'
-            : 'Use hv_db_query for bounded diagnostics without exposing the connection URL.',
-        }
-      );
-    })
-  );
 }
