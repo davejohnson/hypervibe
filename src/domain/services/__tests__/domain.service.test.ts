@@ -248,6 +248,19 @@ describe('setupCustomDomain', () => {
       ['zone-1', '_railway.app.example.com', 'TXT', 'verify-token', { proxied: false }],
     ]);
 
+    const dnsOnly = await setupCustomDomain({
+      project,
+      environment,
+      domain: 'app.example.com',
+      serviceName: 'web',
+      trafficProxied: false,
+    });
+    expect(dnsOnly).toMatchObject({ success: false, pending: true });
+    expect(upsertDnsRecord.mock.calls.slice(2, 4)).toEqual([
+      ['zone-1', 'app.example.com', 'CNAME', 'web-production.up.railway.app', { proxied: false }],
+      ['zone-1', '_railway.app.example.com', 'TXT', 'verify-token', { proxied: false }],
+    ]);
+
     providerVerified = true;
     const verified = await setupCustomDomain({
       project,

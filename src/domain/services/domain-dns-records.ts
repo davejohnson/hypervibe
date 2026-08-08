@@ -112,9 +112,13 @@ export function normalizeProviderDnsRecord(record: ProviderDnsRecord): Normalize
  * Cloudflare should proxy provider-declared traffic routes, while ownership
  * and certificate verification records must remain directly resolvable.
  */
-export function providerDnsRecordShouldBeProxied(record: NormalizedDnsRecord): boolean {
+export function providerDnsRecordShouldBeProxied(
+  record: NormalizedDnsRecord,
+  trafficProxied = true
+): boolean {
   const purpose = record.purpose?.trim().toUpperCase() ?? '';
-  return record.type === 'CNAME'
+  return trafficProxied
+    && record.type === 'CNAME'
     && purpose.includes('TRAFFIC')
     && !purpose.includes('VERIFICATION');
 }

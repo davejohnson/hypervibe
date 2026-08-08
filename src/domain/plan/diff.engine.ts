@@ -666,13 +666,21 @@ export function diffEnvironment(input: {
       : Object.values(localServiceBindings).some((b) => b.customDomains?.includes(spec.domain!));
     const domainStatus = attachedService?.customDomainStatus?.[spec.domain];
     const dnsConfigured = domainStatus?.dnsConfigured;
+    const desiredDomainProxy = spec.domainProxy ?? true;
+    const boundDomainDns = local.bindings?.domainDns;
+    const appliedDomainProxy = boundDomainDns?.name === spec.domain
+      ? boundDomainDns.proxied
+      : undefined;
+    const domainProxyDrift = appliedDomainProxy !== undefined
+      && appliedDomainProxy !== desiredDomainProxy;
     const requiresProviderVerification = providerRequiresCustomDomainAttach(provider);
     const configured = attached
       && (requiresProviderVerification
         ? dnsConfigured !== false
           && (domainStatus?.providerVerified === true
             || (domainStatus?.providerVerified === undefined && dnsConfigured === true))
-        : dnsConfigured !== false);
+        : dnsConfigured !== false)
+      && !domainProxyDrift;
     actions.push({
       id,
       type: configured ? 'noop' : 'update',
@@ -683,12 +691,20 @@ export function diffEnvironment(input: {
           ? `Domain ${spec.domain} is attached on ${provider}, but required DNS records are not configured`
           : domainStatus?.providerVerified === false && requiresProviderVerification
             ? `Domain ${spec.domain} DNS is configured, but ${provider} ownership verification is still pending`
-            : dnsConfigured === undefined && requiresProviderVerification
-              ? `Domain ${spec.domain} is attached on ${provider}, but provider verification status was not observed`
-              : 'Domain attached'
+            : domainProxyDrift
+              ? `Domain ${spec.domain} traffic proxy does not match desired state`
+              : dnsConfigured === undefined && requiresProviderVerification
+                ? `Domain ${spec.domain} is attached on ${provider}, but provider verification status was not observed`
+                : 'Domain attached'
         : `Domain ${spec.domain} is not attached to any service`,
       dependsOn: configured ? undefined : projectDep,
-      ...(domainStatus?.dnsRecords ? { metadata: { dnsRecords: domainStatus.dnsRecords } } : {}),
+      ...(domainProxyDrift
+        ? { diff: [{ field: 'dns:proxied', from: String(appliedDomainProxy), to: String(desiredDomainProxy) }] }
+        : {}),
+      metadata: {
+        ...(domainStatus?.dnsRecords ? { dnsRecords: domainStatus.dnsRecords } : {}),
+        domainProxy: desiredDomainProxy,
+      },
     });
   }
 

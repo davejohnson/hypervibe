@@ -1367,7 +1367,7 @@ async function inspectCloudflareResources(
       zones: (await adapter.listZones()).slice(0, request.limit),
     };
   }
-  const zone = request.id
+  const zone = resource === 'zone' && request.id
     ? (await adapter.listZones()).find((candidate) => candidate.id === request.id) ?? null
     : zoneName
       ? await adapter.findZoneByName(zoneName)
@@ -1384,11 +1384,13 @@ async function inspectCloudflareResources(
   }
   if (resource === 'dns') {
     const records = await adapter.listDnsRecords(zone.id);
-    const filtered = request.name
-      ? records.filter((record) => record.name.toLowerCase() === request.name!.toLowerCase())
-      : records;
+    const filtered = request.id
+      ? records.filter((record) => record.id === request.id)
+      : request.name
+        ? records.filter((record) => record.name.toLowerCase() === request.name!.toLowerCase())
+        : records;
     return {
-      observation: 'present',
+      observation: request.id && filtered.length === 0 ? 'absent' : 'present',
       resource,
       zone: { id: zone.id, name: zone.name },
       records: filtered.slice(0, request.limit),

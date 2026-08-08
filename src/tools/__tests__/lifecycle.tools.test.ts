@@ -15,6 +15,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter, type RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
+import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { NeonAdapter } from '../../adapters/providers/neon/neon.adapter.js';
 import type { ObservedService, ObservedState } from '../../domain/ports/observe.port.js';
@@ -293,6 +294,70 @@ describe('hv_inspect / hv_import', () => {
       expect.objectContaining({ provider: 'cloudflare', resources: expect.arrayContaining(['zone', 'dns']) }),
       expect.objectContaining({ provider: 'railway', resources: expect.arrayContaining(['project', 'environment']) }),
     ]));
+    await t.close();
+  });
+
+  it('hv_inspect resolves an exact Cloudflare DNS record id within the selected zone', async () => {
+    const repository = new ConnectionRepository();
+    const connection = repository.create({
+      provider: 'cloudflare',
+      scope: 'example.com',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'cf-token' }),
+    });
+    repository.updateStatus(connection.id, 'verified');
+    vi.spyOn(CloudflareAdapter.prototype, 'connect').mockImplementation(() => undefined);
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1',
+      name: 'example.com',
+      status: 'active',
+      paused: false,
+      type: 'full',
+      name_servers: [],
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'listDnsRecords').mockResolvedValue([
+      {
+        id: 'record-1',
+        zone_id: 'zone-1',
+        zone_name: 'example.com',
+        name: 'example.com',
+        type: 'CNAME',
+        content: 'app.example.net',
+        proxiable: true,
+        proxied: true,
+        ttl: 1,
+        created_on: '2026-08-08T00:00:00.000Z',
+        modified_on: '2026-08-08T00:00:00.000Z',
+      },
+      {
+        id: 'record-2',
+        zone_id: 'zone-1',
+        zone_name: 'example.com',
+        name: '_verify.example.com',
+        type: 'TXT',
+        content: 'verify-token',
+        proxiable: false,
+        proxied: false,
+        ttl: 1,
+        created_on: '2026-08-08T00:00:00.000Z',
+        modified_on: '2026-08-08T00:00:00.000Z',
+      },
+    ]);
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', {
+      provider: 'cloudflare',
+      scope: 'example.com',
+      resource: 'dns',
+      id: 'record-2',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      resource: 'dns',
+      observation: 'present',
+      zone: { id: 'zone-1', name: 'example.com' },
+      records: [{ id: 'record-2', name: '_verify.example.com', type: 'TXT' }],
+    });
     await t.close();
   });
 

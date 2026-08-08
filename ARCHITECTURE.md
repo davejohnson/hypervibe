@@ -167,6 +167,14 @@ Environments store provider bindings in `platformBindings` using generic keys on
 
 Provider-specific legacy binding names such as `railwayProjectId` and `railwayEnvironmentId` were migrated away in SQLite migration 7.
 
+Custom-domain traffic proxying is explicit desired state through the optional
+`environment.domainProxy` boolean (default `true`). Verification records always
+remain unproxied. A successful DNS write records the domain name and effective
+proxy state in `platformBindings.domainDns`, so changing the setting plans a
+domain update instead of hiding an imperative Cloudflare toggle. This supports
+the reversible certificate-validation workflow where a traffic CNAME is made
+DNS-only until the hosting provider verifies the domain, then proxied again.
+
 Provider-managed edge load balancers use a separate generic
 `platformBindings.loadBalancer` topology. The public hostname, provider scope,
 and each monitor/pool/load-balancer provider id are durable identities. The

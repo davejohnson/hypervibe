@@ -75,6 +75,7 @@ export async function setupCustomDomain(params: {
   environment: Environment;
   domain: string;
   serviceName?: string;
+  trafficProxied?: boolean;
 }): Promise<DomainSetupResult> {
   const { project, environment } = params;
   const domain = normalizeDomainName(params.domain);
@@ -169,7 +170,7 @@ export async function setupCustomDomain(params: {
       for (const record of normalizedRecords) {
         const { name, type, value } = record;
         const upsert = await cfAdapter.upsertDnsRecord(zone.id, name, type, value, {
-          proxied: providerDnsRecordShouldBeProxied(record),
+          proxied: providerDnsRecordShouldBeProxied(record, params.trafficProxied),
         });
         dnsResults.push({ name, type, target: value, action: upsert.action });
       }
@@ -190,7 +191,9 @@ export async function setupCustomDomain(params: {
         : `Custom-domain attach failed on ${provider}; DNS was not changed because the provider has not accepted ${domain}.`;
     } else if (binding?.url) {
       const targetHost = new URL(binding.url).hostname;
-      const upsert = await cfAdapter.upsertDnsRecord(zone.id, domain, 'CNAME', targetHost, { proxied: true });
+      const upsert = await cfAdapter.upsertDnsRecord(zone.id, domain, 'CNAME', targetHost, {
+        proxied: params.trafficProxied ?? true,
+      });
       dnsResults.push({ name: domain, type: 'CNAME', target: targetHost, action: upsert.action });
       result.dnsConfigured = true;
     } else {

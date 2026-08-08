@@ -1422,7 +1422,16 @@ async function applyDomain(
     project,
     environment,
     domain: action.resource.name,
+    trafficProxied: environmentSpec.domainProxy ?? true,
   });
+  if (result.dnsConfigured) {
+    ctx.repos.environments.updatePlatformBindings(environment.id, {
+      domainDns: {
+        name: action.resource.name,
+        proxied: environmentSpec.domainProxy ?? true,
+      },
+    });
+  }
   if (result.pending) {
     return {
       success: true,
