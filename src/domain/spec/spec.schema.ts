@@ -1144,6 +1144,8 @@ export const environmentSpecSchema = z.object({
   database: databaseSpecSchema.optional(),
   cache: cacheSpecSchema.optional(),
   domain: z.string().min(1).optional(),
+  /** Whether Cloudflare proxies the custom-domain traffic record. Disable temporarily when origin certificate validation is stuck. */
+  domainProxy: z.boolean().optional(),
   loadBalancer: loadBalancerSpecSchema.optional(),
   domainRegistration: domainRegistrationSpecSchema.optional(),
   email: emailSpecSchema.default({ enabled: false }),

@@ -853,6 +853,61 @@ describe('diffEnvironment — domain and workload', () => {
     expect(attached.actions.find((a) => a.id === 'domain:myapp.dev')!.type).toBe('noop');
   });
 
+  it('updates a verified domain when the managed traffic proxy differs from desired state', () => {
+    const withDomain = spec({ domain: 'myapp.dev', domainProxy: true });
+    const result = diffEnvironment({
+      spec: withDomain,
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: { 'myapp.dev': { providerVerified: true, dnsConfigured: true } },
+        })],
+      }),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'svc-1' } },
+          domainDns: { name: 'myapp.dev', proxied: false },
+        },
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
+      type: 'update',
+      reason: 'Domain myapp.dev traffic proxy does not match desired state',
+      diff: [{ field: 'dns:proxied', from: 'false', to: 'true' }],
+      metadata: { domainProxy: true },
+    });
+  });
+
+  it('noops a verified domain when the managed traffic proxy matches desired state', () => {
+    const withDomain = spec({ domain: 'myapp.dev', domainProxy: false });
+    const result = diffEnvironment({
+      spec: withDomain,
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: { 'myapp.dev': { providerVerified: true, dnsConfigured: true } },
+        })],
+      }),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'svc-1' } },
+          domainDns: { name: 'myapp.dev', proxied: false },
+        },
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')!.type).toBe('noop');
+  });
+
   it('updates when a provider-attached domain has no observed verification status', () => {
     const withDomain = spec({ domain: 'myapp.dev' });
     const result = diffEnvironment({

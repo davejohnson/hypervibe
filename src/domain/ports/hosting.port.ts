@@ -102,6 +102,10 @@ export const hostingBindingsSchema = z.object({
       }).passthrough().optional(),
     }).passthrough()
   ).optional(),
+  domainDns: z.object({
+    name: z.string().optional(),
+    proxied: z.boolean().optional(),
+  }).passthrough().optional(),
 }).passthrough();
 
 export type ParsedHostingBindings = z.infer<typeof hostingBindingsSchema>;
