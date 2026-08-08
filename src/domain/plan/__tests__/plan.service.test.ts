@@ -25,7 +25,7 @@ import type { Project } from '../../entities/project.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
 import { buildBranchDeployWorkflow } from '../../services/github-ops.service.js';
 import { StripeAdapter } from '../../../adapters/providers/stripe/stripe.adapter.js';
-import { applyDatabaseSeed, executePlanApply } from '../../../application/apply-plan.js';
+import { executePlanApply } from '../../../application/apply-plan.js';
 import { createToolContext } from '../../../tools/context.js';
 
 let project: Project;
@@ -399,7 +399,7 @@ describe('PlanService.plan', () => {
     expect(JSON.stringify(document)).not.toContain('sk_test_staging');
   });
 
-  it('stages Stripe-backed fixture seeding after the reviewed CI release', async () => {
+  it('deploys the exact desired commit before running a newly declared seed command', async () => {
     project = new ProjectRepository().update(project.id, {
       gitRemoteUrl: 'https://github.com/dave/plan-test',
     })!;
@@ -471,6 +471,7 @@ describe('PlanService.plan', () => {
     for (const input of [
       { provider: 'railway', credentials: { apiToken: 'railway-token' }, scope: undefined },
       { provider: 'stripe', credentials: { secretKey: 'rk_test_staging' }, scope: 'staging' },
+      { provider: 'github', credentials: { apiToken: 'github-token' }, scope: undefined },
     ]) {
       const connection = connectionRepo.create({
         provider: input.provider,
@@ -507,70 +508,52 @@ describe('PlanService.plan', () => {
     vi.spyOn(StripeAdapter.prototype, 'listProducts').mockResolvedValue([]);
     vi.spyOn(StripeAdapter.prototype, 'listPrices').mockResolvedValue([]);
     vi.spyOn(StripeAdapter.prototype, 'listWebhookEndpoints').mockResolvedValue([]);
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'getEnvironmentVariable').mockResolvedValue(null);
+    vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({
+      ref: 'refs/heads/main',
+      object: { sha: 'a'.repeat(40) },
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+      total_count: 0,
+      workflow_runs: [],
+    });
 
     const result = await new PlanService().plan(project, 'staging');
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
     const seed = plan.actions.find((action) => action.metadata?.operation === 'databaseSeed');
+    const release = plan.actions.find((action) => action.metadata?.operation === 'githubActionsRelease');
+    const appliedSpecHash = plan.actions.find((action) =>
+      action.id === 'ci:github-actions:staging:applied-spec-hash'
+    );
 
     expect(seed).toMatchObject({
       type: 'update',
-      metadata: { deferUntilNextPlan: true },
+      dependsOn: expect.arrayContaining(['ci:github-actions:staging:release']),
+    });
+    expect(release).toMatchObject({
+      type: 'update',
+      resource: { kind: 'ci', name: 'release:staging', provider: 'github' },
+      metadata: {
+        targetSha: 'a'.repeat(40),
+        workflow: '.github/workflows/deploy-railway-staging.yml',
+      },
+      dependsOn: ['ci:github-actions:staging:applied-spec-hash'],
+    });
+    expect(appliedSpecHash).toMatchObject({
       dependsOn: expect.arrayContaining([
         'payment:stripe:staging:catalog:product:starter',
         'payment:stripe:staging:catalog:price:starter:monthly',
         'payment:stripe:staging:hosting-env:web',
         'payment:stripe:staging:webhook:billing',
         'ci:github-actions:staging:deploy-branch',
-        'ci:github-actions:staging:applied-spec-hash',
       ]),
     });
-    const appliedSpecHash = plan.actions.find((action) =>
-      action.id === 'ci:github-actions:staging:applied-spec-hash'
-    );
     expect(appliedSpecHash?.dependsOn).not.toContain(seed?.id);
     const orderedIds = orderActions(plan.actions).map((action) => action.id);
-    expect(orderedIds.indexOf(appliedSpecHash!.id)).toBeLessThan(orderedIds.indexOf(seed!.id));
-    expect(plan.warnings).toContainEqual(expect.stringContaining(
-      'Database seeding is staged after this apply'
-    ));
-  });
-
-  it('returns a pending seed receipt without starting an environment task before release', async () => {
-    const environment = new EnvironmentRepository().create({
-      projectId: project.id,
-      name: 'staging',
-      platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 're-1' },
-    });
-    new ComponentRepository().create({
-      environmentId: environment.id,
-      type: 'postgres',
-      externalId: 'db-1',
-      bindings: { provider: 'railway' },
-    });
-    const getProviderAdapter = vi.spyOn(adapterFactory, 'getProviderAdapter');
-
-    const result = await applyDatabaseSeed(createToolContext(), project, 'staging', {
-      id: 'database:railway:seed',
-      type: 'update',
-      resource: { kind: 'database', name: 'seed', provider: 'railway' },
-      verified: true,
-      reason: 'Seed application and Stripe fixtures after release',
-      metadata: {
-        operation: 'databaseSeed',
-        engine: 'postgres',
-        command: 'npm run db:seed:personas -- --dataset=invoice-perfect-v1',
-        commandHash: 'hash-v1',
-        deferUntilNextPlan: true,
-      },
-    });
-
-    expect(result).toMatchObject({
-      success: false,
-      status: 'pending',
-      data: { pendingDeploy: true },
-    });
-    expect(getProviderAdapter).not.toHaveBeenCalled();
+    expect(orderedIds.indexOf(appliedSpecHash!.id)).toBeLessThan(orderedIds.indexOf(release!.id));
+    expect(orderedIds.indexOf(release!.id)).toBeLessThan(orderedIds.indexOf(seed!.id));
   });
 
   it('plans bound Stripe webhook deletion before destroying its hosting service', async () => {

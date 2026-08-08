@@ -845,7 +845,7 @@ describe('diffEnvironment — domain and workload', () => {
       observed: observed({
         services: [observedWeb({
           customDomains: ['myapp.dev'],
-          customDomainStatus: { 'myapp.dev': { dnsConfigured: true } },
+          customDomainStatus: { 'myapp.dev': { providerVerified: true, dnsConfigured: true } },
         })],
       }),
       local: local(),
@@ -899,6 +899,31 @@ describe('diffEnvironment — domain and workload', () => {
     expect(domain.metadata?.dnsRecords).toEqual([
       expect.objectContaining({ name: '_railway.myapp.dev', type: 'TXT' }),
     ]);
+  });
+
+  it('keeps a provider-attached domain pending after DNS propagates until ownership is verified', () => {
+    const withDomain = spec({ domain: 'myapp.dev' });
+    const result = diffEnvironment({
+      spec: withDomain,
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: {
+            'myapp.dev': {
+              providerVerified: false,
+              dnsConfigured: true,
+            },
+          },
+        })],
+      }),
+      local: local(),
+    });
+
+    const domain = result.actions.find((action) => action.id === 'domain:myapp.dev')!;
+    expect(domain.type).toBe('update');
+    expect(domain.reason).toContain('DNS is configured');
+    expect(domain.reason).toContain('ownership verification is still pending');
   });
 
   it('replaces a service whose cron-ness changed', () => {

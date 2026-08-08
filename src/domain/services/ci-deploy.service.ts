@@ -36,7 +36,10 @@ import {
 } from './deployment-contract.service.js';
 
 const OPERATION = 'githubActionsDeployBranch';
+export const GITHUB_ACTIONS_RELEASE_OPERATION = 'githubActionsRelease';
 const GITHUB_CI_REQUIRED_CLASSIC_SCOPES = ['repo', 'workflow'];
+const RELEASE_WAIT_TIMEOUT_MS = 30 * 60_000;
+const RELEASE_POLL_INTERVAL_MS = 3_000;
 
 export function requiredProviderSecretNamesForGitHubActions(provider: string): string[] {
   const ci = providerRegistry.getMetadata(provider)?.orchestration?.ci;
@@ -871,6 +874,237 @@ export async function applyGitHubActionsAppliedSpecHash(params: {
       variableName: APPLIED_SPEC_HASH_VARIABLE,
       desiredHash,
     },
+  };
+}
+
+function releaseArtifactName(environmentName: string, targetSha: string): string {
+  const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
+  return `hypervibe-server-release-${safeEnvironment}-${targetSha}`;
+}
+
+async function findVerifiedRelease(params: {
+  adapter: GitHubAdapter;
+  owner: string;
+  repo: string;
+  workflow: string;
+  environmentName: string;
+  targetSha: string;
+}): Promise<{ runId: number; url: string } | null> {
+  const runs = await params.adapter.listWorkflowRuns(params.owner, params.repo, params.workflow, { per_page: 50 });
+  const expectedArtifact = releaseArtifactName(params.environmentName, params.targetSha);
+  const candidates = runs.workflow_runs.filter((run) =>
+    run.status === 'completed'
+    && run.conclusion === 'success'
+    && (run.head_sha === params.targetSha || run.display_title?.includes(params.targetSha))
+  );
+  for (const run of candidates) {
+    const artifacts = await params.adapter.listWorkflowRunArtifacts(params.owner, params.repo, run.id);
+    if (artifacts.artifacts.some((artifact) =>
+      artifact.name === expectedArtifact
+      && artifact.expired === false
+      && artifact.workflow_run?.id === run.id
+    )) {
+      return { runId: run.id, url: run.html_url };
+    }
+  }
+  return null;
+}
+
+export async function planGitHubActionsRelease(params: {
+  project: Project;
+  environmentName: string;
+  environmentSpec: EnvironmentSpec;
+  dependsOn?: string[];
+}): Promise<{ action?: PlanAction; warnings: string[] }> {
+  const warnings: string[] = [];
+  if (!environmentUsesGitHubActionsDeploy(params.environmentSpec)) return { warnings };
+  const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl);
+  const [owner, repo] = repository?.split('/') ?? [];
+  const deployTargets = resolveBranchDeployTargets(params.project);
+  const target = deployTargets.targets
+    .find((candidate) => candidate.environmentName === params.environmentName);
+  if (!repository || !owner || !repo || !target) {
+    warnings.push(`Cannot plan the ${params.environmentName} release required by database.seedCommand.`);
+    return { warnings };
+  }
+  const workflow = buildBranchDeployWorkflow(
+    params.environmentSpec.hosting.provider,
+    target,
+    deployTargets.migration,
+    params.environmentSpec.ios
+  );
+  const action = (
+    verified: boolean,
+    reason: string,
+    metadata: Record<string, unknown>,
+    type: 'update' | 'noop' = 'update'
+  ): PlanAction => ({
+    id: `ci:github-actions:${params.environmentName}:release`,
+    type,
+    resource: { kind: 'ci', name: `release:${params.environmentName}`, provider: 'github' },
+    verified,
+    reason,
+    ...(type === 'update' && params.dependsOn?.length ? { dependsOn: params.dependsOn } : {}),
+    metadata: {
+      operation: GITHUB_ACTIONS_RELEASE_OPERATION,
+      repository,
+      environmentName: params.environmentName,
+      workflow: workflow.path,
+      ref: workflow.branch,
+      ...metadata,
+    },
+  });
+  const adapterResult = getGitHubAdapter(repository);
+  if ('error' in adapterResult) {
+    warnings.push(`Cannot observe the exact release required before database seeding: ${adapterResult.error}`);
+    return {
+      action: action(false, `Cannot verify the ${params.environmentName} release required before database seeding`, {
+        blockedReason: 'github_release_observation_unknown',
+      }),
+      warnings,
+    };
+  }
+  try {
+    const ref = await adapterResult.adapter.getRef(owner, repo, `heads/${workflow.branch}`);
+    const targetSha = ref?.object.sha;
+    if (!targetSha || !/^[0-9a-f]{40}$/i.test(targetSha)) {
+      return {
+        action: action(true, `GitHub branch ${workflow.branch} has no exact commit to release`, {
+          blockedReason: 'github_release_ref_absent',
+        }),
+        warnings,
+      };
+    }
+    const existing = await findVerifiedRelease({
+      adapter: adapterResult.adapter,
+      owner,
+      repo,
+      workflow: workflow.path,
+      environmentName: params.environmentName,
+      targetSha,
+    });
+    const mustReleaseAfterPrerequisites = Boolean(params.dependsOn?.length);
+    return {
+      action: action(
+        true,
+        existing && !mustReleaseAfterPrerequisites
+          ? `Exact commit ${targetSha} is already verified as deployed`
+          : `Deploy and verify exact commit ${targetSha} before database seeding`,
+        {
+          targetSha,
+          forceRelease: mustReleaseAfterPrerequisites,
+          ...(existing ? { previousVerifiedRunId: existing.runId } : {}),
+        },
+        existing && !mustReleaseAfterPrerequisites ? 'noop' : 'update'
+      ),
+      warnings,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    warnings.push(`Cannot observe the exact release required before database seeding: ${message}`);
+    return {
+      action: action(false, `Cannot verify the ${params.environmentName} release required before database seeding`, {
+        blockedReason: 'github_release_observation_unknown',
+      }),
+      warnings,
+    };
+  }
+}
+
+export function isGitHubActionsReleaseAction(action: PlanAction): boolean {
+  return action.metadata?.operation === GITHUB_ACTIONS_RELEASE_OPERATION;
+}
+
+export async function applyGitHubActionsRelease(params: {
+  project: Project;
+  environmentName: string;
+  workflow: string;
+  ref: string;
+  targetSha: string;
+  forceRelease?: boolean;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
+  const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl);
+  const [owner, repo] = repository?.split('/') ?? [];
+  if (!repository || !owner || !repo) {
+    return { success: false, status: 'blocked', message: 'GitHub repository is missing', error: 'Set project gitRemoteUrl to a GitHub remote.' };
+  }
+  const adapterResult = getGitHubAdapter(repository);
+  if ('error' in adapterResult) {
+    return { success: false, status: 'blocked', message: 'GitHub adapter unavailable', error: adapterResult.error };
+  }
+  const adapter = adapterResult.adapter;
+  const alreadyReleased = params.forceRelease
+    ? null
+    : await findVerifiedRelease({
+      adapter,
+      owner,
+      repo,
+      workflow: params.workflow,
+      environmentName: params.environmentName,
+      targetSha: params.targetSha,
+    });
+  if (alreadyReleased) {
+    return {
+      success: true,
+      message: `Verified deployed commit ${params.targetSha}`,
+      data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: alreadyReleased.runId, url: alreadyReleased.url },
+    };
+  }
+
+  const before = await adapter.listWorkflowRuns(owner, repo, params.workflow, { per_page: 50 });
+  const existingRunIds = new Set(before.workflow_runs.map((run) => run.id));
+  await adapter.triggerWorkflow(owner, repo, params.workflow, params.ref, { commit_sha: params.targetSha });
+  const deadline = Date.now() + (params.timeoutMs ?? RELEASE_WAIT_TIMEOUT_MS);
+  let selectedRun: Awaited<ReturnType<GitHubAdapter['listWorkflowRuns']>>['workflow_runs'][number] | undefined;
+  while (Date.now() < deadline) {
+    const observed = await adapter.listWorkflowRuns(owner, repo, params.workflow, { per_page: 50 });
+    selectedRun = selectedRun
+      ? observed.workflow_runs.find((run) => run.id === selectedRun?.id)
+      : observed.workflow_runs.find((run) =>
+        !existingRunIds.has(run.id)
+        && run.event === 'workflow_dispatch'
+        && (run.head_sha === params.targetSha || run.display_title?.includes(params.targetSha))
+      );
+    if (selectedRun?.status === 'completed') break;
+    await new Promise((resolve) => setTimeout(resolve, params.pollIntervalMs ?? RELEASE_POLL_INTERVAL_MS));
+  }
+  if (!selectedRun || selectedRun.status !== 'completed') {
+    return {
+      success: true,
+      status: 'pending',
+      message: `The exact-SHA ${params.environmentName} release is still running`,
+      data: { repository, workflow: params.workflow, targetSha: params.targetSha, ...(selectedRun ? { runId: selectedRun.id, url: selectedRun.html_url } : {}) },
+    };
+  }
+  if (selectedRun.conclusion !== 'success') {
+    return {
+      success: false,
+      message: `The exact-SHA ${params.environmentName} release failed`,
+      error: `GitHub Actions run ${selectedRun.id} concluded ${selectedRun.conclusion ?? 'without a conclusion'}.`,
+      data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url },
+    };
+  }
+  const artifacts = await adapter.listWorkflowRunArtifacts(owner, repo, selectedRun.id);
+  const expectedArtifact = releaseArtifactName(params.environmentName, params.targetSha);
+  const releaseEvidence = artifacts.artifacts.find((artifact) =>
+    artifact.name === expectedArtifact
+    && artifact.expired === false
+    && artifact.workflow_run?.id === selectedRun?.id
+  );
+  if (!releaseEvidence) {
+    return {
+      success: false,
+      message: `The exact-SHA ${params.environmentName} release lacked verified release evidence`,
+      error: `Successful run ${selectedRun.id} did not emit ${expectedArtifact}.`,
+      data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url },
+    };
+  }
+  return {
+    success: true,
+    message: `Deployed and verified exact commit ${params.targetSha}`,
+    data: { repository, workflow: params.workflow, targetSha: params.targetSha, runId: selectedRun.id, url: selectedRun.html_url, artifactId: releaseEvidence.id },
   };
 }
 

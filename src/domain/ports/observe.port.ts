@@ -20,6 +20,7 @@ export interface ObservedService {
   customDomainStatus?: Record<string, {
     /** Provider-confirmed domain verification state, when exposed by the provider. */
     providerVerified?: boolean;
+    certificateStatus?: string;
     dnsConfigured?: boolean;
     dnsRecords?: Array<{
       name: string;

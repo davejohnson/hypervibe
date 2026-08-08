@@ -668,7 +668,11 @@ export function diffEnvironment(input: {
     const dnsConfigured = domainStatus?.dnsConfigured;
     const requiresProviderVerification = providerRequiresCustomDomainAttach(provider);
     const configured = attached
-      && (dnsConfigured === true || (!requiresProviderVerification && dnsConfigured !== false));
+      && (requiresProviderVerification
+        ? dnsConfigured !== false
+          && (domainStatus?.providerVerified === true
+            || (domainStatus?.providerVerified === undefined && dnsConfigured === true))
+        : dnsConfigured !== false);
     actions.push({
       id,
       type: configured ? 'noop' : 'update',
@@ -677,9 +681,11 @@ export function diffEnvironment(input: {
       reason: attached
         ? dnsConfigured === false
           ? `Domain ${spec.domain} is attached on ${provider}, but required DNS records are not configured`
-          : dnsConfigured === undefined && requiresProviderVerification
-            ? `Domain ${spec.domain} is attached on ${provider}, but provider verification status was not observed`
-            : 'Domain attached'
+          : domainStatus?.providerVerified === false && requiresProviderVerification
+            ? `Domain ${spec.domain} DNS is configured, but ${provider} ownership verification is still pending`
+            : dnsConfigured === undefined && requiresProviderVerification
+              ? `Domain ${spec.domain} is attached on ${provider}, but provider verification status was not observed`
+              : 'Domain attached'
         : `Domain ${spec.domain} is not attached to any service`,
       dependsOn: configured ? undefined : projectDep,
       ...(domainStatus?.dnsRecords ? { metadata: { dnsRecords: domainStatus.dnsRecords } } : {}),

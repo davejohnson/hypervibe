@@ -4,7 +4,11 @@ import {
   type CloudflareCredentials,
   type CloudflareDnsRecord,
 } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
-import type { GitHubAdapter, GitHubPagesConfig } from '../../adapters/providers/github/github.adapter.js';
+import {
+  GitHubApiError,
+  type GitHubAdapter,
+  type GitHubPagesConfig,
+} from '../../adapters/providers/github/github.adapter.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import type { GitHubPagesSpec, ProjectSpec } from '../spec/spec.schema.js';
@@ -101,10 +105,6 @@ function normalizePages(config: GitHubPagesConfig | null): Record<string, unknow
     cname: config.cname ?? null,
     httpsEnforced: config.https_enforced ?? false,
   };
-}
-
-function certificateReady(config: GitHubPagesConfig | null): boolean {
-  return ['issued', 'uploaded', 'approved'].includes(config?.https_certificate?.state ?? '');
 }
 
 function dnsActionId(domain: string): string {
@@ -391,11 +391,6 @@ export async function planGitHubPages(params: {
   const dnsDependency = enabled
     ? dns.actions.find((action) => action.type !== 'noop')?.id
     : undefined;
-  const onlyCertificatePending = enabled
-    && baseInSync
-    && !httpsInSync
-    && Boolean(desiredCname)
-    && !certificateReady(current);
   const pageAction: PlanAction = {
     id: GITHUB_PAGES_ACTION_ID,
     type: inSync ? 'noop' : enabled ? (current ? 'update' : 'create') : 'destroy',
@@ -416,7 +411,6 @@ export async function planGitHubPages(params: {
       branch: pages.branch,
       desiredCname,
       observed: normalizePages(current),
-      ...(onlyCertificatePending ? { blockedReason: 'github_pages_certificate_pending' } : {}),
     },
   };
   return {
@@ -482,24 +476,31 @@ export async function applyGitHubPages(params: {
   if (!configured || configured.build_type !== 'workflow' || (configured.cname ?? null) !== (desired.customDomain ?? null)) {
     return { success: false, message: 'GitHub Pages configuration was not verified', error: 'Provider read-back differs from desired state.' };
   }
-  if (desired.customDomain && !certificateReady(configured) && configured.https_enforced !== true) {
-    if (configurationChanged) {
-      await adapter.triggerWorkflow(parts.owner, parts.repo, GITHUB_PAGES_WORKFLOW_PATH, desired.branch);
-    }
-    return {
-      success: true,
-      status: 'pending',
-      message: `GitHub Pages is configured for ${desired.customDomain}; HTTPS certificate provisioning is pending`,
-      data: {
-        repository,
-        domain: desired.customDomain,
-        certificateState: configured.https_certificate?.state ?? null,
-        ...(configurationChanged ? { workflow: GITHUB_PAGES_WORKFLOW_PATH, ref: desired.branch } : {}),
-      },
-    };
-  }
   if (configured.https_enforced !== true) {
-    await adapter.updatePagesSite(parts.owner, parts.repo, { httpsEnforced: true });
+    try {
+      await adapter.updatePagesSite(parts.owner, parts.repo, { httpsEnforced: true });
+    } catch (error) {
+      const certificatePending = desired.customDomain
+        && error instanceof GitHubApiError
+        && [400, 409, 422].includes(error.status)
+        && /https|certificate|domain/i.test(error.message);
+      if (!certificatePending) throw error;
+      if (configurationChanged) {
+        await adapter.triggerWorkflow(parts.owner, parts.repo, GITHUB_PAGES_WORKFLOW_PATH, desired.branch);
+      }
+      return {
+        success: true,
+        status: 'pending',
+        message: `GitHub Pages is configured for ${desired.customDomain}; GitHub has not made HTTPS enforcement available yet`,
+        data: {
+          repository,
+          domain: desired.customDomain,
+          certificateState: configured.https_certificate?.state ?? null,
+          providerStatus: error.status,
+          ...(configurationChanged ? { workflow: GITHUB_PAGES_WORKFLOW_PATH, ref: desired.branch } : {}),
+        },
+      };
+    }
   }
   const verified = await adapter.getPagesConfig(parts.owner, parts.repo);
   if (!verified || verified.build_type !== 'workflow' || verified.https_enforced !== true) {
