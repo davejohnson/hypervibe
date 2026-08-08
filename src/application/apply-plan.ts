@@ -377,7 +377,12 @@ async function executeRepositoryPlanApply(
       case 'github.setting.sync':
         return applyGitHubNativeSetting({ action });
       case 'github.pages.sync':
-        return applyGitHubPages({ spec: params.spec, action });
+        return applyGitHubPages({
+          spec: params.spec,
+          action,
+          project: projectForApply,
+          environmentName: params.envName,
+        });
       case 'github.pages-dns.sync':
         if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
           return blockedActionIdentity(action, `Reviewed DNS action must belong to ${expectedRepository ?? 'a configured repository'}.`);
@@ -789,7 +794,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
           `Reviewed repository is ${action.resource.name}; GitHub Pages currently targets ${expectedRepository ?? 'no repository'}.`
         );
       }
-      return applyGitHubPages({ spec, action });
+      return applyGitHubPages({ spec, action, project: applyProject, environmentName: envName });
     }
     if (capability === 'github.pages-dns.sync') {
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);

@@ -1,4 +1,5 @@
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
+import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import {
   CloudflareAdapter,
   type CloudflareCredentials,
@@ -8,9 +9,13 @@ import {
   GitHubApiError,
   type GitHubAdapter,
   type GitHubPagesConfig,
+  type GitHubPagesDomainHealth,
+  type GitHubPagesHealthCheck,
 } from '../../adapters/providers/github/github.adapter.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import type { PlanAction } from '../plan/plan.types.js';
+import type { Environment } from '../entities/environment.entity.js';
+import type { Project } from '../entities/project.entity.js';
 import type { GitHubPagesSpec, ProjectSpec } from '../spec/spec.schema.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import {
@@ -30,6 +35,13 @@ const GITHUB_PAGES_IPV4 = [
   '185.199.110.153',
   '185.199.111.153',
 ];
+const GITHUB_PAGES_CERTIFICATE_ATTEMPT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+type CertificateAttempt = {
+  domain: string;
+  attemptedAt: string;
+  mode: 'configuration' | 'reattach';
+};
 
 type ConnectionBlock = {
   provider: string;
@@ -105,6 +117,102 @@ function normalizePages(config: GitHubPagesConfig | null): Record<string, unknow
     cname: config.cname ?? null,
     httpsEnforced: config.https_enforced ?? false,
   };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function certificateAttempt(environment: Pick<Environment, 'platformBindings'> | null | undefined): CertificateAttempt | null {
+  const github = asRecord(environment?.platformBindings.github);
+  const raw = asRecord(github?.pagesCertificateAttempt);
+  if (
+    !raw
+    || typeof raw.domain !== 'string'
+    || typeof raw.attemptedAt !== 'string'
+    || !['configuration', 'reattach'].includes(String(raw.mode))
+    || !Number.isFinite(Date.parse(raw.attemptedAt))
+  ) return null;
+  return raw as CertificateAttempt;
+}
+
+function recordCertificateAttempt(params: {
+  project: Project;
+  environmentName: string;
+  domain: string;
+  mode: CertificateAttempt['mode'];
+}): void {
+  const environments = new EnvironmentRepository();
+  const environment = environments.findByProjectAndName(params.project.id, params.environmentName)
+    ?? environments.create({ projectId: params.project.id, name: params.environmentName });
+  const github = asRecord(environment.platformBindings.github) ?? {};
+  const attempt: CertificateAttempt = {
+    domain: params.domain,
+    attemptedAt: new Date().toISOString(),
+    mode: params.mode,
+  };
+  environments.updatePlatformBindings(environment.id, {
+    github: { ...github, pagesCertificateAttempt: attempt },
+  });
+}
+
+function normalizeDomainHealth(domain: GitHubPagesDomainHealth | null | undefined): Record<string, unknown> | null {
+  if (!domain) return null;
+  return {
+    host: domain.host ?? null,
+    dnsResolves: domain.dns_resolves ?? null,
+    isProxied: domain.is_proxied ?? null,
+    isValidDomain: domain.is_valid_domain ?? null,
+    pointsToGitHubPages: domain.is_pointed_to_github_pages_ip ?? null,
+    hasNonGitHubPagesIp: domain.is_non_github_pages_ip_present ?? null,
+    isServedByPages: domain.is_served_by_pages ?? null,
+    isHttpsEligible: domain.is_https_eligible ?? null,
+    isValid: domain.is_valid ?? null,
+    respondsToHttps: domain.responds_to_https ?? null,
+    httpsError: domain.https_error ?? null,
+    caaError: domain.caa_error ?? null,
+  };
+}
+
+function normalizePagesHealth(health: GitHubPagesHealthCheck | null): Record<string, unknown> | null {
+  if (!health) return null;
+  return {
+    domain: normalizeDomainHealth(health.domain),
+    altDomain: normalizeDomainHealth(health.alt_domain),
+  };
+}
+
+function dnsIsHealthyForCertificate(domain: GitHubPagesDomainHealth | null | undefined): boolean {
+  return Boolean(domain)
+    && domain?.dns_resolves === true
+    && domain.is_proxied === false
+    && domain.is_valid_domain === true
+    && domain.is_pointed_to_github_pages_ip === true
+    && domain.is_non_github_pages_ip_present === false
+    && domain.is_served_by_pages === true
+    && domain.is_https_eligible === true
+    && domain.is_valid === true
+    && domain.caa_error === null;
+}
+
+function certificateIsStuck(
+  config: GitHubPagesConfig | null,
+  health: GitHubPagesHealthCheck | null,
+  desiredDomain: string
+): boolean {
+  const domain = health?.domain;
+  const altDomain = health?.alt_domain;
+  return Boolean(config)
+    && config?.cname === desiredDomain
+    && config.build_type === 'workflow'
+    && config.https_enforced !== true
+    && !config.https_certificate
+    && dnsIsHealthyForCertificate(domain)
+    && (altDomain == null || dnsIsHealthyForCertificate(altDomain))
+    && domain?.responds_to_https === false
+    && domain.https_error === 'peer_failed_verification';
 }
 
 function dnsActionId(domain: string): string {
@@ -323,6 +431,7 @@ export async function planGitHubPages(params: {
   spec: ProjectSpec;
   repository: string;
   adapter: GitHubAdapter;
+  environment?: Pick<Environment, 'platformBindings'> | null;
 }): Promise<{ actions: PlanAction[]; warnings: string[]; blocked: ConnectionBlock[] }> {
   const pages = params.spec.github?.pages;
   if (!pages) return { actions: [], warnings: [], blocked: [] };
@@ -387,6 +496,28 @@ export async function planGitHubPages(params: {
     && current?.build_type === 'workflow'
     && (current?.cname ?? null) === desiredCname;
   const httpsInSync = current?.https_enforced === true;
+  let health: GitHubPagesHealthCheck | null = null;
+  const pagesWarnings: string[] = [];
+  if (enabled && desiredCname && baseInSync && !httpsInSync && !current?.https_certificate) {
+    try {
+      health = await params.adapter.getPagesHealthCheck(parts.owner, parts.repo);
+    } catch (error) {
+      pagesWarnings.push(
+        `Cannot verify whether GitHub Pages certificate recovery is safe for ${desiredCname}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+  const observedAttempt = certificateAttempt(params.environment);
+  const matchingAttempt = observedAttempt?.domain === desiredCname ? observedAttempt : null;
+  const attemptedAt = matchingAttempt ? Date.parse(matchingAttempt.attemptedAt) : Number.NaN;
+  const recoveryCooldownActive = Number.isFinite(attemptedAt)
+    && attemptedAt > Date.now() - GITHUB_PAGES_CERTIFICATE_ATTEMPT_COOLDOWN_MS;
+  const stuckCertificate = Boolean(desiredCname)
+    && certificateIsStuck(current, health, desiredCname!);
+  const recoverCertificate = stuckCertificate && !recoveryCooldownActive;
+  const recoveryCooldownUntil = recoveryCooldownActive
+    ? new Date(attemptedAt + GITHUB_PAGES_CERTIFICATE_ATTEMPT_COOLDOWN_MS).toISOString()
+    : undefined;
   const inSync = enabled ? baseInSync && httpsInSync : current === null;
   const dnsDependency = enabled
     ? dns.actions.find((action) => action.type !== 'noop')?.id
@@ -398,9 +529,13 @@ export async function planGitHubPages(params: {
     verified: true,
     reason: inSync
       ? 'GitHub Pages configuration is in sync'
-      : enabled
-        ? `Configure ${params.repository} to publish ${pages.sourcePath} through GitHub Actions`
-        : `Disable the Hypervibe-managed GitHub Pages site for ${params.repository}`,
+      : recoverCertificate
+        ? `Restart stuck GitHub Pages certificate issuance for ${desiredCname} by reattaching the same custom domain`
+        : recoveryCooldownUntil && stuckCertificate
+          ? `GitHub Pages certificate issuance is pending; same-domain recovery is cooling down until ${recoveryCooldownUntil}`
+          : enabled
+            ? `Configure ${params.repository} to publish ${pages.sourcePath} through GitHub Actions`
+            : `Disable the Hypervibe-managed GitHub Pages site for ${params.repository}`,
     ...(!enabled && current ? { requiresConfirm: true } : {}),
     ...(dnsDependency ? { dependsOn: [dnsDependency] } : {}),
     metadata: {
@@ -411,11 +546,17 @@ export async function planGitHubPages(params: {
       branch: pages.branch,
       desiredCname,
       observed: normalizePages(current),
+      ...(recoverCertificate ? {
+        certificateRecovery: 'reattach',
+        observedHealth: normalizePagesHealth(health),
+        observedCertificateAttempt: matchingAttempt,
+      } : {}),
+      ...(recoveryCooldownUntil ? { certificateRecoveryCooldownUntil: recoveryCooldownUntil } : {}),
     },
   };
   return {
     actions: enabled ? [...dns.actions, pageAction] : [pageAction, ...dns.actions],
-    warnings: [...dns.warnings],
+    warnings: [...dns.warnings, ...pagesWarnings],
     blocked: dns.blocked,
   };
 }
@@ -432,9 +573,57 @@ function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+async function reattachPagesDomain(params: {
+  adapter: GitHubAdapter;
+  owner: string;
+  repo: string;
+  domain: string;
+}): Promise<
+  | { config: GitHubPagesConfig }
+  | { error: string; domainPreserved: boolean; restorationError?: string }
+> {
+  try {
+    await params.adapter.updatePagesSite(params.owner, params.repo, { cname: null });
+    const detached = await params.adapter.getPagesConfig(params.owner, params.repo);
+    if (!detached || detached.cname != null) {
+      throw new Error('GitHub did not verify removal of the custom-domain association.');
+    }
+    await params.adapter.updatePagesSite(params.owner, params.repo, {
+      buildType: 'workflow',
+      cname: params.domain,
+    });
+    const restored = await params.adapter.getPagesConfig(params.owner, params.repo);
+    if (!restored || restored.build_type !== 'workflow' || restored.cname !== params.domain) {
+      throw new Error('GitHub did not verify restoration of the custom-domain association.');
+    }
+    return { config: restored };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await params.adapter.updatePagesSite(params.owner, params.repo, {
+        buildType: 'workflow',
+        cname: params.domain,
+      });
+      const restored = await params.adapter.getPagesConfig(params.owner, params.repo);
+      if (!restored || restored.build_type !== 'workflow' || restored.cname !== params.domain) {
+        throw new Error('Provider read-back did not confirm the original domain.');
+      }
+      return { error: message, domainPreserved: true };
+    } catch (restorationError) {
+      return {
+        error: message,
+        domainPreserved: false,
+        restorationError: restorationError instanceof Error ? restorationError.message : String(restorationError),
+      };
+    }
+  }
+}
+
 export async function applyGitHubPages(params: {
   spec: ProjectSpec;
   action: PlanAction;
+  project?: Project;
+  environmentName?: string;
 }): Promise<{ success: boolean; status?: 'pending' | 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
   const repository = typeof params.action.metadata?.repository === 'string' ? params.action.metadata.repository : undefined;
   const desired = params.spec.github?.pages;
@@ -455,6 +644,38 @@ export async function applyGitHubPages(params: {
   if (!sameJson(normalizePages(current), params.action.metadata?.observed ?? null)) {
     return { success: false, status: 'blocked', message: 'GitHub Pages changed after planning', error: 'Re-run hv_plan.' };
   }
+  const recovery = params.action.metadata?.certificateRecovery;
+  if (recovery !== undefined && recovery !== 'reattach') {
+    return { success: false, status: 'blocked', message: 'GitHub Pages certificate recovery action is invalid', error: 'Re-run hv_plan.' };
+  }
+  if (recovery === 'reattach') {
+    if (!desired.enabled || !desired.customDomain || !params.project || !params.environmentName) {
+      return { success: false, status: 'blocked', message: 'GitHub Pages certificate recovery has stale context', error: 'Re-run hv_plan.' };
+    }
+    const environment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
+    const liveAttempt = certificateAttempt(environment);
+    const matchingLiveAttempt = liveAttempt?.domain === desired.customDomain ? liveAttempt : null;
+    if (!sameJson(matchingLiveAttempt, params.action.metadata?.observedCertificateAttempt ?? null)) {
+      return { success: false, status: 'blocked', message: 'GitHub Pages certificate recovery was already attempted after planning', error: 'Re-run hv_plan.' };
+    }
+    let health: GitHubPagesHealthCheck | null;
+    try {
+      health = await adapter.getPagesHealthCheck(parts.owner, parts.repo);
+    } catch (error) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: 'GitHub Pages certificate health could not be re-observed',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (
+      !sameJson(normalizePagesHealth(health), params.action.metadata?.observedHealth ?? null)
+      || !certificateIsStuck(current, health, desired.customDomain)
+    ) {
+      return { success: false, status: 'blocked', message: 'GitHub Pages certificate health changed after planning', error: 'Re-run hv_plan.' };
+    }
+  }
   if (!desired.enabled) {
     if (current) await adapter.deletePagesSite(parts.owner, parts.repo);
     if (await adapter.getPagesConfig(parts.owner, parts.repo)) {
@@ -462,17 +683,51 @@ export async function applyGitHubPages(params: {
     }
     return { success: true, message: `Disabled GitHub Pages for ${repository}`, data: { repository } };
   }
-  const configurationChanged = !current
+  let configurationChanged = !current
     || current.build_type !== 'workflow'
     || (current.cname ?? null) !== (desired.customDomain ?? null);
-  if (!current) {
-    await adapter.createPagesSite(parts.owner, parts.repo, { buildType: 'workflow' });
+  let configured: GitHubPagesConfig | null;
+  if (recovery === 'reattach' && desired.customDomain) {
+    const reattached = await reattachPagesDomain({
+      adapter,
+      owner: parts.owner,
+      repo: parts.repo,
+      domain: desired.customDomain,
+    });
+    if ('error' in reattached) {
+      return {
+        success: false,
+        message: reattached.domainPreserved
+          ? 'GitHub Pages certificate recovery failed, but the original custom domain was restored'
+          : 'GitHub Pages certificate recovery failed and the custom domain could not be restored',
+        error: reattached.restorationError
+          ? `${reattached.error} Restoration failed: ${reattached.restorationError}`
+          : reattached.error,
+        data: { repository, domain: desired.customDomain, domainPreserved: reattached.domainPreserved },
+      };
+    }
+    configured = reattached.config;
+    configurationChanged = true;
+    recordCertificateAttempt({
+      project: params.project!,
+      environmentName: params.environmentName!,
+      domain: desired.customDomain,
+      mode: 'reattach',
+    });
+  } else {
+    if (!current) {
+      await adapter.createPagesSite(parts.owner, parts.repo, { buildType: 'workflow' });
+    }
+    if (configurationChanged) {
+      await adapter.updatePagesSite(parts.owner, parts.repo, {
+        buildType: 'workflow',
+        cname: desired.customDomain ?? null,
+      });
+      configured = await adapter.getPagesConfig(parts.owner, parts.repo);
+    } else {
+      configured = current;
+    }
   }
-  await adapter.updatePagesSite(parts.owner, parts.repo, {
-    buildType: 'workflow',
-    cname: desired.customDomain ?? null,
-  });
-  const configured = await adapter.getPagesConfig(parts.owner, parts.repo);
   if (!configured || configured.build_type !== 'workflow' || (configured.cname ?? null) !== (desired.customDomain ?? null)) {
     return { success: false, message: 'GitHub Pages configuration was not verified', error: 'Provider read-back differs from desired state.' };
   }
@@ -485,6 +740,20 @@ export async function applyGitHubPages(params: {
         && [400, 404, 409, 422].includes(error.status)
         && /https|certificate|domain/i.test(error.message);
       if (!certificatePending) throw error;
+      if (
+        desired.customDomain
+        && configurationChanged
+        && recovery !== 'reattach'
+        && params.project
+        && params.environmentName
+      ) {
+        recordCertificateAttempt({
+          project: params.project,
+          environmentName: params.environmentName,
+          domain: desired.customDomain,
+          mode: 'configuration',
+        });
+      }
       if (configurationChanged) {
         await adapter.triggerWorkflow(parts.owner, parts.repo, GITHUB_PAGES_WORKFLOW_PATH, desired.branch);
       }

@@ -686,7 +686,13 @@ replacement or teardown. Apply may mutate only the reviewed provider action.
 Certificate provisioning is asynchronous. Apply requests HTTPS enforcement
 after the reviewed domain configuration is visible; a GitHub
 certificate/HTTPS rejection returns pending, while every other provider error
-fails. A later apply verifies the enabled setting. Disabling Pages removes the
+fails. When GitHub reports the exact combination of valid unproxied DNS, a site
+served by Pages, HTTPS eligibility, no certificate, and
+`peer_failed_verification`, planning may authorize one same-domain detach and
+reattach to restart GitHub's certificate job. Apply re-observes that signature,
+verifies both transitions, leaves DNS untouched, and records a 24-hour attempt
+cooldown in the GitHub environment binding. A later apply verifies the enabled
+setting. Disabling Pages removes the
 reviewed workflow first, then confirm-gates
 site deletion and removal of only the exact Pages address records Hypervibe
 recognizes. Mail, verification, and unrelated DNS records are never part of
