@@ -166,6 +166,8 @@ function normalizeDomainHealth(domain: GitHubPagesDomainHealth | null | undefine
     isProxied: domain.is_proxied ?? null,
     isValidDomain: domain.is_valid_domain ?? null,
     pointsToGitHubPages: domain.is_pointed_to_github_pages_ip ?? null,
+    isCnameToGitHubUserDomain: domain.is_cname_to_github_user_domain ?? null,
+    isCnameToPagesDomain: domain.is_cname_to_pages_dot_github_dot_com ?? null,
     hasNonGitHubPagesIp: domain.is_non_github_pages_ip_present ?? null,
     isServedByPages: domain.is_served_by_pages ?? null,
     isHttpsEligible: domain.is_https_eligible ?? null,
@@ -185,11 +187,14 @@ function normalizePagesHealth(health: GitHubPagesHealthCheck | null): Record<str
 }
 
 function dnsIsHealthyForCertificate(domain: GitHubPagesDomainHealth | null | undefined): boolean {
+  const routesToPages = domain?.is_pointed_to_github_pages_ip === true
+    || domain?.is_cname_to_github_user_domain === true
+    || domain?.is_cname_to_pages_dot_github_dot_com === true;
   return Boolean(domain)
     && domain?.dns_resolves === true
     && domain.is_proxied === false
     && domain.is_valid_domain === true
-    && domain.is_pointed_to_github_pages_ip === true
+    && routesToPages
     && domain.is_non_github_pages_ip_present === false
     && domain.is_served_by_pages === true
     && domain.is_https_eligible === true
@@ -497,11 +502,13 @@ export async function planGitHubPages(params: {
     && (current?.cname ?? null) === desiredCname;
   const httpsInSync = current?.https_enforced === true;
   let health: GitHubPagesHealthCheck | null = null;
+  let healthObservationUnknown = false;
   const pagesWarnings: string[] = [];
   if (enabled && desiredCname && baseInSync && !httpsInSync && !current?.https_certificate) {
     try {
       health = await params.adapter.getPagesHealthCheck(parts.owner, parts.repo);
     } catch (error) {
+      healthObservationUnknown = true;
       pagesWarnings.push(
         `Cannot verify whether GitHub Pages certificate recovery is safe for ${desiredCname}: ${error instanceof Error ? error.message : String(error)}`
       );
@@ -526,9 +533,11 @@ export async function planGitHubPages(params: {
     id: GITHUB_PAGES_ACTION_ID,
     type: inSync ? 'noop' : enabled ? (current ? 'update' : 'create') : 'destroy',
     resource: { kind: 'repo', name: params.repository, provider: 'github' },
-    verified: true,
+    verified: !healthObservationUnknown,
     reason: inSync
       ? 'GitHub Pages configuration is in sync'
+      : healthObservationUnknown
+        ? `GitHub Pages certificate health is not available for ${desiredCname}; retry planning after GitHub completes its DNS health check`
       : recoverCertificate
         ? `Restart stuck GitHub Pages certificate issuance for ${desiredCname} by reattaching the same custom domain`
         : recoveryCooldownUntil && stuckCertificate
@@ -546,6 +555,7 @@ export async function planGitHubPages(params: {
       branch: pages.branch,
       desiredCname,
       observed: normalizePages(current),
+      ...(healthObservationUnknown ? { blockedReason: 'github_pages_certificate_health_unknown' } : {}),
       ...(recoverCertificate ? {
         certificateRecovery: 'reattach',
         observedHealth: normalizePagesHealth(health),
@@ -632,8 +642,8 @@ export async function applyGitHubPages(params: {
   if (!repository || !parts || !desired || reviewedEnabled !== desired.enabled || params.action.resource.name !== repository) {
     return { success: false, status: 'blocked', message: 'GitHub Pages action has stale identity', error: 'Re-run hv_plan.' };
   }
-  if (params.action.metadata?.blockedReason === 'github_pages_domain_change_requires_teardown') {
-    return { success: false, status: 'blocked', message: 'GitHub Pages domain migration requires an explicit teardown stage', error: 'Re-run hv_plan after disabling the current custom domain.' };
+  if (params.action.metadata?.blockedReason) {
+    return { success: false, status: 'blocked', message: params.action.reason, error: 'Re-run hv_plan.' };
   }
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {

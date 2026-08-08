@@ -717,7 +717,11 @@ served by Pages, HTTPS eligibility, no certificate, and
 `peer_failed_verification`, planning may authorize one same-domain detach and
 reattach to restart GitHub's certificate job. Apply re-observes that signature,
 verifies both transitions, leaves DNS untouched, and records a 24-hour attempt
-cooldown in the GitHub environment binding. A later apply verifies the enabled
+cooldown in the GitHub environment binding. GitHub's DNS health observation is
+asynchronous, so planning polls its documented `202` response and blocks rather
+than silently falling back when health remains unknown. Valid apex address
+records and the valid alternate `www` CNAME are both accepted as Pages routes.
+A later apply verifies the enabled
 setting. Disabling Pages removes the
 reviewed workflow first, then confirm-gates
 site deletion and removal of only the exact Pages address records Hypervibe

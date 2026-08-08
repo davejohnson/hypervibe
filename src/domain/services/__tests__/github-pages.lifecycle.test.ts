@@ -84,7 +84,21 @@ function stuckCertificateHealth(overrides: Partial<NonNullable<GitHubPagesHealth
       caa_error: null,
       ...overrides,
     },
-    alt_domain: null,
+    alt_domain: {
+      host: 'www.hypervibe.dev',
+      dns_resolves: true,
+      is_proxied: false,
+      is_valid_domain: true,
+      is_pointed_to_github_pages_ip: false,
+      is_cname_to_github_user_domain: true,
+      is_non_github_pages_ip_present: false,
+      is_served_by_pages: true,
+      is_https_eligible: true,
+      is_valid: true,
+      responds_to_https: false,
+      https_error: 'peer_failed_verification',
+      caa_error: null,
+    },
   };
 }
 
@@ -437,7 +451,7 @@ describe('declarative GitHub Pages lifecycle', () => {
     expect(result).toMatchObject({ success: true, status: 'pending', data: { providerStatus: 404 } });
   });
 
-  it('plans one same-domain recovery for the exact stuck certificate state and cools down after apply', async () => {
+  it('recovers a stuck apex certificate with a valid alternate www CNAME and cools down after apply', async () => {
     const project = new ProjectRepository().create({ name: 'pages-certificate-recovery' });
     const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'repository' });
     const desiredSpec = spec(project.name);
@@ -525,6 +539,31 @@ describe('declarative GitHub Pages lifecycle', () => {
     const cooledDown = replanned.actions.find((candidate) => candidate.id === GITHUB_PAGES_ACTION_ID)!;
     expect(cooledDown.metadata?.certificateRecovery).toBeUndefined();
     expect(cooledDown.reason).toContain('cooling down until');
+  });
+
+  it('blocks instead of silently falling back when certificate health is unknown', async () => {
+    const desiredSpec = spec('pages-health-pending');
+    const adapter = new GitHubAdapter();
+    adapter.connect({ apiToken: 'github-token' });
+    vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig').mockResolvedValue(pageConfig({ https_certificate: undefined }));
+    vi.spyOn(GitHubAdapter.prototype, 'getPagesHealthCheck')
+      .mockRejectedValue(new GitHubApiError('GitHub Pages DNS health check is still pending', 202));
+
+    const planned = await planGitHubPages({ spec: desiredSpec, repository: REPOSITORY, adapter });
+    const action = planned.actions.find((candidate) => candidate.id === GITHUB_PAGES_ACTION_ID)!;
+
+    expect(action).toMatchObject({
+      type: 'update',
+      verified: false,
+      reason: expect.stringContaining('certificate health is not available'),
+      metadata: { blockedReason: 'github_pages_certificate_health_unknown' },
+    });
+    expect(planned.warnings).toContainEqual(expect.stringContaining('health check is still pending'));
+
+    const update = vi.spyOn(GitHubAdapter.prototype, 'updatePagesSite');
+    const result = await applyGitHubPages({ spec: desiredSpec, action });
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(update).not.toHaveBeenCalled();
   });
 
   it('blocks certificate recovery without mutation when GitHub health changes after planning', async () => {

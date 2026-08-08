@@ -16,7 +16,51 @@ function connectedAdapter(): GitHubAdapter {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('GitHub Pages health', () => {
+  const health = {
+    domain: {
+      host: 'example.com',
+      dns_resolves: true,
+      is_served_by_pages: true,
+    },
+    alt_domain: null,
+  };
+
+  it('polls GitHub when the asynchronous health check initially returns 202', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(response(undefined, 202))
+      .mockResolvedValueOnce(response(health));
+
+    const pending = connectedAdapter().getPagesHealthCheck('dave', 'app');
+    await vi.runAllTimersAsync();
+
+    await expect(pending).resolves.toEqual(health);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports an explicit pending observation after bounded empty responses', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response(undefined, 202));
+
+    const pending = connectedAdapter().getPagesHealthCheck('dave', 'app');
+    const rejection = expect(pending).rejects.toMatchObject({ status: 202 });
+    await vi.runAllTimersAsync();
+
+    await rejection;
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not turn an unobservable health endpoint into an empty successful observation', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({ message: 'Not Found' }, 404));
+
+    await expect(connectedAdapter().getPagesHealthCheck('dave', 'app'))
+      .rejects.toMatchObject({ status: 404 });
+  });
 });
 
 describe('GitHub Actions environment variables', () => {
