@@ -336,6 +336,103 @@ describe('RailwayAdapter service instance updates', () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
+  it('deletes and recreates only the selected Railway custom domain', async () => {
+    const existingDomain = {
+      id: 'cd_old',
+      domain: 'usebillforge.com',
+      status: { verified: false },
+    };
+    const request = vi.fn()
+      // ensureServiceInstanceForEnvironment
+      .mockResolvedValueOnce({
+        service: { serviceInstances: { edges: [{ node: { environmentId: 'env-prod' } }] } },
+      })
+      // getCustomDomainStatus before delete
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{
+              node: {
+                environmentId: 'env-prod',
+                domains: { customDomains: [existingDomain] },
+              },
+            }],
+          },
+        },
+      })
+      // customDomainDelete
+      .mockResolvedValueOnce({ customDomainDelete: true })
+      // customDomainCreate
+      .mockResolvedValueOnce({
+        customDomainCreate: { id: 'cd_new', domain: 'usebillforge.com' },
+      })
+      // getCustomDomainStatus after create
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{
+              node: {
+                environmentId: 'env-prod',
+                domains: {
+                  customDomains: [{
+                    id: 'cd_new',
+                    domain: 'usebillforge.com',
+                    status: {
+                      verified: false,
+                      certificateStatus: 'CERTIFICATE_STATUS_TYPE_ISSUING',
+                      dnsRecords: [{
+                        fqdn: 'usebillforge.com',
+                        recordType: 'CNAME',
+                        requiredValue: 'new-target.up.railway.app',
+                        status: 'DNS_RECORD_STATUS_PENDING',
+                      }],
+                      verificationDnsHost: '_railway-verify.usebillforge.com',
+                      verificationToken: 'railway-verify=new-token',
+                    },
+                  }],
+                },
+              },
+            }],
+          },
+        },
+      });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+    const receipt = await adapter.recreateCustomDomain({
+      projectId: 'rail-project-1',
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+    });
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: {
+        domain: 'usebillforge.com',
+        previousCustomDomainId: 'cd_old',
+        customDomainId: 'cd_new',
+        recreated: true,
+        providerVerified: false,
+        dnsRecords: [
+          expect.objectContaining({ type: 'CNAME', value: 'new-target.up.railway.app' }),
+          expect.objectContaining({ type: 'TXT', value: 'railway-verify=new-token' }),
+        ],
+      },
+    });
+    expect(String(request.mock.calls[2]?.[0])).toContain('customDomainDelete');
+    expect(request.mock.calls[2]?.[1]).toEqual({ id: 'cd_old' });
+    expect(String(request.mock.calls[3]?.[0])).toContain('customDomainCreate');
+    expect(request.mock.calls[3]?.[1]).toEqual({
+      input: {
+        projectId: 'rail-project-1',
+        serviceId: 'svc-web',
+        environmentId: 'env-prod',
+        domain: 'usebillforge.com',
+      },
+    });
+  });
+
   it('does not call Railway customDomainCreate without a projectId binding', async () => {
     const request = vi.fn();
     const adapter = new RailwayAdapter();

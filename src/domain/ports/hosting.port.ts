@@ -105,6 +105,7 @@ export const hostingBindingsSchema = z.object({
   domainDns: z.object({
     name: z.string().optional(),
     proxied: z.boolean().optional(),
+    recreateRevision: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough();
 

@@ -9,10 +9,15 @@ export type DomainAttachParams = {
 
 export type DomainAttachCapableAdapter = {
   attachCustomDomain?: (params: DomainAttachParams) => Promise<Receipt>;
+  recreateCustomDomain?: (params: DomainAttachParams) => Promise<Receipt>;
 };
 
 export type DomainAttachAdapter = DomainAttachCapableAdapter & {
   attachCustomDomain: (params: DomainAttachParams) => Promise<Receipt>;
+};
+
+export type DomainRecreateAdapter = DomainAttachCapableAdapter & {
+  recreateCustomDomain: (params: DomainAttachParams) => Promise<Receipt>;
 };
 
 const PROVIDERS_REQUIRING_PROVIDER_ATTACH = new Set([
@@ -43,6 +48,27 @@ export async function callCustomDomainAttach(
   }
   const attachCustomDomain = adapter.attachCustomDomain;
   return attachCustomDomain.call(adapter, params);
+}
+
+export function supportsCustomDomainRecreate(adapter: unknown): adapter is DomainRecreateAdapter {
+  return Boolean(adapter)
+    && typeof adapter === 'object'
+    && typeof (adapter as DomainAttachCapableAdapter).recreateCustomDomain === 'function';
+}
+
+export async function callCustomDomainRecreate(
+  adapter: DomainAttachCapableAdapter,
+  params: DomainAttachParams
+): Promise<Receipt> {
+  if (!supportsCustomDomainRecreate(adapter)) {
+    return {
+      success: false,
+      message: 'Custom-domain recreation is not supported',
+      error: `${params.domain} cannot be recreated because the hosting provider adapter does not implement confirmation-gated custom-domain replacement.`,
+    };
+  }
+  const recreateCustomDomain = adapter.recreateCustomDomain;
+  return recreateCustomDomain.call(adapter, params);
 }
 
 export function customDomainAttachUnsupportedMessage(provider: string, domain: string): string {

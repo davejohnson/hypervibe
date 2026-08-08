@@ -1049,6 +1049,88 @@ describe('diffEnvironment — domain and workload', () => {
     expect(domain.reason).toContain('ownership verification is still pending');
   });
 
+  it('plans an unapplied domain recreation revision as a confirmation-gated replacement', () => {
+    const withDomain = spec({
+      domain: 'myapp.dev',
+      domainProxy: false,
+      domainRecreateRevision: 'repair-2026-08-08',
+    });
+    const result = diffEnvironment({
+      spec: withDomain,
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: {
+            'myapp.dev': { providerVerified: false, dnsConfigured: true },
+          },
+        })],
+      }),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'svc-1' } },
+          domainDns: {
+            name: 'myapp.dev',
+            proxied: false,
+            recreateRevision: 'repair-previous',
+          },
+        },
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
+      type: 'replace',
+      requiresConfirm: true,
+      reason: 'Domain myapp.dev has an unapplied recreate revision',
+      metadata: {
+        domainProxy: false,
+        domainRecreateRevision: 'repair-2026-08-08',
+      },
+    });
+  });
+
+  it('does not repeat a consumed domain recreation revision', () => {
+    const withDomain = spec({
+      domain: 'myapp.dev',
+      domainProxy: false,
+      domainRecreateRevision: 'repair-2026-08-08',
+    });
+    const result = diffEnvironment({
+      spec: withDomain,
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: {
+            'myapp.dev': { providerVerified: false, dnsConfigured: true },
+          },
+        })],
+      }),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'svc-1' } },
+          domainDns: {
+            name: 'myapp.dev',
+            proxied: false,
+            recreateRevision: 'repair-2026-08-08',
+          },
+        },
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
+      type: 'update',
+      reason: expect.stringContaining('ownership verification is still pending'),
+    });
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')?.requiresConfirm).toBeUndefined();
+  });
+
   it('replaces a service whose cron-ness changed', () => {
     const cronSpec = spec({ services: { web: { workloadKind: 'cron', cronSchedule: '0 3 * * *' } } });
     const result = diffEnvironment({ spec: cronSpec, envName: 'production', observed: observed(), local: local() });

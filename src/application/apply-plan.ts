@@ -1422,18 +1422,38 @@ async function applyDomain(
       error: `Reviewed target is ${action.resource.provider}/${action.resource.name}; expected ${environmentSpec.hosting.provider}/${environmentSpec.domain ?? 'no domain'}.`,
     };
   }
+  const recreateRequested = action.type === 'replace';
+  const reviewedRecreateRevision = stringField(asRecord(action.metadata), 'domainRecreateRevision');
+  if (
+    recreateRequested
+    && (
+      !environmentSpec.domainRecreateRevision
+      || reviewedRecreateRevision !== environmentSpec.domainRecreateRevision
+    )
+  ) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: `Domain replacement ${action.id} no longer matches desired state`,
+      error: 'The reviewed domain recreate revision changed or was removed. Re-run hv_plan.',
+    };
+  }
 
   const result = await setupCustomDomain({
     project,
     environment,
     domain: action.resource.name,
     trafficProxied: environmentSpec.domainProxy ?? true,
+    recreate: recreateRequested,
   });
   if (result.dnsConfigured) {
     ctx.repos.environments.updatePlatformBindings(environment.id, {
       domainDns: {
         name: action.resource.name,
         proxied: environmentSpec.domainProxy ?? true,
+        ...(environmentSpec.domainRecreateRevision
+          ? { recreateRevision: environmentSpec.domainRecreateRevision }
+          : {}),
       },
     });
   }

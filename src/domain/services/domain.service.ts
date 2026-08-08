@@ -10,6 +10,7 @@ import { hostingProviderForEnvironment } from './hosting-env.service.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import {
   callCustomDomainAttach,
+  callCustomDomainRecreate,
   customDomainAttachBindingMissingMessage,
   customDomainAttachUnsupportedMessage,
   providerRequiresCustomDomainAttach,
@@ -51,6 +52,8 @@ export interface DomainSetupResult {
   hostingProvider?: string;
   service?: string;
   customDomainAttached?: boolean;
+  customDomainId?: string;
+  recreated?: boolean;
   providerVerified?: boolean;
   customDomainError?: string;
   dnsConfigured?: boolean;
@@ -76,6 +79,7 @@ export async function setupCustomDomain(params: {
   domain: string;
   serviceName?: string;
   trafficProxied?: boolean;
+  recreate?: boolean;
 }): Promise<DomainSetupResult> {
   const { project, environment } = params;
   const domain = normalizeDomainName(params.domain);
@@ -128,14 +132,27 @@ export async function setupCustomDomain(params: {
   } else if (serviceName && binding?.serviceId && bindings.environmentId) {
     if (supportsCustomDomainAttach(adapter)) {
       try {
-        const receipt = await callCustomDomainAttach(adapter, {
-          projectId: bindings.projectId,
-          serviceId: binding.serviceId,
-          environmentId: bindings.environmentId,
-          domain,
-        });
+        const receipt = params.recreate
+          ? await callCustomDomainRecreate(adapter, {
+              projectId: bindings.projectId,
+              serviceId: binding.serviceId,
+              environmentId: bindings.environmentId,
+              domain,
+            })
+          : await callCustomDomainAttach(adapter, {
+              projectId: bindings.projectId,
+              serviceId: binding.serviceId,
+              environmentId: bindings.environmentId,
+              domain,
+            });
         if (receipt.success) {
           result.customDomainAttached = true;
+          if (typeof receipt.data?.customDomainId === 'string') {
+            result.customDomainId = receipt.data.customDomainId;
+          }
+          if (receipt.data?.recreated === true) {
+            result.recreated = true;
+          }
           if (typeof receipt.data?.providerVerified === 'boolean') {
             result.providerVerified = receipt.data.providerVerified;
           }
