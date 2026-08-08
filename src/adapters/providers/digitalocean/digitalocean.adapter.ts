@@ -1129,6 +1129,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
+      hosting: { customDomains: 'unsupported' },
       databaseEngines: ['postgres'],
       cacheEngines: ['redis'],
     },

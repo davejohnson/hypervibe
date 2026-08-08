@@ -13,7 +13,6 @@ import {
   callCustomDomainRecreate,
   customDomainAttachBindingMissingMessage,
   customDomainAttachUnsupportedMessage,
-  providerRequiresCustomDomainAttach,
   supportsCustomDomainAttach,
   type DomainAttachCapableAdapter,
 } from './domain-attach-policy.js';
@@ -70,7 +69,7 @@ export interface DomainSetupResult {
 /**
  * One-call custom-domain setup, mirroring the domain orchestration that
  * bootstrap/infra_apply performs: Cloudflare zone check, hosting
- * custom-domain attach (when the adapter supports it), DNS record upsert,
+ * custom-domain attach, DNS record upsert,
  * then a verification summary.
  */
 export async function setupCustomDomain(params: {
@@ -124,9 +123,8 @@ export async function setupCustomDomain(params: {
   let providerDnsRecords: ProviderDnsRecord[] = [];
   const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
   const adapter = adapterResult.adapter as DomainAttachCapableAdapter | undefined;
-  const requiresProviderAttach = providerRequiresCustomDomainAttach(provider);
 
-  if (!adapterResult.success && requiresProviderAttach) {
+  if (!adapterResult.success) {
     result.customDomainAttached = false;
     result.customDomainError = adapterResult.error || customDomainAttachUnsupportedMessage(provider, domain);
   } else if (serviceName && binding?.serviceId && bindings.environmentId) {
@@ -167,17 +165,16 @@ export async function setupCustomDomain(params: {
         result.customDomainAttached = false;
         result.customDomainError = error instanceof Error ? error.message : String(error);
       }
-    } else if (requiresProviderAttach) {
+    } else {
       result.customDomainAttached = false;
       result.customDomainError = customDomainAttachUnsupportedMessage(provider, domain);
     }
-  } else if (requiresProviderAttach) {
+  } else {
     result.customDomainAttached = false;
     result.customDomainError = customDomainAttachBindingMissingMessage(provider, domain);
   }
 
-  // Step 3: DNS records — provider-required records when the attach returned
-  // them, otherwise a proxied CNAME to the deployed service URL.
+  // Step 3: write only records returned by a successful provider attachment.
   const dnsResults: DomainDnsRecordResult[] = [];
   try {
     if (providerDnsRecords.length > 0) {
@@ -206,18 +203,9 @@ export async function setupCustomDomain(params: {
       result.dnsError = result.customDomainError
         ? `Custom-domain attach failed on ${provider}: ${result.customDomainError}`
         : `Custom-domain attach failed on ${provider}; DNS was not changed because the provider has not accepted ${domain}.`;
-    } else if (binding?.url) {
-      const targetHost = new URL(binding.url).hostname;
-      const upsert = await cfAdapter.upsertDnsRecord(zone.id, domain, 'CNAME', targetHost, {
-        proxied: params.trafficProxied ?? true,
-      });
-      dnsResults.push({ name: domain, type: 'CNAME', target: targetHost, action: upsert.action });
-      result.dnsConfigured = true;
     } else {
       result.dnsConfigured = false;
-      result.dnsError = serviceName
-        ? `Service "${serviceName}" has no deployed URL in ${environment.name}; deploy it first, then retry.`
-        : `No services are bound in ${environment.name}; deploy first, then retry.`;
+      result.dnsError = `Custom-domain attachment was not verified on ${provider}; DNS was not changed for ${domain}.`;
     }
   } catch (error) {
     result.dnsConfigured = false;
@@ -235,7 +223,6 @@ export async function setupCustomDomain(params: {
       : {}),
   };
   result.pending = result.dnsConfigured === true
-    && requiresProviderAttach
     && result.customDomainAttached === true
     && result.providerVerified !== true;
   result.success = result.dnsConfigured === true && result.pending !== true;

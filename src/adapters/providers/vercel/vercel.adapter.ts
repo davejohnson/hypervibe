@@ -1099,6 +1099,9 @@ providerRegistry.register({
         ],
       ],
     },
+    lifecycle: {
+      hosting: { customDomains: 'unsupported' },
+    },
     orchestration: {
       project: { shareAcrossEnvironments: true },
       diff: {

@@ -33,6 +33,24 @@ function cfDnsRecord(overrides: Record<string, unknown> = {}) {
   };
 }
 
+describe('CloudflareAdapter.findZoneByName', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('blocks ambiguous zone identities instead of selecting the first account match', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => cfResponse([
+      { id: 'zone-1', name: 'example.com', account: { id: 'account-1' } },
+      { id: 'zone-2', name: 'example.com', account: { id: 'account-2' } },
+    ])));
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_dns' });
+
+    await expect(adapter.findZoneByName('example.com'))
+      .rejects.toThrow('Multiple Cloudflare zones match example.com');
+  });
+});
+
 describe('CloudflareAdapter.verify', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -414,6 +432,49 @@ describe('CloudflareAdapter.upsertDnsRecord', () => {
     expect(result.action).toBe('updated');
     expect(result.record.content).toBe('binlu2a8.up.railway.app');
     expect(fetchMock.mock.calls.map((call) => (call[1] as RequestInit | undefined)?.method ?? 'GET')).toEqual(['GET', 'POST', 'GET', 'PATCH']);
+  });
+
+  it('blocks instead of updating an arbitrary duplicate DNS identity', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => cfResponse([
+      cfDnsRecord({ id: 'record-1' }),
+      cfDnsRecord({ id: 'record-2', content: 'other-target.up.railway.app' }),
+    ])));
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_dns' });
+
+    await expect(adapter.upsertDnsRecord(
+      'zone-1',
+      'staging.hlspropertycare.com',
+      'CNAME',
+      'new-target.up.railway.app'
+    )).rejects.toThrow('Multiple Cloudflare CNAME records match');
+  });
+});
+
+describe('CloudflareAdapter.deleteDnsRecord', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('treats an already-absent record as success and verifies absence', async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        return cfResponse(null, {
+          success: false,
+          status: 404,
+          errors: [{ code: 81044, message: 'DNS record not found.' }],
+        });
+      }
+      return cfResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_dns' });
+
+    await expect(adapter.deleteDnsRecord('zone-1', 'missing-record'))
+      .resolves.toEqual({ id: 'missing-record' });
+    expect(fetchMock.mock.calls.map((call) => (call[1] as RequestInit | undefined)?.method ?? 'GET'))
+      .toEqual(['DELETE', 'GET']);
   });
 });
 

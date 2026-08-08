@@ -836,7 +836,7 @@ describe('diffEnvironment — domain and workload', () => {
 
   it('updates when the domain is not attached and noops when it is', () => {
     const withDomain = spec({ domain: 'myapp.dev' });
-    const detached = diffEnvironment({ spec: withDomain, envName: 'production', observed: observed(), local: local() });
+    const detached = diffEnvironment({ spec: withDomain, envName: 'production', observed: observed(), local: local(), customDomainManagement: 'managed' });
     expect(detached.actions.find((a) => a.id === 'domain:myapp.dev')!.type).toBe('update');
 
     const attached = diffEnvironment({
@@ -849,8 +849,36 @@ describe('diffEnvironment — domain and workload', () => {
         })],
       }),
       local: local(),
+      customDomainManagement: 'managed',
     });
     expect(attached.actions.find((a) => a.id === 'domain:myapp.dev')!.type).toBe('noop');
+  });
+
+  it('blocks before DNS mutation when the hosting provider does not manage custom domains', () => {
+    const result = diffEnvironment({
+      spec: spec({
+        hosting: { provider: 'vercel' },
+        database: undefined,
+        domain: 'myapp.dev',
+      }),
+      envName: 'production',
+      observed: observed({
+        provider: 'vercel',
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: { 'myapp.dev': { dnsConfigured: true } },
+        })],
+      }),
+      local: local(),
+      customDomainManagement: 'unsupported',
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
+      type: 'update',
+      verified: false,
+      reason: expect.stringContaining('does not implement managed environment custom domains'),
+      metadata: { blockedReason: 'custom_domain_unsupported' },
+    });
   });
 
   it('updates a verified domain when the managed traffic proxy differs from desired state', () => {
@@ -873,6 +901,7 @@ describe('diffEnvironment — domain and workload', () => {
           domainDns: { name: 'myapp.dev', proxied: false },
         },
       }),
+      customDomainManagement: 'managed',
     });
 
     expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
@@ -903,6 +932,7 @@ describe('diffEnvironment — domain and workload', () => {
           domainDns: { name: 'myapp.dev', proxied: false },
         },
       }),
+      customDomainManagement: 'managed',
     });
 
     expect(result.actions.find((action) => action.id === 'domain:myapp.dev')!.type).toBe('noop');
@@ -934,6 +964,7 @@ describe('diffEnvironment — domain and workload', () => {
           domainDns: { name: 'myapp.dev', proxied: true },
         },
       }),
+      customDomainManagement: 'managed',
     });
 
     expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
@@ -968,6 +999,7 @@ describe('diffEnvironment — domain and workload', () => {
           domainDns: { name: 'myapp.dev', proxied: true },
         },
       }),
+      customDomainManagement: 'managed',
     });
 
     expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
@@ -983,6 +1015,7 @@ describe('diffEnvironment — domain and workload', () => {
       envName: 'production',
       observed: observed({ services: [observedWeb({ customDomains: ['myapp.dev'] })] }),
       local: local(),
+      customDomainManagement: 'managed',
     });
 
     const domain = result.actions.find((a) => a.id === 'domain:myapp.dev')!;
@@ -1014,6 +1047,7 @@ describe('diffEnvironment — domain and workload', () => {
         })],
       }),
       local: local(),
+      customDomainManagement: 'managed',
     });
 
     const domain = result.actions.find((a) => a.id === 'domain:myapp.dev')!;
@@ -1041,6 +1075,7 @@ describe('diffEnvironment — domain and workload', () => {
         })],
       }),
       local: local(),
+      customDomainManagement: 'managed',
     });
 
     const domain = result.actions.find((action) => action.id === 'domain:myapp.dev')!;
@@ -1079,6 +1114,7 @@ describe('diffEnvironment — domain and workload', () => {
           },
         },
       }),
+      customDomainManagement: 'managed',
     });
 
     expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
@@ -1122,6 +1158,7 @@ describe('diffEnvironment — domain and workload', () => {
           },
         },
       }),
+      customDomainManagement: 'managed',
     });
 
     expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({

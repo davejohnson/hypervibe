@@ -20,15 +20,6 @@ export type DomainRecreateAdapter = DomainAttachCapableAdapter & {
   recreateCustomDomain: (params: DomainAttachParams) => Promise<Receipt>;
 };
 
-const PROVIDERS_REQUIRING_PROVIDER_ATTACH = new Set([
-  'cloudrun',
-  'railway',
-]);
-
-export function providerRequiresCustomDomainAttach(provider: string): boolean {
-  return PROVIDERS_REQUIRING_PROVIDER_ATTACH.has(provider.toLowerCase());
-}
-
 export function supportsCustomDomainAttach(adapter: unknown): adapter is DomainAttachAdapter {
   return Boolean(adapter)
     && typeof adapter === 'object'
@@ -72,7 +63,7 @@ export async function callCustomDomainRecreate(
 }
 
 export function customDomainAttachUnsupportedMessage(provider: string, domain: string): string {
-  return `${provider} requires provider-side custom-domain attachment before DNS is changed, but Hypervibe does not implement custom-domain attachment for ${provider} yet. DNS was not changed for ${domain}; add an adapter attachCustomDomain implementation for ${provider} or attach the domain in the provider dashboard, then re-run hv_status.`;
+  return `${provider} requires provider-side custom-domain attachment before DNS is changed, but Hypervibe does not implement that lifecycle for ${provider}. DNS was not changed for ${domain}.`;
 }
 
 export function customDomainAttachBindingMissingMessage(provider: string, domain: string): string {

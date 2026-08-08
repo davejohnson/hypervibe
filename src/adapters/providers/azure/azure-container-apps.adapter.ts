@@ -1507,6 +1507,9 @@ providerRegistry.register({
         ['AZURE_REGISTRY_SERVER', 'HYPERVIBE_AZURE_REGISTRY_SERVER'],
       ],
     },
+    lifecycle: {
+      hosting: { customDomains: 'unsupported' },
+    },
     orchestration: {
       project: { shareAcrossEnvironments: false },
       diff: {

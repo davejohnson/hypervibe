@@ -420,7 +420,7 @@ describe('setupCustomDomain', () => {
     });
 
     expect(result.customDomainAttached).toBe(false);
-    expect(result.customDomainError).toContain('does not implement custom-domain attachment for cloudrun');
+    expect(result.customDomainError).toContain('does not implement that lifecycle for cloudrun');
     expect(result.dnsConfigured).toBe(false);
     expect(upsertDnsRecord).not.toHaveBeenCalled();
   });

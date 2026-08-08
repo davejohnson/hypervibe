@@ -7,7 +7,6 @@ import {
   callCustomDomainAttach,
   customDomainAttachBindingMissingMessage,
   customDomainAttachUnsupportedMessage,
-  providerRequiresCustomDomainAttach,
   supportsCustomDomainAttach,
   type DomainAttachCapableAdapter,
 } from './domain-attach-policy.js';
@@ -27,9 +26,8 @@ const connectionRepo = new ConnectionRepository();
 /**
  * Custom-domain leg of executeBootstrap: attach the domain on the provider
  * (required for managed hosts), write the provider's required DNS records to
- * Cloudflare, and fall back to a plain CNAME only for providers that do not
- * require provider-side attachment. Mutates `summary` in place, matching the
- * inline behavior this was extracted from.
+ * Cloudflare. Mutates `summary` in place, matching the inline behavior this
+ * was extracted from.
  */
 export async function attachBootstrapDomain(args: {
   domain: string;
@@ -38,17 +36,13 @@ export async function attachBootstrapDomain(args: {
   serviceWorkloads: Service[];
   scopeHints: string[];
   targetPlatform: string;
-  deployUrls: string[];
   summary: Record<string, unknown>;
 }): Promise<void> {
-  const { domain, environment, hostingAdapter, serviceWorkloads, scopeHints, targetPlatform, deployUrls, summary } = args;
+  const { domain, environment, hostingAdapter, serviceWorkloads, scopeHints, targetPlatform, summary } = args;
   const secretStore = getSecretStore();
   const normalizedDomain = normalizeDomainName(domain);
   const zoneScope = dnsZoneScopeForDomain(normalizedDomain);
   const cloudflareScopeHints = cloudflareScopeHintsForDomain(normalizedDomain, scopeHints);
-
-  let providerDomainConfigured = false;
-  let providerDomainAttachFailed = false;
 
   try {
     const latestEnvironment = envRepo.findById(environment.id) ?? environment;
@@ -60,7 +54,6 @@ export async function attachBootstrapDomain(args: {
     const targetService = serviceWorkloads[0];
     const targetServiceId = targetService ? boundServices[targetService.name]?.serviceId : undefined;
     const domainProvider = hostingAdapter.name || targetPlatform;
-    const requiresProviderAttach = providerRequiresCustomDomainAttach(domainProvider);
 
     if (targetService && targetServiceId && boundEnvironmentId && supportsCustomDomainAttach(domainAdapter)) {
       const receipt = await callCustomDomainAttach(domainAdapter, {
@@ -71,11 +64,9 @@ export async function attachBootstrapDomain(args: {
       });
 
       if (!receipt.success) {
-        providerDomainAttachFailed = true;
         summary.customDomainAttached = false;
         summary.customDomainError = receipt.error || receipt.message;
       } else {
-        providerDomainConfigured = true;
         summary.customDomainAttached = true;
         summary.customDomain = {
           domain,
@@ -101,7 +92,7 @@ export async function attachBootstrapDomain(args: {
             summary.domainDnsError = `Cloudflare zone not found for ${zoneScope} (needed by ${normalizedDomain})`;
           } else if (dnsRecords.length === 0) {
             summary.domainDnsConfigured = false;
-            summary.domainDnsError = `Railway did not return required DNS records for ${domain}`;
+            summary.domainDnsError = `${domainProvider} did not return required DNS records for ${domain}`;
           } else {
             const normalizedRecords = dnsRecords
               .map(normalizeProviderDnsRecord)
@@ -117,50 +108,22 @@ export async function attachBootstrapDomain(args: {
             summary.domainDnsConfigured = results.length > 0 && results.length === normalizedRecords.length;
             summary.domainDnsRecords = results;
             if (normalizedRecords.length === 0) {
-              summary.domainDnsError = `Railway returned no usable DNS records for ${domain}`;
+              summary.domainDnsError = `${domainProvider} returned no usable DNS records for ${domain}`;
             } else if (results.length !== normalizedRecords.length) {
-              summary.domainDnsError = `Railway returned DNS records for ${domain}, but Hypervibe could not write all required records.`;
+              summary.domainDnsError = `${domainProvider} returned DNS records for ${domain}, but Hypervibe could not write all required records.`;
             }
           }
         }
       }
-    } else if (requiresProviderAttach) {
-      providerDomainAttachFailed = true;
+    } else {
       summary.customDomainAttached = false;
       summary.customDomainError = targetService && targetServiceId && boundEnvironmentId
         ? customDomainAttachUnsupportedMessage(domainProvider, domain)
         : customDomainAttachBindingMissingMessage(domainProvider, domain);
     }
   } catch (error) {
-    providerDomainAttachFailed = true;
     summary.customDomainAttached = false;
     summary.customDomainError = error instanceof Error ? error.message : String(error);
     summary.domainDnsConfigured = false;
-  }
-
-  if (!providerDomainConfigured && !providerDomainAttachFailed && deployUrls[0]) {
-    try {
-      const targetHost = new URL(deployUrls[0]).hostname;
-      const cfConnection = connectionRepo.findBestVerifiedMatchFromHints('cloudflare', cloudflareScopeHints);
-      if (cfConnection) {
-        const cfCreds = secretStore.decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted);
-        const cfAdapter = new CloudflareAdapter();
-        cfAdapter.connect(cfCreds);
-        const zone = (await cfAdapter.findZoneByName(normalizedDomain)) ?? (await cfAdapter.findZoneByName(zoneScope));
-        if (zone) {
-          const result = await cfAdapter.upsertDnsRecord(zone.id, normalizedDomain, 'CNAME', targetHost, { proxied: true });
-          summary.domainDnsConfigured = true;
-          summary.domainDns = { name: normalizedDomain, type: 'CNAME', target: targetHost, action: result.action };
-        } else {
-          summary.domainDnsConfigured = false;
-          summary.domainDnsError = `Cloudflare zone not found for ${zoneScope} (needed by ${normalizedDomain})`;
-        }
-      } else {
-        summary.domainDnsConfigured = false;
-        summary.domainDnsError = `No verified Cloudflare connection available for DNS zone ${zoneScope} (needed by ${normalizedDomain}). ${formatConnectionGuidance('cloudflare', { scope: zoneScope })}`;
-      }
-    } catch {
-      summary.domainDnsConfigured = false;
-    }
   }
 }

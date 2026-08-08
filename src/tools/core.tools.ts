@@ -687,12 +687,14 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         && localCacheProvider === envSpec.cache.provider
         ? buildCacheEnvVarsFromComponent(localCache).envVars
         : undefined;
+      const hostingMetadata = providerRegistry.getMetadata(envSpec.hosting.provider);
       const diff = diffEnvironment({
         spec: envSpec,
         envName,
         observed,
         local,
-        providerBehavior: providerRegistry.getMetadata(envSpec.hosting.provider)?.orchestration?.diff,
+        providerBehavior: hostingMetadata?.orchestration?.diff,
+        customDomainManagement: hostingMetadata?.lifecycle?.hosting?.customDomains,
         expectedSource: planService.expectedDeploySource(projectForStatus, envName, envSpec),
         managedDatabaseEnvVars,
         managedCacheEnvVars,
@@ -712,7 +714,6 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           ?.lifecycle?.databaseResilience,
       });
       const databaseResilienceDrift = databaseResilience.actions.filter((action) => action.type !== 'noop');
-      const hostingMetadata = providerRegistry.getMetadata(envSpec.hosting.provider);
       const nativeDeploySources = planProviderNativeDeploySources({
         environmentSpec: envSpec,
         observed,

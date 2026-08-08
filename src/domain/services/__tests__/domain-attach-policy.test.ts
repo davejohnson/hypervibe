@@ -2,17 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   callCustomDomainAttach,
   customDomainAttachUnsupportedMessage,
-  providerRequiresCustomDomainAttach,
   supportsCustomDomainAttach,
 } from '../domain-attach-policy.js';
 
 describe('domain attach policy', () => {
-  it('requires provider-side domain attachment for managed hosting providers', () => {
-    for (const provider of ['cloudrun', 'railway']) {
-      expect(providerRequiresCustomDomainAttach(provider), provider).toBe(true);
-    }
-  });
-
   it('detects adapters that implement custom-domain attachment', () => {
     expect(supportsCustomDomainAttach({ attachCustomDomain: async () => ({ success: true, message: 'ok' }) })).toBe(true);
     expect(supportsCustomDomainAttach({})).toBe(false);

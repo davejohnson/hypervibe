@@ -1903,6 +1903,9 @@ providerRegistry.register({
     credentialsSchema: EcsCredentialsSchema,
     setupHelpUrl:
       'https://console.aws.amazon.com/iam/home#/security_credentials',
+    lifecycle: {
+      hosting: { customDomains: 'unsupported' },
+    },
     orchestration: {
       project: { shareAcrossEnvironments: false },
       diff: {

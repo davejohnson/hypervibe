@@ -167,7 +167,6 @@ describe('attachBootstrapDomain', () => {
       serviceWorkloads: [service],
       scopeHints: [],
       targetPlatform: 'railway',
-      deployUrls: ['https://web-production.up.railway.app'],
       summary,
     });
 
@@ -212,12 +211,11 @@ describe('attachBootstrapDomain', () => {
       serviceWorkloads: [service],
       scopeHints: [],
       targetPlatform: 'cloudrun',
-      deployUrls: ['https://web-abc123-uc.a.run.app'],
       summary,
     });
 
     expect(summary.customDomainAttached).toBe(false);
-    expect(summary.customDomainError).toContain('does not implement custom-domain attachment for cloudrun');
+    expect(summary.customDomainError).toContain('does not implement that lifecycle for cloudrun');
     expect(summary.domainDnsConfigured).toBeUndefined();
     expect(upsertDnsRecord).not.toHaveBeenCalled();
   });
@@ -251,7 +249,6 @@ describe('attachBootstrapDomain', () => {
       serviceWorkloads: [service],
       scopeHints: [],
       targetPlatform: 'railway',
-      deployUrls: ['https://web-production.up.railway.app'],
       summary,
     });
 
@@ -292,7 +289,6 @@ describe('attachBootstrapDomain', () => {
       serviceWorkloads: [service],
       scopeHints: [],
       targetPlatform: 'railway',
-      deployUrls: ['https://web-production.up.railway.app'],
       summary,
     });
 

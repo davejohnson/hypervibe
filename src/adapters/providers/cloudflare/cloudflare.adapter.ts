@@ -610,6 +610,9 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
 
   async findZoneByName(domain: string): Promise<CloudflareZone | null> {
     const response = await this.request<CloudflareZone[]>('GET', `/zones?name=${encodeURIComponent(domain)}`);
+    if (response.result.length > 1) {
+      throw new Error(`Multiple Cloudflare zones match ${domain}; use a zone-scoped connection so Hypervibe can resolve one durable zone identity.`);
+    }
     return response.result[0] ?? null;
   }
 
@@ -1107,8 +1110,17 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
   }
 
   async deleteDnsRecord(zoneId: string, recordId: string): Promise<{ id: string }> {
-    const response = await this.request<{ id: string }>('DELETE', `/zones/${zoneId}/dns_records/${recordId}`);
-    return response.result;
+    let deleted = { id: recordId };
+    try {
+      const response = await this.request<{ id: string }>('DELETE', `/zones/${zoneId}/dns_records/${recordId}`);
+      deleted = response.result;
+    } catch (error) {
+      if (!isCloudflareNotFound(error)) throw error;
+    }
+    if ((await this.listDnsRecords(zoneId)).some((record) => record.id === recordId)) {
+      throw new Error(`Cloudflare DNS record ${recordId} still exists after deletion.`);
+    }
+    return deleted;
   }
 
   private dnsRecordMatchesName(
@@ -1125,16 +1137,17 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
     records: CloudflareDnsRecord[],
     desiredName: string
   ): Promise<CloudflareDnsRecord | undefined> {
-    const matched = records.find((record) => this.dnsRecordMatchesName(record, desiredName));
-    if (matched || records.length === 0 || records.every((record) => record.zone_name)) {
-      return matched;
-    }
-
     const knownZoneName = records.find((record) => record.zone_name)?.zone_name;
-    const zoneName = knownZoneName ?? (
-      await this.request<CloudflareZone>('GET', `/zones/${encodeURIComponent(zoneId)}`)
-    ).result.name;
-    return records.find((record) => this.dnsRecordMatchesName(record, desiredName, zoneName));
+    const zoneName = records.some((record) => !record.zone_name)
+      ? knownZoneName ?? (
+          await this.request<CloudflareZone>('GET', `/zones/${encodeURIComponent(zoneId)}`)
+        ).result.name
+      : undefined;
+    const matches = records.filter((record) => this.dnsRecordMatchesName(record, desiredName, zoneName));
+    if (matches.length > 1) {
+      throw new Error(`Multiple Cloudflare ${matches[0]!.type} records match ${desiredName}; resolve duplicate DNS identities before applying.`);
+    }
+    return matches[0];
   }
 
   private dnsRecordNeedsUpdate(
