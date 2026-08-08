@@ -131,10 +131,8 @@ export class AdapterFactory {
    * Get list of available hosting platforms (those with connections).
    */
   getAvailableHostingPlatforms(): string[] {
-    const hostingProviders = providerRegistry.getByCategory('deployment');
-    return hostingProviders
-      .filter((p) => this.hasVerifiedConnection(p.metadata.name))
-      .map((p) => p.metadata.name);
+    return providerRegistry.namesFor('hosting')
+      .filter((providerName) => this.hasVerifiedConnection(providerName));
   }
 
   /**

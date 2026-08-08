@@ -3473,6 +3473,9 @@ providerRegistry.register({
     category: 'deployment',
     credentialsSchema: CloudRunCredentialsSchema,
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    lifecycle: {
+      hosting: { customDomains: 'unsupported' },
+    },
     orchestration: {
       diff: {
         workloadKindObservation: 'exact',

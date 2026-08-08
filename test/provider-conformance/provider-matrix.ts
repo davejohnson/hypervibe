@@ -48,6 +48,8 @@ export interface HostingProviderContract {
   vendor: string;
   service: string;
   status: ProviderImplementationStatus;
+  /** Environment custom-domain lifecycle implemented by Hypervibe today. */
+  customDomains: 'managed' | 'unsupported';
   credentials: ProviderCredentialField[];
   /** Opt-in managed GitHub workflow live-test profile. */
   managedWorkflow?: ManagedWorkflowFixture;
@@ -225,6 +227,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'Railway',
     service: 'Railway',
     status: 'supported',
+    customDomains: 'managed',
     credentials: railwayCredentials,
   },
   {
@@ -233,6 +236,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'Google Cloud',
     service: 'Cloud Run',
     status: 'supported',
+    customDomains: 'unsupported',
     credentials: gcpCredentials,
   },
   {
@@ -241,6 +245,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'DigitalOcean',
     service: 'App Platform',
     status: 'ready-for-live',
+    customDomains: 'unsupported',
     credentials: digitalOceanCredentials,
     managedWorkflow: {
       ...dockerWebManagedWorkflow('deploy-digitalocean-production.yml'),
@@ -256,6 +261,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'AWS',
     service: 'ECS on Fargate',
     status: 'ready-for-live',
+    customDomains: 'unsupported',
     credentials: awsEcsCredentials,
     managedWorkflow: dockerWebManagedWorkflow(
       'deploy-ecs-production.yml',
@@ -270,6 +276,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'Microsoft Azure',
     service: 'Azure Container Apps',
     status: 'ready-for-live',
+    customDomains: 'unsupported',
     credentials: azureContainerAppsCredentials,
     managedWorkflow: {
       ...dockerWebManagedWorkflow(
@@ -287,6 +294,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'Vercel',
     service: 'Vercel Projects and Deployments',
     status: 'ready-for-live',
+    customDomains: 'unsupported',
     credentials: vercelCredentials,
     managedWorkflow: {
       environmentName: 'production',

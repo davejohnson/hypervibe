@@ -3359,19 +3359,14 @@ export class RailwayAdapter implements IProviderAdapter {
         };
       }>(query, { id: params.serviceId });
 
-      for (const edge of result.service?.serviceInstances?.edges ?? []) {
-        if (edge.node?.environmentId !== params.environmentId) {
-          continue;
-        }
-        const match = edge.node.domains?.customDomains?.find(
-          (domain) => domain.domain.toLowerCase() === params.domain.toLowerCase()
-        );
-        if (match) {
-          return match;
-        }
+      const matches = (result.service?.serviceInstances?.edges ?? [])
+        .filter((edge) => edge.node?.environmentId === params.environmentId)
+        .flatMap((edge) => edge.node?.domains?.customDomains ?? [])
+        .filter((domain) => domain.domain.toLowerCase() === params.domain.toLowerCase());
+      if (matches.length > 1) {
+        throw new Error(`Multiple Railway custom-domain attachments match ${params.domain} in environment ${params.environmentId}.`);
       }
-
-      return null;
+      return matches[0] ?? null;
     } catch (error) {
       throw new Error(`Failed to observe Railway custom domain ${params.domain}: ${this.describeError(error)}`);
     }
@@ -3595,6 +3590,32 @@ export class RailwayAdapter implements IProviderAdapter {
           error: this.describeError(error),
           data: {
             phase: 'customDomainDelete',
+            customDomainId: existing.id,
+            domain: params.domain,
+          },
+        };
+      }
+      try {
+        const remaining = await this.getCustomDomainStatus(params);
+        if (remaining) {
+          return {
+            success: false,
+            message: 'Railway custom-domain deletion is not yet terminal',
+            error: `Railway custom domain ${params.domain} still exists after deletion; retry after provider deletion converges.`,
+            data: {
+              phase: 'customDomainDeleteVerification',
+              customDomainId: remaining.id,
+              domain: params.domain,
+            },
+          };
+        }
+      } catch (error) {
+        return {
+          success: false,
+          message: 'Failed to verify Railway custom-domain deletion',
+          error: this.describeError(error),
+          data: {
+            phase: 'customDomainDeleteVerification',
             customDomainId: existing.id,
             domain: params.domain,
           },
@@ -4653,6 +4674,7 @@ providerRegistry.register({
       defaultScalarKey: 'apiToken',
     },
     lifecycle: {
+      hosting: { customDomains: 'managed' },
       databaseEngines: ['postgres'],
       cacheEngines: ['redis'],
     },

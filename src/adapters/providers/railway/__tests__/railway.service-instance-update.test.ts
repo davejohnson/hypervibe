@@ -362,6 +362,19 @@ describe('RailwayAdapter service instance updates', () => {
       })
       // customDomainDelete
       .mockResolvedValueOnce({ customDomainDelete: true })
+      // getCustomDomainStatus verifies terminal absence before replacement
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{
+              node: {
+                environmentId: 'env-prod',
+                domains: { customDomains: [] },
+              },
+            }],
+          },
+        },
+      })
       // customDomainCreate
       .mockResolvedValueOnce({
         customDomainCreate: { id: 'cd_new', domain: 'usebillforge.com' },
@@ -422,8 +435,8 @@ describe('RailwayAdapter service instance updates', () => {
     });
     expect(String(request.mock.calls[2]?.[0])).toContain('customDomainDelete');
     expect(request.mock.calls[2]?.[1]).toEqual({ id: 'cd_old' });
-    expect(String(request.mock.calls[3]?.[0])).toContain('customDomainCreate');
-    expect(request.mock.calls[3]?.[1]).toEqual({
+    expect(String(request.mock.calls[4]?.[0])).toContain('customDomainCreate');
+    expect(request.mock.calls[4]?.[1]).toEqual({
       input: {
         projectId: 'rail-project-1',
         serviceId: 'svc-web',
@@ -431,6 +444,82 @@ describe('RailwayAdapter service instance updates', () => {
         domain: 'usebillforge.com',
       },
     });
+  });
+
+  it('blocks custom-domain mutation when Railway returns duplicate identities', async () => {
+    const duplicate = (id: string) => ({ id, domain: 'usebillforge.com', status: { verified: false } });
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        service: { serviceInstances: { edges: [{ node: { environmentId: 'env-prod' } }] } },
+      })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{
+              node: {
+                environmentId: 'env-prod',
+                domains: { customDomains: [duplicate('cd-1'), duplicate('cd-2')] },
+              },
+            }],
+          },
+        },
+      });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.recreateCustomDomain({
+      projectId: 'rail-project-1',
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+    });
+
+    expect(receipt).toMatchObject({
+      success: false,
+      data: { phase: 'observeCustomDomain' },
+      error: expect.stringContaining('Multiple Railway custom-domain attachments match'),
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not recreate until Railway confirms the old custom domain is absent', async () => {
+    const existingDomain = { id: 'cd-old', domain: 'usebillforge.com', status: { verified: false } };
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        service: { serviceInstances: { edges: [{ node: { environmentId: 'env-prod' } }] } },
+      })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod', domains: { customDomains: [existingDomain] } } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({ customDomainDelete: true })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod', domains: { customDomains: [existingDomain] } } }],
+          },
+        },
+      });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.recreateCustomDomain({
+      projectId: 'rail-project-1',
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+    });
+
+    expect(receipt).toMatchObject({
+      success: false,
+      data: { phase: 'customDomainDeleteVerification', customDomainId: 'cd-old' },
+      error: expect.stringContaining('still exists after deletion'),
+    });
+    expect(request).toHaveBeenCalledTimes(4);
+    expect(request.mock.calls.some((call) => String(call[0]).includes('customDomainCreate'))).toBe(false);
   });
 
   it('does not call Railway customDomainCreate without a projectId binding', async () => {

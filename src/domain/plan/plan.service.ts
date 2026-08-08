@@ -961,6 +961,7 @@ export class PlanService {
       observed,
       local,
       providerBehavior: hostingMetadata?.orchestration?.diff,
+      customDomainManagement: hostingMetadata?.lifecycle?.hosting?.customDomains,
       expectedSource: this.expectedDeploySource(projectForPlan, environmentName, environmentSpec),
       managedDatabaseEnvVars,
       managedCacheEnvVars,

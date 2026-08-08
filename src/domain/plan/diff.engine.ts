@@ -4,7 +4,6 @@ import { migrationReleaseCommandWarning, withMigrationReleaseCommand } from '../
 import type { ObservedState, ObservedService } from '../ports/observe.port.js';
 import { hashEnvValue } from '../ports/observe.port.js';
 import type { PlanAction, PlanFieldDiff, DiffResult, LocalSnapshot } from './plan.types.js';
-import { providerRequiresCustomDomainAttach } from '../services/domain-attach-policy.js';
 import { buildDatabaseAliasEnvVars } from '../services/database-env.js';
 
 function certificateStatusIsReady(status?: string): boolean {
@@ -42,6 +41,8 @@ export function diffEnvironment(input: {
     workloadKindObservation?: 'exact' | 'cron-only';
     presenceOnlyManagedEnvVar?: (params: { key: string; value: string }) => boolean;
   };
+  /** Provider-declared environment custom-domain lifecycle. Omission fails closed. */
+  customDomainManagement?: 'managed' | 'unsupported';
   /** Repo/branch services should be linked to when spec.deploy.strategy is "branch". */
   expectedSource?: { repo: string; branch: string };
   /** Managed database env vars derived from the currently desired database component. */
@@ -692,38 +693,46 @@ export function diffEnvironment(input: {
       && domainStatus?.providerVerified === true
       && certificateStatusIsReady(domainStatus.certificateStatus);
     const domainDnsConfigured = dnsConfigured !== false || providerDnsIsProxyOpaque;
-    const requiresProviderVerification = providerRequiresCustomDomainAttach(provider);
-    const configured = attached
-      && (requiresProviderVerification
-        ? domainDnsConfigured
-          && (domainStatus?.providerVerified === true
-            || (domainStatus?.providerVerified === undefined && dnsConfigured === true))
-        : domainDnsConfigured)
+    const customDomainsManaged = input.customDomainManagement === 'managed';
+    const configured = customDomainsManaged
+      && attached
+      && domainDnsConfigured
+      && (domainStatus?.providerVerified === true
+        || (domainStatus?.providerVerified === undefined && dnsConfigured === true))
       && !domainProxyDrift;
     actions.push({
       id,
-      type: domainRecreateNeeded ? 'replace' : configured ? 'noop' : 'update',
+      type: !customDomainsManaged
+        ? 'update'
+        : domainRecreateNeeded
+          ? 'replace'
+          : configured
+            ? 'noop'
+            : 'update',
       resource: { kind: 'domain', name: spec.domain, provider },
-      verified,
-      reason: domainRecreateNeeded
+      verified: customDomainsManaged && verified,
+      reason: !customDomainsManaged
+        ? `${provider} does not implement managed environment custom domains; DNS will not be changed for ${spec.domain}`
+        : domainRecreateNeeded
         ? `Domain ${spec.domain} has an unapplied recreate revision`
         : attached
         ? !domainDnsConfigured
           ? `Domain ${spec.domain} is attached on ${provider}, but required DNS records are not configured`
-          : domainStatus?.providerVerified === false && requiresProviderVerification
+          : domainStatus?.providerVerified === false
             ? `Domain ${spec.domain} DNS is configured, but ${provider} ownership verification is still pending`
             : domainProxyDrift
               ? `Domain ${spec.domain} traffic proxy does not match desired state`
-              : dnsConfigured === undefined && requiresProviderVerification
+              : dnsConfigured === undefined
                 ? `Domain ${spec.domain} is attached on ${provider}, but provider verification status was not observed`
                 : 'Domain attached'
         : `Domain ${spec.domain} is not attached to any service`,
-      dependsOn: configured ? undefined : projectDep,
-      ...(domainRecreateNeeded ? { requiresConfirm: true } : {}),
+      dependsOn: !customDomainsManaged || configured ? undefined : projectDep,
+      ...(customDomainsManaged && domainRecreateNeeded ? { requiresConfirm: true } : {}),
       ...(domainProxyDrift
         ? { diff: [{ field: 'dns:proxied', from: String(appliedDomainProxy), to: String(desiredDomainProxy) }] }
         : {}),
       metadata: {
+        ...(!customDomainsManaged ? { blockedReason: 'custom_domain_unsupported' } : {}),
         ...(domainStatus?.dnsRecords ? { dnsRecords: domainStatus.dnsRecords } : {}),
         domainProxy: desiredDomainProxy,
         ...(spec.domainRecreateRevision

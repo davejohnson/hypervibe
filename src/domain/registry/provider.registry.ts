@@ -41,6 +41,11 @@ export interface ProviderMetadata {
   };
   orchestration?: ProviderOrchestrationMetadata;
   lifecycle?: {
+    /** Hosting lifecycle exists only when the provider is valid in environments.*.hosting. */
+    hosting?: {
+      /** Environment custom domains are either fully managed or explicitly unsupported. */
+      customDomains: 'managed' | 'unsupported';
+    };
     /** Engines this provider can reconcile through its database adapter. */
     databaseEngines?: string[];
     /** Engines this provider can reconcile through its cache adapter. */
@@ -192,7 +197,8 @@ export class ProviderRegistry {
     const provider = this.providers.get(name);
     if (!provider) return false;
     if (capability === 'hosting') {
-      return provider.metadata.category === 'deployment';
+      return provider.metadata.category === 'deployment'
+        && provider.metadata.lifecycle?.hosting !== undefined;
     }
     if (capability === 'database') {
       const exposesAdapter = provider.metadata.category === 'database'

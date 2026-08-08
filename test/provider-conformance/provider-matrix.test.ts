@@ -28,6 +28,18 @@ describe('provider conformance matrix', () => {
     ]);
   });
 
+  it('pins environment custom-domain support to provider lifecycle metadata', () => {
+    for (const contract of hostingProviderContracts) {
+      expect(
+        providerRegistry.getMetadata(contract.provider)?.lifecycle?.hosting?.customDomains,
+        contract.provider
+      ).toBe(contract.customDomains);
+    }
+    expect(providerRegistry.supports('github', 'hosting')).toBe(false);
+    expect(hostingProviderContracts.filter((entry) => entry.customDomains === 'managed').map((entry) => entry.provider))
+      .toEqual(['railway']);
+  });
+
   it('declares and enforces non-native source ownership for every applicable hosting provider', () => {
     const expectedPolicies = {
       railway: 'disconnect',

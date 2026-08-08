@@ -14,6 +14,9 @@ function provider(
       category,
       credentialsSchema: z.object({ token: z.string() }),
       lifecycle: {
+        ...(category === 'deployment'
+          ? { hosting: { customDomains: 'unsupported' as const } }
+          : {}),
         ...(category === 'database' || derivedAdapters?.database
           ? { databaseEngines: ['postgres'] }
           : {}),
@@ -52,5 +55,15 @@ describe('ProviderRegistry lifecycle capabilities', () => {
     registry.register(provider('acme', 'deployment'));
     expect(() => registry.register(provider('acme', 'database')))
       .toThrow('already registered');
+  });
+
+  it('does not treat every deployment-category integration as a hosting lifecycle', () => {
+    const registry = new ProviderRegistry();
+    const repository = provider('repository', 'deployment');
+    delete repository.metadata.lifecycle?.hosting;
+    registry.register(repository);
+
+    expect(registry.supports('repository', 'hosting')).toBe(false);
+    expect(registry.namesFor('hosting')).toEqual([]);
   });
 });

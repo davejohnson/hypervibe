@@ -144,9 +144,15 @@ Claude: Validates and stores the connection.
 ```
 You: "Create a new project called my-app with staging and production environments"
 You: "Deploy to staging"
-You: "Add a custom domain api.myapp.com"
+You: "Add a Railway custom domain api.myapp.com"
 You: "Run database migrations"
 ```
+
+Environment custom domains are fully managed for Railway today. Hypervibe
+fails closed without changing DNS for Cloud Run, DigitalOcean App Platform,
+ECS, Azure Container Apps, and Vercel until their provider attachment and
+certificate lifecycles are implemented. GitHub Pages custom domains use the
+separate project-level `github.pages` lifecycle.
 
 ### 6. Supply Secrets (Optional)
 

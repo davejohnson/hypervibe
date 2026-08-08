@@ -531,7 +531,6 @@ export async function executeBootstrap(params: {
       serviceWorkloads,
       scopeHints,
       targetPlatform,
-      deployUrls: deploy.urls,
       summary,
     });
   }

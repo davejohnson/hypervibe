@@ -14,7 +14,8 @@ Hosting, databases, and caches have separate contracts:
 
 - Hosting: project/environment identity, service identity, configuration,
   environment-variable drift, deploy/source state, observation, deletion, and
-  terminal absence.
+  terminal absence. Environment custom-domain support is a separate explicit
+  provider capability; unsupported hosts must block before DNS mutation.
 - PostgreSQL: provision, observe, wire runtime variables, connect with a
   bounded operation, noop, replace/migrate, destroy, retry, and terminal
   absence.
