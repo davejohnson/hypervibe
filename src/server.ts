@@ -11,6 +11,7 @@ export const HYPERVIBE_SERVER_INSTRUCTIONS = [
   'For Hypervibe-managed GitHub Actions deploys, always inspect workflows, runs, jobs, and logs with hv_ci_status, then use hv_health after a successful run. Do not use gh, a GitHub connector/app, the GitHub UI, or direct GitHub API calls to inspect deploys. If hv_ci_status is blocked, follow or report its connection/error guidance instead of bypassing Hypervibe.',
   'Custom domain and DNS changes must be modeled as desired infrastructure and reconciled through hv_plan/hv_apply. Do not bypass a blocked apply with one-off DNS/provider mutations.',
   'When an hv_* result reports a missing required connection, use hv_connections only when a safe credentialsRef is already available. Otherwise stop and explain the concrete blocked task. Offer to help connect credentials the user already controls or prepare a value-free handoff for the person who manages that provider; do not assume the current user should receive provider access. Do not run hv_plan, hv_apply, hv_deploy, or one-off tools as a workaround.',
+  'Parameter modes: hv_connections({project?}) and hv_secrets({project?}) list by default; secret hosting reads require env. hv_inspect({}) alone discovers providers, every bounded inspection requires provider, and full environment inspection requires provider + project + env.',
   'If a capability seems missing, check the other hv_* tools (most have action/target parameters) before reaching for anything outside Hypervibe.',
 ].join('\n');
 

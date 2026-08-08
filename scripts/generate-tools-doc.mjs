@@ -32,7 +32,7 @@ const groups = new Map([
   ['Connections', /^hv_connections/],
   ['Deploy & observability', /^hv_(deploy|rollback|logs|health)$/],
   ['Database', /^hv_db_/],
-  ['Secrets', /^hv_secrets_/],
+  ['Secrets', /^hv_secrets$/],
   ['CI', /^hv_ci_/],
   ['App Store & iOS', /^hv_appstore_/],
   ['Developer experience', /^hv_runs$/],

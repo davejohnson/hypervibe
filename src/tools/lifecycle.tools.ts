@@ -15,10 +15,10 @@ import { importProvider } from '../application/import-provider.js';
 export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_inspect',
-    'Read-only provider forensics across every registered provider. A completely parameterless call lists providers, connection state, and supported resource reads. Every bounded inspection requires provider; live environment inspection requires provider, project, and env. Never writes Hypervibe local state or provider resources.',
+    'Read-only provider forensics. Modes: {} lists providers/capabilities; {provider,...} inspects a provider account/resource; {provider,project,env} performs full live environment inspection. Project/env without provider is invalid. Never writes Hypervibe local state or provider resources.',
     {
-      provider: z.string().trim().min(1).optional().describe('Registered provider name. Required whenever any other selector is supplied; omit only for parameterless provider discovery.'),
-      project: z.string().optional().describe('Hypervibe project name or id. Required with env; omit for provider-account inspection or parameterless discovery.'),
+      provider: z.string().trim().min(1).optional().describe('Registered provider name. Required whenever any selector is supplied. Use hv_inspect({})—no parameters—for provider discovery.'),
+      project: z.string().optional().describe('Hypervibe project name or id. Requires provider. Required with env; without env it may help choose the project-scoped provider connection.'),
       env: z.string().optional().describe('Exact environment name. Live environment inspection requires provider, project, and env; this command does not default to staging.'),
       scope: z.string().trim().min(1).optional().describe('Provider connection/account/repository/domain scope, such as owner/repo or example.com.'),
       resource: z.string().trim().min(1).optional().describe('Provider-owned resource class returned by the provider listing, such as project, ref, pages, zone, or dns.'),

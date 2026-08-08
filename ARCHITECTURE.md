@@ -178,6 +178,11 @@ When an attached Railway domain remains provider-unverified, the reviewed
 domain update first calls Railway's non-destructive `customDomainUpdate` for
 the same environment to refresh provider verification before rewriting DNS.
 Verified domains remain read-only on this path.
+When that binding confirms the desired traffic record is proxied, provider-side
+CNAME comparison is intentionally opaque: a verified domain with a ready
+provider certificate may converge even if the origin reports its DNS comparison
+as false. Missing bindings, unproxied intent, unverified ownership, and pending
+or failed certificates must still plan repair.
 
 Provider-managed edge load balancers use a separate generic
 `platformBindings.loadBalancer` topology. The public hostname, provider scope,
@@ -263,6 +268,14 @@ delete retry. The current audit and repair queue is tracked in
 Provider credentials and required external connections should be discovered as early as possible from the spec and reported before apply. Prefer `credentialsRef` with exported environment variables, `dotenv:` references, local JSON files, or secret-manager refs; raw credentials in chat are still accepted when the user intentionally chooses that path.
 
 `project` on `hv_connections` and `hv_secrets` selects and validates command context; it does not redefine provider credential scope or make locally stored credentials project-owned. Provider `scope` remains the durable resource boundary. A project-only `hv_connections` call lists connections in that explicit context, and an unknown explicit project must fail instead of being silently ignored.
+
+Umbrella command modes must stay unambiguous in the registry description,
+field schemas, validation hints, generated CLI help, and MCP instructions. A
+project-only `hv_secrets` call lists sources just like `hv_connections`; masked
+hosting-variable reads require an explicit `env`. Only parameterless
+`hv_inspect({})` performs provider discovery. Every bounded inspection requires
+`provider`, and full environment observation additionally requires `project`
+and `env`.
 
 Secrets never cross output boundaries. Secret values may be accepted through `credentialsRef`, encrypted into plans, or stored as verified connections, but they must not be printed in tool output, committed specs, warnings, logs, receipts, or test snapshots.
 

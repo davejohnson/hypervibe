@@ -196,7 +196,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
   commands.register(
     'hv_connections',
-    'List provider connections and available providers by default. Pass project to select and validate project context while listing. Pass provider to manage one: action="add" (default) stores and verifies credentials, action="verify" re-verifies, action="remove" deletes, and action="prepare" performs confirm-gated cloud account preparation. Credentials are encrypted at rest and never returned; credentialsRef is preferred.',
+    'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages one connection. With provider, action="add" is the default, while "verify", "remove", and "prepare" are explicit. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred.',
     {
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
       action: z.enum(['add', 'verify', 'remove', 'prepare']).optional().describe('With provider: operation to perform (default: "add")'),
@@ -205,7 +205,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. Optional for common single-token providers.'),
       credentialsMap: z.record(z.string()).optional().describe('action="add": for credentialsRef="dotenv:/path/.env", maps provider credential keys to .env variable names, e.g. {"apiToken":"GITHUB_TOKEN","packageReadToken":"GITHUB_PACKAGES_TOKEN"}.'),
       scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global.'),
-      project: projectField,
+      project: projectField.describe('Optional Hypervibe project name/id for validated context. With no provider, project-only still lists. Omit for an unscoped list. This never changes provider credential scope.'),
       gcpProjectId: z.string().optional().describe('action="prepare": GCP project ID (defaults to the Cloud Run connection projectId)'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
@@ -247,7 +247,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || confirm !== undefined;
         if (mutationInput) {
           return commandError('VALIDATION', 'provider is required when connection operation parameters are supplied.', {
-            hint: 'Omit all parameters to list connections, or pass provider to add, verify, remove, or prepare one.',
+            hint: 'Use hv_connections({}) to list globally, hv_connections({project}) to list in validated project context, or pass provider to add, verify, remove, or prepare one.',
           });
         }
         const project = projectRef

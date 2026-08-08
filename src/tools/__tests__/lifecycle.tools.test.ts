@@ -370,6 +370,7 @@ describe('hv_inspect / hv_import', () => {
     expect(missingProvider.ok).toBe(false);
     expect(missingProvider.error.code).toBe('VALIDATION');
     expect(missingProvider.error.details.selectors).toEqual(['project']);
+    expect(missingProvider.hint).toContain('hv_inspect({}) with no parameters');
     expect(missingProvider.hint).toContain('provider, project, and env');
 
     const untypedSelector = await t.call('hv_inspect', {

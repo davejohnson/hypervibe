@@ -7,6 +7,13 @@ import type { PlanAction, PlanFieldDiff, DiffResult, LocalSnapshot } from './pla
 import { providerRequiresCustomDomainAttach } from '../services/domain-attach-policy.js';
 import { buildDatabaseAliasEnvVars } from '../services/database-env.js';
 
+function certificateStatusIsReady(status?: string): boolean {
+  if (!status) return false;
+  const normalized = status.trim().toUpperCase();
+  return !/(PENDING|WAITING|FAILED|FAILURE|ERROR|INVALID|UNVERIFIED)/.test(normalized)
+    && /(VALID|VERIFIED|ISSUED|ACTIVE|READY|SUCCESS|SUCCEEDED)/.test(normalized);
+}
+
 /**
  * Pure diff: desired spec vs observed live state (or local state when the
  * provider is not observable). No repository or adapter imports — everything
@@ -673,13 +680,18 @@ export function diffEnvironment(input: {
       : undefined;
     const domainProxyDrift = appliedDomainProxy !== undefined
       && appliedDomainProxy !== desiredDomainProxy;
+    const providerDnsIsProxyOpaque = desiredDomainProxy
+      && appliedDomainProxy === true
+      && domainStatus?.providerVerified === true
+      && certificateStatusIsReady(domainStatus.certificateStatus);
+    const domainDnsConfigured = dnsConfigured !== false || providerDnsIsProxyOpaque;
     const requiresProviderVerification = providerRequiresCustomDomainAttach(provider);
     const configured = attached
       && (requiresProviderVerification
-        ? dnsConfigured !== false
+        ? domainDnsConfigured
           && (domainStatus?.providerVerified === true
             || (domainStatus?.providerVerified === undefined && dnsConfigured === true))
-        : dnsConfigured !== false)
+        : domainDnsConfigured)
       && !domainProxyDrift;
     actions.push({
       id,
@@ -687,7 +699,7 @@ export function diffEnvironment(input: {
       resource: { kind: 'domain', name: spec.domain, provider },
       verified,
       reason: attached
-        ? dnsConfigured === false
+        ? !domainDnsConfigured
           ? `Domain ${spec.domain} is attached on ${provider}, but required DNS records are not configured`
           : domainStatus?.providerVerified === false && requiresProviderVerification
             ? `Domain ${spec.domain} DNS is configured, but ${provider} ownership verification is still pending`

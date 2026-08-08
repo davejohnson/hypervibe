@@ -108,7 +108,7 @@ export async function inspectProvider(
     if (selectors.length > 0) {
       throw new HvError('VALIDATION', 'provider is required when inspection selectors are supplied.', {
         details: { selectors },
-        hint: 'A parameterless hv_inspect call only lists providers. Pass provider with every bounded request; full live environment inspection requires provider, project, and env.',
+        hint: 'Use hv_inspect({}) with no parameters for provider discovery. Every bounded request requires provider; full live environment inspection requires provider, project, and env.',
       });
     }
     return listProviders(ctx);
@@ -119,7 +119,7 @@ export async function inspectProvider(
   if (!registered) {
     throw new HvError('VALIDATION', `Unknown provider "${input.provider}".`, {
       details: { providers: providerRegistry.names() },
-      hint: 'Call hv_inspect without provider to list registered providers and their supported resource reads.',
+      hint: 'Call hv_inspect({}) with no parameters to list registered providers and their supported resource reads.',
     });
   }
 

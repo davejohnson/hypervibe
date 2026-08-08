@@ -65,6 +65,20 @@ describe('reduced secret command surface', () => {
     expect(await client.names()).not.toContain('hv_secrets_set');
     await client.close();
   });
+
+  it('keeps project-only calls in source-list mode', async () => {
+    const project = new ProjectRepository().create({ name: 'secret-list-app', defaultPlatform: 'railway' });
+    const hostingRead = vi.spyOn(hostingEnv, 'readHostingEnvVars');
+    const client = await makeClient();
+
+    const result = await client.call('hv_secrets', { project: project.name });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.project).toEqual({ id: project.id, name: project.name });
+    expect(result.data.sources).toEqual(expect.any(Array));
+    expect(hostingRead).not.toHaveBeenCalled();
+    await client.close();
+  });
 });
 
 describe('secret reads', () => {
@@ -102,6 +116,26 @@ describe('secret reads', () => {
 
     expect(result.data.vars).toEqual({ API_KEY: '[redacted]' });
     expect(JSON.stringify(result)).not.toContain('provider-secret-value');
+    await client.close();
+  });
+
+  it('requires explicit env before hosting-variable selectors', async () => {
+    const project = new ProjectRepository().create({ name: 'hosting-selector-app', defaultPlatform: 'railway' });
+    const hostingRead = vi.spyOn(hostingEnv, 'readHostingEnvVars');
+    const client = await makeClient();
+
+    const result = await client.call('hv_secrets', {
+      project: project.name,
+      service: 'web',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({
+      code: 'VALIDATION',
+      message: 'env is required for hosting-variable inspection.',
+    });
+    expect(result.hint).toContain('Use project alone to list secret sources');
+    expect(hostingRead).not.toHaveBeenCalled();
     await client.close();
   });
 

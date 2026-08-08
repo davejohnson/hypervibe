@@ -908,6 +908,74 @@ describe('diffEnvironment — domain and workload', () => {
     expect(result.actions.find((action) => action.id === 'domain:myapp.dev')!.type).toBe('noop');
   });
 
+  it('recognizes verified provider DNS as proxy-opaque when Hypervibe manages the proxied traffic record', () => {
+    const withDomain = spec({ domain: 'myapp.dev', domainProxy: true });
+    const result = diffEnvironment({
+      spec: withDomain,
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: {
+            'myapp.dev': {
+              providerVerified: true,
+              certificateStatus: 'VALID',
+              dnsConfigured: false,
+            },
+          },
+        })],
+      }),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'svc-1' } },
+          domainDns: { name: 'myapp.dev', proxied: true },
+        },
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
+      type: 'noop',
+      reason: 'Domain attached',
+    });
+  });
+
+  it('does not hide proxied-domain drift while provider certificate verification is pending', () => {
+    const withDomain = spec({ domain: 'myapp.dev', domainProxy: true });
+    const result = diffEnvironment({
+      spec: withDomain,
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: {
+            'myapp.dev': {
+              providerVerified: true,
+              certificateStatus: 'PENDING',
+              dnsConfigured: false,
+            },
+          },
+        })],
+      }),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'svc-1' } },
+          domainDns: { name: 'myapp.dev', proxied: true },
+        },
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
+      type: 'update',
+      reason: 'Domain myapp.dev is attached on railway, but required DNS records are not configured',
+    });
+  });
+
   it('updates when a provider-attached domain has no observed verification status', () => {
     const withDomain = spec({ domain: 'myapp.dev' });
     const result = diffEnvironment({
