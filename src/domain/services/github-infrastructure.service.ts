@@ -1434,6 +1434,7 @@ export async function planGitHubInfrastructure(params: {
       spec: params.spec,
       repository,
       adapter: adapterResult.adapter,
+      environment,
     });
     actions.push(...pages.actions);
     warnings.push(...pages.warnings);

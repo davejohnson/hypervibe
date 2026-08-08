@@ -48,6 +48,7 @@ export interface GitHubVerifyResult {
 
 export interface GitHubPagesConfig {
   url?: string;
+  html_url?: string;
   status?: string;
   cname?: string | null;
   custom_404: boolean;
@@ -64,39 +65,43 @@ export interface GitHubPagesConfig {
     domains: string[];
     expires_at?: string;
   };
+  protected_domain_state?: string | null;
+  pending_domain_unverified_at?: string | null;
+}
+
+export interface GitHubPagesDomainHealth {
+  host?: string;
+  uri?: string;
+  nameservers?: string;
+  dns_resolves?: boolean;
+  is_proxied?: boolean;
+  is_cloudflare_ip?: boolean;
+  is_fastly_ip?: boolean;
+  is_old_ip_address?: boolean;
+  is_a_record?: boolean;
+  has_cname_record?: boolean;
+  has_mx_records_present?: boolean;
+  is_valid_domain?: boolean;
+  is_apex?: boolean;
+  is_apex_domain?: boolean;
+  should_be_a_record?: boolean;
+  is_cname_to_github_user_domain?: boolean;
+  is_cname_to_pages_dot_github_dot_com?: boolean;
+  is_cname_to_fastly?: boolean;
+  is_pointed_to_github_pages_ip?: boolean;
+  is_non_github_pages_ip_present?: boolean;
+  is_https_eligible?: boolean;
+  is_served_by_pages?: boolean;
+  is_valid?: boolean;
+  responds_to_https?: boolean;
+  enforces_https?: boolean;
+  https_error?: string | null;
+  caa_error?: string | null;
 }
 
 export interface GitHubPagesHealthCheck {
-  domain?: {
-    host: string;
-    uri: string;
-    nameservers: string;
-    dns_resolves: boolean;
-    is_proxied: boolean;
-    is_cloudflare_ip: boolean;
-    is_fastly_ip: boolean;
-    is_old_ip_address: boolean;
-    is_a_record: boolean;
-    has_cname_record: boolean;
-    has_mx_records_present: boolean;
-    is_valid_domain: boolean;
-    is_apex_domain: boolean;
-    should_be_a_record: boolean;
-    is_cname_to_github_user_domain: boolean;
-    is_cname_to_pages_dot_github_dot_com: boolean;
-    is_cname_to_fastly: boolean;
-    is_pointed_to_github_pages_ip: boolean;
-    is_non_github_pages_ip_present: boolean;
-    is_https_eligible: boolean;
-    is_served_by_pages: boolean;
-    enforces_https: boolean;
-  };
-  alt_domain?: {
-    host: string;
-    uri: string;
-    nameservers: string;
-    dns_resolves: boolean;
-  } | null;
+  domain?: GitHubPagesDomainHealth;
+  alt_domain?: GitHubPagesDomainHealth | null;
 }
 
 export interface GitHubLabel {

@@ -4,12 +4,14 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { CloudflareAdapter, type CloudflareDnsRecord } from '../../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import {
   GitHubAdapter,
   GitHubApiError,
   type GitHubPagesConfig,
+  type GitHubPagesHealthCheck,
 } from '../../../adapters/providers/github/github.adapter.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { executePlanApply } from '../../../application/apply-plan.js';
@@ -62,6 +64,27 @@ function pageConfig(overrides: Partial<GitHubPagesConfig> = {}): GitHubPagesConf
     https_enforced: false,
     https_certificate: { state: 'issued', description: '', domains: ['hypervibe.dev'] },
     ...overrides,
+  };
+}
+
+function stuckCertificateHealth(overrides: Partial<NonNullable<GitHubPagesHealthCheck['domain']>> = {}): GitHubPagesHealthCheck {
+  return {
+    domain: {
+      host: 'hypervibe.dev',
+      dns_resolves: true,
+      is_proxied: false,
+      is_valid_domain: true,
+      is_pointed_to_github_pages_ip: true,
+      is_non_github_pages_ip_present: false,
+      is_served_by_pages: true,
+      is_https_eligible: true,
+      is_valid: true,
+      responds_to_https: false,
+      https_error: 'peer_failed_verification',
+      caa_error: null,
+      ...overrides,
+    },
+    alt_domain: null,
   };
 }
 
@@ -355,7 +378,6 @@ describe('declarative GitHub Pages lifecycle', () => {
     delete withoutCertificate.https_certificate;
     vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig')
       .mockResolvedValueOnce(withoutCertificate)
-      .mockResolvedValueOnce(withoutCertificate)
       .mockResolvedValueOnce(pageConfig({ https_enforced: true }));
     const update = vi.spyOn(GitHubAdapter.prototype, 'updatePagesSite').mockResolvedValue();
 
@@ -377,7 +399,8 @@ describe('declarative GitHub Pages lifecycle', () => {
     });
 
     expect(result).toMatchObject({ success: true });
-    expect(update).toHaveBeenNthCalledWith(2, 'owner', 'pages-fixture', { httpsEnforced: true });
+    expect(update).toHaveBeenCalledOnce();
+    expect(update).toHaveBeenCalledWith('owner', 'pages-fixture', { httpsEnforced: true });
   });
 
   it('reports GitHub certificate provisioning as pending when the certificate does not exist yet', async () => {
@@ -390,10 +413,8 @@ describe('declarative GitHub Pages lifecycle', () => {
     new ConnectionRepository().updateStatus(connection.id, 'verified');
     const current = pageConfig({ https_certificate: undefined });
     vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig')
-      .mockResolvedValueOnce(current)
       .mockResolvedValueOnce(current);
     vi.spyOn(GitHubAdapter.prototype, 'updatePagesSite')
-      .mockResolvedValueOnce()
       .mockRejectedValueOnce(new GitHubApiError('GitHub API error: The certificate does not exist yet', 404));
 
     const result = await applyGitHubPages({
@@ -414,6 +435,138 @@ describe('declarative GitHub Pages lifecycle', () => {
     });
 
     expect(result).toMatchObject({ success: true, status: 'pending', data: { providerStatus: 404 } });
+  });
+
+  it('plans one same-domain recovery for the exact stuck certificate state and cools down after apply', async () => {
+    const project = new ProjectRepository().create({ name: 'pages-certificate-recovery' });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'repository' });
+    const desiredSpec = spec(project.name);
+    for (const [provider, scope, credentials] of [
+      ['github', REPOSITORY, { apiToken: 'github-token' }],
+      ['cloudflare', 'hypervibe.dev', { apiToken: 'cloudflare-token' }],
+    ] as const) {
+      const connection = new ConnectionRepository().create({
+        provider,
+        scope,
+        credentialsEncrypted: getSecretStore().encryptObject(credentials),
+      });
+      new ConnectionRepository().updateStatus(connection.id, 'verified');
+    }
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1', name: 'hypervibe.dev', status: 'active', paused: false, type: 'full', name_servers: [],
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'listDnsRecords').mockResolvedValue([
+      ...PAGES_IPS.map((ip, index) => dnsRecord(`pages-${index}`, 'A', ip)),
+      dnsRecord('pages-www', 'CNAME', 'owner.github.io', 'www.hypervibe.dev'),
+    ]);
+    let current = pageConfig({ https_certificate: undefined });
+    vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig').mockImplementation(async () => ({ ...current }));
+    vi.spyOn(GitHubAdapter.prototype, 'getPagesHealthCheck').mockResolvedValue(stuckCertificateHealth());
+    const update = vi.spyOn(GitHubAdapter.prototype, 'updatePagesSite').mockImplementation(async (_owner, _repo, input) => {
+      if (input.httpsEnforced) {
+        throw new GitHubApiError('GitHub API error: The certificate does not exist yet', 404);
+      }
+      current = {
+        ...current,
+        ...(input.buildType ? { build_type: input.buildType } : {}),
+        ...(input.cname !== undefined ? { cname: input.cname } : {}),
+      };
+    });
+    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+    const adapter = new GitHubAdapter();
+    adapter.connect({ apiToken: 'github-token' });
+
+    const planned = await planGitHubPages({
+      spec: desiredSpec,
+      repository: REPOSITORY,
+      adapter,
+      environment,
+    });
+    const action = planned.actions.find((candidate) => candidate.id === GITHUB_PAGES_ACTION_ID)!;
+    expect(action).toMatchObject({
+      type: 'update',
+      reason: expect.stringContaining('reattaching the same custom domain'),
+      metadata: {
+        certificateRecovery: 'reattach',
+        observedCertificateAttempt: null,
+      },
+    });
+
+    const result = await applyGitHubPages({
+      spec: desiredSpec,
+      action,
+      project,
+      environmentName: 'repository',
+    });
+
+    expect(result).toMatchObject({ success: true, status: 'pending', data: { providerStatus: 404 } });
+    expect(update).toHaveBeenNthCalledWith(1, 'owner', 'pages-fixture', { cname: null });
+    expect(update).toHaveBeenNthCalledWith(2, 'owner', 'pages-fixture', {
+      buildType: 'workflow',
+      cname: 'hypervibe.dev',
+    });
+    expect(update).toHaveBeenNthCalledWith(3, 'owner', 'pages-fixture', { httpsEnforced: true });
+    expect(trigger).toHaveBeenCalledWith('owner', 'pages-fixture', '.github/workflows/hypervibe-pages.yml', 'main');
+    const updatedEnvironment = new EnvironmentRepository().findById(environment.id)!;
+    expect(updatedEnvironment.platformBindings.github).toMatchObject({
+      pagesCertificateAttempt: {
+        domain: 'hypervibe.dev',
+        mode: 'reattach',
+        attemptedAt: expect.any(String),
+      },
+    });
+
+    const replanned = await planGitHubPages({
+      spec: desiredSpec,
+      repository: REPOSITORY,
+      adapter,
+      environment: updatedEnvironment,
+    });
+    const cooledDown = replanned.actions.find((candidate) => candidate.id === GITHUB_PAGES_ACTION_ID)!;
+    expect(cooledDown.metadata?.certificateRecovery).toBeUndefined();
+    expect(cooledDown.reason).toContain('cooling down until');
+  });
+
+  it('blocks certificate recovery without mutation when GitHub health changes after planning', async () => {
+    const project = new ProjectRepository().create({ name: 'pages-certificate-stale' });
+    const environment = new EnvironmentRepository().create({ projectId: project.id, name: 'repository' });
+    const desiredSpec = spec(project.name);
+    for (const [provider, scope, credentials] of [
+      ['github', REPOSITORY, { apiToken: 'github-token' }],
+      ['cloudflare', 'hypervibe.dev', { apiToken: 'cloudflare-token' }],
+    ] as const) {
+      const connection = new ConnectionRepository().create({
+        provider,
+        scope,
+        credentialsEncrypted: getSecretStore().encryptObject(credentials),
+      });
+      new ConnectionRepository().updateStatus(connection.id, 'verified');
+    }
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1', name: 'hypervibe.dev', status: 'active', paused: false, type: 'full', name_servers: [],
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'listDnsRecords').mockResolvedValue([
+      ...PAGES_IPS.map((ip, index) => dnsRecord(`pages-${index}`, 'A', ip)),
+      dnsRecord('pages-www', 'CNAME', 'owner.github.io', 'www.hypervibe.dev'),
+    ]);
+    vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig').mockResolvedValue(pageConfig({ https_certificate: undefined }));
+    const health = vi.spyOn(GitHubAdapter.prototype, 'getPagesHealthCheck').mockResolvedValue(stuckCertificateHealth());
+    const update = vi.spyOn(GitHubAdapter.prototype, 'updatePagesSite');
+    const adapter = new GitHubAdapter();
+    adapter.connect({ apiToken: 'github-token' });
+    const planned = await planGitHubPages({ spec: desiredSpec, repository: REPOSITORY, adapter, environment });
+    const action = planned.actions.find((candidate) => candidate.id === GITHUB_PAGES_ACTION_ID)!;
+    health.mockResolvedValue(stuckCertificateHealth({ https_error: null }));
+
+    const result = await applyGitHubPages({
+      spec: desiredSpec,
+      action,
+      project,
+      environmentName: 'repository',
+    });
+
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(update).not.toHaveBeenCalled();
   });
 
   it('blocks Pages mutation when provider state changed after planning', async () => {
