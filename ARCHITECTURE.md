@@ -174,6 +174,10 @@ proxy state in `platformBindings.domainDns`, so changing the setting plans a
 domain update instead of hiding an imperative Cloudflare toggle. This supports
 the reversible certificate-validation workflow where a traffic CNAME is made
 DNS-only until the hosting provider verifies the domain, then proxied again.
+When an attached Railway domain remains provider-unverified, the reviewed
+domain update first calls Railway's non-destructive `customDomainUpdate` for
+the same environment to refresh provider verification before rewriting DNS.
+Verified domains remain read-only on this path.
 
 Provider-managed edge load balancers use a separate generic
 `platformBindings.loadBalancer` topology. The public hostname, provider scope,

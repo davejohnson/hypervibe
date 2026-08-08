@@ -214,6 +214,128 @@ describe('RailwayAdapter service instance updates', () => {
     });
   });
 
+  it('refreshes an existing unverified custom domain without deleting it', async () => {
+    const pendingDomain = {
+      id: 'cd_pending',
+      domain: 'usebillforge.com',
+      status: {
+        verified: false,
+        certificateStatus: 'CERTIFICATE_STATUS_TYPE_ISSUING',
+        dnsRecords: [{
+          fqdn: 'usebillforge.com',
+          hostlabel: '@',
+          recordType: 'CNAME',
+          requiredValue: 'web-production.up.railway.app',
+          currentValue: 'web-production.up.railway.app',
+          status: 'DNS_RECORD_STATUS_PROPAGATED',
+          zone: 'usebillforge.com',
+        }],
+        verificationDnsHost: '_railway-verify.usebillforge.com',
+        verificationToken: 'railway-verify=verify-token',
+      },
+    };
+    const domainObservation = {
+      service: {
+        serviceInstances: {
+          edges: [{
+            node: {
+              environmentId: 'env-prod',
+              domains: { customDomains: [pendingDomain] },
+            },
+          }],
+        },
+      },
+    };
+    const request = vi.fn()
+      // ensureServiceInstanceForEnvironment
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod' } }],
+          },
+        },
+      })
+      // getCustomDomainStatus before refresh
+      .mockResolvedValueOnce(domainObservation)
+      // customDomainUpdate
+      .mockResolvedValueOnce({ customDomainUpdate: true })
+      // getCustomDomainStatus after refresh
+      .mockResolvedValueOnce(domainObservation);
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.attachCustomDomain({
+      projectId: 'rail-project-1',
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+    });
+
+    expect(receipt).toMatchObject({
+      success: true,
+      message: expect.stringContaining('refreshed pending verification'),
+      data: {
+        domain: 'usebillforge.com',
+        customDomainId: 'cd_pending',
+        created: false,
+        refreshed: true,
+        providerVerified: false,
+        certificateStatus: 'CERTIFICATE_STATUS_TYPE_ISSUING',
+      },
+    });
+    expect(String(request.mock.calls[2]?.[0])).toContain('customDomainUpdate');
+    expect(request.mock.calls[2]?.[1]).toEqual({
+      id: 'cd_pending',
+      environmentId: 'env-prod',
+    });
+    expect(request.mock.calls.some((call) => String(call[0]).includes('customDomainDelete'))).toBe(false);
+  });
+
+  it('does not refresh an existing verified custom domain', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod' } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{
+              node: {
+                environmentId: 'env-prod',
+                domains: {
+                  customDomains: [{
+                    id: 'cd_verified',
+                    domain: 'usebillforge.com',
+                    status: { verified: true, certificateStatus: 'CERTIFICATE_STATUS_TYPE_ISSUED' },
+                  }],
+                },
+              },
+            }],
+          },
+        },
+      });
+
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+    const receipt = await adapter.attachCustomDomain({
+      projectId: 'rail-project-1',
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+    });
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: { created: false, providerVerified: true },
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
   it('does not call Railway customDomainCreate without a projectId binding', async () => {
     const request = vi.fn();
     const adapter = new RailwayAdapter();

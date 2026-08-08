@@ -3414,20 +3414,51 @@ export class RailwayAdapter implements IProviderAdapter {
 
     const existing = await this.getCustomDomainStatus(params);
     if (existing) {
+      let current = existing;
+      let refreshed = false;
+      if (existing.status?.verified === false) {
+        const mutation = gql`
+          mutation RefreshCustomDomain($id: String!, $environmentId: String!) {
+            customDomainUpdate(id: $id, environmentId: $environmentId)
+          }
+        `;
+        try {
+          await this.client.request<{ customDomainUpdate: boolean }>(mutation, {
+            id: existing.id,
+            environmentId: params.environmentId,
+          });
+          refreshed = true;
+          current = await this.getCustomDomainStatus(params) ?? existing;
+        } catch (error) {
+          return {
+            success: false,
+            message: 'Failed to refresh pending Railway custom domain',
+            error: this.describeError(error),
+            data: {
+              domain: existing.domain,
+              customDomainId: existing.id,
+              phase: 'customDomainUpdate',
+            },
+          };
+        }
+      }
       return {
         success: true,
-        message: 'Railway custom domain already attached',
+        message: refreshed
+          ? 'Railway custom domain already attached; refreshed pending verification'
+          : 'Railway custom domain already attached',
         data: {
-          domain: existing.domain,
-          customDomainId: existing.id,
+          domain: current.domain,
+          customDomainId: current.id,
           created: false,
-          ...(typeof existing.status?.verified === 'boolean'
-            ? { providerVerified: existing.status.verified }
+          ...(refreshed ? { refreshed: true } : {}),
+          ...(typeof current.status?.verified === 'boolean'
+            ? { providerVerified: current.status.verified }
             : {}),
-          ...(existing.status?.certificateStatus
-            ? { certificateStatus: existing.status.certificateStatus }
+          ...(current.status?.certificateStatus
+            ? { certificateStatus: current.status.certificateStatus }
             : {}),
-          dnsRecords: this.extractCustomDomainDnsRecords(existing.status),
+          dnsRecords: this.extractCustomDomainDnsRecords(current.status),
         },
       };
     }
