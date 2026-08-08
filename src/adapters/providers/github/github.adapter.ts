@@ -133,6 +133,17 @@ interface GitHubResponse<T> {
   data: T;
 }
 
+export class GitHubApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly documentationUrl?: string
+  ) {
+    super(message);
+    this.name = 'GitHubApiError';
+  }
+}
+
 export class GitHubAdapter {
   readonly name = 'github';
   private credentials: GitHubCredentials | null = null;
@@ -173,15 +184,17 @@ export class GitHubAdapter {
 
     if (!response.ok) {
       let errorMessage = `GitHub API error: ${response.status} ${response.statusText}`;
+      let documentationUrl: string | undefined;
       try {
         const errorBody = await response.json() as { message?: string; documentation_url?: string };
         if (errorBody.message) {
           errorMessage = `GitHub API error: ${errorBody.message}`;
         }
+        documentationUrl = errorBody.documentation_url;
       } catch {
         // Ignore JSON parse errors
       }
-      throw new Error(errorMessage);
+      throw new GitHubApiError(errorMessage, response.status, documentationUrl);
     }
 
     // Handle 204 No Content responses
@@ -810,6 +823,7 @@ export class GitHubAdapter {
     workflow_runs: Array<{
       id: number;
       name: string;
+      display_title?: string;
       status: string;
       conclusion: string | null;
       created_at: string;
@@ -830,6 +844,7 @@ export class GitHubAdapter {
       workflow_runs: Array<{
         id: number;
         name: string;
+        display_title?: string;
         status: string;
         conclusion: string | null;
         created_at: string;

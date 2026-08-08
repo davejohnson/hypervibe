@@ -30,6 +30,7 @@ import {
 import {
   applyGitHubActionsAppliedSpecHash,
   applyGitHubActionsDeploy,
+  applyGitHubActionsRelease,
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
 import {
@@ -731,6 +732,33 @@ export async function executePlanApply(ctx: CommandContext, params: {
         project: applyProject,
         environmentName: envName,
         desiredHash,
+      });
+    }
+    if (capability === 'github.ci.release') {
+      const expectedRepository = parseGitHubRepoFromRemote(applyProject.gitRemoteUrl);
+      const repository = stringField(asRecord(action.metadata), 'repository');
+      const environmentName = stringField(asRecord(action.metadata), 'environmentName');
+      const workflow = stringField(asRecord(action.metadata), 'workflow');
+      const ref = stringField(asRecord(action.metadata), 'ref');
+      const targetSha = stringField(asRecord(action.metadata), 'targetSha');
+      const forceRelease = asRecord(action.metadata)?.forceRelease === true;
+      if (
+        repository !== expectedRepository
+        || environmentName !== envName
+        || action.resource.name !== `release:${envName}`
+        || !workflow
+        || !ref
+        || !targetSha
+      ) {
+        return blockedActionIdentity(action, 'The reviewed repository, environment, workflow, ref, or exact commit no longer matches.');
+      }
+      return applyGitHubActionsRelease({
+        project: applyProject,
+        environmentName: envName,
+        workflow,
+        ref,
+        targetSha,
+        forceRelease,
       });
     }
     if (capability === 'github.collaboration.sync') {
@@ -1922,18 +1950,6 @@ export async function applyDatabaseSeed(
       success: false,
       message: 'Database component not found',
       error: `No ${engine} component is recorded for ${project.name}/${envName}. Re-run hv_plan/hv_apply to create the database first.`,
-    };
-  }
-
-  if (asRecord(action.metadata)?.deferUntilNextPlan === true) {
-    return {
-      success: false,
-      status: 'pending',
-      message: `Database seed is waiting for the reviewed Stripe-aware deploy for ${project.name}/${envName}`,
-      data: {
-        pendingDeploy: true,
-        hint: 'Let the managed CI release finish, verify it with hv_ci_status and hv_health, then re-run hv_plan/hv_apply. The seed remains planned until it completes.',
-      },
     };
   }
 

@@ -441,12 +441,11 @@ ids. Model the relationship explicitly through
   both sides after catalog, credential, webhook, and deployment prerequisites
   converge. Stored provider ids and metadata are durable identity; Stripe
   idempotency keys provide retry safety only.
-- When a CI-owned plan changes Stripe runtime values or creates/replaces a
-  webhook signing value, its non-noop database seed depends on the reviewed
-  Stripe actions and is staged after the applied-spec marker. Apply reports the
-  seed pending without starting an environment task. After the managed release
-  succeeds and health is verified, the next plan runs the still-uncompleted
-  seed against the deployed image.
+- A non-noop database seed in a managed-CI environment depends on the reviewed
+  integration actions and applied-spec marker, then on one explicit exact-SHA
+  release action. Apply dispatches and verifies that release before starting
+  the provider-neutral seed task, so a seed command introduced by the desired
+  commit cannot run in the previously deployed image.
 
 Stripe-managed runtime keys cannot also come from ordinary `envVars`, env-file
 includes, delegated secret slots, overrides, or removal tombstones. Removing
@@ -609,11 +608,11 @@ Generated provider CI workflow steps belong under provider-owned modules and are
 Generated workflows must gate image deployment on the environment-scoped
 `HYPERVIBE_APPLIED_SPEC_HASH` GitHub Actions variable. The desired hash covers
 only that environment plus its applicable delegated-secret declarations.
-`hv_plan` models updating this marker as the final release dependency and
-`hv_apply` updates it only after every preceding infrastructure action
-completes. A post-release database seed may explicitly depend on the marker and
-remain pending until the next plan; it is excluded from the marker's own
-dependencies to avoid a cycle. This preserves
+`hv_plan` models updating this marker after the infrastructure actions that
+affect a release, and `hv_apply` updates it only after those actions complete.
+A non-noop database seed is excluded from the marker's own dependencies to
+avoid a cycle; in a managed-CI environment, an explicit exact-SHA release
+depends on the marker and the seed depends on that verified release. This preserves
 automatic code-only staging deploys while preventing a changed desired-state
 contract from deploying before reconciliation. Missing, failed, pending, or
 unconfirmed dependencies must leave the previous marker intact.
@@ -676,9 +675,11 @@ reviewable infrastructure pull request before any provider settings change.
 After merge, planning emits separate GitHub Pages and Cloudflare DNS actions,
 with explicit dependency order, provider snapshots, and confirmation for DNS
 replacement or teardown. Apply may mutate only the reviewed provider action.
-Certificate provisioning is asynchronous and returns pending until GitHub
-reports a ready certificate; HTTPS enforcement is a later verified converge
-step. Disabling Pages removes the reviewed workflow first, then confirm-gates
+Certificate provisioning is asynchronous. Apply requests HTTPS enforcement
+after the reviewed domain configuration is visible; a documented GitHub
+certificate/HTTPS rejection returns pending, while every other provider error
+fails. A later apply verifies the enabled setting. Disabling Pages removes the
+reviewed workflow first, then confirm-gates
 site deletion and removal of only the exact Pages address records Hypervibe
 recognizes. Mail, verification, and unrelated DNS records are never part of
 the Pages mutation boundary.
@@ -762,7 +763,7 @@ containers should converge schema during startup, or the spec may declare a
 durable provider predeploy/release command when startup migration is not
 appropriate.
 
-Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`. It should plan a visible one-shot seed action, run through the provider-neutral environment task runner during `hv_apply`, and record completion on the database component only after terminal success. Integrations whose changes require a deferred CI release must be explicit seed dependencies; the seed stays pending until a later plan rather than running an older image or racing newly issued webhook credentials.
+Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`. It should plan a visible one-shot seed action, run through the provider-neutral environment task runner during `hv_apply`, and record completion on the database component only after terminal success. In a managed-CI environment, a non-noop seed has an explicit dependency on a verified exact-SHA release of the desired commit. If that release remains in progress, apply stops pending before the seed; it never runs the older image or races newly issued integration credentials.
 
 `hv_db_migrate` must not exist in the command registry, MCP surface, or CLI.
 Provider-to-provider data moves are lifecycle operations and must be modeled as

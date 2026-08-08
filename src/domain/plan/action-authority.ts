@@ -6,6 +6,7 @@ import {
 import {
   isGitHubActionsAppliedSpecHashAction,
   isGitHubActionsDeployAction,
+  isGitHubActionsReleaseAction,
 } from '../services/ci-deploy.service.js';
 import { isGitHubCollaborationAction } from '../services/repo-collaboration.service.js';
 import {
@@ -56,6 +57,7 @@ export type PlanMutationCapability =
   | 'domain.registration.mutate'
   | 'github.ci.sync'
   | 'github.ci.rollback'
+  | 'github.ci.release'
   | 'github.applied-spec-hash.sync'
   | 'github.collaboration.sync'
   | 'github.infrastructure.sync'
@@ -295,6 +297,18 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'desiredHash')
   ) {
     return authority(action, 'github.applied-spec-hash.sync');
+  }
+  if (
+    isGitHubActionsReleaseAction(action)
+    && exactResource(action, 'ci', 'github')
+    && action.type === 'update'
+    && action.resource.name === `release:${metadataString(action, 'environmentName') ?? ''}`
+    && metadataString(action, 'repository')
+    && metadataString(action, 'workflow')
+    && metadataString(action, 'ref')
+    && /^[0-9a-f]{40}$/i.test(metadataString(action, 'targetSha') ?? '')
+  ) {
+    return authority(action, 'github.ci.release');
   }
   if (
     isGitHubCollaborationAction(action)

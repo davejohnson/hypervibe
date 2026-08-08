@@ -6,7 +6,11 @@ import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.a
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { CloudflareAdapter, type CloudflareDnsRecord } from '../../../adapters/providers/cloudflare/cloudflare.adapter.js';
-import { GitHubAdapter, type GitHubPagesConfig } from '../../../adapters/providers/github/github.adapter.js';
+import {
+  GitHubAdapter,
+  GitHubApiError,
+  type GitHubPagesConfig,
+} from '../../../adapters/providers/github/github.adapter.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { executePlanApply } from '../../../application/apply-plan.js';
 import { createToolContext } from '../../../tools/context.js';
@@ -337,6 +341,79 @@ describe('declarative GitHub Pages lifecycle', () => {
     expect(dnsAction).toMatchObject({ type: 'update' });
     expect(dnsAction.dependsOn).toBeUndefined();
     expect(pagesAction).toMatchObject({ type: 'create', dependsOn: [dnsAction.id] });
+  });
+
+  it('asks GitHub to enforce HTTPS even when the Pages response omits certificate details', async () => {
+    const desiredSpec = spec('pages-https');
+    const connection = new ConnectionRepository().create({
+      provider: 'github',
+      scope: REPOSITORY,
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'github-token' }),
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
+    const withoutCertificate = pageConfig();
+    delete withoutCertificate.https_certificate;
+    vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig')
+      .mockResolvedValueOnce(withoutCertificate)
+      .mockResolvedValueOnce(withoutCertificate)
+      .mockResolvedValueOnce(pageConfig({ https_enforced: true }));
+    const update = vi.spyOn(GitHubAdapter.prototype, 'updatePagesSite').mockResolvedValue();
+
+    const result = await applyGitHubPages({
+      spec: desiredSpec,
+      action: {
+        id: GITHUB_PAGES_ACTION_ID,
+        type: 'update',
+        resource: { kind: 'repo', name: REPOSITORY, provider: 'github' },
+        verified: true,
+        reason: 'Enable HTTPS',
+        metadata: {
+          operation: 'githubPagesConfigure',
+          repository: REPOSITORY,
+          enabled: true,
+          observed: { buildType: 'workflow', cname: 'hypervibe.dev', httpsEnforced: false },
+        },
+      },
+    });
+
+    expect(result).toMatchObject({ success: true });
+    expect(update).toHaveBeenNthCalledWith(2, 'owner', 'pages-fixture', { httpsEnforced: true });
+  });
+
+  it('reports GitHub certificate provisioning as pending only after HTTPS enforcement is rejected', async () => {
+    const desiredSpec = spec('pages-https-pending');
+    const connection = new ConnectionRepository().create({
+      provider: 'github',
+      scope: REPOSITORY,
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'github-token' }),
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
+    const current = pageConfig({ https_certificate: undefined });
+    vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig')
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce(current);
+    vi.spyOn(GitHubAdapter.prototype, 'updatePagesSite')
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new GitHubApiError('GitHub API error: HTTPS certificate is not ready', 422));
+
+    const result = await applyGitHubPages({
+      spec: desiredSpec,
+      action: {
+        id: GITHUB_PAGES_ACTION_ID,
+        type: 'update',
+        resource: { kind: 'repo', name: REPOSITORY, provider: 'github' },
+        verified: true,
+        reason: 'Enable HTTPS',
+        metadata: {
+          operation: 'githubPagesConfigure',
+          repository: REPOSITORY,
+          enabled: true,
+          observed: { buildType: 'workflow', cname: 'hypervibe.dev', httpsEnforced: false },
+        },
+      },
+    });
+
+    expect(result).toMatchObject({ success: true, status: 'pending', data: { providerStatus: 422 } });
   });
 
   it('blocks Pages mutation when provider state changed after planning', async () => {

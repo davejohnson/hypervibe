@@ -125,7 +125,7 @@ function statusImpliesConfigured(status?: string): boolean | undefined {
   if (/(INVALID|PENDING|WAITING|MISSING|FAILED|FAILURE|ERROR|UNVERIFIED)/.test(normalized)) {
     return false;
   }
-  if (/(VALID|VERIFIED|ACTIVE|SUCCESS|SUCCEEDED|CONFIGURED)/.test(normalized)) {
+  if (/(VALID|VERIFIED|ACTIVE|SUCCESS|SUCCEEDED|CONFIGURED|PROPAGATED)/.test(normalized)) {
     return true;
   }
   return undefined;

@@ -19,11 +19,13 @@ import type { Project } from '../../entities/project.entity.js';
 import {
   applyGitHubActionsAppliedSpecHash,
   applyGitHubActionsDeploy,
+  applyGitHubActionsRelease,
   environmentUsesGitHubActionsDeploy,
   githubCiDeployPermissionProblem,
   missingProviderSecretsMessage,
   planGitHubActionsAppliedSpecHash,
   planGitHubActionsDeploy,
+  planGitHubActionsRelease,
   requiredProviderSecretNamesForGitHubActions,
 } from '../ci-deploy.service.js';
 import { environmentDeploymentContractHash } from '../deployment-contract.service.js';
@@ -823,6 +825,106 @@ describe('ci-deploy.service', () => {
           },
         },
       });
+    });
+  });
+
+  describe('database seed release barrier', () => {
+    it('plans an exact-SHA release after its reviewed prerequisites', async () => {
+      const { project } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      vi.spyOn(GitHubAdapter.prototype, 'getRef').mockResolvedValue({
+        ref: 'refs/heads/main',
+        object: { sha: 'a'.repeat(40) },
+      });
+      vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+        total_count: 0,
+        workflow_runs: [],
+      });
+      const spec = new SpecStore().get(project)!.spec;
+
+      const result = await planGitHubActionsRelease({
+        project,
+        environmentName: 'production',
+        environmentSpec: spec.environments.production,
+        dependsOn: ['ci:github-actions:production:applied-spec-hash'],
+      });
+
+      expect(result.warnings).toEqual([]);
+      expect(result.action).toMatchObject({
+        id: 'ci:github-actions:production:release',
+        type: 'update',
+        verified: true,
+        dependsOn: ['ci:github-actions:production:applied-spec-hash'],
+        metadata: {
+          operation: 'githubActionsRelease',
+          repository: 'davejohnson/billforge',
+          ref: 'main',
+          targetSha: 'a'.repeat(40),
+          forceRelease: true,
+        },
+      });
+    });
+
+    it('dispatches the exact commit and waits for verified release evidence', async () => {
+      const { project } = seedProjectWithSpec();
+      seedVerifiedConnections();
+      const sha = 'b'.repeat(40);
+      const run = {
+        id: 42,
+        name: 'Deploy Railway (production)',
+        display_title: `Deploy production ${sha}`,
+        status: 'completed',
+        conclusion: 'success',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        head_sha: sha,
+        head_branch: 'main',
+        event: 'workflow_dispatch',
+        html_url: 'https://github.com/davejohnson/billforge/actions/runs/42',
+      };
+      vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns')
+        .mockResolvedValueOnce({ total_count: 0, workflow_runs: [] })
+        .mockResolvedValueOnce({ total_count: 1, workflow_runs: [run] });
+      const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+      vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunArtifacts').mockResolvedValue({
+        total_count: 1,
+        artifacts: [{
+          id: 99,
+          name: `hypervibe-server-release-production-${sha}`,
+          expired: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          workflow_run: {
+            id: 42,
+            repository_id: 1,
+            head_repository_id: 1,
+            head_branch: 'main',
+            head_sha: sha,
+          },
+        }],
+      });
+
+      const result = await applyGitHubActionsRelease({
+        project,
+        environmentName: 'production',
+        workflow: '.github/workflows/deploy-railway-production.yml',
+        ref: 'main',
+        targetSha: sha,
+        forceRelease: true,
+        pollIntervalMs: 0,
+      });
+
+      expect(result).toMatchObject({
+        success: true,
+        data: { targetSha: sha, runId: 42, artifactId: 99 },
+      });
+      expect(trigger).toHaveBeenCalledWith(
+        'davejohnson',
+        'billforge',
+        '.github/workflows/deploy-railway-production.yml',
+        'main',
+        { commit_sha: sha }
+      );
     });
   });
 });

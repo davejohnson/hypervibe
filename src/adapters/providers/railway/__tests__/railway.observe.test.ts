@@ -272,6 +272,56 @@ describe('RailwayAdapter observe', () => {
     });
   });
 
+  it('separates propagated routing DNS from pending Railway ownership and certificate state', async () => {
+    const pendingOwnershipProject = structuredClone(projectDetailsResponse);
+    pendingOwnershipProject.project.services.edges[0].node.serviceInstances.edges[0].node.domains.customDomains = [
+      {
+        id: 'cd_123',
+        domain: 'usebillforge.com',
+        status: {
+          verified: false,
+          certificateStatus: 'PENDING',
+          dnsRecords: [{
+            fqdn: 'usebillforge.com',
+            recordType: 'DNS_RECORD_TYPE_CNAME',
+            requiredValue: 'web-production.up.railway.app.',
+            status: 'DNS_RECORD_STATUS_PROPAGATED',
+          }],
+          verificationDnsHost: '_railway-verify.usebillforge.com',
+          verificationToken: 'verify-token',
+        },
+      },
+    ] as RailwayCustomDomain[];
+    const request = vi.fn()
+      .mockResolvedValueOnce(pendingOwnershipProject)
+      .mockResolvedValueOnce({ serviceInstance: { latestDeployment: { status: 'SUCCESS' } } })
+      .mockResolvedValueOnce({ variables: {} });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.observe(
+      makeEnvironment({ projectId: 'rail-project-1', environmentId: 'env-prod' })
+    );
+
+    expect(result.services[0]?.customDomainStatus?.['usebillforge.com']).toMatchObject({
+      providerVerified: false,
+      certificateStatus: 'PENDING',
+      dnsConfigured: true,
+    });
+  });
+
+  it('does not turn a failed Railway custom-domain read into an absent domain', async () => {
+    const adapter = new RailwayAdapter();
+    const request = vi.fn().mockRejectedValue(new Error('Railway timed out'));
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.getCustomDomainStatus({
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+    })).rejects.toThrow('Failed to observe Railway custom domain usebillforge.com');
+  });
+
   it('surfaces the linked repo and branch as the service source', async () => {
     const withTrigger = structuredClone(projectDetailsResponse);
     (withTrigger.project.services.edges[0].node as { repoTriggers: unknown }).repoTriggers = {

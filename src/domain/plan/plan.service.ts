@@ -44,6 +44,7 @@ import {
   environmentUsesGitHubActionsDeploy,
   planGitHubActionsAppliedSpecHash,
   planGitHubActionsDeploy,
+  planGitHubActionsRelease,
 } from '../services/ci-deploy.service.js';
 import { planIos } from '../services/appstore-plan.service.js';
 import { planQueues } from '../services/queue-plan.service.js';
@@ -73,8 +74,6 @@ import {
   planGitHubInfrastructure,
 } from '../services/github-infrastructure.service.js';
 import {
-  isStripeHostingEnvSyncAction,
-  isStripeWebhookAction,
   planStripeEnvironmentSync,
   stripeEnvironmentName,
   stripeManagedEnvKeys,
@@ -1276,30 +1275,6 @@ export class PlanService {
         ]));
       }
 
-      const stripeRuntimeReleaseRequired = stripeSync.actions.some((action) =>
-        action.type !== 'noop'
-        && (
-          isStripeHostingEnvSyncAction(action)
-          || (
-            isStripeWebhookAction(action)
-            && (action.type === 'create' || action.type === 'replace')
-          )
-        )
-      );
-      if (
-        stripeRuntimeReleaseRequired
-        && environmentSpec.deploy?.strategy === 'branch'
-        && environmentSpec.deploy.trigger === 'ci'
-      ) {
-        databaseSeedAction.metadata = {
-          ...(databaseSeedAction.metadata ?? {}),
-          deferUntilNextPlan: true,
-          deferReason: 'Stripe runtime variables or a webhook signing secret must reach the deployed application before fixture creation.',
-        };
-        stripeSync.warnings.push(
-          'Database seeding is staged after this apply: Stripe catalog, runtime variables, and webhooks will converge first. Let the reviewed CI release finish, verify it with hv_ci_status and hv_health, then re-run hv_plan/hv_apply to create application and Stripe fixtures.'
-        );
-      }
     }
     for (const stripeBlock of stripeSync.blocked) {
       if (!blocked.some((entry) => entry.provider === 'stripe' && entry.scope === stripeBlock.scope)) {
@@ -1398,17 +1373,16 @@ export class PlanService {
     actions.push(...ios.actions);
     actions.push(...githubConfirmationActions);
 
-    // The applied-spec marker is the final release dependency. A seed that
-    // explicitly waits for this release is excluded to avoid a dependency
-    // cycle, then ordered after the workflow/marker so it reports pending only
-    // after the new deployment contract has been unlocked.
-    const deferredSeedAction = actions.find((action) =>
+    // A CI-managed seed must run only after the exact desired commit is
+    // deployed. Exclude it from the applied-contract marker to avoid a cycle;
+    // the explicit release action below bridges marker -> deploy -> seed.
+    const managedCiSeedAction = actions.find((action) =>
       action.type !== 'noop'
       && action.metadata?.operation === 'databaseSeed'
-      && action.metadata.deferUntilNextPlan === true
+      && environmentUsesGitHubActionsDeploy(environmentSpec)
     );
     const appliedSpecHashDependsOn = actions
-      .filter((action) => action.type !== 'noop' && action.id !== deferredSeedAction?.id)
+      .filter((action) => action.type !== 'noop' && action.id !== managedCiSeedAction?.id)
       .map((action) => action.id);
     const appliedSpecHash = await planGitHubActionsAppliedSpecHash({
       project: projectForPlan,
@@ -1421,12 +1395,28 @@ export class PlanService {
     if (appliedSpecHash.action) {
       actions.push(appliedSpecHash.action);
     }
-    if (deferredSeedAction) {
-      deferredSeedAction.dependsOn = Array.from(new Set([
-        ...(deferredSeedAction.dependsOn ?? []),
-        ...(ciDeploy.action ? [ciDeploy.action.id] : []),
-        ...(appliedSpecHash.action ? [appliedSpecHash.action.id] : []),
+    const releaseDependsOn = appliedSpecHash.action && appliedSpecHash.action.type !== 'noop'
+      ? [appliedSpecHash.action.id]
+      : appliedSpecHashDependsOn;
+    const managedSeedRelease = managedCiSeedAction
+      ? await planGitHubActionsRelease({
+        project: projectForPlan,
+        environmentName,
+        environmentSpec,
+        dependsOn: releaseDependsOn,
+      })
+      : { warnings: [] };
+    if (managedSeedRelease.action && managedCiSeedAction) {
+      actions.push(managedSeedRelease.action);
+      managedCiSeedAction.dependsOn = Array.from(new Set([
+        ...(managedCiSeedAction.dependsOn ?? []),
+        managedSeedRelease.action.id,
       ]));
+    } else if (managedCiSeedAction) {
+      managedCiSeedAction.metadata = {
+        ...(managedCiSeedAction.metadata ?? {}),
+        blockedReason: 'managed_ci_release_unavailable',
+      };
     }
 
     // Deployment ownership is a safety stage of its own. A stale native
@@ -1576,7 +1566,7 @@ export class PlanService {
         : {}),
       actions,
       unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged, ...loadBalancer.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedSeedRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
       ...(secretInputRequired.length > 0 ? { inputRequired: secretInputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };

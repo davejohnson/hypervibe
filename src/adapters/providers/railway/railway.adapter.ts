@@ -2795,6 +2795,7 @@ export class RailwayAdapter implements IProviderAdapter {
                             domain
                             status {
                               verified
+                              certificateStatus
                               dnsRecords {
                                 currentValue
                                 fqdn
@@ -3319,6 +3320,7 @@ export class RailwayAdapter implements IProviderAdapter {
                     domain
                     status {
                       verified
+                      certificateStatus
                       dnsRecords {
                         currentValue
                         fqdn
@@ -3370,8 +3372,8 @@ export class RailwayAdapter implements IProviderAdapter {
       }
 
       return null;
-    } catch {
-      return null;
+    } catch (error) {
+      throw new Error(`Failed to observe Railway custom domain ${params.domain}: ${this.describeError(error)}`);
     }
   }
 
@@ -3422,6 +3424,9 @@ export class RailwayAdapter implements IProviderAdapter {
           ...(typeof existing.status?.verified === 'boolean'
             ? { providerVerified: existing.status.verified }
             : {}),
+          ...(existing.status?.certificateStatus
+            ? { certificateStatus: existing.status.certificateStatus }
+            : {}),
           dnsRecords: this.extractCustomDomainDnsRecords(existing.status),
         },
       };
@@ -3461,6 +3466,9 @@ export class RailwayAdapter implements IProviderAdapter {
           created: true,
           ...(typeof current?.status?.verified === 'boolean'
             ? { providerVerified: current.status.verified }
+            : {}),
+          ...(current?.status?.certificateStatus
+            ? { certificateStatus: current.status.certificateStatus }
             : {}),
           dnsRecords: this.extractCustomDomainDnsRecords(current?.status),
         },
@@ -4117,12 +4125,14 @@ export class RailwayAdapter implements IProviderAdapter {
       const customDomainStatus = Object.fromEntries(
         (instance?.domains?.customDomains ?? []).map((domain) => {
           const dnsRecords = this.extractCustomDomainDnsRecords(domain.status);
-          const dnsConfigured = typeof domain.status?.verified === 'boolean'
-            ? domain.status.verified
-            : providerDnsRecordsAreConfigured(dnsRecords);
+          const routingRecords = dnsRecords.filter((record) => record.purpose !== 'verification');
+          const dnsConfigured = providerDnsRecordsAreConfigured(routingRecords);
           return [domain.domain, {
             ...(typeof domain.status?.verified === 'boolean'
               ? { providerVerified: domain.status.verified }
+              : {}),
+            ...(domain.status?.certificateStatus
+              ? { certificateStatus: domain.status.certificateStatus }
               : {}),
             ...(dnsRecords.length > 0 ? { dnsRecords } : {}),
             ...(dnsConfigured !== undefined
@@ -4386,6 +4396,7 @@ export interface RailwayCustomDomainDnsRecord {
 
 export interface RailwayCustomDomainStatus {
   verified?: boolean;
+  certificateStatus?: string;
   dnsRecords?: RailwayCustomDomainDnsRecord[];
   verificationDnsHost?: string;
   verificationToken?: string;

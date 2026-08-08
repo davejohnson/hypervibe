@@ -135,6 +135,25 @@ const authorized: AuthorizedCase[] = [
     }),
   },
   {
+    label: 'GitHub Actions exact-SHA release',
+    capability: 'github.ci.release',
+    action: action({
+      id: 'ci:github-actions:production:release',
+      type: 'update',
+      kind: 'ci',
+      name: 'release:production',
+      provider: 'github',
+      operation: 'githubActionsRelease',
+      metadata: {
+        repository: 'owner/repo',
+        environmentName: 'production',
+        workflow: '.github/workflows/deploy-railway-production.yml',
+        ref: 'main',
+        targetSha: 'a'.repeat(40),
+      },
+    }),
+  },
+  {
     label: 'GitHub applied spec hash',
     capability: 'github.applied-spec-hash.sync',
     action: action({
