@@ -676,7 +676,7 @@ After merge, planning emits separate GitHub Pages and Cloudflare DNS actions,
 with explicit dependency order, provider snapshots, and confirmation for DNS
 replacement or teardown. Apply may mutate only the reviewed provider action.
 Certificate provisioning is asynchronous. Apply requests HTTPS enforcement
-after the reviewed domain configuration is visible; a documented GitHub
+after the reviewed domain configuration is visible; a GitHub
 certificate/HTTPS rejection returns pending, while every other provider error
 fails. A later apply verifies the enabled setting. Disabling Pages removes the
 reviewed workflow first, then confirm-gates

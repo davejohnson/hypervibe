@@ -482,7 +482,7 @@ export async function applyGitHubPages(params: {
     } catch (error) {
       const certificatePending = desired.customDomain
         && error instanceof GitHubApiError
-        && [400, 409, 422].includes(error.status)
+        && [400, 404, 409, 422].includes(error.status)
         && /https|certificate|domain/i.test(error.message);
       if (!certificatePending) throw error;
       if (configurationChanged) {
