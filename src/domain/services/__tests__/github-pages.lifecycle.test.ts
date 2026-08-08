@@ -380,7 +380,7 @@ describe('declarative GitHub Pages lifecycle', () => {
     expect(update).toHaveBeenNthCalledWith(2, 'owner', 'pages-fixture', { httpsEnforced: true });
   });
 
-  it('reports GitHub certificate provisioning as pending only after HTTPS enforcement is rejected', async () => {
+  it('reports GitHub certificate provisioning as pending when the certificate does not exist yet', async () => {
     const desiredSpec = spec('pages-https-pending');
     const connection = new ConnectionRepository().create({
       provider: 'github',
@@ -394,7 +394,7 @@ describe('declarative GitHub Pages lifecycle', () => {
       .mockResolvedValueOnce(current);
     vi.spyOn(GitHubAdapter.prototype, 'updatePagesSite')
       .mockResolvedValueOnce()
-      .mockRejectedValueOnce(new GitHubApiError('GitHub API error: HTTPS certificate is not ready', 422));
+      .mockRejectedValueOnce(new GitHubApiError('GitHub API error: The certificate does not exist yet', 404));
 
     const result = await applyGitHubPages({
       spec: desiredSpec,
@@ -413,7 +413,7 @@ describe('declarative GitHub Pages lifecycle', () => {
       },
     });
 
-    expect(result).toMatchObject({ success: true, status: 'pending', data: { providerStatus: 422 } });
+    expect(result).toMatchObject({ success: true, status: 'pending', data: { providerStatus: 404 } });
   });
 
   it('blocks Pages mutation when provider state changed after planning', async () => {
