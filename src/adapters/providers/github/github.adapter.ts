@@ -7,6 +7,8 @@ import {
 
 const GITHUB_API_URL = 'https://api.github.com';
 const GITHUB_API_VERSION = '2026-03-10';
+const GITHUB_PAGES_HEALTH_ATTEMPTS = 3;
+const GITHUB_PAGES_HEALTH_RETRY_MS = 1_000;
 const require = createRequire(import.meta.url);
 
 function encodeFileContent(content: string): string {
@@ -82,7 +84,6 @@ export interface GitHubPagesDomainHealth {
   has_cname_record?: boolean;
   has_mx_records_present?: boolean;
   is_valid_domain?: boolean;
-  is_apex?: boolean;
   is_apex_domain?: boolean;
   should_be_a_record?: boolean;
   is_cname_to_github_user_domain?: boolean;
@@ -160,7 +161,8 @@ export class GitHubAdapter {
   private async request<T>(
     method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
     endpoint: string,
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    responseOptions?: { acceptEmpty202?: boolean }
   ): Promise<T> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -202,8 +204,7 @@ export class GitHubAdapter {
       throw new GitHubApiError(errorMessage, response.status, documentationUrl);
     }
 
-    // Handle 204 No Content responses
-    if (response.status === 204) {
+    if (response.status === 204 || (response.status === 202 && responseOptions?.acceptEmpty202)) {
       return {} as T;
     }
 
@@ -291,16 +292,20 @@ export class GitHubAdapter {
     }
   }
 
-  async getPagesHealthCheck(owner: string, repo: string): Promise<GitHubPagesHealthCheck | null> {
-    try {
-      return await this.request<GitHubPagesHealthCheck>('GET', `/repos/${owner}/${repo}/pages/health`);
-    } catch (error) {
-      // 404 means no custom domain or health check not available
-      if (error instanceof Error && (error.message.includes('404') || error.message.includes('Not Found'))) {
-        return null;
+  async getPagesHealthCheck(owner: string, repo: string): Promise<GitHubPagesHealthCheck> {
+    for (let attempt = 0; attempt < GITHUB_PAGES_HEALTH_ATTEMPTS; attempt += 1) {
+      const health = await this.request<GitHubPagesHealthCheck>(
+        'GET',
+        `/repos/${owner}/${repo}/pages/health`,
+        undefined,
+        { acceptEmpty202: true }
+      );
+      if (health.domain || health.alt_domain) return health;
+      if (attempt < GITHUB_PAGES_HEALTH_ATTEMPTS - 1) {
+        await new Promise((resolve) => setTimeout(resolve, GITHUB_PAGES_HEALTH_RETRY_MS));
       }
-      throw error;
     }
+    throw new GitHubApiError('GitHub Pages DNS health check is still pending', 202);
   }
 
   async createPagesSite(
