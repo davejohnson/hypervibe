@@ -607,7 +607,7 @@ export function resolvePlanActionAuthority(
   }
   if (
     exactResource(action, 'domain')
-    && hasType(action, 'create', 'update')
+    && hasType(action, 'create', 'update', 'replace')
     && !action.metadata?.operation
   ) {
     return authority(action, 'domain.configure');

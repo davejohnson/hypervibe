@@ -276,6 +276,108 @@ describe('setupCustomDomain', () => {
     });
   });
 
+  it('routes an explicit domain replacement through the recreate capability', async () => {
+    seedCloudflareConnection({ apiToken: 'cf-token' }, 'app.example.com');
+    const project = new ProjectRepository().create({ name: 'domain-recreate-app', defaultPlatform: 'railway' });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project-1',
+        environmentId: 'rail-env-1',
+        services: {
+          web: {
+            serviceId: 'rail-web',
+            url: 'https://web-production.up.railway.app',
+          },
+        },
+      },
+    });
+
+    const attachCustomDomain = vi.fn();
+    const recreateCustomDomain = vi.fn(async () => ({
+      success: true,
+      message: 'Railway custom domain deleted and recreated',
+      data: {
+        domain: 'app.example.com',
+        customDomainId: 'cd-new',
+        recreated: true,
+        providerVerified: false,
+        dnsRecords: [
+          { name: 'app.example.com', type: 'CNAME', value: 'new-target.up.railway.app' },
+          { name: '_railway-verify.app.example.com', type: 'TXT', value: 'railway-verify=new-token' },
+        ],
+      },
+    }));
+    const fakeHostingAdapter = {
+      ...createBaseAdapter('railway'),
+      attachCustomDomain,
+      recreateCustomDomain,
+    } satisfies IProviderAdapter & {
+      attachCustomDomain: typeof attachCustomDomain;
+      recreateCustomDomain: typeof recreateCustomDomain;
+    };
+
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeHostingAdapter,
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'connect').mockImplementation(() => {});
+    vi.spyOn(CloudflareAdapter.prototype, 'findZoneByName').mockResolvedValue({
+      id: 'zone-1',
+      name: 'example.com',
+      status: 'active',
+      paused: false,
+      type: 'full',
+      name_servers: [],
+    });
+    const upsertDnsRecord = vi.spyOn(CloudflareAdapter.prototype, 'upsertDnsRecord')
+      .mockResolvedValue({
+        record: {
+          id: 'rec-1',
+          zone_id: 'zone-1',
+          zone_name: 'example.com',
+          name: 'app.example.com',
+          type: 'CNAME',
+          content: 'new-target.up.railway.app',
+          proxied: false,
+          proxiable: true,
+          ttl: 1,
+          created_on: new Date().toISOString(),
+          modified_on: new Date().toISOString(),
+        },
+        action: 'updated',
+      });
+
+    const result = await setupCustomDomain({
+      project,
+      environment,
+      domain: 'app.example.com',
+      serviceName: 'web',
+      trafficProxied: false,
+      recreate: true,
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      pending: true,
+      customDomainAttached: true,
+      customDomainId: 'cd-new',
+      recreated: true,
+      providerVerified: false,
+      dnsConfigured: true,
+    });
+    expect(attachCustomDomain).not.toHaveBeenCalled();
+    expect(recreateCustomDomain).toHaveBeenCalledWith({
+      projectId: 'rail-project-1',
+      serviceId: 'rail-web',
+      environmentId: 'rail-env-1',
+      domain: 'app.example.com',
+    });
+    expect(upsertDnsRecord).toHaveBeenCalledTimes(2);
+  });
+
   it('does not write fallback DNS for managed hosts without domain attach support', async () => {
     seedCloudflareConnection({ apiToken: 'cf-token' }, 'app.example.com');
     const project = new ProjectRepository().create({ name: 'domain-unsupported-host-app', defaultPlatform: 'cloudrun' });

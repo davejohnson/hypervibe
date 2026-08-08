@@ -178,6 +178,15 @@ When an attached Railway domain remains provider-unverified, the reviewed
 domain update first calls Railway's non-destructive `customDomainUpdate` for
 the same environment to refresh provider verification before rewriting DNS.
 Verified domains remain read-only on this path.
+For a provider attachment that remains stuck after that repair, setting a new
+`environment.domainRecreateRevision` plans a one-time, confirmation-gated
+domain replacement. Apply deletes only the observed custom-domain id, recreates
+the same hostname on the same service and environment, and writes the provider's
+fresh DNS requirements. The consumed revision is stored in
+`platformBindings.domainDns.recreateRevision` after DNS is written so later
+plans cannot repeat the deletion. Keep `domainProxy` disabled until provider
+ownership and certificate issuance are verified, then enable it in a separate
+reviewed plan.
 When that binding confirms the desired traffic record is proxied, provider-side
 CNAME comparison is intentionally opaque: a verified domain with a ready
 provider certificate may converge even if the origin reports its DNS comparison

@@ -678,6 +678,13 @@ export function diffEnvironment(input: {
     const appliedDomainProxy = boundDomainDns?.name === spec.domain
       ? boundDomainDns.proxied
       : undefined;
+    const appliedDomainRecreateRevision = boundDomainDns?.name === spec.domain
+      ? boundDomainDns.recreateRevision
+      : undefined;
+    const domainRecreateNeeded = Boolean(
+      spec.domainRecreateRevision
+      && spec.domainRecreateRevision !== appliedDomainRecreateRevision
+    );
     const domainProxyDrift = appliedDomainProxy !== undefined
       && appliedDomainProxy !== desiredDomainProxy;
     const providerDnsIsProxyOpaque = desiredDomainProxy
@@ -695,10 +702,12 @@ export function diffEnvironment(input: {
       && !domainProxyDrift;
     actions.push({
       id,
-      type: configured ? 'noop' : 'update',
+      type: domainRecreateNeeded ? 'replace' : configured ? 'noop' : 'update',
       resource: { kind: 'domain', name: spec.domain, provider },
       verified,
-      reason: attached
+      reason: domainRecreateNeeded
+        ? `Domain ${spec.domain} has an unapplied recreate revision`
+        : attached
         ? !domainDnsConfigured
           ? `Domain ${spec.domain} is attached on ${provider}, but required DNS records are not configured`
           : domainStatus?.providerVerified === false && requiresProviderVerification
@@ -710,12 +719,16 @@ export function diffEnvironment(input: {
                 : 'Domain attached'
         : `Domain ${spec.domain} is not attached to any service`,
       dependsOn: configured ? undefined : projectDep,
+      ...(domainRecreateNeeded ? { requiresConfirm: true } : {}),
       ...(domainProxyDrift
         ? { diff: [{ field: 'dns:proxied', from: String(appliedDomainProxy), to: String(desiredDomainProxy) }] }
         : {}),
       metadata: {
         ...(domainStatus?.dnsRecords ? { dnsRecords: domainStatus.dnsRecords } : {}),
         domainProxy: desiredDomainProxy,
+        ...(spec.domainRecreateRevision
+          ? { domainRecreateRevision: spec.domainRecreateRevision }
+          : {}),
       },
     });
   }

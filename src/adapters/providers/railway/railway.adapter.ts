@@ -3513,6 +3513,154 @@ export class RailwayAdapter implements IProviderAdapter {
     }
   }
 
+  async recreateCustomDomain(params: {
+    projectId?: string;
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+  }): Promise<Receipt> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    if (!params.projectId) {
+      return {
+        success: false,
+        message: 'Failed to recreate Railway custom domain',
+        error: 'Railway custom-domain creation requires the Railway projectId, but no project binding was available. Re-run hv_status or hv_plan to refresh repo bindings, then retry.',
+      };
+    }
+
+    const ensuredInstance = await this.ensureServiceInstanceForEnvironment(
+      params.serviceId,
+      params.environmentId
+    );
+    if (!ensuredInstance.success) {
+      return {
+        success: false,
+        message: 'Failed to recreate Railway custom domain',
+        error: `Railway service ${params.serviceId} has no service instance in environment ${params.environmentId}: ${ensuredInstance.error}`,
+        data: {
+          phase: 'ensureServiceInstance',
+          serviceId: params.serviceId,
+          environmentId: params.environmentId,
+          domain: params.domain,
+        },
+      };
+    }
+
+    let existing: RailwayCustomDomain | null;
+    try {
+      existing = await this.getCustomDomainStatus(params);
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to recreate Railway custom domain',
+        error: this.describeError(error),
+        data: {
+          phase: 'observeCustomDomain',
+          serviceId: params.serviceId,
+          environmentId: params.environmentId,
+          domain: params.domain,
+        },
+      };
+    }
+
+    if (existing) {
+      const deleteMutation = gql`
+        mutation DeleteCustomDomain($id: String!) {
+          customDomainDelete(id: $id)
+        }
+      `;
+      try {
+        const deleted = await this.client.request<{ customDomainDelete: boolean }>(
+          deleteMutation,
+          { id: existing.id }
+        );
+        if (deleted.customDomainDelete !== true) {
+          return {
+            success: false,
+            message: 'Failed to recreate Railway custom domain',
+            error: `Railway did not confirm deletion of custom domain ${params.domain}`,
+            data: {
+              phase: 'customDomainDelete',
+              customDomainId: existing.id,
+              domain: params.domain,
+            },
+          };
+        }
+      } catch (error) {
+        return {
+          success: false,
+          message: 'Failed to recreate Railway custom domain',
+          error: this.describeError(error),
+          data: {
+            phase: 'customDomainDelete',
+            customDomainId: existing.id,
+            domain: params.domain,
+          },
+        };
+      }
+    }
+
+    const createMutation = gql`
+      mutation CreateCustomDomain($input: CustomDomainCreateInput!) {
+        customDomainCreate(input: $input) {
+          id
+          domain
+        }
+      }
+    `;
+
+    try {
+      const created = await this.client.request<{
+        customDomainCreate: {
+          id: string;
+          domain: string;
+        };
+      }>(createMutation, {
+        input: {
+          projectId: params.projectId,
+          serviceId: params.serviceId,
+          environmentId: params.environmentId,
+          domain: params.domain,
+        },
+      });
+      const current = await this.getCustomDomainStatus(params);
+
+      return {
+        success: true,
+        message: existing
+          ? 'Railway custom domain deleted and recreated'
+          : 'Railway custom domain created because no previous attachment existed',
+        data: {
+          domain: created.customDomainCreate.domain,
+          ...(existing ? { previousCustomDomainId: existing.id } : {}),
+          customDomainId: created.customDomainCreate.id,
+          created: true,
+          recreated: Boolean(existing),
+          ...(typeof current?.status?.verified === 'boolean'
+            ? { providerVerified: current.status.verified }
+            : {}),
+          ...(current?.status?.certificateStatus
+            ? { certificateStatus: current.status.certificateStatus }
+            : {}),
+          dnsRecords: this.extractCustomDomainDnsRecords(current?.status),
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to recreate Railway custom domain',
+        error: this.describeError(error),
+        data: {
+          phase: 'customDomainCreate',
+          domain: params.domain,
+          ...(existing ? { deletedCustomDomainId: existing.id } : {}),
+        },
+      };
+    }
+  }
+
   /**
    * Return the service's Railway-generated domain for an environment,
    * creating one when none exists. Returns null (with error) on failure

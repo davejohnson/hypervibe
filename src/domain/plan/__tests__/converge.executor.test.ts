@@ -318,6 +318,36 @@ describe('ConvergeExecutor execution', () => {
     expect(handler).toHaveBeenCalledOnce();
   });
 
+  it('does not mutate a replacement action until its exact id is confirmed', async () => {
+    const handler = vi.fn().mockResolvedValue({ success: true, message: 'replaced' });
+    const replacement = action({
+      id: 'domain:app.example.com',
+      type: 'replace',
+      resource: { kind: 'domain', name: 'app.example.com', provider: 'railway' },
+      requiresConfirm: true,
+    });
+
+    const unconfirmedPlanId = storePlan([replacement]);
+    const unconfirmed = await new ConvergeExecutor().execute({
+      planRunId: unconfirmedPlanId,
+      currentSpecRevision: 1,
+      handler,
+    });
+    expect(unconfirmed.success).toBe(false);
+    expect(unconfirmed.receipts[0]?.status).toBe('skipped_requires_confirm');
+    expect(handler).not.toHaveBeenCalled();
+
+    const confirmedPlanId = storePlan([replacement]);
+    const confirmed = await new ConvergeExecutor().execute({
+      planRunId: confirmedPlanId,
+      currentSpecRevision: 1,
+      confirmActions: ['domain:app.example.com'],
+      handler,
+    });
+    expect(confirmed.success).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
   it.each([
     { flag: 'billable', action: action({ id: 'database:railway', billable: true }) },
     { flag: 'data-bearing', action: action({ id: 'database:railway:destroy', type: 'destroy', dataBearing: true }) },
