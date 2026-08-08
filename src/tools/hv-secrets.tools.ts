@@ -34,8 +34,8 @@ async function managerAdapter(
   return adapter;
 }
 
-function githubRepoForProject(project: Project, repoArg?: string): { owner: string; repo: string } {
-  const full = repoArg ?? parseGitHubRepoFromRemote(project.gitRemoteUrl) ?? undefined;
+function githubRepoForProject(project: Project | null, repoArg?: string): { owner: string; repo: string } {
+  const full = repoArg ?? (project ? parseGitHubRepoFromRemote(project.gitRemoteUrl) : null) ?? undefined;
   if (!full || !full.includes('/')) {
     throw new HvError('VALIDATION', 'Could not determine the GitHub repository.', {
       hint: 'Pass repo="owner/name" or set the project gitRemoteUrl.',
@@ -78,10 +78,10 @@ function resolveHostingService(
 export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_secrets',
-    'List secret sources by default. Pass project to select and validate project context. Pass provider to list that manager, provider plus path to check a manager value, include=["github"] to list GitHub Actions secret names, or project/environment/service selectors to inspect hosting variables. Values are never returned.',
+    'Secret read modes: {} or {project} lists sources; {provider,pathPrefix?} lists one manager; {provider,path,key?,version?} checks one manager value; {include:["github"],project?,repo?} lists GitHub Actions names; {project?,env,service?,key?} inspects masked hosting variables. Hosting mode requires explicit env. Values are never returned.',
     {
-      project: projectField,
-      env: envField,
+      project: projectField.describe('Optional Hypervibe project name/id for validated context. Project-only still lists sources. Omit to use no project context for source/manager lists or auto-detect only in GitHub/hosting modes.'),
+      env: envField.describe('Exact environment for hosting-variable inspection. Required in hosting mode; never inferred from project alone.'),
       key: z.string().optional().describe('Hosting variable name or key within a manager secret'),
       provider: z.enum(SECRET_MANAGER_PROVIDERS).optional(),
       path: z.string().optional().describe('Secret-manager path'),
@@ -114,7 +114,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
         return listSecrets({ selectedProject, provider, pathPrefix, include, repo });
       }
 
-      const hostingLookup = projectRef !== undefined || env !== undefined || key !== undefined || service !== undefined;
+      const hostingLookup = env !== undefined || key !== undefined || service !== undefined;
       if (!hostingLookup) {
         const sources = [...SECRET_MANAGER_PROVIDERS, 'github'].map((source) => {
           const connections = ctx.repos.connections.findAllByProvider(source);
@@ -125,8 +125,17 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
               : connections.length > 0 ? 'unverified' : 'missing',
           };
         });
-        return commandSuccess({ sources }, {
+        return commandSuccess({
+          ...(selectedProject ? { project: { id: selectedProject.id, name: selectedProject.name } } : {}),
+          sources,
+        }, {
           hint: 'Pass provider to list manager paths, include=["github"] plus project/repo to list GitHub names, or project/env/service to inspect masked hosting variables.',
+        });
+      }
+
+      if (!env) {
+        throw new HvError('VALIDATION', 'env is required for hosting-variable inspection.', {
+          hint: 'Pass project (optional), env (required), and optional service/key. Use project alone to list secret sources.',
         });
       }
 
@@ -175,7 +184,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
         };
       }
       if (include?.includes('github')) {
-        const project = selectedProject ?? ctx.resolveProjectOrThrow();
+        const project = selectedProject ?? (repo ? null : ctx.resolveProjectOrThrow());
         const { owner, repo: repoName } = githubRepoForProject(project, repo);
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
         if ('error' in gh) {

@@ -488,6 +488,7 @@ describe('hv_connections', () => {
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('VALIDATION');
     expect(result.error.message).toContain('provider is required');
+    expect(result.hint).toContain('hv_connections({project})');
     await t.close();
   });
 

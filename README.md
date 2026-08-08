@@ -191,6 +191,24 @@ Around that core: connections (`hv_connections`), deploy/rollback, logs/errors/h
 
 `hv_connections` and `hv_secrets` both accept `project="name-or-id"` to select and validate project context. Provider `scope` remains separate: it identifies the actual repository, domain, account, or environment covered by a credential.
 
+Their parameter modes are intentionally explicit:
+
+```text
+hv_connections                                      # list globally
+hv_connections project="my-app"                     # list; validate project context
+hv_connections project="my-app" provider="github" credentialsRef="env:NODE_AUTH_TOKEN"
+
+hv_secrets                                          # list sources globally
+hv_secrets project="my-app"                         # list sources; validate project context
+hv_secrets project="my-app" env="staging"           # masked hosting-variable names
+
+hv_inspect                                          # provider/capability discovery; no parameters
+hv_inspect provider="railway"                       # provider-account inspection
+hv_inspect provider="railway" project="my-app" env="staging"  # full live environment
+```
+
+For `hv_inspect`, any bounded selector requires `provider`; `project` plus `env` never replaces it. For hosting-variable mode, `hv_secrets` requires an explicit `env` and does not infer staging from `project` alone.
+
 - Full generated MCP/CLI catalog: `docs/TOOLS.md`
 - Regenerate after tool changes: `npm run build && npm run docs:tools`
 

@@ -90,6 +90,11 @@ describe('server tool surface', () => {
     expect(registry.get('hv_secrets')?.cliPath).toEqual(['secrets']);
     expect(registry.get('hv_connections')?.inputShape.project).toBeDefined();
     expect(registry.get('hv_secrets')?.inputShape.project).toBeDefined();
+    expect(registry.get('hv_connections')?.description).toContain('{} lists every connection/provider');
+    expect(registry.get('hv_connections')?.description).toContain('{project} lists');
+    expect(registry.get('hv_secrets')?.description).toContain('{} or {project} lists sources');
+    expect(registry.get('hv_secrets')?.description).toContain('Hosting mode requires explicit env');
+    expect(registry.get('hv_inspect')?.description).toContain('{provider,project,env}');
     expect(registry.get('hv_secrets')?.access).toBe('read');
     expect(registry.get('hv_plan')?.cliPath).toEqual(['plan']);
     expect(registry.get('hv_db_query')?.cliPath).toEqual(['db', 'query']);
@@ -120,6 +125,12 @@ describe('server tool surface', () => {
     );
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
       'follow or report its connection/error guidance instead of bypassing Hypervibe'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'hv_connections({project?}) and hv_secrets({project?}) list by default'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'full environment inspection requires provider + project + env'
     );
   });
 
