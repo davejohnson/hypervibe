@@ -48,6 +48,12 @@ Vercel. Run each environment stage-by-stage through `hv_spec`, `hv_plan`,
 `hv_apply`, and `hv_status`; do not apply the entire six-provider fixture as one
 opaque batch.
 
+Hosting credential schemas contain authentication and durable account/project
+scope only. Region/location is optional desired state at
+`environments.<name>.hosting.region`; agents normally omit it and accept the
+provider default unless latency, residency, availability, or an existing
+resource gives them a concrete reason to choose one.
+
 The shared contract requires provider attach before Cloudflare mutation,
 provider-returned DNS records only, durable provider/service/environment/zone
 and record ids, explicit pending certificate receipts, noop convergence, and a
@@ -127,7 +133,8 @@ Managed Redis remain implemented under independent `azure-postgres` and
 `azure-managed-redis` provider ids and stay `planned` pending their own full
 stack live contracts. Datastore credentials and lifecycle remain separate from
 hosting, and generated passwords, keys, and connection URLs stay out of
-receipts.
+receipts. The hosting adapter defaults to `canadacentral`; another location is
+declared in `hosting.region`, never in the service-principal credential.
 
 The extended matrix also includes:
 

@@ -7,6 +7,7 @@ import type {
   VerifyResult,
   JobResult,
   DeploymentMutationOptions,
+  HostingTargetOptions,
 } from './provider.port.js';
 
 /**
@@ -157,6 +158,9 @@ export interface IHostingAdapter {
    * Disconnect and clean up
    */
   disconnect?(): Promise<void>;
+
+  /** Configure non-secret desired placement before observation or mutation. */
+  configureTarget?(target: HostingTargetOptions): void | Promise<void>;
 
   /**
    * Ensure a project/app exists on the hosting platform.

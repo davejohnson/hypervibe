@@ -202,8 +202,15 @@ AWS ECS Express Mode and Azure Container Apps use authentication-only
 connections. Infrastructure identities must never return to their credential
 schemas.
 
-- The `ecs` connection contains only an AWS access-key pair and optional
-  region. Its explicit per-environment project action ensures the account/region
+Hosting geography is desired state, never authentication. An environment may
+set `hosting.region`; when it does not, the provider adapter uses its documented
+Hypervibe default. Agents should normally omit the field unless latency, data
+residency, provider availability, or existing infrastructure gives them a
+reason to choose it. Connection forms and credential files must not ask users
+for region or location.
+
+- The `ecs` connection contains only an AWS access-key pair. Its explicit
+  per-environment project action ensures the selected account/region
   default-VPC prerequisite and owns one tagged ECR repository, the two
   AWS-documented Express Mode IAM roles, and one ECS cluster. The shared default
   VPC is never treated as an environment-owned deletion target. Each service
@@ -213,7 +220,7 @@ schemas.
   Managed CI may only push to the bound repository and update already-bound
   Express service ARNs.
 - The `azure-container-apps` connection contains only a Microsoft Entra service
-  principal, subscription, and optional location. Its explicit per-environment
+  principal and subscription. Its explicit per-environment
   project action owns one tagged resource group, Basic ACR registry, ACR push
   assignment, and Container Apps managed environment. Each service action owns
   one system-identity Container App and its exact ACR pull assignment. Managed

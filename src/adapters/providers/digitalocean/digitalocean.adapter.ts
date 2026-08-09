@@ -36,7 +36,8 @@ import {
 import { DigitalOceanDatabaseAdapter } from './digitalocean-database.adapter.js';
 import {
   DigitalOceanCredentialsSchema,
-  type DigitalOceanCredentials,
+  parseDigitalOceanRuntimeCredentials,
+  type DigitalOceanRuntimeCredentials,
 } from './digitalocean.credentials.js';
 import {
   buildDigitalOceanGitHubActionsSteps,
@@ -66,12 +67,19 @@ export class DigitalOceanAdapter implements IProviderAdapter {
     supportsDeferredDeploy: true,
   };
 
-  private credentials: DigitalOceanCredentials | null = null;
+  private credentials: DigitalOceanRuntimeCredentials | null = null;
   private client: DigitalOceanClient | null = null;
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = DigitalOceanCredentialsSchema.parse(credentials);
+    this.credentials = parseDigitalOceanRuntimeCredentials(credentials);
     this.client = new DigitalOceanClient(this.credentials.apiToken);
+  }
+
+  configureTarget(target: { region?: string }): void {
+    if (!target.region) return;
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    this.credentials = { ...this.credentials, appRegion: target.region.trim() };
+    if (!this.credentials.appRegion) throw new Error('DigitalOcean App Platform region is required');
   }
 
   async verify(): Promise<VerifyResult> {
@@ -708,6 +716,11 @@ export class DigitalOceanAdapter implements IProviderAdapter {
         partial: false,
         warnings: [],
       };
+    }
+    if (app.spec.region && this.credentials && app.spec.region !== this.credentials.appRegion) {
+      throw new Error(
+        `Bound DigitalOcean app is in ${app.spec.region}, but desired hosting.region is ${this.credentials.appRegion}. Region changes require an explicit teardown and recreate; Hypervibe will not move the app implicitly.`
+      );
     }
 
     const domainOwnerId = this.observedDomainOwnerId(app, bindings);
@@ -1439,9 +1452,8 @@ providerRegistry.register({
     },
   },
   factory: (credentials) => {
-    const validated = DigitalOceanCredentialsSchema.parse(credentials);
     const adapter = new DigitalOceanAdapter();
-    void adapter.connect(validated);
+    void adapter.connect(credentials);
     return adapter;
   },
   derivedAdapters: {

@@ -178,6 +178,7 @@ export function resolveBranchDeployTargets(project: Project): {
         serviceNames: serviceNames.length > 0 ? serviceNames : bindings.boundServiceNames,
         providerProjectId: bindings.providerProjectId,
         providerEnvironmentId: bindings.providerEnvironmentId,
+        ...(envSpec.hosting.region ? { providerRegion: envSpec.hosting.region } : {}),
         providerServiceIds: bindings.providerServiceIds,
         providerJobNames: bindings.providerJobNames,
         needsServiceNames: runtimeServiceNames.length > 0 || (serviceNames.length === 0 && bindings.providerServiceIds.length > 0),

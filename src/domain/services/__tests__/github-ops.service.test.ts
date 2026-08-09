@@ -547,9 +547,12 @@ describe('github tools', () => {
     const cloudRunWorkflow = buildBranchDeployWorkflow('cloudrun', {
       ...baseTarget,
       providerServiceIds: ['cloudrun-web'],
+      providerRegion: 'us-west1',
     }, { includeStep: false });
-    expect(cloudRunWorkflow.requiredSecrets).toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION']);
+    expect(cloudRunWorkflow.requiredSecrets).toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID']);
     expect(cloudRunWorkflow.requiredVariables).toEqual([]);
+    expect(cloudRunWorkflow.content).toContain('GCP_REGION: "us-west1"');
+    expect(cloudRunWorkflow.content).not.toContain('secrets.GCP_REGION');
     expect(cloudRunWorkflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'cloudrun-web'");
     expect(cloudRunWorkflow.content).toContain("CLOUDRUN_JOB_NAMES: ''");
     expect(cloudRunWorkflow.content).toContain('https://run.googleapis.com/v2/projects/');
@@ -597,7 +600,7 @@ describe('github tools', () => {
       project: project.name,
       environments: {
         production: {
-          hosting: { provider: 'cloudrun' },
+          hosting: { provider: 'cloudrun', region: 'us-west1' },
           services: {
             web: { workloadKind: 'web' },
             daily: { workloadKind: 'cron', cronSchedule: '0 8 * * *' },
@@ -613,10 +616,12 @@ describe('github tools', () => {
       providerJobNames: ['gcp-project-daily'],
       needsServiceNames: true,
       needsJobNames: true,
+      providerRegion: 'us-west1',
     });
 
     const workflow = buildBranchDeployWorkflow('cloudrun', targets[0], { includeStep: false });
     expect(workflow.requiredVariables).toEqual([]);
+    expect(workflow.content).toContain('GCP_REGION: "us-west1"');
     expect(workflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'gcp-project-web'");
     expect(workflow.content).toContain("CLOUDRUN_JOB_NAMES: 'gcp-project-daily'");
     expect(workflow.content).toContain('/jobs/\' + encodeURIComponent(jobName)');

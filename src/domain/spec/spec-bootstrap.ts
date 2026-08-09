@@ -4,6 +4,8 @@ import type { DesiredState } from '../services/spec.service.js';
 export interface BootstrapParams {
   projectName: string;
   environmentName: string;
+  /** Non-secret hosting placement declared in environments.<name>.hosting.region. */
+  hostingRegion?: string;
   services: string[];
   crons?: DesiredState['crons'];
   domain?: string;
@@ -127,6 +129,7 @@ export function specToBootstrapParams(
   return {
     projectName,
     environmentName,
+    ...(env.hosting.region ? { hostingRegion: env.hosting.region } : {}),
     services,
     ...(Object.keys(crons).length > 0 ? { crons } : {}),
     ...(env.domain ? { domain: env.domain } : {}),

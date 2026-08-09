@@ -14,8 +14,8 @@ import {
   type DigitalOceanDatabaseCluster,
 } from './digitalocean.client.js';
 import {
-  DigitalOceanCredentialsSchema,
-  type DigitalOceanCredentials,
+  parseDigitalOceanRuntimeCredentials,
+  type DigitalOceanRuntimeCredentials,
 } from './digitalocean.credentials.js';
 import { DigitalOceanCacheAdapter } from './digitalocean-cache.adapter.js';
 
@@ -33,11 +33,11 @@ export class DigitalOceanDatabaseAdapter implements IDatabaseAdapter {
     serverlessOptimized: false,
   };
 
-  private credentials: DigitalOceanCredentials | null = null;
+  private credentials: DigitalOceanRuntimeCredentials | null = null;
   private client: DigitalOceanClient | null = null;
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = DigitalOceanCredentialsSchema.parse(credentials);
+    this.credentials = parseDigitalOceanRuntimeCredentials(credentials);
     this.client = new DigitalOceanClient(this.credentials.apiToken);
   }
 

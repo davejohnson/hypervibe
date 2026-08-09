@@ -20,13 +20,21 @@ import { hashEnvValue, type ObservedService, type ObservedState } from '../../..
 import { effectiveProjectRuntime } from '../../../domain/spec/project-runtime.js';
 
 // Credentials schema for self-registration
-export const CloudRunCredentialsSchema = z.object({
+const CloudRunAuthenticationSchema = z.object({
   projectId: z.string().min(1, 'GCP Project ID is required'),
   credentials: z.string().min(1, 'Service account JSON is required'),
-  region: z.string().default('us-central1'),
-});
+}).strict();
+
+export const CloudRunCredentialsSchema = z.preprocess((input) => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const { region: _legacyRegion, ...authentication } = input as Record<string, unknown>;
+  return authentication;
+}, CloudRunAuthenticationSchema);
 
 export type CloudRunCredentials = z.infer<typeof CloudRunCredentialsSchema>;
+const DEFAULT_CLOUD_RUN_REGION = 'us-central1';
+const CloudRunRegionSchema = z.string().trim().min(1, 'GCP region is required');
+type ConnectedCloudRunCredentials = CloudRunCredentials & { region: string };
 
 const MANAGED_DATABASE_ENV_KEYS = new Set([
   'DATABASE_URL',
@@ -309,18 +317,31 @@ export class CloudRunAdapter implements IProviderAdapter {
     supportsDeferredDeploy: true,
   };
 
-  private credentials: CloudRunCredentials | null = null;
+  private credentials: ConnectedCloudRunCredentials | null = null;
   private serviceAccountCreds: ServiceAccountCredentials | null = null;
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = credentials as CloudRunCredentials;
+    const parsed = CloudRunCredentialsSchema.parse(credentials);
+    const legacyRegion = credentials && typeof credentials === 'object' && typeof (credentials as Record<string, unknown>).region === 'string'
+      ? (credentials as Record<string, string>).region
+      : DEFAULT_CLOUD_RUN_REGION;
+    this.credentials = { ...parsed, region: CloudRunRegionSchema.parse(legacyRegion) };
     try {
       this.serviceAccountCreds = JSON.parse(this.credentials.credentials);
     } catch {
       throw new Error('Invalid service account JSON');
     }
+  }
+
+  configureTarget(target: { region?: string }): void {
+    if (!target.region) return;
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    this.credentials = {
+      ...this.credentials,
+      region: CloudRunRegionSchema.parse(target.region),
+    };
   }
 
   async verify(): Promise<{ success: boolean; error?: string; email?: string; warning?: string }> {
@@ -1821,6 +1842,11 @@ export class CloudRunAdapter implements IProviderAdapter {
         partial: false,
         warnings: [],
       };
+    }
+    if (bindings.environmentId && bindings.environmentId !== this.credentials.region) {
+      throw new Error(
+        `Bound Cloud Run environment is in ${bindings.environmentId}, but desired hosting.region is ${this.credentials.region}. Region changes require an explicit teardown and recreate; Hypervibe will not create a cross-region replacement over existing bindings.`
+      );
     }
 
     const token = await this.getAccessToken();
@@ -3904,7 +3930,6 @@ providerRegistry.register({
         secretCredentialKeys: {
           GCP_SERVICE_ACCOUNT_JSON: 'credentials',
           GCP_PROJECT_ID: 'projectId',
-          GCP_REGION: 'region',
         },
         buildGitHubActionsSteps: buildCloudRunGitHubActionsSteps,
       },

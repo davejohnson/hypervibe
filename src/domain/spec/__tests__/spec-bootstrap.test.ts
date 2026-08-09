@@ -18,6 +18,17 @@ describe('spec bootstrap env vars', () => {
     expect(params.runtime).toEqual({ kind: 'python', version: '3.13' });
   });
 
+  it('projects optional hosting geography as non-secret deploy intent', () => {
+    const params = specToBootstrapParams('regional-app', 'production', {
+      hosting: { provider: 'ecs', region: 'us-east-1' },
+      services: { web: { workloadKind: 'web' } },
+      email: { enabled: false },
+      envVars: {},
+    });
+
+    expect(params.hostingRegion).toBe('us-east-1');
+  });
+
   it('merges deploy env files below spec envVars and explicit overrides above both', () => {
     const params = specToBootstrapParams('env-app', 'production', {
       hosting: { provider: 'railway' },

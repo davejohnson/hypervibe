@@ -23,6 +23,7 @@ type JsonObj = Record<string, unknown>;
 async function applyInfra(args: {
   projectName: string;
   environmentName?: string;
+  hostingRegion?: string;
   services?: string[];
   crons?: Record<string, { schedule: string; command?: string; timeZone?: string }>;
   serviceName?: string;
@@ -59,6 +60,7 @@ async function applyInfra(args: {
   const executed = await executeBootstrap({
     projectName: args.projectName,
     environmentName: desired.environmentName,
+    ...(args.hostingRegion ? { hostingRegion: args.hostingRegion } : {}),
     services: desired.services,
     crons: desired.crons,
     domain: desired.domain,
@@ -95,6 +97,7 @@ describe('infra_apply multi-service convergence', () => {
 
     const provisionCalls: string[] = [];
     const deployCalls: string[] = [];
+    const targetCalls: Array<{ region?: string }> = [];
 
     const fakeDatabaseAdapter: IDatabaseAdapter = {
       name: 'railway',
@@ -167,6 +170,9 @@ describe('infra_apply multi-service convergence', () => {
       async verify() {
         return { success: true };
       },
+      configureTarget(target) {
+        targetCalls.push(target);
+      },
       async ensureProject() {
         return {
           success: true,
@@ -218,6 +224,7 @@ describe('infra_apply multi-service convergence', () => {
 
     const payload = await applyInfra({
       projectName: project.name,
+      hostingRegion: 'us-west1',
       environmentName: 'staging',
       services: ['web', 'worker'],
       databaseProvider: 'railway',
@@ -228,6 +235,7 @@ describe('infra_apply multi-service convergence', () => {
     expect(payload.success).toBe(true);
     expect(payload.services).toEqual(['web', 'worker']);
     expect(provisionCalls).toEqual(['postgres:staging']);
+    expect(targetCalls).toEqual([{ region: 'us-west1' }]);
     expect(deployCalls).toEqual(['web', 'worker']);
     const createdServices = serviceRepo.findByProjectId(project.id).map((service) => service.name);
     expect(createdServices).toEqual(['web', 'worker']);
