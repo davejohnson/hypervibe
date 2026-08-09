@@ -21,6 +21,8 @@ describe('provider conformance matrix', () => {
     expect(hostingProviderContracts.map((entry) => entry.vendor)).toEqual([
       'Railway',
       'Google Cloud',
+      'AWS',
+      'Microsoft Azure',
       'DigitalOcean',
       'Vercel',
     ]);
@@ -39,7 +41,7 @@ describe('provider conformance matrix', () => {
     }
     expect(providerRegistry.supports('github', 'hosting')).toBe(false);
     expect(hostingProviderContracts.filter((entry) => entry.customDomains === 'managed').map((entry) => entry.provider))
-      .toEqual(['railway', 'cloudrun', 'digitalocean', 'vercel']);
+      .toEqual(['railway', 'cloudrun', 'ecs', 'azure-container-apps', 'digitalocean', 'vercel']);
   });
 
   it('keeps one isolated DNS-only domain fixture for every hosting provider', () => {
@@ -193,16 +195,14 @@ describe('provider conformance matrix', () => {
       'render',
       'fly',
       'fly-managed-postgres',
-      'ecs',
-      'azure-container-apps',
     ]);
     expect(providerContracts.some((entry) => excluded.has(entry.provider))).toBe(false);
     expect(providerRegistry.supports('heroku', 'hosting')).toBe(false);
     expect(providerRegistry.supports('render', 'hosting')).toBe(false);
     expect(providerRegistry.supportsEngine('render', 'database', 'postgres')).toBe(false);
     expect(providerRegistry.supportsEngine('render', 'cache', 'redis')).toBe(false);
-    expect(providerRegistry.supports('ecs', 'hosting')).toBe(false);
-    expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(false);
+    expect(providerRegistry.supports('ecs', 'hosting')).toBe(true);
+    expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(true);
   });
 
   it('uses stable provider ids and secret-free credential descriptors', () => {

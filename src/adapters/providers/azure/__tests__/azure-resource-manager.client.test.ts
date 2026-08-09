@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Buffer } from 'node:buffer';
 import { AzureDatastoreCredentialsSchema } from '../azure-datastore.credentials.js';
 import {
   AzureResourceManagerClient,
@@ -29,6 +30,14 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function tokenResponse(): Response {
   return jsonResponse({ access_token: 'safe-access-token' });
+}
+
+function principalTokenResponse(): Response {
+  const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    oid: '44444444-4444-4444-8444-444444444444',
+  })).toString('base64url');
+  return jsonResponse({ access_token: `${header}.${payload}.signature` });
 }
 
 afterEach(() => {
@@ -141,5 +150,41 @@ describe('AzureResourceManagerClient', () => {
       'resources'
     )).toThrow(/outside the configured subscription\/resource group/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('verifies subscription-scoped clients and exposes the service-principal identity', async () => {
+    const subscriptionCredentials = {
+      tenantId: credentials.tenantId,
+      subscriptionId: SUBSCRIPTION_ID,
+      clientId: credentials.clientId,
+      clientSecret: credentials.clientSecret,
+    };
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(principalTokenResponse())
+      .mockResolvedValueOnce(jsonResponse({ id: `/subscriptions/${SUBSCRIPTION_ID}` })));
+    const client = new AzureResourceManagerClient(subscriptionCredentials);
+
+    await expect(client.verifySubscription()).resolves.toBeUndefined();
+    await expect(client.servicePrincipalId()).resolves.toBe(
+      '44444444-4444-4444-8444-444444444444'
+    );
+  });
+
+  it('waits for trusted long-running operations and re-observes updated resources', async () => {
+    const resource = `${COLLECTION}/one`;
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(new Response(null, {
+        status: 202,
+        headers: {
+          'azure-asyncoperation': 'https://management.azure.com/operations/one',
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({ status: 'Succeeded' }))
+      .mockResolvedValueOnce(jsonResponse({ id: resource, properties: { provisioningState: 'Succeeded' } })));
+    const client = new AzureResourceManagerClient(credentials);
+
+    await expect(client.request('PATCH', resource, '2025-08-01', { properties: {} }))
+      .resolves.toMatchObject({ id: resource });
   });
 });

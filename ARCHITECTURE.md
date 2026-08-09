@@ -198,13 +198,42 @@ metadata, so generic apply forces its Cloudflare traffic records unproxied even
 if `domainProxy` was requested. GitHub Pages remains the separate project-level
 lifecycle described below.
 
-AWS ECS and Azure Container Apps are intentionally not registered as hosting
-providers. Their former connections required users to pre-create registries,
-networking, roles, and load-balancer identities, which made infrastructure
-inputs masquerade as credentials and left core hosting lifecycle outside
-Hypervibe. They must not return until an authentication-only connection can
-drive complete desired-state creation and teardown. AWS and Azure datastore and
-secret providers remain independent capabilities.
+AWS ECS Express Mode and Azure Container Apps use authentication-only
+connections. Infrastructure identities must never return to their credential
+schemas.
+
+- The `ecs` connection contains only an AWS access-key pair and optional
+  region. Its explicit per-environment project action ensures the account/region
+  default-VPC prerequisite and owns one tagged ECR repository, the two
+  AWS-documented Express Mode IAM roles, and one ECS cluster. The shared default
+  VPC is never treated as an environment-owned deletion target. Each service
+  action owns one ECS Express
+  Gateway service; AWS owns the Fargate, load-balancer, security-group,
+  autoscaling, monitoring, and generated-HTTPS resources inside that service.
+  Managed CI may only push to the bound repository and update already-bound
+  Express service ARNs.
+- The `azure-container-apps` connection contains only a Microsoft Entra service
+  principal, subscription, and optional location. Its explicit per-environment
+  project action owns one tagged resource group, Basic ACR registry, ACR push
+  assignment, and Container Apps managed environment. Each service action owns
+  one system-identity Container App and its exact ACR pull assignment. Managed
+  CI may only push to the deterministic bound registry and update already-bound
+  Container App ARM ids.
+- These provider projects deliberately do not share across Hypervibe
+  environments. That makes the existing project action the complete ownership
+  and teardown boundary without hiding an environment deletion inside another
+  resource action.
+- AWS custom domains are phased through a Hypervibe-tagged ACM certificate and
+  the exact Express-managed ALB listener rule/certificate attachment. Azure
+  custom domains first return the provider's direct DNS and verification
+  requirements, then create and bind the managed certificate only after those
+  records resolve publicly. Both providers require DNS-only traffic during
+  certificate issuance and renewal. Domain detach removes only the exact
+  reviewed binding and Hypervibe-owned certificate before DNS deletion.
+
+The removed hand-built ECS and pre-provisioned Container Apps implementations
+must not be revived. AWS and Azure datastore and secret providers remain
+independent capabilities.
 
 DigitalOcean Container Registry is an account-level hosting prerequisite, not
 a credential field. The explicit DigitalOcean project action reuses the

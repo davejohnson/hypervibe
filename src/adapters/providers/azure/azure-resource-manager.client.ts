@@ -1,8 +1,14 @@
-import type { AzureDatastoreCredentials } from './azure-datastore.credentials.js';
-
 const AZURE_MANAGEMENT_URL = 'https://management.azure.com';
 const AZURE_RESOURCE_API_VERSION = '2024-11-01';
 const PAGE_CAP = 1000;
+
+export interface AzureResourceManagerCredentials {
+  tenantId: string;
+  subscriptionId: string;
+  clientId: string;
+  clientSecret: string;
+  resourceGroup?: string;
+}
 
 interface AzureCollection<T> {
   value?: T[];
@@ -29,14 +35,40 @@ export class AzureResourceManagerClient {
   private accessToken: string | null = null;
   private accessTokenPromise: Promise<string> | null = null;
 
-  constructor(readonly credentials: AzureDatastoreCredentials) {}
+  constructor(readonly credentials: AzureResourceManagerCredentials) {}
+
+  async verifySubscription(): Promise<void> {
+    await this.request(
+      'GET',
+      `/subscriptions/${encodeURIComponent(this.credentials.subscriptionId)}`,
+      AZURE_RESOURCE_API_VERSION
+    );
+  }
 
   async verifyResourceGroup(): Promise<void> {
+    const resourceGroup = this.configuredResourceGroup();
     await this.request(
       'GET',
       `/subscriptions/${encodeURIComponent(this.credentials.subscriptionId)}`
-        + `/resourceGroups/${encodeURIComponent(this.credentials.resourceGroup)}`,
+        + `/resourceGroups/${encodeURIComponent(resourceGroup)}`,
       AZURE_RESOURCE_API_VERSION
+    );
+  }
+
+  async servicePrincipalId(): Promise<string> {
+    const token = await this.getAccessToken();
+    try {
+      const payload = JSON.parse(
+        Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')
+      ) as { oid?: unknown };
+      if (typeof payload.oid === 'string' && /^[0-9a-f-]{36}$/i.test(payload.oid)) {
+        return payload.oid;
+      }
+    } catch {
+      // The stable error below is safe for every output boundary.
+    }
+    throw new Error(
+      'The Azure access token did not identify the service principal object ID.'
     );
   }
 
@@ -44,8 +76,9 @@ export class AzureResourceManagerClient {
     namespace: string,
     resourceType: string
   ): string {
+    const resourceGroup = this.configuredResourceGroup();
     return `/subscriptions/${encodeURIComponent(this.credentials.subscriptionId)}`
-      + `/resourceGroups/${encodeURIComponent(this.credentials.resourceGroup)}`
+      + `/resourceGroups/${encodeURIComponent(resourceGroup)}`
       + `/providers/${namespace}/${resourceType}`;
   }
 
@@ -88,8 +121,9 @@ export class AzureResourceManagerClient {
     if (
       identity.subscriptionId.toLowerCase()
         !== this.credentials.subscriptionId.toLowerCase()
-      || identity.resourceGroup.toLowerCase()
-        !== this.credentials.resourceGroup.toLowerCase()
+      || (this.credentials.resourceGroup
+        && identity.resourceGroup.toLowerCase()
+          !== this.credentials.resourceGroup.toLowerCase())
     ) {
       throw new Error(
         'Azure resource is outside the configured subscription/resource group.'
@@ -167,6 +201,18 @@ export class AzureResourceManagerClient {
     }
   }
 
+  async deleteIfPresent(path: string, apiVersion: string): Promise<boolean> {
+    try {
+      await this.request('DELETE', path, apiVersion);
+      return true;
+    } catch (error) {
+      if (error instanceof AzureResourceManagerError && error.status === 404) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
   async request<T = void>(
     method: string,
     pathOrUrl: string,
@@ -194,9 +240,13 @@ export class AzureResourceManagerClient {
     });
     const text = response.status === 204 ? '' : await response.text();
     if (!response.ok) {
-      throw new AzureResourceManagerError(
-        response.status
-      );
+      throw new AzureResourceManagerError(response.status);
+    }
+    const operation = response.headers.get('azure-asyncoperation')
+      ?? response.headers.get('operation-location');
+    if (operation) await this.waitForOperation(operation, apiVersion);
+    if ((method === 'PUT' || method === 'PATCH') && operation) {
+      return this.request<T>('GET', pathOrUrl, apiVersion);
     }
     if (!text) return undefined as T;
     try {
@@ -261,6 +311,41 @@ export class AzureResourceManagerClient {
     return payload.access_token;
   }
 
+  private async waitForOperation(
+    operationUrl: string,
+    apiVersion: string
+  ): Promise<void> {
+    const url = this.withApiVersion(operationUrl, apiVersion);
+    this.assertManagementUrl(url);
+    for (let attempt = 1; attempt <= 180; attempt += 1) {
+      const response = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${await this.getAccessToken()}`,
+        },
+      });
+      const text = response.status === 204 ? '' : await response.text();
+      if (!response.ok) throw new AzureResourceManagerError(response.status);
+      let payload: { status?: unknown; properties?: { provisioningState?: unknown } } = {};
+      if (text) {
+        try {
+          payload = JSON.parse(text) as typeof payload;
+        } catch {
+          throw new Error('Azure Resource Manager operation returned invalid JSON.');
+        }
+      }
+      const status = String(
+        payload.status ?? payload.properties?.provisioningState ?? ''
+      ).toLowerCase();
+      if (['succeeded', 'completed'].includes(status)) return;
+      if (['failed', 'canceled', 'cancelled'].includes(status)) {
+        throw new Error(`Azure Resource Manager operation ended in ${status}.`);
+      }
+      if (attempt < 180) await this.delay();
+    }
+    throw new Error('Azure Resource Manager operation did not reach a terminal state.');
+  }
+
   private withApiVersion(pathOrUrl: string, apiVersion: string): string {
     const url = new URL(
       pathOrUrl,
@@ -289,9 +374,10 @@ export class AzureResourceManagerClient {
   private assertContinuationUrl(value: string, initialPath: string): void {
     this.assertManagementUrl(value);
     const url = new URL(value);
-    const expectedPrefix =
-      `/subscriptions/${this.credentials.subscriptionId}`
-      + `/resourceGroups/${this.credentials.resourceGroup}/`;
+    const expectedPrefix = this.credentials.resourceGroup
+      ? `/subscriptions/${this.credentials.subscriptionId}`
+        + `/resourceGroups/${this.credentials.resourceGroup}/`
+      : `/subscriptions/${this.credentials.subscriptionId}/`;
     if (
       !decodeURIComponent(url.pathname).toLowerCase()
         .startsWith(expectedPrefix.toLowerCase())
@@ -311,6 +397,20 @@ export class AzureResourceManagerClient {
       throw new Error(
         'Azure Resource Manager pagination left the observed collection.'
       );
+    }
+  }
+
+  private configuredResourceGroup(): string {
+    if (!this.credentials.resourceGroup) {
+      throw new Error('Azure resource-group operation requires a configured resource group.');
+    }
+    return this.credentials.resourceGroup;
+  }
+
+  private async delay(): Promise<void> {
+    const value = Number(process.env.HYPERVIBE_AZURE_WAIT_DELAY_MS ?? 1000);
+    if (Number.isFinite(value) && value > 0) {
+      await new Promise((resolve) => setTimeout(resolve, value));
     }
   }
 }
