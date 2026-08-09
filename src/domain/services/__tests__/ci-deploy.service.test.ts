@@ -146,12 +146,11 @@ describe('ci-deploy.service', () => {
       ]);
     });
 
-    it('returns the DigitalOcean API token and existing registry name', () => {
+    it('returns only the DigitalOcean API token', () => {
       expect(
         requiredProviderSecretNamesForGitHubActions('digitalocean')
       ).toEqual([
         'DIGITALOCEAN_TOKEN',
-        'DIGITALOCEAN_REGISTRY',
       ]);
     });
 

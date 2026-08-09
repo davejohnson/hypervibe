@@ -45,6 +45,8 @@ export interface ProviderMetadata {
     hosting?: {
       /** Environment custom domains are either fully managed or explicitly unsupported. */
       customDomains: 'managed' | 'unsupported';
+      /** Whether traffic DNS may be proxied or must remain directly resolvable. */
+      domainTrafficProxy?: 'supported' | 'dns-only';
     };
     /** Engines this provider can reconcile through its database adapter. */
     databaseEngines?: string[];

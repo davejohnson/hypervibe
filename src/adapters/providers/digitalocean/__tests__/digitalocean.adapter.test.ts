@@ -114,35 +114,6 @@ describe('DigitalOceanAdapter', () => {
     }
   });
 
-  it('verifies an explicitly configured container registry without creating it', async () => {
-    const fetchMock = vi.fn(async (
-      input: string | URL | Request,
-      _init?: RequestInit
-    ) => {
-      const url = new URL(String(input));
-      if (url.pathname === '/v2/apps') {
-        return jsonResponse({ apps: [], links: {} });
-      }
-      if (url.pathname === '/v2/databases') {
-        return jsonResponse({ databases: [], links: {} });
-      }
-      if (url.pathname === '/v2/registries/hypervibe') {
-        return jsonResponse({
-          registry: { name: 'hypervibe', region: 'nyc3' },
-        });
-      }
-      throw new Error(`unexpected request: ${url}`);
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const adapter = await connectedAdapter({
-      containerRegistry: 'hypervibe',
-    });
-
-    await expect(adapter.verify()).resolves.toEqual({ success: true });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(mutationCalls(fetchMock)).toEqual([]);
-  });
-
   it('creates an empty app only after a complete paginated absence check', async () => {
     const environment = makeEnvironment();
     let page = 0;
@@ -179,6 +150,12 @@ describe('DigitalOceanAdapter', () => {
           },
         }, 201);
       }
+      if (url.pathname === '/v2/registries' && method === 'GET') {
+        return jsonResponse({
+          registries: [{ name: 'existing-registry', region: 'sfo3' }],
+          links: {},
+        });
+      }
       throw new Error(`unexpected request: ${method} ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -191,6 +168,7 @@ describe('DigitalOceanAdapter', () => {
       data: {
         projectId: 'do-app-created',
         projectName: expectedAppName(environment),
+        registryName: 'existing-registry',
         created: true,
       },
     });
@@ -202,6 +180,54 @@ describe('DigitalOceanAdapter', () => {
       spec: {
         name: expectedAppName(environment),
         region: 'sfo',
+      },
+    });
+  });
+
+  it('creates a free stable Starter registry when the team has none', async () => {
+    const fetchMock = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/v2/apps/do-app-1' && method === 'GET') {
+        return jsonResponse({ app: { id: 'do-app-1', spec: { name: 'hv-app' } } });
+      }
+      if (url.pathname === '/v2/registries' && method === 'GET') {
+        return jsonResponse({ registries: [], links: {} });
+      }
+      if (url.pathname === '/v2/account' && method === 'GET') {
+        return jsonResponse({ account: { uuid: 'A1B2-C3D4' } });
+      }
+      if (url.pathname === '/v2/registries' && method === 'POST') {
+        const body = JSON.parse(String(init?.body));
+        expect(body).toEqual({
+          name: 'hypervibe-a1b2c3d4',
+          region: 'sfo3',
+          subscription_tier_slug: 'starter',
+        });
+        return jsonResponse({
+          registry: { name: body.name, region: body.region },
+        }, 201);
+      }
+      throw new Error(`unexpected request: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    const receipt = await adapter.ensureProject('invoice-perfect', makeEnvironment({
+      provider: 'digitalocean',
+      projectId: 'do-app-1',
+      services: {},
+    }));
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: {
+        projectId: 'do-app-1',
+        registryName: 'hypervibe-a1b2c3d4',
+        created: false,
       },
     });
   });
@@ -403,13 +429,22 @@ describe('DigitalOceanAdapter', () => {
     expect(mutationCalls(fetchMock)).toEqual([]);
   });
 
-  it('blocks a deferred first component when no existing registry is configured', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({
-      app: {
-        id: 'do-app-1',
-        spec: { name: 'hv-app', region: 'sfo' },
-      },
-    }));
+  it('blocks a deferred first component when the explicit project action has not created a registry', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v2/apps/do-app-1') {
+        return jsonResponse({
+          app: {
+            id: 'do-app-1',
+            spec: { name: 'hv-app', region: 'sfo' },
+          },
+        });
+      }
+      if (url.pathname === '/v2/registries') {
+        return jsonResponse({ registries: [], links: {} });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
     vi.stubGlobal('fetch', fetchMock);
     const adapter = await connectedAdapter();
 
@@ -428,8 +463,7 @@ describe('DigitalOceanAdapter', () => {
     );
 
     expect(result.status).toBe('failed');
-    expect(result.receipt.error).toContain('containerRegistry');
-    expect(result.receipt.error).toContain('will not create');
+    expect(result.receipt.error).toContain('explicit project action');
     expect(mutationCalls(fetchMock)).toEqual([]);
   });
 
@@ -447,12 +481,10 @@ describe('DigitalOceanAdapter', () => {
       if (url.pathname === '/v2/apps/do-app-1' && method === 'GET') {
         return jsonResponse({ app });
       }
-      if (
-        url.pathname === '/v2/registries/hypervibe'
-        && method === 'GET'
-      ) {
+      if (url.pathname === '/v2/registries' && method === 'GET') {
         return jsonResponse({
-          registry: { name: 'hypervibe', region: 'nyc3' },
+          registries: [{ name: 'hypervibe', region: 'nyc3' }],
+          links: {},
         });
       }
       if (url.pathname === '/v2/apps/do-app-1' && method === 'PUT') {
@@ -471,9 +503,7 @@ describe('DigitalOceanAdapter', () => {
       throw new Error(`unexpected request: ${method} ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
-    const adapter = await connectedAdapter({
-      containerRegistry: 'hypervibe',
-    });
+    const adapter = await connectedAdapter();
 
     const result = await adapter.deploy(
       makeService(),
@@ -536,15 +566,13 @@ describe('DigitalOceanAdapter', () => {
           },
         });
       }
-      if (url.pathname === '/v2/registries/hypervibe') {
+      if (url.pathname === '/v2/registries') {
         return jsonResponse({ message: 'forbidden' }, 403);
       }
       throw new Error(`unexpected request: ${method} ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
-    const adapter = await connectedAdapter({
-      containerRegistry: 'hypervibe',
-    });
+    const adapter = await connectedAdapter();
 
     const result = await adapter.deploy(
       makeService(),
@@ -705,6 +733,234 @@ describe('DigitalOceanAdapter', () => {
     const adapter = await connectedAdapter();
 
     await expect(adapter.observe(environment)).rejects.toThrow(/hv_import/);
+  });
+
+  it('attaches an exact app domain while preserving the complete observed spec', async () => {
+    let appRead = 0;
+    const fetchMock = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/v2/apps/do-app-1' && method === 'GET') {
+        appRead += 1;
+        return jsonResponse({
+          app: {
+            id: 'do-app-1',
+            spec: {
+              name: 'hv-app',
+              region: 'sfo',
+              features: ['keep-this'],
+              services: [{ name: 'web', routes: [{ path: '/' }] }],
+              ...(appRead > 1
+                ? { domains: [{ domain: 'do.domain-test.hypervibe.dev', type: 'ALIAS' }] }
+                : {}),
+            },
+            default_ingress: 'hv-app-abc.ondigitalocean.app',
+            ...(appRead > 1
+              ? {
+                  domains: [{
+                    id: 'domain-1',
+                    phase: 'CONFIGURING',
+                    spec: {
+                      domain: 'do.domain-test.hypervibe.dev',
+                      type: 'ALIAS',
+                      validations: [{
+                        txt_name: '_acme-challenge.do.domain-test.hypervibe.dev',
+                        txt_value: 'validation-token',
+                      }],
+                    },
+                  }],
+                }
+              : {}),
+          },
+        });
+      }
+      if (url.pathname === '/v2/apps/do-app-1' && method === 'PUT') {
+        const body = JSON.parse(String(init?.body));
+        expect(body.spec.features).toEqual(['keep-this']);
+        expect(body.spec.services).toEqual([{ name: 'web', routes: [{ path: '/' }] }]);
+        expect(body.spec.domains).toEqual([{
+          domain: 'do.domain-test.hypervibe.dev',
+          type: 'ALIAS',
+        }]);
+        return jsonResponse({ app: { id: 'do-app-1', spec: body.spec } });
+      }
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    const receipt = await adapter.attachCustomDomain({
+      projectId: 'do-app-1',
+      serviceId: 'do-app-1:services:web',
+      environmentId: 'env-1',
+      domain: 'do.domain-test.hypervibe.dev',
+    });
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: {
+        customDomainId: 'domain-1',
+        created: true,
+        providerVerified: false,
+        certificateStatus: 'CONFIGURING',
+        dnsRecords: [
+          {
+            name: 'do.domain-test.hypervibe.dev',
+            type: 'CNAME',
+            value: 'hv-app-abc.ondigitalocean.app',
+            purpose: 'traffic',
+          },
+          {
+            name: '_acme-challenge.do.domain-test.hypervibe.dev',
+            type: 'TXT',
+            value: 'validation-token',
+            purpose: 'verification',
+          },
+        ],
+      },
+    });
+    expect(mutationCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('detaches only the reviewed app domain and verifies terminal absence', async () => {
+    let appRead = 0;
+    const fetchMock = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/v2/apps/do-app-1' && method === 'GET') {
+        appRead += 1;
+        const domains = appRead === 1
+          ? [
+              { domain: 'do.domain-test.hypervibe.dev', type: 'ALIAS' },
+              { domain: 'keep.hypervibe.dev', type: 'PRIMARY' },
+            ]
+          : [{ domain: 'keep.hypervibe.dev', type: 'PRIMARY' }];
+        return jsonResponse({
+          app: {
+            id: 'do-app-1',
+            spec: {
+              name: 'hv-app',
+              features: ['keep-this'],
+              services: [{ name: 'web' }],
+              domains,
+            },
+            default_ingress: 'hv-app-abc.ondigitalocean.app',
+            domains: domains.map((domain) => ({
+              id: domain.domain.startsWith('do.') ? 'domain-1' : 'domain-keep',
+              phase: 'ACTIVE',
+              spec: domain,
+            })),
+          },
+        });
+      }
+      if (url.pathname === '/v2/apps/do-app-1' && method === 'PUT') {
+        const body = JSON.parse(String(init?.body));
+        expect(body.spec.features).toEqual(['keep-this']);
+        expect(body.spec.domains).toEqual([{
+          domain: 'keep.hypervibe.dev',
+          type: 'PRIMARY',
+        }]);
+        return jsonResponse({ app: { id: 'do-app-1', spec: body.spec } });
+      }
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    const receipt = await adapter.detachCustomDomain({
+      projectId: 'do-app-1',
+      serviceId: 'do-app-1:services:web',
+      environmentId: 'env-1',
+      domain: 'do.domain-test.hypervibe.dev',
+      customDomainId: 'domain-1',
+    });
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: { customDomainId: 'domain-1', deleted: true },
+    });
+    expect(mutationCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('blocks DigitalOcean domain deletion when the reviewed id changed', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      app: {
+        id: 'do-app-1',
+        spec: {
+          name: 'hv-app',
+          services: [{ name: 'web' }],
+          domains: [{ domain: 'do.domain-test.hypervibe.dev', type: 'ALIAS' }],
+        },
+        domains: [{
+          id: 'different-domain-id',
+          phase: 'ACTIVE',
+          spec: { domain: 'do.domain-test.hypervibe.dev', type: 'ALIAS' },
+        }],
+      },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    const receipt = await adapter.detachCustomDomain({
+      projectId: 'do-app-1',
+      serviceId: 'do-app-1:services:web',
+      environmentId: 'env-1',
+      domain: 'do.domain-test.hypervibe.dev',
+      customDomainId: 'domain-1',
+    });
+
+    expect(receipt).toMatchObject({ success: false });
+    expect(receipt.error).toMatch(/does not match observed id/);
+    expect(mutationCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('attributes app-level domains to the durable bound service during observation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      app: {
+        id: 'do-app-1',
+        spec: {
+          name: 'hv-app',
+          services: [{ name: 'web' }, { name: 'admin' }],
+          domains: [{ domain: 'do.domain-test.hypervibe.dev', type: 'ALIAS' }],
+        },
+        default_ingress: 'https://hv-app-abc.ondigitalocean.app',
+        domains: [{
+          id: 'domain-1',
+          phase: 'ACTIVE',
+          spec: { domain: 'do.domain-test.hypervibe.dev', type: 'ALIAS' },
+        }],
+        active_deployment: { id: 'deploy-1', phase: 'ACTIVE' },
+      },
+    })));
+    const adapter = await connectedAdapter();
+
+    const observed = await adapter.observe(makeEnvironment({
+      provider: 'digitalocean',
+      projectId: 'do-app-1',
+      services: {},
+      domainDns: {
+        name: 'do.domain-test.hypervibe.dev',
+        serviceId: 'do-app-1:services:web',
+      },
+    }));
+
+    expect(observed.services.find((service) => service.name === 'web')).toMatchObject({
+      customDomains: ['do.domain-test.hypervibe.dev'],
+      customDomainStatus: {
+        'do.domain-test.hypervibe.dev': {
+          providerVerified: true,
+          certificateStatus: 'ACTIVE',
+          dnsConfigured: true,
+        },
+      },
+    });
+    expect(observed.services.find((service) => service.name === 'admin')?.customDomains).toEqual([]);
   });
 
   it('removes one exact component and waits for provider-confirmed absence', async () => {

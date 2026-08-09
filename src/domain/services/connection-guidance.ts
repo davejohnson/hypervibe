@@ -204,44 +204,6 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     credentialExample: 'hv_connections provider="aws-secrets" credentialsRef="file:/absolute/path/aws-secrets.json"',
     notes: ['Credentials come from the connection or the AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN environment variables; profiles, SSO, and instance roles are not read.'],
   },
-  'azure-container-apps': {
-    provider: 'azure-container-apps',
-    displayName: 'Azure Container Apps',
-    tokenType: 'Microsoft Entra application service principal (tenantId, clientId, and clientSecret) scoped to one existing Azure subscription/resource group and Azure Container Registry',
-    setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
-    setupUrls: [
-      {
-        label: 'Create or review the Microsoft Entra application',
-        url: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
-      },
-      {
-        label: 'Microsoft Entra service-principal setup guide',
-        url: 'https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal',
-      },
-      {
-        label: 'Azure Container Apps built-in roles',
-        url: 'https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/containers',
-      },
-      {
-        label: 'Azure Container Registry service-principal authentication',
-        url: 'https://learn.microsoft.com/en-us/azure/container-registry/container-registry-auth-service-principal',
-      },
-    ],
-    permissions: [
-      'At the exact resource-group scope Hypervibe will manage, assign Container Apps Contributor (role ID 358470bc-b998-42bd-ab17-a7e34c199c0f) for Container App lifecycle and managed-environment joins.',
-      'At the same resource-group scope, assign Container Apps ManagedEnvironments Contributor (role ID 57cc5028-e6a7-4284-868d-0611c5923f8d) so Hypervibe can create, observe, and delete its managed environments.',
-      'At the exact existing Azure Container Registry resource scope, grant Reader so Hypervibe can verify the durable registry binding.',
-      'For a registry using classic Registry RBAC permissions, also grant AcrPush (role ID 8311e382-0749-4cb8-b61a-304f252e45ec). For an ABAC-enabled registry, use Container Registry Repository Writer (role ID 2a1e307c-b015-4ebd-883e-5b7698a07328) instead.',
-    ],
-    credentialExample: 'hv_connections provider="azure-container-apps" credentialsRef="file:/absolute/path/azure-container-apps.json"',
-    notes: [
-      'The JSON file must contain tenantId, subscriptionId, clientId, clientSecret, resourceGroup, location, registryId, and registryServer. registryId is the full ARM resource ID of an existing ACR registry; registryServer is its login hostname.',
-      'Hypervibe owns its managed environments and Container Apps. It does not create or delete the subscription, resource group, registry, service principal, or role assignments.',
-      'The same service principal is synchronized into the managed GitHub workflow, which pushes the full checked-out SHA to the existing registry and releases only already-bound Container App IDs by exact registry digest.',
-      'Client secrets expire. Store this JSON outside the repository, rotate the secret before expiry, and reconnect with the replacement value; Hypervibe never prints or persists it in repo state.',
-      'Container App service creation is confirmation-gated because the resulting compute and supporting Azure resources can be billable.',
-    ],
-  },
   'azure-postgres': {
     provider: 'azure-postgres',
     displayName: 'Azure Database for PostgreSQL',
@@ -377,10 +339,13 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Grant roles/cloudscheduler.admin when using cron jobs.',
       'Grant roles/pubsub.editor when using queues.',
       'Grant roles/logging.viewer and roles/logging.viewAccessor for logs.',
+      'Native custom domains use the Cloud Run domain-mapping API covered by roles/run.admin. The connected identity must also be authorized for the verified base domain before apply.',
     ],
     credentialExample: 'hv_connections provider="cloudrun" credentialsRef="file:/absolute/path/cloudrun.json"',
     notes: [
       'Run hv_connections action="prepare" when Hypervibe should enable APIs and grant these roles from one-time admin credentials.',
+      'Cloud Run native domain mappings are available only in Google-supported regions. Hypervibe blocks before DNS mutation in other regions; use a separately declared external HTTPS load balancer there.',
+      'Cloud Run returns a multi-value A/AAAA/CNAME record set for the mapping. Hypervibe keeps those traffic records DNS-only while Google validates ownership and manages TLS.',
       'Google recommends short-lived credentials over long-lived service account JSON keys; if you use a JSON key, rotate it and grant only the roles above.',
     ],
   },
@@ -433,57 +398,15 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'For Managed PostgreSQL and Valkey lifecycle through hv_plan/hv_apply, also grant database:create, database:update, and database:delete.',
       'DigitalOcean requires regions:read, sizes:read, and actions:read alongside non-read database scopes so Hypervibe can validate regions/sizes and observe asynchronous actions.',
       'When DigitalOcean App Platform hosting is enabled, also grant app:read, app:create, app:update, and app:delete; omit those app scopes for a database/cache-only connection.',
-      'For exact-SHA App Platform CI deploys, grant registry:read and registry:update on the team that owns the existing DOCR registry named by containerRegistry.',
+      'For exact-SHA App Platform CI deploys, grant registry:read and registry:update. Also grant registry:create plus account:read so the reviewed project action can create a stable free Starter registry when the team has none.',
+      'App Platform custom-domain attach, observation, certificate status, and detach use the same app:read/app:update permissions; Hypervibe preserves the rest of the current App Spec.',
     ],
     credentialExample: 'hv_connections provider="digitalocean" credentialsRef="file:/absolute/path/digitalocean.json"',
     notes: [
       'Create the PAT at https://cloud.digitalocean.com/account/api/tokens with Custom Scopes for least privilege. Full Access is a broader fallback, not the recommended default.',
-      'For App Platform CI, the JSON credential file must contain apiToken and containerRegistry. Hypervibe verifies the registry but never creates a registry implicitly because registry subscriptions can be billable.',
+      'The JSON credential file needs only apiToken for ordinary App Platform use. Hypervibe deterministically reuses an existing team registry, or creates a free Starter registry during the reviewed project action when none exists; CI only reads and uses that registry.',
       'DigitalOcean shows a PAT only once. Store it in a dotenv file or secret manager instead of chat; Hypervibe accepts DIGITALOCEAN_TOKEN and HYPERVIBE_DIGITALOCEAN_TOKEN.',
       'Token scopes cannot be changed after creation, and the token cannot exceed its creator\'s DigitalOcean team role. Create a replacement token if scopes or team access are wrong.',
-    ],
-  },
-  ecs: {
-    provider: 'ecs',
-    displayName: 'Amazon ECS on Fargate',
-    tokenType: 'AWS IAM user access key (accessKeyId and secretAccessKey) for one commercial-partition account and region; the same scoped key is synchronized to managed GitHub Actions',
-    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
-    setupUrls: [
-      {
-        label: 'Create or review the IAM access key',
-        url: 'https://console.aws.amazon.com/iam/home#/security_credentials',
-      },
-      {
-        label: 'AWS access-key security guidance',
-        url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html',
-      },
-      {
-        label: 'Amazon ECS API permissions reference',
-        url: 'https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonelasticcontainerservice.html',
-      },
-      {
-        label: 'Amazon ECR repository push permissions',
-        url: 'https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-push-iam.html',
-      },
-    ],
-    permissions: [
-      'For ECS observation and lifecycle: ecs:ListAccountSettings, ecs:ListClusters, ecs:DescribeClusters, ecs:CreateCluster, ecs:DeleteCluster, ecs:ListServices, ecs:DescribeServices, ecs:CreateService, ecs:UpdateService, ecs:DeleteService, ecs:RegisterTaskDefinition, ecs:DescribeTaskDefinition, ecs:ListTaskDefinitions, ecs:DeregisterTaskDefinition, ecs:DeleteTaskDefinitions, ecs:ListTasks, ecs:DescribeTasks, ecs:TagResource, and ecs:ListTagsForResource.',
-      'For the existing private ECR repository and exact-digest managed workflow: ecr:GetAuthorizationToken on Resource="*", plus ecr:DescribeRepositories, ecr:BatchCheckLayerAvailability, ecr:GetDownloadUrlForLayer, ecr:BatchGetImage, ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload, and ecr:PutImage on the exact repository ARN.',
-      'For read-only network prerequisite verification: ec2:DescribeSubnets and ec2:DescribeSecurityGroups. Hypervibe does not create, modify, or delete the VPC, subnets, or security groups.',
-      'For an existing public Application Load Balancer target: elasticloadbalancing:DescribeTargetGroups, elasticloadbalancing:DescribeLoadBalancers, elasticloadbalancing:DescribeListeners, and elasticloadbalancing:DescribeRules. Hypervibe does not create, modify, or delete the load balancer, listener rules, or target group.',
-      'For existing ECS task roles: iam:GetRole and iam:PassRole on the exact execution-role ARN and optional task-role ARN. Restrict iam:PassedToService to ecs-tasks.amazonaws.com.',
-    ],
-    credentialExample: 'hv_connections provider="ecs" credentialsRef="file:/absolute/path/aws-ecs.json"',
-    notes: [
-      'The JSON must include accessKeyId, secretAccessKey, region, ecrRepositoryArn, ecrRepositoryUri, subnetIds (a JSON array), securityGroupIds (a JSON array), and executionRoleArn. Public web services also require targetGroupArn. Set publicUrl to the externally routed HTTP(S) origin when the target is not the default HTTP listener action, including HTTPS-only listeners; taskRoleArn and assignPublicIp are optional.',
-      'The existing ECR repository, VPC subnets, security groups, IAM roles, and optional Application Load Balancer target group stay externally owned. Hypervibe owns only its ECS cluster, ECS services, and task-definition revisions.',
-      'Scope ECS create/update/delete permissions to the intended Hypervibe cluster, service, and task-definition-family ARN patterns where AWS supports resource-level authorization. ECS list/account-setting actions require Resource="*", and cross-cluster service observation must remain available so Hypervibe can prove the external target group is not already attached elsewhere.',
-      'A public target group must use target type ip, be in the subnet/security-group VPC, and be routed by an HTTP or HTTPS listener on one active internet-facing Application Load Balancer. One target group cannot be shared implicitly by multiple Hypervibe services.',
-      'The selected subnets need outbound access to ECR and application dependencies, and the security group must allow the load balancer to reach containerPort while permitting required egress. Hypervibe verifies identity and VPC scope but does not modify these external network rules.',
-      'Both configured IAM roles must trust ecs-tasks.amazonaws.com for sts:AssumeRole. The execution role also needs the usual private-ECR pull permissions (ecr:GetAuthorizationToken, ecr:BatchCheckLayerAvailability, ecr:GetDownloadUrlForLayer, and ecr:BatchGetImage); Hypervibe verifies the trust relationship but cannot prove every attached role policy before a task runs.',
-      'Enable the ECS serviceLongArnFormat account setting before connecting. Durable long-form service ARNs are required so Hypervibe can prove exact cluster and service identity.',
-      'Service creation is billable and exact-action confirmation-gated. Apply creates a zero-task bootstrap service; the managed workflow builds the full checked-out Git SHA, publishes it to the existing repository, resolves the ECR digest, and scales only already-bound services to one task.',
-      'This adapter currently supports the commercial aws partition and static IAM access keys. Keep the credential file outside the repository, rotate the key regularly, and reconnect after rotation; support for temporary STS/OIDC credentials requires a separate credential lifecycle.',
     ],
   },
   elasticache: {
@@ -620,6 +543,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     permissions: [
       'For a Team scope, use an Owner or Member token identity, or a Developer/Contributor identity granted Create Project, Full Production Deployment, and Environment Variable Manager permissions for the intended Team.',
       'Hypervibe needs REST access to read/create/delete Projects, read and upsert/delete Project environment variables, upload deployment files, and create/read production Deployments.',
+      'Declared custom domains additionally require REST access to add, inspect/verify, and remove domains on the exact Project.',
       'Scope the token to only the intended Vercel Team when possible and include that immutable teamId in the connection JSON; omit teamId only for a personal-account deployment scope.',
     ],
     credentialExample: 'hv_connections provider="vercel" credentialsRef="file:/absolute/path/vercel.json"',

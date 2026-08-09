@@ -75,6 +75,18 @@ export interface VercelProjectDomain {
   apexName?: string;
   projectId: string;
   verified: boolean;
+  verification?: Array<{
+    type: string;
+    domain: string;
+    value: string;
+    reason?: string;
+  }>;
+}
+
+export interface VercelDomainConfig {
+  configuredBy?: string | null;
+  acceptedChallenges?: string[];
+  misconfigured: boolean;
 }
 
 export class VercelApiError extends Error {
@@ -333,6 +345,56 @@ export class VercelClient {
     throw new Error(`Vercel project-domain pagination exceeded ${PAGE_CAP} pages.`);
   }
 
+  async getProjectDomain(
+    projectIdOrName: string,
+    domain: string
+  ): Promise<VercelProjectDomain | null> {
+    const result = await this.getNullable<VercelProjectDomain>(
+      `/v9/projects/${encodeURIComponent(projectIdOrName)}/domains/${encodeURIComponent(domain)}`
+    );
+    if (result) this.assertProjectDomain(result, projectIdOrName);
+    return result;
+  }
+
+  async addProjectDomain(
+    projectIdOrName: string,
+    domain: string
+  ): Promise<VercelProjectDomain> {
+    const result = await this.request<VercelProjectDomain>(
+      'POST',
+      `/v10/projects/${encodeURIComponent(projectIdOrName)}/domains`,
+      { body: { name: domain } }
+    );
+    this.assertProjectDomain(result, projectIdOrName);
+    return result;
+  }
+
+  async removeProjectDomain(
+    projectIdOrName: string,
+    domain: string
+  ): Promise<void> {
+    try {
+      await this.request(
+        'DELETE',
+        `/v9/projects/${encodeURIComponent(projectIdOrName)}/domains/${encodeURIComponent(domain)}`
+      );
+    } catch (error) {
+      if (error instanceof VercelApiError && error.status === 404) return;
+      throw error;
+    }
+  }
+
+  async getDomainConfig(domain: string): Promise<VercelDomainConfig> {
+    const result = await this.request<VercelDomainConfig>(
+      'GET',
+      `/v6/domains/${encodeURIComponent(domain)}/config`
+    );
+    if (!result || typeof result.misconfigured !== 'boolean') {
+      throw new Error('Vercel domain configuration returned an incomplete response.');
+    }
+    return result;
+  }
+
   private async getNullable<T>(path: string): Promise<T | null> {
     try {
       return await this.request<T>('GET', path);
@@ -488,22 +550,7 @@ export class VercelClient {
   ): void {
     const names = new Set<string>();
     for (const domain of domains) {
-      if (
-        !domain
-        || typeof domain.name !== 'string'
-        || typeof domain.projectId !== 'string'
-        || typeof domain.verified !== 'boolean'
-      ) {
-        throw new Error('Vercel returned an incomplete project-domain identity.');
-      }
-      if (
-        projectIdOrName.startsWith('prj_')
-        && domain.projectId !== projectIdOrName
-      ) {
-        throw new Error(
-          `Vercel returned domain ${domain.name} for project ${domain.projectId}, not requested project ${projectIdOrName}.`
-        );
-      }
+      this.assertProjectDomain(domain, projectIdOrName);
       const normalized = domain.name.toLowerCase();
       if (names.has(normalized)) {
         throw new Error(
@@ -511,6 +558,36 @@ export class VercelClient {
         );
       }
       names.add(normalized);
+    }
+  }
+
+  private assertProjectDomain(
+    domain: VercelProjectDomain,
+    projectIdOrName: string
+  ): void {
+    if (
+      !domain
+      || typeof domain.name !== 'string'
+      || typeof domain.projectId !== 'string'
+      || typeof domain.verified !== 'boolean'
+    ) {
+      throw new Error('Vercel returned an incomplete project-domain identity.');
+    }
+    if (
+      projectIdOrName.startsWith('prj_')
+      && domain.projectId !== projectIdOrName
+    ) {
+      throw new Error(
+        `Vercel returned domain ${domain.name} for project ${domain.projectId}, not requested project ${projectIdOrName}.`
+      );
+    }
+    if (domain.verification && domain.verification.some((record) => (
+      !record
+      || typeof record.type !== 'string'
+      || typeof record.domain !== 'string'
+      || typeof record.value !== 'string'
+    ))) {
+      throw new Error(`Vercel returned incomplete verification records for ${domain.name}.`);
     }
   }
 }

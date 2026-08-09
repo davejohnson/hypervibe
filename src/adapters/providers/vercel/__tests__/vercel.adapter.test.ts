@@ -229,6 +229,77 @@ describe('VercelAdapter', () => {
     expect(mutationCalls(fetchMock)).toEqual([]);
   });
 
+  it('attaches, observes, and detaches one exact project domain', async () => {
+    let attached = false;
+    const domain = {
+      name: 'vercel.domain-test.hypervibe.dev',
+      apexName: 'hypervibe.dev',
+      projectId: PROJECT_ID,
+      verified: false,
+      verification: [{
+        type: 'TXT',
+        domain: '_vercel.vercel.domain-test.hypervibe.dev',
+        value: 'verify-domain',
+      }],
+    };
+    const fetchMock = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      const identity = identityResponse(url);
+      if (identity) return identity;
+      if (url.pathname === `/v9/projects/${PROJECT_ID}`) return jsonResponse(project());
+      if (url.pathname === `/v9/projects/${PROJECT_ID}/domains/${domain.name}`) {
+        if (method === 'DELETE') {
+          attached = false;
+          return jsonResponse(undefined, 204);
+        }
+        return attached ? jsonResponse(domain) : jsonResponse({}, 404);
+      }
+      if (url.pathname === `/v10/projects/${PROJECT_ID}/domains` && method === 'POST') {
+        attached = true;
+        return jsonResponse(domain);
+      }
+      if (url.pathname === `/v6/domains/${domain.name}/config`) {
+        return jsonResponse({ misconfigured: true });
+      }
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    const created = await adapter.attachCustomDomain({
+      projectId: SCOPE_BINDING,
+      serviceId: SERVICE_BINDING,
+      environmentId: 'env-1',
+      domain: domain.name,
+    });
+    expect(created).toMatchObject({
+      success: true,
+      data: {
+        customDomainId: `project-domain:${PROJECT_ID}:${domain.name}`,
+        created: true,
+        providerVerified: false,
+        dnsRecords: [
+          { name: domain.name, type: 'CNAME', value: 'cname.vercel-dns-0.com', purpose: 'traffic' },
+          { name: domain.verification[0].domain, type: 'TXT', value: 'verify-domain', purpose: 'verification' },
+        ],
+      },
+    });
+
+    const detached = await adapter.detachCustomDomain({
+      projectId: SCOPE_BINDING,
+      serviceId: SERVICE_BINDING,
+      environmentId: 'env-1',
+      domain: domain.name,
+      customDomainId: `project-domain:${PROJECT_ID}:${domain.name}`,
+    });
+    expect(detached).toMatchObject({ success: true, data: { deleted: true } });
+    expect(attached).toBe(false);
+  });
+
   it('creates only a source-less project, configures production vars, and defers deployment', async () => {
     const fetchMock = vi.fn(async (
       input: string | URL | Request,
@@ -570,6 +641,9 @@ describe('VercelAdapter', () => {
           },
         ]));
       }
+      if (url.pathname === '/v6/domains/invoiceperfect.com/config') {
+        return jsonResponse({ misconfigured: false });
+      }
       throw new Error(`unexpected request: ${url.pathname}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -593,7 +667,7 @@ describe('VercelAdapter', () => {
         url: 'https://invoice-perfect.vercel.app',
         customDomains: ['invoiceperfect.com'],
         customDomainStatus: {
-          'invoiceperfect.com': { dnsConfigured: true },
+          'invoiceperfect.com': { providerVerified: true, dnsConfigured: true },
         },
         config: {
           healthCheckPath: '/health',

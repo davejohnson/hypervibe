@@ -201,4 +201,38 @@ describe('VercelClient', () => {
       },
     ]);
   });
+
+  it('creates, observes, configures, and removes one exact project domain', async () => {
+    const domain = {
+      name: 'app.example.com',
+      apexName: 'example.com',
+      projectId: PROJECT_ID,
+      verified: false,
+      verification: [{ type: 'TXT', domain: '_vercel.app.example.com', value: 'verify-1' }],
+    };
+    const fetchMock = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = new URL(String(input));
+      if (init?.method === 'POST') return jsonResponse(domain);
+      if (url.pathname.endsWith('/config')) return jsonResponse({ misconfigured: true });
+      if (init?.method === 'DELETE') return jsonResponse(undefined, 204);
+      return jsonResponse(domain);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new VercelClient({ accessToken: 'token', teamId: TEAM_ID });
+
+    await expect(client.addProjectDomain(PROJECT_ID, domain.name)).resolves.toEqual(domain);
+    await expect(client.getProjectDomain(PROJECT_ID, domain.name)).resolves.toEqual(domain);
+    await expect(client.getDomainConfig(domain.name)).resolves.toEqual({ misconfigured: true });
+    await expect(client.removeProjectDomain(PROJECT_ID, domain.name)).resolves.toBeUndefined();
+
+    const [postUrl, postInit] = fetchMock.mock.calls[0] as unknown as [URL, RequestInit];
+    expect(postUrl.pathname).toBe(`/v10/projects/${PROJECT_ID}/domains`);
+    expect(postUrl.searchParams.get('teamId')).toBe(TEAM_ID);
+    expect(JSON.parse(String(postInit.body))).toEqual({ name: domain.name });
+    const [deleteUrl] = fetchMock.mock.calls[3] as unknown as [URL, RequestInit];
+    expect(deleteUrl.pathname).toBe(`/v9/projects/${PROJECT_ID}/domains/${domain.name}`);
+  });
 });

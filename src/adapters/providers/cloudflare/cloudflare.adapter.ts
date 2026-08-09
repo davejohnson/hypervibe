@@ -1240,8 +1240,13 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
     name: string,
     type: string,
     contents: string[],
-    options?: { ttl?: number; proxied?: boolean }
-  ): Promise<{ created: string[]; deleted: string[]; unchanged: string[] }> {
+    options?: { ttl?: number; proxied?: boolean; pruneExtras?: boolean }
+  ): Promise<{
+    created: string[];
+    deleted: string[];
+    unchanged: string[];
+    records: CloudflareDnsRecord[];
+  }> {
     // Get existing records for this name+type
     const allRecords = await this.listDnsRecords(zoneId, type);
     const existingRecords = allRecords.filter(
@@ -1280,15 +1285,37 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
       }
     }
 
-    // Delete extra records
-    for (const record of existingRecords) {
-      if (!desiredContents.has(record.content)) {
-        await this.deleteDnsRecord(zoneId, record.id);
-        deleted.push(record.content);
+    // Delete extras only when the caller explicitly owns the complete set.
+    if (options?.pruneExtras !== false) {
+      for (const record of existingRecords) {
+        if (!desiredContents.has(record.content)) {
+          await this.deleteDnsRecord(zoneId, record.id);
+          deleted.push(record.content);
+        }
       }
     }
 
-    return { created, deleted, unchanged };
+    const refreshed = (await this.listDnsRecords(zoneId, type)).filter(
+      (record) => record.name === name || record.name === `${name}.${record.zone_name}`
+    );
+    const records: CloudflareDnsRecord[] = [];
+    for (const content of desiredContents) {
+      const matches = refreshed.filter((record) => record.content === content);
+      if (matches.length !== 1) {
+        throw new Error(`Cloudflare returned ${matches.length} ${type} records for ${name} with desired value ${content}; refusing an ambiguous record-set binding.`);
+      }
+      const current = matches[0]!;
+      const reconciled = this.dnsRecordNeedsUpdate(current, type, content, options)
+        ? await this.updateDnsRecord(zoneId, current.id, {
+            content,
+            ttl: options?.ttl,
+            proxied: options?.proxied,
+          })
+        : current;
+      records.push(reconciled);
+    }
+
+    return { created, deleted, unchanged, records };
   }
 
   // IDnsProvider interface methods (wrapping Cloudflare-specific methods)

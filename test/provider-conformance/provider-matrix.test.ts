@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import '../../src/application/providers.js';
 import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import { planProviderNativeDeploySources } from '../../src/domain/services/provider-native-deploy-source.service.js';
-import { environmentSpecSchema } from '../../src/domain/spec/spec.schema.js';
+import { environmentSpecSchema, projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import {
   cacheProviderContracts,
   databaseProviderContracts,
@@ -22,8 +22,6 @@ describe('provider conformance matrix', () => {
       'Railway',
       'Google Cloud',
       'DigitalOcean',
-      'AWS',
-      'Microsoft Azure',
       'Vercel',
     ]);
   });
@@ -34,17 +32,38 @@ describe('provider conformance matrix', () => {
         providerRegistry.getMetadata(contract.provider)?.lifecycle?.hosting?.customDomains,
         contract.provider
       ).toBe(contract.customDomains);
+      expect(
+        providerRegistry.getMetadata(contract.provider)?.lifecycle?.hosting?.domainTrafficProxy ?? 'supported',
+        contract.provider
+      ).toBe(contract.domainTrafficProxy);
     }
     expect(providerRegistry.supports('github', 'hosting')).toBe(false);
     expect(hostingProviderContracts.filter((entry) => entry.customDomains === 'managed').map((entry) => entry.provider))
-      .toEqual(['railway']);
+      .toEqual(['railway', 'cloudrun', 'digitalocean', 'vercel']);
+  });
+
+  it('keeps one isolated DNS-only domain fixture for every hosting provider', () => {
+    const fixture = projectSpecSchema.parse(JSON.parse(readFileSync(
+      path.resolve('test/provider-conformance/domain-lifecycle.spec.json'),
+      'utf8'
+    )));
+    const environments = Object.values(fixture.environments);
+
+    expect(environments.map((environment) => environment.hosting.provider)).toEqual(
+      hostingProviderContracts.map((contract) => contract.provider)
+    );
+    expect(new Set(environments.map((environment) => environment.domain)).size).toBe(environments.length);
+    for (const environment of environments) {
+      expect(environment.domain).toMatch(/\.domain-test\.hypervibe\.dev$/);
+      expect(environment.domainProxy).toBe(false);
+      expect(environment.services.web).toMatchObject({ public: true });
+    }
   });
 
   it('declares and enforces non-native source ownership for every applicable hosting provider', () => {
     const expectedPolicies = {
       railway: 'disconnect',
       digitalocean: 'block',
-      'azure-container-apps': 'disconnect',
       vercel: 'block',
     } as const;
 
@@ -147,13 +166,13 @@ describe('provider conformance matrix', () => {
     );
   });
 
-  it('opens ElastiCache for opt-in live lifecycle validation', () => {
+  it('keeps ElastiCache live promotion blocked without a declarative AWS workload network', () => {
     expect(
       cacheProviderContracts.find((entry) => entry.provider === 'elasticache')
     ).toMatchObject({
-      status: 'ready-for-live',
+      status: 'planned',
       engine: 'redis',
-      fixtureHostingProvider: 'ecs',
+      fixtureHostingProvider: 'railway',
     });
   });
 
@@ -169,12 +188,21 @@ describe('provider conformance matrix', () => {
   });
 
   it('keeps deliberately excluded providers out of the lifecycle catalog and registry', () => {
-    const excluded = new Set(['heroku', 'render', 'fly', 'fly-managed-postgres']);
+    const excluded = new Set([
+      'heroku',
+      'render',
+      'fly',
+      'fly-managed-postgres',
+      'ecs',
+      'azure-container-apps',
+    ]);
     expect(providerContracts.some((entry) => excluded.has(entry.provider))).toBe(false);
     expect(providerRegistry.supports('heroku', 'hosting')).toBe(false);
     expect(providerRegistry.supports('render', 'hosting')).toBe(false);
     expect(providerRegistry.supportsEngine('render', 'database', 'postgres')).toBe(false);
     expect(providerRegistry.supportsEngine('render', 'cache', 'redis')).toBe(false);
+    expect(providerRegistry.supports('ecs', 'hosting')).toBe(false);
+    expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(false);
   });
 
   it('uses stable provider ids and secret-free credential descriptors', () => {
@@ -337,59 +365,6 @@ describe('provider conformance matrix', () => {
     ).toBe(true);
   });
 
-  it('exposes the implemented Azure hosting slice to the managed-workflow live gate', () => {
-    const entry = hostingProviderContracts.find(
-      (provider) => provider.provider === 'azure-container-apps'
-    );
-
-    expect(entry).toMatchObject({
-      status: 'ready-for-live',
-      implementationNote: expect.stringContaining('implemented'),
-      credentials: expect.arrayContaining([
-        expect.objectContaining({ field: 'registryId' }),
-        expect.objectContaining({ field: 'registryServer' }),
-      ]),
-      managedWorkflow: {
-        environmentName: 'production',
-        fixtureDirectory: 'test/provider-conformance/fixture',
-        workflow: 'deploy-azure-container-apps-production.yml',
-        publicUrlProtocols: ['https:'],
-        serviceName: 'web',
-        service: {
-          workloadKind: 'web',
-          startCommand: 'node server.mjs',
-          healthCheckPath: '/health',
-          public: true,
-        },
-        database: {
-          provider: 'azure-postgres',
-          engine: 'postgres',
-        },
-        cache: {
-          provider: 'azure-managed-redis',
-          engine: 'redis',
-        },
-      },
-    });
-    expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(
-      true
-    );
-    expect(
-      providerRegistry.supportsEngine(
-        'azure-postgres',
-        'database',
-        'postgres'
-      )
-    ).toBe(true);
-    expect(
-      providerRegistry.supportsEngine(
-        'azure-managed-redis',
-        'cache',
-        'redis'
-      )
-    ).toBe(true);
-  });
-
   it('exposes the implemented Vercel slice only to the managed-workflow live gate', () => {
     const entry = hostingProviderContracts.find(
       (provider) => provider.provider === 'vercel'
@@ -417,37 +392,4 @@ describe('provider conformance matrix', () => {
     expect(providerRegistry.supports('vercel', 'hosting')).toBe(true);
   });
 
-  it('exposes the implemented AWS ECS hosting slice to the managed-workflow live gate', () => {
-    const entry = hostingProviderContracts.find(
-      (provider) => provider.provider === 'ecs'
-    );
-
-    expect(entry).toMatchObject({
-      status: 'ready-for-live',
-      implementationNote: expect.stringContaining('implemented'),
-      credentials: expect.arrayContaining([
-        expect.objectContaining({ field: 'ecrRepositoryArn' }),
-        expect.objectContaining({ field: 'ecrRepositoryUri' }),
-        expect.objectContaining({ field: 'subnetIds', parseAs: 'json' }),
-        expect.objectContaining({ field: 'securityGroupIds', parseAs: 'json' }),
-        expect.objectContaining({ field: 'executionRoleArn' }),
-        expect.objectContaining({ field: 'targetGroupArn' }),
-        expect.objectContaining({ field: 'publicUrl', optional: true }),
-      ]),
-      managedWorkflow: {
-        environmentName: 'production',
-        fixtureDirectory: 'test/provider-conformance/fixture',
-        workflow: 'deploy-ecs-production.yml',
-        publicUrlProtocols: ['http:', 'https:'],
-        serviceName: 'web',
-        service: {
-          workloadKind: 'web',
-          startCommand: 'node server.mjs',
-          healthCheckPath: '/health',
-          public: true,
-        },
-      },
-    });
-    expect(providerRegistry.supports('ecs', 'hosting')).toBe(true);
-  });
 });

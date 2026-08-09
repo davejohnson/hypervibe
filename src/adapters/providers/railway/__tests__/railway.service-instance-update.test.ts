@@ -336,6 +336,94 @@ describe('RailwayAdapter service instance updates', () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
+  it('detaches the exact Railway custom domain and verifies terminal absence', async () => {
+    const existingDomain = { id: 'cd_exact', domain: 'usebillforge.com', status: { verified: true } };
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod', domains: { customDomains: [existingDomain] } } }],
+          },
+        },
+      })
+      .mockResolvedValueOnce({ customDomainDelete: true })
+      .mockResolvedValueOnce({
+        service: {
+          serviceInstances: {
+            edges: [{ node: { environmentId: 'env-prod', domains: { customDomains: [] } } }],
+          },
+        },
+      });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.detachCustomDomain({
+      projectId: 'rail-project-1',
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+      customDomainId: 'cd_exact',
+    });
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: { customDomainId: 'cd_exact', deleted: true },
+    });
+    expect(String(request.mock.calls[1]?.[0])).toContain('customDomainDelete');
+    expect(request.mock.calls[1]?.[1]).toEqual({ id: 'cd_exact' });
+  });
+
+  it('blocks custom-domain deletion when the reviewed Railway id changed', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      service: {
+        serviceInstances: {
+          edges: [{
+            node: {
+              environmentId: 'env-prod',
+              domains: { customDomains: [{ id: 'cd_other', domain: 'usebillforge.com' }] },
+            },
+          }],
+        },
+      },
+    });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.detachCustomDomain({
+      projectId: 'rail-project-1',
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+      customDomainId: 'cd_reviewed',
+    });
+
+    expect(receipt).toMatchObject({ success: false, message: expect.stringContaining('identity changed') });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats an already-absent Railway custom domain as a successful retry', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      service: {
+        serviceInstances: {
+          edges: [{ node: { environmentId: 'env-prod', domains: { customDomains: [] } } }],
+        },
+      },
+    });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const receipt = await adapter.detachCustomDomain({
+      projectId: 'rail-project-1',
+      serviceId: 'svc-web',
+      environmentId: 'env-prod',
+      domain: 'usebillforge.com',
+      customDomainId: 'cd_deleted',
+    });
+
+    expect(receipt).toMatchObject({ success: true, data: { alreadyAbsent: true } });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('deletes and recreates only the selected Railway custom domain', async () => {
     const existingDomain = {
       id: 'cd_old',

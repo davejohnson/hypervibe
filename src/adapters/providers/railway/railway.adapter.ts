@@ -3508,6 +3508,79 @@ export class RailwayAdapter implements IProviderAdapter {
     }
   }
 
+  async detachCustomDomain(params: {
+    projectId?: string;
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+    customDomainId?: string;
+  }): Promise<Receipt> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const existing = await this.getCustomDomainStatus(params);
+    if (!existing) {
+      return {
+        success: true,
+        message: 'Railway custom domain is already absent',
+        data: {
+          domain: params.domain,
+          customDomainId: params.customDomainId,
+          alreadyAbsent: true,
+        },
+      };
+    }
+    if (params.customDomainId && existing.id !== params.customDomainId) {
+      return {
+        success: false,
+        message: 'Railway custom-domain identity changed',
+        error: `Reviewed custom-domain id ${params.customDomainId} does not match observed id ${existing.id} for ${params.domain}.`,
+      };
+    }
+
+    const mutation = gql`
+      mutation DeleteCustomDomain($id: String!) {
+        customDomainDelete(id: $id)
+      }
+    `;
+    try {
+      const deleted = await this.client.request<{ customDomainDelete: boolean }>(
+        mutation,
+        { id: existing.id }
+      );
+      if (deleted.customDomainDelete !== true) {
+        return {
+          success: false,
+          message: 'Failed to detach Railway custom domain',
+          error: `Railway did not confirm deletion of custom-domain id ${existing.id}.`,
+        };
+      }
+      const remaining = await this.getCustomDomainStatus(params);
+      if (remaining) {
+        return {
+          success: false,
+          message: 'Railway custom-domain deletion is not complete',
+          error: `Railway custom-domain id ${remaining.id} still exists for ${params.domain} after deletion.`,
+        };
+      }
+      return {
+        success: true,
+        message: 'Railway custom domain detached',
+        data: {
+          domain: params.domain,
+          customDomainId: existing.id,
+          deleted: true,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to detach Railway custom domain',
+        error: this.describeError(error),
+      };
+    }
+  }
+
   async recreateCustomDomain(params: {
     projectId?: string;
     serviceId: string;

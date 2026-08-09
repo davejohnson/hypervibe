@@ -148,11 +148,13 @@ You: "Add a Railway custom domain api.myapp.com"
 You: "Run database migrations"
 ```
 
-Environment custom domains are fully managed for Railway today. Hypervibe
-fails closed without changing DNS for Cloud Run, DigitalOcean App Platform,
-ECS, Azure Container Apps, and Vercel until their provider attachment and
-certificate lifecycles are implemented. GitHub Pages custom domains use the
-separate project-level `github.pages` lifecycle.
+Environment custom domains use the same spec/plan/apply loop for Railway,
+Cloud Run, DigitalOcean App Platform, and Vercel.
+Hypervibe attaches the hostname at the provider first, writes only returned
+Cloudflare records, persists exact provider/DNS ids, and confirmation-gates
+exact detach. Cloud Run stays DNS-only during its native certificate flow.
+GitHub Pages custom domains use the separate project-level `github.pages`
+lifecycle.
 
 ### 6. Supply Secrets (Optional)
 
@@ -1105,9 +1107,9 @@ Fine-grained PATs can work for some GitHub API operations when granted the permi
 Provider-native source ownership is exclusive. Only an explicit
 `deploy.trigger: "native"` may keep a repository connected at the hosting
 provider. Manual and CI modes stage source reconciliation before every other
-mutation: Railway and Azure Container Apps disconnect through their provider
-APIs, while Vercel and DigitalOcean block with manual-disconnect guidance.
-Unknown source observation blocks for all four providers. After the source-only
+mutation: Railway disconnects through its provider API, while Vercel and
+DigitalOcean block with manual-disconnect guidance.
+Unknown source observation blocks for all three providers. After the source-only
 plan converges, run `hv_plan` again to review storage, variable, workflow, or
 deployment work separately.
 
@@ -1254,7 +1256,7 @@ Provider credentials remain local and encrypted. Database component bindings (co
 
 `workloadKind: "job"` was removed from the service spec — it never had run-to-completion deploy semantics. Specs using it fail validation; choose `worker` (always-on, internal-only on Cloud Run with a minimum of one instance — note Cloud Run workers must still listen on `PORT`) or `cron` (scheduled). Railway's observe cannot distinguish `web` from `worker`, so kind drift is not detected there.
 
-The provider catalog is intentionally focused. DigitalOcean, Azure Container Apps, Vercel, and AWS ECS on Fargate pass mocked lifecycle and managed exact-SHA/image workflow contracts, but remain behind the provider-conformance live promotion gate and are not advertised as supported yet. Heroku, Render, and Fly are deliberately out of scope. Supported database providers remain `supabase`, `cloudsql`, `railway`, and `rds`; Azure PostgreSQL, Neon, and DigitalOcean are conformance targets at various pre-support stages. Stored connections for removed providers can still be deleted with `hv_connections action="remove"`.
+The provider catalog is intentionally focused. DigitalOcean and Vercel pass mocked lifecycle and managed exact-SHA/image workflow contracts, but remain behind the provider-conformance live promotion gate and are not advertised as supported yet. DigitalOcean now needs only an API token: its reviewed project action reuses an existing team registry or creates a free Starter registry when none exists. AWS ECS and Azure Container Apps hosting were removed because their connections required pre-created infrastructure rather than credentials; Heroku, Render, and Fly are deliberately out of scope. Supported database providers remain `supabase`, `cloudsql`, `railway`, and `rds`; Azure PostgreSQL, Neon, and DigitalOcean are conformance targets at various pre-support stages. Stored connections for removed providers can still be deleted with `hv_connections action="remove"`.
 
 Redis is a separate cache lifecycle instead of a database component and wires `REDIS_URL`. Railway, DigitalOcean, Azure Managed Redis, and Amazon ElastiCache have adapter or conformance slices; GCP Memorystore's private-IP lifecycle is implemented, but its Cloud Run full-stack profile remains blocked on declarative VPC egress. PostgreSQL is the only database engine in desired state; MongoDB and MySQL are intentionally outside the core lifecycle.
 

@@ -135,6 +135,8 @@ const batchJob = {
 describe('CloudRunAdapter.observe', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it('observes live services, scheduled jobs, and plain jobs with hashed env vars', async () => {
@@ -146,6 +148,9 @@ describe('CloudRunAdapter.observe', () => {
 
       if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/services?') && method === 'GET') {
         return Response.json({ services: [webService, workerService, strayService] });
+      }
+      if (url.startsWith('https://us-central1-run.googleapis.com/apis/domains.cloudrun.com/v1/namespaces/gcp-project/domainmappings?') && method === 'GET') {
+        return Response.json({ items: [] });
       }
       if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/jobs?') && method === 'GET') {
         return Response.json({ jobs: [cronJob, batchJob] });
@@ -252,6 +257,9 @@ describe('CloudRunAdapter.observe', () => {
       if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/services?') && method === 'GET') {
         return new Response('internal error', { status: 500 });
       }
+      if (url.startsWith('https://us-central1-run.googleapis.com/apis/domains.cloudrun.com/v1/namespaces/gcp-project/domainmappings?') && method === 'GET') {
+        return Response.json({ items: [] });
+      }
       if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/jobs?') && method === 'GET') {
         return Response.json({ jobs: [cronJob] });
       }
@@ -281,6 +289,156 @@ describe('CloudRunAdapter.observe', () => {
       name: 'cron',
       workloadKind: 'cron',
       status: 'running',
+    });
+  });
+
+  it('attaches, observes, and terminally detaches one exact Cloud Run domain mapping', async () => {
+    const adapter = await connectedAdapter();
+    const domain = 'cloudrun.domain-test.hypervibe.dev';
+    let mappingExists = false;
+    const mapping = {
+      apiVersion: 'domains.cloudrun.com/v1',
+      kind: 'DomainMapping',
+      metadata: {
+        name: domain,
+        namespace: 'gcp-project',
+        uid: 'mapping-uid-1',
+      },
+      spec: {
+        routeName: 'gcp-project-web',
+        certificateMode: 'AUTOMATIC',
+      },
+      status: {
+        mappedRouteName: 'gcp-project-web',
+        conditions: [
+          { type: 'Ready', status: 'True' },
+          { type: 'CertificateProvisioned', status: 'True', reason: 'CertificateReady' },
+        ],
+        resourceRecords: [{
+          name: 'cloudrun',
+          type: 'CNAME',
+          rrdata: 'ghs.googlehosted.com',
+        }],
+      },
+    };
+    const mutations: string[] = [];
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url === 'https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/services/gcp-project-web') {
+        return Response.json(webService);
+      }
+      if (url.includes('/domainmappings/') && method === 'GET') {
+        return mappingExists
+          ? Response.json(mapping)
+          : new Response(null, { status: 404 });
+      }
+      if (url.endsWith('/domainmappings') && method === 'POST') {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          metadata: { name: domain, namespace: 'gcp-project' },
+          spec: {
+            routeName: 'gcp-project-web',
+            certificateMode: 'AUTOMATIC',
+          },
+        });
+        mappingExists = true;
+        mutations.push('create');
+        return Response.json(mapping, { status: 201 });
+      }
+      if (url.includes('/domainmappings/') && method === 'DELETE') {
+        mappingExists = false;
+        mutations.push('delete');
+        return Response.json({});
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const attached = await adapter.attachCustomDomain({
+      projectId: 'gcp-project',
+      serviceId: 'gcp-project-web',
+      environmentId: 'us-central1',
+      domain,
+      dnsZone: 'hypervibe.dev',
+    });
+    expect(attached).toMatchObject({
+      success: true,
+      data: {
+        customDomainId: 'mapping-uid-1',
+        created: true,
+        providerVerified: true,
+        certificateStatus: 'CertificateReady',
+        dnsRecords: [{
+          name: domain,
+          type: 'CNAME',
+          value: 'ghs.googlehosted.com',
+          purpose: 'traffic verification',
+        }],
+      },
+    });
+
+    vi.stubEnv('HYPERVIBE_CLOUDRUN_DOMAIN_DELETE_DELAY_MS', '0');
+    const detached = await adapter.detachCustomDomain({
+      projectId: 'gcp-project',
+      serviceId: 'gcp-project-web',
+      environmentId: 'us-central1',
+      domain,
+      customDomainId: 'mapping-uid-1',
+    });
+    expect(detached).toMatchObject({
+      success: true,
+      data: { customDomainId: 'mapping-uid-1', deleted: true },
+    });
+    expect(mutations).toEqual(['create', 'delete']);
+  });
+
+  it('attributes observed Cloud Run mapping and certificate state to its exact route', async () => {
+    const adapter = await connectedAdapter();
+    const domain = 'cloudrun.domain-test.hypervibe.dev';
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/services?')) {
+        return Response.json({ services: [webService] });
+      }
+      if (url.startsWith('https://run.googleapis.com/v2/projects/gcp-project/locations/us-central1/jobs?')) {
+        return Response.json({ jobs: [] });
+      }
+      if (url.includes('/domainmappings?')) {
+        return Response.json({
+          items: [{
+            metadata: { name: domain, namespace: 'gcp-project', uid: 'mapping-uid-1' },
+            spec: { routeName: 'gcp-project-web' },
+            status: {
+              conditions: [{ type: 'Ready', status: 'True' }],
+              resourceRecords: [{ type: 'CNAME', rrdata: 'ghs.googlehosted.com' }],
+            },
+          }],
+        });
+      }
+      if (url.endsWith('/services/gcp-project-web:getIamPolicy') && method === 'GET') {
+        return Response.json({ bindings: [{ role: 'roles/run.invoker', members: ['allUsers'] }] });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const observed = await adapter.observe(environmentWith({
+      provider: 'cloudrun',
+      projectId: 'gcp-project',
+      environmentId: 'us-central1',
+      services: { web: { serviceId: 'gcp-project-web' } },
+    }));
+
+    expect(observed.services[0]).toMatchObject({
+      customDomains: [domain],
+      customDomainStatus: {
+        [domain]: {
+          providerVerified: true,
+          certificateStatus: 'True',
+          dnsConfigured: true,
+        },
+      },
     });
   });
 

@@ -178,19 +178,49 @@ Environment custom domains always require a successful provider-side attachment
 before Hypervibe writes DNS. Hosting providers declare `lifecycle.hosting` and
 their custom-domain support in registry metadata; generic orchestration must not
 infer support from a provider name or deployment category. There is no generic
-CNAME-to-service fallback. Railway currently implements the complete managed
-attachment lifecycle. Cloud Run, DigitalOcean App Platform, ECS, Azure Container
-Apps, and Vercel explicitly block environment custom-domain actions until their
-adapters implement attach and observation contracts. GitHub Pages remains the
-separate project-level lifecycle described below.
+CNAME-to-service fallback. Railway, Cloud Run, DigitalOcean App Platform, and
+Vercel implement provider-owned attach, observation, and exact detach contracts.
+Each successful attachment persists the provider
+domain id, service and environment ids, Cloudflare zone id, and every managed
+DNS record id before it may converge. An observed provider attachment without
+that durable binding is an adoption candidate and blocks with `hv_import`
+guidance; it is never silently adopted. Removing `environment.domain` plans a
+confirmation-gated detach of only those exact identities, with provider absence
+verified before DNS deletion. A provider attachment accepted before its DNS
+requirements are available is persisted with a known-empty record set so a
+later plan can continue or safely detach it.
+
+Provider certificate flows remain provider-owned. Cloud Run uses native domain
+mappings only in regions where Google exposes that API. DigitalOcean preserves
+the full App Spec while reconciling its domain collection. Vercel uses the exact
+Project-domain identity. Cloud Run declares DNS-only traffic in provider
+metadata, so generic apply forces its Cloudflare traffic records unproxied even
+if `domainProxy` was requested. GitHub Pages remains the separate project-level
+lifecycle described below.
+
+AWS ECS and Azure Container Apps are intentionally not registered as hosting
+providers. Their former connections required users to pre-create registries,
+networking, roles, and load-balancer identities, which made infrastructure
+inputs masquerade as credentials and left core hosting lifecycle outside
+Hypervibe. They must not return until an authentication-only connection can
+drive complete desired-state creation and teardown. AWS and Azure datastore and
+secret providers remain independent capabilities.
+
+DigitalOcean Container Registry is an account-level hosting prerequisite, not
+a credential field. The explicit DigitalOcean project action reuses the
+deterministically selected existing registry or creates a free Starter registry
+when the account has none. Provider CI only discovers and uses that reviewed
+registry; it must never create registry infrastructure. Environment teardown
+does not delete the shared account registry.
+
 When an attached Railway domain remains provider-unverified, the reviewed
 domain update first calls Railway's non-destructive `customDomainUpdate` for
 the same environment to refresh provider verification before rewriting DNS.
 Verified domains remain read-only on this path.
-For a provider attachment that remains stuck after that repair, setting a new
+For a provider adapter that exposes the repair capability, setting a new
 `environment.domainRecreateRevision` plans a one-time, confirmation-gated
 domain replacement. Apply deletes only the observed custom-domain id, recreates
-the same hostname on the same service and environment only after Railway
+the same hostname on the same service and environment only after the provider
 confirms the old attachment is absent, and writes the provider's fresh DNS
 requirements. Duplicate matching attachments block before deletion. The
 consumed revision is stored in
@@ -201,7 +231,9 @@ reviewed plan.
 Cloudflare DNS mutations resolve durable zone and record identities before
 writing. Ambiguous same-name zones or same-name/type records block instead of
 selecting the first result. Record deletion treats already-absent as success but
-must verify terminal absence before reporting success.
+must verify terminal absence before reporting success. Multi-value record sets,
+including Cloud Run A/AAAA answers, are reconciled as a set and persist every
+exact record id without pruning unrelated values Hypervibe did not create.
 When that binding confirms the desired traffic record is proxied, provider-side
 CNAME comparison is intentionally opaque: a verified domain with a ready
 provider certificate may converge even if the origin reports its DNS comparison

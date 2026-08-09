@@ -23,6 +23,7 @@ import type {
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import {
   VercelClient,
+  type VercelDomainConfig,
   type VercelDeployment,
   type VercelEnvironmentVariable,
   type VercelProject,
@@ -475,6 +476,111 @@ export class VercelAdapter implements IProviderAdapter {
     }
   }
 
+  async attachCustomDomain(params: {
+    projectId?: string;
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+  }): Promise<Receipt> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    try {
+      const scope = await this.assertScopeBinding(params.projectId);
+      const binding = parseVercelServiceBinding(params.serviceId);
+      this.assertServiceScopeBinding(binding.scope.binding, scope);
+      const project = await this.client.getProject(binding.projectId);
+      if (!project) {
+        return {
+          success: false,
+          message: 'Failed to attach Vercel custom domain',
+          error: `Bound Vercel project ${binding.projectId} was not found.`,
+        };
+      }
+      this.assertProjectScope(project, scope);
+      const existing = await this.client.getProjectDomain(binding.projectId, params.domain);
+      const current = existing
+        ?? await this.client.addProjectDomain(binding.projectId, params.domain);
+      const config = await this.client.getDomainConfig(params.domain);
+      return {
+        success: true,
+        message: existing
+          ? 'Vercel custom domain already attached'
+          : 'Vercel custom domain attached',
+        data: {
+          domain: current.name,
+          customDomainId: this.projectDomainId(binding.projectId, current.name),
+          created: !existing,
+          providerVerified: current.verified && !config.misconfigured,
+          dnsRecords: this.projectDomainDnsRecords(current),
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to attach Vercel custom domain',
+        error: this.formatError(error),
+      };
+    }
+  }
+
+  async detachCustomDomain(params: {
+    projectId?: string;
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+    customDomainId?: string;
+  }): Promise<Receipt> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    try {
+      const scope = await this.assertScopeBinding(params.projectId);
+      const binding = parseVercelServiceBinding(params.serviceId);
+      this.assertServiceScopeBinding(binding.scope.binding, scope);
+      const project = await this.client.getProject(binding.projectId);
+      if (!project) {
+        return {
+          success: false,
+          message: 'Failed to detach Vercel custom domain',
+          error: `Bound Vercel project ${binding.projectId} was not found, so domain absence cannot be verified.`,
+        };
+      }
+      this.assertProjectScope(project, scope);
+      const expectedId = this.projectDomainId(binding.projectId, params.domain);
+      if (params.customDomainId && params.customDomainId !== expectedId) {
+        return {
+          success: false,
+          message: 'Vercel custom-domain identity changed',
+          error: `Reviewed custom-domain identity ${params.customDomainId} does not match ${expectedId}.`,
+        };
+      }
+      const existing = await this.client.getProjectDomain(binding.projectId, params.domain);
+      if (!existing) {
+        return {
+          success: true,
+          message: 'Vercel custom domain is already absent',
+          data: { domain: params.domain, customDomainId: expectedId, alreadyAbsent: true },
+        };
+      }
+      await this.client.removeProjectDomain(binding.projectId, params.domain);
+      if (await this.client.getProjectDomain(binding.projectId, params.domain)) {
+        return {
+          success: false,
+          message: 'Vercel custom-domain deletion is not complete',
+          error: `${params.domain} remains attached to Vercel project ${binding.projectId}.`,
+        };
+      }
+      return {
+        success: true,
+        message: 'Vercel custom domain detached',
+        data: { domain: params.domain, customDomainId: expectedId, deleted: true },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to detach Vercel custom domain',
+        error: this.formatError(error),
+      };
+    }
+  }
+
   async getDeployStatus(
     environment: Environment,
     serviceId: string
@@ -599,6 +705,12 @@ export class VercelAdapter implements IProviderAdapter {
       this.client!.listDeployments(project.id),
       this.client!.listProjectDomains(project.id),
     ]);
+    const domainConfigs = new Map<string, VercelDomainConfig>(await Promise.all(
+      domains.map(async (domain) => [
+        domain.name,
+        await this.client!.getDomainConfig(domain.name),
+      ] as const)
+    ));
     const production = variables.filter(
       (variable) => this.targetsProduction(variable)
     );
@@ -643,7 +755,7 @@ export class VercelAdapter implements IProviderAdapter {
         workloadKind: 'web',
         ...(url ? { url } : {}),
         customDomains: domains.map((domain) => domain.name).sort(),
-        customDomainStatus: this.customDomainStatus(domains),
+        customDomainStatus: this.customDomainStatus(domains, domainConfigs),
         config: {
           ...(healthVariable && this.variableValueIsKnown(healthVariable)
             ? { healthCheckPath: healthVariable.value }
@@ -976,14 +1088,43 @@ export class VercelAdapter implements IProviderAdapter {
   }
 
   private customDomainStatus(
-    domains: VercelProjectDomain[]
-  ): Record<string, { dnsConfigured?: boolean }> {
+    domains: VercelProjectDomain[],
+    configs: Map<string, VercelDomainConfig>
+  ): Record<string, { providerVerified: boolean; dnsConfigured: boolean }> {
     return Object.fromEntries(
-      domains.map((domain) => [
-        domain.name,
-        { dnsConfigured: domain.verified },
-      ])
+      domains.map((domain) => {
+        const configured = configs.get(domain.name);
+        if (!configured) {
+          throw new Error(`Vercel domain configuration was not observed for ${domain.name}.`);
+        }
+        return [domain.name, {
+          providerVerified: domain.verified && !configured.misconfigured,
+          dnsConfigured: !configured.misconfigured,
+        }];
+      })
     );
+  }
+
+  private projectDomainId(projectId: string, domain: string): string {
+    return `project-domain:${projectId}:${domain.toLowerCase()}`;
+  }
+
+  private projectDomainDnsRecords(domain: VercelProjectDomain): Array<{
+    name: string;
+    type: string;
+    value: string;
+    purpose: string;
+  }> {
+    const traffic = domain.name.toLowerCase() === domain.apexName?.toLowerCase()
+      ? { name: domain.name, type: 'A', value: '76.76.21.21', purpose: 'traffic' }
+      : { name: domain.name, type: 'CNAME', value: 'cname.vercel-dns-0.com', purpose: 'traffic' };
+    const verification = (domain.verification ?? []).map((record) => ({
+      name: record.domain,
+      type: record.type,
+      value: record.value,
+      purpose: 'verification',
+    }));
+    return [traffic, ...verification];
   }
 
   private servicePrefix(environment: Environment): string {
@@ -1100,7 +1241,7 @@ providerRegistry.register({
       ],
     },
     lifecycle: {
-      hosting: { customDomains: 'unsupported' },
+      hosting: { customDomains: 'managed' },
     },
     orchestration: {
       project: { shareAcrossEnvironments: true },

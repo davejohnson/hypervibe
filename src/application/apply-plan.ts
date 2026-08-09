@@ -49,7 +49,8 @@ import {
   applyGitHubPages,
   applyGitHubPagesDns,
 } from '../domain/services/github-pages.service.js';
-import { setupCustomDomain } from '../domain/services/domain.service.js';
+import { setupCustomDomain, teardownCustomDomain } from '../domain/services/domain.service.js';
+import { DOMAIN_DETACH_OPERATION } from '../domain/services/domain-attach-policy.js';
 import {
   connectionSetupDetails,
   formatConnectionGuidance,
@@ -1411,6 +1412,66 @@ async function applyDomain(
       error: `No local environment "${envName}"`,
     };
   }
+  if (action.type === 'destroy') {
+    const metadata = asRecord(action.metadata);
+    const bindings = parseHostingBindings(environment);
+    const domainBinding = bindings.domainDns;
+    const reviewedRecordIds = stringArrayField(metadata, 'dnsRecordIds').sort();
+    const currentRecordIds = (domainBinding?.records ?? []).map((record) => record.id).sort();
+    const bindingMatches = action.metadata?.operation === DOMAIN_DETACH_OPERATION
+      && action.resource.provider === environmentSpec.hosting.provider
+      && !environmentSpec.domain
+      && domainBinding?.name === action.resource.name
+      && stringField(metadata, 'projectId') === bindings.projectId
+      && stringField(metadata, 'serviceName') === domainBinding.serviceName
+      && stringField(metadata, 'serviceId') === domainBinding.serviceId
+      && stringField(metadata, 'environmentId') === domainBinding.environmentId
+      && stringField(metadata, 'providerDomainId') === domainBinding.providerDomainId
+      && stringField(metadata, 'zoneId') === domainBinding.zoneId
+      && JSON.stringify(reviewedRecordIds) === JSON.stringify(currentRecordIds);
+    if (!bindingMatches) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Domain teardown ${action.id} no longer matches desired state`,
+        error: 'The reviewed provider or DNS identities changed, the domain was re-declared, or the environment binding is incomplete. Re-run hv_plan.',
+      };
+    }
+
+    const result = await teardownCustomDomain({
+      project,
+      environment,
+      domain: action.resource.name,
+    });
+    if (!result.success) {
+      return {
+        success: false,
+        message: `Domain teardown failed for ${action.resource.name}`,
+        error: result.error ?? 'Domain teardown failed',
+        data: result as unknown as Record<string, unknown>,
+      };
+    }
+
+    const serviceName = domainBinding.serviceName!;
+    const services = { ...(bindings.services ?? {}) };
+    const serviceBinding = services[serviceName];
+    if (serviceBinding) {
+      services[serviceName] = {
+        ...serviceBinding,
+        customDomains: (serviceBinding.customDomains ?? [])
+          .filter((domain) => domain !== action.resource.name),
+      };
+    }
+    ctx.repos.environments.updatePlatformBindings(environment.id, {
+      services,
+      domainDns: undefined,
+    });
+    return {
+      success: true,
+      message: `Detached domain ${action.resource.name} and removed its managed DNS records`,
+      data: result as unknown as Record<string, unknown>,
+    };
+  }
   if (
     action.resource.provider !== environmentSpec.hosting.provider
     || action.resource.name !== environmentSpec.domain
@@ -1439,18 +1500,53 @@ async function applyDomain(
     };
   }
 
+  const effectiveDomainProxy = booleanField(
+    asRecord(action.metadata) ?? {},
+    'domainProxy'
+  ) ?? environmentSpec.domainProxy ?? true;
   const result = await setupCustomDomain({
     project,
     environment,
     domain: action.resource.name,
-    trafficProxied: environmentSpec.domainProxy ?? true,
+    trafficProxied: effectiveDomainProxy,
     recreate: recreateRequested,
   });
-  if (result.dnsConfigured) {
+  if (
+    result.customDomainAttached
+    && result.customDomainId
+  ) {
+    const bindings = parseHostingBindings(environment);
+    const serviceName = result.service;
+    const serviceBinding = serviceName ? bindings.services?.[serviceName] : undefined;
     ctx.repos.environments.updatePlatformBindings(environment.id, {
+      ...(serviceName && serviceBinding
+        ? {
+          services: {
+            ...(bindings.services ?? {}),
+            [serviceName]: {
+              ...serviceBinding,
+              customDomains: Array.from(new Set([
+                ...(serviceBinding.customDomains ?? []),
+                action.resource.name,
+              ])),
+            },
+          },
+        }
+        : {}),
       domainDns: {
         name: action.resource.name,
-        proxied: environmentSpec.domainProxy ?? true,
+        proxied: effectiveDomainProxy,
+        ...(result.customDomainId ? { providerDomainId: result.customDomainId } : {}),
+        ...(serviceName ? { serviceName } : {}),
+        ...(serviceBinding?.serviceId ? { serviceId: serviceBinding.serviceId } : {}),
+        ...(bindings.environmentId ? { environmentId: bindings.environmentId } : {}),
+        ...(result.zone?.id ? { zoneId: result.zone.id } : {}),
+        records: (result.dnsRecords ?? []).map((record) => ({
+          id: record.id,
+          name: record.name,
+          type: record.type,
+          target: record.target,
+        })),
         ...(environmentSpec.domainRecreateRevision
           ? { recreateRevision: environmentSpec.domainRecreateRevision }
           : {}),

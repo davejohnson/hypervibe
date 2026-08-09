@@ -962,6 +962,7 @@ export class PlanService {
       local,
       providerBehavior: hostingMetadata?.orchestration?.diff,
       customDomainManagement: hostingMetadata?.lifecycle?.hosting?.customDomains,
+      customDomainTrafficProxy: hostingMetadata?.lifecycle?.hosting?.domainTrafficProxy,
       expectedSource: this.expectedDeploySource(projectForPlan, environmentName, environmentSpec),
       managedDatabaseEnvVars,
       managedCacheEnvVars,

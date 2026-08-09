@@ -32,6 +32,7 @@ import { GITHUB_ACTIONS_ROLLBACK_OPERATION } from '../../domain/services/ci-roll
 import { DATABASE_RESILIENCE_OPERATIONS } from '../../domain/services/database-resilience-plan.service.js';
 import { LOAD_BALANCER_OPERATIONS } from '../../domain/services/load-balancer-plan.service.js';
 import { MESSAGING_OPERATIONS } from '../../domain/services/twilio-messaging.service.js';
+import { DOMAIN_DETACH_OPERATION } from '../../domain/services/domain-attach-policy.js';
 import {
   resolvePlanActionAuthority,
   type PlanMutationCapability,
@@ -537,6 +538,26 @@ const authorized: AuthorizedCase[] = [
     label: 'custom domain configure',
     capability: 'domain.configure',
     action: action({ id: 'domain:example.com', kind: 'domain', name: 'example.com' }),
+  },
+  {
+    label: 'custom domain detach',
+    capability: 'domain.configure',
+    action: action({
+      id: 'domain:example.com',
+      type: 'destroy',
+      kind: 'domain',
+      name: 'example.com',
+      operation: DOMAIN_DETACH_OPERATION,
+      metadata: {
+        projectId: 'project-1',
+        serviceName: 'web',
+        serviceId: 'service-1',
+        environmentId: 'environment-1',
+        providerDomainId: 'domain-1',
+        zoneId: 'zone-1',
+        dnsRecordIds: ['record-1'],
+      },
+    }),
   },
   {
     label: 'email runtime sync',

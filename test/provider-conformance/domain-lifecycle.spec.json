@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "project": "hypervibe-domain-conformance",
+  "gitRemoteUrl": "https://github.com/davejohnson/hypervibe.git",
+  "runtime": {
+    "kind": "node",
+    "version": "24"
+  },
+  "environments": {
+    "railway": {
+      "hosting": {
+        "provider": "railway"
+      },
+      "services": {
+        "web": {
+          "workloadKind": "web",
+          "startCommand": "node test/provider-conformance/fixture/server.mjs",
+          "healthCheckPath": "/health",
+          "public": true
+        }
+      },
+      "domain": "railway.domain-test.hypervibe.dev",
+      "domainProxy": false,
+      "email": {
+        "enabled": false
+      },
+      "envVars": {
+        "HYPERVIBE_CONFORMANCE_REVISION": "railway-v1"
+      },
+      "deploy": {
+        "strategy": "manual"
+      }
+    },
+    "cloudrun": {
+      "hosting": {
+        "provider": "cloudrun"
+      },
+      "services": {
+        "web": {
+          "workloadKind": "web",
+          "startCommand": "node test/provider-conformance/fixture/server.mjs",
+          "healthCheckPath": "/health",
+          "public": true
+        }
+      },
+      "domain": "cloudrun.domain-test.hypervibe.dev",
+      "domainProxy": false,
+      "email": {
+        "enabled": false
+      },
+      "envVars": {
+        "HYPERVIBE_CONFORMANCE_REVISION": "cloudrun-v1"
+      },
+      "deploy": {
+        "strategy": "manual"
+      }
+    },
+    "digitalocean": {
+      "hosting": {
+        "provider": "digitalocean"
+      },
+      "services": {
+        "web": {
+          "workloadKind": "web",
+          "startCommand": "node test/provider-conformance/fixture/server.mjs",
+          "healthCheckPath": "/health",
+          "public": true
+        }
+      },
+      "domain": "digitalocean.domain-test.hypervibe.dev",
+      "domainProxy": false,
+      "email": {
+        "enabled": false
+      },
+      "envVars": {
+        "HYPERVIBE_CONFORMANCE_REVISION": "digitalocean-v1"
+      },
+      "deploy": {
+        "strategy": "manual"
+      }
+    },
+    "vercel": {
+      "hosting": {
+        "provider": "vercel"
+      },
+      "services": {
+        "web": {
+          "workloadKind": "web",
+          "healthCheckPath": "/api/health",
+          "public": true
+        }
+      },
+      "domain": "vercel.domain-test.hypervibe.dev",
+      "domainProxy": false,
+      "email": {
+        "enabled": false
+      },
+      "envVars": {
+        "HYPERVIBE_CONFORMANCE_REVISION": "vercel-v1"
+      },
+      "deploy": {
+        "strategy": "manual"
+      }
+    }
+  }
+}

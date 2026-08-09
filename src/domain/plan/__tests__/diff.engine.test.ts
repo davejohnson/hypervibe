@@ -91,6 +91,42 @@ function local(overrides: Partial<LocalSnapshot> = {}): LocalSnapshot {
   };
 }
 
+function localWithDomain(params: {
+  provider?: string;
+  proxied?: boolean;
+  recreateRevision?: string;
+  withDnsRecords?: boolean;
+} = {}): LocalSnapshot {
+  return local({
+    bindings: {
+      provider: params.provider ?? 'railway',
+      projectId: params.provider === 'cloudrun' ? 'gcp-project' : 'rail-proj-1',
+      environmentId: params.provider === 'cloudrun' ? 'us-central1' : 'rail-env-1',
+      services: { web: { serviceId: 'svc-1', customDomains: ['myapp.dev'] } },
+      domainDns: {
+        name: 'myapp.dev',
+        proxied: params.proxied ?? true,
+        providerDomainId: 'provider-domain-1',
+        serviceName: 'web',
+        serviceId: 'svc-1',
+        environmentId: params.provider === 'cloudrun' ? 'us-central1' : 'rail-env-1',
+        zoneId: 'zone-1',
+        records: params.withDnsRecords === false
+          ? []
+          : [{
+              id: 'dns-1',
+              name: 'myapp.dev',
+              type: 'CNAME',
+              target: 'provider.example',
+            }],
+        ...(params.recreateRevision
+          ? { recreateRevision: params.recreateRevision }
+          : {}),
+      },
+    },
+  });
+}
+
 describe('diffEnvironment — in sync', () => {
   it('returns noops when everything matches', () => {
     const result = diffEnvironment({ spec: spec(), envName: 'production', observed: observed(), local: local() });
@@ -848,10 +884,136 @@ describe('diffEnvironment — domain and workload', () => {
           customDomainStatus: { 'myapp.dev': { providerVerified: true, dnsConfigured: true } },
         })],
       }),
-      local: local(),
+      local: localWithDomain(),
       customDomainManagement: 'managed',
     });
     expect(attached.actions.find((a) => a.id === 'domain:myapp.dev')!.type).toBe('noop');
+  });
+
+  it('requires explicit import when an attached domain is missing its durable local binding', () => {
+    const result = diffEnvironment({
+      spec: spec({ domain: 'myapp.dev' }),
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: {
+            'myapp.dev': { providerVerified: true, dnsConfigured: true },
+          },
+        })],
+      }),
+      local: local(),
+      customDomainManagement: 'managed',
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
+      type: 'update',
+      metadata: { blockedReason: 'domain_binding_missing' },
+      reason: expect.stringContaining('hv_import'),
+    });
+  });
+
+  it('plans exact confirmation-gated domain teardown before its service is destroyed', () => {
+    const result = diffEnvironment({
+      spec: spec({ services: {}, envVars: {} }),
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({ customDomains: ['railway.domain-test.hypervibe.dev'] })],
+      }),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: {
+            web: {
+              serviceId: 'svc-1',
+              customDomains: ['railway.domain-test.hypervibe.dev'],
+            },
+          },
+          domainDns: {
+            name: 'railway.domain-test.hypervibe.dev',
+            proxied: false,
+            providerDomainId: 'domain-1',
+            serviceName: 'web',
+            serviceId: 'svc-1',
+            environmentId: 'rail-env-1',
+            zoneId: 'zone-1',
+            records: [{
+              id: 'record-1',
+              name: 'railway.domain-test.hypervibe.dev',
+              type: 'CNAME',
+              target: 'target.railway.app',
+            }],
+          },
+        },
+      }),
+      customDomainManagement: 'managed',
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:railway.domain-test.hypervibe.dev')).toMatchObject({
+      type: 'destroy',
+      verified: true,
+      requiresConfirm: true,
+      metadata: {
+        operation: 'customDomainDetach',
+        projectId: 'rail-proj-1',
+        serviceName: 'web',
+        serviceId: 'svc-1',
+        environmentId: 'rail-env-1',
+        providerDomainId: 'domain-1',
+        zoneId: 'zone-1',
+        dnsRecordIds: ['record-1'],
+      },
+    });
+    expect(result.actions.find((action) => action.id === 'service:web:destroy')?.dependsOn)
+      .toContain('domain:railway.domain-test.hypervibe.dev');
+  });
+
+  it('can detach a provider attachment recorded before DNS requirements became available', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({ customDomains: ['myapp.dev'] })],
+      }),
+      local: localWithDomain({ proxied: false, withDnsRecords: false }),
+      customDomainManagement: 'managed',
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
+      type: 'destroy',
+      requiresConfirm: true,
+      metadata: {
+        providerDomainId: 'provider-domain-1',
+        zoneId: 'zone-1',
+        dnsRecordIds: [],
+      },
+    });
+  });
+
+  it('blocks domain teardown when durable attachment and DNS identities are incomplete', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({ services: [observedWeb({ customDomains: ['legacy.example.com'] })] }),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'svc-1' } },
+          domainDns: { name: 'legacy.example.com', proxied: false },
+        },
+      }),
+      customDomainManagement: 'managed',
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:legacy.example.com')).toMatchObject({
+      type: 'destroy',
+      requiresConfirm: true,
+      metadata: { blockedReason: 'domain_detach_binding_incomplete' },
+    });
   });
 
   it('blocks before DNS mutation when the hosting provider does not manage custom domains', () => {
@@ -892,15 +1054,7 @@ describe('diffEnvironment — domain and workload', () => {
           customDomainStatus: { 'myapp.dev': { providerVerified: true, dnsConfigured: true } },
         })],
       }),
-      local: local({
-        bindings: {
-          provider: 'railway',
-          projectId: 'rail-proj-1',
-          environmentId: 'rail-env-1',
-          services: { web: { serviceId: 'svc-1' } },
-          domainDns: { name: 'myapp.dev', proxied: false },
-        },
-      }),
+      local: localWithDomain({ proxied: false }),
       customDomainManagement: 'managed',
     });
 
@@ -923,19 +1077,37 @@ describe('diffEnvironment — domain and workload', () => {
           customDomainStatus: { 'myapp.dev': { providerVerified: true, dnsConfigured: true } },
         })],
       }),
-      local: local({
-        bindings: {
-          provider: 'railway',
-          projectId: 'rail-proj-1',
-          environmentId: 'rail-env-1',
-          services: { web: { serviceId: 'svc-1' } },
-          domainDns: { name: 'myapp.dev', proxied: false },
-        },
-      }),
+      local: localWithDomain({ proxied: false }),
       customDomainManagement: 'managed',
     });
 
     expect(result.actions.find((action) => action.id === 'domain:myapp.dev')!.type).toBe('noop');
+  });
+
+  it('uses DNS-only traffic as effective desired state when the provider requires it', () => {
+    const result = diffEnvironment({
+      spec: spec({ domain: 'myapp.dev', domainProxy: true }),
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: {
+            'myapp.dev': { providerVerified: true, dnsConfigured: true },
+          },
+        })],
+      }),
+      local: localWithDomain({ provider: 'cloudrun', proxied: false }),
+      customDomainManagement: 'managed',
+      customDomainTrafficProxy: 'dns-only',
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
+      type: 'noop',
+      metadata: {
+        domainProxy: false,
+        domainTrafficProxy: 'dns-only',
+      },
+    });
   });
 
   it('recognizes verified provider DNS as proxy-opaque when Hypervibe manages the proxied traffic record', () => {
@@ -955,15 +1127,7 @@ describe('diffEnvironment — domain and workload', () => {
           },
         })],
       }),
-      local: local({
-        bindings: {
-          provider: 'railway',
-          projectId: 'rail-proj-1',
-          environmentId: 'rail-env-1',
-          services: { web: { serviceId: 'svc-1' } },
-          domainDns: { name: 'myapp.dev', proxied: true },
-        },
-      }),
+      local: localWithDomain(),
       customDomainManagement: 'managed',
     });
 
@@ -990,15 +1154,7 @@ describe('diffEnvironment — domain and workload', () => {
           },
         })],
       }),
-      local: local({
-        bindings: {
-          provider: 'railway',
-          projectId: 'rail-proj-1',
-          environmentId: 'rail-env-1',
-          services: { web: { serviceId: 'svc-1' } },
-          domainDns: { name: 'myapp.dev', proxied: true },
-        },
-      }),
+      local: localWithDomain(),
       customDomainManagement: 'managed',
     });
 
@@ -1014,7 +1170,7 @@ describe('diffEnvironment — domain and workload', () => {
       spec: withDomain,
       envName: 'production',
       observed: observed({ services: [observedWeb({ customDomains: ['myapp.dev'] })] }),
-      local: local(),
+      local: localWithDomain(),
       customDomainManagement: 'managed',
     });
 
@@ -1046,7 +1202,7 @@ describe('diffEnvironment — domain and workload', () => {
           },
         })],
       }),
-      local: local(),
+      local: localWithDomain(),
       customDomainManagement: 'managed',
     });
 
@@ -1074,7 +1230,7 @@ describe('diffEnvironment — domain and workload', () => {
           },
         })],
       }),
-      local: local(),
+      local: localWithDomain(),
       customDomainManagement: 'managed',
     });
 
@@ -1101,19 +1257,7 @@ describe('diffEnvironment — domain and workload', () => {
           },
         })],
       }),
-      local: local({
-        bindings: {
-          provider: 'railway',
-          projectId: 'rail-proj-1',
-          environmentId: 'rail-env-1',
-          services: { web: { serviceId: 'svc-1' } },
-          domainDns: {
-            name: 'myapp.dev',
-            proxied: false,
-            recreateRevision: 'repair-previous',
-          },
-        },
-      }),
+      local: localWithDomain({ proxied: false, recreateRevision: 'repair-previous' }),
       customDomainManagement: 'managed',
     });
 
@@ -1145,18 +1289,9 @@ describe('diffEnvironment — domain and workload', () => {
           },
         })],
       }),
-      local: local({
-        bindings: {
-          provider: 'railway',
-          projectId: 'rail-proj-1',
-          environmentId: 'rail-env-1',
-          services: { web: { serviceId: 'svc-1' } },
-          domainDns: {
-            name: 'myapp.dev',
-            proxied: false,
-            recreateRevision: 'repair-2026-08-08',
-          },
-        },
+      local: localWithDomain({
+        proxied: false,
+        recreateRevision: 'repair-2026-08-08',
       }),
       customDomainManagement: 'managed',
     });
