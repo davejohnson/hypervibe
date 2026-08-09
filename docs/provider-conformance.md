@@ -43,17 +43,19 @@ ordinary CI gate until the corresponding provider is fully supported.
 `test/provider-conformance/domain-lifecycle.spec.json` is the isolated live
 fixture for environment domains. It declares one DNS-only subdomain under
 `domain-test.hypervibe.dev` for each hosting provider: Railway, Cloud Run,
-DigitalOcean App Platform, and Vercel. Run each
-environment stage-by-stage through `hv_spec`, `hv_plan`, `hv_apply`, and
-`hv_status`; do not apply the entire four-provider fixture as one opaque batch.
+AWS ECS Express Mode, Azure Container Apps, DigitalOcean App Platform, and
+Vercel. Run each environment stage-by-stage through `hv_spec`, `hv_plan`,
+`hv_apply`, and `hv_status`; do not apply the entire six-provider fixture as one
+opaque batch.
 
 The shared contract requires provider attach before Cloudflare mutation,
 provider-returned DNS records only, durable provider/service/environment/zone
 and record ids, explicit pending certificate receipts, noop convergence, and a
 confirmation-gated exact detach with terminal provider and DNS absence. An
 already-attached hostname without the durable binding blocks for explicit
-`hv_import`. Cloud Run declares DNS-only traffic; the other three providers may
-opt into proxying only after direct certificate validation succeeds.
+`hv_import`. Cloud Run, ECS Express Mode, and Azure Container Apps declare
+DNS-only traffic; Railway, DigitalOcean, and Vercel may opt into proxying only
+after direct certificate validation succeeds.
 
 Redis/Valkey starts with Railway, Memorystore, DigitalOcean, ElastiCache,
 and Azure Managed Redis. Railway is the first implemented
@@ -116,15 +118,16 @@ updates, then proves load-balancer-first cleanup before origin deletion. V1
 does not create AWS ALBs, private origins, weighted
 steering, geo steering, session affinity, or cross-environment origins.
 
-Azure Database for PostgreSQL Flexible Server and Azure Managed Redis remain
-implemented under their independent `azure-postgres` and
-`azure-managed-redis` provider ids. They are `planned`, not ready for live
-promotion, until Hypervibe has a compatible declarative Azure hosting and
-network profile. Azure Container Apps hosting was removed because it required
-users to pre-create and identify an ACR registry and supporting infrastructure.
-The datastore adapters still use Microsoft Entra, subscription, resource-group,
-and location credentials and keep generated passwords, keys, and connection
-URLs out of receipts.
+Azure Container Apps is now an authentication-only, `ready-for-live` hosting
+slice. Its reviewed project action creates the tagged resource group, Basic
+ACR registry, role assignments, and managed environment; service actions create
+system-identity Container Apps, and CI only pushes an exact digest and updates
+already-bound app IDs. Azure Database for PostgreSQL Flexible Server and Azure
+Managed Redis remain implemented under independent `azure-postgres` and
+`azure-managed-redis` provider ids and stay `planned` pending their own full
+stack live contracts. Datastore credentials and lifecycle remain separate from
+hosting, and generated passwords, keys, and connection URLs stay out of
+receipts.
 
 The extended matrix also includes:
 

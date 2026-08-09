@@ -132,6 +132,14 @@ const azureCredentials: ProviderCredentialField[] = [
   { field: 'location', environmentVariable: 'HYPERVIBE_TEST_AZURE_LOCATION' },
 ];
 
+const azureHostingCredentials: ProviderCredentialField[] = [
+  { field: 'tenantId', environmentVariable: 'HYPERVIBE_TEST_AZURE_TENANT_ID' },
+  { field: 'subscriptionId', environmentVariable: 'HYPERVIBE_TEST_AZURE_SUBSCRIPTION_ID' },
+  { field: 'clientId', environmentVariable: 'HYPERVIBE_TEST_AZURE_CLIENT_ID' },
+  { field: 'clientSecret', environmentVariable: 'HYPERVIBE_TEST_AZURE_CLIENT_SECRET' },
+  { field: 'location', environmentVariable: 'HYPERVIBE_TEST_AZURE_LOCATION', optional: true },
+];
+
 const vercelCredentials: ProviderCredentialField[] = [
   { field: 'accessToken', environmentVariable: 'HYPERVIBE_TEST_VERCEL_ACCESS_TOKEN' },
   { field: 'teamId', environmentVariable: 'HYPERVIBE_TEST_VERCEL_TEAM_ID', optional: true },
@@ -189,6 +197,32 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     customDomains: 'managed',
     domainTrafficProxy: 'dns-only',
     credentials: gcpCredentials,
+  },
+  {
+    kind: 'hosting',
+    provider: 'ecs',
+    vendor: 'AWS',
+    service: 'ECS Express Mode',
+    status: 'ready-for-live',
+    customDomains: 'managed',
+    domainTrafficProxy: 'dns-only',
+    credentials: awsCredentials,
+    managedWorkflow: dockerWebManagedWorkflow('deploy-ecs-production.yml'),
+    implementationNote:
+      'The authentication-only connection, shared default-VPC prerequisite, project-owned ECR/IAM/cluster bootstrap, ECS Express service lifecycle, phased ACM/ALB domain lifecycle, exact-digest CI workflow, and mocked safety contracts are implemented. Promotion requires a successful opt-in live lifecycle run.',
+  },
+  {
+    kind: 'hosting',
+    provider: 'azure-container-apps',
+    vendor: 'Microsoft Azure',
+    service: 'Container Apps',
+    status: 'ready-for-live',
+    customDomains: 'managed',
+    domainTrafficProxy: 'dns-only',
+    credentials: azureHostingCredentials,
+    managedWorkflow: dockerWebManagedWorkflow('deploy-azure-container-apps-production.yml'),
+    implementationNote:
+      'The service-principal-only connection, project-owned resource group/ACR/managed-environment bootstrap, managed-identity Container App lifecycle, phased managed-certificate domain lifecycle, exact-digest CI workflow, and mocked safety contracts are implemented. Promotion requires a successful opt-in live lifecycle run.',
   },
   {
     kind: 'hosting',
@@ -305,7 +339,7 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     credentials: azureCredentials,
     fixtureHostingProvider: 'railway',
     implementationNote:
-      'The PostgreSQL Flexible Server adapter and mocked lifecycle safety contract remain implemented. Live promotion is blocked until a compatible declarative hosting and network profile exists; Azure Container Apps hosting was removed because it required pre-created registry infrastructure.',
+      'The PostgreSQL Flexible Server adapter and mocked lifecycle safety contract remain implemented. Azure Container Apps now provides declarative hosting, but this datastore remains planned until its independent network profile and full-stack live lifecycle pass.',
   },
   {
     kind: 'database',
@@ -378,7 +412,7 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     credentials: azureCredentials,
     fixtureHostingProvider: 'railway',
     implementationNote:
-      'The Azure Managed Redis adapter and mocked lifecycle safety contract remain implemented. Live promotion is blocked until a compatible declarative hosting and network profile exists; Azure Container Apps hosting was removed because it required pre-created registry infrastructure.',
+      'The Azure Managed Redis adapter and mocked lifecycle safety contract remain implemented. Azure Container Apps now provides declarative hosting, but this datastore remains planned until its independent network profile and full-stack live lifecycle pass.',
   },
 ];
 

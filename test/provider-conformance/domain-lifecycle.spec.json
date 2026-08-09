@@ -55,6 +55,54 @@
         "strategy": "manual"
       }
     },
+    "ecs": {
+      "hosting": {
+        "provider": "ecs"
+      },
+      "services": {
+        "web": {
+          "workloadKind": "web",
+          "startCommand": "node test/provider-conformance/fixture/server.mjs",
+          "healthCheckPath": "/health",
+          "public": true
+        }
+      },
+      "domain": "ecs.domain-test.hypervibe.dev",
+      "domainProxy": false,
+      "email": {
+        "enabled": false
+      },
+      "envVars": {
+        "HYPERVIBE_CONFORMANCE_REVISION": "ecs-v1"
+      },
+      "deploy": {
+        "strategy": "manual"
+      }
+    },
+    "azure-container-apps": {
+      "hosting": {
+        "provider": "azure-container-apps"
+      },
+      "services": {
+        "web": {
+          "workloadKind": "web",
+          "startCommand": "node test/provider-conformance/fixture/server.mjs",
+          "healthCheckPath": "/health",
+          "public": true
+        }
+      },
+      "domain": "azure.domain-test.hypervibe.dev",
+      "domainProxy": false,
+      "email": {
+        "enabled": false
+      },
+      "envVars": {
+        "HYPERVIBE_CONFORMANCE_REVISION": "azure-v1"
+      },
+      "deploy": {
+        "strategy": "manual"
+      }
+    },
     "digitalocean": {
       "hosting": {
         "provider": "digitalocean"
