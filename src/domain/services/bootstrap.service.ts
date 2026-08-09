@@ -82,6 +82,8 @@ function recordConnectedDeploySource(params: {
 export async function executeBootstrap(params: {
   projectName: string;
   environmentName: string;
+  /** Non-secret desired hosting placement; provider default when omitted. */
+  hostingRegion?: string;
   services: string[];
   crons?: DesiredState['crons'];
   domain?: string;
@@ -290,6 +292,20 @@ export async function executeBootstrap(params: {
       success: false,
       summary: {
         error: `Provider ${targetPlatform} is not a hosting adapter`,
+        rollback: cleanup,
+        transaction: { created: tx.listResources() },
+      },
+    };
+  }
+
+  try {
+    await hostingAdapter.configureTarget?.({ region: params.hostingRegion });
+  } catch (error) {
+    const cleanup = await tx.rollback();
+    return {
+      success: false,
+      summary: {
+        error: `Invalid hosting target for ${targetPlatform}: ${error instanceof Error ? error.message : String(error)}`,
         rollback: cleanup,
         transaction: { created: tx.listResources() },
       },

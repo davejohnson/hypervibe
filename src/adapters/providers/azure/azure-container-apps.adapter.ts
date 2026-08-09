@@ -48,15 +48,23 @@ const INTERNAL_ENV_KEYS = new Set([
   IMAGE_DIGEST_KEY,
 ]);
 
-export const AzureContainerAppsCredentialsSchema = z.object({
+const AzureContainerAppsAuthenticationSchema = z.object({
   tenantId: z.string().uuid('Azure tenant ID must be a UUID'),
   subscriptionId: z.string().uuid('Azure subscription ID must be a UUID'),
   clientId: z.string().uuid('Azure service principal client ID must be a UUID'),
   clientSecret: z.string().min(8, 'Azure service principal client secret is required'),
-  location: z.string().trim().regex(/^[a-z0-9]+$/, 'Azure location must be a region slug').default('canadacentral'),
 }).strict();
 
+export const AzureContainerAppsCredentialsSchema = z.preprocess((input) => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const { location: _legacyLocation, ...authentication } = input as Record<string, unknown>;
+  return authentication;
+}, AzureContainerAppsAuthenticationSchema);
+
 export type AzureContainerAppsCredentials = z.infer<typeof AzureContainerAppsCredentialsSchema>;
+const DEFAULT_AZURE_CONTAINER_APPS_LOCATION = 'canadacentral';
+const AzureLocationSchema = z.string().trim().regex(/^[a-z0-9]+$/, 'Azure location must be a region slug');
+type ConnectedAzureContainerAppsCredentials = AzureContainerAppsCredentials & { location: string };
 
 type AzureResource = {
   id: string;
@@ -93,12 +101,22 @@ export class AzureContainerAppsAdapter implements IProviderAdapter {
     supportsDeferredDeploy: true,
   };
 
-  private credentials: AzureContainerAppsCredentials | null = null;
+  private credentials: ConnectedAzureContainerAppsCredentials | null = null;
   private client: AzureResourceManagerClient | null = null;
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = AzureContainerAppsCredentialsSchema.parse(credentials);
+    const parsed = AzureContainerAppsCredentialsSchema.parse(credentials);
+    const legacyLocation = credentials && typeof credentials === 'object' && typeof (credentials as Record<string, unknown>).location === 'string'
+      ? (credentials as Record<string, string>).location
+      : DEFAULT_AZURE_CONTAINER_APPS_LOCATION;
+    this.credentials = { ...parsed, location: AzureLocationSchema.parse(legacyLocation) };
     this.client = new AzureResourceManagerClient(this.credentials);
+  }
+
+  configureTarget(target: { region?: string }): void {
+    if (!target.region) return;
+    const { credentials } = this.connected();
+    this.credentials = { ...credentials, location: AzureLocationSchema.parse(target.region) };
   }
 
   async verify(): Promise<VerifyResult> {
@@ -609,6 +627,13 @@ export class AzureContainerAppsAdapter implements IProviderAdapter {
       this.getResource(project.registryId, REGISTRY_API),
       this.getResource(project.environmentId, CONTAINER_APPS_API),
     ]);
+    for (const resource of [group, registry, managedEnvironment]) {
+      if (resource?.location && resource.location.toLowerCase() !== this.connected().credentials.location.toLowerCase()) {
+        throw new Error(
+          `Bound Azure resource ${resource.id} is in ${resource.location}, but desired hosting.region is ${this.connected().credentials.location}. Region changes require an explicit teardown and recreate; Hypervibe will not move bound infrastructure implicitly.`
+        );
+      }
+    }
     const principalId = await this.connected().client.servicePrincipalId();
     const pushReady = await this.roleAssignmentExists(project.registryId, principalId, ACR_PUSH_ROLE);
     const projectExists = Boolean(
@@ -683,7 +708,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter {
     };
   }
 
-  private connected(): { client: AzureResourceManagerClient; credentials: AzureContainerAppsCredentials } {
+  private connected(): { client: AzureResourceManagerClient; credentials: ConnectedAzureContainerAppsCredentials } {
     if (!this.client || !this.credentials) throw new Error('Not connected. Call connect() first.');
     return { client: this.client, credentials: this.credentials };
   }
@@ -1129,7 +1154,6 @@ providerRegistry.register({
         ['HYPERVIBE_AZURE_SUBSCRIPTION_ID', 'AZURE_SUBSCRIPTION_ID'],
         ['HYPERVIBE_AZURE_CLIENT_ID', 'AZURE_CLIENT_ID'],
         ['HYPERVIBE_AZURE_CLIENT_SECRET', 'AZURE_CLIENT_SECRET'],
-        ['HYPERVIBE_AZURE_LOCATION', 'AZURE_LOCATION'],
       ],
     },
     orchestration: {
@@ -1153,7 +1177,7 @@ providerRegistry.register({
   },
   factory: (credentials) => {
     const adapter = new AzureContainerAppsAdapter();
-    void adapter.connect(AzureContainerAppsCredentialsSchema.parse(credentials));
+    void adapter.connect(credentials);
     return adapter;
   },
 });

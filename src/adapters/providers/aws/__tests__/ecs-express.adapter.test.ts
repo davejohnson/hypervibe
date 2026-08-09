@@ -73,12 +73,22 @@ function service(): Service {
 }
 
 describe('EcsExpressAdapter lifecycle boundaries', () => {
-  it('accepts authentication and region only', () => {
-    expect(EcsExpressCredentialsSchema.parse(credentials)).toEqual(credentials);
+  it('keeps region out of credentials while accepting a legacy value during migration', () => {
+    expect(EcsExpressCredentialsSchema.parse(credentials)).toEqual({
+      accessKeyId: credentials.accessKeyId,
+      secretAccessKey: credentials.secretAccessKey,
+    });
     expect(() => EcsExpressCredentialsSchema.parse({
       ...credentials,
       clusterArn: CLUSTER_ARN,
     })).toThrow();
+  });
+
+  it('uses explicit desired-state region instead of the legacy connection value', async () => {
+    const adapter = await adapterWithSend(async () => ({}));
+    adapter.configureTarget({ region: 'us-east-1' });
+    const runtime = (adapter as unknown as { credentials: { region: string } }).credentials;
+    expect(runtime.region).toBe('us-east-1');
   });
 
   it('does not create a replacement for a missing bound cluster', async () => {

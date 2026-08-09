@@ -393,6 +393,20 @@ describe('connection guidance', () => {
 });
 
 describe('credentialFieldsFromSchema', () => {
+  it('keeps hosting geography out of connection forms', () => {
+    const expected = {
+      cloudrun: ['projectId', 'credentials'],
+      ecs: ['accessKeyId', 'secretAccessKey'],
+      'azure-container-apps': ['tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
+      digitalocean: ['apiToken'],
+    };
+
+    for (const [provider, fields] of Object.entries(expected)) {
+      const schema = providerRegistry.get(provider)!.metadata.credentialsSchema;
+      expect(credentialFieldsFromSchema(schema)?.map(({ name }) => name), provider).toEqual(fields);
+    }
+  });
+
   it('describes required, optional, secret, multiline, and choice fields', () => {
     const schema = z.object({
       apiToken: z.string().min(1),

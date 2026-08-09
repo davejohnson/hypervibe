@@ -14,8 +14,8 @@ import {
   type DigitalOceanDatabaseCluster,
 } from './digitalocean.client.js';
 import {
-  DigitalOceanCredentialsSchema,
-  type DigitalOceanCredentials,
+  parseDigitalOceanRuntimeCredentials,
+  type DigitalOceanRuntimeCredentials,
 } from './digitalocean.credentials.js';
 
 export class DigitalOceanCacheAdapter implements ICacheAdapter {
@@ -30,18 +30,18 @@ export class DigitalOceanCacheAdapter implements ICacheAdapter {
   };
 
   private client: DigitalOceanClient | null;
-  private credentials: DigitalOceanCredentials | null;
+  private credentials: DigitalOceanRuntimeCredentials | null;
 
   constructor(
     client?: DigitalOceanClient,
-    credentials?: DigitalOceanCredentials
+    credentials?: DigitalOceanRuntimeCredentials
   ) {
     this.client = client ?? null;
     this.credentials = credentials ?? null;
   }
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = DigitalOceanCredentialsSchema.parse(credentials);
+    this.credentials = parseDigitalOceanRuntimeCredentials(credentials);
     this.client = new DigitalOceanClient(this.credentials.apiToken);
   }
 

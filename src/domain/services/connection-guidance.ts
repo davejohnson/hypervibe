@@ -279,7 +279,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   'azure-container-apps': {
     provider: 'azure-container-apps',
     displayName: 'Azure Container Apps',
-    tokenType: 'Microsoft Entra service principal using tenantId, subscriptionId, application clientId, and a clientSecret; location is optional and defaults to canadacentral',
+    tokenType: 'Microsoft Entra service principal using tenantId, subscriptionId, application clientId, and a clientSecret',
     setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
     setupUrls: [
       {
@@ -303,7 +303,8 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'hv_connections provider="azure-container-apps" credentialsRef="file:/absolute/path/azure-container-apps.json"',
     notes: [
-      'The JSON needs only tenantId, subscriptionId, clientId, and clientSecret; location is optional. Do not include a resource group, registry, registry server, managed-environment ID, or Container App ID—those are Hypervibe desired state.',
+      'The JSON needs only tenantId, subscriptionId, clientId, and clientSecret. Do not include location, a resource group, registry, registry server, managed-environment ID, or Container App ID—those are Hypervibe desired state.',
+      'Hypervibe uses canadacentral when environments.<name>.hosting.region is omitted. An agent may declare another Azure location in the spec when latency, residency, or existing infrastructure requires it.',
       'Copy the client secret VALUE when it is created; Azure shows it only once. Do not use the secret ID.',
       'Microsoft does not publish a documented pre-filled credential-template URL for this flow. The links above intentionally open the official app-registration and role documentation without guessed dashboard parameters.',
       'Client secrets expire. Store the JSON outside the repository, rotate it before expiry, and reconnect from a file, dotenv mapping, or secret-manager reference.',
@@ -377,6 +378,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     credentialExample: 'hv_connections provider="cloudrun" credentialsRef="file:/absolute/path/cloudrun.json"',
     notes: [
       'Run hv_connections action="prepare" when Hypervibe should enable APIs and grant these roles from one-time admin credentials.',
+      'The connection JSON contains only projectId and credentials. Hypervibe uses us-central1 when environments.<name>.hosting.region is omitted; an agent may declare another supported region in the spec.',
       'Cloud Run native domain mappings are available only in Google-supported regions. Hypervibe blocks before DNS mutation in other regions; use a separately declared external HTTPS load balancer there.',
       'Cloud Run returns a multi-value A/AAAA/CNAME record set for the mapping. Hypervibe keeps those traffic records DNS-only while Google validates ownership and manages TLS.',
       'Google recommends short-lived credentials over long-lived service account JSON keys; if you use a JSON key, rotate it and grant only the roles above.',
@@ -438,6 +440,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     notes: [
       'Create the PAT at https://cloud.digitalocean.com/account/api/tokens with Custom Scopes for least privilege. Full Access is a broader fallback, not the recommended default.',
       'The JSON credential file needs only apiToken for ordinary App Platform use. Hypervibe deterministically reuses an existing team registry, or creates a free Starter registry during the reviewed project action when none exists; CI only reads and uses that registry.',
+      'App placement is desired state, not authentication. Hypervibe uses nyc when environments.<name>.hosting.region is omitted; an agent may declare another App Platform region in the spec.',
       'DigitalOcean shows a PAT only once. Store it in a dotenv file or secret manager instead of chat; Hypervibe accepts DIGITALOCEAN_TOKEN and HYPERVIBE_DIGITALOCEAN_TOKEN.',
       'Token scopes cannot be changed after creation, and the token cannot exceed its creator\'s DigitalOcean team role. Create a replacement token if scopes or team access are wrong.',
     ],
@@ -463,7 +466,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   ecs: {
     provider: 'ecs',
     displayName: 'AWS ECS Express Mode',
-    tokenType: 'AWS IAM access key pair containing accessKeyId and secretAccessKey, plus an optional region that defaults to us-west-2',
+    tokenType: 'AWS IAM access key pair containing accessKeyId and secretAccessKey',
     setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
     setupUrls: [
       {
@@ -489,7 +492,8 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'hv_connections provider="ecs" credentialsRef="file:/absolute/path/aws-ecs.json"',
     notes: [
-      'The JSON needs only accessKeyId and secretAccessKey; region is optional. Do not include cluster, repository, VPC, subnet, security-group, IAM-role, load-balancer, listener, or certificate IDs—Hypervibe creates and binds those through plan/apply.',
+      'The JSON needs only accessKeyId and secretAccessKey. Do not include region, cluster, repository, VPC, subnet, security-group, IAM-role, load-balancer, listener, or certificate IDs—Hypervibe creates and binds those through plan/apply.',
+      'Hypervibe uses us-west-2 when environments.<name>.hosting.region is omitted. An agent may declare another AWS region in the spec when latency, residency, or existing infrastructure requires it.',
       'AWS does not publish a documented pre-filled access-key creation template. The official IAM page cannot safely preselect a user or permissions, so Hypervibe does not invent dashboard query parameters.',
       'ECS Express Mode creates the Fargate service, public HTTPS endpoint, load balancer, security groups, autoscaling, monitoring, and networking components. Hypervibe owns the smaller prerequisite project boundary and exact-digest CI release.',
       'AWS shows a new secret access key only once. Store it outside the repository and rotate it regularly.',

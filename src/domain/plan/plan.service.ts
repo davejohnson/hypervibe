@@ -213,6 +213,13 @@ export class PlanService {
     }
 
     const adapter = adapterResult.adapter as IProviderAdapter;
+    try {
+      await adapter.configureTarget?.({ region: environmentSpec.hosting.region });
+    } catch (error) {
+      return unknownObservation(
+        `Cannot configure ${provider} hosting target: ${error instanceof Error ? error.message : String(error)}. Mutations are blocked.`
+      );
+    }
     if (!adapter.capabilities.supportsObserve || typeof adapter.observe !== 'function') {
       return unknownObservation(
         `${provider} does not support live observation. Existing local bindings are preserved and mutations that require proof of absence are blocked.`

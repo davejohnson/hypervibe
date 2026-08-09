@@ -12,6 +12,8 @@ export interface BranchDeployTarget {
   serviceNames: string[];
   providerProjectId?: string;
   providerEnvironmentId?: string;
+  /** Non-secret desired hosting placement from the environment spec. */
+  providerRegion?: string;
   providerServiceIds: string[];
   providerJobNames?: string[];
   needsServiceNames?: boolean;

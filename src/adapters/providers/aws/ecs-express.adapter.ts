@@ -107,13 +107,22 @@ const INTERNAL_ENV_KEYS = new Set([
   IMAGE_DIGEST_KEY,
 ]);
 
-export const EcsExpressCredentialsSchema = z.object({
+const EcsExpressAuthenticationSchema = z.object({
   accessKeyId: z.string().trim().min(16, 'AWS access key ID is required'),
   secretAccessKey: z.string().min(32, 'AWS secret access key is required'),
-  region: z.string().trim().regex(/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/, 'AWS region is invalid').default('us-west-2'),
 }).strict();
 
+export const EcsExpressCredentialsSchema = z.preprocess((input) => {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const { region: _legacyRegion, ...authentication } = input as Record<string, unknown>;
+  return authentication;
+}, EcsExpressAuthenticationSchema);
+
 export type EcsExpressCredentials = z.infer<typeof EcsExpressCredentialsSchema>;
+
+const DEFAULT_ECS_REGION = 'us-west-2';
+const EcsRegionSchema = z.string().trim().regex(/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/, 'AWS region is invalid');
+type ConnectedEcsExpressCredentials = EcsExpressCredentials & { region: string };
 
 type AwsClients = {
   acm: ACMClient;
@@ -165,20 +174,39 @@ export class EcsExpressAdapter implements IProviderAdapter {
     supportsDeferredDeploy: true,
   };
 
-  private credentials: EcsExpressCredentials | null = null;
+  private credentials: ConnectedEcsExpressCredentials | null = null;
   private clients: AwsClients | null = null;
   private accountId: string | null = null;
 
   async connect(credentials: unknown): Promise<void> {
     const parsed = EcsExpressCredentialsSchema.parse(credentials);
+    const legacyRegion = credentials && typeof credentials === 'object' && typeof (credentials as Record<string, unknown>).region === 'string'
+      ? (credentials as Record<string, string>).region
+      : DEFAULT_ECS_REGION;
+    this.credentials = { ...parsed, region: EcsRegionSchema.parse(legacyRegion) };
+    this.replaceClients();
+  }
+
+  configureTarget(target: { region?: string }): void {
+    if (!target.region) return;
+    const credentials = this.connected().credentials;
+    const region = EcsRegionSchema.parse(target.region);
+    if (region === credentials.region) return;
+    this.credentials = { ...credentials, region };
+    this.accountId = null;
+    this.replaceClients();
+  }
+
+  private replaceClients(): void {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    for (const client of Object.values(this.clients ?? {})) client.destroy();
     const config = {
-      region: parsed.region,
+      region: this.credentials.region,
       credentials: {
-        accessKeyId: parsed.accessKeyId,
-        secretAccessKey: parsed.secretAccessKey,
+        accessKeyId: this.credentials.accessKeyId,
+        secretAccessKey: this.credentials.secretAccessKey,
       },
     };
-    this.credentials = parsed;
     this.clients = {
       acm: new ACMClient(config),
       ec2: new EC2Client(config),
@@ -804,7 +832,7 @@ export class EcsExpressAdapter implements IProviderAdapter {
     return identity.Account;
   }
 
-  private connected(): { clients: AwsClients; credentials: EcsExpressCredentials } {
+  private connected(): { clients: AwsClients; credentials: ConnectedEcsExpressCredentials } {
     if (!this.clients || !this.credentials) throw new Error('Not connected. Call connect() first.');
     return { clients: this.clients, credentials: this.credentials };
   }
@@ -1471,7 +1499,6 @@ providerRegistry.register({
       environmentVariableAliases: [
         ['HYPERVIBE_AWS_ACCESS_KEY_ID', 'AWS_ACCESS_KEY_ID'],
         ['HYPERVIBE_AWS_SECRET_ACCESS_KEY', 'AWS_SECRET_ACCESS_KEY'],
-        ['HYPERVIBE_AWS_REGION', 'AWS_REGION', 'AWS_DEFAULT_REGION'],
       ],
     },
     orchestration: {
@@ -1493,7 +1520,7 @@ providerRegistry.register({
   },
   factory: (credentials) => {
     const adapter = new EcsExpressAdapter();
-    void adapter.connect(EcsExpressCredentialsSchema.parse(credentials));
+    void adapter.connect(credentials);
     return adapter;
   },
 });

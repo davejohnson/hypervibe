@@ -1138,7 +1138,8 @@ export const environmentSpecSchema = z.object({
   hosting: z.object({
     /** Hosting provider name; validated against the adapter registry at spec_set time. */
     provider: z.string().min(1),
-    region: z.string().min(1).optional(),
+    /** Optional desired placement. Omit to use the provider's sensible default. */
+    region: z.string().trim().min(1).optional(),
   }),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),

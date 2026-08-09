@@ -80,13 +80,25 @@ afterEach(() => {
 });
 
 describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
-  it('accepts authentication and location only', () => {
-    expect(AzureContainerAppsCredentialsSchema.parse(credentials)).toEqual(credentials);
+  it('keeps location out of credentials while accepting a legacy value during migration', () => {
+    expect(AzureContainerAppsCredentialsSchema.parse(credentials)).toEqual({
+      tenantId: TENANT_ID,
+      subscriptionId: SUBSCRIPTION_ID,
+      clientId: CLIENT_ID,
+      clientSecret: credentials.clientSecret,
+    });
     expect(() => AzureContainerAppsCredentialsSchema.parse({
       ...credentials,
       resourceGroup: 'precreated-group',
       registryServer: 'precreated.azurecr.io',
     })).toThrow();
+  });
+
+  it('uses explicit desired-state location instead of the legacy connection value', async () => {
+    const adapter = await connectedAdapter();
+    adapter.configureTarget({ region: 'westus2' });
+    const runtime = (adapter as unknown as { credentials: { location: string } }).credentials;
+    expect(runtime.location).toBe('westus2');
   });
 
   it('preserves an unknown project observation and performs no mutations', async () => {

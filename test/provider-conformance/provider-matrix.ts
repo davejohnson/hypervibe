@@ -94,11 +94,15 @@ const gcpCredentials: ProviderCredentialField[] = [
   { field: 'region', environmentVariable: 'HYPERVIBE_TEST_GCP_REGION', optional: true },
 ];
 
+const gcpHostingCredentials = gcpCredentials.filter(({ field }) => field !== 'region');
+
 const awsCredentials: ProviderCredentialField[] = [
   { field: 'accessKeyId', environmentVariable: 'HYPERVIBE_TEST_AWS_ACCESS_KEY_ID' },
   { field: 'secretAccessKey', environmentVariable: 'HYPERVIBE_TEST_AWS_SECRET_ACCESS_KEY' },
   { field: 'region', environmentVariable: 'HYPERVIBE_TEST_AWS_REGION', optional: true },
 ];
+
+const awsHostingCredentials = awsCredentials.filter(({ field }) => field !== 'region');
 
 const awsNetworkCredentials: ProviderCredentialField[] = [
   ...awsCredentials,
@@ -137,7 +141,6 @@ const azureHostingCredentials: ProviderCredentialField[] = [
   { field: 'subscriptionId', environmentVariable: 'HYPERVIBE_TEST_AZURE_SUBSCRIPTION_ID' },
   { field: 'clientId', environmentVariable: 'HYPERVIBE_TEST_AZURE_CLIENT_ID' },
   { field: 'clientSecret', environmentVariable: 'HYPERVIBE_TEST_AZURE_CLIENT_SECRET' },
-  { field: 'location', environmentVariable: 'HYPERVIBE_TEST_AZURE_LOCATION', optional: true },
 ];
 
 const vercelCredentials: ProviderCredentialField[] = [
@@ -196,7 +199,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'supported',
     customDomains: 'managed',
     domainTrafficProxy: 'dns-only',
-    credentials: gcpCredentials,
+    credentials: gcpHostingCredentials,
   },
   {
     kind: 'hosting',
@@ -206,7 +209,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'ready-for-live',
     customDomains: 'managed',
     domainTrafficProxy: 'dns-only',
-    credentials: awsCredentials,
+    credentials: awsHostingCredentials,
     managedWorkflow: dockerWebManagedWorkflow('deploy-ecs-production.yml'),
     implementationNote:
       'The authentication-only connection, shared default-VPC prerequisite, project-owned ECR/IAM/cluster bootstrap, ECS Express service lifecycle, phased ACM/ALB domain lifecycle, exact-digest CI workflow, and mocked safety contracts are implemented. Promotion requires a successful opt-in live lifecycle run.',

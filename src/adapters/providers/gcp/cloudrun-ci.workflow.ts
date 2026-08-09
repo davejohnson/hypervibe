@@ -5,9 +5,10 @@ import {
   variableExpression,
 } from '../../../domain/services/github-actions-workflow.js';
 
-export const CLOUDRUN_CI_REQUIRED_SECRETS = ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID', 'GCP_REGION'];
+export const CLOUDRUN_CI_REQUIRED_SECRETS = ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID'];
 
 export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): BranchDeployStepResult {
+  const region = JSON.stringify(target.providerRegion ?? target.providerEnvironmentId ?? 'us-central1');
   const jobNames = target.providerJobNames ?? [];
   const needsServiceNames = target.needsServiceNames ?? true;
   const needsJobNames = target.needsJobNames ?? false;
@@ -36,7 +37,7 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
         uses: actions/github-script@v8
         env:
           GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
-          GCP_REGION: \${{ secrets.GCP_REGION }}
+          GCP_REGION: ${region}
           GCP_ARTIFACT_REPOSITORY: \${{ vars.GCP_ARTIFACT_REPOSITORY }}
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
@@ -57,7 +58,7 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
         env:
           GCP_SERVICE_ACCOUNT_JSON: \${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
-          GCP_REGION: \${{ secrets.GCP_REGION }}
+          GCP_REGION: ${region}
           GCP_ARTIFACT_REPOSITORY: \${{ vars.GCP_ARTIFACT_REPOSITORY }}
         with:
           script: |
@@ -132,7 +133,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
         env:
           GCP_SERVICE_ACCOUNT_JSON: \${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
-          GCP_REGION: \${{ secrets.GCP_REGION }}
+          GCP_REGION: ${region}
           CLOUDRUN_SERVICE_NAMES: ${cloudRunServiceNames}
           CLOUDRUN_JOB_NAMES: ${cloudRunJobNames}
           IMAGE_URI: \${{ steps.image.outputs.uri }}

@@ -19,6 +19,11 @@ export interface DeploymentMutationOptions {
   deferDeployment?: boolean;
 }
 
+/** Non-secret desired hosting placement selected by the spec, not credentials. */
+export interface HostingTargetOptions {
+  region?: string;
+}
+
 /**
  * Capabilities that a deployment provider supports.
  * Used to determine what features are available and how to configure deployments.
@@ -127,6 +132,9 @@ export interface IProviderAdapter {
   connect(credentials: unknown): Promise<void>;
   verify(): Promise<VerifyResult>;
   disconnect?(): Promise<void>;
+
+  /** Configure non-secret desired placement before observation or mutation. */
+  configureTarget?(target: HostingTargetOptions): void | Promise<void>;
 
   ensureProject(
     projectName: string,

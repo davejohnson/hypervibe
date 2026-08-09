@@ -4,6 +4,7 @@ import path from 'node:path';
 import '../../src/application/providers.js';
 import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import { planProviderNativeDeploySources } from '../../src/domain/services/provider-native-deploy-source.service.js';
+import { credentialFieldsFromSchema } from '../../src/domain/services/connection-guidance.js';
 import { environmentSpecSchema, projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import {
   cacheProviderContracts,
@@ -217,6 +218,17 @@ describe('provider conformance matrix', () => {
         );
         expect(credential).not.toHaveProperty('value');
       }
+    }
+  });
+
+  it('keeps hosting geography in desired state instead of credentials', () => {
+    for (const entry of hostingProviderContracts) {
+      expect(entry.credentials.map(({ field }) => field), entry.provider)
+        .not.toEqual(expect.arrayContaining(['region', 'location', 'appRegion']));
+      const schema = providerRegistry.getMetadata(entry.provider)?.credentialsSchema;
+      expect(schema, entry.provider).toBeDefined();
+      expect(credentialFieldsFromSchema(schema!)?.map(({ name }) => name), entry.provider)
+        .not.toEqual(expect.arrayContaining(['region', 'location', 'appRegion']));
     }
   });
 

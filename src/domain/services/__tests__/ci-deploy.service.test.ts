@@ -142,7 +142,6 @@ describe('ci-deploy.service', () => {
       expect(requiredProviderSecretNamesForGitHubActions('cloudrun')).toEqual([
         'GCP_SERVICE_ACCOUNT_JSON',
         'GCP_PROJECT_ID',
-        'GCP_REGION',
       ]);
     });
 
