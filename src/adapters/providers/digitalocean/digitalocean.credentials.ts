@@ -4,7 +4,6 @@ export const DigitalOceanCredentialsSchema = z.object({
   apiToken: z
     .string({ required_error: 'DigitalOcean personal access token is required' })
     .min(1, 'DigitalOcean personal access token is required'),
-  containerRegistry: z.string().min(3).optional(),
   region: z.string().min(1).default('nyc3'),
   appRegion: z.string().min(1).default('nyc'),
   appInstanceSize: z.string().min(1).default('apps-s-1vcpu-0.5gb'),

@@ -182,6 +182,14 @@ function repoSpecMatchesProject(spec: ProjectSpec, project: Project): boolean {
   return spec.project === project.name;
 }
 
+function writeMatchingRepoSpec(project: Project, spec: ProjectSpec) {
+  const existing = readRepoSpecFile();
+  if (existing && !repoSpecMatchesProject(existing.spec, project)) {
+    return null;
+  }
+  return writeRepoSpecFile(spec);
+}
+
 /**
  * Revisioned storage for project specs. Every write creates a new revision —
  * hv_plan records the revision it planned against, and hv_apply rejects
@@ -231,7 +239,7 @@ export class SpecStore {
     const converted = desiredStateToSpec(project);
     if (!converted) return null;
     const row = this.repo.insert(project.id, 1, converted);
-    const written = writeRepoSpecFile(converted);
+    const written = writeMatchingRepoSpec(project, converted);
     return {
       spec: converted,
       revision: row.revision,
@@ -255,7 +263,7 @@ export class SpecStore {
     }
     const latest = this.repo.findLatest(project.id);
     const row = this.repo.insert(project.id, (latest?.revision ?? 0) + 1, parsed);
-    const written = writeRepoSpecFile(parsed);
+    const written = writeMatchingRepoSpec(project, parsed);
     return {
       spec: parsed,
       revision: row.revision,

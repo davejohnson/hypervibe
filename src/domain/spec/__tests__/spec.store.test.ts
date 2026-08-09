@@ -233,6 +233,51 @@ describe('SpecStore', () => {
     }
   });
 
+  it('keeps a second project local when the checkout belongs to another project', () => {
+    const oldCwd = process.cwd();
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const repoDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'hypervibe-cross-project-spec-')));
+    mkdirSync(path.join(repoDir, '.git'));
+
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      process.chdir(repoDir);
+      const checkoutSpec = projectSpecSchema.parse({
+        version: 1,
+        project: 'checkout-project',
+        environments: {},
+      });
+      const specPath = writeRepoSpecFile(checkoutSpec)!.path;
+      const secondProject = new ProjectRepository().create({
+        name: 'domain-conformance-project',
+        defaultPlatform: 'railway',
+        policies: {},
+      });
+
+      const stored = new SpecStore().replace(secondProject, {
+        version: 1,
+        project: secondProject.name,
+        environments: {
+          railway: {
+            hosting: { provider: 'railway' },
+            services: { web: {} },
+          },
+        },
+      });
+
+      expect(stored.source).toEqual({ kind: 'local' });
+      expect(JSON.parse(readFileSync(specPath, 'utf8'))).toEqual(checkoutSpec);
+    } finally {
+      process.chdir(oldCwd);
+      if (oldDisable === undefined) {
+        delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      } else {
+        process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
+      }
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it('preserves existing env template content and adds only missing reCAPTCHA slots', () => {
     const oldCwd = process.cwd();
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;

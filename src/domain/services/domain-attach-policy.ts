@@ -1,15 +1,23 @@
 import type { Receipt } from '../ports/provider.port.js';
 
+export const DOMAIN_DETACH_OPERATION = 'customDomainDetach';
+
 export type DomainAttachParams = {
   projectId?: string;
   serviceId: string;
   environmentId: string;
   domain: string;
+  dnsZone?: string;
+};
+
+export type DomainDetachParams = DomainAttachParams & {
+  customDomainId?: string;
 };
 
 export type DomainAttachCapableAdapter = {
   attachCustomDomain?: (params: DomainAttachParams) => Promise<Receipt>;
   recreateCustomDomain?: (params: DomainAttachParams) => Promise<Receipt>;
+  detachCustomDomain?: (params: DomainDetachParams) => Promise<Receipt>;
 };
 
 export type DomainAttachAdapter = DomainAttachCapableAdapter & {
@@ -18,6 +26,10 @@ export type DomainAttachAdapter = DomainAttachCapableAdapter & {
 
 export type DomainRecreateAdapter = DomainAttachCapableAdapter & {
   recreateCustomDomain: (params: DomainAttachParams) => Promise<Receipt>;
+};
+
+export type DomainDetachAdapter = DomainAttachCapableAdapter & {
+  detachCustomDomain: (params: DomainDetachParams) => Promise<Receipt>;
 };
 
 export function supportsCustomDomainAttach(adapter: unknown): adapter is DomainAttachAdapter {
@@ -60,6 +72,26 @@ export async function callCustomDomainRecreate(
   }
   const recreateCustomDomain = adapter.recreateCustomDomain;
   return recreateCustomDomain.call(adapter, params);
+}
+
+export function supportsCustomDomainDetach(adapter: unknown): adapter is DomainDetachAdapter {
+  return Boolean(adapter)
+    && typeof adapter === 'object'
+    && typeof (adapter as DomainAttachCapableAdapter).detachCustomDomain === 'function';
+}
+
+export async function callCustomDomainDetach(
+  adapter: DomainAttachCapableAdapter,
+  params: DomainDetachParams
+): Promise<Receipt> {
+  if (!supportsCustomDomainDetach(adapter)) {
+    return {
+      success: false,
+      message: 'Custom-domain detachment is not supported',
+      error: `${params.domain} cannot be detached because the hosting provider adapter does not implement verified custom-domain deletion.`,
+    };
+  }
+  return adapter.detachCustomDomain.call(adapter, params);
 }
 
 export function customDomainAttachUnsupportedMessage(provider: string, domain: string): string {

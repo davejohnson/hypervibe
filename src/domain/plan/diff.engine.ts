@@ -5,6 +5,7 @@ import type { ObservedState, ObservedService } from '../ports/observe.port.js';
 import { hashEnvValue } from '../ports/observe.port.js';
 import type { PlanAction, PlanFieldDiff, DiffResult, LocalSnapshot } from './plan.types.js';
 import { buildDatabaseAliasEnvVars } from '../services/database-env.js';
+import { DOMAIN_DETACH_OPERATION } from '../services/domain-attach-policy.js';
 
 function certificateStatusIsReady(status?: string): boolean {
   if (!status) return false;
@@ -43,6 +44,7 @@ export function diffEnvironment(input: {
   };
   /** Provider-declared environment custom-domain lifecycle. Omission fails closed. */
   customDomainManagement?: 'managed' | 'unsupported';
+  customDomainTrafficProxy?: 'supported' | 'dns-only';
   /** Repo/branch services should be linked to when spec.deploy.strategy is "branch". */
   expectedSource?: { repo: string; branch: string };
   /** Managed database env vars derived from the currently desired database component. */
@@ -664,6 +666,7 @@ export function diffEnvironment(input: {
   }
 
   // ---- domain ---------------------------------------------------------------
+  const boundDomainDns = local.bindings?.domainDns;
   if (spec.domain && !spec.loadBalancer) {
     const id = `domain:${spec.domain}`;
     const attachedService = observed
@@ -673,9 +676,16 @@ export function diffEnvironment(input: {
       ? Boolean(attachedService)
       : Object.values(localServiceBindings).some((b) => b.customDomains?.includes(spec.domain!));
     const domainStatus = attachedService?.customDomainStatus?.[spec.domain];
+    const domainBindingPresent = boundDomainDns?.name === spec.domain
+      && Boolean(
+        boundDomainDns.providerDomainId
+        && boundDomainDns.serviceId
+        && boundDomainDns.environmentId
+      );
     const dnsConfigured = domainStatus?.dnsConfigured;
-    const desiredDomainProxy = spec.domainProxy ?? true;
-    const boundDomainDns = local.bindings?.domainDns;
+    const desiredDomainProxy = input.customDomainTrafficProxy === 'dns-only'
+      ? false
+      : spec.domainProxy ?? true;
     const appliedDomainProxy = boundDomainDns?.name === spec.domain
       ? boundDomainDns.proxied
       : undefined;
@@ -696,6 +706,7 @@ export function diffEnvironment(input: {
     const customDomainsManaged = input.customDomainManagement === 'managed';
     const configured = customDomainsManaged
       && attached
+      && domainBindingPresent
       && domainDnsConfigured
       && (domainStatus?.providerVerified === true
         || (domainStatus?.providerVerified === undefined && dnsConfigured === true))
@@ -716,7 +727,9 @@ export function diffEnvironment(input: {
         : domainRecreateNeeded
         ? `Domain ${spec.domain} has an unapplied recreate revision`
         : attached
-        ? !domainDnsConfigured
+        ? !domainBindingPresent
+          ? `Domain ${spec.domain} exists on ${provider}, but its durable provider identity is not bound locally; use hv_import or remove the unmanaged attachment before applying`
+          : !domainDnsConfigured
           ? `Domain ${spec.domain} is attached on ${provider}, but required DNS records are not configured`
           : domainStatus?.providerVerified === false
             ? `Domain ${spec.domain} DNS is configured, but ${provider} ownership verification is still pending`
@@ -733,13 +746,86 @@ export function diffEnvironment(input: {
         : {}),
       metadata: {
         ...(!customDomainsManaged ? { blockedReason: 'custom_domain_unsupported' } : {}),
+        ...(customDomainsManaged && attached && !domainBindingPresent
+          ? { blockedReason: 'domain_binding_missing' }
+          : {}),
         ...(domainStatus?.dnsRecords ? { dnsRecords: domainStatus.dnsRecords } : {}),
         domainProxy: desiredDomainProxy,
+        ...(input.customDomainTrafficProxy === 'dns-only'
+          ? { domainTrafficProxy: 'dns-only' }
+          : {}),
         ...(spec.domainRecreateRevision
           ? { domainRecreateRevision: spec.domainRecreateRevision }
           : {}),
       },
     });
+  } else if (!spec.domain && !spec.loadBalancer && boundDomainDns?.name) {
+    const domain = boundDomainDns.name;
+    const id = `domain:${domain}`;
+    const attachedService = observed && serviceObservationKnown
+      ? observed.services.find((service) => service.customDomains.includes(domain))
+      : undefined;
+    const serviceName = boundDomainDns.serviceName ?? attachedService?.name;
+    const serviceId = boundDomainDns.serviceId
+      ?? attachedService?.externalId
+      ?? (serviceName ? localServiceBindings[serviceName]?.serviceId : undefined);
+    const environmentId = boundDomainDns.environmentId ?? local.bindings?.environmentId;
+    const projectId = local.bindings?.projectId;
+    const providerDomainId = boundDomainDns.providerDomainId;
+    const zoneId = boundDomainDns.zoneId;
+    const dnsRecordIds = (boundDomainDns.records ?? []).map((record) => record.id);
+    const customDomainsManaged = input.customDomainManagement === 'managed';
+    const observationKnown = observed !== null && serviceObservationKnown;
+    const bindingComplete = Boolean(
+      projectId
+      && serviceName
+      && serviceId
+      && environmentId
+      && providerDomainId
+      && zoneId
+      && Array.isArray(boundDomainDns.records)
+    );
+    const blockedReason = !customDomainsManaged
+      ? 'custom_domain_unsupported'
+      : !observationKnown
+        ? 'domain_observation_unknown'
+        : !bindingComplete
+          ? 'domain_detach_binding_incomplete'
+          : undefined;
+    actions.push({
+      id,
+      type: 'destroy',
+      resource: { kind: 'domain', name: domain, provider: boundProvider ?? provider },
+      verified: verified && serviceObservationKnown,
+      requiresConfirm: true,
+      reason: blockedReason === 'custom_domain_unsupported'
+        ? `${boundProvider ?? provider} does not implement managed custom-domain teardown`
+        : blockedReason === 'domain_observation_unknown'
+          ? `Cannot safely detach ${domain} because provider domain observation is unknown`
+          : blockedReason === 'domain_detach_binding_incomplete'
+            ? `Cannot safely detach ${domain} because its durable provider or DNS identities are incomplete`
+            : attachedService
+              ? `Domain ${domain} is no longer desired and remains attached to ${attachedService.name}`
+              : `Domain ${domain} is no longer desired; remove its verified provider attachment and managed DNS records`,
+      metadata: {
+        operation: DOMAIN_DETACH_OPERATION,
+        ...(projectId ? { projectId } : {}),
+        ...(serviceName ? { serviceName } : {}),
+        ...(serviceId ? { serviceId } : {}),
+        ...(environmentId ? { environmentId } : {}),
+        ...(providerDomainId ? { providerDomainId } : {}),
+        ...(zoneId ? { zoneId } : {}),
+        dnsRecordIds,
+        ...(blockedReason ? { blockedReason } : {}),
+      },
+    });
+    for (const serviceAction of actions.filter((action) => (
+      action.resource.kind === 'service'
+      && action.type === 'destroy'
+      && (!serviceName || action.resource.name === serviceName)
+    ))) {
+      serviceAction.dependsOn = Array.from(new Set([...(serviceAction.dependsOn ?? []), id]));
+    }
   }
 
   return { actions, unmanaged, warnings };

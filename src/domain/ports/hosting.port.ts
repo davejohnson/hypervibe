@@ -106,6 +106,17 @@ export const hostingBindingsSchema = z.object({
     name: z.string().optional(),
     proxied: z.boolean().optional(),
     recreateRevision: z.string().optional(),
+    providerDomainId: z.string().optional(),
+    serviceName: z.string().optional(),
+    serviceId: z.string().optional(),
+    environmentId: z.string().optional(),
+    zoneId: z.string().optional(),
+    records: z.array(z.object({
+      id: z.string(),
+      name: z.string(),
+      type: z.string(),
+      target: z.string(),
+    }).strict()).optional(),
   }).passthrough().optional(),
 }).passthrough();
 

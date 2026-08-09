@@ -10,7 +10,6 @@ import {
 
 export const DIGITALOCEAN_CI_REQUIRED_SECRETS = [
   'DIGITALOCEAN_TOKEN',
-  'DIGITALOCEAN_REGISTRY',
 ];
 
 type ComponentCollection = 'services' | 'workers' | 'jobs';
@@ -65,28 +64,54 @@ export function buildDigitalOceanGitHubActionsSteps(
 `,
     reviewDetails: [
       'Publishes one container image tagged with the exact checked-out 40-character Git SHA.',
-      'Updates only App Platform components that Hypervibe already planned, applied, and bound; it never creates an app, component, or container registry.',
+      'Uses the existing registry selected or created by the reviewed Hypervibe project action; CI never creates infrastructure.',
+      'Updates only App Platform components that Hypervibe already planned, applied, and bound.',
       'Waits for the exact DigitalOcean deployment ID to become ACTIVE, then verifies every target component references that SHA.',
     ],
     steps: `      - name: Resolve DigitalOcean image URI
         id: image
         uses: actions/github-script@v8
         env:
-          DIGITALOCEAN_REGISTRY: \${{ secrets.DIGITALOCEAN_REGISTRY }}
+          DIGITALOCEAN_TOKEN: \${{ secrets.DIGITALOCEAN_TOKEN }}
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
-            const registry = (process.env.DIGITALOCEAN_REGISTRY || '').trim();
             const sha = (process.env.DEPLOY_SHA || '').trim();
-            if (!registry) throw new Error('DIGITALOCEAN_REGISTRY is required');
             if (!/^[0-9a-f]{40}$/i.test(sha)) {
               throw new Error('DEPLOY_SHA must be a full 40-character Git SHA');
             }
+            const response = await fetch(
+              'https://api.digitalocean.com/v2/registries?page=1&per_page=200',
+              {
+                headers: {
+                  Accept: 'application/json',
+                  Authorization: 'Bearer ' + process.env.DIGITALOCEAN_TOKEN,
+                },
+              }
+            );
+            if (!response.ok) {
+              throw new Error(
+                'DigitalOcean registry observation failed with HTTP ' + response.status
+              );
+            }
+            const payload = await response.json();
+            const registries = Array.isArray(payload.registries)
+              ? payload.registries
+                .filter((entry) => typeof entry?.name === 'string')
+                .sort((left, right) => left.name.localeCompare(right.name))
+              : [];
+            const registry = registries[0]?.name;
+            if (!registry) {
+              throw new Error(
+                'No DigitalOcean registry exists; run hv_plan/hv_apply before CI'
+              );
+            }
             if (!/^[a-z0-9-]{3,63}$/.test(registry)) {
-              throw new Error('DIGITALOCEAN_REGISTRY is not a valid DOCR registry name');
+              throw new Error('DigitalOcean returned an invalid DOCR registry name');
             }
             const repository = process.env.GITHUB_REPOSITORY.toLowerCase();
             core.setOutput('registry', 'registry.digitalocean.com');
+            core.setOutput('registry_name', registry);
             core.setOutput('repository', repository);
             core.setOutput(
               'uri',
@@ -112,7 +137,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
         uses: actions/github-script@v8
         env:
           DIGITALOCEAN_TOKEN: \${{ secrets.DIGITALOCEAN_TOKEN }}
-          DIGITALOCEAN_REGISTRY: \${{ secrets.DIGITALOCEAN_REGISTRY }}
+          DIGITALOCEAN_REGISTRY: \${{ steps.image.outputs.registry_name }}
           DIGITALOCEAN_APP_ID: ${appIdValue}
           DIGITALOCEAN_TARGET_BINDINGS: ${serviceBindings}
           DIGITALOCEAN_TARGET_NAMES: ${serviceNames}

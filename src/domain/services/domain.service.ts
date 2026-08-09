@@ -9,11 +9,13 @@ import { getProjectScopeHints } from './project-scope.js';
 import { hostingProviderForEnvironment } from './hosting-env.service.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import {
+  callCustomDomainDetach,
   callCustomDomainAttach,
   callCustomDomainRecreate,
   customDomainAttachBindingMissingMessage,
   customDomainAttachUnsupportedMessage,
   supportsCustomDomainAttach,
+  supportsCustomDomainDetach,
   type DomainAttachCapableAdapter,
 } from './domain-attach-policy.js';
 import {
@@ -25,6 +27,7 @@ import {
 import { cloudflareScopeHintsForDomain, dnsZoneScopeForDomain, normalizeDomainName } from './domain-scope.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
+import { parseHostingBindings } from '../ports/hosting.port.js';
 
 const connectionRepo = new ConnectionRepository();
 
@@ -35,10 +38,19 @@ type HostingBindings = {
 };
 
 export interface DomainDnsRecordResult {
+  id: string;
   name: string;
   type: string;
   target: string;
   action: string;
+}
+
+export interface DomainTeardownResult {
+  success: boolean;
+  error?: string;
+  hostingDetached?: boolean;
+  deletedDnsRecordIds?: string[];
+  customDomainId?: string;
 }
 
 export interface DomainSetupResult {
@@ -136,12 +148,14 @@ export async function setupCustomDomain(params: {
               serviceId: binding.serviceId,
               environmentId: bindings.environmentId,
               domain,
+              dnsZone: zone.name,
             })
           : await callCustomDomainAttach(adapter, {
               projectId: bindings.projectId,
               serviceId: binding.serviceId,
               environmentId: bindings.environmentId,
               domain,
+              dnsZone: zone.name,
             });
         if (receipt.success) {
           result.customDomainAttached = true;
@@ -181,12 +195,54 @@ export async function setupCustomDomain(params: {
       const normalizedRecords = providerDnsRecords
         .map(normalizeProviderDnsRecord)
         .filter((record): record is NormalizedDnsRecord => Boolean(record));
+      const recordGroups = new Map<string, NormalizedDnsRecord[]>();
       for (const record of normalizedRecords) {
-        const { name, type, value } = record;
-        const upsert = await cfAdapter.upsertDnsRecord(zone.id, name, type, value, {
-          proxied: providerDnsRecordShouldBeProxied(record, params.trafficProxied),
-        });
-        dnsResults.push({ name, type, target: value, action: upsert.action });
+        const key = `${record.name}\u0000${record.type}`;
+        recordGroups.set(key, [...(recordGroups.get(key) ?? []), record]);
+      }
+      for (const records of recordGroups.values()) {
+        const first = records[0]!;
+        const proxyModes = new Set(records.map((record) =>
+          providerDnsRecordShouldBeProxied(record, params.trafficProxied)
+        ));
+        if (proxyModes.size !== 1) {
+          throw new Error(`${provider} returned conflicting proxy requirements for ${first.type} ${first.name}.`);
+        }
+        const proxied = [...proxyModes][0]!;
+        const values = Array.from(new Set(records.map((record) => record.value)));
+        if (values.length === 1) {
+          const upsert = await cfAdapter.upsertDnsRecord(
+            zone.id,
+            first.name,
+            first.type,
+            values[0]!,
+            { proxied }
+          );
+          dnsResults.push({
+            id: upsert.record.id,
+            name: first.name,
+            type: first.type,
+            target: values[0]!,
+            action: upsert.action,
+          });
+          continue;
+        }
+        const ensured = await cfAdapter.ensureRecords(
+          zone.id,
+          first.name,
+          first.type,
+          values,
+          { proxied, pruneExtras: false }
+        );
+        for (const record of ensured.records) {
+          dnsResults.push({
+            id: record.id,
+            name: first.name,
+            type: first.type,
+            target: record.content,
+            action: ensured.created.includes(record.content) ? 'created' : 'updated',
+          });
+        }
       }
       result.dnsConfigured = dnsResults.length > 0 && dnsResults.length === normalizedRecords.length;
       if (normalizedRecords.length === 0) {
@@ -227,4 +283,117 @@ export async function setupCustomDomain(params: {
     && result.providerVerified !== true;
   result.success = result.dnsConfigured === true && result.pending !== true;
   return result;
+}
+
+function dnsTargetMatches(type: string, observed: string, expected: string): boolean {
+  if (type.toUpperCase() === 'CNAME') {
+    return observed.trim().replace(/\.$/, '').toLowerCase()
+      === expected.trim().replace(/\.$/, '').toLowerCase();
+  }
+  return observed === expected;
+}
+
+/**
+ * Remove one previously recorded environment domain. The durable provider and
+ * Cloudflare ids are validated before the provider attachment is touched;
+ * provider absence is then verified before exact managed DNS records are
+ * deleted. A partial failure preserves the binding so the same action retries.
+ */
+export async function teardownCustomDomain(params: {
+  project: Project;
+  environment: Environment;
+  domain: string;
+}): Promise<DomainTeardownResult> {
+  const domain = normalizeDomainName(params.domain);
+  const bindings = parseHostingBindings(params.environment);
+  const binding = bindings.domainDns;
+  if (
+    binding?.name !== domain
+    || !bindings.projectId
+    || !binding.serviceId
+    || !binding.environmentId
+    || !binding.providerDomainId
+    || !binding.zoneId
+    || !Array.isArray(binding.records)
+  ) {
+    return {
+      success: false,
+      error: `Cannot detach ${domain}: durable provider and DNS identities are incomplete. Re-run hv_status or restore the reviewed binding before retrying.`,
+    };
+  }
+
+  const cfConnection = connectionRepo.findBestVerifiedMatchFromHints(
+    'cloudflare',
+    cloudflareScopeHintsForDomain(domain, getProjectScopeHints(params.project))
+  );
+  if (!cfConnection) {
+    return {
+      success: false,
+      error: `No verified Cloudflare connection is available to remove the exact managed DNS records for ${domain}.`,
+    };
+  }
+  const cfAdapter = new CloudflareAdapter();
+  cfAdapter.connect(getSecretStore().decryptObject<CloudflareCredentials>(cfConnection.credentialsEncrypted));
+
+  const recordsByType = new Map<string, Awaited<ReturnType<CloudflareAdapter['listDnsRecords']>>>();
+  const existingRecordIds: string[] = [];
+  for (const expected of binding.records) {
+    const type = expected.type.toUpperCase();
+    let records = recordsByType.get(type);
+    if (!records) {
+      records = await cfAdapter.listDnsRecords(binding.zoneId, type);
+      recordsByType.set(type, records);
+    }
+    const observed = records.find((record) => record.id === expected.id);
+    if (!observed) continue;
+    if (
+      normalizeDomainName(observed.name) !== normalizeDomainName(expected.name)
+      || observed.type.toUpperCase() !== type
+      || !dnsTargetMatches(type, observed.content, expected.target)
+    ) {
+      return {
+        success: false,
+        error: `Cloudflare DNS record ${expected.id} no longer matches the reviewed ${type} identity for ${domain}; no provider or DNS mutation was attempted.`,
+      };
+    }
+    existingRecordIds.push(expected.id);
+  }
+
+  const provider = hostingProviderForEnvironment(params.project, params.environment);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapter = adapterResult.adapter as DomainAttachCapableAdapter | undefined;
+  if (!adapterResult.success || !supportsCustomDomainDetach(adapter)) {
+    return {
+      success: false,
+      error: adapterResult.error
+        ?? `${provider} does not implement verified custom-domain detachment for ${domain}.`,
+    };
+  }
+  const detached = await callCustomDomainDetach(adapter, {
+    projectId: bindings.projectId,
+    serviceId: binding.serviceId,
+    environmentId: binding.environmentId,
+    domain,
+    customDomainId: binding.providerDomainId,
+  });
+  if (!detached.success) {
+    return {
+      success: false,
+      hostingDetached: false,
+      customDomainId: binding.providerDomainId,
+      error: detached.error ?? detached.message,
+    };
+  }
+
+  const deletedDnsRecordIds: string[] = [];
+  for (const recordId of existingRecordIds) {
+    await cfAdapter.deleteDnsRecord(binding.zoneId, recordId);
+    deletedDnsRecordIds.push(recordId);
+  }
+  return {
+    success: true,
+    hostingDetached: true,
+    customDomainId: binding.providerDomainId,
+    deletedDnsRecordIds,
+  };
 }

@@ -33,6 +33,7 @@ describe('DigitalOcean App Platform GitHub Actions workflow', () => {
     const result = buildDigitalOceanGitHubActionsSteps(target());
 
     expect(result.requiredSecrets).toEqual(DIGITALOCEAN_CI_REQUIRED_SECRETS);
+    expect(result.requiredSecrets).toEqual(['DIGITALOCEAN_TOKEN']);
     expect(result.requiredVariables).toEqual([]);
     expect(result.permissions).toContain('contents: read');
     expect(result.steps).toContain(
@@ -63,7 +64,8 @@ describe('DigitalOcean App Platform GitHub Actions workflow', () => {
     );
     expect(result.steps).not.toMatch(/\bdoctl\b/);
     expect(result.steps).not.toContain("method: 'POST'");
-    expect(result.steps).not.toContain('/v2/registries');
+    expect(result.steps).toContain('/v2/registries?page=1&per_page=200');
+    expect(result.steps).not.toContain('secrets.DIGITALOCEAN_REGISTRY');
   });
 
   it('derives the durable app identity from component bindings', () => {

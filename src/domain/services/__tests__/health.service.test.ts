@@ -211,7 +211,7 @@ describe('health.service', () => {
         projectId: project.id,
         name: 'staging',
         platformBindings: {
-          provider: 'azure-container-apps',
+          provider: 'vercel',
           services: { web: { serviceId: 'staging-web' } },
         },
       }),
@@ -239,11 +239,11 @@ describe('health.service', () => {
     ]);
     expect(result.environments).toContainEqual(expect.objectContaining({
       environment: 'staging',
-      provider: 'azure-container-apps',
+      provider: 'vercel',
       state: 'healthy',
     }));
     expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('railway', project);
-    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('azure-container-apps', project);
+    expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('vercel', project);
   });
 
   it('preserves unknown deployment state when a provider cannot be observed', async () => {

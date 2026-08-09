@@ -28,6 +28,7 @@ import {
   DigitalOceanClient,
   type DigitalOceanApp,
   type DigitalOceanAppComponent,
+  type DigitalOceanAppDomain,
   type DigitalOceanAppEnv,
   type DigitalOceanAppImage,
   type DigitalOceanAppSpec,
@@ -81,9 +82,6 @@ export class DigitalOceanAdapter implements IProviderAdapter {
       await Promise.all([
         this.client.verifyAppAccess(),
         this.client.verifyDatabaseAccess(),
-        ...(this.credentials?.containerRegistry
-          ? [this.verifyContainerRegistry(this.credentials.containerRegistry)]
-          : []),
       ]);
       return { success: true };
     } catch (error) {
@@ -132,12 +130,14 @@ export class DigitalOceanAdapter implements IProviderAdapter {
             error: `Bound DigitalOcean app ${bindings.projectId} was not found. Re-run hv_plan; Hypervibe will not create a replacement from a stale binding.`,
           };
         }
+        const registryName = (await this.resolveContainerRegistry(true)).name;
         return {
           success: true,
           message: `Using bound DigitalOcean app: ${bound.spec.name}`,
           data: {
             projectId: bound.id,
             projectName: bound.spec.name,
+            registryName,
             created: false,
           },
         };
@@ -175,6 +175,17 @@ export class DigitalOceanAdapter implements IProviderAdapter {
       };
     }
 
+    let registryName: string;
+    try {
+      registryName = (await this.resolveContainerRegistry(true)).name;
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to ensure DigitalOcean container registry',
+        error: this.formatError(error),
+      };
+    }
+
     try {
       const created = await this.client.createApp({
         name: appName,
@@ -186,6 +197,7 @@ export class DigitalOceanAdapter implements IProviderAdapter {
         data: {
           projectId: created.id,
           projectName: created.spec.name,
+          registryName,
           created: true,
         },
       };
@@ -194,6 +206,7 @@ export class DigitalOceanAdapter implements IProviderAdapter {
         success: false,
         message: 'Failed to create DigitalOcean app',
         error: this.formatError(error),
+        data: { registryName },
       };
     }
   }
@@ -259,22 +272,7 @@ export class DigitalOceanAdapter implements IProviderAdapter {
       let imageUri = this.imageUriForService(service, envVars);
       let pendingImage = false;
       if (options.deferDeployment) {
-        const registry = this.credentials.containerRegistry?.trim();
-        if (!registry) {
-          return this.failedDeploy(
-            service,
-            'DigitalOcean CI deploys require containerRegistry in the verified DigitalOcean connection. Hypervibe will not create a billable registry from a service or CI action; create or import the intended DOCR registry, reconnect with containerRegistry, then run hv_plan again.',
-            appId
-          );
-        }
-        const observedRegistry = await this.client.getContainerRegistry(registry);
-        if (!observedRegistry) {
-          return this.failedDeploy(
-            service,
-            `DigitalOcean Container Registry "${registry}" was not found. Hypervibe will not create a registry implicitly; create or import it explicitly, then run hv_plan again.`,
-            appId
-          );
-        }
+        const registry = (await this.resolveContainerRegistry(false)).name;
         if (!existing?.component.image) {
           const repository = parseGitHubRepoFromRemote(
             envVars.HYPERVIBE_SOURCE_REPO_URL
@@ -500,6 +498,149 @@ export class DigitalOceanAdapter implements IProviderAdapter {
     }
   }
 
+  async attachCustomDomain(params: {
+    projectId?: string;
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+  }): Promise<Receipt> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    try {
+      const identity = this.requireDomainServiceIdentity(params);
+      const app = await this.client.getApp(identity.appId);
+      if (!app) {
+        return {
+          success: false,
+          message: 'Failed to attach DigitalOcean custom domain',
+          error: `Bound DigitalOcean app ${identity.appId} was not found.`,
+        };
+      }
+      this.assertDomainServiceExists(app, identity);
+      const desiredMatches = this.appSpecDomainMatches(app, params.domain);
+      if (desiredMatches.length > 1) {
+        throw new Error(`DigitalOcean app ${app.id} contains multiple spec entries for ${params.domain}.`);
+      }
+      if (desiredMatches.length === 0) {
+        await this.client.updateApp(app.id, {
+          ...app.spec,
+          domains: [
+            ...(app.spec.domains ?? []),
+            { domain: params.domain, type: 'ALIAS' },
+          ],
+        });
+      }
+
+      const currentApp = await this.client.getApp(app.id);
+      if (!currentApp) {
+        throw new Error(`DigitalOcean app ${app.id} disappeared after its domain spec was updated.`);
+      }
+      const current = this.requireSingleObservedDomain(currentApp, params.domain);
+      return {
+        success: true,
+        message: desiredMatches.length > 0
+          ? 'DigitalOcean custom domain already attached'
+          : 'DigitalOcean custom domain attached',
+        data: {
+          domain: current.spec.domain,
+          customDomainId: current.id,
+          created: desiredMatches.length === 0,
+          providerVerified: current.phase === 'ACTIVE',
+          ...(current.phase ? { certificateStatus: current.phase } : {}),
+          dnsRecords: this.appDomainDnsRecords(currentApp, current),
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to attach DigitalOcean custom domain',
+        error: this.formatError(error),
+      };
+    }
+  }
+
+  async detachCustomDomain(params: {
+    projectId?: string;
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+    customDomainId?: string;
+  }): Promise<Receipt> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    try {
+      const identity = this.requireDomainServiceIdentity(params);
+      const app = await this.client.getApp(identity.appId);
+      if (!app) {
+        return {
+          success: false,
+          message: 'Failed to detach DigitalOcean custom domain',
+          error: `Bound DigitalOcean app ${identity.appId} was not found, so domain absence cannot be verified.`,
+        };
+      }
+      this.assertDomainServiceExists(app, identity);
+      const observedMatches = this.observedDomainMatches(app, params.domain);
+      const specMatches = this.appSpecDomainMatches(app, params.domain);
+      if (observedMatches.length > 1 || specMatches.length > 1) {
+        throw new Error(`DigitalOcean app ${app.id} contains multiple domain identities for ${params.domain}.`);
+      }
+      const observed = observedMatches[0];
+      const specDomain = specMatches[0];
+      if (!observed && !specDomain) {
+        return {
+          success: true,
+          message: 'DigitalOcean custom domain is already absent',
+          data: { domain: params.domain, customDomainId: params.customDomainId, alreadyAbsent: true },
+        };
+      }
+      if (!observed) {
+        throw new Error(`DigitalOcean still has ${params.domain} in the app spec but did not return its durable domain id.`);
+      }
+      if (params.customDomainId && observed.id !== params.customDomainId) {
+        return {
+          success: false,
+          message: 'DigitalOcean custom-domain identity changed',
+          error: `Reviewed custom-domain id ${params.customDomainId} does not match observed id ${observed.id} for ${params.domain}.`,
+        };
+      }
+      if (!specDomain) {
+        throw new Error(`DigitalOcean returned domain id ${observed.id}, but ${params.domain} was absent from the full app spec; refusing an unverifiable update.`);
+      }
+
+      const remainingDomains = (app.spec.domains ?? []).filter(
+        (domain) => domain !== specDomain
+      );
+      const nextSpec: DigitalOceanAppSpec = { ...app.spec };
+      if (remainingDomains.length > 0) nextSpec.domains = remainingDomains;
+      else delete nextSpec.domains;
+      await this.client.updateApp(app.id, nextSpec);
+
+      const currentApp = await this.client.getApp(app.id);
+      if (!currentApp) {
+        throw new Error(`DigitalOcean app ${app.id} disappeared after its domain spec was updated.`);
+      }
+      if (
+        this.observedDomainMatches(currentApp, params.domain).length > 0
+        || this.appSpecDomainMatches(currentApp, params.domain).length > 0
+      ) {
+        return {
+          success: false,
+          message: 'DigitalOcean custom-domain deletion is not complete',
+          error: `${params.domain} remains attached to DigitalOcean app ${app.id}.`,
+        };
+      }
+      return {
+        success: true,
+        message: 'DigitalOcean custom domain detached',
+        data: { domain: params.domain, customDomainId: observed.id, deleted: true },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to detach DigitalOcean custom domain',
+        error: this.formatError(error),
+      };
+    }
+  }
+
   async getDeployStatus(
     environment: Environment,
     deploymentId: string
@@ -569,10 +710,16 @@ export class DigitalOceanAdapter implements IProviderAdapter {
       };
     }
 
+    const domainOwnerId = this.observedDomainOwnerId(app, bindings);
     const services: ObservedService[] = [];
     for (const collection of this.collections()) {
       for (const component of app.spec[collection] ?? []) {
-        services.push(this.observedService(app, collection, component));
+        services.push(this.observedService(
+          app,
+          collection,
+          component,
+          domainOwnerId === this.serviceExternalId(app.id, collection, component.name)
+        ));
       }
     }
     return {
@@ -839,22 +986,47 @@ export class DigitalOceanAdapter implements IProviderAdapter {
     );
   }
 
-  private async verifyContainerRegistry(registryName: string): Promise<void> {
-    if (!this.client) {
+  private async resolveContainerRegistry(
+    createIfMissing: boolean
+  ): Promise<{ name: string }> {
+    if (!this.client || !this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
-    const registry = await this.client.getContainerRegistry(registryName);
-    if (!registry) {
+    const existing = (await this.client.listContainerRegistries())
+      .filter((registry) => registry.name?.trim())
+      .sort((left, right) => left.name.localeCompare(right.name));
+    if (existing.length > 0) {
+      return existing[0]!;
+    }
+    if (!createIfMissing) {
       throw new Error(
-        `DigitalOcean Container Registry "${registryName}" was not found.`
+        'No DigitalOcean Container Registry exists. Re-run hv_plan so the explicit project action can create Hypervibe\'s free Starter registry before service configuration.'
       );
+    }
+
+    const accountUuid = await this.client.getAccountUuid();
+    const suffix = accountUuid.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!suffix) {
+      throw new Error('DigitalOcean account UUID cannot produce a stable registry name.');
+    }
+    const name = `hypervibe-${suffix}`.slice(0, 63).replace(/-+$/, '');
+    try {
+      return await this.client.createContainerRegistry({
+        name,
+        region: this.credentials.region,
+      });
+    } catch (error) {
+      const observed = await this.client.getContainerRegistry(name);
+      if (observed) return observed;
+      throw error;
     }
   }
 
   private observedService(
     app: DigitalOceanApp,
     collection: ComponentCollection,
-    component: DigitalOceanAppComponent
+    component: DigitalOceanAppComponent,
+    ownsDomains = false
   ): ObservedService {
     const env = component.envs ?? [];
     const source = component.github?.repo
@@ -894,7 +1066,12 @@ export class DigitalOceanAdapter implements IProviderAdapter {
       ...(collection === 'services' && app.live_url
         ? { url: app.live_url }
         : {}),
-      customDomains: [],
+      customDomains: ownsDomains
+        ? (app.domains ?? []).map((domain) => domain.spec.domain).sort()
+        : [],
+      ...(ownsDomains && (app.domains?.length ?? 0) > 0
+        ? { customDomainStatus: this.observedDomainStatus(app) }
+        : {}),
       config: {
         ...(component.run_command
           ? { startCommand: component.run_command }
@@ -935,6 +1112,134 @@ export class DigitalOceanAdapter implements IProviderAdapter {
       }
     }
     return matches;
+  }
+
+  private requireDomainServiceIdentity(params: {
+    projectId?: string;
+    serviceId: string;
+  }): { appId: string; collection: ComponentCollection; componentName: string } {
+    const identity = this.parseServiceExternalId(params.serviceId);
+    if (!identity) {
+      throw new Error(`DigitalOcean service binding ${params.serviceId} is malformed.`);
+    }
+    if (params.projectId && params.projectId !== identity.appId) {
+      throw new Error(`DigitalOcean project binding ${params.projectId} does not match service app ${identity.appId}.`);
+    }
+    if (identity.collection !== 'services') {
+      throw new Error(`DigitalOcean custom domains can only attach to public service components, not ${identity.collection}.`);
+    }
+    return identity;
+  }
+
+  private assertDomainServiceExists(
+    app: DigitalOceanApp,
+    identity: { appId: string; collection: ComponentCollection; componentName: string }
+  ): void {
+    if (app.id !== identity.appId) {
+      throw new Error(`DigitalOcean app identity changed from ${identity.appId} to ${app.id}.`);
+    }
+    const matches = this.componentMatches(app.spec, identity.componentName).filter(
+      (match) => match.collection === identity.collection
+    );
+    if (matches.length !== 1) {
+      throw new Error(matches.length === 0
+        ? `Bound DigitalOcean service component ${identity.componentName} was not found in app ${app.id}.`
+        : `Multiple DigitalOcean service components match ${identity.componentName} in app ${app.id}.`);
+    }
+  }
+
+  private appSpecDomainMatches(app: DigitalOceanApp, domain: string) {
+    return (app.spec.domains ?? []).filter(
+      (candidate) => candidate.domain.toLowerCase() === domain.toLowerCase()
+    );
+  }
+
+  private observedDomainMatches(app: DigitalOceanApp, domain: string): DigitalOceanAppDomain[] {
+    return (app.domains ?? []).filter(
+      (candidate) => candidate.spec.domain.toLowerCase() === domain.toLowerCase()
+    );
+  }
+
+  private requireSingleObservedDomain(app: DigitalOceanApp, domain: string): DigitalOceanAppDomain {
+    const matches = this.observedDomainMatches(app, domain);
+    if (matches.length !== 1) {
+      throw new Error(matches.length === 0
+        ? `DigitalOcean did not return a durable domain id for ${domain} after the app spec update.`
+        : `DigitalOcean returned multiple domain ids for ${domain}.`);
+    }
+    return matches[0]!;
+  }
+
+  private appDomainDnsRecords(
+    app: DigitalOceanApp,
+    domain: DigitalOceanAppDomain
+  ): Array<{ name: string; type: string; value: string; purpose: string }> {
+    const ingress = this.appIngressHostname(app);
+    const records = [{
+      name: domain.spec.domain,
+      type: 'CNAME',
+      value: ingress,
+      purpose: 'traffic',
+    }];
+    for (const validation of domain.spec.validations ?? []) {
+      if (!validation.txt_name || !validation.txt_value) {
+        throw new Error(`DigitalOcean returned an incomplete TXT validation record for ${domain.spec.domain}.`);
+      }
+      records.push({
+        name: validation.txt_name,
+        type: 'TXT',
+        value: validation.txt_value,
+        purpose: 'verification',
+      });
+    }
+    return records;
+  }
+
+  private appIngressHostname(app: DigitalOceanApp): string {
+    const raw = app.default_ingress ?? app.live_url;
+    if (!raw) {
+      throw new Error(`DigitalOcean app ${app.id} did not expose its required ingress hostname.`);
+    }
+    const normalized = raw.match(/^https?:\/\//i)
+      ? new URL(raw).hostname
+      : raw.replace(/\/+$/, '');
+    if (!normalized) {
+      throw new Error(`DigitalOcean app ${app.id} returned an invalid ingress hostname.`);
+    }
+    return normalized;
+  }
+
+  private observedDomainOwnerId(
+    app: DigitalOceanApp,
+    bindings: ReturnType<typeof parseHostingBindings>
+  ): string | undefined {
+    if ((app.domains?.length ?? 0) === 0) return undefined;
+    const boundOwner = bindings.domainDns?.serviceId;
+    if (boundOwner) {
+      const identity = this.requireDomainServiceIdentity({
+        projectId: app.id,
+        serviceId: boundOwner,
+      });
+      this.assertDomainServiceExists(app, identity);
+      return boundOwner;
+    }
+    const services = app.spec.services ?? [];
+    if (services.length !== 1) {
+      throw new Error(`DigitalOcean app ${app.id} has custom domains and ${services.length} public services, but no durable domain-to-service binding. Use hv_import to adopt the intended ownership.`);
+    }
+    return this.serviceExternalId(app.id, 'services', services[0]!.name);
+  }
+
+  private observedDomainStatus(app: DigitalOceanApp): NonNullable<ObservedService['customDomainStatus']> {
+    return Object.fromEntries((app.domains ?? []).map((domain) => [
+      domain.spec.domain,
+      {
+        providerVerified: domain.phase === 'ACTIVE',
+        certificateStatus: domain.phase ?? 'UNKNOWN',
+        dnsConfigured: domain.phase === 'ACTIVE',
+        dnsRecords: this.appDomainDnsRecords(app, domain),
+      },
+    ]));
   }
 
   private replaceComponent(
@@ -1120,7 +1425,6 @@ providerRegistry.register({
         requiredSecrets: DIGITALOCEAN_CI_REQUIRED_SECRETS,
         secretCredentialKeys: {
           DIGITALOCEAN_TOKEN: 'apiToken',
-          DIGITALOCEAN_REGISTRY: 'containerRegistry',
         },
         buildGitHubActionsSteps: buildDigitalOceanGitHubActionsSteps,
       },
@@ -1129,7 +1433,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { customDomains: 'unsupported' },
+      hosting: { customDomains: 'managed' },
       databaseEngines: ['postgres'],
       cacheEngines: ['redis'],
     },

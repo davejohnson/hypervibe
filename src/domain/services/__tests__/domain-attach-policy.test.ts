@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   callCustomDomainAttach,
+  callCustomDomainDetach,
   customDomainAttachUnsupportedMessage,
   supportsCustomDomainAttach,
+  supportsCustomDomainDetach,
 } from '../domain-attach-policy.js';
 
 describe('domain attach policy', () => {
@@ -39,5 +41,29 @@ describe('domain attach policy', () => {
     expect(message).toContain('provider-side custom-domain attachment');
     expect(message).toContain('DNS was not changed');
     expect(message).toContain('vercel');
+  });
+
+  it('detects and invokes verified custom-domain detachment with adapter context', async () => {
+    const adapter = {
+      client: 'provider-client',
+      async detachCustomDomain(this: { client?: string }, params: { customDomainId?: string }) {
+        return {
+          success: this.client === 'provider-client',
+          message: 'detached',
+          data: { customDomainId: params.customDomainId },
+        };
+      },
+    };
+
+    expect(supportsCustomDomainDetach(adapter)).toBe(true);
+    await expect(callCustomDomainDetach(adapter, {
+      serviceId: 'svc-1',
+      environmentId: 'env-1',
+      domain: 'example.com',
+      customDomainId: 'domain-1',
+    })).resolves.toMatchObject({
+      success: true,
+      data: { customDomainId: 'domain-1' },
+    });
   });
 });

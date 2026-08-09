@@ -1,7 +1,3 @@
-export * from './azure-container-apps.credentials.js';
-export * from './azure-container-apps.client.js';
-export * from './azure-container-apps-ci.workflow.js';
-export * from './azure-container-apps.adapter.js';
 export * from './azure-datastore.credentials.js';
 export * from './azure-resource-manager.client.js';
 export * from './azure-postgres.client.js';

@@ -151,6 +151,44 @@ interface CloudRunCondition {
   message?: string;
 }
 
+interface CloudRunDomainMapping {
+  apiVersion?: string;
+  kind?: string;
+  metadata?: {
+    name?: string;
+    namespace?: string;
+    uid?: string;
+    labels?: Record<string, string>;
+  };
+  spec?: {
+    routeName?: string;
+    certificateMode?: string;
+    forceOverride?: boolean;
+  };
+  status?: {
+    mappedRouteName?: string;
+    conditions?: CloudRunCondition[];
+    resourceRecords?: Array<{
+      name?: string;
+      rrdata?: string;
+      type?: string;
+    }>;
+  };
+}
+
+const CLOUD_RUN_DOMAIN_MAPPING_REGIONS = new Set([
+  'asia-east1',
+  'asia-northeast1',
+  'asia-southeast1',
+  'europe-north1',
+  'europe-west1',
+  'europe-west4',
+  'us-central1',
+  'us-east1',
+  'us-east4',
+  'us-west1',
+]);
+
 interface CloudRunContainer {
   name?: string;
   image?: string;
@@ -858,6 +896,130 @@ export class CloudRunAdapter implements IProviderAdapter {
     } catch (error) {
       return {
         success: false,
+        error: this.formatError(error),
+      };
+    }
+  }
+
+  async attachCustomDomain(params: {
+    projectId?: string;
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+    dnsZone?: string;
+  }): Promise<Receipt> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    try {
+      this.assertDomainMappingScope(params);
+      const token = await this.getAccessToken();
+      const service = await this.getCloudRunServiceStrict(params.serviceId, token);
+      if (!service) {
+        throw new Error(`Bound Cloud Run service ${params.serviceId} was not found.`);
+      }
+      const readiness = this.cloudRunServiceReadiness(service);
+      if (!readiness.ready) {
+        throw new Error(`Cloud Run service ${params.serviceId} is not ready${readiness.error ? `: ${readiness.error}` : '.'}`);
+      }
+
+      const existing = await this.getCloudRunDomainMapping(params.domain, token);
+      let mapping = existing;
+      if (existing) {
+        this.assertDomainMappingIdentity(existing, params.domain);
+        const route = existing.spec?.routeName ?? existing.status?.mappedRouteName;
+        if (route !== params.serviceId) {
+          throw new Error(`Cloud Run domain ${params.domain} is already mapped to ${route ?? 'an unknown route'}; Hypervibe will not force-override it.`);
+        }
+      } else {
+        mapping = await this.createCloudRunDomainMapping(
+          params.domain,
+          params.serviceId,
+          token
+        );
+      }
+      this.assertDomainMappingIdentity(mapping!, params.domain);
+      const ready = this.domainMappingReady(mapping!);
+      return {
+        success: true,
+        message: existing
+          ? 'Cloud Run custom domain already mapped'
+          : 'Cloud Run custom domain mapped',
+        data: {
+          domain: params.domain,
+          customDomainId: mapping!.metadata!.uid,
+          created: !existing,
+          providerVerified: ready,
+          certificateStatus: this.domainMappingCertificateStatus(mapping!),
+          dnsRecords: this.domainMappingDnsRecords(mapping!, params.domain),
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to attach Cloud Run custom domain',
+        error: this.formatError(error),
+      };
+    }
+  }
+
+  async detachCustomDomain(params: {
+    projectId?: string;
+    serviceId: string;
+    environmentId: string;
+    domain: string;
+    customDomainId?: string;
+  }): Promise<Receipt> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    try {
+      this.assertDomainMappingScope(params);
+      const token = await this.getAccessToken();
+      const mapping = await this.getCloudRunDomainMapping(params.domain, token);
+      if (!mapping) {
+        return {
+          success: true,
+          message: 'Cloud Run custom domain is already absent',
+          data: { domain: params.domain, customDomainId: params.customDomainId, alreadyAbsent: true },
+        };
+      }
+      this.assertDomainMappingIdentity(mapping, params.domain);
+      if (params.customDomainId && mapping.metadata!.uid !== params.customDomainId) {
+        return {
+          success: false,
+          message: 'Cloud Run custom-domain identity changed',
+          error: `Reviewed mapping uid ${params.customDomainId} does not match observed uid ${mapping.metadata!.uid}.`,
+        };
+      }
+      const route = mapping.spec?.routeName ?? mapping.status?.mappedRouteName;
+      if (route !== params.serviceId) {
+        throw new Error(`Cloud Run domain ${params.domain} now maps to ${route ?? 'an unknown route'}, not reviewed service ${params.serviceId}.`);
+      }
+      await this.deleteCloudRunDomainMapping(params.domain, token);
+      const attempts = this.positiveIntegerEnv(
+        'HYPERVIBE_CLOUDRUN_DOMAIN_DELETE_ATTEMPTS',
+        60
+      );
+      const delayMs = this.nonNegativeIntegerEnv(
+        'HYPERVIBE_CLOUDRUN_DOMAIN_DELETE_DELAY_MS',
+        1000
+      );
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        if (!await this.getCloudRunDomainMapping(params.domain, token)) {
+          return {
+            success: true,
+            message: 'Cloud Run custom domain detached',
+            data: {
+              domain: params.domain,
+              customDomainId: mapping.metadata!.uid,
+              deleted: true,
+            },
+          };
+        }
+        if (attempt < attempts) await this.delay(delayMs);
+      }
+      throw new Error(`Cloud Run domain mapping ${params.domain} remained observable after ${attempts} deletion checks.`);
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to detach Cloud Run custom domain',
         error: this.formatError(error),
       };
     }
@@ -1668,6 +1830,28 @@ export class CloudRunAdapter implements IProviderAdapter {
     const warnings: string[] = [];
     const services: ObservedService[] = [];
 
+    let domainMappings: CloudRunDomainMapping[] = [];
+    let domainObservationKnown = true;
+    if (this.domainMappingRegionSupported()) {
+      try {
+        domainMappings = await this.listCloudRunDomainMappings(token);
+      } catch (error) {
+        domainObservationKnown = false;
+        warnings.push(`Failed to list Cloud Run domain mappings: ${this.formatError(error)}`);
+      }
+    }
+    const mappingsByRoute = new Map<string, CloudRunDomainMapping[]>();
+    for (const mapping of domainMappings) {
+      const route = mapping.spec?.routeName ?? mapping.status?.mappedRouteName;
+      if (!route) {
+        throw new Error(`Cloud Run domain mapping ${mapping.metadata?.name ?? 'unknown'} did not expose its mapped route.`);
+      }
+      mappingsByRoute.set(route, [
+        ...(mappingsByRoute.get(route) ?? []),
+        mapping,
+      ]);
+    }
+
     let liveServices: CloudRunService[] = [];
     try {
       liveServices = await this.listCloudRunServices(token);
@@ -1689,6 +1873,7 @@ export class CloudRunAdapter implements IProviderAdapter {
       const startCommand = this.containerStartCommand(container);
       const healthCheckPath = container?.startupProbe?.httpGet?.path ?? container?.livenessProbe?.httpGet?.path;
       const publicAccess = await this.observePublicInvoker(externalId, token);
+      const serviceMappings = mappingsByRoute.get(externalId) ?? [];
       services.push({
         name: this.observedServiceName(externalId, liveService.labels, bindingKey, prefix),
         externalId,
@@ -1696,7 +1881,20 @@ export class CloudRunAdapter implements IProviderAdapter {
         // diff can converge a manually flipped ingress back to the spec.
         workloadKind: liveService.ingress === 'INGRESS_TRAFFIC_INTERNAL_ONLY' ? 'worker' : 'web',
         ...(liveService.uri ? { url: liveService.uri } : {}),
-        customDomains: [],
+        customDomains: serviceMappings.map((mapping) => mapping.metadata!.name!).sort(),
+        ...(serviceMappings.length > 0
+          ? {
+              customDomainStatus: Object.fromEntries(serviceMappings.map((mapping) => [
+                mapping.metadata!.name!,
+                {
+                  providerVerified: this.domainMappingReady(mapping),
+                  certificateStatus: this.domainMappingCertificateStatus(mapping),
+                  dnsConfigured: this.domainMappingReady(mapping),
+                  dnsRecords: this.domainMappingDnsRecords(mapping, mapping.metadata!.name!),
+                },
+              ])),
+            }
+          : {}),
         config: {
           ...(startCommand ? { startCommand } : {}),
           ...(healthCheckPath ? { healthCheckPath } : {}),
@@ -1758,12 +1956,211 @@ export class CloudRunAdapter implements IProviderAdapter {
       environmentId: bindings.environmentId ?? this.credentials.region,
       services,
       databases: [],
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: domainObservationKnown ? 'complete' : 'unknown',
+        databases: 'unknown',
+        caches: 'unknown',
+        storage: 'complete',
+      },
       partial: warnings.length > 0,
       warnings,
     };
   }
 
   // Helper methods
+
+  private domainMappingBaseUrl(): string {
+    const { projectId, region } = this.credentials!;
+    return `https://${region}-run.googleapis.com/apis/domains.cloudrun.com/v1/namespaces/${encodeURIComponent(projectId)}/domainmappings`;
+  }
+
+  private domainMappingRegionSupported(): boolean {
+    return CLOUD_RUN_DOMAIN_MAPPING_REGIONS.has(this.credentials!.region);
+  }
+
+  private assertDomainMappingScope(params: {
+    environmentId: string;
+    serviceId: string;
+    domain: string;
+  }): void {
+    if (!this.domainMappingRegionSupported()) {
+      throw new Error(`Cloud Run native domain mappings are unavailable in ${this.credentials!.region}. Use a declarative external Application Load Balancer instead; DNS was not changed for ${params.domain}.`);
+    }
+    if (params.environmentId !== this.credentials!.region) {
+      throw new Error(`Cloud Run environment binding ${params.environmentId} does not match configured region ${this.credentials!.region}.`);
+    }
+    if (!params.serviceId || params.serviceId.includes('/')) {
+      throw new Error(`Cloud Run service binding ${params.serviceId} is invalid.`);
+    }
+  }
+
+  private async getCloudRunServiceStrict(
+    serviceName: string,
+    token: string
+  ): Promise<CloudRunService | null> {
+    const { projectId, region } = this.credentials!;
+    const response = await fetch(
+      `https://run.googleapis.com/v2/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(region)}/services/${encodeURIComponent(serviceName)}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new Error(`Cloud Run service observation failed with HTTP ${response.status}.`);
+    }
+    return await response.json() as CloudRunService;
+  }
+
+  private async getCloudRunDomainMapping(
+    domain: string,
+    token: string
+  ): Promise<CloudRunDomainMapping | null> {
+    const response = await fetch(
+      `${this.domainMappingBaseUrl()}/${encodeURIComponent(domain)}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new Error(`Cloud Run domain-mapping observation failed with HTTP ${response.status}.`);
+    }
+    return await response.json() as CloudRunDomainMapping;
+  }
+
+  private async listCloudRunDomainMappings(
+    token: string
+  ): Promise<CloudRunDomainMapping[]> {
+    const mappings: CloudRunDomainMapping[] = [];
+    const seenNames = new Set<string>();
+    let continuation: string | undefined;
+    do {
+      const response = await fetch(
+        `${this.domainMappingBaseUrl()}?limit=100${continuation ? `&continue=${encodeURIComponent(continuation)}` : ''}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!response.ok) {
+        throw new Error(`Cloud Run domain-mapping list failed with HTTP ${response.status}.`);
+      }
+      const body = await response.json() as {
+        items?: CloudRunDomainMapping[];
+        metadata?: { continue?: string };
+        unreachable?: string[];
+      };
+      if (!Array.isArray(body.items)) {
+        throw new Error('Cloud Run domain-mapping list returned an invalid items collection.');
+      }
+      if ((body.unreachable?.length ?? 0) > 0) {
+        throw new Error(`Cloud Run domain-mapping observation was incomplete for: ${body.unreachable!.join(', ')}.`);
+      }
+      for (const mapping of body.items) {
+        this.assertDomainMappingIdentity(mapping);
+        const name = mapping.metadata!.name!.toLowerCase();
+        if (seenNames.has(name)) {
+          throw new Error(`Cloud Run returned duplicate domain mapping ${mapping.metadata!.name}.`);
+        }
+        seenNames.add(name);
+        mappings.push(mapping);
+      }
+      continuation = body.metadata?.continue || undefined;
+    } while (continuation);
+    return mappings;
+  }
+
+  private async createCloudRunDomainMapping(
+    domain: string,
+    serviceId: string,
+    token: string
+  ): Promise<CloudRunDomainMapping> {
+    const response = await fetch(this.domainMappingBaseUrl(), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        apiVersion: 'domains.cloudrun.com/v1',
+        kind: 'DomainMapping',
+        metadata: {
+          name: domain,
+          namespace: this.credentials!.projectId,
+        },
+        spec: {
+          routeName: serviceId,
+          certificateMode: 'AUTOMATIC',
+        },
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Cloud Run domain-mapping create failed with HTTP ${response.status}. Verify base-domain ownership and run.domainmappings.create permission.`);
+    }
+    return await response.json() as CloudRunDomainMapping;
+  }
+
+  private async deleteCloudRunDomainMapping(
+    domain: string,
+    token: string
+  ): Promise<void> {
+    const response = await fetch(
+      `${this.domainMappingBaseUrl()}/${encodeURIComponent(domain)}`,
+      { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (response.status === 404) return;
+    if (!response.ok) {
+      throw new Error(`Cloud Run domain-mapping delete failed with HTTP ${response.status}.`);
+    }
+  }
+
+  private assertDomainMappingIdentity(
+    mapping: CloudRunDomainMapping,
+    expectedDomain?: string
+  ): void {
+    const name = mapping.metadata?.name;
+    const uid = mapping.metadata?.uid;
+    const namespace = mapping.metadata?.namespace;
+    if (!name || !uid || !namespace) {
+      throw new Error('Cloud Run returned an incomplete domain-mapping identity.');
+    }
+    if (namespace !== this.credentials!.projectId) {
+      throw new Error(`Cloud Run domain mapping ${name} belongs to namespace ${namespace}, not ${this.credentials!.projectId}.`);
+    }
+    if (expectedDomain && name.toLowerCase() !== expectedDomain.toLowerCase()) {
+      throw new Error(`Cloud Run domain mapping identity ${name} does not match ${expectedDomain}.`);
+    }
+  }
+
+  private domainMappingReady(mapping: CloudRunDomainMapping): boolean {
+    const ready = mapping.status?.conditions?.find((condition) => condition.type === 'Ready');
+    return ['True', 'CONDITION_SUCCEEDED'].includes(ready?.status ?? ready?.state ?? '');
+  }
+
+  private domainMappingCertificateStatus(mapping: CloudRunDomainMapping): string {
+    const certificate = mapping.status?.conditions?.find((condition) =>
+      /certificate/i.test(condition.type ?? '')
+    );
+    const ready = mapping.status?.conditions?.find((condition) => condition.type === 'Ready');
+    const condition = certificate ?? ready;
+    return condition?.reason
+      ?? condition?.status
+      ?? condition?.state
+      ?? 'PENDING';
+  }
+
+  private domainMappingDnsRecords(
+    mapping: CloudRunDomainMapping,
+    domain: string
+  ): Array<{ name: string; type: string; value: string; purpose: string }> {
+    return (mapping.status?.resourceRecords ?? []).map((record) => {
+      if (!record.type || !record.rrdata) {
+        throw new Error(`Cloud Run returned an incomplete DNS record for ${domain}.`);
+      }
+      return {
+        name: domain,
+        type: record.type,
+        value: record.rrdata,
+        purpose: 'traffic verification',
+      };
+    });
+  }
 
   private async queryCloudLogging(params: {
     token: string;
@@ -3371,6 +3768,20 @@ export class CloudRunAdapter implements IProviderAdapter {
     return (existing ?? []).filter((entry) => entry.name !== 'cloudsql');
   }
 
+  private positiveIntegerEnv(name: string, fallback: number): number {
+    const value = Number(process.env[name] ?? fallback);
+    return Number.isInteger(value) && value > 0 ? value : fallback;
+  }
+
+  private nonNegativeIntegerEnv(name: string, fallback: number): number {
+    const value = Number(process.env[name] ?? fallback);
+    return Number.isInteger(value) && value >= 0 ? value : fallback;
+  }
+
+  private async delay(ms: number): Promise<void> {
+    if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   private mergeEnvVars(
     existing: Array<Record<string, unknown>> | undefined,
     updates: Record<string, string>,
@@ -3474,7 +3885,10 @@ providerRegistry.register({
     credentialsSchema: CloudRunCredentialsSchema,
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
     lifecycle: {
-      hosting: { customDomains: 'unsupported' },
+      hosting: {
+        customDomains: 'managed',
+        domainTrafficProxy: 'dns-only',
+      },
     },
     orchestration: {
       diff: {

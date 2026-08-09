@@ -76,9 +76,30 @@ export interface DigitalOceanAppComponent {
   schedule?: { cron?: string };
 }
 
+export interface DigitalOceanAppDomainSpec {
+  domain: string;
+  type?: 'UNSPECIFIED' | 'DEFAULT' | 'PRIMARY' | 'ALIAS' | string;
+  wildcard?: boolean;
+  zone?: string;
+  minimum_tls_version?: '1.2' | '1.3' | string;
+}
+
+export interface DigitalOceanAppDomain {
+  id: string;
+  phase?: 'UNKNOWN' | 'PENDING' | 'CONFIGURING' | 'ACTIVE' | 'ERROR' | string;
+  certificate_expires_at?: string;
+  spec: DigitalOceanAppDomainSpec & {
+    validations?: Array<{
+      txt_name?: string;
+      txt_value?: string;
+    }>;
+  };
+}
+
 export interface DigitalOceanAppSpec {
   name: string;
   region?: string;
+  domains?: DigitalOceanAppDomainSpec[];
   services?: DigitalOceanAppComponent[];
   workers?: DigitalOceanAppComponent[];
   jobs?: DigitalOceanAppComponent[];
@@ -89,6 +110,7 @@ export interface DigitalOceanAppSpec {
 export interface DigitalOceanApp {
   id: string;
   spec: DigitalOceanAppSpec;
+  domains?: DigitalOceanAppDomain[];
   live_url?: string;
   default_ingress?: string;
   active_deployment?: {
@@ -142,6 +164,15 @@ interface ContainerRegistryResponse {
   registry: DigitalOceanContainerRegistry;
 }
 
+interface ListContainerRegistriesResponse {
+  registries: DigitalOceanContainerRegistry[];
+  links?: { pages?: { next?: string } };
+}
+
+interface AccountResponse {
+  account: { uuid?: string };
+}
+
 export class DigitalOceanApiError extends Error {
   constructor(
     readonly status: number,
@@ -181,6 +212,64 @@ export class DigitalOceanClient {
       }
       throw error;
     }
+  }
+
+  async listContainerRegistries(): Promise<DigitalOceanContainerRegistry[]> {
+    const registries: DigitalOceanContainerRegistry[] = [];
+    const visitedPages = new Set<number>();
+    let page = 1;
+
+    while (true) {
+      if (visitedPages.has(page)) {
+        throw new Error(`DigitalOcean registry pagination repeated page ${page}.`);
+      }
+      visitedPages.add(page);
+      const response = await this.request<ListContainerRegistriesResponse>(
+        'GET',
+        '/v2/registries',
+        { query: { page, per_page: 200 } }
+      );
+      if (!Array.isArray(response.registries)) {
+        throw new Error('DigitalOcean registry observation returned an invalid registry list.');
+      }
+      registries.push(...response.registries);
+      if (!response.links?.pages?.next) break;
+      page += 1;
+      if (page > 1000) {
+        throw new Error('DigitalOcean registry pagination exceeded 1000 pages.');
+      }
+    }
+    return registries;
+  }
+
+  async getAccountUuid(): Promise<string> {
+    const response = await this.request<AccountResponse>('GET', '/v2/account');
+    const uuid = response.account?.uuid?.trim();
+    if (!uuid) {
+      throw new Error('DigitalOcean account observation returned no account UUID.');
+    }
+    return uuid;
+  }
+
+  async createContainerRegistry(input: {
+    name: string;
+    region: string;
+  }): Promise<DigitalOceanContainerRegistry> {
+    const response = await this.request<ContainerRegistryResponse>(
+      'POST',
+      '/v2/registries',
+      {
+        body: {
+          name: input.name,
+          region: input.region,
+          subscription_tier_slug: 'starter',
+        },
+      }
+    );
+    if (!response.registry?.name) {
+      throw new Error('DigitalOcean returned an invalid container registry create response.');
+    }
+    return response.registry;
   }
 
   async listApps(): Promise<DigitalOceanApp[]> {

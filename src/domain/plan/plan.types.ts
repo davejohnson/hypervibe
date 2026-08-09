@@ -48,7 +48,17 @@ export interface LocalSnapshot {
     projectId?: string;
     environmentId?: string;
     services?: Record<string, { serviceId?: string; url?: string; customDomains?: string[] }>;
-    domainDns?: { name?: string; proxied?: boolean; recreateRevision?: string };
+    domainDns?: {
+      name?: string;
+      proxied?: boolean;
+      recreateRevision?: string;
+      providerDomainId?: string;
+      serviceName?: string;
+      serviceId?: string;
+      environmentId?: string;
+      zoneId?: string;
+      records?: Array<{ id: string; name: string; type: string; target: string }>;
+    };
     /** Bindings of the hosting provider abandoned by a provider switch; drives confirm-gated teardown. */
     previousHosting?: {
       provider?: string;

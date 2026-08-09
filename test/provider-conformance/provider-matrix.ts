@@ -50,6 +50,8 @@ export interface HostingProviderContract {
   status: ProviderImplementationStatus;
   /** Environment custom-domain lifecycle implemented by Hypervibe today. */
   customDomains: 'managed' | 'unsupported';
+  /** Whether the provider certificate path permits proxied traffic DNS. */
+  domainTrafficProxy: 'supported' | 'dns-only';
   credentials: ProviderCredentialField[];
   /** Opt-in managed GitHub workflow live-test profile. */
   managedWorkflow?: ManagedWorkflowFixture;
@@ -112,52 +114,8 @@ const awsNetworkCredentials: ProviderCredentialField[] = [
   },
 ];
 
-const awsEcsCredentials: ProviderCredentialField[] = [
-  ...awsCredentials,
-  { field: 'ecrRepositoryArn', environmentVariable: 'HYPERVIBE_TEST_AWS_ECR_REPOSITORY_ARN' },
-  { field: 'ecrRepositoryUri', environmentVariable: 'HYPERVIBE_TEST_AWS_ECR_REPOSITORY_URI' },
-  {
-    field: 'subnetIds',
-    environmentVariable: 'HYPERVIBE_TEST_AWS_SUBNET_IDS_JSON',
-    parseAs: 'json',
-  },
-  {
-    field: 'securityGroupIds',
-    environmentVariable: 'HYPERVIBE_TEST_AWS_SECURITY_GROUP_IDS_JSON',
-    parseAs: 'json',
-  },
-  { field: 'executionRoleArn', environmentVariable: 'HYPERVIBE_TEST_AWS_EXECUTION_ROLE_ARN' },
-  {
-    field: 'taskRoleArn',
-    environmentVariable: 'HYPERVIBE_TEST_AWS_TASK_ROLE_ARN',
-    optional: true,
-  },
-  {
-    field: 'targetGroupArn',
-    environmentVariable: 'HYPERVIBE_TEST_AWS_TARGET_GROUP_ARN',
-  },
-  {
-    field: 'publicUrl',
-    environmentVariable: 'HYPERVIBE_TEST_AWS_PUBLIC_URL',
-    optional: true,
-  },
-  {
-    field: 'assignPublicIp',
-    environmentVariable: 'HYPERVIBE_TEST_AWS_ASSIGN_PUBLIC_IP',
-    parseAs: 'boolean',
-    optional: true,
-  },
-  {
-    field: 'containerPort',
-    environmentVariable: 'HYPERVIBE_TEST_AWS_CONTAINER_PORT',
-    parseAs: 'number',
-    optional: true,
-  },
-];
-
 const digitalOceanCredentials: ProviderCredentialField[] = [
   { field: 'apiToken', environmentVariable: 'HYPERVIBE_TEST_DIGITALOCEAN_TOKEN' },
-  { field: 'containerRegistry', environmentVariable: 'HYPERVIBE_TEST_DIGITALOCEAN_REGISTRY' },
 ];
 
 const railwayCredentials: ProviderCredentialField[] = [
@@ -174,12 +132,6 @@ const azureCredentials: ProviderCredentialField[] = [
   { field: 'location', environmentVariable: 'HYPERVIBE_TEST_AZURE_LOCATION' },
 ];
 
-const azureContainerAppsCredentials: ProviderCredentialField[] = [
-  ...azureCredentials,
-  { field: 'registryId', environmentVariable: 'HYPERVIBE_TEST_AZURE_REGISTRY_ID' },
-  { field: 'registryServer', environmentVariable: 'HYPERVIBE_TEST_AZURE_REGISTRY_SERVER' },
-];
-
 const vercelCredentials: ProviderCredentialField[] = [
   { field: 'accessToken', environmentVariable: 'HYPERVIBE_TEST_VERCEL_ACCESS_TOKEN' },
   { field: 'teamId', environmentVariable: 'HYPERVIBE_TEST_VERCEL_TEAM_ID', optional: true },
@@ -189,10 +141,7 @@ export const managedWorkflowGitHubCredentials: ProviderCredentialField[] = [
   { field: 'apiToken', environmentVariable: 'HYPERVIBE_TEST_GITHUB_API_TOKEN' },
 ];
 
-function dockerWebManagedWorkflow(
-  workflow: string,
-  publicUrlProtocols: ManagedWorkflowFixture['publicUrlProtocols'] = ['https:']
-): ManagedWorkflowFixture {
+function dockerWebManagedWorkflow(workflow: string): ManagedWorkflowFixture {
   return {
     environmentName: 'production',
     fixtureDirectory: 'test/provider-conformance/fixture',
@@ -203,7 +152,7 @@ function dockerWebManagedWorkflow(
       'server.mjs',
     ],
     workflow,
-    publicUrlProtocols,
+    publicUrlProtocols: ['https:'],
     serviceName: 'web',
     service: {
       workloadKind: 'web',
@@ -228,6 +177,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     service: 'Railway',
     status: 'supported',
     customDomains: 'managed',
+    domainTrafficProxy: 'supported',
     credentials: railwayCredentials,
   },
   {
@@ -236,7 +186,8 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'Google Cloud',
     service: 'Cloud Run',
     status: 'supported',
-    customDomains: 'unsupported',
+    customDomains: 'managed',
+    domainTrafficProxy: 'dns-only',
     credentials: gcpCredentials,
   },
   {
@@ -245,7 +196,8 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'DigitalOcean',
     service: 'App Platform',
     status: 'ready-for-live',
-    customDomains: 'unsupported',
+    customDomains: 'managed',
+    domainTrafficProxy: 'supported',
     credentials: digitalOceanCredentials,
     managedWorkflow: {
       ...dockerWebManagedWorkflow('deploy-digitalocean-production.yml'),
@@ -253,40 +205,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
       cache: { provider: 'digitalocean', engine: 'redis' },
     },
     implementationNote:
-      'The registry, credential schema, App Platform adapter, derived PostgreSQL and Valkey adapters, guidance, mocked lifecycle, exact-SHA CI workflow, and review-gated full-stack managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run against an isolated DigitalOcean team and existing DOCR registry.',
-  },
-  {
-    kind: 'hosting',
-    provider: 'ecs',
-    vendor: 'AWS',
-    service: 'ECS on Fargate',
-    status: 'ready-for-live',
-    customDomains: 'unsupported',
-    credentials: awsEcsCredentials,
-    managedWorkflow: dockerWebManagedWorkflow(
-      'deploy-ecs-production.yml',
-      ['http:', 'https:']
-    ),
-    implementationNote:
-      'The cluster/service/task-definition lifecycle adapter, prerequisite guidance, mocked safety contracts, exact-digest ECR workflow, and review-gated managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run in an isolated AWS account.',
-  },
-  {
-    kind: 'hosting',
-    provider: 'azure-container-apps',
-    vendor: 'Microsoft Azure',
-    service: 'Azure Container Apps',
-    status: 'ready-for-live',
-    customDomains: 'unsupported',
-    credentials: azureContainerAppsCredentials,
-    managedWorkflow: {
-      ...dockerWebManagedWorkflow(
-        'deploy-azure-container-apps-production.yml'
-      ),
-      database: { provider: 'azure-postgres', engine: 'postgres' },
-      cache: { provider: 'azure-managed-redis', engine: 'redis' },
-    },
-    implementationNote:
-      'The managed-environment, Container App, PostgreSQL Flexible Server, and Managed Redis lifecycle adapters, service-principal guidance, mocked safety contracts, native-source guard, exact-digest ACR workflow, and review-gated full-stack managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run in an isolated Azure subscription.',
+      'The credential schema, App Platform adapter, automatic free Starter registry bootstrap, derived PostgreSQL and Valkey adapters, guidance, mocked lifecycle, exact-SHA CI workflow, and review-gated full-stack managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run against an isolated DigitalOcean team.',
   },
   {
     kind: 'hosting',
@@ -294,7 +213,8 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     vendor: 'Vercel',
     service: 'Vercel Projects and Deployments',
     status: 'ready-for-live',
-    customDomains: 'unsupported',
+    customDomains: 'managed',
+    domainTrafficProxy: 'supported',
     credentials: vercelCredentials,
     managedWorkflow: {
       environmentName: 'production',
@@ -381,11 +301,11 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     vendor: 'Microsoft Azure',
     service: 'Azure Database for PostgreSQL Flexible Server',
     engine: 'postgres',
-    status: 'ready-for-live',
+    status: 'planned',
     credentials: azureCredentials,
-    fixtureHostingProvider: 'azure-container-apps',
+    fixtureHostingProvider: 'railway',
     implementationNote:
-      'The ARM registry, credential schema, PostgreSQL Flexible Server adapter, Azure-services firewall wiring, and mocked lifecycle safety contract are implemented. Promotion requires one successful complete Azure live stack run.',
+      'The PostgreSQL Flexible Server adapter and mocked lifecycle safety contract remain implemented. Live promotion is blocked until a compatible declarative hosting and network profile exists; Azure Container Apps hosting was removed because it required pre-created registry infrastructure.',
   },
   {
     kind: 'database',
@@ -432,11 +352,11 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     vendor: 'AWS',
     service: 'ElastiCache for Valkey/Redis',
     engine: 'redis',
-    status: 'ready-for-live',
+    status: 'planned',
     credentials: awsNetworkCredentials,
-    fixtureHostingProvider: 'ecs',
+    fixtureHostingProvider: 'railway',
     implementationNote:
-      'The serverless Valkey adapter, dedicated workload-source security group, durable ARN observation, dependency-ordered teardown, and mocked lifecycle safety contract are implemented. Promotion requires one successful ECS full-stack live run.',
+      'The serverless Valkey adapter and mocked lifecycle safety contract remain implemented. Live promotion is blocked until Hypervibe owns a declarative AWS workload-network profile; ECS hosting was removed because it required pre-created infrastructure identifiers.',
   },
   {
     kind: 'cache',
@@ -454,11 +374,11 @@ export const cacheProviderContracts: CacheProviderContract[] = [
     vendor: 'Microsoft Azure',
     service: 'Azure Managed Redis',
     engine: 'redis',
-    status: 'ready-for-live',
+    status: 'planned',
     credentials: azureCredentials,
-    fixtureHostingProvider: 'azure-container-apps',
+    fixtureHostingProvider: 'railway',
     implementationNote:
-      'The ARM registry, credential schema, Azure Managed Redis adapter, encrypted default database wiring, and mocked lifecycle safety contract are implemented. Promotion requires one successful complete Azure live stack run.',
+      'The Azure Managed Redis adapter and mocked lifecycle safety contract remain implemented. Live promotion is blocked until a compatible declarative hosting and network profile exists; Azure Container Apps hosting was removed because it required pre-created registry infrastructure.',
   },
 ];
 

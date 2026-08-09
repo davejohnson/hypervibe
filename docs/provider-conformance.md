@@ -38,10 +38,22 @@ accepts the matrix credential shape, and has been promoted to `supported`.
 Those failures are the implementation queue; they must not be added to the
 ordinary CI gate until the corresponding provider is fully supported.
 
-AWS hosting targets ECS on Fargate rather than App Runner because the
-[AWS App Runner API documentation](https://docs.aws.amazon.com/apprunner/latest/api/API_ListServices.html)
-says App Runner is unavailable to new customers after March 31, 2026. The
-requested database matrix uses RDS independently of that hosting choice.
+### Environment custom domains
+
+`test/provider-conformance/domain-lifecycle.spec.json` is the isolated live
+fixture for environment domains. It declares one DNS-only subdomain under
+`domain-test.hypervibe.dev` for each hosting provider: Railway, Cloud Run,
+DigitalOcean App Platform, and Vercel. Run each
+environment stage-by-stage through `hv_spec`, `hv_plan`, `hv_apply`, and
+`hv_status`; do not apply the entire four-provider fixture as one opaque batch.
+
+The shared contract requires provider attach before Cloudflare mutation,
+provider-returned DNS records only, durable provider/service/environment/zone
+and record ids, explicit pending certificate receipts, noop convergence, and a
+confirmation-gated exact detach with terminal provider and DNS absence. An
+already-attached hostname without the durable binding blocks for explicit
+`hv_import`. Cloud Run declares DNS-only traffic; the other three providers may
+opt into proxying only after direct certificate validation succeeds.
 
 Redis/Valkey starts with Railway, Memorystore, DigitalOcean, ElastiCache,
 and Azure Managed Redis. Railway is the first implemented
@@ -80,60 +92,15 @@ DigitalOcean App Platform, Managed PostgreSQL, and Managed Valkey are
 Actions workflow that publishes one DOCR image tagged with the exact checked-
 out Git SHA, updates only already-bound App Platform components, waits for that
 exact deployment ID to become `ACTIVE`, and verifies the active component
-image. It never creates a container registry, app, or component from CI. A
-verified connection must name an existing registry with `containerRegistry`,
-supplied to the live runner as
-`HYPERVIBE_TEST_DIGITALOCEAN_REGISTRY`.
+image. CI never creates infrastructure. The reviewed project action
+deterministically reuses an existing team registry, or creates a free Starter
+registry when none exists; the connection contains only the API token.
 
 The review-gated managed-workflow harness and provider-neutral Docker fixture
 can now prove one full desired-state stack: App Platform, Managed PostgreSQL, and
 Managed Valkey create/observe/wire, exact-SHA deploy, noop, update, dependency-
 ordered destruction, and terminal absence. Promotion to `supported` still
-requires one successful opt-in run against an isolated DigitalOcean team and
-existing DOCR registry.
-
-AWS ECS on Fargate is the next hosting-only adapter slice. The AWS account,
-existing private ECR repository, VPC subnets, security groups, IAM execution
-and optional task roles, and optional Application Load Balancer target group
-are externally owned. Hypervibe owns one ECS cluster per Hypervibe environment,
-one ECS service per web or worker workload, and that service's task-definition
-revisions. Cron workloads stay outside this adapter. Public web services require
-an existing `ip` target group in the same VPC, routed by an HTTP or HTTPS
-listener on one active internet-facing Application Load Balancer. An explicit
-`publicUrl` pins the externally routed origin for host/path rules and HTTPS-only
-listeners; without it, Hypervibe accepts only a default HTTP route whose bare
-ALB hostname can be health-checked safely.
-
-AWS ECS is `ready-for-live`. Its mocked contracts pin complete token
-pagination, long-form durable ARN validation, provider-confirmed `MISSING`
-semantics, unknown-error preservation, duplicate and unbound identity
-blocking, partial create identity, immutable task-definition configuration,
-billable confirmation, dependency-ordered terminal deletion, and safe
-task-definition cleanup. Apply creates a zero-task ECS service using a public
-Alpine bootstrap task definition, so it does not deploy application code or
-start billable Fargate tasks before the reviewed CI action.
-
-The generated workflow builds one `linux/amd64` image tagged with the full
-checked-out Git SHA, pushes it to the existing ECR repository, and deploys the
-ECR-reported digest only to already-bound long-form ECS service ARNs. It
-registers a release-only task-definition revision, scales that exact service to
-one task, waits for the exact rollout, verifies the running task image digest
-and SHA marker, and checks configured public web health paths. CI never creates
-an ECS cluster or service, task role, ECR repository, VPC resource, load
-balancer, listener rule, or target group, and it does not depend on the AWS CLI.
-
-The connection uses a scoped IAM user access key because the same credential is
-currently synchronized into managed GitHub Actions. It needs ECS lifecycle and
-observation permissions, exact-repository ECR read/push access, read-only
-EC2/ELB prerequisite inspection, and `iam:GetRole` plus `iam:PassRole` on only
-the configured task roles. The `serviceLongArnFormat` account setting must be
-enabled. This first slice supports the commercial `aws` partition; temporary
-STS and GitHub OIDC credential lifecycles are future work.
-
-The review-gated managed-workflow harness and provider-neutral Docker fixture
-can now prove create/release/noop/update/terminal teardown. Promotion to
-`supported` still requires one successful opt-in run in an isolated AWS
-account with all external prerequisites.
+requires one successful opt-in run against an isolated DigitalOcean team.
 
 Cloudflare provides the first provider-managed edge load-balancer lifecycle.
 An environment may declare one load balancer at its existing `domain`, with at
@@ -149,64 +116,22 @@ updates, then proves load-balancer-first cleanup before origin deletion. V1
 does not create AWS ALBs, private origins, weighted
 steering, geo steering, session affinity, or cross-environment origins.
 
-Azure Container Apps is the hosting side of the Azure adapter slice. The Azure
-subscription, resource group, Microsoft Entra service principal, and Azure
-Container Registry are externally owned. Hypervibe owns one managed environment
-per Hypervibe environment and one Container App per web or worker service so
-configuration and deletion remain action-scoped. Existing name matches require
-explicit `hv_import`, stale ARM resource-ID bindings block, and teardown removes
-the managed environment only after every owned Container App is
-provider-confirmed absent. Container Apps Jobs and cron workloads remain outside
-this adapter because they have a separate resource lifecycle.
-
-Azure Container Apps is `ready-for-live`. Its mocked contracts pin complete
-ARM pagination, durable-ID-first observation, unknown-error preservation,
-duplicate and unbound identity blocking, secret-safe configuration updates,
-partial-create identity, billable confirmation, native source-control
-disconnection, and idempotent terminal deletion. The generated workflow pushes
-one `linux/amd64` image tagged with the full checked-out Git SHA to an existing
-ACR registry, deploys the registry-reported digest only to already-bound
-Container App ARM IDs, waits for the unique revision to become ready, verifies
-the provider-reported image/SHA markers, and checks web health paths. CI never
-creates a resource group, registry, role assignment, managed environment,
-Container App, or source control.
-
-The connection uses a Microsoft Entra application service principal. At the
-managed resource-group scope it needs Container Apps Contributor and Container
-Apps ManagedEnvironments Contributor. At the exact existing registry scope it
-needs Reader plus AcrPush for classic Registry RBAC, or Container Registry
-Repository Writer for an ABAC-enabled registry. Hypervibe authenticates through
-ARM and ACR directly and never depends on `az`.
-
-Azure Database for PostgreSQL Flexible Server and Azure Managed Redis are now
-`ready-for-live` under their independent `azure-postgres` and
-`azure-managed-redis` provider ids. Both use the same Microsoft Entra,
-subscription, resource-group, and location credential fields as the hosting
-adapter, without requiring the hosting adapter's ACR fields. The PostgreSQL
-adapter creates a generated-password Flexible Server, logical `app` database,
-and Azure-services firewall subresource. The Redis adapter creates a TLS-only
-Managed Redis cluster and its default database, then retrieves its access key
-only for encrypted local runtime wiring. Their receipts never contain the
-generated password, access key, or connection URL.
-
-The review-gated managed-workflow harness and provider-neutral Docker fixture
-can now prove the combined Container Apps, PostgreSQL, and Managed Redis stack:
-create/observe/wire, exact-digest release, noop, update, dependency-ordered
-destruction, and terminal absence. Promotion to `supported` still requires one
-successful opt-in run in an isolated Azure subscription/resource group with
-an existing ACR registry. All three creates are confirmation-gated because
-they can be billable, and cleanup failures preserve the remaining ARM resource
-ids.
+Azure Database for PostgreSQL Flexible Server and Azure Managed Redis remain
+implemented under their independent `azure-postgres` and
+`azure-managed-redis` provider ids. They are `planned`, not ready for live
+promotion, until Hypervibe has a compatible declarative Azure hosting and
+network profile. Azure Container Apps hosting was removed because it required
+users to pre-create and identify an ACR registry and supporting infrastructure.
+The datastore adapters still use Microsoft Entra, subscription, resource-group,
+and location credentials and keep generated passwords, keys, and connection
+URLs out of receipts.
 
 The extended matrix also includes:
 
 - [Azure Database for PostgreSQL Flexible Server](https://learn.microsoft.com/en-us/rest/api/postgresql/)
   for PostgreSQL, and [Azure Managed Redis](https://learn.microsoft.com/en-us/azure/redis/overview)
-  for Redis. They use separate provider ids from Azure Container Apps because
-  they have independent resource types, durable identities, observation, and
-  deletion lifecycles, while sharing the core Microsoft Entra, subscription,
-  resource-group, and location fields. Azure Container Apps additionally binds
-  an existing ACR registry by resource ID and login server.
+  for Redis. They use separate provider ids because they have independent
+  resource types, durable identities, observation, and deletion lifecycles.
 - [Vercel Projects and Deployments](https://vercel.com/docs/rest-api) for
   hosting. Vercel is intentionally absent from the database matrix because
   [Vercel Postgres is no longer available](https://vercel.com/docs/postgres);
@@ -230,8 +155,8 @@ The extended matrix also includes:
   under the `elasticache` cache provider. Hypervibe creates TLS serverless
   Valkey plus a dedicated security group that permits port 6379 only from the
   declared workload security groups. It observes by ARN and deletes the cache
-  before retrying managed security-group cleanup. The entry is
-  `ready-for-live` for an ECS full-stack run.
+  before retrying managed security-group cleanup. The entry remains `planned`
+  until Hypervibe owns a declarative AWS workload-network profile.
 - [Google Cloud Memorystore for Redis](https://cloud.google.com/memorystore/docs/redis/reference/rest)
   under the `memorystore` cache provider. Its private-IP, Redis AUTH, durable
   resource observation, uncertain-create preservation, and terminal deletion
@@ -282,7 +207,7 @@ then select exactly one contract:
 HYPERVIBE_LIVE_HOSTING=railway npm run test:providers:live
 HYPERVIBE_LIVE_DATABASE=cloudsql npm run test:providers:live
 HYPERVIBE_LIVE_DATABASE=neon npm run test:providers:live
-HYPERVIBE_LIVE_CACHE=elasticache npm run test:providers:live
+HYPERVIBE_LIVE_CACHE=railway npm run test:providers:live
 ```
 
 `HYPERVIBE_LIVE_CACHE=<provider>` becomes available when a cache entry reaches
@@ -294,30 +219,6 @@ fixture-host credentials. Set `HYPERVIBE_TEST_NEON_ORGANIZATION_ID` when a
 personal Neon key should target an organization, and optionally set
 `HYPERVIBE_TEST_NEON_REGION_ID`. Use only an isolated account/workspace because
 the contract creates and destroys real provider resources.
-
-The ElastiCache contract requires the AWS access key and region plus
-`HYPERVIBE_TEST_AWS_SUBNET_IDS_JSON` and
-`HYPERVIBE_TEST_AWS_SECURITY_GROUP_IDS_JSON`. The subnets must span at least
-two availability zones in one VPC; the security groups must be the workload
-groups that should receive TCP 6379 access. Hypervibe creates and later removes
-a separate cache security group.
-
-The ECS managed-workflow contract declares its complete live credential shape:
-`HYPERVIBE_TEST_AWS_ACCESS_KEY_ID`,
-`HYPERVIBE_TEST_AWS_SECRET_ACCESS_KEY`, optional
-`HYPERVIBE_TEST_AWS_REGION`, `HYPERVIBE_TEST_AWS_ECR_REPOSITORY_ARN`,
-`HYPERVIBE_TEST_AWS_ECR_REPOSITORY_URI`,
-`HYPERVIBE_TEST_AWS_SUBNET_IDS_JSON`,
-`HYPERVIBE_TEST_AWS_SECURITY_GROUP_IDS_JSON`,
-`HYPERVIBE_TEST_AWS_EXECUTION_ROLE_ARN`, optional
-`HYPERVIBE_TEST_AWS_TASK_ROLE_ARN`, and
-`HYPERVIBE_TEST_AWS_TARGET_GROUP_ARN` for the public web fixture. Optional
-`HYPERVIBE_TEST_AWS_PUBLIC_URL` pins the routed origin when the fixture is not
-served by the default HTTP action. Optional
-`HYPERVIBE_TEST_AWS_ASSIGN_PUBLIC_IP` and
-`HYPERVIBE_TEST_AWS_CONTAINER_PORT` override the network defaults. Array
-values are parsed explicitly as JSON by the live runner instead of being
-passed to the provider as strings.
 
 The runner copies a tiny HTTP fixture into a temporary worktree and writes a
 mode-`0600` temporary credential object. Hypervibe consumes it through
@@ -469,8 +370,6 @@ are enabled:
 | --- | --- | --- | --- | --- |
 | `vercel` | `test/provider-conformance/fixture-vercel` | `deploy-vercel-production.yml` | none | HTTPS `/api/health` |
 | `digitalocean` | `test/provider-conformance/fixture` | `deploy-digitalocean-production.yml` | PostgreSQL + Valkey | HTTPS `/health` |
-| `ecs` | `test/provider-conformance/fixture` | `deploy-ecs-production.yml` | none | HTTP or HTTPS `/health` |
-| `azure-container-apps` | `test/provider-conformance/fixture` | `deploy-azure-container-apps-production.yml` | PostgreSQL + Managed Redis | HTTPS `/health` |
 
 The harness never merges its own infrastructure pull request: it applies the
 reviewed plan, prints the Hypervibe PR URL, waits for a human merge, and then
@@ -523,8 +422,7 @@ provider:
 ```
 
 For `vercel`, use provider `vercel` and keep the service block above. For
-`digitalocean`, `ecs`, or `azure-container-apps`, use that
-provider id and replace the service block with this exact object:
+`digitalocean`, replace the service block with this exact object:
 
 ```json
 {
@@ -544,19 +442,6 @@ The `digitalocean` profile also requires these environment fields:
 },
 "cache": {
   "provider": "digitalocean",
-  "engine": "redis"
-}
-```
-
-The `azure-container-apps` profile requires:
-
-```json
-"database": {
-  "provider": "azure-postgres",
-  "engine": "postgres"
-},
-"cache": {
-  "provider": "azure-managed-redis",
   "engine": "redis"
 }
 ```
@@ -582,12 +467,6 @@ export HYPERVIBE_TEST_VERCEL_ACCESS_TOKEN="<Vercel personal or Team token>"
 export HYPERVIBE_TEST_VERCEL_TEAM_ID="team_..."
 HYPERVIBE_LIVE_MANAGED_HOSTING=vercel npm run test:providers:managed-live
 
-# Or, after exporting the AWS variables listed above:
-HYPERVIBE_LIVE_MANAGED_HOSTING=ecs npm run test:providers:managed-live
-
-# Or, after exporting the Azure variables listed below:
-HYPERVIBE_LIVE_MANAGED_HOSTING=azure-container-apps npm run test:providers:managed-live
-
 # Or, after exporting the provider variables described below:
 HYPERVIBE_LIVE_MANAGED_HOSTING=digitalocean npm run test:providers:managed-live
 ```
@@ -611,45 +490,16 @@ command arguments, plans, receipts, or test output.
 For DigitalOcean App Platform, create a
 [custom-scope PAT](https://cloud.digitalocean.com/account/api/tokens) for the
 isolated team. Grant `app:read`, `app:create`, `app:update`, `app:delete`,
-`registry:read`, and `registry:update`, plus the region, size, and action read
-scopes described in the DigitalOcean section above. Export
-`HYPERVIBE_TEST_DIGITALOCEAN_TOKEN` and
-`HYPERVIBE_TEST_DIGITALOCEAN_REGISTRY`. The existing DOCR registry remains
-externally owned and is not removed by the test. The full-stack profile also
+`registry:read`, `registry:update`, `registry:create`, and `account:read`, plus
+the region, size, and action read scopes described in the DigitalOcean section
+above. Export only `HYPERVIBE_TEST_DIGITALOCEAN_TOKEN`. The reviewed project
+action reuses an existing registry or creates a free Starter registry when none
+exists. This account-level support registry is not removed by environment
+teardown. The full-stack profile also
 requires `database:read`, `database:view_credentials`, `database:create`,
 `database:update`, and `database:delete`; the created PostgreSQL and Valkey
 clusters are billable and are removed by exact confirmed actions during
 teardown.
-
-For ECS, create a scoped IAM user
-[access key](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)
-for the isolated account. It needs the ECS, ECR, EC2/ELB inspection, and
-role-scoped IAM permissions described in the AWS section above; restrict ECR
-pushes to the exact repository and `iam:PassRole` to the configured execution
-and task roles. Export the complete AWS credential shape listed in the
-opt-in-live section. The configured subnets, security groups, target group,
-roles, repository, and ALB routing remain externally owned and are not removed
-by the test.
-
-For Azure Container Apps, create a Microsoft Entra application
-[service principal](https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal)
-for the isolated subscription. Export
-`HYPERVIBE_TEST_AZURE_TENANT_ID`,
-`HYPERVIBE_TEST_AZURE_SUBSCRIPTION_ID`,
-`HYPERVIBE_TEST_AZURE_CLIENT_ID`,
-`HYPERVIBE_TEST_AZURE_CLIENT_SECRET`,
-`HYPERVIBE_TEST_AZURE_RESOURCE_GROUP`,
-`HYPERVIBE_TEST_AZURE_LOCATION`,
-`HYPERVIBE_TEST_AZURE_REGISTRY_ID`, and
-`HYPERVIBE_TEST_AZURE_REGISTRY_SERVER`. Grant the resource-group and exact-ACR
-roles described in the Azure section above. The resource group, registry, and
-role assignments remain externally owned and are not removed by the test.
-The same service-principal values are stored as separate verified
-`azure-postgres` and `azure-managed-redis` connections by the harness. At the
-resource group, grant the PostgreSQL ARM permissions and Azure Managed Redis
-Contributor role documented by `hv_connections`. The test owns and
-removes its Flexible Server, Azure-services firewall rule, logical database,
-Managed Redis cluster, and default Redis database.
 
 The default review and workflow timeouts are 30 minutes. Override them with
 positive millisecond values in `HYPERVIBE_LIVE_REVIEW_TIMEOUT_MS` and
