@@ -18,7 +18,10 @@ explicit `initialized: false` bootstrap contract so an agent can inspect the
 application and submit its initial desired state. The read performs no writes;
 only the following `hv_spec` call with `spec` creates the project and committed
 `.hypervibe/spec.json`. Other commands continue to reject uninitialized
-projects as `NOT_FOUND` and point back to this flow.
+projects as `NOT_FOUND` and point back to this flow. An unknown explicit project
+selector is treated as a possible typo: the error returns the requested name,
+the current-repository candidate, and a bounded registered-project list so an
+agent can retry an unambiguous correction and a CLI user can check the name.
 
 When adding capabilities that create, mutate, purchase, migrate, deploy, schedule, or destroy infrastructure, default to modeling them in the spec and plan/apply flow. Use separate imperative tools only for read-only inspection, explicit operational actions, or narrow escape hatches; they should not become the primary path for lifecycle-managed infrastructure.
 

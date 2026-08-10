@@ -90,6 +90,7 @@ describe('server tool surface', () => {
     expect(registry.get('hv_secrets')?.cliPath).toEqual(['secrets']);
     expect(registry.get('hv_connections')?.inputShape.project).toBeDefined();
     expect(registry.get('hv_secrets')?.inputShape.project).toBeDefined();
+    expect(registry.get('hv_spec')?.inputShape.project.description).toContain('typos can be corrected safely');
     expect(registry.get('hv_connections')?.description).toContain('{} lists every connection/provider');
     expect(registry.get('hv_spec')?.description).toContain('fresh git repository');
     expect(registry.get('hv_connections')?.description).toContain('{project} lists');
@@ -135,6 +136,9 @@ describe('server tool surface', () => {
     );
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
       'Its successful initialized=false result is a normal bootstrap state'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'correct one unambiguous selector typo and retry once'
     );
   });
 

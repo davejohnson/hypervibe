@@ -95,6 +95,8 @@ describe('secret reads', () => {
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('NOT_FOUND');
     expect(result.error.message).toContain('does-not-exist');
+    expect(result.error.details.requestedProject).toBe('does-not-exist');
+    expect(result.agentInstruction.action).toBe('continue');
     await client.close();
   });
 

@@ -11,8 +11,8 @@ import { adapterFactory } from '../domain/services/adapter.factory.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import { resolveProject } from '../domain/services/resolve-project.js';
-import { detectGitRemoteUrl } from '../lib/git-remote.js';
-import { readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
+import { detectGitRemoteUrl, parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { findRepoRoot, readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
 import { readRepoBindingsFile } from '../domain/spec/repo-bindings-file.js';
 import { HvError } from './results.js';
 
@@ -200,8 +200,33 @@ export function createCommandContext(): CommandContext {
 
       const requestedProject = opts?.project?.trim();
       if (requestedProject) {
-        throw new HvError('NOT_FOUND', `Project "${requestedProject}" is not initialized in Hypervibe.`, {
-          hint: `From that project repository, call hv_spec first. A fresh-repository read returns the initialization contract; then call hv_spec with project="${requestedProject}" and spec input.`,
+        const remoteUrl = detectGitRemoteUrl();
+        const repositoryProject = parseGitHubRepoFromRemote(remoteUrl ?? undefined)?.split('/').at(-1)
+          ?? findRepoRoot()?.split(/[\\/]/).filter(Boolean).at(-1)
+          ?? null;
+        const registered = repos.projects.findAll()
+          .sort((a, b) => a.name.localeCompare(b.name));
+        const registeredProjects = registered
+          .slice(0, 10)
+          .map(({ id, name }) => ({ id, name }));
+        const repositoryMatches = repositoryProject?.toLowerCase() === requestedProject.toLowerCase();
+        const registeredSummary = registeredProjects.length > 0
+          ? ` Registered projects: ${registeredProjects.map(({ name }) => name).join(', ')}${registered.length > registeredProjects.length ? ', …' : ''}.`
+          : ' No projects are registered yet.';
+        throw new HvError('NOT_FOUND', `Project "${requestedProject}" was not found in Hypervibe.`, {
+          details: {
+            requestedProject,
+            repositoryProject,
+            registeredProjects,
+            registeredProjectCount: registered.length,
+          },
+          hint: repositoryMatches
+            ? `The name matches the current repository, but it has not been initialized. Run hv_spec({}) (CLI: hypervibe spec) to inspect its bootstrap contract, then submit the initial spec.${registeredSummary}`
+            : `Check the project name before creating anything.${repositoryProject ? ` The current repository suggests "${repositoryProject}", not "${requestedProject}".` : ''}${registeredSummary} Run hv_spec({}) (CLI: hypervibe spec) from the intended repository to see the selected project or fresh-project bootstrap contract.`,
+          agentInstruction: {
+            action: 'continue',
+            message: 'Compare requestedProject with repositoryProject and registeredProjects. If the correction is unambiguous, retry once with the corrected project name. Otherwise ask the user; do not initialize the possibly misspelled name.',
+          },
         });
       }
 

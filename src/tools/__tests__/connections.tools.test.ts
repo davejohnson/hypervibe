@@ -481,6 +481,11 @@ describe('hv_connections', () => {
     expect(unknown.error.code).toBe('NOT_FOUND');
     expect(unknown.error.message).toContain('does-not-exist');
     expect(unknown.hint).toContain('hv_spec');
+    expect(unknown.error.details).toMatchObject({
+      requestedProject: 'does-not-exist',
+      registeredProjectCount: 1,
+    });
+    expect(unknown.agentInstruction.action).toBe('continue');
     await t.close();
   });
 

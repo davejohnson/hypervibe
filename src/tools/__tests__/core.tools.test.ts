@@ -189,6 +189,28 @@ describe('hv_spec', () => {
       expect(new ProjectRepository().findByName('fresh-agent-app')).toBeNull();
       expect(new ProjectRepository().findByName('unrelated-existing-app')).toBeTruthy();
 
+      const typo = await t.call('hv_spec', {
+        project: 'fresh-agent-ap',
+      });
+      expect(typo).toMatchObject({
+        ok: false,
+        error: {
+          code: 'NOT_FOUND',
+          details: {
+            requestedProject: 'fresh-agent-ap',
+            repositoryProject: 'fresh-agent-app',
+            registeredProjects: [
+              expect.objectContaining({ name: 'unrelated-existing-app' }),
+            ],
+            registeredProjectCount: 1,
+          },
+        },
+        agentInstruction: { action: 'continue' },
+      });
+      expect(typo.hint).toContain('Check the project name');
+      expect(typo.hint).toContain('hv_spec({})');
+      expect(new ProjectRepository().findByName('fresh-agent-ap')).toBeNull();
+
       const explicitDiscovery = await t.call('hv_spec', {
         project: 'fresh-agent-app',
       });

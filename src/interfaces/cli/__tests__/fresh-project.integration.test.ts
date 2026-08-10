@@ -61,6 +61,20 @@ describe('fresh-project CLI workflow', () => {
       process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
       process.chdir(repoDir);
       const registry = createCommandRegistry(createCommandContext());
+
+      const typo = captureIo();
+      expect(await runCli(['spec', '--project', 'fresh-cli-ap'], {
+        registry,
+        io: typo.io,
+        initialize: false,
+      })).toBe(1);
+      expect(typo.stdout()).toContain('Project "fresh-cli-ap" was not found');
+      expect(typo.stdout()).toContain('Check the project name');
+      expect(typo.stdout()).toContain('fresh-cli-app');
+      expect(typo.stdout()).toContain('hypervibe spec');
+      expect(typo.stderr()).toBe('');
+      expect(new ProjectRepository().findByName('fresh-cli-ap')).toBeNull();
+
       const read = captureIo();
       expect(await runCli(['spec', '--json'], {
         registry,

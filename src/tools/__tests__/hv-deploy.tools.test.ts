@@ -150,6 +150,8 @@ describe('hv_deploy', () => {
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('NOT_FOUND');
     expect(result.hint).toContain('hv_spec');
+    expect(result.error.details.requestedProject).toBe('nope');
+    expect(result.agentInstruction.action).toBe('continue');
     await t.close();
   });
 
