@@ -478,7 +478,9 @@ describe('hv_connections', () => {
 
     const unknown = await t.call('hv_connections', { project: 'does-not-exist' });
     expect(unknown.ok).toBe(false);
-    expect(unknown.error.code).toBe('AMBIGUOUS_PROJECT');
+    expect(unknown.error.code).toBe('NOT_FOUND');
+    expect(unknown.error.message).toContain('does-not-exist');
+    expect(unknown.hint).toContain('hv_spec');
     await t.close();
   });
 

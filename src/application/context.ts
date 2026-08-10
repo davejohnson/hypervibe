@@ -173,6 +173,11 @@ export function createCommandContext(): CommandContext {
         if (remoteProject) {
           return hydrateAndReturn(remoteProject);
         }
+        const repoBacked = resolveRepoBackedProject();
+        if (repoBacked) return repoBacked;
+        // A repository identity is stronger than the legacy single-project
+        // fallback. Never bind a new checkout to an unrelated lone project.
+        return null;
       }
       const repoBacked = resolveRepoBackedProject();
       if (repoBacked) return repoBacked;
@@ -193,10 +198,24 @@ export function createCommandContext(): CommandContext {
       const project = resolve(opts);
       if (project) return project;
 
+      const requestedProject = opts?.project?.trim();
+      if (requestedProject) {
+        throw new HvError('NOT_FOUND', `Project "${requestedProject}" is not initialized in Hypervibe.`, {
+          hint: `From that project repository, call hv_spec first. A fresh-repository read returns the initialization contract; then call hv_spec with project="${requestedProject}" and spec input.`,
+        });
+      }
+
+      const remoteUrl = detectGitRemoteUrl();
+      if (remoteUrl) {
+        throw new HvError('NOT_FOUND', `No Hypervibe project is initialized for git remote "${remoteUrl}".`, {
+          hint: 'Call hv_spec from this repository. A fresh-repository read returns the initialization contract, then hv_spec with spec input creates the project.',
+        });
+      }
+
       const all = repos.projects.findAll();
       if (all.length === 0) {
         throw new HvError('NOT_FOUND', 'No projects found.', {
-          hint: 'Create one with hv_spec, or inspect existing provider infrastructure with hv_inspect and adopt it with hv_import.',
+          hint: 'Call hv_spec from a git repository to begin initialization, or inspect existing provider infrastructure with hv_inspect and adopt it with hv_import.',
         });
       }
       throw new HvError('AMBIGUOUS_PROJECT', 'Could not resolve a project from this directory.', {
