@@ -53,7 +53,6 @@ import { setupCustomDomain, teardownCustomDomain } from '../domain/services/doma
 import { DOMAIN_DETACH_OPERATION } from '../domain/services/domain-attach-policy.js';
 import {
   connectionSetupDetails,
-  formatConnectionGuidance,
   GITHUB_TOKEN_URLS,
 } from '../domain/services/connection-guidance.js';
 import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
@@ -158,32 +157,45 @@ export function connectionProviders(blocks: ConnectionBlock[]): string[] {
   return Array.from(new Set(blocks.map((block) => block.provider))).sort();
 }
 
-function providerConnectionCommand(block: ConnectionBlock): string {
-  return formatConnectionGuidance(block.provider, { scope: block.scope });
+function providerConnectionSetup(
+  block: ConnectionBlock,
+  options: { project?: string; gitRemoteUrl?: string } = {}
+) {
+  const scope = block.scope
+    ?? (block.provider === 'github' ? parseGitHubRepoFromRemote(options.gitRemoteUrl) ?? undefined : undefined);
+  return connectionSetupDetails(block.provider, { scope, project: options.project });
 }
 
 export function connectionRecoveryHint(
   blocks: ConnectionBlock[],
-  options: { after?: string; includePackageRead?: boolean } = {}
+  options: { after?: string; includePackageRead?: boolean; project?: string; gitRemoteUrl?: string } = {}
 ): string {
   const uniqueBlocks = uniqueConnectionBlocks(blocks);
   const providers = connectionProviders(uniqueBlocks).join(', ');
-  const commands = uniqueBlocks.map(providerConnectionCommand).join('; ');
+  const setup = uniqueBlocks.map((block) => providerConnectionSetup(block, options));
+  const setupPages = setup
+    .filter((entry) => entry.recommendedSetupUrl)
+    .map((entry) => `${entry.provider}: ${entry.recommendedSetupUrl}`)
+    .join('; ');
+  const commands = setup.map((entry) => entry.credentialExample).join('; ');
   const packageReadNeeded = options.includePackageRead
     || uniqueBlocks.some((block) => /packageReadToken|IMAGE_REGISTRY_|GHCR|GitHub Actions/i.test(block.reason ?? ''));
   const packageReadHint = packageReadNeeded
-    ? ` For GitHub Actions image deploys, the GitHub connection must include both GitHub API access and GHCR package-read access: apiToken needs repo + workflow (create: ${GITHUB_TOKEN_URLS.api}), while packageReadToken needs read:packages for durable image pulls (create: ${GITHUB_TOKEN_URLS.packageRead}). A read:packages-only token is not enough as apiToken. For a one-token setup, export NODE_AUTH_TOKEN with a classic PAT that has repo + workflow + read:packages, then use credentialsRef="env:NODE_AUTH_TOKEN"; Hypervibe also accepts HYPERVIBE_GITHUB_TOKEN and HYPERVIBE_GITHUB_PACKAGES_TOKEN as aliases when only one distinct value is available. For split credentials, use credentialsRef="dotenv:/absolute/path/.env" with credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}, or credentialsRef="file:/absolute/path/github.json" containing apiToken plus packageReadToken.`
+    ? ' For GitHub Actions image deploys, the recommended combined classic PAT link preselects repo, workflow, and read:packages. A read:packages-only token cannot manage repository workflows.'
     : '';
   const after = options.after ? ` ${options.after}` : '';
-  return `This task needs provider access that is not connected on this Mac (${providers}). Hypervibe can store and verify credentials the user already controls with hv_connections. ${commands}.${packageReadHint} Prefer exported env vars, existing .env files via credentialsRef="dotenv:/absolute/path/.env#KEY", or local JSON for structured credentials; raw credentials={...} is still accepted if the user intentionally wants chat entry. If no usable credential reference is already available, stop and offer two concrete paths: help connect credentials the user already has, or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume the user should be added to the provider, and do not run hv_plan, hv_apply, or hv_deploy as a workaround.${after}`;
+  return `This task needs provider access that is not connected on this Mac (${providers}).${setupPages ? ` Recommended credential page(s): ${setupPages}.` : ''} Save the credential outside chat in an exported environment variable, a gitignored dotenv file, or a local JSON file, then use the exact connection command shown in connectionSetup: ${commands}.${packageReadHint} Replace /absolute/path with the real local path. Do not call this an abstract "Hypervibe credential flow"; show these concrete links and commands. If the credential is not controlled by this user, prepare a value-free handoff naming the provider, scope, and blocked task. Do not bypass Hypervibe with provider CLIs or rerun plan/apply/deploy before the connection verifies.${after}`;
 }
 
-export function connectionRecoveryDetails(blocks: ConnectionBlock[]): {
+export function connectionRecoveryDetails(
+  blocks: ConnectionBlock[],
+  options: { project?: string; gitRemoteUrl?: string } = {}
+): {
   connectionSetup: ReturnType<typeof connectionSetupDetails>[];
 } {
   return {
     connectionSetup: uniqueConnectionBlocks(blocks)
-      .map((block) => connectionSetupDetails(block.provider, { scope: block.scope })),
+      .map((block) => providerConnectionSetup(block, options)),
   };
 }
 

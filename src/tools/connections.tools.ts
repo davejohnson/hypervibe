@@ -184,8 +184,53 @@ function warningExtras(data: Record<string, unknown>): { warnings: string[] } | 
     : undefined;
 }
 
-function setupDetails(provider: string, scope?: string) {
-  return { connectionSetup: connectionSetupDetails(provider, { scope }) };
+function setupDetails(provider: string, scope?: string, project?: string) {
+  return { connectionSetup: connectionSetupDetails(provider, { scope, project }) };
+}
+
+type ProviderDiscoveryEntry = {
+  name: string;
+  displayName: string;
+  setupHelpUrl?: string;
+  setupHelpUrls?: Array<{ label: string; url: string }>;
+  tokenType?: string;
+  requiredPermissions?: string[];
+  credentialExample?: string;
+  notes?: string[];
+  credentialFields?: CredentialFieldDescriptor[];
+  defaultScalarKey?: string;
+  environmentVariableAliases?: string[][];
+};
+
+function providerDiscoveryEntry(metadata: {
+  name: string;
+  displayName: string;
+  setupHelpUrl?: string;
+  credentialsSchema: z.ZodTypeAny;
+  credentials?: {
+    defaultScalarKey?: string;
+    environmentVariableAliases?: string[][];
+  };
+}): ProviderDiscoveryEntry {
+  const guidance = getConnectionGuidance(metadata.name);
+  const credentialFields = credentialFieldsFromSchema(metadata.credentialsSchema);
+  return {
+    name: metadata.name,
+    displayName: metadata.displayName,
+    ...(credentialFields !== undefined ? { credentialFields } : {}),
+    ...(metadata.credentials?.defaultScalarKey ? { defaultScalarKey: metadata.credentials.defaultScalarKey } : {}),
+    ...(metadata.credentials?.environmentVariableAliases?.length
+      ? { environmentVariableAliases: metadata.credentials.environmentVariableAliases }
+      : {}),
+    ...(guidance?.setupUrl || metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? metadata.setupHelpUrl } : {}),
+    ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
+    ...(guidance ? {
+      tokenType: guidance.tokenType,
+      requiredPermissions: guidance.permissions,
+      credentialExample: guidance.credentialExample,
+      ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
+    } : {}),
+  };
 }
 
 export function registerConnectionsTools(commands: CommandRegistrar, ctx: CommandContext): void {
@@ -309,7 +354,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         }
         if (!credentials && !credentialsRef) {
           return commandError('VALIDATION', 'credentials are required for action="add".', {
-            details: setupDetails(provider, scope),
+            details: setupDetails(provider, scope, project?.name),
             hint: `Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -324,7 +369,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
             : credentials!;
         } catch (error) {
           return commandError('VALIDATION', error instanceof Error ? error.message : String(error), {
-            details: setupDetails(provider, scope),
+            details: setupDetails(provider, scope, project?.name),
             hint: `Use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -332,7 +377,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const saved = await saveConnection(provider, credentialsToSave, scope);
         if (!saved.success) {
           return commandError('VALIDATION', saved.error!, {
-            details: setupDetails(provider, scope),
+            details: setupDetails(provider, scope, project?.name),
             hint: `Fix the credentials object to match the provider schema and retry. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -341,7 +386,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const verified = await verifyConnection(provider, scope);
         if (verified.kind !== 'verified') {
           return commandError('PROVIDER_ERROR', verified.error ?? 'Verification failed.', {
-            details: { connection: saved.connection, ...setupDetails(provider, scope) },
+            details: { connection: saved.connection, ...setupDetails(provider, scope, project?.name) },
             hint: `The connection was saved but failed verification. Confirm the token type and permissions, then re-run hv_connections provider="${provider}" action="verify" or action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -377,14 +422,14 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         }
         case 'not_found':
           return commandError('NOT_FOUND', verified.error, {
-            details: setupDetails(provider, scope),
+            details: setupDetails(provider, scope, project?.name),
             hint: `Add the connection first with hv_connections provider="${provider}" action="add". ${formatConnectionGuidance(provider, { scope })}`,
           });
         case 'unknown_provider':
           return commandError('UNSUPPORTED', verified.error);
         default:
           return commandError('PROVIDER_ERROR', verified.error, {
-            details: setupDetails(provider, scope),
+            details: setupDetails(provider, scope, project?.name),
             hint: `Confirm the token type and permissions, then re-run hv_connections provider="${provider}" action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
       }
@@ -399,60 +444,15 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         lastVerifiedAt: c.lastVerifiedAt,
       }));
 
-      const availableProviders: Record<string, Array<{
-        name: string;
-        displayName: string;
-        setupHelpUrl?: string;
-        setupHelpUrls?: Array<{ label: string; url: string }>;
-        tokenType?: string;
-        requiredPermissions?: string[];
-        credentialExample?: string;
-        notes?: string[];
-        credentialFields?: CredentialFieldDescriptor[];
-        defaultScalarKey?: string;
-        environmentVariableAliases?: string[][];
-      }>> = {};
+      const availableProviders: Record<string, ProviderDiscoveryEntry[]> = {};
       for (const p of providerRegistry.all()) {
         const category = p.metadata.category;
-        const guidance = getConnectionGuidance(p.metadata.name);
-        const credentialFields = credentialFieldsFromSchema(p.metadata.credentialsSchema);
         availableProviders[category] = availableProviders[category] ?? [];
-        availableProviders[category].push({
-          name: p.metadata.name,
-          displayName: p.metadata.displayName,
-          ...(credentialFields !== undefined ? { credentialFields } : {}),
-          ...(p.metadata.credentials?.defaultScalarKey ? { defaultScalarKey: p.metadata.credentials.defaultScalarKey } : {}),
-          ...(p.metadata.credentials?.environmentVariableAliases?.length
-            ? { environmentVariableAliases: p.metadata.credentials.environmentVariableAliases }
-            : {}),
-          ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
-          ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
-          ...(guidance ? {
-            tokenType: guidance.tokenType,
-            requiredPermissions: guidance.permissions,
-            credentialExample: guidance.credentialExample,
-            ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
-          } : {}),
-        });
+        availableProviders[category].push(providerDiscoveryEntry(p.metadata));
       }
       for (const p of secretManagerRegistry.all()) {
-        const guidance = getConnectionGuidance(p.metadata.name);
-        const credentialFields = credentialFieldsFromSchema(p.metadata.credentialsSchema);
         availableProviders['secrets'] = availableProviders['secrets'] ?? [];
-        availableProviders['secrets'].push({
-          name: p.metadata.name,
-          displayName: p.metadata.displayName,
-          ...(credentialFields !== undefined ? { credentialFields } : {}),
-          ...(p.metadata.credentials?.defaultScalarKey ? { defaultScalarKey: p.metadata.credentials.defaultScalarKey } : {}),
-          ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
-          ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
-          ...(guidance ? {
-            tokenType: guidance.tokenType,
-            requiredPermissions: guidance.permissions,
-            credentialExample: guidance.credentialExample,
-            ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
-          } : {}),
-        });
+        availableProviders['secrets'].push(providerDiscoveryEntry(p.metadata));
       }
 
       const discoveryHint = 'This list is credential discovery only. If a concrete task is blocked, use hv_connections with provider only when a safe credentialsRef is already available. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';

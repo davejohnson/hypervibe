@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
-import { parseToolEnvelope } from './tool-result.js';
+import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -613,29 +613,19 @@ describe('hv_spec', () => {
       'railway',
       'sendgrid',
     ]);
-    expect(set.data.connections.missing.find((entry: { provider: string }) => entry.provider === 'cloudflare')).toMatchObject({
+    const cloudflare = set.data.connections.missing.find((entry: { provider: string }) => entry.provider === 'cloudflare');
+    const github = set.data.connections.missing.find((entry: { provider: string }) => entry.provider === 'github');
+    expectActionableConnectionSetup(cloudflare.connectionSetup, {
+      provider: 'cloudflare',
+      project: 'connection-check-app',
       scope: 'connection-check-app.com',
-      hint: expect.stringContaining('connection-check-app.com'),
+    });
+    expectActionableConnectionSetup(github.connectionSetup, {
+      provider: 'github',
+      project: 'connection-check-app',
     });
     expect(set.hint).toContain('This task needs provider access that is not connected on this Mac');
-    expect(set.hint).toContain('prepare a value-free handoff');
-    expect(set.hint).toContain('Cloudflare Account API Token');
-    expect(set.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
-    expect(set.hint).toContain('Cloudflare User API Token');
-    expect(set.hint).toContain('https://dash.cloudflare.com/profile/api-tokens');
-    expect(set.hint).toContain('permissionGroupKeys=');
-    expect(set.hint).toContain('narrow both selectors before creating the token');
-    expect(set.hint).toContain('Zone -> Zone Settings -> Read or Edit');
-    expect(set.hint).toContain('Zone -> DNS -> Edit.');
-    expect(set.hint).toContain('scope="connection-check-app.com"');
-    expect(set.hint).toContain('classic GitHub personal access token');
-    expect(set.hint).toContain('NODE_AUTH_TOKEN');
-    expect(set.hint).toContain('https://github.com/settings/personal-access-tokens/new');
-    expect(set.hint).toContain('Railway Account API token');
-    expect(set.hint).toContain('https://railway.com/account/tokens');
-    expect(set.hint).toContain('SendGrid API key (Restricted Access for least privilege');
-    expect(set.hint).toContain('mail.send');
-    expect(set.hint).toContain('credentialsRef="dotenv:/absolute/path/.env#KEY"');
+    expect(set.hint).toContain('connectionSetup');
     expect(set.next).toEqual(['hv_connections', 'hv_plan']);
     await t.close();
   });
@@ -1548,6 +1538,16 @@ describe('hv_plan / hv_status / hv_apply', () => {
     }));
     expect(plan.warnings).toContainEqual(expect.stringContaining('GitHub apiToken needs repo + workflow'));
     expect(plan.next).toEqual(['hv_connections', 'hv_plan']);
+    expectActionableConnectionSetup(plan.data.connectionSetup, {
+      provider: 'github',
+      project: 'ci-missing-image-token-app',
+      scope: 'davejohnson/ci-missing-image-token-app',
+    });
+    expect(plan.agentInstruction).toMatchObject({ action: 'ask_user' });
+    expect(plan.agentInstruction.message).toContain('exact clickable setup links');
+    expect(plan.agentInstruction.message).toContain('offer to open');
+    expect(plan.agentInstruction.message).toContain('real local path');
+    expect(plan.agentInstruction.message).not.toContain('ask the user for an exported token');
 
     const apply = await t.call('hv_apply', { project: 'ci-missing-image-token-app', planId: plan.data.planId });
     expect(apply.ok).toBe(false);
@@ -1556,25 +1556,14 @@ describe('hv_plan / hv_status / hv_apply', () => {
       provider: 'github',
       reason: expect.stringContaining('repo/workflow API access plus packageReadToken'),
     }));
-    expect(apply.error.details.connectionSetup).toContainEqual(expect.objectContaining({
+    expectActionableConnectionSetup(apply.error.details.connectionSetup, {
       provider: 'github',
-      requiredPermissions: expect.arrayContaining([
-        expect.stringContaining('Contents read/write'),
-        expect.stringContaining('Workflows read/write'),
-        expect.stringContaining('packageReadToken must have read:packages'),
-      ]),
-    }));
-    expect(apply.hint).toContain('classic GitHub personal access token');
-    expect(apply.hint).toContain('https://github.com/settings/personal-access-tokens/new');
-    expect(apply.hint).toContain('https://github.com/settings/tokens/new?scopes=read:packages');
-    expect(apply.hint).toContain('apiToken needs repo + workflow');
+      project: 'ci-missing-image-token-app',
+      scope: 'davejohnson/ci-missing-image-token-app',
+    });
+    expect(apply.hint).toContain('combined classic PAT');
     expect(apply.hint).toContain('read:packages');
-    expect(apply.hint).toContain('packageReadToken');
-    expect(apply.hint).toContain('credentialsRef="env:NODE_AUTH_TOKEN"');
-    expect(apply.hint).toContain('HYPERVIBE_GITHUB_TOKEN');
-    expect(apply.hint).toContain('HYPERVIBE_GITHUB_PACKAGES_TOKEN');
-    expect(apply.hint).toContain('credentialsMap={"apiToken":"HYPERVIBE_GITHUB_TOKEN","packageReadToken":"HYPERVIBE_GITHUB_PACKAGES_TOKEN"}');
-    expect(apply.hint).toContain('credentialsRef="file:/absolute/path/github.json"');
+    expect(apply.hint).toContain('connectionSetup');
     expect(apply.next).toEqual(['hv_connections', 'hv_plan', 'hv_apply']);
     expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'RAILWAY_API_TOKEN', 'railway-token');
     expect(setSecret).not.toHaveBeenCalledWith('davejohnson', 'ci-missing-image-token-app', 'IMAGE_REGISTRY_TOKEN', expect.any(String));
@@ -1649,23 +1638,12 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.ok).toBe(false);
     expect(apply.error.code).toBe('MISSING_CONNECTION');
     expect(apply.error.details.blocked).toContainEqual(expect.objectContaining({ provider: 'cloudflare' }));
-    expect(apply.error.details.connectionSetup).toContainEqual(expect.objectContaining({
+    expectActionableConnectionSetup(apply.error.details.connectionSetup, {
       provider: 'cloudflare',
-      setupUrls: expect.arrayContaining([
-        expect.stringContaining('https://dash.cloudflare.com/?to=/:account/api-tokens'),
-        expect.stringContaining('https://dash.cloudflare.com/profile/api-tokens'),
-      ]),
-    }));
-    expect(apply.hint).toContain('Cloudflare Account API Token');
-    expect(apply.hint).toContain('Cloudflare User API Token');
-    expect(apply.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
-    expect(apply.hint).toContain('https://dash.cloudflare.com/profile/api-tokens');
-    expect(apply.hint).toContain('permissionGroupKeys=');
-    expect(apply.hint).toContain('Zone -> Zone -> Read');
-    expect(apply.hint).toContain('Zone -> DNS -> Edit');
-    expect(apply.hint).toContain('Zone Resources must be Include -> Specific zone');
-    expect(apply.hint).toContain('Registrar write permissions');
-    expect(apply.hint).toContain('Account API Tokens cannot be used for Registrar');
+      project: 'ci-domain-soft-block-app',
+      scope: 'apreskeys.com',
+    });
+    expect(apply.hint).toContain('connectionSetup');
     expect(setSecret).not.toHaveBeenCalled();
     await t.close();
   });
@@ -2029,22 +2007,12 @@ describe('hv_plan / hv_status / hv_apply', () => {
       id: 'domain:hlspropertycare.com',
       type: 'update',
     }));
-    expect(status.data.connectionSetup).toContainEqual(expect.objectContaining({
+    expectActionableConnectionSetup(status.data.connectionSetup, {
       provider: 'cloudflare',
+      project: 'domain-status-missing-connection-app',
       scope: 'hlspropertycare.com',
-      setupUrls: expect.arrayContaining([
-        expect.stringContaining('https://dash.cloudflare.com/?to=/:account/api-tokens'),
-      ]),
-      requiredPermissions: expect.arrayContaining([
-        expect.stringContaining('Zone -> DNS -> Edit'),
-      ]),
-    }));
-    expect(status.hint).toContain('Cloudflare Account API Token');
-    expect(status.hint).toContain('https://dash.cloudflare.com/?to=/:account/api-tokens');
-    expect(status.hint).toContain('Zone -> DNS -> Edit');
-    expect(status.hint).toContain('stop and offer two concrete paths');
-    expect(status.hint).toContain('prepare a value-free handoff');
-    expect(status.hint).toContain('do not run hv_plan');
+    });
+    expect(status.hint).toContain('connectionSetup');
     expect(status.next).toEqual(['hv_connections']);
     await t.close();
   });
@@ -2220,8 +2188,13 @@ describe('hv_plan / hv_status / hv_apply', () => {
     const apply = await t.call('hv_apply', { project: 'core-spec-app', planId: plan.data.planId });
     expect(apply.ok).toBe(false);
     expect(apply.error.code).toBe('MISSING_CONNECTION');
-    expect(apply.hint).toContain('Railway Account API token');
     expect(apply.hint).toContain('https://railway.com/account/tokens');
+    expectActionableConnectionSetup(apply.error.details.connectionSetup, {
+      provider: 'railway',
+      project: 'core-spec-app',
+    });
+    expect(apply.agentInstruction.message).toContain('offer to open');
+    expect(apply.agentInstruction.message).toContain('complete credentialExample');
     expect(apply.next).toEqual(['hv_connections', 'hv_plan', 'hv_apply']);
     await t.close();
   });

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseToolEnvelope } from './tool-result.js';
+import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -55,6 +55,68 @@ async function makeClient() {
 }
 
 describe('hv_logs', () => {
+  it('returns project-scoped hosting setup before reading provider logs', async () => {
+    const project = new ProjectRepository().create({
+      name: 'provider-logs-app',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/davejohnson/provider-logs-app',
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { provider: 'railway', services: { web: { serviceId: 'svc-web' } } },
+    });
+    const t = await makeClient();
+    const result = await t.call('hv_logs', { project: project.name, env: 'staging', source: 'service' });
+
+    expect(result.error.code).toBe('MISSING_CONNECTION');
+    expectActionableConnectionSetup(result.error.details.connectionSetup, {
+      provider: 'railway',
+      project: project.name,
+      scope: 'davejohnson/provider-logs-app',
+    });
+    await t.close();
+  });
+
+  it('returns environment-scoped Stripe setup before reading webhook status', async () => {
+    const project = new ProjectRepository().create({ name: 'stripe-setup-app' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { provider: 'railway', services: {} },
+    });
+    new SpecStore().replace(project, projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { workloadKind: 'web' } },
+          payments: {
+            stripe: {
+              services: ['web'],
+              credentials: { secretKeyEnvVar: 'STRIPE_SECRET_KEY' },
+            },
+          },
+        },
+      },
+    }));
+    const t = await makeClient();
+    const result = await t.call('hv_logs', {
+      project: project.name,
+      env: 'staging',
+      source: 'stripe-webhooks',
+    });
+
+    expect(result.error.code).toBe('MISSING_CONNECTION');
+    expectActionableConnectionSetup(result.error.details.connectionSetup, {
+      provider: 'stripe',
+      project: project.name,
+      scope: 'staging',
+    });
+    await t.close();
+  });
+
   it('errors when the environment is missing', async () => {
     new ProjectRepository().create({ name: 'obs-app' });
     const t = await makeClient();

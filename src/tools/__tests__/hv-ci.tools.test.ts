@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseToolEnvelope } from './tool-result.js';
+import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -77,6 +77,28 @@ describe('generic CI diagnostics', () => {
   });
 });
 describe('hv_ci_status', () => {
+  it('returns project-scoped setup for every CI command when GitHub is missing', async () => {
+    seedProject();
+    const connections = new ConnectionRepository();
+    for (const connection of connections.findAllByProvider('github')) connections.delete(connection.id);
+    const t = await makeClient();
+
+    const results = await Promise.all([
+      t.call('hv_ci_status', { project: 'billforge' }),
+      t.call('hv_ci_trigger', { project: 'billforge', workflow: 'deploy.yml' }),
+    ]);
+    for (const result of results) {
+      expect(result.error.code).toBe('MISSING_CONNECTION');
+      expectActionableConnectionSetup(result.error.details.connectionSetup, {
+        provider: 'github',
+        project: 'billforge',
+        scope: 'davejohnson/billforge',
+      });
+      expect(result.agentInstruction.message).toContain('offer to open');
+    }
+    await t.close();
+  });
+
   it('returns the requested sections', async () => {
     seedProject();
     vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({

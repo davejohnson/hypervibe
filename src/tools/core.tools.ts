@@ -28,7 +28,7 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
-import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { connectionSetupDetails } from '../domain/services/connection-guidance.js';
 import {
   actionScopedBlocksAllowedDuringApply,
   actionScopedBlocksRequiringConnectBeforeApply,
@@ -364,6 +364,12 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
         environments: Array.from(entry.environments).sort(),
         reasons: Array.from(entry.reasons).sort(),
         ...(scope ? { scope } : {}),
+        ...(!verified ? {
+          connectionSetup: connectionSetupDetails(entry.provider, {
+            scope,
+            project: spec.project,
+          }),
+        } : {}),
         hint: verified
           ? undefined
           : connectionRecoveryHint(
@@ -562,7 +568,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         },
         {
           hint: connections.missing.length > 0
-            ? connectionRecoveryHint(connections.missing, { after: 'Then run hv_plan.' })
+            ? connectionRecoveryHint(connections.missing, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then run hv_plan.' })
             : undefined,
           warnings,
           next: connections.missing.length > 0 ? ['hv_connections', 'hv_plan'] : ['hv_plan'],
@@ -616,9 +622,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       let next: string[] | undefined;
 
       if (hardBlocked.length > 0) {
-        hint = connectionRecoveryHint(hardBlocked, { after: 'Do not run hv_apply until these connections verify; then re-run hv_plan and hv_apply.' });
+        hint = connectionRecoveryHint(hardBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Do not run hv_apply until these connections verify; then re-run hv_plan and hv_apply.' });
       } else if (connectBeforeApply.length > 0) {
         hint = connectionRecoveryHint(connectBeforeApply, {
+          project: project.name,
+          gitRemoteUrl: project.gitRemoteUrl,
           includePackageRead: true,
           after: 'Then re-run hv_plan and hv_apply. GitHub Actions push-to-deploy cannot converge until these credentials are available.',
         });
@@ -628,6 +636,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         hint = 'Everything is in sync — nothing to apply.';
       } else if (softActionScopedBlocked.length > 0) {
         hint = connectionRecoveryHint(softActionScopedBlocked, {
+          project: project.name,
+          gitRemoteUrl: project.gitRemoteUrl,
           after: 'Connect them for full convergence, or apply this plan to converge independent actions and fail only blocked actions.',
         });
       } else {
@@ -666,7 +676,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           blocked: hardBlocked,
           actionScopedBlocked: actionScopedBlocked.length > 0 ? actionScopedBlocked : undefined,
           ...(result.blocked.length > 0 || actionScopedBlocked.length > 0
-            ? connectionRecoveryDetails([...result.blocked, ...actionScopedBlocked])
+            ? connectionRecoveryDetails([...result.blocked, ...actionScopedBlocked], { project: project.name, gitRemoteUrl: project.gitRemoteUrl })
             : {}),
         },
         {
@@ -721,11 +731,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             drift: drift.map(({ metadata: _metadata, ...action }) => action),
             unmanaged: [],
             blocked,
-            ...(blocked.length > 0 ? connectionRecoveryDetails(blocked) : {}),
+            ...(blocked.length > 0 ? connectionRecoveryDetails(blocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl }) : {}),
           }, {
             warnings: github.warnings,
             hint: blocked.length > 0
-              ? connectionRecoveryHint(blocked, { after: 'Then rerun hv_status or hv_plan.' })
+              ? connectionRecoveryHint(blocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then rerun hv_status or hv_plan.' })
               : drift.length > 0
                 ? 'Run hv_plan to get an executable plan for this drift.'
                 : 'Repository infrastructure is in sync.',
@@ -971,7 +981,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             : {}),
           inputRequired: delegatedSecrets.inputRequired.length > 0 ? delegatedSecrets.inputRequired : undefined,
           blocked,
-          ...(blocked.length > 0 ? connectionRecoveryDetails(blocked) : {}),
+          ...(blocked.length > 0 ? connectionRecoveryDetails(blocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl }) : {}),
           ...(iosStatus ? { ios: iosStatus } : {}),
           deploySource: {
             strategy: deployStrategy,
@@ -988,6 +998,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           warnings: [...warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings],
           hint: blocked.length > 0
             ? connectionRecoveryHint(blocked, {
+              project: project.name,
+              gitRemoteUrl: project.gitRemoteUrl,
               after: 'After the connection verifies, rerun hv_status or hv_plan. Do not ask to run hv_plan for DNS/domain drift until the required connection is verified.',
             })
             : sourceWarnings.length > 0
@@ -1049,9 +1061,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         return commandError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {
           details: {
             blocked: outcome.applyBlocked,
-            ...connectionRecoveryDetails(outcome.applyBlocked),
+            ...connectionRecoveryDetails(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl }),
           },
-          hint: connectionRecoveryHint(outcome.applyBlocked, { after: 'Then re-run hv_plan and hv_apply.' }),
+          hint: connectionRecoveryHint(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then re-run hv_plan and hv_apply.' }),
           next: ['hv_connections', 'hv_plan', 'hv_apply'],
         });
       }

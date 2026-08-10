@@ -39,6 +39,7 @@ export type DatabaseAccessAcquireResult =
     code: 'no_database' | 'no_external_access' | 'provider_error';
     error: string;
     provider?: string;
+    connectionUnavailable?: boolean;
     resourceCreated: boolean | 'unknown';
     cleanup: 'not_needed' | 'completed' | 'unknown';
     hint?: string;
@@ -368,6 +369,7 @@ export async function acquireManagedDatabaseAccess(
       code: adapterResult.success ? 'no_external_access' : 'provider_error',
       error: adapterResult.error ?? `${provider} does not support operation-scoped database access.`,
       provider,
+      connectionUnavailable: !adapterResult.success,
       resourceCreated: false,
       cleanup: 'not_needed',
       hint: 'Use a verified database connection or a provider that supports private or ephemeral diagnostic access.',

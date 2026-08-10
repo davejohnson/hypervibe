@@ -154,9 +154,9 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         return commandError('MISSING_CONNECTION', `Missing verified connections: ${connectionProviders(outcome.applyBlocked).join(', ')}.`, {
           details: {
             blocked: outcome.applyBlocked,
-            ...connectionRecoveryDetails(outcome.applyBlocked),
+            ...connectionRecoveryDetails(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl }),
           },
-          hint: connectionRecoveryHint(outcome.applyBlocked, { after: 'Then re-run hv_deploy.' }),
+          hint: connectionRecoveryHint(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl, after: 'Then re-run hv_deploy.' }),
           next: ['hv_connections', 'hv_deploy'],
         });
       }
@@ -254,7 +254,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
             : 'NOT_FOUND';
         return commandError(code, result.error, {
           ...(code === 'MISSING_CONNECTION'
-            ? { details: connectionRecoveryDetails([{ provider: 'provider' in result && result.provider ? result.provider : project.defaultPlatform }]) }
+            ? { details: connectionRecoveryDetails([{ provider: 'provider' in result && result.provider ? result.provider : project.defaultPlatform }], { project: project.name, gitRemoteUrl: project.gitRemoteUrl }) }
             : {}),
           ...('hint' in result && result.hint ? { hint: result.hint } : {}),
           ...(result.reason === 'workflow_drift' ? { next: ['hv_plan', 'hv_apply'] } : {}),

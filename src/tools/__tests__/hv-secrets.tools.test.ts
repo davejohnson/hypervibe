@@ -17,7 +17,7 @@ import * as hostingEnv from '../../domain/services/hosting-env.service.js';
 import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { createToolContext } from '../context.js';
 import { registerHvSecretsTools } from '../hv-secrets.tools.js';
-import { parseToolEnvelope } from './tool-result.js';
+import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 
 let tempDir: string;
 
@@ -82,6 +82,34 @@ describe('reduced secret command surface', () => {
 });
 
 describe('secret reads', () => {
+  it('returns project-scoped setup for missing manager and GitHub connections', async () => {
+    const project = new ProjectRepository().create({
+      name: 'secret-setup-app',
+      gitRemoteUrl: 'https://github.com/davejohnson/secret-setup-app',
+    });
+    const client = await makeClient();
+
+    const manager = await client.call('hv_secrets', {
+      project: project.name,
+      provider: 'vault',
+      path: 'apps/production',
+    });
+    expect(manager.error.code).toBe('MISSING_CONNECTION');
+    expectActionableConnectionSetup(manager.error.details.connectionSetup, {
+      provider: 'vault',
+      project: project.name,
+    });
+
+    const github = await client.call('hv_secrets', { project: project.name, include: ['github'] });
+    expect(github.error.code).toBe('MISSING_CONNECTION');
+    expectActionableConnectionSetup(github.error.details.connectionSetup, {
+      provider: 'github',
+      project: project.name,
+      scope: 'davejohnson/secret-setup-app',
+    });
+    await client.close();
+  });
+
   it('validates explicit project context for manager reads', async () => {
     new ProjectRepository().create({ name: 'known-project', defaultPlatform: 'railway' });
     const client = await makeClient();
@@ -97,6 +125,45 @@ describe('secret reads', () => {
     expect(result.error.message).toContain('does-not-exist');
     expect(result.error.details.requestedProject).toBe('does-not-exist');
     expect(result.agentInstruction.action).toBe('continue');
+    await client.close();
+  });
+
+  it('returns project-scoped hosting setup when its provider connection is unavailable', async () => {
+    const project = new ProjectRepository().create({
+      name: 'hosting-setup-app',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/davejohnson/hosting-setup-app',
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'railway-project',
+        environmentId: 'railway-environment',
+        services: { web: { serviceId: 'railway-service' } },
+      },
+    });
+    new ServiceRepository().create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: {},
+      envVarSpec: {},
+    });
+    const client = await makeClient();
+
+    const result = await client.call('hv_secrets', {
+      project: project.name,
+      env: 'staging',
+      service: 'web',
+    });
+
+    expect(result.error.code).toBe('MISSING_CONNECTION');
+    expectActionableConnectionSetup(result.error.details.connectionSetup, {
+      provider: 'railway',
+      project: project.name,
+      scope: 'davejohnson/hosting-setup-app',
+    });
     await client.close();
   });
 

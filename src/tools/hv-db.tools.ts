@@ -18,7 +18,8 @@ import {
 } from '../domain/services/database-access.service.js';
 import type { CommandContext } from '../application/context.js';
 import type { Project } from '../domain/entities/project.entity.js';
-import { formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { connectionSetupOptions } from '../domain/services/connection-guidance.js';
+import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 
@@ -83,7 +84,7 @@ async function resolveConfiguredTarget(
     const connection = ctx.repos.connections.findBestMatch('database', opts.connectionName);
     if (!connection) {
       throw new HvError('NOT_FOUND', `No database connection found for: ${opts.connectionName}.`, {
-        hint: formatConnectionGuidance('database', { scope: opts.connectionName }),
+        ...connectionSetupOptions('database', { project: opts.project, scope: opts.connectionName }),
       });
     }
     const creds = ctx.secretStore.decryptObject<DatabaseCredentials>(connection.credentialsEncrypted);
@@ -111,14 +112,26 @@ async function resolveTemporaryExternalTarget(
   assertManagedEnvironmentUsesPostgres(ctx, environment);
   const result = await acquireManagedDatabaseAccess(project, environment, opts.service);
   if (!result.ok) {
-    const code = result.code === 'provider_error' ? 'PROVIDER_ERROR' : 'NOT_FOUND';
+    const missingConnection = result.code === 'provider_error'
+      && result.connectionUnavailable
+      && result.provider;
+    const code = missingConnection ? 'MISSING_CONNECTION'
+      : result.code === 'provider_error' ? 'PROVIDER_ERROR'
+      : 'NOT_FOUND';
+    const scope = getProjectScopeHints(project)
+      .find((hint) => !hint.includes('://') && !hint.includes('github.com/'));
+    const setup = missingConnection
+      ? connectionSetupOptions(result.provider!, { project: project.name, scope })
+      : undefined;
     throw new HvError(code, result.error, {
       details: {
         provider: result.provider,
         resourceCreated: result.resourceCreated,
         cleanup: result.cleanup,
+        ...(setup?.details ?? {}),
       },
-      hint: result.hint,
+      hint: setup?.hint ?? result.hint,
+      next: setup?.next,
     });
   }
   return {

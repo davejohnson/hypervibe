@@ -14,6 +14,9 @@ type EnvironmentLike = {
   name: string;
 };
 
+/** Adapter resolution failed before a provider log API could be called. */
+export class ProviderLogsConnectionError extends Error {}
+
 export function detectProviderName(projectDefaultPlatform: string | undefined, bindingsProvider: string | undefined): string {
   return (bindingsProvider || projectDefaultPlatform || 'cloudrun').toLowerCase();
 }
@@ -86,7 +89,7 @@ export async function fetchProviderLogs(
 
   const result = await adapterFactory.getProviderAdapter(provider, project);
   if (!result.success || !result.adapter) {
-    throw new Error(result.error || `Failed to create ${provider} adapter`);
+    throw new ProviderLogsConnectionError(result.error || `Failed to create ${provider} adapter`);
   }
   const adapter = result.adapter as unknown as {
     getDeployments?: (
@@ -188,7 +191,7 @@ export async function fetchProviderDeployments(
 
   const result = await adapterFactory.getProviderAdapter(provider, project);
   if (!result.success || !result.adapter) {
-    throw new Error(result.error || `Failed to create ${provider} adapter`);
+    throw new ProviderLogsConnectionError(result.error || `Failed to create ${provider} adapter`);
   }
   const adapter = result.adapter as unknown as {
     listDeployments?: (
@@ -251,7 +254,7 @@ export async function fetchProviderBuildLogs(
 
   const result = await adapterFactory.getProviderAdapter(provider, project);
   if (!result.success || !result.adapter) {
-    throw new Error(result.error || `Failed to create ${provider} adapter`);
+    throw new ProviderLogsConnectionError(result.error || `Failed to create ${provider} adapter`);
   }
   const adapter = result.adapter as unknown as {
     getBuildLogs?: (deploymentId: string) => Promise<string>;

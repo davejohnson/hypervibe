@@ -172,9 +172,22 @@ function hasReceiptStatus(value: unknown, statuses: Set<string>): boolean {
   });
 }
 
+function hasConnectionSetup(data: Record<string, unknown>): boolean {
+  const setup = data.connectionSetup;
+  return isRecord(setup) || (Array.isArray(setup) && setup.some(isRecord));
+}
+
+const CONNECTION_SETUP_AGENT_MESSAGE = 'Stop before any dependent operation. Show the user the exact clickable setup links and required permissions from connectionSetup, recommend its recommendedSetupUrl, and offer to open that page in their browser. Then explain where to save the credential and show the complete credentialExample with /absolute/path replaced by the real local path. Never summarize this as a vague "Hypervibe credential flow" or ask the user to paste a token into chat.';
+
 function successAgentInstruction(data: unknown): CommandEnvelope['agentInstruction'] | undefined {
   if (!isRecord(data)) return undefined;
   if (isNonEmptyArrayField(data, 'blocked') || isNonEmptyArrayField(data, 'actionScopedBlocked')) {
+    if (hasConnectionSetup(data)) {
+      return {
+        action: 'ask_user',
+        message: CONNECTION_SETUP_AGENT_MESSAGE,
+      };
+    }
     return {
       action: 'ask_user',
       message: 'Stop here. Summarize the blockers and ask the user to provide the missing connection, confirmation, or direction before running more apply/deploy tools.',
@@ -189,7 +202,13 @@ function successAgentInstruction(data: unknown): CommandEnvelope['agentInstructi
   return undefined;
 }
 
-function errorAgentInstruction(code: ErrorCode): CommandEnvelope['agentInstruction'] {
+function errorAgentInstruction(code: ErrorCode, details?: unknown): CommandEnvelope['agentInstruction'] {
+  if (isRecord(details) && hasConnectionSetup(details)) {
+    return {
+      action: 'ask_user',
+      message: CONNECTION_SETUP_AGENT_MESSAGE,
+    };
+  }
   if (code === 'CONFIRM_REQUIRED') {
     return {
       action: 'ask_user',
@@ -199,7 +218,7 @@ function errorAgentInstruction(code: ErrorCode): CommandEnvelope['agentInstructi
   if (code === 'MISSING_CONNECTION') {
     return {
       action: 'ask_user',
-      message: 'Stop here. Report the missing connection and ask the user for an exported token, dotenv/file credentialsRef, or explicit chat entry; do not work around it with other tools.',
+      message: CONNECTION_SETUP_AGENT_MESSAGE,
     };
   }
   return {
@@ -402,6 +421,14 @@ function formatConnections(value: unknown): string[] {
   return lines;
 }
 
+function setupLink(value: string, recommendedSetupUrl?: string): string {
+  const match = /^(.*?):\s+(https?:\/\/\S+)$/.exec(value);
+  const label = (match?.[1] ?? 'Open setup page').replace(/[\[\]]/g, '');
+  const url = match?.[2] ?? value;
+  const recommended = url === recommendedSetupUrl ? ' (recommended)' : '';
+  return `  - Setup Link${recommended}: [${label}](${url})`;
+}
+
 function formatConnectionSetup(value: unknown): string[] {
   const entries = Array.isArray(value) ? value : [value];
   const validEntries = entries.filter(isRecord);
@@ -411,21 +438,24 @@ function formatConnectionSetup(value: unknown): string[] {
     const provider = typeof entry.provider === 'string' ? entry.provider : 'provider';
     const scope = typeof entry.scope === 'string' ? ` for ${entry.scope}` : '';
     lines.push(`  - ${provider}${scope}`);
+    const recommendedSetupUrl = typeof entry.recommendedSetupUrl === 'string'
+      ? entry.recommendedSetupUrl
+      : undefined;
+    const setupUrls = Array.isArray(entry.setupUrls) ? entry.setupUrls.filter((item): item is string => typeof item === 'string') : [];
+    setupUrls.slice(0, 4).forEach((url) => lines.push(setupLink(url, recommendedSetupUrl)));
+    if (typeof entry.credentialExample === 'string') {
+      lines.push(`  - Connect with hv_connections: ${entry.credentialExample}`);
+    }
     if (typeof entry.tokenType === 'string') {
       lines.push(`  - Token Type: ${entry.tokenType}`);
     }
-    const setupUrls = Array.isArray(entry.setupUrls) ? entry.setupUrls.filter((item): item is string => typeof item === 'string') : [];
-    setupUrls.slice(0, 4).forEach((url) => lines.push(`  - Setup URL: ${url}`));
+    const notes = Array.isArray(entry.notes) ? entry.notes.filter((item): item is string => typeof item === 'string') : [];
+    notes.slice(0, 3).forEach((note) => lines.push(`  - Note: ${note}`));
     const permissions = Array.isArray(entry.requiredPermissions)
       ? entry.requiredPermissions.filter((item): item is string => typeof item === 'string')
       : [];
     permissions.slice(0, 8).forEach((permission) => lines.push(`  - Permission: ${permission}`));
     if (permissions.length > 8) lines.push(`  - Permission: ... ${permissions.length - 8} more`);
-    if (typeof entry.credentialExample === 'string') {
-      lines.push(`  - Connect: ${entry.credentialExample}`);
-    }
-    const notes = Array.isArray(entry.notes) ? entry.notes.filter((item): item is string => typeof item === 'string') : [];
-    notes.slice(0, 3).forEach((note) => lines.push(`  - Note: ${note}`));
   }
   if (validEntries.length > 6) lines.push(`  - ... ${validEntries.length - 6} more`);
   return lines;
@@ -568,7 +598,7 @@ export function commandError(
   message: string,
   extras?: ResponseExtras & { details?: unknown }
 ): CommandEnvelope {
-  const agentInstruction = extras?.agentInstruction ?? errorAgentInstruction(code);
+  const agentInstruction = extras?.agentInstruction ?? errorAgentInstruction(code, extras?.details);
   return redactCommandEnvelope({
     ok: false,
     error: {

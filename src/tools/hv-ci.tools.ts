@@ -6,8 +6,7 @@ import {
   getGitHubAdapter,
 } from '../domain/services/github-ops.service.js';
 import {
-  connectionSetupDetails,
-  formatConnectionGuidance,
+  connectionSetupOptions,
 } from '../domain/services/connection-guidance.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import type { CiWorkflowDiagnostic } from '../domain/ports/ci-deploy.port.js';
@@ -31,6 +30,7 @@ const numericIdField = z.preprocess(
 );
 
 interface RepoRef {
+  project: string;
   owner: string;
   repo: string;
 }
@@ -62,15 +62,14 @@ function resolveRepoOrThrow(ctx: CommandContext, projectRef: string | undefined,
       hint: 'Pass repo="owner/repo", or set the project gitRemoteUrl to a GitHub remote.',
     });
   }
-  return { project, owner: parts[0], repo: parts[1] };
+  return { project: project.name, owner: parts[0], repo: parts[1] };
 }
 
-function githubAdapterOrThrow({ owner, repo }: RepoRef): GitHubAdapter {
+function githubAdapterOrThrow({ project, owner, repo }: RepoRef): GitHubAdapter {
   const result = getGitHubAdapter(`${owner}/${repo}`);
   if ('error' in result) {
     throw new HvError('MISSING_CONNECTION', result.error, {
-      details: { connectionSetup: connectionSetupDetails('github', { scope: `${owner}/${repo}` }) },
-      hint: formatConnectionGuidance('github', { scope: `${owner}/${repo}` }),
+      ...connectionSetupOptions('github', { project, scope: `${owner}/${repo}` }),
     });
   }
   return result.adapter;
@@ -201,8 +200,9 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
       branch: z.string().optional().describe('Branch for branch-protection (default "main")'),
     },
     wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, include, workflow, runId, jobId, logLines, branch }) => {
-      const { owner, repo } = resolveRepoOrThrow(ctx, projectRef, repoOverride);
-      const adapter = githubAdapterOrThrow({ owner, repo });
+      const repoRef = resolveRepoOrThrow(ctx, projectRef, repoOverride);
+      const { owner, repo } = repoRef;
+      const adapter = githubAdapterOrThrow(repoRef);
       const sections = include?.length ? include : ['workflows' as const];
       const data: Record<string, unknown> = { repository: `${owner}/${repo}` };
 
@@ -368,8 +368,9 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
       inputs: z.record(z.string()).optional().describe('Workflow inputs as key-value pairs'),
     },
     wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, workflow, ref, inputs }) => {
-      const { owner, repo } = resolveRepoOrThrow(ctx, projectRef, repoOverride);
-      const adapter = githubAdapterOrThrow({ owner, repo });
+      const repoRef = resolveRepoOrThrow(ctx, projectRef, repoOverride);
+      const { owner, repo } = repoRef;
+      const adapter = githubAdapterOrThrow(repoRef);
 
       await adapter.triggerWorkflow(owner, repo, workflow, ref ?? 'main', inputs);
       ctx.repos.audit.create({
