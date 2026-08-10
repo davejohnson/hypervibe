@@ -199,12 +199,30 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     provider: 'aws-secrets',
     displayName: 'AWS Secrets Manager',
     tokenType: 'AWS IAM access key (accessKeyId/secretAccessKey, plus sessionToken for temporary STS session credentials)',
-    setupUrl: 'https://docs.aws.amazon.com/secretsmanager/',
+    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+    setupUrls: [
+      {
+        label: 'Open IAM security credentials to create or rotate an access key',
+        url: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+      },
+      {
+        label: 'Review the AWS access-key security guidance',
+        url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html',
+      },
+      {
+        label: 'Review Secrets Manager authentication and permissions',
+        url: 'https://docs.aws.amazon.com/secretsmanager/',
+      },
+    ],
     permissions: [
       'secretsmanager:GetSecretValue and secretsmanager:ListSecrets for read-only resolution (ListSecrets is required for connection verification and hv_secrets).',
     ],
     credentialExample: 'hv_connections provider="aws-secrets" credentialsRef="file:/absolute/path/aws-secrets.json"',
-    notes: ['Credentials come from the connection or the AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN environment variables; profiles, SSO, and instance roles are not read.'],
+    notes: [
+      'Prefer temporary STS credentials when your organization can issue them. Never create or use root-user access keys.',
+      'Credentials come from the connection or the AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN environment variables; profiles, SSO, and instance roles are not read.',
+      'The secret access key is shown only when it is created. Save it outside the repository.',
+    ],
   },
   'azure-postgres': {
     provider: 'azure-postgres',
@@ -505,7 +523,11 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     provider: 'doppler',
     displayName: 'Doppler',
     tokenType: 'Doppler read-only service token',
-    setupUrl: 'https://docs.doppler.com/docs/service-tokens',
+    setupUrl: 'https://dashboard.doppler.com/',
+    setupUrls: [
+      { label: 'Open the Doppler dashboard and select the project config Access tab', url: 'https://dashboard.doppler.com/' },
+      { label: 'Follow the official service-token guide', url: 'https://docs.doppler.com/docs/service-tokens' },
+    ],
     permissions: [
       'Create a service token scoped to the project/config Hypervibe should read.',
     ],
@@ -781,6 +803,12 @@ function credentialExample(
       if (options.scope) example = example.replace('scope="development"', `scope="${options.scope}"`);
       break;
   }
+  if (options.scope && !example.includes(`scope="${options.scope}"`)) {
+    example = example.replace(
+      `provider="${guidance.provider}"`,
+      `provider="${guidance.provider}" scope="${options.scope}"`
+    );
+  }
   return options.project
     ? example.replace('hv_connections ', `hv_connections project="${options.project}" `)
     : example;
@@ -823,6 +851,18 @@ export function connectionSetupDetails(
     requiredPermissions: guidance.permissions,
     credentialExample: credentialExample(guidance, options),
     ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
+  };
+}
+
+/** Shared application-boundary payload for one unavailable provider connection. */
+export function connectionSetupOptions(
+  provider: string,
+  options: { scope?: string; project?: string } = {}
+) {
+  return {
+    details: { connectionSetup: connectionSetupDetails(provider, options) },
+    hint: formatConnectionGuidance(provider, { scope: options.scope }),
+    next: ['hv_connections'],
   };
 }
 

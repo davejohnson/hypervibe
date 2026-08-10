@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseToolEnvelope } from './tool-result.js';
+import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -274,10 +274,19 @@ describe('hv_inspect / hv_import', () => {
   }
 
   it('hv_inspect returns MISSING_CONNECTION when no Railway connection exists', async () => {
+    new ProjectRepository().create({
+      name: 'inspect-app',
+      gitRemoteUrl: 'https://github.com/davejohnson/inspect-app',
+    });
     const t = await makeClient();
-    const result = await t.call('hv_inspect', { provider: 'railway' });
+    const result = await t.call('hv_inspect', { provider: 'railway', project: 'inspect-app' });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('MISSING_CONNECTION');
+    expectActionableConnectionSetup(result.error.details.connectionSetup, {
+      provider: 'railway',
+      project: 'inspect-app',
+      scope: 'davejohnson/inspect-app',
+    });
     expect(result.next).toContain('hv_connections');
     await t.close();
   });

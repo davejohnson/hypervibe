@@ -8,24 +8,25 @@ import {
   SECRET_MANAGER_PROVIDERS,
 } from '../domain/ports/secretmanager.port.js';
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
-import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { connectionSetupOptions } from '../domain/services/connection-guidance.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
 import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import { envField, projectField } from './schemas.js';
 
 const REDACTED = '[redacted]';
 
 async function managerAdapter(
   ctx: CommandContext,
-  provider: (typeof SECRET_MANAGER_PROVIDERS)[number]
+  provider: (typeof SECRET_MANAGER_PROVIDERS)[number],
+  project?: string
 ) {
   const connection = ctx.repos.connections.findByProvider(provider);
   if (!connection || connection.status !== 'verified') {
     throw new HvError('MISSING_CONNECTION', `No verified connection for ${provider}.`, {
-      details: { connectionSetup: connectionSetupDetails(provider) },
-      hint: formatConnectionGuidance(provider),
+      ...connectionSetupOptions(provider, { project }),
     });
   }
   const credentials = ctx.secretStore.decryptObject(connection.credentialsEncrypted);
@@ -101,7 +102,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
           throw new HvError('VALIDATION', 'Manager value lookup cannot be combined with list parameters.');
         }
         if (!provider || !path) throw new HvError('VALIDATION', 'provider and path must be passed together.');
-        const secret = await (await managerAdapter(ctx, provider)).getSecret(path, key, version);
+        const secret = await (await managerAdapter(ctx, provider, selectedProject?.name)).getSecret(path, key, version);
         return commandSuccess({
           secretRef: `${provider}://${path}${key ? `#${key}` : ''}`,
           value: REDACTED,
@@ -143,7 +144,16 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
       const targetService = resolveHostingService(ctx, project, environment.name, service);
       const result = await readHostingEnvVars({ project, environment, service: targetService });
-      if (!result.success) return commandError('PROVIDER_ERROR', result.error);
+      if (!result.success) {
+        if (result.connectionUnavailable) {
+          const scope = getProjectScopeHints(project)
+            .find((hint) => !hint.includes('://') && !hint.includes('github.com/'));
+          return commandError('MISSING_CONNECTION', result.error, {
+            ...connectionSetupOptions(result.provider, { project: project.name, scope }),
+          });
+        }
+        return commandError('PROVIDER_ERROR', result.error);
+      }
       if (key && !(key in result.variables)) {
         return commandError('NOT_FOUND', `Variable ${key} not set in ${environment.name}.`, {
           details: { available: Object.keys(result.variables) },
@@ -176,7 +186,7 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       }
       const sections: Record<string, unknown> = {};
       if (provider) {
-        const secrets = await (await managerAdapter(ctx, provider)).listSecrets(pathPrefix);
+        const secrets = await (await managerAdapter(ctx, provider, selectedProject?.name)).listSecrets(pathPrefix);
         sections.manager = {
           provider,
           count: secrets.length,
@@ -189,8 +199,10 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
         const gh = getGitHubAdapter(`${owner}/${repoName}`);
         if ('error' in gh) {
           return commandError('MISSING_CONNECTION', gh.error, {
-            details: { connectionSetup: connectionSetupDetails('github', { scope: `${owner}/${repoName}` }) },
-            hint: formatConnectionGuidance('github', { scope: `${owner}/${repoName}` }),
+            ...connectionSetupOptions('github', {
+              project: project?.name,
+              scope: `${owner}/${repoName}`,
+            }),
           });
         }
         const secrets = await gh.adapter.listSecrets(owner, repoName);

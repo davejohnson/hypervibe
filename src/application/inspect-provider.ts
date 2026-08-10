@@ -1,7 +1,7 @@
 import type { CommandContext } from './context.js';
 import { HvError } from './results.js';
 import { providerRegistry, type ProviderInspectionRequest } from '../domain/registry/provider.registry.js';
-import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { connectionSetupOptions } from '../domain/services/connection-guidance.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
@@ -196,6 +196,8 @@ export async function inspectProvider(
   const scopeHints = input.scope
     ? [input.scope, ...projectHints.filter((hint) => hint !== input.scope)]
     : projectHints;
+  const requestedScope = input.scope
+    ?? projectHints.find((hint) => !hint.includes('://') && !hint.includes('github.com/'));
   const resolved = await ctx.adapterFactory.getProviderAdapter(
     providerName,
     project ?? undefined,
@@ -203,16 +205,14 @@ export async function inspectProvider(
   );
   if (!resolved.success || !resolved.adapter) {
     throw new HvError('MISSING_CONNECTION', resolved.error ?? `No ${providerName} connection configured.`, {
-      details: { connectionSetup: connectionSetupDetails(providerName, { scope: input.scope }) },
-      hint: formatConnectionGuidance(providerName, { scope: input.scope }),
-      next: ['hv_connections'],
+      ...connectionSetupOptions(providerName, { project: project?.name, scope: requestedScope }),
     });
   }
 
   const adapter = resolved.adapter as unknown as Record<string, unknown>;
   const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
   const request: ProviderInspectionRequest = {
-    scope: input.scope ?? projectHints.find((hint) => !hint.includes('://') && !hint.includes('github.com/')),
+    scope: requestedScope,
     resource: input.resource,
     id: input.id,
     name: input.name,

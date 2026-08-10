@@ -188,6 +188,51 @@ function setupDetails(provider: string, scope?: string, project?: string) {
   return { connectionSetup: connectionSetupDetails(provider, { scope, project }) };
 }
 
+type ProviderDiscoveryEntry = {
+  name: string;
+  displayName: string;
+  setupHelpUrl?: string;
+  setupHelpUrls?: Array<{ label: string; url: string }>;
+  tokenType?: string;
+  requiredPermissions?: string[];
+  credentialExample?: string;
+  notes?: string[];
+  credentialFields?: CredentialFieldDescriptor[];
+  defaultScalarKey?: string;
+  environmentVariableAliases?: string[][];
+};
+
+function providerDiscoveryEntry(metadata: {
+  name: string;
+  displayName: string;
+  setupHelpUrl?: string;
+  credentialsSchema: z.ZodTypeAny;
+  credentials?: {
+    defaultScalarKey?: string;
+    environmentVariableAliases?: string[][];
+  };
+}): ProviderDiscoveryEntry {
+  const guidance = getConnectionGuidance(metadata.name);
+  const credentialFields = credentialFieldsFromSchema(metadata.credentialsSchema);
+  return {
+    name: metadata.name,
+    displayName: metadata.displayName,
+    ...(credentialFields !== undefined ? { credentialFields } : {}),
+    ...(metadata.credentials?.defaultScalarKey ? { defaultScalarKey: metadata.credentials.defaultScalarKey } : {}),
+    ...(metadata.credentials?.environmentVariableAliases?.length
+      ? { environmentVariableAliases: metadata.credentials.environmentVariableAliases }
+      : {}),
+    ...(guidance?.setupUrl || metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? metadata.setupHelpUrl } : {}),
+    ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
+    ...(guidance ? {
+      tokenType: guidance.tokenType,
+      requiredPermissions: guidance.permissions,
+      credentialExample: guidance.credentialExample,
+      ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
+    } : {}),
+  };
+}
+
 export function registerConnectionsTools(commands: CommandRegistrar, ctx: CommandContext): void {
   const providerNames = [...new Set([...providerRegistry.names(), ...secretManagerRegistry.names()])];
   if (providerNames.length === 0) {
@@ -399,60 +444,15 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         lastVerifiedAt: c.lastVerifiedAt,
       }));
 
-      const availableProviders: Record<string, Array<{
-        name: string;
-        displayName: string;
-        setupHelpUrl?: string;
-        setupHelpUrls?: Array<{ label: string; url: string }>;
-        tokenType?: string;
-        requiredPermissions?: string[];
-        credentialExample?: string;
-        notes?: string[];
-        credentialFields?: CredentialFieldDescriptor[];
-        defaultScalarKey?: string;
-        environmentVariableAliases?: string[][];
-      }>> = {};
+      const availableProviders: Record<string, ProviderDiscoveryEntry[]> = {};
       for (const p of providerRegistry.all()) {
         const category = p.metadata.category;
-        const guidance = getConnectionGuidance(p.metadata.name);
-        const credentialFields = credentialFieldsFromSchema(p.metadata.credentialsSchema);
         availableProviders[category] = availableProviders[category] ?? [];
-        availableProviders[category].push({
-          name: p.metadata.name,
-          displayName: p.metadata.displayName,
-          ...(credentialFields !== undefined ? { credentialFields } : {}),
-          ...(p.metadata.credentials?.defaultScalarKey ? { defaultScalarKey: p.metadata.credentials.defaultScalarKey } : {}),
-          ...(p.metadata.credentials?.environmentVariableAliases?.length
-            ? { environmentVariableAliases: p.metadata.credentials.environmentVariableAliases }
-            : {}),
-          ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
-          ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
-          ...(guidance ? {
-            tokenType: guidance.tokenType,
-            requiredPermissions: guidance.permissions,
-            credentialExample: guidance.credentialExample,
-            ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
-          } : {}),
-        });
+        availableProviders[category].push(providerDiscoveryEntry(p.metadata));
       }
       for (const p of secretManagerRegistry.all()) {
-        const guidance = getConnectionGuidance(p.metadata.name);
-        const credentialFields = credentialFieldsFromSchema(p.metadata.credentialsSchema);
         availableProviders['secrets'] = availableProviders['secrets'] ?? [];
-        availableProviders['secrets'].push({
-          name: p.metadata.name,
-          displayName: p.metadata.displayName,
-          ...(credentialFields !== undefined ? { credentialFields } : {}),
-          ...(p.metadata.credentials?.defaultScalarKey ? { defaultScalarKey: p.metadata.credentials.defaultScalarKey } : {}),
-          ...(guidance?.setupUrl || p.metadata.setupHelpUrl ? { setupHelpUrl: guidance?.setupUrl ?? p.metadata.setupHelpUrl } : {}),
-          ...(guidance?.setupUrls?.length ? { setupHelpUrls: guidance.setupUrls } : {}),
-          ...(guidance ? {
-            tokenType: guidance.tokenType,
-            requiredPermissions: guidance.permissions,
-            credentialExample: guidance.credentialExample,
-            ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
-          } : {}),
-        });
+        availableProviders['secrets'].push(providerDiscoveryEntry(p.metadata));
       }
 
       const discoveryHint = 'This list is credential discovery only. If a concrete task is blocked, use hv_connections with provider only when a safe credentialsRef is already available. Otherwise offer to help connect credentials the user already controls or prepare a value-free handoff naming the provider, scope, and blocked task for the person who manages that access. Do not assume provider membership or run hv_plan, hv_apply, or hv_deploy to bypass the missing connection.';

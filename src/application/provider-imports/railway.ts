@@ -6,7 +6,7 @@ import {
   importRailwayProject,
   inspectRailwayProject,
 } from '../../domain/services/import.service.js';
-import { connectionSetupDetails, formatConnectionGuidance } from '../../domain/services/connection-guidance.js';
+import { connectionSetupOptions } from '../../domain/services/connection-guidance.js';
 
 export const importRailwayProvider: ProviderImportDriver = async (ctx, input) => {
   const {
@@ -29,9 +29,7 @@ export const importRailwayProvider: ProviderImportDriver = async (ctx, input) =>
   const adapter = await connectRailwayForImport();
   if (!adapter) {
     return commandError('MISSING_CONNECTION', 'No Railway connection configured.', {
-      details: { connectionSetup: connectionSetupDetails('railway') },
-      hint: formatConnectionGuidance('railway'),
-      next: ['hv_connections'],
+      ...connectionSetupOptions('railway'),
     });
   }
 

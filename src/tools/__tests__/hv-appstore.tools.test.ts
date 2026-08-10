@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseToolEnvelope } from './tool-result.js';
+import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -181,6 +181,10 @@ describe('hv_appstore_status', () => {
     const status = await t.call('hv_appstore_status', { appIdentifier: 'com.example.app' });
     expect(status.ok).toBe(false);
     expect(status.error.code).toBe('MISSING_CONNECTION');
+    expectActionableConnectionSetup(status.error.details.connectionSetup, {
+      provider: 'appstoreconnect',
+      scope: 'com.example.app',
+    });
     expect(status.hint).toContain('appstoreconnect.apple.com/access/integrations/api');
     await t.close();
   });
@@ -199,6 +203,40 @@ describe('hv_appstore_submit', () => {
     vi.spyOn(AppStoreConnectAdapter.prototype, 'getEditableAppStoreVersion').mockResolvedValue(VERSION);
     vi.spyOn(AppStoreConnectAdapter.prototype, 'getAppStoreVersionBuild').mockResolvedValue({ id: 'build-1', version: '42' });
   }
+
+  it('returns project-scoped GitHub setup when release evidence cannot be read', async () => {
+    seedConnection();
+    const connections = new ConnectionRepository();
+    connections.delete(connections.findByProviderAndScope('github', 'davejohnson/example')!.id);
+    const t = await makeClient();
+
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+
+    expect(result.error.code).toBe('MISSING_CONNECTION');
+    expectActionableConnectionSetup(result.error.details.connectionSetup, {
+      provider: 'github',
+      project: 'example',
+      scope: 'davejohnson/example',
+    });
+    await t.close();
+  });
+
+  it('returns project-scoped App Store setup after release evidence succeeds', async () => {
+    seedConnection();
+    const connections = new ConnectionRepository();
+    connections.delete(connections.findByProvider('appstoreconnect')!.id);
+    const t = await makeClient();
+
+    const result = await t.call('hv_appstore_submit', SUBMIT_INPUT);
+
+    expect(result.error.code).toBe('MISSING_CONNECTION');
+    expectActionableConnectionSetup(result.error.details.connectionSetup, {
+      provider: 'appstoreconnect',
+      project: 'example',
+      scope: 'com.example.app',
+    });
+    await t.close();
+  });
 
   it('creates a review submission, adds the version as an item, and submits it', async () => {
     seedConnection();

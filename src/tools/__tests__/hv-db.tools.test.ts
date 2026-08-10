@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseToolEnvelope } from './tool-result.js';
+import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -169,6 +169,43 @@ function seedRdsDbProject() {
 
 describe('hv_db_query', () => {
   const URL = 'postgres://user:pw@localhost:5432/app';
+
+  it('returns project-scoped setup for a missing named database connection', async () => {
+    new ProjectRepository().create({ name: 'named-db-app' });
+    const t = await makeClient();
+    const result = await t.call('hv_db_query', {
+      project: 'named-db-app',
+      connectionName: 'analytics',
+      sql: 'SELECT 1',
+    });
+
+    expect(result.error.code).toBe('NOT_FOUND');
+    expectActionableConnectionSetup(result.error.details.connectionSetup, {
+      provider: 'database',
+      project: 'named-db-app',
+      scope: 'analytics',
+      setupUrl: false,
+    });
+    await t.close();
+  });
+
+  it('returns hosting-provider setup when managed database access lacks a connection', async () => {
+    seedInternalRailwayDbProject();
+    const t = await makeClient();
+    const result = await t.call('hv_db_query', {
+      project: 'rail-db-app',
+      env: 'production',
+      sql: 'SELECT 1',
+    });
+
+    expect(result.error.code).toBe('MISSING_CONNECTION');
+    expectActionableConnectionSetup(result.error.details.connectionSetup, {
+      provider: 'railway',
+      project: 'rail-db-app',
+    });
+    expect(result.next).toEqual(['hv_connections']);
+    await t.close();
+  });
 
   it('rejects provider template refs before reaching the database adapter', async () => {
     const t = await makeClient();

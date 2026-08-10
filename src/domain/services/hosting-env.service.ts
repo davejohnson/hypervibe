@@ -181,7 +181,10 @@ export async function readHostingEnvVars(params: {
   project: Project;
   environment: Environment;
   service: Service;
-}): Promise<{ success: true; provider: string; variables: Record<string, string> } | { success: false; provider: string; error: string }> {
+}): Promise<
+  { success: true; provider: string; variables: Record<string, string> }
+  | { success: false; provider: string; error: string; connectionUnavailable?: boolean }
+> {
   const provider = hostingProviderForEnvironment(params.project, params.environment);
   const displayName = providerDisplayName(provider);
   const bindings = parseHostingBindings(params.environment);
@@ -200,6 +203,7 @@ export async function readHostingEnvVars(params: {
       success: false,
       provider,
       error: adapterResult.error || `No ${provider} hosting adapter available`,
+      connectionUnavailable: true,
     };
   }
 

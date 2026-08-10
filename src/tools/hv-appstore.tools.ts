@@ -6,7 +6,7 @@ import {
   getAppStoreConnectAdapter,
   summarizeBuild,
 } from '../domain/services/appstore-ops.service.js';
-import { connectionSetupDetails, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
+import { connectionSetupOptions, formatConnectionGuidance } from '../domain/services/connection-guidance.js';
 import type {
   AppStoreConnectAdapter,
 } from '../adapters/providers/appstoreconnect/appstoreconnect.adapter.js';
@@ -21,11 +21,11 @@ const SETUP_HINT =
 const platformField = z.enum(['IOS', 'MAC_OS', 'TV_OS']).optional().describe('Platform (default: IOS)');
 type AscPlatform = 'IOS' | 'MAC_OS' | 'TV_OS' | undefined;
 
-function adapterOrThrow(scopeHint?: string): AppStoreConnectAdapter {
+function adapterOrThrow(scopeHint?: string, project?: string): AppStoreConnectAdapter {
   const result = getAppStoreConnectAdapter(scopeHint);
   if ('error' in result) {
     throw new HvError('MISSING_CONNECTION', result.error, {
-      details: { connectionSetup: connectionSetupDetails('appstoreconnect', { scope: scopeHint }) },
+      ...connectionSetupOptions('appstoreconnect', { project, scope: scopeHint }),
       hint: SETUP_HINT,
     });
   }
@@ -184,7 +184,9 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
       }
       const github = getGitHubAdapter(repository);
       if ('error' in github) {
-        return commandError('MISSING_CONNECTION', github.error);
+        return commandError('MISSING_CONNECTION', github.error, {
+          ...connectionSetupOptions('github', { project: project.name, scope: repository }),
+        });
       }
       const safeEnvironment = environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
       const serverWorkflow = `deploy-${environmentSpec.hosting.provider}-${safeEnvironment}.yml`;
@@ -247,7 +249,7 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
           hint: 'Run the managed server deploy and iOS release workflows for the same commit, verify them with hv_ci_status, then retry.',
         });
       }
-      const adapter = adapterOrThrow(appIdentifier);
+      const adapter = adapterOrThrow(appIdentifier, project.name);
 
       const app = await adapter.findAppByBundleId(appIdentifier);
       if (!app) {

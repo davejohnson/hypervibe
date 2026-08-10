@@ -155,7 +155,7 @@ describe('hv_deploy', () => {
     await t.close();
   });
 
-  it('confirm-gates protected environments', async () => {
+  it('confirm-gates deploys to protected environments', async () => {
     const project = new ProjectRepository().create({
       name: 'gate-app',
       policies: { protectedEnvironments: ['production'] },
@@ -997,7 +997,7 @@ describe('hv_rollback', () => {
     await t.close();
   });
 
-  it('confirm-gates protected environments', async () => {
+  it('confirm-gates rollbacks of protected environments', async () => {
     const project = new ProjectRepository().create({
       name: 'rollback-gate-app',
       policies: { protectedEnvironments: ['production'] },

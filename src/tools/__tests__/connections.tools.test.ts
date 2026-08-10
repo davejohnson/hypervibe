@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseToolEnvelope } from './tool-result.js';
+import { expectActionableConnectionSetup, parseToolEnvelope } from './tool-result.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -429,23 +429,10 @@ describe('hv_connections', () => {
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe('NOT_FOUND');
     expect(result.error.message).toBe('No connection found for provider: cloudflare (hlspropertycare.com).');
-    expect(result.error.details.connectionSetup).toMatchObject({
+    expectActionableConnectionSetup(result.error.details.connectionSetup, {
       provider: 'cloudflare',
       scope: 'hlspropertycare.com',
-      tokenType: expect.stringContaining('Cloudflare Account API Token'),
-      recommendedSetupUrl: expect.stringContaining('https://dash.cloudflare.com/profile/api-tokens'),
-      credentialExample: expect.stringContaining('scope="hlspropertycare.com"'),
     });
-    expect(result.error.details.connectionSetup.setupUrls).toEqual(expect.arrayContaining([
-      expect.stringContaining('https://dash.cloudflare.com/?to=/:account/api-tokens'),
-      expect.stringContaining('https://dash.cloudflare.com/profile/api-tokens'),
-    ]));
-    expect(result.error.details.connectionSetup.requiredPermissions).toEqual(expect.arrayContaining([
-      expect.stringContaining('Zone -> Zone -> Read'),
-      expect.stringContaining('Zone -> DNS -> Edit'),
-      expect.stringContaining('Zone Resources must be Include -> Specific zone'),
-      expect.stringContaining('Registrar write permissions'),
-    ]));
     expect(result.agentInstruction.message).toContain('exact clickable setup link');
     expect(result.agentInstruction.message).toContain('offer to open');
     expect(result.agentInstruction.message).toContain('complete credentialExample');

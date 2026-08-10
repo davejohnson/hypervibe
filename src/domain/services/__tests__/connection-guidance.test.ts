@@ -15,44 +15,45 @@ import {
 describe('connection guidance', () => {
   const noSetupUrlExpected = new Set(['database', 'local', 'xcode']);
 
-  it('covers every registered provider and secret manager', () => {
+  it('keeps every registered provider and secret manager actionable', () => {
     const providers = [...providerRegistry.names(), ...secretManagerRegistry.names()].sort();
     const missing = providers.filter((provider) => !getConnectionGuidance(provider));
 
     expect(missing).toEqual([]);
     for (const provider of providers) {
-      const guidance = formatConnectionGuidance(provider);
-      expect(guidance).toContain('Token/credential type:');
-      expect(guidance).toContain('Required permissions:');
-      expect(guidance).toContain('Connect with:');
-      if (!noSetupUrlExpected.has(provider)) {
-        expect(guidance, provider).toContain('Create or review it here:');
-        expect(guidance, provider).toMatch(/https?:\/\//);
-      }
-    }
-  });
-
-  it('keeps token guidance specific enough for agents to act on', () => {
-    const providers = [...providerRegistry.names(), ...secretManagerRegistry.names()].sort();
-
-    for (const provider of providers) {
-      const guidance = getConnectionGuidance(provider)!;
-      expect(guidance.displayName.trim().length, provider).toBeGreaterThan(0);
-      expect(guidance.tokenType.trim().length, provider).toBeGreaterThan(0);
-      expect(guidance.permissions.length, provider).toBeGreaterThan(0);
-      expect(guidance.credentialExample, provider).toContain('hv_connections provider=');
+      const record = getConnectionGuidance(provider)!;
+      const formatted = formatConnectionGuidance(provider);
+      const setup = connectionSetupDetails(provider);
+      const scopedSetup = connectionSetupDetails(provider, { project: 'example', scope: 'owner/example' });
+      expect(record.displayName.trim().length, provider).toBeGreaterThan(0);
+      expect(record.tokenType.trim().length, provider).toBeGreaterThan(0);
+      expect(record.permissions.length, provider).toBeGreaterThan(0);
+      expect(record.credentialExample, provider).toContain('hv_connections provider=');
       expect(
-        guidance.credentialExample.includes('credentialsRef=')
-        || guidance.credentialExample.includes('credentials='),
+        record.credentialExample.includes('credentialsRef=')
+        || record.credentialExample.includes('credentials='),
         provider
       ).toBe(true);
+      expect(formatted).toContain('Token/credential type:');
+      expect(formatted).toContain('Required permissions:');
+      expect(formatted).toContain('Connect with:');
+      expect(setup.requiredPermissions).toEqual(record.permissions);
+      expect(setup.credentialExample).toBe(record.credentialExample);
+      expect(scopedSetup.credentialExample, provider).toContain('project="example"');
+      expect(scopedSetup.credentialExample, provider).toContain('scope="owner/example"');
 
       if (!noSetupUrlExpected.has(provider)) {
-        expect(guidance.setupUrl, provider).toMatch(/^https?:\/\//);
-        expect(formatConnectionGuidance(provider), provider).toContain('Create or review it here:');
+        expect(record.setupUrl, provider).toMatch(/^https?:\/\//);
+        expect(formatted, provider).toContain('Create or review it here:');
+        expect(setup.recommendedSetupUrl, provider).toMatch(/^https?:\/\//);
+        expect(setup.setupUrls.length, provider).toBeGreaterThan(0);
       }
 
-      for (const permission of guidance.permissions) {
+      for (const setupUrl of record.setupUrls ?? []) {
+        expect(new URL(setupUrl.url).protocol, provider).toBe('https:');
+      }
+
+      for (const permission of record.permissions) {
         expect(permission.trim().length, `${provider}: ${permission}`).toBeGreaterThan(20);
         expect(permission, provider).not.toMatch(/^(read|write|admin|full access|valid token)\.?$/i);
       }

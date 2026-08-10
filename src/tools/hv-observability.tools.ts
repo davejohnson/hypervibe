@@ -9,6 +9,7 @@ import {
   supportsLogsBuildProvider,
   logsDeploymentsUnsupportedMessage,
   logsBuildUnsupportedMessage,
+  ProviderLogsConnectionError,
 } from '../domain/services/provider-logs.service.js';
 import { fetchStripeWebhookStatuses } from '../domain/services/stripe-ops.service.js';
 import { stripeEnvironmentName } from '../domain/services/stripe-env.service.js';
@@ -25,6 +26,8 @@ import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
+import { connectionSetupOptions } from '../domain/services/connection-guidance.js';
+import { getProjectScopeHints } from '../domain/services/project-scope.js';
 
 function resolveEnvOrThrow(ctx: CommandContext, projectRef: string | undefined, envName: string | undefined) {
   const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -32,6 +35,23 @@ function resolveEnvOrThrow(ctx: CommandContext, projectRef: string | undefined, 
   const bindings = environment.platformBindings as { provider?: string; services?: Record<string, { serviceId: string }> };
   const provider = detectProviderName(project.defaultPlatform, bindings.provider);
   return { project, environment, bindings, provider };
+}
+
+async function readProviderLogs<T>(
+  provider: string,
+  project: ReturnType<CommandContext['resolveProjectOrThrow']>,
+  read: () => Promise<T>
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (!(error instanceof ProviderLogsConnectionError)) throw error;
+    const scopeHints = getProjectScopeHints(project);
+    const scope = scopeHints.find((hint) => !hint.includes('://') && !hint.includes('github.com/'));
+    throw new HvError('MISSING_CONNECTION', error.message, {
+      ...connectionSetupOptions(provider, { project: project.name, scope }),
+    });
+  }
 }
 
 export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: CommandContext): void {
@@ -75,7 +95,14 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         const result = await fetchStripeWebhookStatuses(stripeEnvironment, mode);
         if (!result.success) {
           throw new HvError(result.code, result.error, {
-            next: result.code === 'MISSING_CONNECTION' ? ['hv_connections'] : undefined,
+            ...(result.code === 'MISSING_CONNECTION'
+              ? {
+                ...connectionSetupOptions('stripe', {
+                  project: project.name,
+                  scope: stripeEnvironment,
+                }),
+              }
+              : {}),
           });
         }
         return commandSuccess({
@@ -109,7 +136,11 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         if (!supportsLogsDeploymentsProvider(provider)) {
           throw new HvError('UNSUPPORTED', logsDeploymentsUnsupportedMessage(provider));
         }
-        const deployments = await fetchProviderDeployments(provider, project, environment, service, limit ?? 10);
+        const deployments = await readProviderLogs(
+          provider,
+          project,
+          () => fetchProviderDeployments(provider, project, environment, service, limit ?? 10)
+        );
         return commandSuccess({ source, provider, environment: environment.name, deployments });
       }
 
@@ -123,17 +154,25 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         if (!supportsLogsBuildProvider(provider)) {
           throw new HvError('UNSUPPORTED', logsBuildUnsupportedMessage(provider));
         }
-        const result = await fetchProviderBuildLogs(provider, project, environment, serviceName, deploymentId);
+        const result = await readProviderLogs(
+          provider,
+          project,
+          () => fetchProviderBuildLogs(provider, project, environment, serviceName, deploymentId)
+        );
         return commandSuccess({ source, provider, service: serviceName, ...result });
       }
 
-      const { logs, deploymentStatus } = await fetchProviderLogs(
+      const { logs, deploymentStatus } = await readProviderLogs(
         provider,
         project,
-        environment,
-        serviceName,
-        limit ?? 100,
-        { errorsOnly }
+        () => fetchProviderLogs(
+          provider,
+          project,
+          environment,
+          serviceName,
+          limit ?? 100,
+          { errorsOnly }
+        )
       );
       return commandSuccess({
         source,
