@@ -184,8 +184,8 @@ function warningExtras(data: Record<string, unknown>): { warnings: string[] } | 
     : undefined;
 }
 
-function setupDetails(provider: string, scope?: string) {
-  return { connectionSetup: connectionSetupDetails(provider, { scope }) };
+function setupDetails(provider: string, scope?: string, project?: string) {
+  return { connectionSetup: connectionSetupDetails(provider, { scope, project }) };
 }
 
 export function registerConnectionsTools(commands: CommandRegistrar, ctx: CommandContext): void {
@@ -309,7 +309,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         }
         if (!credentials && !credentialsRef) {
           return commandError('VALIDATION', 'credentials are required for action="add".', {
-            details: setupDetails(provider, scope),
+            details: setupDetails(provider, scope, project?.name),
             hint: `Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -324,7 +324,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
             : credentials!;
         } catch (error) {
           return commandError('VALIDATION', error instanceof Error ? error.message : String(error), {
-            details: setupDetails(provider, scope),
+            details: setupDetails(provider, scope, project?.name),
             hint: `Use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -332,7 +332,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const saved = await saveConnection(provider, credentialsToSave, scope);
         if (!saved.success) {
           return commandError('VALIDATION', saved.error!, {
-            details: setupDetails(provider, scope),
+            details: setupDetails(provider, scope, project?.name),
             hint: `Fix the credentials object to match the provider schema and retry. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -341,7 +341,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const verified = await verifyConnection(provider, scope);
         if (verified.kind !== 'verified') {
           return commandError('PROVIDER_ERROR', verified.error ?? 'Verification failed.', {
-            details: { connection: saved.connection, ...setupDetails(provider, scope) },
+            details: { connection: saved.connection, ...setupDetails(provider, scope, project?.name) },
             hint: `The connection was saved but failed verification. Confirm the token type and permissions, then re-run hv_connections provider="${provider}" action="verify" or action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
@@ -377,14 +377,14 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         }
         case 'not_found':
           return commandError('NOT_FOUND', verified.error, {
-            details: setupDetails(provider, scope),
+            details: setupDetails(provider, scope, project?.name),
             hint: `Add the connection first with hv_connections provider="${provider}" action="add". ${formatConnectionGuidance(provider, { scope })}`,
           });
         case 'unknown_provider':
           return commandError('UNSUPPORTED', verified.error);
         default:
           return commandError('PROVIDER_ERROR', verified.error, {
-            details: setupDetails(provider, scope),
+            details: setupDetails(provider, scope, project?.name),
             hint: `Confirm the token type and permissions, then re-run hv_connections provider="${provider}" action="add" with corrected credentials. ${formatConnectionGuidance(provider, { scope })}`,
           });
       }

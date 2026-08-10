@@ -41,9 +41,11 @@ export interface ConnectionGuidance {
 
 export interface ConnectionSetupDetails {
   provider: string;
+  project?: string;
   scope?: string;
   displayName?: string;
   tokenType?: string;
+  recommendedSetupUrl?: string;
   setupUrls: string[];
   requiredPermissions: string[];
   credentialExample: string;
@@ -527,8 +529,9 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'For the one-token classic PAT setup, grant repo, workflow, and read:packages. Hypervibe uses it for API management and package/image reads.',
       `For private GHCR image pulls, packageReadToken must have read:packages — create it here: ${GITHUB_TOKEN_URLS.packageRead}. This can be the same classic PAT only when that PAT also has repo + workflow + read:packages.`,
     ],
-    credentialExample: 'export NODE_AUTH_TOKEN="<classic PAT with repo, workflow, read:packages>"; hv_connections provider="github" scope="owner/repository" credentialsRef="env:NODE_AUTH_TOKEN"',
+    credentialExample: 'hv_connections provider="github" scope="owner/repository" credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN"',
     notes: [
+      'Save the PAT as NODE_AUTH_TOKEN in an existing gitignored .env file, replace /absolute/path in the Connect command with that file\'s directory, and let the agent call hv_connections. Alternatively, export NODE_AUTH_TOKEN before starting Hypervibe and use credentialsRef="env:NODE_AUTH_TOKEN".',
       'NODE_AUTH_TOKEN, HYPERVIBE_GITHUB_TOKEN, and HYPERVIBE_GITHUB_PACKAGES_TOKEN are accepted as aliases when resolving GitHub credentials. Use NODE_AUTH_TOKEN when npm also needs the token.',
       'An explicitly referenced variable wins. If it is absent and multiple aliases contain different values, Hypervibe blocks instead of guessing.',
       'A read:packages-only token cannot manage repository infrastructure; use it only as packageReadToken.',
@@ -756,38 +759,46 @@ export function getConnectionGuidance(provider: string): ConnectionGuidance | un
   return GUIDANCE[provider];
 }
 
-function credentialExample(guidance: ConnectionGuidance, scope?: string): string {
-  if (!scope) {
-    return guidance.credentialExample;
-  }
+function credentialExample(
+  guidance: ConnectionGuidance,
+  options: { scope?: string; project?: string } = {}
+): string {
+  let example = guidance.credentialExample;
   switch (guidance.provider) {
     case 'cloudflare':
-      return guidance.credentialExample.replaceAll('scope="example.com"', `scope="${scope}"`);
+      if (options.scope) example = example.replaceAll('scope="example.com"', `scope="${options.scope}"`);
+      break;
     case 'github':
-      return guidance.credentialExample.replace('provider="github"', `provider="github" scope="${scope}"`);
+      if (options.scope) example = example.replace('scope="owner/repository"', `scope="${options.scope}"`);
+      break;
     case 'database':
-      return guidance.credentialExample.replace('provider="database"', `provider="database" scope="${scope}"`);
+      if (options.scope) example = example.replace('provider="database"', `provider="database" scope="${options.scope}"`);
+      break;
     case 'appstoreconnect':
-      return guidance.credentialExample.replace('provider="appstoreconnect"', `provider="appstoreconnect" scope="${scope}"`);
+      if (options.scope) example = example.replace('provider="appstoreconnect"', `provider="appstoreconnect" scope="${options.scope}"`);
+      break;
     case 'stripe':
-      return guidance.credentialExample.replace('scope="development"', `scope="${scope}"`);
-    default:
-      return guidance.credentialExample;
+      if (options.scope) example = example.replace('scope="development"', `scope="${options.scope}"`);
+      break;
   }
+  return options.project
+    ? example.replace('hv_connections ', `hv_connections project="${options.project}" `)
+    : example;
 }
 
 export function connectionSetupDetails(
   provider: string,
-  options: { scope?: string } = {}
+  options: { scope?: string; project?: string } = {}
 ): ConnectionSetupDetails {
   const guidance = getConnectionGuidance(provider);
   if (!guidance) {
     return {
       provider,
+      ...(options.project ? { project: options.project } : {}),
       ...(options.scope ? { scope: options.scope } : {}),
       setupUrls: [],
       requiredPermissions: [],
-      credentialExample: `hv_connections provider="${provider}" credentialsRef="env:NAME"`,
+      credentialExample: `hv_connections ${options.project ? `project="${options.project}" ` : ''}provider="${provider}" credentialsRef="env:NAME"`,
       notes: [
         'Run hv_connections to see the provider schema and credential fields.',
         'Prefer credentialsRef="env:NAME", credentialsRef="dotenv:/absolute/path/.env#KEY", or credentialsRef="file:/absolute/path" so secrets do not enter chat.',
@@ -801,12 +812,16 @@ export function connectionSetupDetails(
 
   return {
     provider,
+    ...(options.project ? { project: options.project } : {}),
     ...(options.scope ? { scope: options.scope } : {}),
     displayName: guidance.displayName,
     tokenType: guidance.tokenType,
+    ...((guidance.setupUrl ?? guidance.setupUrls?.[0]?.url)
+      ? { recommendedSetupUrl: guidance.setupUrl ?? guidance.setupUrls?.[0]?.url }
+      : {}),
     setupUrls,
     requiredPermissions: guidance.permissions,
-    credentialExample: credentialExample(guidance, options.scope),
+    credentialExample: credentialExample(guidance, options),
     ...(guidance.notes?.length ? { notes: guidance.notes } : {}),
   };
 }
@@ -832,7 +847,7 @@ export function formatConnectionGuidance(
       : guidance.setupUrl ? `Create or review it here: ${guidance.setupUrl}.` : undefined,
     `Required permissions: ${guidance.permissions.join(' ')}`,
     guidance.notes?.length ? `Notes: ${guidance.notes.join(' ')}` : undefined,
-    `Connect with: ${credentialExample(guidance, options.scope)}.`,
+    `Connect with: ${credentialExample(guidance, { scope: options.scope })}.`,
   ].filter(Boolean);
   return parts.join(' ');
 }

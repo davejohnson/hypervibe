@@ -140,6 +140,12 @@ describe('server tool surface', () => {
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
       'correct one unambiguous selector typo and retry once'
     );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'offer to open it in the user\'s browser'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'Never refer vaguely to a "Hypervibe credential flow"'
+    );
   });
 
   it('every tool responds with the structured envelope on error paths', async () => {

@@ -393,6 +393,14 @@ starts.
 
 Connection guidance is part of the product contract, not incidental copy. Every provider or secret-manager connection should have a `ConnectionGuidance` entry in `src/domain/services/connection-guidance.ts`, and token/permission errors should route through `formatConnectionGuidance(...)` whenever possible.
 
+Missing-connection results must be directly actionable in both MCP and CLI.
+Return the exact prefilled setup links, identify one `recommendedSetupUrl`, and
+include a project/scoped `credentialExample` using a safe local reference. The
+human renderer keeps clickable links and that command ahead of long permission
+details. Agents reproduce the links, offer to open the recommended page, tell
+the user exactly where to save the credential, and then call `hv_connections`
+themselves. Never hide those steps behind the phrase "credential flow."
+
 When adding or changing token guidance, include all of these details:
 
 - The exact credential kind, including distinctions that matter operationally, such as user token vs account token, classic PAT vs fine-grained PAT, service account JSON vs access token, or read token vs API-management token.

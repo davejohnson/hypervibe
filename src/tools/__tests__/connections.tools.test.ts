@@ -433,6 +433,7 @@ describe('hv_connections', () => {
       provider: 'cloudflare',
       scope: 'hlspropertycare.com',
       tokenType: expect.stringContaining('Cloudflare Account API Token'),
+      recommendedSetupUrl: expect.stringContaining('https://dash.cloudflare.com/profile/api-tokens'),
       credentialExample: expect.stringContaining('scope="hlspropertycare.com"'),
     });
     expect(result.error.details.connectionSetup.setupUrls).toEqual(expect.arrayContaining([
@@ -445,6 +446,9 @@ describe('hv_connections', () => {
       expect.stringContaining('Zone Resources must be Include -> Specific zone'),
       expect.stringContaining('Registrar write permissions'),
     ]));
+    expect(result.agentInstruction.message).toContain('exact clickable setup link');
+    expect(result.agentInstruction.message).toContain('offer to open');
+    expect(result.agentInstruction.message).toContain('complete credentialExample');
     await t.close();
   });
 

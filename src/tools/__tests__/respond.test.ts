@@ -76,6 +76,28 @@ describe('toolSuccess', () => {
     });
   });
 
+  it('tells agents to expose and offer to open concrete connection setup links', () => {
+    const body = parse(toolSuccess({
+      blocked: [{ provider: 'github', scope: 'davejohnson/livetrainer' }],
+      connectionSetup: [{
+        provider: 'github',
+        recommendedSetupUrl: 'https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages',
+        setupUrls: [
+          'Create recommended combined classic token: https://github.com/settings/tokens/new?scopes=repo,workflow,read:packages',
+        ],
+        requiredPermissions: ['repo, workflow, read:packages'],
+        credentialExample: 'hv_connections project="livetrainer" provider="github" scope="davejohnson/livetrainer" credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN"',
+      }],
+    }));
+
+    expect(body.agentInstruction).toMatchObject({ action: 'ask_user' });
+    expect(body.agentInstruction?.message).toContain('exact clickable setup links');
+    expect(body.agentInstruction?.message).toContain('offer to open');
+    expect(body.agentInstruction?.message).toContain('credentialExample');
+    expect(body.agentInstruction?.message).toContain('real local path');
+    expect(body.agentInstruction?.message).toContain('Never summarize this as a vague');
+  });
+
   it('formats action ids with colons without corrupting markdown labels', () => {
     const response = toolSuccess({
       actions: [{
@@ -115,7 +137,8 @@ describe('toolError', () => {
     expect(body.agentInstruction).toMatchObject({
       action: 'ask_user',
     });
-    expect(rendered(response)).toContain('ask the user for an exported token');
+    expect(rendered(response)).toContain('offer to open that page in their browser');
+    expect(rendered(response)).toContain('complete credentialExample');
   });
 
   it('includes details when provided', () => {
@@ -130,6 +153,7 @@ describe('toolError', () => {
           provider: 'cloudflare',
           scope: 'hlspropertycare.com',
           tokenType: 'Cloudflare Account API Token for DNS',
+          recommendedSetupUrl: 'https://dash.cloudflare.com/?to=/:account/api-tokens',
           setupUrls: [
             'Account API Tokens: https://dash.cloudflare.com/?to=/:account/api-tokens',
             'User API Tokens: https://dash.cloudflare.com/profile/api-tokens',
@@ -146,9 +170,12 @@ describe('toolError', () => {
     const text = rendered(response);
     expect(text).toContain('Connection Setup: 1');
     expect(text).toContain('Token Type: Cloudflare Account API Token for DNS');
-    expect(text).toContain('Setup URL: Account API Tokens: https://dash.cloudflare.com/?to=/:account/api-tokens');
+    expect(text).toContain('Setup Link (recommended): [Account API Tokens](https://dash.cloudflare.com/?to=/:account/api-tokens)');
+    expect(text).toContain('Setup Link: [User API Tokens](https://dash.cloudflare.com/profile/api-tokens)');
     expect(text).toContain('Permission: For DNS/custom domains: grant Zone -> DNS -> Edit.');
-    expect(text).toContain('Connect: hv_connections provider="cloudflare" scope="hlspropertycare.com"');
+    expect(text).toContain('Connect with hv_connections: hv_connections provider="cloudflare" scope="hlspropertycare.com"');
+    expect(text.indexOf('Setup Link (recommended)')).toBeLessThan(text.indexOf('Token Type:'));
+    expect(text.indexOf('Connect with hv_connections:')).toBeLessThan(text.indexOf('Permission:'));
   });
 });
 

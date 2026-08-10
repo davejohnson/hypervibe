@@ -5,6 +5,7 @@ import { providerRegistry } from '../../registry/provider.registry.js';
 import { secretManagerRegistry } from '../../registry/secretmanager.registry.js';
 import {
   CLOUDFLARE_TOKEN_URLS,
+  connectionSetupDetails,
   credentialFieldsFromSchema,
   formatConnectionGuidance,
   GITHUB_TOKEN_URLS,
@@ -136,6 +137,24 @@ describe('connection guidance', () => {
     expect(guidance).toContain('NODE_AUTH_TOKEN');
     expect(guidance).toContain('HYPERVIBE_GITHUB_TOKEN');
     expect(guidance).toContain('HYPERVIBE_GITHUB_PACKAGES_TOKEN');
+  });
+
+  it('returns an exact recommended GitHub link and project-scoped safe connect command', () => {
+    const setup = connectionSetupDetails('github', {
+      project: 'livetrainer',
+      scope: 'davejohnson/livetrainer',
+    });
+
+    expect(setup.recommendedSetupUrl).toBe(GITHUB_TOKEN_URLS.combined);
+    expect(setup.setupUrls).toEqual(expect.arrayContaining([
+      `Create recommended combined classic token: ${GITHUB_TOKEN_URLS.combined}`,
+      `Create pre-filled fine-grained repository token: ${GITHUB_TOKEN_URLS.fineGrained}`,
+      `Create optional classic GHCR package token: ${GITHUB_TOKEN_URLS.packageRead}`,
+    ]));
+    expect(setup.credentialExample).toBe(
+      'hv_connections project="livetrainer" provider="github" scope="davejohnson/livetrainer" credentialsRef="dotenv:/absolute/path/.env#NODE_AUTH_TOKEN"'
+    );
+    expect(setup.notes).toContainEqual(expect.stringContaining('Save the PAT as NODE_AUTH_TOKEN'));
   });
 
   it('keeps every GitHub PAT creation link pre-filled for its role', () => {
