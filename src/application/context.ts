@@ -11,8 +11,8 @@ import { adapterFactory } from '../domain/services/adapter.factory.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import { resolveProject } from '../domain/services/resolve-project.js';
-import { detectGitRemoteUrl } from '../lib/git-remote.js';
-import { readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
+import { detectGitRemoteUrl, parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { findRepoRoot, readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
 import { readRepoBindingsFile } from '../domain/spec/repo-bindings-file.js';
 import { HvError } from './results.js';
 
@@ -173,6 +173,11 @@ export function createCommandContext(): CommandContext {
         if (remoteProject) {
           return hydrateAndReturn(remoteProject);
         }
+        const repoBacked = resolveRepoBackedProject();
+        if (repoBacked) return repoBacked;
+        // A repository identity is stronger than the legacy single-project
+        // fallback. Never bind a new checkout to an unrelated lone project.
+        return null;
       }
       const repoBacked = resolveRepoBackedProject();
       if (repoBacked) return repoBacked;
@@ -193,10 +198,49 @@ export function createCommandContext(): CommandContext {
       const project = resolve(opts);
       if (project) return project;
 
+      const requestedProject = opts?.project?.trim();
+      if (requestedProject) {
+        const remoteUrl = detectGitRemoteUrl();
+        const repositoryProject = parseGitHubRepoFromRemote(remoteUrl ?? undefined)?.split('/').at(-1)
+          ?? findRepoRoot()?.split(/[\\/]/).filter(Boolean).at(-1)
+          ?? null;
+        const registered = repos.projects.findAll()
+          .sort((a, b) => a.name.localeCompare(b.name));
+        const registeredProjects = registered
+          .slice(0, 10)
+          .map(({ id, name }) => ({ id, name }));
+        const repositoryMatches = repositoryProject?.toLowerCase() === requestedProject.toLowerCase();
+        const registeredSummary = registeredProjects.length > 0
+          ? ` Registered projects: ${registeredProjects.map(({ name }) => name).join(', ')}${registered.length > registeredProjects.length ? ', …' : ''}.`
+          : ' No projects are registered yet.';
+        throw new HvError('NOT_FOUND', `Project "${requestedProject}" was not found in Hypervibe.`, {
+          details: {
+            requestedProject,
+            repositoryProject,
+            registeredProjects,
+            registeredProjectCount: registered.length,
+          },
+          hint: repositoryMatches
+            ? `The name matches the current repository, but it has not been initialized. Run hv_spec({}) (CLI: hypervibe spec) to inspect its bootstrap contract, then submit the initial spec.${registeredSummary}`
+            : `Check the project name before creating anything.${repositoryProject ? ` The current repository suggests "${repositoryProject}", not "${requestedProject}".` : ''}${registeredSummary} Run hv_spec({}) (CLI: hypervibe spec) from the intended repository to see the selected project or fresh-project bootstrap contract.`,
+          agentInstruction: {
+            action: 'continue',
+            message: 'Compare requestedProject with repositoryProject and registeredProjects. If the correction is unambiguous, retry once with the corrected project name. Otherwise ask the user; do not initialize the possibly misspelled name.',
+          },
+        });
+      }
+
+      const remoteUrl = detectGitRemoteUrl();
+      if (remoteUrl) {
+        throw new HvError('NOT_FOUND', `No Hypervibe project is initialized for git remote "${remoteUrl}".`, {
+          hint: 'Call hv_spec from this repository. A fresh-repository read returns the initialization contract, then hv_spec with spec input creates the project.',
+        });
+      }
+
       const all = repos.projects.findAll();
       if (all.length === 0) {
         throw new HvError('NOT_FOUND', 'No projects found.', {
-          hint: 'Create one with hv_spec, or inspect existing provider infrastructure with hv_inspect and adopt it with hv_import.',
+          hint: 'Call hv_spec from a git repository to begin initialization, or inspect existing provider infrastructure with hv_inspect and adopt it with hv_import.',
         });
       }
       throw new HvError('AMBIGUOUS_PROJECT', 'Could not resolve a project from this directory.', {

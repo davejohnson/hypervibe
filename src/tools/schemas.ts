@@ -8,7 +8,7 @@ import { z } from 'zod';
 export const projectField = z
   .string()
   .optional()
-  .describe('Project name or id. Omit to auto-detect from the git remote of the working directory (or the only project).');
+  .describe('Project name or id. Omit to auto-detect from the current git repository (or the only project). Unknown names return the repository candidate and a bounded registered-project list so typos can be corrected safely.');
 
 export const envField = z
   .string()

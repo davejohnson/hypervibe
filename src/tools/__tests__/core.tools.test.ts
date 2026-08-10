@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
+import { execFileSync } from 'child_process';
 import { parseToolEnvelope } from './tool-result.js';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -141,6 +142,133 @@ describe('bootstrap action receipt mapping', () => {
 });
 
 describe('hv_spec', () => {
+  it('bootstraps the read-first MCP workflow in a completely new git repository', async () => {
+    const oldCwd = process.cwd();
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const repoDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'hypervibe-fresh-project-')));
+    execFileSync('git', ['init', '-q'], { cwd: repoDir });
+    execFileSync('git', [
+      'remote',
+      'add',
+      'origin',
+      'git@github.com:davejohnson/fresh-agent-app.git',
+    ], { cwd: repoDir });
+
+    let t: Awaited<ReturnType<typeof makeClient>> | null = null;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      process.chdir(repoDir);
+      new ProjectRepository().create({
+        name: 'unrelated-existing-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/unrelated-existing-app.git',
+      });
+      t = await makeClient();
+
+      const discovered = await t.call('hv_spec', {});
+      expect(discovered).toMatchObject({
+        ok: true,
+        data: {
+          initialized: false,
+          project: {
+            name: 'fresh-agent-app',
+            gitRemoteUrl: 'git@github.com:davejohnson/fresh-agent-app.git',
+          },
+          revision: null,
+          spec: null,
+          bootstrap: {
+            required: true,
+            nextCommand: 'hv_spec',
+            requiredSpecFields: ['project', 'environments'],
+          },
+        },
+        agentInstruction: { action: 'continue' },
+        next: ['hv_spec'],
+      });
+      expect(discovered.hint).toContain('normal fresh-project state');
+      expect(discovered.hint).toContain('Do not run hv_plan or hv_deploy');
+      expect(new ProjectRepository().findByName('fresh-agent-app')).toBeNull();
+      expect(new ProjectRepository().findByName('unrelated-existing-app')).toBeTruthy();
+
+      const typo = await t.call('hv_spec', {
+        project: 'fresh-agent-ap',
+      });
+      expect(typo).toMatchObject({
+        ok: false,
+        error: {
+          code: 'NOT_FOUND',
+          details: {
+            requestedProject: 'fresh-agent-ap',
+            repositoryProject: 'fresh-agent-app',
+            registeredProjects: [
+              expect.objectContaining({ name: 'unrelated-existing-app' }),
+            ],
+            registeredProjectCount: 1,
+          },
+        },
+        agentInstruction: { action: 'continue' },
+      });
+      expect(typo.hint).toContain('Check the project name');
+      expect(typo.hint).toContain('hv_spec({})');
+      expect(new ProjectRepository().findByName('fresh-agent-ap')).toBeNull();
+
+      const explicitDiscovery = await t.call('hv_spec', {
+        project: 'fresh-agent-app',
+      });
+      expect(explicitDiscovery).toMatchObject({
+        ok: true,
+        data: {
+          initialized: false,
+          project: { name: 'fresh-agent-app' },
+        },
+        agentInstruction: { action: 'continue' },
+      });
+      expect(new ProjectRepository().findByName('fresh-agent-app')).toBeNull();
+
+      const initialized = await t.call('hv_spec', {
+        project: 'fresh-agent-app',
+        spec: {
+          project: 'fresh-agent-app',
+          environments: {
+            staging: {
+              hosting: { provider: 'railway' },
+              services: { web: { startCommand: 'npm start' } },
+            },
+          },
+        },
+      });
+      expect(initialized.ok).toBe(true);
+      expect(initialized.data.revision).toBe(1);
+      expect(initialized.data.project).toMatchObject({
+        name: 'fresh-agent-app',
+        gitRemoteUrl: 'git@github.com:davejohnson/fresh-agent-app.git',
+      });
+      expect(new ProjectRepository().findByName('fresh-agent-app')).toMatchObject({
+        gitRemoteUrl: 'git@github.com:davejohnson/fresh-agent-app.git',
+      });
+      expect(JSON.parse(
+        readFileSync(path.join(repoDir, '.hypervibe', 'spec.json'), 'utf8')
+      )).toMatchObject({ project: 'fresh-agent-app' });
+
+      const plan = await t.call('hv_plan', {
+        project: 'fresh-agent-app',
+        env: 'staging',
+      });
+      expect(plan.ok).toBe(true);
+      expect(plan.data.blocked).toContainEqual(expect.objectContaining({
+        provider: 'railway',
+      }));
+    } finally {
+      if (t) await t.close();
+      process.chdir(oldCwd);
+      if (oldDisable === undefined) {
+        delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      } else {
+        process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
+      }
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it('creates a project, stores the spec, and bumps revisions on merge', async () => {
     const t = await makeClient();
     const set = await t.call('hv_spec', { spec: SPEC });
@@ -251,6 +379,7 @@ describe('hv_spec', () => {
     expect(bad.ok).toBe(false);
     expect(bad.error.code).toBe('VALIDATION');
     expect(JSON.stringify(bad.error.details)).toContain('cronSchedule');
+    expect(new ProjectRepository().findByName('bad-app')).toBeNull();
     await t.close();
   });
 
@@ -282,6 +411,7 @@ describe('hv_spec', () => {
     expect(result.hint).toContain('separately chosen');
     expect(result.hint).toContain('envVarExceptions');
     expect(JSON.stringify(result)).not.toContain('production-site-id');
+    expect(new ProjectRepository().findByName('coverage-block-app')).toBeNull();
     await t.close();
   });
 
@@ -391,6 +521,7 @@ describe('hv_spec', () => {
     expect(bad.ok).toBe(false);
     expect(bad.error.code).toBe('VALIDATION');
     expect(bad.hint).toContain('railway');
+    expect(new ProjectRepository().findByName('bad-provider-app')).toBeNull();
     await t.close();
   });
 

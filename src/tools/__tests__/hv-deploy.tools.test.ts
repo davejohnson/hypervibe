@@ -148,7 +148,10 @@ describe('hv_deploy', () => {
     const t = await makeClient();
     const result = await t.call('hv_deploy', { project: 'nope' });
     expect(result.ok).toBe(false);
-    expect(['NOT_FOUND', 'AMBIGUOUS_PROJECT']).toContain(result.error.code);
+    expect(result.error.code).toBe('NOT_FOUND');
+    expect(result.hint).toContain('hv_spec');
+    expect(result.error.details.requestedProject).toBe('nope');
+    expect(result.agentInstruction.action).toBe('continue');
     await t.close();
   });
 

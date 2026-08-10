@@ -46,7 +46,8 @@ import {
   planGitHubInfrastructure,
   shouldPlanGitHubInfrastructure,
 } from '../domain/services/github-infrastructure.service.js';
-import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { detectGitRemoteUrl, parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { findRepoRoot } from '../domain/spec/repo-spec-file.js';
 import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service.js';
 import { planEmail } from '../domain/services/email-plan.service.js';
 import { planTwilioMessaging } from '../domain/services/twilio-messaging.service.js';
@@ -245,6 +246,32 @@ function gitRemoteUrlFromSpecInput(spec: Record<string, unknown>): string | unde
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function freshProjectCandidate(projectRef?: string): {
+  name: string;
+  gitRemoteUrl?: string;
+} | null {
+  const repoRoot = findRepoRoot();
+  if (!repoRoot) return null;
+  const requestedProject = projectRef?.trim();
+  const gitRemoteUrl = detectGitRemoteUrl() ?? undefined;
+  const githubRepo = parseGitHubRepoFromRemote(gitRemoteUrl);
+  const repositoryProject = githubRepo?.split('/').at(-1)
+    ?? repoRoot.split(/[\\/]/).filter(Boolean).at(-1);
+  if (
+    requestedProject
+    && repositoryProject
+    && requestedProject.toLowerCase() !== repositoryProject.toLowerCase()
+  ) {
+    return null;
+  }
+  const name = requestedProject || repositoryProject;
+  if (!name) return null;
+  return {
+    name,
+    ...(gitRemoteUrl ? { gitRemoteUrl } : {}),
+  };
+}
+
 function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Project {
   const gitRemoteUrl = spec.gitRemoteUrl?.trim();
   return gitRemoteUrl && gitRemoteUrl !== project.gitRemoteUrl
@@ -362,7 +389,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_spec',
-    'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
+    'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. In a fresh git repository, that read returns a successful uninitialized contract; inspect the repository, then call hv_spec with spec input to create its project. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
     {
       project: projectField,
       spec: z.record(z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
@@ -376,7 +403,37 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             hint: 'Pass spec to update desired state, or omit mutation fields to read it.',
           });
         }
-        const project = ctx.resolveProjectOrThrow({ project: projectRef });
+        const project = ctx.resolveProject({ project: projectRef });
+        if (!project) {
+          const candidate = freshProjectCandidate(projectRef);
+          if (!candidate) {
+            ctx.resolveProjectOrThrow({ project: projectRef });
+            throw new Error('Project resolution unexpectedly returned no result.');
+          }
+          const example = `hv_spec project="${candidate.name}" spec={"project":"${candidate.name}","environments":{...}}`;
+          return commandSuccess({
+            initialized: false,
+            project: {
+              name: candidate.name,
+              gitRemoteUrl: candidate.gitRemoteUrl ?? null,
+            },
+            revision: null,
+            specSource: null,
+            spec: null,
+            bootstrap: {
+              required: true,
+              nextCommand: 'hv_spec',
+              requiredSpecFields: ['project', 'environments'],
+            },
+          }, {
+            hint: `This is a normal fresh-project state. Inspect the repository and choose its desired environments and providers, then initialize it with ${example}. Do not run hv_plan or hv_deploy before that write succeeds.`,
+            next: ['hv_spec'],
+            agentInstruction: {
+              action: 'continue',
+              message: 'This repository is not initialized yet. Continue by inspecting the repository and calling hv_spec with its complete initial desired state; do not stop merely because no prior Hypervibe project exists.',
+            },
+          });
+        }
         const result = specStore.get(project);
         if (!result) {
           return commandError('NOT_FOUND', `Project "${project.name}" has no spec yet.`, {
@@ -400,6 +457,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         ? spec.project.trim()
         : undefined;
       let project = ctx.resolveProject({ project: projectRef });
+      let newProject: { name: string; gitRemoteUrl?: string } | null = null;
       if (project && specProject && specProject !== project.name) {
         throw new HvError('VALIDATION', `Spec project "${specProject}" does not match selected project "${project.name}".`, {
           details: { selectedProject: project.name, specProject },
@@ -420,22 +478,25 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             hint: 'Pass project (or spec.project) to create a new project.',
           });
         }
-        const gitRemoteUrl = gitRemoteUrlFromSpecInput(spec);
-        project = ctx.repos.projects.create({
+        const localCandidate = freshProjectCandidate(name);
+        const gitRemoteUrl = gitRemoteUrlFromSpecInput(spec)
+          ?? (localCandidate?.name === name ? localCandidate.gitRemoteUrl : undefined);
+        newProject = {
           name,
           ...(gitRemoteUrl ? { gitRemoteUrl } : {}),
-        });
+        };
       }
 
       let result;
       let coverageReport: EnvironmentVariableCoverageReport = { complete: true, issues: [] };
       try {
-        const previousSpec = specStore.get(project)?.spec ?? null;
-        const baseSpec = previousSpec ?? { version: 1 as const, project: project.name, environments: {} };
+        const projectName = project?.name ?? newProject!.name;
+        const previousSpec = project ? specStore.get(project)?.spec ?? null : null;
+        const baseSpec = previousSpec ?? { version: 1 as const, project: projectName, environments: {} };
         const candidateInput = replace
           ? {
             version: 1,
-            project: project.name,
+            project: projectName,
             ...spec,
           }
           : deepMergeSpec(baseSpec, spec);
@@ -463,6 +524,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           });
         }
         validateInstalledProviders(candidateSpec);
+        if (!project) {
+          project = ctx.repos.projects.create(newProject!);
+        }
         result = specStore.replace(project, candidateSpec);
       } catch (error) {
         if (error instanceof z.ZodError) {
@@ -472,6 +536,9 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           });
         }
         throw error;
+      }
+      if (!project) {
+        throw new Error('Project initialization completed without a project record.');
       }
       project = syncProjectGitRemoteUrl(ctx, project, result.spec);
       const connections = requiredConnectionChecklist(ctx, result.spec);
