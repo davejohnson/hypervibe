@@ -27,6 +27,12 @@ export interface StorageBinding {
   services: string[];
   envKeys: string[];
   updatedAt?: string;
+  dataMigration?: Record<string, unknown>;
+  previousTarget?: {
+    provider: string;
+    externalId: string;
+    region: string;
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

@@ -116,6 +116,37 @@ describe('apply-run reservation persistence', () => {
     ]);
   });
 
+  it('atomically conflicts when either apply locks the other environment', () => {
+    const sourceEnvironmentId = new EnvironmentRepository().create({
+      projectId,
+      name: 'staging',
+    }).id;
+    const repository = new RunRepository();
+    const migration = repository.reserveApply({
+      projectId,
+      environmentId,
+      planRunId: planRunId('migration'),
+      environmentName: 'production',
+      specRevision: 1,
+      lockEnvironmentIds: [sourceEnvironmentId],
+    });
+    expect(migration.reserved).toBe(true);
+
+    const sourcePlanId = new RunRepository().create({
+      projectId,
+      environmentId: sourceEnvironmentId,
+      type: 'plan',
+      plan: { kind: 'hv_plan', environmentName: 'staging', specRevision: 1, observedFingerprint: null, actions: [] },
+    }).id;
+    expect(repository.reserveApply({
+      projectId,
+      environmentId: sourceEnvironmentId,
+      planRunId: sourcePlanId,
+      environmentName: 'staging',
+      specRevision: 1,
+    })).toMatchObject({ reserved: false, reason: 'environment_in_progress' });
+  });
+
   it('refuses to bypass the atomic reservation through generic run creation', () => {
     expect(() => new RunRepository().create({
       projectId,

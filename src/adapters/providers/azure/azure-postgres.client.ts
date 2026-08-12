@@ -156,6 +156,47 @@ export class AzurePostgresClient {
     );
   }
 
+  async upsertFirewallRule(
+    serverResourceId: string,
+    ruleName: string,
+    address: string
+  ): Promise<void> {
+    const identity = this.parseServerId(serverResourceId);
+    await this.arm.request(
+      'PUT',
+      `${this.serverResourceId(identity.name)}/firewallRules/${encodeURIComponent(ruleName)}`,
+      AZURE_POSTGRES_API_VERSION,
+      { properties: { startIpAddress: address, endIpAddress: address } }
+    );
+  }
+
+  async getFirewallRule(
+    serverResourceId: string,
+    ruleName: string
+  ): Promise<AzurePostgresFirewallRule | null> {
+    const identity = this.parseServerId(serverResourceId);
+    return this.arm.getNullable(
+      `${this.serverResourceId(identity.name)}/firewallRules/${encodeURIComponent(ruleName)}`,
+      AZURE_POSTGRES_API_VERSION
+    );
+  }
+
+  async deleteFirewallRule(
+    serverResourceId: string,
+    ruleName: string
+  ): Promise<void> {
+    const identity = this.parseServerId(serverResourceId);
+    try {
+      await this.arm.request(
+        'DELETE',
+        `${this.serverResourceId(identity.name)}/firewallRules/${encodeURIComponent(ruleName)}`,
+        AZURE_POSTGRES_API_VERSION
+      );
+    } catch (error) {
+      if (!(error instanceof AzureResourceManagerError) || error.status !== 404) throw error;
+    }
+  }
+
   async getAzureServicesFirewallRule(
     serverResourceId: string
   ): Promise<AzurePostgresFirewallRule | null> {

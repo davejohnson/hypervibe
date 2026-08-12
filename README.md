@@ -808,6 +808,28 @@ from removing the old value before compatible code is running. A confirmed
 removal may reconcile or redeploy the provider's already-compatible current
 image, so do not collapse these two releases into one.
 
+### Environment data migration
+
+To promote real data from one environment into another, declare a one-use
+`dataMigration` on the target rather than renaming environments or running a
+provider CLI:
+
+```json
+{
+  "dataMigration": {
+    "id": "initial-production-launch",
+    "fromEnvironment": "staging",
+    "include": { "database": true, "storage": ["documents"] }
+  }
+}
+```
+
+Hypervibe isolates the confirmed copy stage, restores into fresh unreachable
+targets, verifies non-secret database/storage manifests, and records the new
+bindings only after success. Re-run plan/apply to cut services over, verify the
+production release, then re-plan to review deletion of retained rollback
+targets. See [the full migration workflow](docs/data-migration.md).
+
 ### Database resilience and restore drills
 
 Cloud SQL can manage regional availability, backup/PITR retention, named read

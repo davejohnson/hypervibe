@@ -2999,4 +2999,77 @@ describe('PlanService.plan', () => {
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.blocked).toEqual([]);
   });
+
+  it('isolates a pending environment data migration from service and ordinary database mutations', async () => {
+    const connectionRepo = new ConnectionRepository();
+    const connection = connectionRepo.create({ provider: 'railway', credentialsEncrypted: 'x' });
+    connectionRepo.updateStatus(connection.id, 'verified');
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          database: { provider: 'railway', engine: 'postgres' },
+        },
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          database: { provider: 'railway', engine: 'postgres' },
+          dataMigration: {
+            id: 'initial-production-launch',
+            fromEnvironment: 'staging',
+            include: { database: true, storage: [] },
+          },
+        },
+      },
+    });
+    const source = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 'staging-env' },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 'production-env' },
+    });
+    new ComponentRepository().create({
+      environmentId: source.id,
+      type: 'postgres',
+      bindings: { provider: 'railway', instanceId: 'source-db' },
+      externalId: 'source-db',
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'production-env',
+      services: [],
+      databases: [],
+      partial: false,
+      warnings: [],
+    });
+
+    const result = await new PlanService().plan(project, 'production');
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0]).toMatchObject({
+      id: 'data-migration:initial-production-launch:database',
+      type: 'update',
+      resource: { kind: 'database', provider: 'railway' },
+      dataBearing: true,
+      requiresConfirm: true,
+      metadata: { operation: 'dataMigrationDatabaseCopy', sourceComponentId: expect.any(String) },
+    });
+    expect(plan.warnings).toContainEqual(expect.stringContaining('isolated apply stage'));
+    expect(plan.blocked).toEqual([]);
+    expect(new RunRepository().findById(plan.planRunId)?.plan).toMatchObject({
+      lockEnvironmentIds: [source.id],
+    });
+  });
 });

@@ -1,3 +1,4 @@
+import type { Readable } from 'node:stream';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Receipt, VerifyResult } from './provider.port.js';
 import type { ObservedStorage } from './observe.port.js';
@@ -7,6 +8,30 @@ export interface StorageCapabilities {
   regions: string[];
   privateOnly: boolean;
   supportsUsageObservation: boolean;
+  /** Provider can expose a streaming object data plane for migration. */
+  supportsObjectTransfer?: boolean;
+}
+
+export interface StorageObjectRecord {
+  key: string;
+  size: number;
+}
+
+export interface StorageObjectPayload {
+  body: Readable | ReadableStream | Blob;
+  size: number;
+  contentType?: string;
+  contentEncoding?: string;
+  cacheControl?: string;
+  contentDisposition?: string;
+  metadata?: Record<string, string>;
+}
+
+export interface StorageObjectClient {
+  list(): Promise<StorageObjectRecord[]>;
+  get(key: string): Promise<StorageObjectPayload>;
+  put(key: string, payload: StorageObjectPayload): Promise<void>;
+  destroy(): void;
 }
 
 export interface StorageContext {
@@ -43,5 +68,10 @@ export interface IStorageAdapter {
   observe(environment: Environment, context: StorageContext): Promise<ObservedStorage[]>;
   ensureBucket(environment: Environment, context: StorageContext, name: string, region: string): Promise<StorageEnsureResult>;
   getCredentials(environment: Environment, context: StorageContext, externalId: string): Promise<StorageCredentials>;
+  /**
+   * Optional provider-native object stream. Azure/GCP adapters can translate
+   * their native APIs here; S3-compatible adapters may rely on credentials.
+   */
+  openObjectTransfer?(environment: Environment, context: StorageContext, externalId: string): Promise<StorageObjectClient>;
   destroyBucket(environment: Environment, context: StorageContext, externalId: string): Promise<Receipt>;
 }

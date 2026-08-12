@@ -95,6 +95,7 @@ import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandContext } from './context.js';
 import { resolvePlanActionAuthority } from '../domain/plan/action-authority.js';
 import { applyDatabaseResilienceAction } from './apply-database-resilience.js';
+import { applyDataMigrationAction } from './apply-data-migration.js';
 
 /**
  * The shared plan-apply pipeline: connection gating, TOCTOU re-observe,
@@ -477,10 +478,34 @@ export async function executePlanApply(ctx: CommandContext, params: {
     ? { ...project, gitRemoteUrl: spec.gitRemoteUrl }
     : project;
   const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-  const blocked = [
-    ...planService.preflight(envSpec, envName),
-    ...planService.projectPreflight(projectForPreflight, spec, envName),
-  ];
+  const migrationActions = loaded.document.actions.filter((action) =>
+    action.type === 'update'
+    && (
+      action.metadata?.operation === 'dataMigrationDatabaseCopy'
+      || action.metadata?.operation === 'dataMigrationStorageCopy'
+    )
+  );
+  const migrationProviders = migrationActions.flatMap((action) => [
+    stringField(asRecord(action.metadata), 'sourceProvider'),
+    stringField(asRecord(action.metadata), 'targetProvider'),
+    action.resource.provider,
+  ]).filter((provider): provider is string => Boolean(provider));
+  const migrationCleanupProviders = loaded.document.actions
+    .filter((action) =>
+      action.type === 'destroy'
+      && (
+        action.metadata?.operation === 'dataMigrationDatabasePreviousDestroy'
+        || action.metadata?.operation === 'dataMigrationStoragePreviousDestroy'
+      )
+    )
+    .map((action) => action.resource.provider);
+  const blocked = migrationActions.length > 0
+    ? planService.providerPreflight(migrationProviders)
+    : [
+        ...planService.preflight(envSpec, envName),
+        ...planService.projectPreflight(projectForPreflight, spec, envName),
+        ...planService.providerPreflight(migrationCleanupProviders),
+      ];
   const { hardBlocked, actionScopedBlocked } = splitActionScopedConnectionBlocks(blocked, loaded.document.actions);
   const connectBeforeApply = actionScopedBlocksRequiringConnectBeforeApply(actionScopedBlocked);
   const applyBlocked = [...hardBlocked, ...connectBeforeApply];
@@ -1022,6 +1047,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     if (capability === 'database.provision') {
       return createDatabase(ctx, applyProject, envName, action);
+    }
+    if (
+      capability === 'database.migrate'
+      || capability === 'storage.migrate'
+      || capability === 'database.migration-target.destroy'
+      || capability === 'storage.migration-target.destroy'
+    ) {
+      return applyDataMigrationAction({
+        ctx,
+        project: applyProject,
+        spec,
+        targetEnvironmentName: envName,
+        action,
+      });
     }
     if (
       capability === 'database.availability.configure'

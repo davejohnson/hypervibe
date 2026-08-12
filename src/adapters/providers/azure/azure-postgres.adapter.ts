@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import type { Component } from '../../../domain/entities/component.entity.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type {
@@ -8,7 +8,7 @@ import type {
   ProvisionResult,
 } from '../../../domain/ports/database.port.js';
 import type { ObservedDatabase } from '../../../domain/ports/observe.port.js';
-import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
+import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from '../../../domain/ports/provider.port.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import {
   AzurePostgresCredentialsSchema,
@@ -22,6 +22,7 @@ import { AzureResourceManagerClient } from './azure-resource-manager.client.js';
 
 const PROVIDER = 'azure-postgres';
 const ADMIN_USERNAME = 'hypervibeadmin';
+const PUBLIC_IP_ENDPOINT = 'https://checkip.amazonaws.com/';
 
 export class AzurePostgresAdapter implements IDatabaseAdapter {
   readonly name = PROVIDER;
@@ -32,10 +33,13 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
     supportsReadReplicas: true,
     supportsPointInTimeRecovery: true,
     serverlessOptimized: false,
+    supportsTemporaryDatabaseAccess: true,
+    prefersTemporaryDatabaseAccess: true,
   };
 
   private credentials: AzurePostgresCredentials | null = null;
   private client: AzurePostgresClient | null = null;
+  private temporaryFirewallRules = new Map<string, { resourceId: string; ruleName: string }>();
 
   async connect(credentials: unknown): Promise<void> {
     this.credentials = AzurePostgresCredentialsSchema.parse(credentials);
@@ -220,6 +224,51 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
     return typeof stored === 'string' ? stored : null;
   }
 
+  async acquireTemporaryDatabaseAccess(
+    _environment: Environment,
+    component: Component,
+    _applicationPort: number
+  ): Promise<TemporaryDatabaseAccess> {
+    if (!this.client || !component.externalId) {
+      throw new Error('Azure PostgreSQL access requires a connected adapter and a tracked server.');
+    }
+    const connectionUrl = await this.getConnectionUrl(component);
+    if (!connectionUrl) throw new Error('Azure PostgreSQL bindings are missing database credentials.');
+    const address = await this.resolvePublicIpv4();
+    const ruleName = `hypervibe-operation-${createHash('sha256').update(address).digest('hex').slice(0, 16)}`;
+    await this.client.upsertFirewallRule(component.externalId, ruleName, address);
+    const releaseToken = `${component.externalId}:${ruleName}`;
+    this.temporaryFirewallRules.set(releaseToken, { resourceId: component.externalId, ruleName });
+    try {
+      await this.waitForOperationFirewallRule(component.externalId, ruleName, address);
+    } catch (error) {
+      await this.client.deleteFirewallRule(component.externalId, ruleName).catch(() => undefined);
+      this.temporaryFirewallRules.delete(releaseToken);
+      throw error;
+    }
+    return {
+      connectionUrl,
+      source: 'temporary_firewall',
+      temporary: true,
+      releaseToken,
+    };
+  }
+
+  async releaseTemporaryDatabaseAccess(
+    _environment: Environment,
+    _component: Component,
+    access: TemporaryDatabaseAccess
+  ): Promise<void> {
+    if (!access.temporary) return;
+    if (!this.client || !access.releaseToken) {
+      throw new Error('Temporary Azure PostgreSQL access is missing its cleanup identity.');
+    }
+    const rule = this.temporaryFirewallRules.get(access.releaseToken);
+    if (!rule) return;
+    await this.client.deleteFirewallRule(rule.resourceId, rule.ruleName);
+    this.temporaryFirewallRules.delete(access.releaseToken);
+  }
+
   async destroy(component: Component): Promise<Receipt> {
     if (!this.client) {
       return { success: false, message: 'Not connected' };
@@ -375,6 +424,32 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
     throw new Error(
       `Azure PostgreSQL firewall rule for ${resourceId} did not become observable.`
     );
+  }
+
+  private async waitForOperationFirewallRule(
+    resourceId: string,
+    ruleName: string,
+    address: string
+  ): Promise<void> {
+    const attempts = this.positiveIntegerEnv('HYPERVIBE_AZURE_POSTGRES_POLL_ATTEMPTS', 180);
+    const interval = this.nonNegativeIntegerEnv('HYPERVIBE_AZURE_POSTGRES_POLL_INTERVAL_MS', 5000);
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const rule = await this.client!.getFirewallRule(resourceId, ruleName);
+      if (rule?.properties?.startIpAddress === address && rule.properties.endIpAddress === address) return;
+      if (attempt < attempts) await this.delay(interval);
+    }
+    throw new Error(`Azure PostgreSQL operation-scoped firewall rule for ${resourceId} did not become observable.`);
+  }
+
+  private async resolvePublicIpv4(): Promise<string> {
+    const response = await fetch(PUBLIC_IP_ENDPOINT, { signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) throw new Error(`Could not resolve operation source address (${response.status}).`);
+    const address = (await response.text()).trim();
+    const parts = address.split('.').map(Number);
+    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+      throw new Error('Operation source address was not a valid IPv4 address.');
+    }
+    return address;
   }
 
   private async waitForAbsence(resourceId: string): Promise<void> {

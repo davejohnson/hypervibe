@@ -289,6 +289,82 @@ export function acquireExistingDatabaseAccess(connectionUrl: string, provider = 
   return noopLease(connectionUrl, provider);
 }
 
+/**
+ * Acquire bounded access for an explicit component that has not yet been made
+ * the environment's active database. Data migration uses this for a freshly
+ * provisioned target so application services cannot reach partially restored
+ * data. The candidate is never written to local bindings by this helper.
+ */
+export async function acquireDatabaseComponentAccess(
+  project: Project,
+  environment: Environment,
+  component: Component,
+  provider: string
+): Promise<DatabaseAccessAcquireResult> {
+  const adapterResult = await adapterFactory.getDatabaseAdapter(provider, project);
+  const adapter = adapterResult.adapter;
+  if (!adapterResult.success || !adapter) {
+    return {
+      ok: false,
+      code: 'provider_error',
+      error: adapterResult.error ?? `${provider} database adapter is unavailable.`,
+      provider,
+      resourceCreated: false,
+      cleanup: 'not_needed',
+    };
+  }
+
+  let existing: string | null = null;
+  try {
+    const candidate = await adapter.getConnectionUrl(component);
+    existing = isExternallyUsableDatabaseUrl(candidate) ? candidate : null;
+  } catch {
+    // A private-only URL is normal for managed databases. Prefer the bounded
+    // provider access path below without copying provider errors into output.
+  }
+
+  const supportsTemporaryAccess = Boolean(
+    adapter.capabilities.supportsTemporaryDatabaseAccess
+    && typeof adapter.acquireTemporaryDatabaseAccess === 'function'
+    && typeof adapter.releaseTemporaryDatabaseAccess === 'function'
+  );
+  const shouldAcquireTemporaryAccess = supportsTemporaryAccess
+    && (adapter.capabilities.prefersTemporaryDatabaseAccess === true || !existing);
+
+  if (shouldAcquireTemporaryAccess) {
+    try {
+      const lease = await databaseAccessLeaseCoordinator.acquire({
+        key: `${provider}:${environment.id}:${component.id}:5432`,
+        provider,
+        adapter,
+        environment,
+        component,
+        create: () => adapter.acquireTemporaryDatabaseAccess!(environment, component, 5432),
+      });
+      return { ok: true, lease };
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'provider_error',
+        error: `Failed to acquire operation-scoped database access from ${provider}: ${error instanceof Error ? error.message : String(error)}`,
+        provider,
+        resourceCreated: 'unknown',
+        cleanup: 'unknown',
+      };
+    }
+  }
+
+  if (existing) return { ok: true, lease: noopLease(existing, provider) };
+  return {
+    ok: false,
+    code: 'no_external_access',
+    error: `${provider} cannot provide externally usable access for the migration target.`,
+    provider,
+    resourceCreated: false,
+    cleanup: 'not_needed',
+  };
+}
+
 export async function acquireManagedDatabaseAccess(
   project: Project,
   environment: Environment,

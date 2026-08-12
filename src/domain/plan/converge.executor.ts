@@ -37,6 +37,7 @@ export const planRunDocumentSchema = z.object({
   specRevision: z.number().int().nonnegative(),
   observedFingerprint: z.string().nullable(),
   integrationFingerprints: z.record(z.string()).optional(),
+  lockEnvironmentIds: z.array(z.string().min(1)).optional(),
   actions: z.array(planActionSchema),
   unmanaged: z.array(z.object({ kind: z.string(), name: z.string(), detail: z.string().optional() })).optional(),
   warnings: z.array(z.string()).optional(),
@@ -284,6 +285,7 @@ export class ConvergeExecutor {
       planRunId: params.planRunId,
       environmentName: document.environmentName,
       specRevision: document.specRevision,
+      lockEnvironmentIds: document.lockEnvironmentIds,
     });
     if (!reservation.reserved) {
       const error = reservation.reason === 'already_applied'
