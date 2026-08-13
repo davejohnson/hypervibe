@@ -1,6 +1,7 @@
 import type { Receipt } from '../ports/provider.port.js';
 
 export const DOMAIN_DETACH_OPERATION = 'customDomainDetach';
+export const DOMAIN_ADOPT_OPERATION = 'customDomainAdopt';
 
 export type DomainAttachParams = {
   projectId?: string;

@@ -50,7 +50,10 @@ import {
   applyGitHubPagesDns,
 } from '../domain/services/github-pages.service.js';
 import { setupCustomDomain, teardownCustomDomain } from '../domain/services/domain.service.js';
-import { DOMAIN_DETACH_OPERATION } from '../domain/services/domain-attach-policy.js';
+import {
+  DOMAIN_ADOPT_OPERATION,
+  DOMAIN_DETACH_OPERATION,
+} from '../domain/services/domain-attach-policy.js';
 import {
   connectionSetupDetails,
   GITHUB_TOKEN_URLS,
@@ -69,6 +72,7 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
+import type { IProviderAdapter } from '../domain/ports/provider.port.js';
 import { runEnvironmentTask } from '../domain/services/environment-task.service.js';
 import {
   buildDatabaseAliasEnvVars,
@@ -1532,6 +1536,149 @@ async function applyDomain(
       status: 'blocked',
       message: `Domain action ${action.id} does not match the current environment spec`,
       error: `Reviewed target is ${action.resource.provider}/${action.resource.name}; expected ${environmentSpec.hosting.provider}/${environmentSpec.domain ?? 'no domain'}.`,
+    };
+  }
+  const metadata = asRecord(action.metadata);
+  if (metadata?.operation === DOMAIN_ADOPT_OPERATION) {
+    const providerDomainId = stringField(metadata, 'providerDomainId');
+    const serviceName = stringField(metadata, 'serviceName');
+    const serviceId = stringField(metadata, 'serviceId');
+    const environmentId = stringField(metadata, 'environmentId');
+    const bindings = parseHostingBindings(environment);
+    const serviceBinding = serviceName ? bindings.services?.[serviceName] : undefined;
+    const exactLegacyBinding = Boolean(
+      providerDomainId
+      && serviceName
+      && serviceId
+      && environmentId
+      && bindings.provider === action.resource.provider
+      && bindings.environmentId === environmentId
+      && (!bindings.domainDns?.name || bindings.domainDns.name === action.resource.name)
+      && serviceBinding?.serviceId === serviceId
+      && serviceBinding.customDomains?.includes(action.resource.name)
+    );
+    if (!exactLegacyBinding) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Legacy domain adoption ${action.id} no longer matches local state`,
+        error: 'The reviewed provider, environment, service, or legacy hostname binding changed. Re-run hv_plan.',
+      };
+    }
+
+    const adapterResult = await ctx.adapterFactory.getProviderAdapter(
+      action.resource.provider,
+      project
+    );
+    if (!adapterResult.success || !adapterResult.adapter) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Cannot re-observe ${action.resource.name} for adoption`,
+        error: adapterResult.error ?? `No ${action.resource.provider} adapter is available.`,
+      };
+    }
+    const adapter = adapterResult.adapter as IProviderAdapter;
+    try {
+      await adapter.configureTarget?.({ region: environmentSpec.hosting.region });
+    } catch (error) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Cannot configure ${action.resource.provider} observation for domain adoption`,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (!adapter.capabilities.supportsObserve || typeof adapter.observe !== 'function') {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Cannot verify ${action.resource.name} for adoption`,
+        error: `${action.resource.provider} does not support the live observation required for local-only domain adoption.`,
+      };
+    }
+
+    let observed;
+    try {
+      observed = await adapter.observe(environment);
+    } catch (error) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Cannot re-observe ${action.resource.name} for adoption`,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (
+      observed.partial
+      || observed.completeness?.services === 'unknown'
+      || observed.environmentId !== environmentId
+    ) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Cannot prove the exact provider identity for ${action.resource.name}`,
+        error: 'Provider service observation is partial, unknown, or no longer targets the reviewed environment. No binding was changed.',
+      };
+    }
+    const normalizedDomain = action.resource.name.toLowerCase();
+    const matches = observed.services.filter((service) => (
+      service.name === serviceName
+      && service.externalId === serviceId
+      && service.customDomains.some((domain) => domain.toLowerCase() === normalizedDomain)
+    ));
+    const observedDomainStatus = matches.length === 1
+      ? Object.entries(matches[0]!.customDomainStatus ?? {})
+          .find(([domain]) => domain.toLowerCase() === normalizedDomain)?.[1]
+      : undefined;
+    if (
+      matches.length !== 1
+      || observedDomainStatus?.providerDomainId !== providerDomainId
+    ) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `Provider identity for ${action.resource.name} changed before adoption`,
+        error: 'The exact reviewed domain, service, or provider-domain identity was not re-observed. No binding was changed; re-run hv_plan.',
+      };
+    }
+
+    const existingDomainBinding = bindings.domainDns?.name === action.resource.name
+      ? bindings.domainDns
+      : {};
+    ctx.repos.environments.updatePlatformBindings(environment.id, {
+      services: {
+        ...(bindings.services ?? {}),
+        [serviceName!]: {
+          ...serviceBinding!,
+          customDomains: Array.from(new Set([
+            ...(serviceBinding!.customDomains ?? []),
+            action.resource.name,
+          ])),
+        },
+      },
+      domainDns: {
+        ...existingDomainBinding,
+        name: action.resource.name,
+        proxied: booleanField(metadata, 'domainProxy') ?? environmentSpec.domainProxy ?? true,
+        providerDomainId,
+        serviceName,
+        serviceId,
+        environmentId,
+      },
+    });
+    return {
+      success: true,
+      message: `Adopted the existing ${action.resource.provider} domain identity without changing provider or DNS resources`,
+      data: {
+        applied: 1,
+        skipped: 0,
+        providerMutations: 0,
+        providerDomainId,
+        serviceName,
+        serviceId,
+        environmentId,
+      },
     };
   }
   const recreateRequested = action.type === 'replace';

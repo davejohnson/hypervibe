@@ -1844,6 +1844,28 @@ function branchBlocked(params: {
   };
 }
 
+async function observeGitHubRefAfterWrite(params: {
+  adapter: GitHubAdapter;
+  owner: string;
+  repo: string;
+  ref: string;
+  expectedSha: string;
+}): Promise<{ ref: string; object: { sha: string } } | null> {
+  const attempts = 5;
+  const delayMs = 250;
+  let observed: { ref: string; object: { sha: string } } | null = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    observed = await params.adapter.getRef(params.owner, params.repo, params.ref);
+    if (observed?.object.sha === params.expectedSha) {
+      return observed;
+    }
+    if (attempt < attempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs * (2 ** attempt)));
+    }
+  }
+  return observed;
+}
+
 function isMergedManagedInfrastructurePull(
   pull: GitHubPullRequestSummary,
   params: {
@@ -1924,7 +1946,13 @@ async function reconcileGitHubInfrastructureBranch(params: {
         });
       }
       await adapter.createRef(owner, repo, `refs/${branchRefName}`, baseRef.object.sha);
-      branchRef = await adapter.getRef(owner, repo, branchRefName);
+      branchRef = await observeGitHubRefAfterWrite({
+        adapter,
+        owner,
+        repo,
+        ref: branchRefName,
+        expectedSha: baseRef.object.sha,
+      });
       if (!branchRef || branchRef.object.sha !== baseRef.object.sha) {
         return branchBlocked({
           repository,

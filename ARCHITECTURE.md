@@ -194,8 +194,16 @@ Vercel implement provider-owned attach, observation, and exact detach contracts.
 Each successful attachment persists the provider
 domain id, service and environment ids, Cloudflare zone id, and every managed
 DNS record id before it may converge. An observed provider attachment without
-that durable binding is an adoption candidate and blocks with `hv_import`
-guidance; it is never silently adopted. Removing `environment.domain` plans a
+that durable binding is normally an adoption candidate and blocks with
+`hv_import` guidance; it is never silently adopted. The compatibility exception
+is a legacy service binding that already records the exact domain plus the same
+durable service and environment ids. When one provider attachment matches and
+the provider exposes its durable domain id, planning emits an explicit
+local-only adoption action. Apply re-observes every identity before recording
+the provider domain id and makes no provider or DNS mutation. It does not claim
+unrecorded DNS identities, so a later detach still blocks until the exact DNS
+binding is restored. Missing legacy ownership evidence, duplicate attachments,
+partial observation, or conflicting bindings continue to block. Removing `environment.domain` plans a
 confirmation-gated detach of only those exact identities, with provider absence
 verified before DNS deletion. A provider attachment accepted before its DNS
 requirements are available is persisted with a known-empty record set so a
@@ -353,6 +361,9 @@ Creates, updates, and destroys must be retry-safe:
 - Provider deletes must treat already-absent resources as converged, wait for
   realistic asynchronous deletion, and verify terminal absence before removing
   local bindings.
+- Provider writes followed by a read must tolerate bounded eventual consistency
+  and verify the exact expected identity or revision; exhausting the observation
+  window remains a blocked or failed action, never inferred success.
 - Multi-resource destruction follows dependency order and stops on failed or
   unknown deletion. Do not delete dependent data, storage, networking, or
   credentials until the owning resource is confirmed absent.
@@ -767,6 +778,10 @@ head ref, and base ref. Re-observe the branch immediately before resetting it
 and verify the reset before writing files. Closed-unmerged pull requests,
 post-merge commits, duplicate open pull requests, ambiguous provenance, and
 observation failures must block without branch or file mutations.
+New branch creation uses bounded read-after-write polling for the exact requested
+SHA before any files are written. A successful create response alone is not
+proof that the branch is ready, and an observation that never converges still
+blocks the infrastructure action.
 
 GitHub desired state uses capability-level opt-in with exclusive ownership.
 Once a capability is enabled, Hypervibe owns and reconciles every generated

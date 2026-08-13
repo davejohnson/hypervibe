@@ -890,7 +890,7 @@ describe('diffEnvironment — domain and workload', () => {
     expect(attached.actions.find((a) => a.id === 'domain:myapp.dev')!.type).toBe('noop');
   });
 
-  it('requires explicit import when an attached domain is missing its durable local binding', () => {
+  it('plans local-only adoption for an exact provider domain already recorded by a legacy service binding', () => {
     const result = diffEnvironment({
       spec: spec({ domain: 'myapp.dev' }),
       envName: 'production',
@@ -898,7 +898,56 @@ describe('diffEnvironment — domain and workload', () => {
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: {
-            'myapp.dev': { providerVerified: true, dnsConfigured: true },
+            'myapp.dev': {
+              providerDomainId: 'provider-domain-1',
+              providerVerified: true,
+              dnsConfigured: true,
+            },
+          },
+        })],
+      }),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: {
+            web: {
+              serviceId: 'svc-1',
+              customDomains: ['myapp.dev'],
+            },
+          },
+        },
+      }),
+      customDomainManagement: 'managed',
+    });
+
+    expect(result.actions.find((action) => action.id === 'domain:myapp.dev')).toMatchObject({
+      type: 'update',
+      metadata: {
+        operation: 'customDomainAdopt',
+        providerDomainId: 'provider-domain-1',
+        serviceName: 'web',
+        serviceId: 'svc-1',
+        environmentId: 'rail-env-1',
+      },
+      reason: expect.stringContaining('legacy binding'),
+    });
+  });
+
+  it('still requires explicit import for an unmanaged attached domain', () => {
+    const result = diffEnvironment({
+      spec: spec({ domain: 'myapp.dev' }),
+      envName: 'production',
+      observed: observed({
+        services: [observedWeb({
+          customDomains: ['myapp.dev'],
+          customDomainStatus: {
+            'myapp.dev': {
+              providerDomainId: 'provider-domain-1',
+              providerVerified: true,
+              dnsConfigured: true,
+            },
           },
         })],
       }),

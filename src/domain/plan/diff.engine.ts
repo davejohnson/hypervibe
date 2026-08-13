@@ -5,7 +5,10 @@ import type { ObservedState, ObservedService } from '../ports/observe.port.js';
 import { hashEnvValue } from '../ports/observe.port.js';
 import type { PlanAction, PlanFieldDiff, DiffResult, LocalSnapshot } from './plan.types.js';
 import { buildDatabaseAliasEnvVars } from '../services/database-env.js';
-import { DOMAIN_DETACH_OPERATION } from '../services/domain-attach-policy.js';
+import {
+  DOMAIN_ADOPT_OPERATION,
+  DOMAIN_DETACH_OPERATION,
+} from '../services/domain-attach-policy.js';
 
 function certificateStatusIsReady(status?: string): boolean {
   if (!status) return false;
@@ -669,11 +672,12 @@ export function diffEnvironment(input: {
   const boundDomainDns = local.bindings?.domainDns;
   if (spec.domain && !spec.loadBalancer) {
     const id = `domain:${spec.domain}`;
-    const attachedService = observed
-      ? observed.services.find((s) => s.customDomains.includes(spec.domain!))
-      : undefined;
+    const attachedServices = observed
+      ? observed.services.filter((service) => service.customDomains.includes(spec.domain!))
+      : [];
+    const attachedService = attachedServices.length === 1 ? attachedServices[0] : undefined;
     const attached = observed
-      ? Boolean(attachedService)
+      ? attachedServices.length > 0
       : Object.values(localServiceBindings).some((b) => b.customDomains?.includes(spec.domain!));
     const domainStatus = attachedService?.customDomainStatus?.[spec.domain];
     const domainBindingPresent = boundDomainDns?.name === spec.domain
@@ -682,6 +686,21 @@ export function diffEnvironment(input: {
         && boundDomainDns.serviceId
         && boundDomainDns.environmentId
       );
+    const legacyServiceBinding = attachedService
+      ? localServiceBindings[attachedService.name]
+      : undefined;
+    const legacyDomainAdoption = Boolean(
+      observed
+      && attachedServices.length === 1
+      && !domainBindingPresent
+      && (!boundDomainDns?.name || boundDomainDns.name === spec.domain)
+      && domainStatus?.providerDomainId
+      && observed.environmentId
+      && local.bindings?.environmentId === observed.environmentId
+      && legacyServiceBinding?.serviceId === attachedService?.externalId
+      && legacyServiceBinding?.customDomains?.includes(spec.domain)
+    );
+    const ambiguousDomainAttachment = attachedServices.length > 1;
     const dnsConfigured = domainStatus?.dnsConfigured;
     const desiredDomainProxy = input.customDomainTrafficProxy === 'dns-only'
       ? false
@@ -726,6 +745,10 @@ export function diffEnvironment(input: {
         ? `${provider} does not implement managed environment custom domains; DNS will not be changed for ${spec.domain}`
         : domainRecreateNeeded
         ? `Domain ${spec.domain} has an unapplied recreate revision`
+        : ambiguousDomainAttachment
+          ? `Multiple provider services have a custom-domain attachment matching ${spec.domain}; Hypervibe will not choose one`
+        : legacyDomainAdoption
+          ? `Domain ${spec.domain} matches its legacy binding on ${attachedService!.name}; adopt the exact provider identity without changing the provider attachment`
         : attached
         ? !domainBindingPresent
           ? `Domain ${spec.domain} exists on ${provider}, but its durable provider identity is not bound locally; use hv_import or remove the unmanaged attachment before applying`
@@ -746,7 +769,19 @@ export function diffEnvironment(input: {
         : {}),
       metadata: {
         ...(!customDomainsManaged ? { blockedReason: 'custom_domain_unsupported' } : {}),
-        ...(customDomainsManaged && attached && !domainBindingPresent
+        ...(customDomainsManaged && ambiguousDomainAttachment
+          ? { blockedReason: 'ambiguous_domain_identity' }
+          : {}),
+        ...(customDomainsManaged && legacyDomainAdoption
+          ? {
+            operation: DOMAIN_ADOPT_OPERATION,
+            providerDomainId: domainStatus!.providerDomainId,
+            serviceName: attachedService!.name,
+            serviceId: attachedService!.externalId,
+            environmentId: observed!.environmentId,
+          }
+          : {}),
+        ...(customDomainsManaged && attached && !domainBindingPresent && !legacyDomainAdoption && !ambiguousDomainAttachment
           ? { blockedReason: 'domain_binding_missing' }
           : {}),
         ...(domainStatus?.dnsRecords ? { dnsRecords: domainStatus.dnsRecords } : {}),

@@ -889,6 +889,149 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('adopts an exact legacy Railway domain binding locally and then reports it in sync', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec', {
+      spec: {
+        project: 'legacy-domain-adoption-app',
+        environments: {
+          staging: {
+            hosting: { provider: 'railway' },
+            services: {
+              web: {
+                startCommand: 'npm start',
+                public: true,
+              },
+            },
+            domain: 'staging.example.com',
+            envVars: { NODE_ENV: 'staging' },
+          },
+        },
+      },
+    });
+    verifyRailwayConnection();
+    verifyConnection('cloudflare');
+    const project = new ProjectRepository().findByName('legacy-domain-adoption-app')!;
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: {
+          web: {
+            serviceId: 'svc-1',
+            customDomains: ['staging.example.com'],
+          },
+        },
+      },
+    });
+    mockObserved({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 're-1',
+      services: [{
+        name: 'web',
+        externalId: 'svc-1',
+        workloadKind: 'web',
+        customDomains: ['staging.example.com'],
+        customDomainStatus: {
+          'staging.example.com': {
+            providerDomainId: 'provider-domain-1',
+            providerVerified: true,
+            certificateStatus: 'CERTIFICATE_STATUS_TYPE_VALID',
+            dnsConfigured: false,
+          },
+        },
+        config: { startCommand: 'npm start', public: true },
+        envVarKeys: ['NODE_ENV'],
+        envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+        status: 'running',
+      }],
+      databases: [],
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: 'complete',
+        databases: 'complete',
+      },
+      partial: false,
+      warnings: [],
+    });
+
+    const before = await t.call('hv_status', {
+      project: project.name,
+      env: 'staging',
+    });
+    expect(before.ok).toBe(true);
+    expect(before.data.drift).toContainEqual(expect.objectContaining({
+      id: 'domain:staging.example.com',
+      type: 'update',
+      metadata: expect.objectContaining({
+        operation: 'customDomainAdopt',
+        providerDomainId: 'provider-domain-1',
+        serviceName: 'web',
+        serviceId: 'svc-1',
+        environmentId: 're-1',
+      }),
+    }));
+
+    const plan = await t.call('hv_plan', {
+      project: project.name,
+      env: 'staging',
+    });
+    const domainAction = storedPlanAction(
+      plan.data.planId,
+      'domain:staging.example.com'
+    );
+    expect(domainAction).toMatchObject({
+      type: 'update',
+      metadata: { operation: 'customDomainAdopt' },
+    });
+
+    const apply = await t.call('hv_apply', {
+      project: project.name,
+      planId: plan.data.planId,
+    });
+    expect(apply.ok).toBe(true);
+    expect(apply.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'domain:staging.example.com',
+      status: 'succeeded',
+      data: expect.objectContaining({
+        applied: 1,
+        skipped: 0,
+        providerMutations: 0,
+        providerDomainId: 'provider-domain-1',
+      }),
+    }));
+    expect(new EnvironmentRepository()
+      .findByProjectAndName(project.id, 'staging')?.platformBindings)
+      .toMatchObject({
+        domainDns: {
+          name: 'staging.example.com',
+          proxied: true,
+          providerDomainId: 'provider-domain-1',
+          serviceName: 'web',
+          serviceId: 'svc-1',
+          environmentId: 're-1',
+        },
+      });
+
+    const after = await t.call('hv_status', {
+      project: project.name,
+      env: 'staging',
+    });
+    expect(after.ok).toBe(true);
+    expect(after.data.inSync).toBe(true);
+    expect(after.data.drift).not.toContainEqual(expect.objectContaining({
+      id: 'domain:staging.example.com',
+    }));
+    await t.close();
+  });
+
   it('plans Cloudflare domain registration from desired state as a confirm-gated action', async () => {
     const t = await makeClient();
     await t.call('hv_spec', {

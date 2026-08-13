@@ -540,6 +540,22 @@ const authorized: AuthorizedCase[] = [
     action: action({ id: 'domain:example.com', kind: 'domain', name: 'example.com' }),
   },
   {
+    label: 'custom domain adopt',
+    capability: 'domain.configure',
+    action: action({
+      id: 'domain:example.com',
+      kind: 'domain',
+      name: 'example.com',
+      operation: 'customDomainAdopt',
+      metadata: {
+        providerDomainId: 'domain-1',
+        serviceName: 'web',
+        serviceId: 'service-1',
+        environmentId: 'environment-1',
+      },
+    }),
+  },
+  {
     label: 'custom domain detach',
     capability: 'domain.configure',
     action: action({

@@ -112,6 +112,7 @@ describe('GitHub infrastructure plan/apply', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -361,6 +362,38 @@ describe('GitHub infrastructure plan/apply', () => {
     expect(write).toHaveBeenCalledWith(
       'owner', 'example', expect.any(String), expect.any(String), expect.any(String), GITHUB_INFRASTRUCTURE_BRANCH
     );
+  });
+
+  it('retries branch observation when a newly created infrastructure branch is not immediately visible', async () => {
+    vi.useFakeTimers();
+    const action = infrastructureAction();
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, scopes: ['repo', 'workflow'] });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
+    vi.spyOn(GitHubAdapter.prototype, 'getRef')
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ ref: `refs/heads/${GITHUB_INFRASTRUCTURE_BRANCH}`, object: { sha: 'base-sha' } });
+    vi.spyOn(GitHubAdapter.prototype, 'createRef').mockResolvedValue();
+    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
+    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
+    const write = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile')
+      .mockResolvedValue({ created: true, updated: false });
+    vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
+      number: 58,
+      html_url: 'https://github.com/owner/example/pull/58',
+    });
+
+    const resultPromise = applyGitHubInfrastructure({ action });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result).toMatchObject({
+      success: false,
+      status: 'pending',
+      data: { pullRequestNumber: 58 },
+    });
+    expect(write).toHaveBeenCalled();
   });
 
   it('recycles a squash-merged managed branch and proposes the next infrastructure PR', async () => {

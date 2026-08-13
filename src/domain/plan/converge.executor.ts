@@ -136,6 +136,7 @@ export function fingerprintObservedState(observed: ObservedState): string {
           Object.entries(s.customDomainStatus ?? {})
             .sort(([left], [right]) => left.localeCompare(right))
             .map(([domain, status]) => [domain, {
+              providerDomainId: status.providerDomainId ?? null,
               providerVerified: status.providerVerified ?? null,
               certificateStatus: status.certificateStatus ?? null,
               dnsConfigured: status.dnsConfigured ?? null,
