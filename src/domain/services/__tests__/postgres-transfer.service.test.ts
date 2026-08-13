@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  postgresDumpArguments,
   postgresMajorVersion,
   postgresProcessEnvironment,
   transferPostgresDatabase,
@@ -35,6 +36,15 @@ function clientFor(params: {
 }
 
 describe('PostgreSQL transfer', () => {
+  it('streams the custom archive to stdout for pg_restore', () => {
+    expect(postgresDumpArguments('00000001-1')).toEqual([
+      '--format=custom',
+      '--no-owner',
+      '--no-acl',
+      '--snapshot=00000001-1',
+    ]);
+  });
+
   it('extracts modern PostgreSQL major versions', () => {
     expect(postgresMajorVersion('170004')).toBe(17);
     expect(postgresMajorVersion('160010')).toBe(16);

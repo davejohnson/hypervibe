@@ -73,6 +73,15 @@ export function postgresMajorVersion(versionNumber: string): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed / 10_000) : null;
 }
 
+export function postgresDumpArguments(snapshotId: string): string[] {
+  return [
+    '--format=custom',
+    '--no-owner',
+    '--no-acl',
+    `--snapshot=${snapshotId}`,
+  ];
+}
+
 async function databaseManifest(client: SnapshotClient): Promise<Omit<PostgresTransferManifest, 'dumpBytes'>> {
   const version = await client.query('SELECT current_setting(\'server_version_num\') AS version') as QueryResultLike<{ version: string }>;
   const extensions = await client.query('SELECT extname FROM pg_extension ORDER BY extname') as QueryResultLike<{ extname: string }>;
@@ -123,13 +132,7 @@ async function runPostgresTools(
   input: PostgresToolTransferInput,
   spawnProcess: typeof spawn
 ): Promise<number> {
-  const dump = spawnProcess('pg_dump', [
-    '--format=custom',
-    '--no-owner',
-    '--no-acl',
-    '--file=-',
-    `--snapshot=${input.snapshotId}`,
-  ], {
+  const dump = spawnProcess('pg_dump', postgresDumpArguments(input.snapshotId), {
     env: postgresProcessEnvironment(input.sourceUrl),
     stdio: ['ignore', 'pipe', 'pipe'],
   }) as unknown as ChildProcessWithoutNullStreams;
