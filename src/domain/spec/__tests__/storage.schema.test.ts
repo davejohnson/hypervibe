@@ -15,6 +15,15 @@ describe('storage spec', () => {
     expect(storageSpecSchema.safeParse({ provider: 'railway', type: 'bucket', region: 'sjc', injectInto: [] }).success).toBe(true);
   });
 
+  it('keeps non-Railway provider ids and regions portable for registered adapters', () => {
+    expect(storageSpecSchema.safeParse({
+      provider: 's3', type: 'bucket', region: 'us-west-2', injectInto: ['api'],
+    }).success).toBe(true);
+    expect(storageSpecSchema.safeParse({
+      provider: 'gcs', type: 'bucket', region: 'northamerica-northeast1', injectInto: [],
+    }).success).toBe(true);
+  });
+
   it('rejects storage targets that are not declared services', () => {
     const result = environmentSpecSchema.safeParse({
       hosting: { provider: 'railway' }, services: { api: {} },

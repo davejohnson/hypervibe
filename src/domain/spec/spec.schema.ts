@@ -769,17 +769,60 @@ export const queueSpecSchema = z.object({
 }).strict();
 
 /**
- * Named, durable object storage. The name is both the provider display name
- * used by Railway variable references. Each selected service receives the
- * conventional AWS S3 variable names, so one bucket may target each service.
+ * Named, durable object storage. Provider adapters own provisioning and data
+ * plane translation; services receive the conventional S3-compatible runtime
+ * variables currently used by the supported storage adapters.
  */
 export const storageSpecSchema = z.object({
-  provider: z.literal('railway'),
+  provider: providerIdSchema,
   type: z.literal('bucket'),
-  /** Railway bucket regions are immutable after the bucket instance is created. */
-  region: z.enum(['sjc', 'iad', 'ams', 'sin']),
+  /** Provider-native region identifier. Bucket regions are treated as immutable. */
+  region: z.string().min(1),
   /** Services that receive this bucket's generated runtime variables. */
   injectInto: z.array(z.string().min(1)),
+}).strict().superRefine((storage, ctx) => {
+  const railwayRegions = ['sjc', 'iad', 'ams', 'sin'];
+  if (storage.provider === 'railway' && !railwayRegions.includes(storage.region)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Railway bucket region must be one of: ${railwayRegions.join(', ')}`,
+      path: ['region'],
+    });
+  }
+});
+
+/**
+ * One reviewed, one-use copy of durable environment data. The target database
+ * and storage providers remain declared on the target environment; the source
+ * providers are resolved from fromEnvironment. V1 deliberately supports only
+ * whole-resource replacement, never application-specific row merging.
+ */
+export const dataMigrationSpecSchema = z.object({
+  id: z.string()
+    .regex(/^[a-z][a-z0-9-]{0,62}$/, 'data migration ids must be lowercase slugs starting with a letter'),
+  fromEnvironment: z.string().min(1),
+  include: z.object({
+    database: z.boolean().default(false),
+    storage: z.array(
+      z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'storage names: lowercase alphanumeric and dashes, starting with a letter')
+    ).default([]),
+  }).strict().superRefine((include, ctx) => {
+    if (!include.database && include.storage.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'dataMigration.include must select the database or at least one storage resource',
+        path: [],
+      });
+    }
+    const duplicates = include.storage.filter((name, index) => include.storage.indexOf(name) !== index);
+    if (duplicates.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `dataMigration.include.storage contains duplicate names: ${[...new Set(duplicates)].join(', ')}`,
+        path: ['storage'],
+      });
+    }
+  }),
 }).strict();
 
 export const stripePriceEnvBindingSpecSchema = z.object({
@@ -1177,6 +1220,7 @@ export const environmentSpecSchema = z.object({
     z.string().regex(/^[a-z][a-z0-9-]{0,60}$/, 'storage names: lowercase alphanumeric and dashes, starting with a letter'),
     storageSpecSchema
   ).optional(),
+  dataMigration: dataMigrationSpecSchema.optional(),
   payments: paymentsSpecSchema.optional(),
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
@@ -1742,6 +1786,43 @@ export const projectSpecSchema = z.object({
   ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 }).superRefine((spec, ctx) => {
+  for (const [targetName, target] of Object.entries(spec.environments)) {
+    const migration = target.dataMigration;
+    if (!migration) continue;
+    if (migration.fromEnvironment === targetName) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'dataMigration.fromEnvironment must name a different environment',
+        path: ['environments', targetName, 'dataMigration', 'fromEnvironment'],
+      });
+      continue;
+    }
+    const source = spec.environments[migration.fromEnvironment];
+    if (!source) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `dataMigration.fromEnvironment targets unknown environment "${migration.fromEnvironment}"`,
+        path: ['environments', targetName, 'dataMigration', 'fromEnvironment'],
+      });
+      continue;
+    }
+    if (migration.include.database && (!source.database || !target.database)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'database migration requires database declarations in both source and target environments',
+        path: ['environments', targetName, 'dataMigration', 'include', 'database'],
+      });
+    }
+    for (const [index, storageName] of migration.include.storage.entries()) {
+      if (!source.storage?.[storageName] || !target.storage?.[storageName]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `storage migration "${storageName}" requires matching declarations in both source and target environments`,
+          path: ['environments', targetName, 'dataMigration', 'include', 'storage', index],
+        });
+      }
+    }
+  }
   if (spec.github && spec.collaboration) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -1920,6 +2001,7 @@ export type IosSpec = z.infer<typeof iosSpecSchema>;
 export type IosReleaseSpec = z.infer<typeof iosReleaseSpecSchema>;
 export type QueueSpec = z.infer<typeof queueSpecSchema>;
 export type StorageSpec = z.infer<typeof storageSpecSchema>;
+export type DataMigrationSpec = z.infer<typeof dataMigrationSpecSchema>;
 export type StripePriceEnvBindingSpec = z.infer<typeof stripePriceEnvBindingSpecSchema>;
 export type StripeCatalogPriceSpec = z.infer<typeof stripeCatalogPriceSpecSchema>;
 export type StripeCatalogProductSpec = z.infer<typeof stripeCatalogProductSpecSchema>;

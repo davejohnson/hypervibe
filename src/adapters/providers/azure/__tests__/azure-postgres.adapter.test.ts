@@ -225,6 +225,46 @@ describe('AzurePostgresAdapter', () => {
     });
   });
 
+  it('opens and removes an operation-scoped firewall rule for portable data access', async () => {
+    const requests: Array<{ method: string; pathname: string; body: any }> = [];
+    installAzureFetch((url, method, body) => {
+      if (url.hostname === 'checkip.amazonaws.com') {
+        return new Response('203.0.113.24\n');
+      }
+      requests.push({ method, pathname: url.pathname, body });
+      if (url.pathname.includes('/firewallRules/hypervibe-operation-')) {
+        if (method === 'PUT') return accepted();
+        if (method === 'GET') return jsonResponse({
+          id: `${SERVER_ID}/firewallRules/temporary`,
+          name: 'temporary',
+          properties: { startIpAddress: '203.0.113.24', endIpAddress: '203.0.113.24' },
+        });
+        if (method === 'DELETE') return accepted();
+      }
+      throw new Error(`Unexpected ${method} ${url.pathname}`);
+    });
+    const adapter = await connected();
+    const component = {
+      id: 'component',
+      environmentId: 'env-local',
+      type: 'postgres',
+      bindings: { connectionString: 'postgresql://user:password@server.example.com/app?sslmode=require' },
+      externalId: SERVER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const access = await adapter.acquireTemporaryDatabaseAccess(environment(), component, 5432);
+    expect(access).toMatchObject({ source: 'temporary_firewall', temporary: true });
+    expect(requests).toContainEqual(expect.objectContaining({
+      method: 'PUT',
+      body: { properties: { startIpAddress: '203.0.113.24', endIpAddress: '203.0.113.24' } },
+    }));
+
+    await adapter.releaseTemporaryDatabaseAccess(environment(), component, access);
+    expect(requests.some((request) => request.method === 'DELETE' && request.pathname.includes('/firewallRules/hypervibe-operation-'))).toBe(true);
+  });
+
   it('resolves durable ids before names and treats only 404 as absence', async () => {
     let listCalled = false;
     installAzureFetch((url, method) => {

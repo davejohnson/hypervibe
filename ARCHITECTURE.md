@@ -897,8 +897,19 @@ Cloud SQL is the first resilience adapter. It observes and verifies HA,
 backup/PITR policy, and replica topology through the SQL Admin API. Its restore
 drill uses `instances.clone` with an explicit point-in-time to create a new
 instance, never a destructive restore onto the primary. Provider-to-provider
-database migration, replica promotion/failover, replica replacement, and
-multi-environment restore-drill scheduling are separate future lifecycle slices.
+replica promotion/failover, replica replacement, and multi-environment
+restore-drill scheduling are separate future lifecycle slices.
+
+Environment data moves are explicit one-use desired state under the target
+environment's `dataMigration`. V1 copies only whole PostgreSQL databases and
+named object buckets from another declared environment. Plan isolates pending
+copy actions from ordinary convergence, apply restores into fresh unreachable
+targets, verifies non-secret manifests, and only then records active bindings.
+The next plan performs service/CI cutover; a later fully converged plan may
+offer separate confirm-gated deletion of retained rollback targets. Provider
+adapters own provisioning and bounded/native data-plane access while generic
+transfer engines own PostgreSQL snapshot and object streaming semantics. See
+`docs/data-migration.md` for the operator contract.
 
 ## Database Tasks And Seed Data
 
@@ -912,13 +923,13 @@ appropriate.
 Fresh-environment seed/bootstrap data belongs in desired state as `database.seedCommand`. It should plan a visible one-shot seed action, run through the provider-neutral environment task runner during `hv_apply`, and record completion on the database component only after terminal success. In a managed-CI environment, a non-noop seed has an explicit dependency on a verified exact-SHA release of the desired commit. If that release remains in progress, apply stops pending before the seed; it never runs the older image or races newly issued integration credentials.
 
 `hv_db_migrate` must not exist in the command registry, MCP surface, or CLI.
-Provider-to-provider data moves are lifecycle operations and must be modeled as
-explicit spec/plan/apply actions with dependency edges, data-bearing
-confirmation, cutover state, and verification receipts before they are
-supported. Database resets likewise belong to desired-state destruction, not
-an imperative shortcut. Re-running or repairing seed data requires a new
-reviewable desired-state intent; Hypervibe does not expose a generic seed
-command runner.
+Provider-to-provider data moves are lifecycle operations modeled as explicit
+`dataMigration` spec/plan/apply actions with dependency edges, data-bearing
+confirmation, isolated copy and cutover stages, and verification receipts.
+Database resets likewise belong to desired-state destruction, not an
+imperative shortcut. Re-running or repairing seed or migrated data requires a
+new reviewable desired-state id; Hypervibe does not expose a generic seed or
+copy command runner.
 
 ## New Provider Checklist
 

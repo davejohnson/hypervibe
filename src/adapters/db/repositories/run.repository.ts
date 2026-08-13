@@ -10,6 +10,8 @@ export interface ReserveApplyInput {
   planRunId: string;
   environmentName: string;
   specRevision: number;
+  /** Additional environment ids whose durable data this apply reads/writes. */
+  lockEnvironmentIds?: string[];
 }
 
 export type ReserveApplyResult =
@@ -77,15 +79,30 @@ export class RunRepository {
         };
       }
 
-      const activeApply = db.prepare(`
+      const requestedEnvironmentIds = new Set([
+        input.environmentId,
+        ...(input.lockEnvironmentIds ?? []),
+      ]);
+      const activeApplies = db.prepare(`
         SELECT *
         FROM runs
         WHERE type = 'apply'
           AND status = 'running'
-          AND environment_id = ?
+          AND project_id = ?
         ORDER BY created_at ASC
-        LIMIT 1
-      `).get(input.environmentId) as Record<string, unknown> | undefined;
+      `).all(input.projectId) as Record<string, unknown>[];
+      const activeApply = activeApplies.find((candidate) => {
+        if (requestedEnvironmentIds.has(candidate.environment_id as string)) return true;
+        const activeDocument = parseJsonColumn(
+          runPlanColumnSchema,
+          candidate.plan,
+          `runs.plan (${candidate.id})`
+        ) as Record<string, unknown>;
+        const locked = Array.isArray(activeDocument.lockEnvironmentIds)
+          ? activeDocument.lockEnvironmentIds.filter((value): value is string => typeof value === 'string')
+          : [];
+        return locked.some((environmentId) => requestedEnvironmentIds.has(environmentId));
+      });
       if (activeApply) {
         const activeDocument = parseJsonColumn(
           runPlanColumnSchema,
@@ -124,6 +141,7 @@ export class RunRepository {
           planRunId: input.planRunId,
           environmentName: input.environmentName,
           specRevision: input.specRevision,
+          lockEnvironmentIds: [...requestedEnvironmentIds],
         }),
         JSON.stringify([]),
         now,

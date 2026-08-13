@@ -88,6 +88,7 @@ import {
   LOAD_BALANCER_OPERATIONS,
   planLoadBalancer,
 } from '../services/load-balancer-plan.service.js';
+import { planDataMigration } from '../services/data-migration-plan.service.js';
 
 export interface PlanOptions {
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
@@ -563,6 +564,25 @@ export class PlanService {
     return blocked;
   }
 
+  /** Provider connections needed by an isolated cross-environment data copy.
+   * Unrelated hosting, email, DNS, and CI connections cannot block this stage. */
+  providerPreflight(providers: string[]): Array<{ provider: string; reason: string; policy: 'hard' }> {
+    const blocked: Array<{ provider: string; reason: string; policy: 'hard' }> = [];
+    for (const provider of [...new Set(providers)].sort()) {
+      const verified = this.connectionRepo
+        .findAllByProvider(provider)
+        .some((connection) => connection.status === 'verified');
+      if (!verified) {
+        blocked.push({
+          provider,
+          reason: `No verified ${provider} connection. ${formatConnectionGuidance(provider)}`,
+          policy: 'hard',
+        });
+      }
+    }
+    return blocked;
+  }
+
   /** Connections required by project-level desired state planned in one canonical environment. */
   projectPreflight(
     project: Project,
@@ -894,6 +914,31 @@ export class PlanService {
         suppliedValues: delegatedSecretValues,
       });
     const local = this.buildLocalSnapshot(projectForPlan, environment, effectiveBindings);
+    const sourceEnvironmentName = environmentSpec.dataMigration?.fromEnvironment;
+    const sourceEnvironmentSpec = sourceEnvironmentName
+      ? specResult.spec.environments[sourceEnvironmentName]
+      : undefined;
+    const sourceEnvironment = sourceEnvironmentName
+      ? this.envRepo.findByProjectAndName(project.id, sourceEnvironmentName)
+      : null;
+    const dataMigration = sourceEnvironmentSpec
+      ? planDataMigration({
+          targetEnvironmentName: environmentName,
+          targetSpec: environmentSpec,
+          targetEnvironment: environment,
+          targetComponents: local.components,
+          sourceSpec: sourceEnvironmentSpec,
+          sourceEnvironment,
+          sourceComponents: sourceEnvironment
+            ? this.componentRepo.findByEnvironmentId(sourceEnvironment.id)
+            : [],
+        })
+      : { actions: [], pending: false, providers: [], warnings: [] };
+    if (dataMigration.pending && serviceFilter) {
+      return {
+        error: `Data migration "${environmentSpec.dataMigration?.id}" must use a full environment plan. Remove services= and re-run hv_plan.`,
+      };
+    }
     const managedDatabaseEnvVars = buildManagedDatabaseEnvVars(
       environmentSpec.database,
       local.components
@@ -999,10 +1044,12 @@ export class PlanService {
       providerDisplayName: hostingMetadata?.displayName ?? environmentSpec.hosting.provider,
       nonNativeSourcePolicy: hostingMetadata?.orchestration?.nativeBranchDeploy?.nonNativeSourcePolicy,
     });
-    const blocked = [
-      ...this.preflight(environmentSpec, environmentName),
-      ...this.projectPreflight(projectForPlan, specResult.spec, environmentName),
-    ];
+    const blocked: EnvironmentPlan['blocked'] = dataMigration.pending
+      ? this.providerPreflight(dataMigration.providers)
+      : [
+          ...this.preflight(environmentSpec, environmentName),
+          ...this.projectPreflight(projectForPlan, specResult.spec, environmentName),
+        ];
     const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
     const domainRegistration = await planCloudflareDomainRegistration({ environmentSpec, environment });
 
@@ -1428,11 +1475,49 @@ export class PlanService {
       };
     }
 
+    // Data copy is a safety stage of its own. Do not provision the ordinary
+    // desired database/bucket or deploy services in the same apply: each copy
+    // handler owns a fresh unreachable candidate, verifies it, and only then
+    // records it as active for a later plan.
+    if (dataMigration.pending) {
+      const scaffolding = actions.filter((action) =>
+        (action.resource.kind === 'project' || action.resource.kind === 'environment')
+        && action.type !== 'destroy'
+      );
+      const scaffoldDependencies = scaffolding
+        .filter((action) => action.type !== 'noop')
+        .map((action) => action.id);
+      actions = [
+        ...scaffolding,
+        ...dataMigration.actions
+          .filter((action) => action.type !== 'destroy')
+          .map((action) => action.type === 'noop' || scaffoldDependencies.length === 0
+          ? action
+          : {
+              ...action,
+              dependsOn: Array.from(new Set([...(action.dependsOn ?? []), ...scaffoldDependencies])),
+            }),
+      ];
+    } else {
+      const cleanupActions = dataMigration.actions.filter((candidate) =>
+        candidate.metadata?.operation === 'dataMigrationDatabasePreviousDestroy'
+        || candidate.metadata?.operation === 'dataMigrationStoragePreviousDestroy'
+      );
+      const cutoverPending = actions.some((action) => action.type !== 'noop');
+      if (cleanupActions.length > 0 && !cutoverPending) {
+        actions.push(...cleanupActions);
+      } else if (cleanupActions.length > 0) {
+        dataMigration.warnings.push(
+          `Previous migration target cleanup is deferred until the cutover plan has fully converged. Re-run hv_plan after deployment verification to review the retained data-bearing targets.`
+        );
+      }
+    }
+
     // Deployment ownership is a safety stage of its own. A stale native
     // source must be removed (or explicitly blocked) before a plan asks for
     // unrelated billable resources, environment changes, or releases. This
     // also lets operators repair the trigger without confirming later work.
-    if (nativeDeploySources.actions.length > 0) {
+    if (!dataMigration.pending && nativeDeploySources.actions.length > 0) {
       const sourceActionIds = new Set(nativeDeploySources.actions.map((action) => action.id));
       actions = actions
         .filter(isProviderNativeDeploySourceAction)
@@ -1483,6 +1568,21 @@ export class PlanService {
       filterWarnings.push(
         `Partial plan (services: ${serviceFilter.join(', ')}): delegated secrets, domain, load balancer, CI, collaboration, iOS, queue, storage, and destroy convergence was excluded; run hv_plan without services for full convergence.`
       );
+    }
+
+    const plannedMigrationCleanupProviders = actions
+      .filter((action) =>
+        action.type === 'destroy'
+        && (
+          action.metadata?.operation === 'dataMigrationDatabasePreviousDestroy'
+          || action.metadata?.operation === 'dataMigrationStoragePreviousDestroy'
+        )
+      )
+      .map((action) => action.resource.provider);
+    for (const block of this.providerPreflight(plannedMigrationCleanupProviders)) {
+      if (!blocked.some((existing) => existing.provider === block.provider && existing.reason === block.reason)) {
+        blocked.push(block);
+      }
     }
 
     const envFileWarnings: string[] = [];
@@ -1564,6 +1664,9 @@ export class PlanService {
       environmentName,
       specRevision: specResult.revision,
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
+      ...(dataMigration.pending && sourceEnvironment
+        ? { lockEnvironmentIds: [sourceEnvironment.id] }
+        : {}),
       ...((stripeSync.fingerprint || email.fingerprint || messaging.fingerprint)
         ? {
           integrationFingerprints: {
@@ -1575,7 +1678,7 @@ export class PlanService {
         : {}),
       actions,
       unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged, ...loadBalancer.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedSeedRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedSeedRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
       ...(secretInputRequired.length > 0 ? { inputRequired: secretInputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };

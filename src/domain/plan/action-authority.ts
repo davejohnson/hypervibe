@@ -52,6 +52,10 @@ import {
 import { EMAIL_OPERATIONS } from '../services/email-plan.service.js';
 import { MESSAGING_OPERATIONS } from '../services/twilio-messaging.service.js';
 import { DOMAIN_DETACH_OPERATION } from '../services/domain-attach-policy.js';
+import {
+  DATA_MIGRATION_OPERATIONS,
+  isDataMigrationAction,
+} from '../services/data-migration-plan.service.js';
 
 export type PlanMutationCapability =
   | 'hosting.environment.ensure'
@@ -89,6 +93,10 @@ export type PlanMutationCapability =
   | 'database.replica.destroy'
   | 'database.seed'
   | 'database.destroy'
+  | 'database.migrate'
+  | 'storage.migrate'
+  | 'database.migration-target.destroy'
+  | 'storage.migration-target.destroy'
   | 'hosting.task-service.destroy'
   | 'hosting.previous-service.destroy'
   | 'hosting.service.destroy'
@@ -395,6 +403,60 @@ export function resolvePlanActionAuthority(
     && action.resource.name === metadataString(action, 'queueName')
   ) {
     return authority(action, 'queue.mutate');
+  }
+  if (
+    isDataMigrationAction(action)
+    && metadataString(action, 'migrationId')
+    && metadataString(action, 'sourceEnvironment')
+    && metadataString(action, 'targetEnvironment')
+  ) {
+    if (
+      action.metadata?.operation === DATA_MIGRATION_OPERATIONS.databaseCopy
+      && action.type === 'update'
+      && action.dataBearing === true
+      && action.requiresConfirm === true
+      && exactResource(action, 'database')
+      && metadataString(action, 'engine') === action.resource.name
+      && metadataString(action, 'sourceComponentId')
+      && metadataString(action, 'sourceProvider')
+      && metadataString(action, 'targetProvider') === action.resource.provider
+    ) {
+      return authority(action, 'database.migrate');
+    }
+    if (
+      action.metadata?.operation === DATA_MIGRATION_OPERATIONS.storageCopy
+      && action.type === 'update'
+      && action.dataBearing === true
+      && action.requiresConfirm === true
+      && exactResource(action, 'storage')
+      && metadataString(action, 'storageName') === action.resource.name
+      && metadataString(action, 'sourceExternalId')
+      && metadataString(action, 'sourceProvider')
+      && metadataString(action, 'targetProvider') === action.resource.provider
+    ) {
+      return authority(action, 'storage.migrate');
+    }
+    if (
+      action.metadata?.operation === DATA_MIGRATION_OPERATIONS.databasePreviousDestroy
+      && action.type === 'destroy'
+      && action.dataBearing === true
+      && action.requiresConfirm === true
+      && exactResource(action, 'database')
+      && metadataString(action, 'previousExternalId')
+    ) {
+      return authority(action, 'database.migration-target.destroy');
+    }
+    if (
+      action.metadata?.operation === DATA_MIGRATION_OPERATIONS.storagePreviousDestroy
+      && action.type === 'destroy'
+      && action.dataBearing === true
+      && action.requiresConfirm === true
+      && exactResource(action, 'storage')
+      && metadataString(action, 'previousExternalId')
+    ) {
+      return authority(action, 'storage.migration-target.destroy');
+    }
+    return null;
   }
   if (
     isStorageAction(action)

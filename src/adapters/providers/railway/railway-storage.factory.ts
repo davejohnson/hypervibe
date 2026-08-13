@@ -14,6 +14,7 @@ export function createRailwayStorageAdapter(railway: RailwayAdapter): IStorageAd
       regions: ['sjc', 'iad', 'ams', 'sin'],
       privateOnly: true,
       supportsUsageObservation: true,
+      supportsObjectTransfer: true,
     },
     connect: (credentials) => railway.connect(credentials),
     verify: () => railway.verify(),
