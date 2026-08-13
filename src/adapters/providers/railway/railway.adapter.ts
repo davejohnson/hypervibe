@@ -1619,7 +1619,7 @@ export class RailwayAdapter implements IProviderAdapter {
   }
 
   private async waitUntilProjectDeleted(projectId: string): Promise<DeletionVerification> {
-    const attempts = Number(process.env.HYPERVIBE_RAILWAY_DELETE_ATTEMPTS ?? 20);
+    const attempts = Number(process.env.HYPERVIBE_RAILWAY_DELETE_ATTEMPTS ?? 40);
     const delayMs = Number(process.env.HYPERVIBE_RAILWAY_DELETE_DELAY_MS ?? 500);
     for (let attempt = 0; attempt < attempts; attempt++) {
       const existence = await this.projectExists(projectId);
@@ -1641,7 +1641,7 @@ export class RailwayAdapter implements IProviderAdapter {
   }
 
   private async waitUntilServiceDeleted(serviceId: string): Promise<DeletionVerification> {
-    const attempts = Number(process.env.HYPERVIBE_RAILWAY_DELETE_ATTEMPTS ?? 20);
+    const attempts = Number(process.env.HYPERVIBE_RAILWAY_DELETE_ATTEMPTS ?? 40);
     const delayMs = Number(process.env.HYPERVIBE_RAILWAY_DELETE_DELAY_MS ?? 500);
     for (let attempt = 0; attempt < attempts; attempt++) {
       const existence = await this.serviceExists(serviceId);
@@ -4401,6 +4401,7 @@ export class RailwayAdapter implements IProviderAdapter {
           const routingRecords = dnsRecords.filter((record) => record.purpose !== 'verification');
           const dnsConfigured = providerDnsRecordsAreConfigured(routingRecords);
           return [domain.domain, {
+            ...(domain.id ? { providerDomainId: domain.id } : {}),
             ...(typeof domain.status?.verified === 'boolean'
               ? { providerVerified: domain.status.verified }
               : {}),

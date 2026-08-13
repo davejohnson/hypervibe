@@ -18,6 +18,8 @@ export interface ObservedService {
   url?: string;
   customDomains: string[];
   customDomainStatus?: Record<string, {
+    /** Durable provider attachment identity, when exposed by the provider. */
+    providerDomainId?: string;
     /** Provider-confirmed domain verification state, when exposed by the provider. */
     providerVerified?: boolean;
     certificateStatus?: string;

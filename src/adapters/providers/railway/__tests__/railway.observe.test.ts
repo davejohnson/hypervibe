@@ -216,6 +216,7 @@ describe('RailwayAdapter observe', () => {
     );
 
     expect(result.services[0]?.customDomainStatus?.['usebillforge.com']).toMatchObject({
+      providerDomainId: 'cd_123',
       providerVerified: false,
       dnsConfigured: false,
       dnsRecords: [
@@ -263,6 +264,7 @@ describe('RailwayAdapter observe', () => {
     );
 
     expect(result.services[0]?.customDomainStatus?.['usebillforge.com']).toMatchObject({
+      providerDomainId: 'cd_123',
       providerVerified: true,
       dnsConfigured: true,
       dnsRecords: [

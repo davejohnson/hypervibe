@@ -75,6 +75,22 @@ describe('RailwayAdapter delete verification', () => {
     expect(request).toHaveBeenCalledTimes(9);
   });
 
+  it('keeps polling when service deletion becomes visible after twenty observations', async () => {
+    vi.stubEnv('HYPERVIBE_RAILWAY_DELETE_DELAY_MS', '0');
+    const request = vi.fn()
+      .mockResolvedValueOnce({ service: { id: 'svc-eventually-deleted' } })
+      .mockResolvedValueOnce({ serviceDelete: true });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      request.mockResolvedValueOnce({ service: { id: 'svc-eventually-deleted' } });
+    }
+    request.mockResolvedValueOnce({ service: null });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.deleteService('svc-eventually-deleted')).resolves.toEqual({ success: true });
+    expect(request).toHaveBeenCalledTimes(23);
+  });
+
   it('does not mistake an observation failure for successful deletion', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce({ service: { id: 'svc-unknown' } })

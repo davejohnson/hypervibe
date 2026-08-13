@@ -51,7 +51,10 @@ import {
 } from '../services/load-balancer-plan.service.js';
 import { EMAIL_OPERATIONS } from '../services/email-plan.service.js';
 import { MESSAGING_OPERATIONS } from '../services/twilio-messaging.service.js';
-import { DOMAIN_DETACH_OPERATION } from '../services/domain-attach-policy.js';
+import {
+  DOMAIN_ADOPT_OPERATION,
+  DOMAIN_DETACH_OPERATION,
+} from '../services/domain-attach-policy.js';
 import {
   DATA_MIGRATION_OPERATIONS,
   isDataMigrationAction,
@@ -672,6 +675,17 @@ export function resolvePlanActionAuthority(
     exactResource(action, 'domain')
     && hasType(action, 'create', 'update', 'replace')
     && !action.metadata?.operation
+  ) {
+    return authority(action, 'domain.configure');
+  }
+  if (
+    exactResource(action, 'domain')
+    && action.type === 'update'
+    && action.metadata?.operation === DOMAIN_ADOPT_OPERATION
+    && metadataString(action, 'providerDomainId')
+    && metadataString(action, 'serviceName')
+    && metadataString(action, 'serviceId')
+    && metadataString(action, 'environmentId')
   ) {
     return authority(action, 'domain.configure');
   }
