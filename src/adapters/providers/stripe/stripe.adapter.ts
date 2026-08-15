@@ -17,6 +17,7 @@ export interface StripeProduct {
   id: string;
   name: string;
   description: string | null;
+  tax_code?: string | null;
   active: boolean;
   metadata: Record<string, string>;
   default_price?: string | null;
@@ -379,6 +380,9 @@ export class StripeAdapter {
     if (product.description) {
       body.description = product.description;
     }
+    if (product.tax_code !== undefined && product.tax_code !== null) {
+      body.tax_code = product.tax_code;
+    }
     if (product.metadata && Object.keys(product.metadata).length > 0) {
       body.metadata = product.metadata;
     }
@@ -389,11 +393,12 @@ export class StripeAdapter {
   async updateProduct(
     mode: StripeMode,
     productId: string,
-    product: Pick<Partial<StripeProduct>, 'name' | 'description' | 'active' | 'metadata'>
+    product: Pick<Partial<StripeProduct>, 'name' | 'description' | 'tax_code' | 'active' | 'metadata'>
   ): Promise<StripeProduct> {
     return this.request<StripeProduct>(mode, 'POST', `/products/${productId}`, {
       ...(product.name !== undefined ? { name: product.name } : {}),
       ...(product.description !== undefined ? { description: product.description ?? '' } : {}),
+      ...(product.tax_code !== undefined ? { tax_code: product.tax_code ?? '' } : {}),
       ...(product.active !== undefined ? { active: product.active } : {}),
       ...(product.metadata !== undefined ? { metadata: product.metadata } : {}),
     });

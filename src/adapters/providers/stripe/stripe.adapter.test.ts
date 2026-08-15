@@ -90,4 +90,59 @@ describe('StripeAdapter observation semantics', () => {
       kind: 'malformed_response',
     } satisfies Partial<StripeApiError>);
   });
+
+  it('sends tax_code when creating a product', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({
+        id: 'prod_starter',
+        name: 'Starter',
+        description: null,
+        tax_code: 'txcd_10103001',
+        active: true,
+        metadata: {},
+        created: 1,
+        updated: 1,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await adapter().createProduct('sandbox', {
+      name: 'Starter',
+      tax_code: 'txcd_10103001',
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.stripe.com/v1/products',
+      expect.objectContaining({
+        body: expect.stringContaining('tax_code=txcd_10103001'),
+      })
+    );
+  });
+
+  it('sends tax_code when updating a product', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({
+        id: 'prod_starter',
+        name: 'Starter',
+        description: null,
+        tax_code: 'txcd_10103001',
+        active: true,
+        metadata: {},
+        created: 1,
+        updated: 2,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await adapter().updateProduct('sandbox', 'prod_starter', {
+      tax_code: 'txcd_10103001',
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.stripe.com/v1/products/prod_starter',
+      expect.objectContaining({
+        body: expect.stringContaining('tax_code=txcd_10103001'),
+      })
+    );
+  });
 });

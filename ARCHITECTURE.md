@@ -567,7 +567,7 @@ ids. Model the relationship explicitly through
   metadata/name/config match is an explicit confirm-gated adoption candidate;
   multiple candidates block instead of choosing one. Unmanaged products and
   prices are untouched.
-- Product display fields are mutable. Recurring price amount, currency, and
+- Product display fields and an explicitly declared Stripe tax code are mutable. Recurring price amount, currency, and
   interval are immutable: changing them plans a replacement, makes hosting
   consume the replacement, and only then permits confirm-gated archival of the
   previous price. Removal follows the same hosting-before-archive order.

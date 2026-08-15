@@ -32,6 +32,7 @@ const products: StripeProduct[] = [
     id: 'prod_starter',
     name: 'Invoice Perfect Starter',
     description: null,
+    tax_code: 'txcd_10103001',
     active: true,
     metadata: {},
     created: 1,
@@ -82,6 +83,7 @@ function environmentSpec(): EnvironmentSpec {
           products: {
             starter: {
               name: 'Invoice Perfect Starter',
+              taxCode: 'txcd_10103001',
               prices: {
                 monthly: {
                   unitAmount: 4900,
@@ -109,6 +111,7 @@ function stripeCatalogBindings() {
             starter: {
               productId: 'prod_starter',
               name: 'Invoice Perfect Starter',
+              taxCode: 'txcd_10103001',
               prices: {
                 monthly: {
                   priceId: 'price_starter_month',
@@ -274,9 +277,40 @@ describe('Stripe hosting environment sync', () => {
       diff: [{ field: 'env:STRIPE_STARTER_MONTHLY_PRICE_ID' }],
     });
     expect(result.actions.find((action) => action.resource.name === 'cron')?.type).toBe('noop');
+    expect(result.actions.find((action) =>
+      action.metadata?.operation === 'stripeCatalogProductEnsure'
+    )?.type).toBe('noop');
     const serialized = JSON.stringify(result.actions);
     expect(serialized).not.toContain('sk_test_staging_secret');
     expect(serialized).not.toContain('pk_test_staging_public');
+  });
+
+  it('plans a product update when its Stripe tax code drifts', async () => {
+    vi.spyOn(StripeAdapter.prototype, 'listProducts').mockResolvedValue([{
+      ...products[0],
+      tax_code: 'txcd_99999999',
+    }]);
+
+    const result = await planStripeEnvironmentSync({
+      projectName: 'billing-app',
+      environmentName: 'staging',
+      environmentSpec: environmentSpec(),
+      environment: { platformBindings: stripeCatalogBindings() } as never,
+      observed: null,
+    });
+    const product = result.actions.find((action) =>
+      action.metadata?.operation === 'stripeCatalogProductEnsure'
+    );
+
+    expect(product).toMatchObject({
+      type: 'update',
+      diff: [{
+        field: 'taxCode',
+        from: 'txcd_99999999',
+        to: 'txcd_10103001',
+      }],
+      metadata: { productTaxCode: 'txcd_10103001' },
+    });
   });
 
   it('applies through the hosting adapter with CI deployment deferred and redacted receipts', async () => {
@@ -538,6 +572,7 @@ describe('Stripe hosting environment sync', () => {
         productKey: 'starter',
         productName: 'Invoice Perfect Starter',
         productDescription: null,
+        productTaxCode: 'txcd_10103001',
       },
     };
     const productResult = await applyStripeCatalogAction({
@@ -548,9 +583,16 @@ describe('Stripe hosting environment sync', () => {
     expect(productResult.success).toBe(true);
     expect(createProduct).toHaveBeenCalledWith(
       'sandbox',
-      expect.objectContaining({ name: 'Invoice Perfect Starter' }),
+      expect.objectContaining({
+        name: 'Invoice Perfect Starter',
+        tax_code: 'txcd_10103001',
+      }),
       { idempotencyKey: productAction.id }
     );
+    expect(productResult.data).toMatchObject({
+      productId: 'prod_starter',
+      taxCode: 'txcd_10103001',
+    });
 
     const latest = new EnvironmentRepository().findById(environment.id)!;
     const priceAction = {
@@ -591,6 +633,7 @@ describe('Stripe hosting environment sync', () => {
     const bindings = parseStripeBindings(new EnvironmentRepository().findById(environment.id));
     expect(bindings.catalog.products.starter).toMatchObject({
       productId: 'prod_starter',
+      taxCode: 'txcd_10103001',
       prices: {
         monthly: {
           priceId: 'price_starter_month',
@@ -599,6 +642,65 @@ describe('Stripe hosting environment sync', () => {
       },
     });
     expect(JSON.stringify(bindings)).not.toContain('sk_test_staging_secret');
+  });
+
+  it('applies a product tax-code update and records it in the receipt and binding', async () => {
+    const project = new ProjectRepository().create({
+      name: 'billing-app',
+      defaultPlatform: 'railway',
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: stripeCatalogBindings(),
+    });
+    const getProduct = vi.spyOn(StripeAdapter.prototype, 'getProduct').mockResolvedValue({
+      ...products[0],
+      tax_code: 'txcd_99999999',
+    });
+    const updateProduct = vi.spyOn(StripeAdapter.prototype, 'updateProduct').mockResolvedValue({
+      ...products[0],
+      tax_code: 'txcd_10103001',
+      updated: 2,
+    });
+    const action = {
+      id: 'payment:stripe:staging:catalog:product:starter',
+      type: 'update' as const,
+      resource: { kind: 'payment' as const, name: 'starter', provider: 'stripe' },
+      verified: true,
+      reason: 'update tax code',
+      diff: [{ field: 'taxCode', from: 'txcd_99999999', to: 'txcd_10103001' }],
+      metadata: {
+        operation: 'stripeCatalogProductEnsure',
+        stripeEnvironment: 'staging',
+        projectName: 'billing-app',
+        productKey: 'starter',
+        productId: 'prod_starter',
+        productName: 'Invoice Perfect Starter',
+        productDescription: null,
+        productTaxCode: 'txcd_10103001',
+      },
+    };
+
+    const result = await applyStripeCatalogAction({
+      environment,
+      environmentSpec: environmentSpec(),
+      action,
+    });
+
+    expect(result.success).toBe(true);
+    expect(getProduct).toHaveBeenCalledWith('sandbox', 'prod_starter');
+    expect(updateProduct).toHaveBeenCalledWith(
+      'sandbox',
+      'prod_starter',
+      expect.objectContaining({ tax_code: 'txcd_10103001' })
+    );
+    expect(result.data).toMatchObject({
+      productId: 'prod_starter',
+      taxCode: 'txcd_10103001',
+    });
+    expect(parseStripeBindings(new EnvironmentRepository().findById(environment.id))
+      .catalog.products.starter.taxCode).toBe('txcd_10103001');
   });
 
   it('plans webhook creation and explicit adoption without exposing signing values', async () => {

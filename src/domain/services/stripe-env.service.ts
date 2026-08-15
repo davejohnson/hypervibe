@@ -72,6 +72,7 @@ export interface StripeCatalogPriceBinding {
 export interface StripeCatalogProductBinding {
   productId: string;
   name: string;
+  taxCode?: string;
   prices: Record<string, StripeCatalogPriceBinding>;
   updatedAt?: string;
 }
@@ -154,6 +155,7 @@ export function parseStripeBindings(
     products[productKey] = {
       productId: record.productId,
       name: record.name,
+      ...(typeof record.taxCode === 'string' ? { taxCode: record.taxCode } : {}),
       prices,
       ...(typeof record.updatedAt === 'string' ? { updatedAt: record.updatedAt } : {}),
     };
@@ -259,6 +261,7 @@ export function stripeIntegrationFingerprint(
       id: product.id,
       name: product.name,
       description: product.description,
+      taxCode: product.tax_code ?? null,
       active: product.active,
       metadata: product.metadata,
     }));
@@ -801,7 +804,22 @@ function catalogPriceMatches(price: StripePrice, productId: string, spec: Stripe
 function catalogProductConfigMatches(product: StripeProduct, spec: StripeCatalogProductSpec): boolean {
   return product.active
     && product.name === spec.name
-    && (product.description ?? null) === (spec.description ?? null);
+    && (product.description ?? null) === (spec.description ?? null)
+    && (spec.taxCode === undefined || (product.tax_code ?? null) === spec.taxCode);
+}
+
+function catalogProductDiff(
+  product: StripeProduct,
+  spec: StripeCatalogProductSpec
+): NonNullable<PlanAction['diff']> {
+  if (spec.taxCode !== undefined && (product.tax_code ?? null) !== spec.taxCode) {
+    return [{
+      field: 'taxCode',
+      ...(product.tax_code ? { from: product.tax_code } : {}),
+      to: spec.taxCode,
+    }];
+  }
+  return [];
 }
 
 function stripeCatalogAction(params: {
@@ -818,6 +836,7 @@ function stripeCatalogAction(params: {
   productId?: string;
   priceId?: string;
   previousPriceId?: string;
+  diff?: PlanAction['diff'];
   dependsOn?: string[];
   blockedReason?: string;
   requiresConfirm?: boolean;
@@ -834,6 +853,7 @@ function stripeCatalogAction(params: {
     resource: { kind: 'payment', name, provider: 'stripe' },
     verified: params.verified,
     reason: params.reason,
+    ...(params.diff?.length ? { diff: params.diff } : {}),
     ...(params.dependsOn?.length ? { dependsOn: [...new Set(params.dependsOn)] } : {}),
     ...(params.requiresConfirm ? { requiresConfirm: true } : {}),
     metadata: {
@@ -846,6 +866,9 @@ function stripeCatalogAction(params: {
         ? {
           productName: params.productSpec.name,
           productDescription: params.productSpec.description ?? null,
+          ...(params.productSpec.taxCode
+            ? { productTaxCode: params.productSpec.taxCode }
+            : {}),
         }
         : {}),
       ...(params.priceSpec
@@ -940,6 +963,7 @@ function planStripeCatalogActions(params: {
         verified: true,
         productSpec,
         productId: productBinding.productId,
+        diff: boundProduct ? catalogProductDiff(boundProduct, productSpec) : undefined,
         requiresConfirm: !boundProduct,
       });
     } else {
@@ -1327,7 +1351,8 @@ export function isStripeCatalogAction(action: {
 function catalogProductSpecMatchesAction(spec: StripeCatalogProductSpec, action: PlanAction): boolean {
   const metadata = action.metadata ?? {};
   return metadata.productName === spec.name
-    && metadata.productDescription === (spec.description ?? null);
+    && metadata.productDescription === (spec.description ?? null)
+    && metadata.productTaxCode === spec.taxCode;
 }
 
 function catalogPriceSpecMatchesAction(spec: StripeCatalogPriceSpec, action: PlanAction): boolean {
@@ -1520,6 +1545,7 @@ export async function applyStripeCatalogAction(params: {
         : await stripe.adapter.updateProduct(stripe.mode, productId, {
           name: productSpec.name,
           description: productSpec.description ?? null,
+          ...(productSpec.taxCode ? { tax_code: productSpec.taxCode } : {}),
           active: true,
           metadata: { ...live.metadata, ...ownership },
         });
@@ -1529,6 +1555,7 @@ export async function applyStripeCatalogAction(params: {
           [productKey]: {
             productId: converged.id,
             name: productSpec.name,
+            ...(productSpec.taxCode ? { taxCode: productSpec.taxCode } : {}),
             prices: {},
             updatedAt: new Date().toISOString(),
           },
@@ -1537,7 +1564,10 @@ export async function applyStripeCatalogAction(params: {
       return {
         success: true,
         message: `Adopted Stripe catalog product "${productKey}"`,
-        data: { productId },
+        data: {
+          productId,
+          ...(productSpec.taxCode ? { taxCode: productSpec.taxCode } : {}),
+        },
       };
     }
 
@@ -1570,6 +1600,7 @@ export async function applyStripeCatalogAction(params: {
         product = await stripe.adapter.updateProduct(stripe.mode, productId, {
           name: productSpec.name,
           description: productSpec.description ?? null,
+          ...(productSpec.taxCode ? { tax_code: productSpec.taxCode } : {}),
           active: true,
           metadata: { ...live.metadata, ...ownership },
         });
@@ -1602,6 +1633,7 @@ export async function applyStripeCatalogAction(params: {
         product = await stripe.adapter.createProduct(stripe.mode, {
           name: productSpec.name,
           description: productSpec.description ?? null,
+          ...(productSpec.taxCode ? { tax_code: productSpec.taxCode } : {}),
           active: true,
           metadata: ownership,
         }, { idempotencyKey: params.action.id });
@@ -1619,6 +1651,7 @@ export async function applyStripeCatalogAction(params: {
           [productKey]: {
             productId: product.id,
             name: productSpec.name,
+            ...(productSpec.taxCode ? { taxCode: productSpec.taxCode } : {}),
             prices: productBinding?.prices ?? {},
             updatedAt: new Date().toISOString(),
           },
@@ -1627,7 +1660,10 @@ export async function applyStripeCatalogAction(params: {
       return {
         success: true,
         message: `${params.action.type === 'create' ? 'Created' : params.action.type === 'replace' ? 'Recreated' : 'Updated'} Stripe catalog product "${productKey}"`,
-        data: { productId: product.id },
+        data: {
+          productId: product.id,
+          ...(productSpec.taxCode ? { taxCode: productSpec.taxCode } : {}),
+        },
       };
     }
 
