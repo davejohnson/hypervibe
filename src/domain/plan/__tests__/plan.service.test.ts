@@ -29,6 +29,7 @@ import { buildBranchDeployWorkflow } from '../../services/github-ops.service.js'
 import { StripeAdapter } from '../../../adapters/providers/stripe/stripe.adapter.js';
 import { executePlanApply } from '../../../application/apply-plan.js';
 import { createToolContext } from '../../../tools/context.js';
+import * as environmentMaintenanceService from '../../services/environment-maintenance.service.js';
 
 let project: Project;
 
@@ -3061,6 +3062,8 @@ describe('PlanService.plan', () => {
     const connectionRepo = new ConnectionRepository();
     const connection = connectionRepo.create({ provider: 'railway', credentialsEncrypted: 'x' });
     connectionRepo.updateStatus(connection.id, 'verified');
+    const cloudflare = connectionRepo.create({ provider: 'cloudflare', credentialsEncrypted: 'x' });
+    connectionRepo.updateStatus(cloudflare.id, 'verified');
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
@@ -3069,11 +3072,13 @@ describe('PlanService.plan', () => {
           hosting: { provider: 'railway' },
           services: { web: {} },
           database: { provider: 'railway', engine: 'postgres' },
+          maintenance: { enabled: true },
         },
         production: {
           hosting: { provider: 'railway' },
           services: { web: {} },
           database: { provider: 'railway', engine: 'postgres' },
+          maintenance: { enabled: true },
           dataMigration: {
             id: 'initial-production-launch',
             fromEnvironment: 'staging',
@@ -3085,12 +3090,22 @@ describe('PlanService.plan', () => {
     const source = new EnvironmentRepository().create({
       projectId: project.id,
       name: 'staging',
-      platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 'staging-env' },
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'staging-env',
+        maintenance: { state: 'active' },
+      },
     });
     new EnvironmentRepository().create({
       projectId: project.id,
       name: 'production',
-      platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 'production-env' },
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'production-env',
+        maintenance: { state: 'active' },
+      },
     });
     new ComponentRepository().create({
       environmentId: source.id,
@@ -3109,6 +3124,26 @@ describe('PlanService.plan', () => {
       partial: false,
       warnings: [],
     });
+    vi.spyOn(environmentMaintenanceService, 'observeEnvironmentMaintenance').mockImplementation(
+      async ({ environment }) => ({
+        state: 'active',
+        stage: 'verified',
+        edge: {
+          state: 'active',
+          hostname: `${environment.name}.example.com`,
+          markerVerified: true,
+        },
+        workloads: {
+          web: {
+            state: 'suspended',
+            serviceId: `${environment.name}-web`,
+            workloadKind: 'web',
+            wasRunning: true,
+          },
+        },
+        database: { state: 'fenced' },
+      })
+    );
 
     const result = await new PlanService().plan(project, 'production');
     expect(result).not.toHaveProperty('error');

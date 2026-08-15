@@ -44,6 +44,9 @@ export interface HostingCapabilities {
 
   /** Whether config can converge while exact-SHA CI remains the code release boundary. */
   supportsDeferredDeploy?: boolean;
+
+  /** Whether the adapter can provider-verify reversible workload suspension. */
+  supportsMaintenance?: boolean;
 }
 
 /**
@@ -119,6 +122,7 @@ export const hostingBindingsSchema = z.object({
       target: z.string(),
     }).strict()).optional(),
   }).passthrough().optional(),
+  maintenance: z.record(z.unknown()).optional(),
 }).passthrough();
 
 export type ParsedHostingBindings = z.infer<typeof hostingBindingsSchema>;

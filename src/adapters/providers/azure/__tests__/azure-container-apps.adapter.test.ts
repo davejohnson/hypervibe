@@ -361,3 +361,54 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
     expect(roleAssignments.size).toBe(0);
   });
 });
+
+describe('AzureContainerAppsAdapter maintenance', () => {
+  it('stops and restarts the exact bound Container App with terminal verification', async () => {
+    const adapter = await connectedAdapter();
+    let runningStatus = 'Running';
+    const calls: Array<{ method: string; url: string }> = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('login.microsoftonline.com')) return json({ access_token: token() });
+      const method = init?.method ?? 'GET';
+      calls.push({ method, url });
+      if (url.includes(encodeURI(APP_ID)) && method === 'GET') {
+        return json({
+          id: APP_ID,
+          name: 'hv-web',
+          tags: {
+            'managed-by': 'hypervibe',
+            'hypervibe-environment-id': 'environment-local',
+          },
+          properties: { runningStatus },
+        });
+      }
+      if (url.includes(`${encodeURI(APP_ID)}/stop`) && method === 'POST') {
+        runningStatus = 'Stopped';
+        return json({});
+      }
+      if (url.includes(`${encodeURI(APP_ID)}/start`) && method === 'POST') {
+        runningStatus = 'Running';
+        return json({});
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const env = {
+      ...environment(),
+      platformBindings: {
+        provider: 'azure-container-apps',
+        projectId: RESOURCE_GROUP_ID,
+        services: { web: { serviceId: APP_ID } },
+      },
+    };
+
+    const snapshot = await adapter.observeMaintenanceWorkload(env, APP_ID, 'web');
+    await expect(adapter.suspendMaintenanceWorkload(env, snapshot)).resolves.toMatchObject({ success: true });
+    await expect(adapter.resumeMaintenanceWorkload(env, snapshot)).resolves.toMatchObject({ success: true });
+
+    expect(calls.some(({ method, url }) => method === 'POST' && url.includes(`${encodeURI(APP_ID)}/stop`))).toBe(true);
+    expect(calls.some(({ method, url }) => method === 'POST' && url.includes(`${encodeURI(APP_ID)}/start`))).toBe(true);
+    expect(runningStatus).toBe('Running');
+  });
+});

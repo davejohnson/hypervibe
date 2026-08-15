@@ -2,6 +2,8 @@ import type { Component } from '../entities/component.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { PlanAction } from '../plan/plan.types.js';
 import type { EnvironmentSpec } from '../spec/spec.schema.js';
+import type { EnvironmentMaintenanceObservation } from '../ports/observe.port.js';
+import { createHash } from 'node:crypto';
 import { parseStorageBindings, parseStorageProviderContexts } from './storage-plan.service.js';
 
 export const DATA_MIGRATION_OPERATIONS = {
@@ -125,12 +127,25 @@ export function planDataMigration(params: {
   sourceSpec: EnvironmentSpec;
   sourceEnvironment: Environment | null;
   sourceComponents: Component[];
+  sourceMaintenance?: EnvironmentMaintenanceObservation;
+  targetMaintenance?: EnvironmentMaintenanceObservation;
 }): DataMigrationPlanResult {
   const migration = params.targetSpec.dataMigration;
   if (!migration) return { actions: [], pending: false, providers: [], warnings: [] };
 
   const actions: PlanAction[] = [];
   const sourceName = migration.fromEnvironment;
+  const maintenanceBlockedReason = params.sourceSpec.maintenance?.enabled !== true
+    ? 'source_maintenance_not_desired'
+    : params.targetSpec.maintenance?.enabled !== true
+      ? 'target_maintenance_not_desired'
+      : params.sourceMaintenance?.state !== 'active'
+        ? 'source_maintenance_not_verified'
+        : params.targetMaintenance?.state !== 'active'
+          ? 'target_maintenance_not_verified'
+          : undefined;
+  const maintenanceFingerprint = (value: EnvironmentMaintenanceObservation | undefined): string | undefined =>
+    value ? createHash('sha256').update(JSON.stringify(value)).digest('hex') : undefined;
 
   if (migration.include.database) {
     const sourceDatabaseSpec = params.sourceSpec.database!;
@@ -142,13 +157,14 @@ export function planDataMigration(params: {
     const marker = asRecord(asRecord(target?.bindings)?.dataMigration);
     const previousTarget = asRecord(asRecord(target?.bindings)?.dataMigrationPreviousTarget);
     const isComplete = completed(marker, migration.id, sourceName);
-    const blockedReason = !params.sourceEnvironment
+    const blockedReason = maintenanceBlockedReason
+      ?? (!params.sourceEnvironment
       ? 'source_environment_not_tracked'
       : !source
         ? 'source_database_not_tracked'
         : sourceProvider !== sourceDatabaseSpec.provider
           ? 'source_database_binding_stale'
-          : undefined;
+          : undefined);
     actions.push(migrationAction({
       id: `data-migration:${migration.id}:database`,
       resourceName: targetDatabaseSpec.engine,
@@ -169,6 +185,8 @@ export function planDataMigration(params: {
         targetProvider: targetDatabaseSpec.provider,
         engine: targetDatabaseSpec.engine,
         sourceWritesMustBeStopped: true,
+        sourceMaintenanceFingerprint: maintenanceFingerprint(params.sourceMaintenance),
+        targetMaintenanceFingerprint: maintenanceFingerprint(params.targetMaintenance),
         ...(source
           ? {
               sourceComponentId: source.id,
@@ -204,7 +222,8 @@ export function planDataMigration(params: {
     const sourceBinding = sourceStorageBindings[storageName];
     const marker = asRecord(targetStorageBindings[storageName]?.dataMigration);
     const isComplete = completed(marker, migration.id, sourceName);
-    const blockedReason = !params.sourceEnvironment
+    const blockedReason = maintenanceBlockedReason
+      ?? (!params.sourceEnvironment
       ? 'source_environment_not_tracked'
       : !sourceBinding
         ? 'source_storage_not_tracked'
@@ -212,7 +231,7 @@ export function planDataMigration(params: {
           ? 'source_storage_binding_stale'
           : !sourceStorageContexts[sourceStorageSpec.provider]
             ? 'source_storage_context_missing'
-            : undefined;
+            : undefined);
     actions.push(migrationAction({
       id: `data-migration:${migration.id}:storage:${storageName}`,
       resourceName: storageName,
@@ -234,6 +253,8 @@ export function planDataMigration(params: {
         targetProvider: targetStorageSpec.provider,
         sourceExternalId: sourceBinding?.externalId,
         sourceWritesMustBeStopped: true,
+        sourceMaintenanceFingerprint: maintenanceFingerprint(params.sourceMaintenance),
+        targetMaintenanceFingerprint: maintenanceFingerprint(params.targetMaintenance),
       },
     }));
     if (isComplete && targetStorageBindings[storageName]?.previousTarget) {
@@ -267,13 +288,18 @@ export function planDataMigration(params: {
     if (sourceProvider) pendingProviders.add(sourceProvider);
     if (targetProvider) pendingProviders.add(targetProvider);
   }
+  if (pending) {
+    pendingProviders.add(params.sourceSpec.hosting.provider);
+    pendingProviders.add(params.targetSpec.hosting.provider);
+    pendingProviders.add('cloudflare');
+  }
   return {
     actions,
     pending,
     providers: [...pendingProviders].sort(),
     warnings: pending
       ? [
-          `Data migration "${migration.id}" is an isolated apply stage. Stop writes in "${sourceName}" before confirming it; after verified copies complete, run hv_plan again to rewire and deploy "${params.targetEnvironmentName}".`,
+          `Data migration "${migration.id}" is an isolated apply stage and remains blocked until maintenance is provider-verified in both "${sourceName}" and "${params.targetEnvironmentName}". After verified copies complete, run hv_plan again to rewire and deploy the target.`,
         ]
       : [],
   };

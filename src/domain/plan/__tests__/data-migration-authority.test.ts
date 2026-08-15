@@ -21,6 +21,8 @@ function databaseCopy(overrides: Partial<PlanAction> = {}): PlanAction {
       targetProvider: 'rds',
       sourceComponentId: 'source-component',
       engine: 'postgres',
+      sourceMaintenanceFingerprint: 'source-maintenance-fingerprint',
+      targetMaintenanceFingerprint: 'target-maintenance-fingerprint',
     },
     ...overrides,
   };
@@ -38,6 +40,12 @@ describe('data migration action authority', () => {
     expect(resolvePlanActionAuthority(databaseCopy({ requiresConfirm: false }))).toBeNull();
     expect(resolvePlanActionAuthority(databaseCopy({
       resource: { kind: 'database', name: 'postgres', provider: 'cloudsql' },
+    }))).toBeNull();
+    expect(resolvePlanActionAuthority(databaseCopy({
+      metadata: {
+        ...databaseCopy().metadata,
+        sourceMaintenanceFingerprint: undefined,
+      },
     }))).toBeNull();
   });
 

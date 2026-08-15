@@ -825,6 +825,14 @@ export const dataMigrationSpecSchema = z.object({
   }),
 }).strict();
 
+/**
+ * Provider-owned whole-environment maintenance. V1 deliberately exposes one
+ * safe switch instead of application-specific read-only or bypass behavior.
+ */
+export const maintenanceSpecSchema = z.object({
+  enabled: z.boolean(),
+}).strict();
+
 export const stripePriceEnvBindingSpecSchema = z.object({
   /**
    * Stripe product id (prod_...) or product name. Name matching is exact
@@ -1228,6 +1236,7 @@ export const environmentSpecSchema = z.object({
     storageSpecSchema
   ).optional(),
   dataMigration: dataMigrationSpecSchema.optional(),
+  maintenance: maintenanceSpecSchema.optional(),
   payments: paymentsSpecSchema.optional(),
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
@@ -2009,6 +2018,7 @@ export type IosReleaseSpec = z.infer<typeof iosReleaseSpecSchema>;
 export type QueueSpec = z.infer<typeof queueSpecSchema>;
 export type StorageSpec = z.infer<typeof storageSpecSchema>;
 export type DataMigrationSpec = z.infer<typeof dataMigrationSpecSchema>;
+export type MaintenanceSpec = z.infer<typeof maintenanceSpecSchema>;
 export type StripePriceEnvBindingSpec = z.infer<typeof stripePriceEnvBindingSpecSchema>;
 export type StripeCatalogPriceSpec = z.infer<typeof stripeCatalogPriceSpecSchema>;
 export type StripeCatalogProductSpec = z.infer<typeof stripeCatalogProductSpecSchema>;

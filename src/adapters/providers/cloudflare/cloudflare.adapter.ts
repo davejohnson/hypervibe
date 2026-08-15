@@ -1,9 +1,15 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   providerRegistry,
   type ProviderInspectionRequest,
 } from '../../../domain/registry/provider.registry.js';
 import type { IDnsProvider, DnsZone, DnsRecord } from '../../../domain/ports/dns.port.js';
+import type {
+  IEdgeMaintenanceAdapter,
+  MaintenanceEdgeBinding,
+  MaintenanceEdgeObservation,
+} from '../../../domain/ports/maintenance.port.js';
 import type {
   ILoadBalancerAdapter,
   LoadBalancerEnsureResult,
@@ -13,6 +19,7 @@ import type {
   ManagedLoadBalancer,
 } from '../../../domain/ports/load-balancer.port.js';
 import { CLOUDFLARE_TOKEN_URLS } from '../../../domain/services/connection-guidance.js';
+import type { Receipt } from '../../../domain/ports/provider.port.js';
 
 const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4';
 const CLOUDFLARE_USER_TOKEN_URL = CLOUDFLARE_TOKEN_URLS.user;
@@ -349,7 +356,7 @@ function isDuplicateDnsRecordError(error: unknown): boolean {
   return /already exists|identical record/i.test(message);
 }
 
-export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
+export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter, IEdgeMaintenanceAdapter {
   readonly name = 'cloudflare';
   private credentials: CloudflareCredentials | null = null;
 
@@ -393,6 +400,193 @@ export class CloudflareAdapter implements IDnsProvider, ILoadBalancerAdapter {
     }
 
     return data;
+  }
+
+  private async rawRequest(
+    method: 'GET' | 'PUT',
+    endpoint: string,
+    options: { body?: string; contentType?: string } = {}
+  ): Promise<Response> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const response = await fetch(`${CLOUDFLARE_API_URL}${endpoint}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${normalizeApiToken(this.credentials.apiToken)}`,
+        ...(options.contentType ? { 'Content-Type': options.contentType } : {}),
+      },
+      ...(options.body === undefined ? {} : { body: options.body }),
+    });
+    if (!response.ok) {
+      throw new CloudflareApiError(`Cloudflare API error: HTTP ${response.status}`, response.status);
+    }
+    return response;
+  }
+
+  private maintenanceScript(hostname: string): { name: string; source: string; contentHash: string } {
+    const normalized = hostname.trim().replace(/\.$/, '').toLowerCase();
+    const contentHash = createHash('sha256').update(`hypervibe-maintenance-v1:${normalized}`).digest('hex');
+    const name = `hv-maintenance-${createHash('sha256').update(normalized).digest('hex').slice(0, 20)}`;
+    const source = `addEventListener("fetch",event=>event.respondWith(new Response("Temporarily unavailable for maintenance\\n",{status:503,headers:{"Content-Type":"text/plain; charset=utf-8","Cache-Control":"no-store","Retry-After":"30","X-Hypervibe-Maintenance":"${contentHash}"}})));`;
+    return { name, source, contentHash };
+  }
+
+  async observeMaintenanceEdge(
+    hostname: string,
+    binding?: MaintenanceEdgeBinding
+  ): Promise<MaintenanceEdgeObservation> {
+    try {
+      const expected = this.maintenanceScript(hostname);
+      const scope = await this.resolveLoadBalancerScope(hostname);
+      const routes = await this.listPaginated<{ id: string; pattern: string; script?: string }>(
+        `/zones/${scope.zoneId}/workers/routes`
+      );
+      const pattern = `${hostname.trim().replace(/\.$/, '').toLowerCase()}/*`;
+      const matching = routes.filter((route) => route.pattern.toLowerCase() === pattern);
+      const conflicting = routes.filter((route) => {
+        const candidate = route.pattern.toLowerCase();
+        return candidate.startsWith(`${hostname.toLowerCase()}/`)
+          && candidate !== pattern
+          && route.script !== expected.name;
+      });
+      if (conflicting.length > 0) {
+        return { state: 'unknown', hostname, markerVerified: false, binding, reason: 'maintenance_edge_conflicting_route' };
+      }
+      if (!binding) {
+        return matching.length === 0
+          ? { state: 'inactive', hostname, markerVerified: false }
+          : { state: 'unknown', hostname, markerVerified: false, reason: 'maintenance_edge_unbound_route' };
+      }
+      if (
+        binding.hostname !== hostname
+        || binding.accountId !== scope.accountId
+        || binding.zoneId !== scope.zoneId
+        || binding.scriptName !== expected.name
+        || binding.contentHash !== expected.contentHash
+      ) {
+        return { state: 'unknown', hostname, markerVerified: false, reason: 'maintenance_edge_binding_mismatch' };
+      }
+      const exact = matching.filter((route) => route.id === binding.routeId && route.script === binding.scriptName);
+      if (exact.length !== 1) {
+        return matching.length === 0
+          ? { state: 'inactive', hostname, markerVerified: false, binding }
+          : { state: 'unknown', hostname, markerVerified: false, binding, reason: 'maintenance_edge_route_mismatch' };
+      }
+      const marker = await fetch(`https://${hostname}/.well-known/hypervibe-maintenance?nonce=${Date.now()}`, {
+        redirect: 'manual',
+        headers: { 'Cache-Control': 'no-cache' },
+      });
+      const markerVerified = marker.status === 503
+        && marker.headers.get('x-hypervibe-maintenance') === expected.contentHash;
+      return markerVerified
+        ? { state: 'active', hostname, markerVerified: true, binding }
+        : { state: 'unknown', hostname, markerVerified: false, binding, reason: 'maintenance_edge_marker_unverified' };
+    } catch {
+      return { state: 'unknown', hostname, markerVerified: false, reason: 'maintenance_edge_observation_failed' };
+    }
+  }
+
+  async ensureMaintenanceEdge(
+    hostname: string,
+    expectedContentHash: string,
+    binding?: MaintenanceEdgeBinding
+  ): Promise<Receipt> {
+    try {
+      const expected = this.maintenanceScript(hostname);
+      if (expected.contentHash !== expectedContentHash) {
+        throw new Error('Reviewed maintenance content changed.');
+      }
+      const scope = await this.resolveLoadBalancerScope(hostname);
+      const pattern = `${hostname.trim().replace(/\.$/, '').toLowerCase()}/*`;
+      const routes = await this.listPaginated<{ id: string; pattern: string; script?: string }>(
+        `/zones/${scope.zoneId}/workers/routes`
+      );
+      const matching = routes.filter((route) => route.pattern.toLowerCase() === pattern);
+      const conflicting = routes.filter((route) => {
+        const candidate = route.pattern.toLowerCase();
+        return candidate.startsWith(`${hostname.toLowerCase()}/`)
+          && candidate !== pattern
+          && route.script !== expected.name;
+      });
+      if (matching.some((route) => route.script !== expected.name) || conflicting.length > 0) {
+        throw new Error('The hostname already has a different Cloudflare Worker route.');
+      }
+      if (!binding && matching.length > 0) {
+        throw new Error('A matching maintenance route exists without a durable Hypervibe binding.');
+      }
+      await this.rawRequest(
+        'PUT',
+        `/accounts/${scope.accountId}/workers/scripts/${encodeURIComponent(expected.name)}`,
+        { body: expected.source, contentType: 'application/javascript' }
+      );
+      let route = binding
+        ? matching.find((candidate) => candidate.id === binding.routeId)
+        : undefined;
+      if (!route) {
+        const created = await this.request<{ id: string; pattern: string; script: string }>(
+          'POST',
+          `/zones/${scope.zoneId}/workers/routes`,
+          { pattern, script: expected.name }
+        );
+        route = created.result;
+      }
+      const nextBinding: MaintenanceEdgeBinding = {
+        hostname,
+        accountId: scope.accountId,
+        zoneId: scope.zoneId,
+        routeId: route.id,
+        scriptName: expected.name,
+        contentHash: expected.contentHash,
+      };
+      return {
+        success: true,
+        message: `Cloudflare maintenance edge configured for ${hostname}`,
+        data: { binding: nextBinding, applied: 1, skipped: 0 },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Cloudflare maintenance edge was not configured for ${hostname}`,
+        error: error instanceof Error ? error.message : 'Cloudflare maintenance edge failed',
+      };
+    }
+  }
+
+  async removeMaintenanceEdge(binding: MaintenanceEdgeBinding): Promise<Receipt> {
+    try {
+      const routes = await this.listPaginated<{ id: string; pattern: string; script?: string }>(
+        `/zones/${binding.zoneId}/workers/routes`
+      );
+      const route = routes.find((candidate) => candidate.id === binding.routeId);
+      if (route && (
+        route.pattern.toLowerCase() !== `${binding.hostname.toLowerCase()}/*`
+        || route.script !== binding.scriptName
+      )) {
+        throw new Error('The bound Cloudflare route identity changed.');
+      }
+      if (route) {
+        await this.request('DELETE', `/zones/${binding.zoneId}/workers/routes/${binding.routeId}`);
+      }
+      try {
+        await this.request('DELETE', `/accounts/${binding.accountId}/workers/scripts/${encodeURIComponent(binding.scriptName)}`);
+      } catch (error) {
+        if (!(error instanceof CloudflareApiError) || error.status !== 404) throw error;
+      }
+      return {
+        success: true,
+        message: `Cloudflare maintenance edge removed from ${binding.hostname}`,
+        data: { applied: route ? 1 : 0, skipped: route ? 0 : 1 },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Cloudflare maintenance edge was not removed from ${binding.hostname}`,
+        error: error instanceof Error ? error.message : 'Cloudflare maintenance edge removal failed',
+      };
+    }
+  }
+
+  maintenanceContentHash(hostname: string): string {
+    return this.maintenanceScript(hostname).contentHash;
   }
 
   private async listPaginated<T>(endpoint: string): Promise<T[]> {

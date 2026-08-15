@@ -89,6 +89,11 @@ import {
   planLoadBalancer,
 } from '../services/load-balancer-plan.service.js';
 import { planDataMigration } from '../services/data-migration-plan.service.js';
+import { planMaintenance } from '../services/maintenance-plan.service.js';
+import {
+  observeEnvironmentMaintenance,
+  parseEnvironmentMaintenanceBinding,
+} from '../services/environment-maintenance.service.js';
 
 export interface PlanOptions {
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
@@ -414,6 +419,24 @@ export class PlanService {
           observed.partial = true;
           observed.completeness.storage = 'unknown';
           observed.warnings.push(`Storage observation failed (${storageProvider}): ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      if (
+        environmentSpec.maintenance
+        || parseEnvironmentMaintenanceBinding(environment)
+      ) {
+        observed.maintenance = await observeEnvironmentMaintenance({
+          project,
+          environment,
+          environmentSpec,
+          hostingAdapter: adapter,
+        });
+        if (observed.maintenance.state === 'unknown') {
+          observed.partial = true;
+          observed.warnings.push(
+            'Environment maintenance observation is incomplete; transition actions are blocked fail-closed.'
+          );
         }
       }
 
@@ -929,6 +952,24 @@ export class PlanService {
       }
     }
     const { observed, warnings: observeWarnings } = await this.observeEnvironment(projectForPlan, environmentForObserve, environmentSpec);
+    const maintenance = observed && environmentForObserve
+      ? planMaintenance({
+          environmentName,
+          environmentSpec,
+          environment: environmentForObserve,
+          observed,
+        })
+      : {
+          actions: [],
+          pending: Boolean(environmentSpec.maintenance?.enabled),
+          providers: [],
+          warnings: [],
+        };
+    if (maintenance.pending && serviceFilter) {
+      return {
+        error: 'Environment maintenance must use a full environment plan. Remove services= and re-run hv_plan.',
+      };
+    }
     const delegatedSecrets = serviceFilter
       ? { actions: [], desiredEnvVars: {}, inputRequired: [], warnings: [] }
       : planDelegatedSecrets({
@@ -947,6 +988,10 @@ export class PlanService {
     const sourceEnvironment = sourceEnvironmentName
       ? this.envRepo.findByProjectAndName(project.id, sourceEnvironmentName)
       : null;
+    const sourceObservation = sourceEnvironmentSpec && sourceEnvironment
+      ? await this.observeEnvironment(projectForPlan, sourceEnvironment, sourceEnvironmentSpec)
+      : null;
+    const sourceMaintenanceWarnings = sourceObservation?.warnings ?? [];
     const dataMigration = sourceEnvironmentSpec
       ? planDataMigration({
           targetEnvironmentName: environmentName,
@@ -958,6 +1003,8 @@ export class PlanService {
           sourceComponents: sourceEnvironment
             ? this.componentRepo.findByEnvironmentId(sourceEnvironment.id)
             : [],
+          sourceMaintenance: sourceObservation?.observed?.maintenance,
+          targetMaintenance: observed?.maintenance,
         })
       : { actions: [], pending: false, providers: [], warnings: [] };
     if (dataMigration.pending && serviceFilter) {
@@ -1070,7 +1117,9 @@ export class PlanService {
       providerDisplayName: hostingMetadata?.displayName ?? environmentSpec.hosting.provider,
       nonNativeSourcePolicy: hostingMetadata?.orchestration?.nativeBranchDeploy?.nonNativeSourcePolicy,
     });
-    const blocked: EnvironmentPlan['blocked'] = dataMigration.pending
+    const blocked: EnvironmentPlan['blocked'] = maintenance.pending
+      ? this.providerPreflight(maintenance.providers)
+      : dataMigration.pending
       ? this.providerPreflight(dataMigration.providers)
       : [
           ...this.preflight(environmentSpec, environmentName),
@@ -1083,6 +1132,7 @@ export class PlanService {
       ...(domainRegistration.action ? [domainRegistration.action] : []),
       ...nativeDeploySources.actions,
       ...diff.actions,
+      ...maintenance.actions,
     ];
     if (databaseResilience.actions.length > 0) {
       const firstServiceIndex = actions.findIndex((action) => action.resource.kind === 'service');
@@ -1505,7 +1555,24 @@ export class PlanService {
     // desired database/bucket or deploy services in the same apply: each copy
     // handler owns a fresh unreachable candidate, verifies it, and only then
     // records it as active for a later plan.
-    if (dataMigration.pending) {
+    if (maintenance.pending) {
+      const scaffolding = actions.filter((action) =>
+        (action.resource.kind === 'project' || action.resource.kind === 'environment')
+        && action.type !== 'destroy'
+      );
+      const scaffoldDependencies = scaffolding
+        .filter((action) => action.type !== 'noop')
+        .map((action) => action.id);
+      actions = [
+        ...scaffolding,
+        ...maintenance.actions.map((action) => action.type === 'noop' || scaffoldDependencies.length === 0
+          ? action
+          : {
+              ...action,
+              dependsOn: Array.from(new Set([...(action.dependsOn ?? []), ...scaffoldDependencies])),
+            }),
+      ];
+    } else if (dataMigration.pending) {
       const scaffolding = actions.filter((action) =>
         (action.resource.kind === 'project' || action.resource.kind === 'environment')
         && action.type !== 'destroy'
@@ -1704,7 +1771,7 @@ export class PlanService {
         : {}),
       actions,
       unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged, ...loadBalancer.unmanaged],
-      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedSeedRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
+      warnings: [...specWarnings, ...sharedProjectBinding.warnings, ...observeWarnings, ...sourceMaintenanceWarnings, ...envFileWarnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...maintenance.warnings, ...dataMigration.warnings, ...nativeDeploySources.warnings, ...sourceWarnings, ...domainRegistration.warnings, ...loadBalancer.warnings, ...ciDeploy.warnings, ...appliedSpecHash.warnings, ...managedSeedRelease.warnings, ...repoCollaboration.warnings, ...githubInfrastructure.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings, ...filterWarnings],
       ...(secretInputRequired.length > 0 ? { inputRequired: secretInputRequired } : {}),
       ...(overrides ? { overrides } : {}),
     };

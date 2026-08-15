@@ -51,6 +51,81 @@ describe('CloudflareAdapter.findZoneByName', () => {
   });
 });
 
+describe('CloudflareAdapter maintenance edge', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('creates a bound static 503 edge and verifies its public marker', async () => {
+    const hostname = 'production.example.com';
+    let routes: Array<{ id: string; pattern: string; script: string }> = [];
+    let uploadedScript = '';
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_maintenance', accountId: 'account-1' });
+    vi.spyOn(adapter, 'resolveLoadBalancerScope').mockResolvedValue({
+      accountId: 'account-1',
+      zoneId: 'zone-1',
+    });
+    const contentHash = adapter.maintenanceContentHash(hostname);
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.includes('/workers/routes') && method === 'GET') return cfResponse(routes);
+      if (url.includes('/workers/scripts/') && method === 'PUT') {
+        uploadedScript = String(init?.body ?? '');
+        return new Response('', { status: 200 });
+      }
+      if (url.includes('/workers/routes') && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { pattern: string; script: string };
+        routes = [{ id: 'route-1', ...body }];
+        return cfResponse(routes[0]);
+      }
+      if (url.startsWith(`https://${hostname}/`)) {
+        return new Response('Temporarily unavailable', {
+          status: 503,
+          headers: { 'X-Hypervibe-Maintenance': contentHash },
+        });
+      }
+      throw new Error(`unexpected request: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const ensured = await adapter.ensureMaintenanceEdge(hostname, contentHash);
+    const binding = ensured.data?.binding;
+
+    expect(ensured).toMatchObject({ success: true, data: { applied: 1, skipped: 0 } });
+    expect(uploadedScript).toContain('status:503');
+    expect(uploadedScript).toContain(contentHash);
+    expect(binding).toMatchObject({ hostname, routeId: 'route-1', contentHash });
+    await expect(adapter.observeMaintenanceEdge(hostname, binding as never)).resolves.toMatchObject({
+      state: 'active',
+      markerVerified: true,
+    });
+  });
+
+  it('does not replace an existing unrelated Worker route', async () => {
+    const adapter = new CloudflareAdapter();
+    adapter.connect({ apiToken: 'cfut_maintenance', accountId: 'account-1' });
+    vi.spyOn(adapter, 'resolveLoadBalancerScope').mockResolvedValue({
+      accountId: 'account-1',
+      zoneId: 'zone-1',
+    });
+    const fetchMock = vi.fn(async () => cfResponse([
+      { id: 'route-existing', pattern: 'production.example.com/*', script: 'customer-worker' },
+    ]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(adapter.ensureMaintenanceEdge(
+      'production.example.com',
+      adapter.maintenanceContentHash('production.example.com')
+    )).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('different Cloudflare Worker route'),
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+});
+
 describe('CloudflareAdapter.verify', () => {
   afterEach(() => {
     vi.unstubAllGlobals();

@@ -51,6 +51,8 @@ export interface ProviderMetadata {
       customDomains: 'managed' | 'unsupported';
       /** Whether traffic DNS may be proxied or must remain directly resolvable. */
       domainTrafficProxy?: 'supported' | 'dns-only';
+      /** Provider-owned direct-origin and background-workload suspension. */
+      maintenance?: 'managed' | 'unsupported';
     };
     /** Engines this provider can reconcile through its database adapter. */
     databaseEngines?: string[];

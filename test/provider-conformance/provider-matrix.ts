@@ -52,6 +52,8 @@ export interface HostingProviderContract {
   customDomains: 'managed' | 'unsupported';
   /** Whether the provider certificate path permits proxied traffic DNS. */
   domainTrafficProxy: 'supported' | 'dns-only';
+  /** Reversible, provider-verified suspension of every declared workload. */
+  maintenance: 'managed' | 'unsupported';
   credentials: ProviderCredentialField[];
   /** Opt-in managed GitHub workflow live-test profile. */
   managedWorkflow?: ManagedWorkflowFixture;
@@ -189,6 +191,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'supported',
     customDomains: 'managed',
     domainTrafficProxy: 'supported',
+    maintenance: 'managed',
     credentials: railwayCredentials,
   },
   {
@@ -199,6 +202,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'supported',
     customDomains: 'managed',
     domainTrafficProxy: 'dns-only',
+    maintenance: 'managed',
     credentials: gcpHostingCredentials,
   },
   {
@@ -209,6 +213,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'ready-for-live',
     customDomains: 'managed',
     domainTrafficProxy: 'dns-only',
+    maintenance: 'unsupported',
     credentials: awsHostingCredentials,
     managedWorkflow: dockerWebManagedWorkflow('deploy-ecs-production.yml'),
     implementationNote:
@@ -222,6 +227,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'ready-for-live',
     customDomains: 'managed',
     domainTrafficProxy: 'dns-only',
+    maintenance: 'managed',
     credentials: azureHostingCredentials,
     managedWorkflow: dockerWebManagedWorkflow('deploy-azure-container-apps-production.yml'),
     implementationNote:
@@ -235,6 +241,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'ready-for-live',
     customDomains: 'managed',
     domainTrafficProxy: 'supported',
+    maintenance: 'unsupported',
     credentials: digitalOceanCredentials,
     managedWorkflow: {
       ...dockerWebManagedWorkflow('deploy-digitalocean-production.yml'),
@@ -252,6 +259,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'ready-for-live',
     customDomains: 'managed',
     domainTrafficProxy: 'supported',
+    maintenance: 'unsupported',
     credentials: vercelCredentials,
     managedWorkflow: {
       environmentName: 'production',

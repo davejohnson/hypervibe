@@ -28,6 +28,10 @@ import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../ap
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { connectionSetupOptions } from '../domain/services/connection-guidance.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
+import { PlanService } from '../domain/plan/plan.service.js';
+import { parseEnvironmentMaintenanceBinding } from '../domain/services/environment-maintenance.service.js';
+import type { Environment } from '../domain/entities/environment.entity.js';
+import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
 
 function resolveEnvOrThrow(ctx: CommandContext, projectRef: string | undefined, envName: string | undefined) {
   const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -202,6 +206,8 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
       let healthPath = path;
       let resolvedService: string | undefined;
       let resolvedProject: ReturnType<CommandContext['resolveProjectOrThrow']> | undefined;
+      let resolvedEnvironment: Environment | undefined;
+      let resolvedEnvironmentSpec: EnvironmentSpec | undefined;
 
       if (url) {
         baseUrl = normalizeBaseUrl(url);
@@ -214,8 +220,10 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         if (!environment) {
           throw new HvError('NOT_FOUND', 'No environment found to check.', { hint: 'Pass env explicitly.' });
         }
+        resolvedEnvironment = environment;
         const storedService = resolveHealthService(project.id, service);
         const environmentSpec = new SpecStore().get(project)?.spec.environments[environment.name];
+        resolvedEnvironmentSpec = environmentSpec;
         const desiredServiceName = service
           ?? Object.entries(environmentSpec?.services ?? {}).find(([, value]) => value.workloadKind === 'web')?.[0]
           ?? Object.keys(environmentSpec?.services ?? {})[0];
@@ -242,6 +250,40 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
           ?? storedService?.buildConfig.healthCheckPath
           ?? desiredService?.healthCheckPath
           ?? '/';
+      }
+
+      if (
+        resolvedProject
+        && resolvedEnvironment
+        && resolvedEnvironmentSpec
+        && (
+          resolvedEnvironmentSpec.maintenance
+          || parseEnvironmentMaintenanceBinding(resolvedEnvironment)
+        )
+      ) {
+        const observation = await new PlanService().observeEnvironment(
+          resolvedProject,
+          resolvedEnvironment,
+          resolvedEnvironmentSpec
+        );
+        const maintenance = observation.observed?.maintenance;
+        if (maintenance) {
+          return commandSuccess({
+            service: resolvedService,
+            baseUrl,
+            state: maintenance.state === 'active' ? 'maintenance' : 'unknown',
+            maintenance: {
+              desired: resolvedEnvironmentSpec.maintenance?.enabled === true,
+              observed: maintenance.state,
+              stage: maintenance.stage,
+            },
+          }, {
+            hint: maintenance.state === 'active'
+              ? 'The provider-verified maintenance boundary is active; normal HTTP health is intentionally suppressed.'
+              : 'Maintenance is transitioning or could not be fully observed. Use hv_status before changing data.',
+            warnings: observation.warnings.length > 0 ? observation.warnings : undefined,
+          });
+        }
       }
 
       const check = await runHttpCheck({

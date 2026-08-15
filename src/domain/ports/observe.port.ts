@@ -53,6 +53,55 @@ export interface ObservedService {
   envVarHashes: Record<string, string>;
   /** 'empty' = the service exists but has never deployed (no source/code). */
   status: 'running' | 'failed' | 'empty' | 'unknown';
+  /** Provider-confirmed execution state used by environment maintenance. */
+  maintenance?: {
+    state: 'running' | 'suspended' | 'unknown';
+    deploymentId?: string;
+    deploymentStatus?: string;
+    numReplicas?: number;
+    sleepApplication?: boolean;
+    providerState?: Record<string, unknown>;
+  };
+}
+
+export interface ObservedMaintenanceEdge {
+  state: 'active' | 'inactive' | 'unknown';
+  hostname: string;
+  markerVerified: boolean;
+  accountId?: string;
+  zoneId?: string;
+  routeId?: string;
+  scriptName?: string;
+  contentHash?: string;
+  reason?: string;
+}
+
+export interface ObservedMaintenanceWorkload {
+  state: 'running' | 'suspended' | 'unknown';
+  serviceId: string;
+  workloadKind: string;
+  deploymentId?: string;
+  deploymentStatus?: string;
+  numReplicas?: number;
+  sleepApplication?: boolean;
+  cronSchedule?: string;
+  providerState?: Record<string, unknown>;
+  reason?: string;
+}
+
+export interface ObservedMaintenanceDatabase {
+  state: 'fenced' | 'unfenced' | 'not-applicable' | 'unknown';
+  componentId?: string;
+  externalId?: string;
+  reason?: string;
+}
+
+export interface EnvironmentMaintenanceObservation {
+  state: 'active' | 'inactive' | 'partial' | 'unknown';
+  stage: 'edge' | 'workloads' | 'database' | 'verified' | 'exit' | 'unknown';
+  edge: ObservedMaintenanceEdge;
+  workloads: Record<string, ObservedMaintenanceWorkload>;
+  database: ObservedMaintenanceDatabase;
 }
 
 export interface ObservedDatabase {
@@ -124,6 +173,8 @@ export interface ObservedState {
   /** True when one or more sub-queries failed; see warnings. */
   partial: boolean;
   warnings: string[];
+  /** Multi-provider observation of the environment maintenance boundary. */
+  maintenance?: EnvironmentMaintenanceObservation;
 }
 
 export interface IObservableHosting {

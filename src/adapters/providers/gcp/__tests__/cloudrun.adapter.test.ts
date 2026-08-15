@@ -6,7 +6,144 @@ import type { Service } from '../../../../domain/entities/service.entity.js';
 describe('CloudRunAdapter', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+});
+
+describe('CloudRunAdapter maintenance', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
+
+  async function maintenanceAdapter(): Promise<CloudRunAdapter> {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    return adapter;
+  }
+
+  function maintenanceEnvironment(binding: Record<string, unknown>): Environment {
+    const now = new Date();
+    return {
+      id: 'env-maintenance',
+      projectId: 'project-1',
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        environmentId: 'us-central1',
+        services: { workload: binding },
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  it('sets service scaling to zero and restores the exact automatic scaling state', async () => {
+    const adapter = await maintenanceAdapter();
+    const environment = maintenanceEnvironment({ serviceId: 'gcp-project-web' });
+    let scaling: Record<string, unknown> = {
+      scalingMode: 'AUTOMATIC',
+      minInstanceCount: 1,
+      maxInstanceCount: 8,
+    };
+    const patchBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/services/gcp-project-web') && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ name: 'gcp-project-web', scaling });
+      }
+      if (url.includes('/services/gcp-project-web') && init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body)) as { scaling: Record<string, unknown> };
+        patchBodies.push(body);
+        scaling = body.scaling;
+        return Response.json({ name: 'operations/maintenance-scaling' });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const snapshot = await adapter.observeMaintenanceWorkload(environment, 'gcp-project-web', 'web');
+    await expect(adapter.suspendMaintenanceWorkload(environment, snapshot)).resolves.toMatchObject({ success: true });
+    await expect(adapter.resumeMaintenanceWorkload(environment, snapshot)).resolves.toMatchObject({ success: true });
+
+    expect(patchBodies[0]).toEqual({ scaling: { scalingMode: 'MANUAL', manualInstanceCount: 0 } });
+    expect(patchBodies[1]).toEqual({
+      launchStage: 'BETA',
+      scaling: {
+        scalingMode: 'AUTOMATIC',
+        minInstanceCount: 1,
+        maxInstanceCount: 8,
+        manualInstanceCount: null,
+      },
+    });
+    expect(fetchMock.mock.calls.filter(([input, init]) =>
+      String(input).includes('/services/gcp-project-web') && init?.method === 'PATCH'
+    ).every(([input]) => String(input).includes('updateMask='))).toBe(true);
+  });
+
+  it('pauses a cron trigger and cancels active executions before reporting suspension', async () => {
+    vi.stubEnv('HYPERVIBE_GCP_WAIT_DELAY_MS', '0');
+    const adapter = await maintenanceAdapter();
+    const environment = maintenanceEnvironment({
+      serviceId: 'gcp-project-cron-schedule',
+      jobName: 'gcp-project-cron',
+      schedulerJobName: 'gcp-project-cron-schedule',
+    });
+    let schedulerState = 'ENABLED';
+    let executionTerminal = false;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.includes('cloudscheduler.googleapis.com') && method === 'GET') {
+        return Response.json({ state: schedulerState, schedule: '0 * * * *' });
+      }
+      if (url.endsWith(':pause') && method === 'POST') {
+        schedulerState = 'PAUSED';
+        return Response.json({ state: schedulerState });
+      }
+      if (url.endsWith(':resume') && method === 'POST') {
+        schedulerState = 'ENABLED';
+        return Response.json({ state: schedulerState });
+      }
+      if (url.includes('/executions?') && method === 'GET') {
+        return Response.json({
+          executions: [executionTerminal
+            ? { name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron/executions/run-1', completionStatus: 'SUCCEEDED' }
+            : { name: 'projects/gcp-project/locations/us-central1/jobs/gcp-project-cron/executions/run-1', reconciling: true }],
+        });
+      }
+      if (url.endsWith('/executions/run-1:cancel') && method === 'POST') {
+        executionTerminal = true;
+        return Response.json({ name: 'operations/cancel-run-1' });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const snapshot = await adapter.observeMaintenanceWorkload(
+      environment,
+      'gcp-project-cron-schedule',
+      'cron'
+    );
+    await expect(adapter.suspendMaintenanceWorkload(environment, snapshot)).resolves.toMatchObject({ success: true });
+    await expect(adapter.resumeMaintenanceWorkload(environment, snapshot)).resolves.toMatchObject({ success: true });
+
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).endsWith('/executions/run-1:cancel') && init?.method === 'POST'
+    )).toBe(true);
+  });
+});
 
   it('preserves live revision env vars and Cloud SQL volumes on redeploy', async () => {
     const adapter = new CloudRunAdapter();

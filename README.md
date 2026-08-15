@@ -833,6 +833,15 @@ bindings only after success. Re-run plan/apply to cut services over, verify the
 production release, then re-plan to review deletion of retained rollback
 targets. See [the full migration workflow](docs/data-migration.md).
 
+The copy is authorized only while both source and target declare
+`"maintenance": { "enabled": true }` and Hypervibe freshly verifies the full
+boundary: a Cloudflare-owned static 503 marker, every hosting workload stopped,
+and PostgreSQL defaulting new sessions to read-only. Railway, GCP Cloud Run, and
+Azure Container Apps implement reversible workload maintenance. AWS ECS Express,
+DigitalOcean App Platform, and Vercel currently fail closed before the copy.
+No application maintenance flag, email dry-run switch, or AI dry-run switch is
+introduced.
+
 ### Database resilience and restore drills
 
 Cloud SQL can manage regional availability, backup/PITR retention, named read

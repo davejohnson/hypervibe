@@ -29,6 +29,11 @@ import {
   type NormalizedDnsRecord,
 } from '../../../domain/services/domain-dns-records.js';
 import { inspectRailwayResources } from './railway-inspection.driver.js';
+import type {
+  IWorkloadMaintenanceAdapter,
+  MaintenanceWorkloadObservation,
+  MaintenanceWorkloadSnapshot,
+} from '../../../domain/ports/maintenance.port.js';
 
 // Credentials schema for self-registration
 export const RailwayCredentialsSchema = z.object({
@@ -98,7 +103,7 @@ function railwayNamePart(value: string): string {
     || 'default';
 }
 
-export class RailwayAdapter implements IProviderAdapter {
+export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAdapter {
   readonly name = 'railway';
 
   readonly capabilities: ProviderCapabilities = {
@@ -115,6 +120,7 @@ export class RailwayAdapter implements IProviderAdapter {
     supportsOneOffTasks: true,
     supportsDeferredDeploy: true,
     supportsTemporaryDatabaseAccess: true,
+    supportsMaintenance: true,
   };
 
   private client: GraphQLClient | null = null;
@@ -4259,7 +4265,7 @@ export class RailwayAdapter implements IProviderAdapter {
     const bindings = environment.platformBindings as {
       projectId?: string;
       environmentId?: string;
-      services?: Record<string, { serviceId?: string; source?: { repo?: string; branch?: string } }>;
+      services?: Record<string, { serviceId?: string; workloadKind?: string; source?: { repo?: string; branch?: string } }>;
     };
     const projectId = bindings.projectId;
     if (!projectId) {
@@ -4422,6 +4428,10 @@ export class RailwayAdapter implements IProviderAdapter {
       let releaseCommand: string | undefined;
       let healthCheckPath = instance?.healthcheckPath ?? undefined;
       let cronSchedule: string | undefined;
+      let numReplicas: number | undefined;
+      let sleepApplication: boolean | undefined;
+      let deploymentId: string | undefined;
+      let deploymentStatus: string | undefined;
       let instanceSourceRepo: string | undefined;
       let instanceSourceObserved = false;
       let status: ObservedService['status'] = 'unknown';
@@ -4435,6 +4445,10 @@ export class RailwayAdapter implements IProviderAdapter {
             releaseCommand = this.normalizePreDeployCommand(instanceDetails.preDeployCommand);
             healthCheckPath = instanceDetails.healthcheckPath ?? healthCheckPath;
             cronSchedule = instanceDetails.cronSchedule ?? undefined;
+            numReplicas = instanceDetails.numReplicas;
+            sleepApplication = instanceDetails.sleepApplication;
+            deploymentId = instanceDetails.latestDeployment?.id;
+            deploymentStatus = instanceDetails.latestDeployment?.status;
             instanceSourceRepo = instanceDetails.source?.repo ?? undefined;
             // No deployment at all means the service has no source connected.
             status = instanceDetails.latestDeployment
@@ -4478,7 +4492,11 @@ export class RailwayAdapter implements IProviderAdapter {
       services.push({
         name: observedServiceName,
         externalId: node.id,
-        workloadKind: cronSchedule ? 'cron' : 'web',
+        workloadKind: ['web', 'worker', 'cron'].includes(
+          bindings.services?.[observedServiceName]?.workloadKind ?? ''
+        )
+          ? bindings.services![observedServiceName]!.workloadKind as 'web' | 'worker' | 'cron'
+          : cronSchedule ? 'cron' : 'web',
         url: serviceDomain ? `https://${serviceDomain}` : undefined,
         customDomains,
         ...(Object.keys(customDomainStatus).length > 0 ? { customDomainStatus } : {}),
@@ -4496,6 +4514,15 @@ export class RailwayAdapter implements IProviderAdapter {
         envVarKeys,
         envVarHashes,
         status,
+        maintenance: {
+          state: !deploymentId || ['REMOVED', 'CANCELLED'].includes(deploymentStatus ?? '')
+            ? 'suspended'
+            : ['SUCCESS', 'SLEEPING'].includes(deploymentStatus ?? '') ? 'running' : 'unknown',
+          ...(deploymentId ? { deploymentId } : {}),
+          ...(deploymentStatus ? { deploymentStatus } : {}),
+          ...(numReplicas === undefined ? {} : { numReplicas }),
+          ...(sleepApplication === undefined ? {} : { sleepApplication }),
+        },
       });
     }
 
@@ -4552,8 +4579,10 @@ export class RailwayAdapter implements IProviderAdapter {
     preDeployCommand?: unknown;
     healthcheckPath?: string;
     cronSchedule?: string;
+    numReplicas?: number;
+    sleepApplication?: boolean;
     source?: { repo?: string } | null;
-    latestDeployment?: { status?: string } | null;
+    latestDeployment?: { id?: string; status?: string } | null;
   } | null> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
@@ -4566,10 +4595,13 @@ export class RailwayAdapter implements IProviderAdapter {
           preDeployCommand
           healthcheckPath
           cronSchedule
+          numReplicas
+          sleepApplication
           source {
             repo
           }
           latestDeployment {
+            id
             status
           }
         }
@@ -4582,11 +4614,165 @@ export class RailwayAdapter implements IProviderAdapter {
         preDeployCommand?: unknown;
         healthcheckPath?: string;
         cronSchedule?: string;
+        numReplicas?: number;
+        sleepApplication?: boolean;
         source?: { repo?: string } | null;
-        latestDeployment?: { status?: string } | null;
+        latestDeployment?: { id?: string; status?: string } | null;
       } | null;
     }>(query, { serviceId, environmentId });
     return result.serviceInstance ?? null;
+  }
+
+  async observeMaintenanceWorkload(
+    environment: Environment,
+    serviceId: string,
+    workloadKind: MaintenanceWorkloadSnapshot['workloadKind']
+  ): Promise<MaintenanceWorkloadObservation> {
+    const bindings = environment.platformBindings as {
+      environmentId?: string;
+      services?: Record<string, { serviceId?: string }>;
+    };
+    if (
+      !bindings.environmentId
+      || !Object.values(bindings.services ?? {}).some((binding) => binding.serviceId === serviceId)
+    ) {
+      return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_workload_unbound' };
+    }
+    try {
+      const details = await this.getServiceInstanceDetails(serviceId, bindings.environmentId);
+      if (!details) {
+        return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_workload_missing' };
+      }
+      const deploymentStatus = details.latestDeployment?.status;
+      const suspended = !details.latestDeployment
+        || ['REMOVED', 'CANCELLED'].includes(deploymentStatus ?? '');
+      const running = ['SUCCESS', 'SLEEPING'].includes(deploymentStatus ?? '');
+      return {
+        serviceId,
+        environmentId: bindings.environmentId,
+        workloadKind,
+        wasRunning: running,
+        state: suspended ? 'suspended' : running ? 'running' : 'unknown',
+        deploymentId: details.latestDeployment?.id,
+        deploymentStatus,
+        numReplicas: details.numReplicas,
+        sleepApplication: details.sleepApplication,
+        cronSchedule: details.cronSchedule,
+      };
+    } catch {
+      return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_workload_observation_failed' };
+    }
+  }
+
+  async suspendMaintenanceWorkload(
+    environment: Environment,
+    expected: MaintenanceWorkloadSnapshot
+  ): Promise<Receipt> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const current = await this.observeMaintenanceWorkload(environment, expected.serviceId, expected.workloadKind);
+    if (current.state === 'suspended') {
+      return { success: true, message: `Railway workload ${expected.serviceId} is already suspended`, data: { applied: 0, skipped: 1 } };
+    }
+    if (current.state !== 'running' || !current.environmentId || !current.deploymentId) {
+      return { success: false, message: 'Railway workload was not suspended', error: 'The exact bound workload deployment could not be verified.' };
+    }
+    try {
+      if (current.cronSchedule) {
+        await this.updateMaintenanceInstance(current.environmentId, expected.serviceId, { cronSchedule: null });
+      }
+      const mutation = gql`
+        mutation DeploymentRemove($id: String!) {
+          deploymentRemove(id: $id)
+        }
+      `;
+      await this.client.request(mutation, { id: current.deploymentId });
+      const verified = await this.waitForRailwayMaintenanceState(environment, expected, 'suspended');
+      return verified
+        ? { success: true, message: `Suspended Railway workload ${expected.serviceId}`, data: { applied: 1, skipped: 0 } }
+        : { success: false, message: 'Railway suspension was not verified', error: 'Railway did not report the reviewed deployment removed before the verification deadline.' };
+    } catch (error) {
+      return { success: false, message: 'Railway workload was not suspended', error: this.describeError(error) };
+    }
+  }
+
+  async resumeMaintenanceWorkload(
+    environment: Environment,
+    snapshot: MaintenanceWorkloadSnapshot
+  ): Promise<Receipt> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const current = await this.observeMaintenanceWorkload(environment, snapshot.serviceId, snapshot.workloadKind);
+    if (!snapshot.wasRunning) {
+      return current.state === 'suspended'
+        ? { success: true, message: `Railway workload ${snapshot.serviceId} was stopped before maintenance`, data: { applied: 0, skipped: 1 } }
+        : { success: false, message: 'Railway restoration was blocked', error: 'A workload that was previously stopped is now running.' };
+    }
+    if (current.state === 'running') {
+      return { success: true, message: `Railway workload ${snapshot.serviceId} is already running`, data: { applied: 0, skipped: 1 } };
+    }
+    if (current.state !== 'suspended' || !current.environmentId) {
+      return { success: false, message: 'Railway workload was not restored', error: 'The exact bound workload state could not be verified.' };
+    }
+    try {
+      await this.updateMaintenanceInstance(current.environmentId, snapshot.serviceId, {
+        ...(snapshot.numReplicas === undefined ? {} : { numReplicas: snapshot.numReplicas }),
+        ...(snapshot.sleepApplication === undefined ? {} : { sleepApplication: snapshot.sleepApplication }),
+      });
+      const redeploy = gql`
+        mutation ServiceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
+          serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+        }
+      `;
+      await this.client.request(redeploy, {
+        serviceId: snapshot.serviceId,
+        environmentId: current.environmentId,
+      });
+      if (!await this.waitForRailwayMaintenanceState(environment, snapshot, 'running')) {
+        return { success: false, message: 'Railway restoration was not verified', error: 'Railway did not report a successful deployment before the verification deadline.' };
+      }
+      if (snapshot.cronSchedule) {
+        await this.updateMaintenanceInstance(current.environmentId, snapshot.serviceId, {
+          cronSchedule: snapshot.cronSchedule,
+        });
+      }
+      return { success: true, message: `Restored Railway workload ${snapshot.serviceId}`, data: { applied: 1, skipped: 0 } };
+    } catch (error) {
+      return { success: false, message: 'Railway workload was not restored', error: this.describeError(error) };
+    }
+  }
+
+  private async updateMaintenanceInstance(
+    environmentId: string,
+    serviceId: string,
+    input: Record<string, unknown>
+  ): Promise<void> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const mutation = gql`
+      mutation ServiceInstanceUpdate(
+        $serviceId: String!
+        $environmentId: String!
+        $input: ServiceInstanceUpdateInput!
+      ) {
+        serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
+      }
+    `;
+    await this.client.request(mutation, { serviceId, environmentId, input });
+  }
+
+  private async waitForRailwayMaintenanceState(
+    environment: Environment,
+    snapshot: MaintenanceWorkloadSnapshot,
+    expected: 'running' | 'suspended'
+  ): Promise<boolean> {
+    for (let attempt = 1; attempt <= 120; attempt += 1) {
+      const observed = await this.observeMaintenanceWorkload(environment, snapshot.serviceId, snapshot.workloadKind);
+      if (observed.state === expected) return true;
+      if (observed.state === 'unknown' && ['FAILED', 'CRASHED'].includes(observed.deploymentStatus ?? '')) return false;
+      if (attempt < 120) {
+        const delay = Number(process.env.HYPERVIBE_RAILWAY_WAIT_DELAY_MS ?? 1000);
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+    return false;
   }
 
   /**
@@ -4749,7 +4935,7 @@ providerRegistry.register({
       defaultScalarKey: 'apiToken',
     },
     lifecycle: {
-      hosting: { customDomains: 'managed' },
+      hosting: { customDomains: 'managed', maintenance: 'managed' },
       databaseEngines: ['postgres'],
       cacheEngines: ['redis'],
     },

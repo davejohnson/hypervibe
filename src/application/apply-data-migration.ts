@@ -26,6 +26,8 @@ import {
 } from '../domain/services/storage-plan.service.js';
 import type { StorageContext } from '../domain/ports/storage.port.js';
 import type { CommandContext } from './context.js';
+import { observeEnvironmentMaintenance } from '../domain/services/environment-maintenance.service.js';
+import type { IProviderAdapter } from '../domain/ports/provider.port.js';
 
 interface StorageCandidate {
   migrationId: string;
@@ -71,6 +73,50 @@ function accessFailure(label: string, result: Extract<DatabaseAccessAcquireResul
     message: `Could not acquire bounded ${label} database access`,
     error: `Provider access is unavailable (${result.code}); no database binding was changed.`,
   };
+}
+
+async function verifyMigrationMaintenance(params: {
+  project: Project;
+  sourceEnvironment: Environment;
+  targetEnvironment: Environment;
+  sourceSpec: ProjectSpec['environments'][string];
+  targetSpec: ProjectSpec['environments'][string];
+  action: PlanAction;
+}): Promise<ActionResult | null> {
+  if (
+    params.sourceSpec.maintenance?.enabled !== true
+    || params.targetSpec.maintenance?.enabled !== true
+  ) {
+    return stale(params.action, 'Source and target maintenance are no longer desired.');
+  }
+  const observations = await Promise.all([
+    [params.sourceEnvironment, params.sourceSpec] as const,
+    [params.targetEnvironment, params.targetSpec] as const,
+  ].map(async ([environment, spec]) => {
+    const adapterResult = await adapterFactory.getProviderAdapter(spec.hosting.provider, params.project);
+    if (!adapterResult.success || !adapterResult.adapter) return null;
+    const adapter = adapterResult.adapter as IProviderAdapter;
+    await adapter.configureTarget?.({ region: spec.hosting.region });
+    return observeEnvironmentMaintenance({
+      project: params.project,
+      environment,
+      environmentSpec: spec,
+      hostingAdapter: adapter,
+    });
+  }));
+  const [source, target] = observations;
+  if (!source || !target || source.state !== 'active' || target.state !== 'active') {
+    return stale(params.action, 'Provider-verified maintenance is no longer active in both environments.');
+  }
+  const sourceFingerprint = createHash('sha256').update(JSON.stringify(source)).digest('hex');
+  const targetFingerprint = createHash('sha256').update(JSON.stringify(target)).digest('hex');
+  if (
+    sourceFingerprint !== stringField(asRecord(params.action.metadata), 'sourceMaintenanceFingerprint')
+    || targetFingerprint !== stringField(asRecord(params.action.metadata), 'targetMaintenanceFingerprint')
+  ) {
+    return stale(params.action, 'The source or target maintenance observation changed after planning.');
+  }
+  return null;
 }
 
 function migrationIdentity(params: {
@@ -143,6 +189,15 @@ async function applyDatabaseMigration(params: {
   if (!targetEnvironment || !sourceEnvironment) {
     return stale(params.action, 'The source or target environment is not tracked locally.');
   }
+  const maintenanceFailure = await verifyMigrationMaintenance({
+    project: params.project,
+    sourceEnvironment,
+    targetEnvironment,
+    sourceSpec,
+    targetSpec,
+    action: params.action,
+  });
+  if (maintenanceFailure) return maintenanceFailure;
   const alreadyActive = params.ctx.repos.components.findByEnvironmentAndType(
     targetEnvironment.id,
     targetSpec.database.engine
@@ -448,6 +503,15 @@ async function applyStorageMigration(params: {
   const targetEnvironment = params.ctx.repos.environments.findByProjectAndName(params.project.id, params.targetEnvironmentName);
   const sourceEnvironment = params.ctx.repos.environments.findByProjectAndName(params.project.id, identity.sourceEnvironmentName);
   if (!targetEnvironment || !sourceEnvironment) return stale(params.action, 'The source or target environment is not tracked locally.');
+  const maintenanceFailure = await verifyMigrationMaintenance({
+    project: params.project,
+    sourceEnvironment,
+    targetEnvironment,
+    sourceSpec,
+    targetSpec,
+    action: params.action,
+  });
+  if (maintenanceFailure) return maintenanceFailure;
   const reviewedTargetBindings = parseStorageBindings(targetEnvironment);
   const alreadyMarker = asRecord(reviewedTargetBindings[storageName]?.dataMigration);
   if (
