@@ -362,7 +362,7 @@ export class PlanService {
         ) {
           continue;
         }
-        const context = contexts[storageProvider]
+        let context = contexts[storageProvider]
           ?? (storageProvider === provider
             && hostingBindings.projectId
             && hostingBindings.environmentId
@@ -371,10 +371,10 @@ export class PlanService {
                 environmentId: hostingBindings.environmentId,
               }
             : undefined);
-        if (!context) {
+        if (!context && storageProvider === provider) {
           observed.completeness.storage = 'unknown';
           observed.partial = true;
-          observed.warnings.push(`Storage observation unavailable (${storageProvider}): provider context is missing`);
+          observed.warnings.push(`Storage observation unavailable (${storageProvider}): provider environment context is missing`);
           continue;
         }
         const storageResult = await adapterFactory.getStorageAdapter(storageProvider, project);
@@ -383,6 +383,29 @@ export class PlanService {
           observed.completeness.storage = 'unknown';
           observed.warnings.push(`Storage observation failed (${storageProvider}): ${storageResult.error ?? 'adapter unavailable'}`);
           continue;
+        }
+        if (!context) {
+          const regions = [...new Set(Object.values(environmentSpec.storage ?? {})
+            .filter((storage) => storage.provider === storageProvider)
+            .map((storage) => storage.region))];
+          if (regions.length !== 1 || !storageResult.adapter.resolveObservationContext) {
+            observed.completeness.storage = 'unknown';
+            observed.partial = true;
+            observed.warnings.push(`Storage observation unavailable (${storageProvider}): provider context is missing and cannot be resolved read-only`);
+            continue;
+          }
+          const contextResult = await storageResult.adapter.resolveObservationContext(
+            project.name,
+            environment,
+            regions[0]
+          );
+          if (!contextResult.receipt.success || !contextResult.context) {
+            observed.completeness.storage = 'unknown';
+            observed.partial = true;
+            observed.warnings.push(`Storage observation unavailable (${storageProvider}): ${contextResult.receipt.error ?? contextResult.receipt.message}`);
+            continue;
+          }
+          context = contextResult.context;
         }
         try {
           const items = await storageResult.adapter.observe(environment, context);
@@ -531,14 +554,17 @@ export class PlanService {
       const key = `${requirement.provider}:${requirement.scopeHints?.join('|') ?? '*'}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const connectionProviders = providerRegistry.connectionProviders(requirement.provider);
       const scoped = requirement.scopeHints?.length
-        ? this.connectionRepo.findBestVerifiedMatchFromHints(requirement.provider, requirement.scopeHints)
+        ? connectionProviders
+          .map((connectionProvider) => this.connectionRepo.findBestVerifiedMatchFromHints(connectionProvider, requirement.scopeHints!))
+          .find((candidate) => candidate !== null)
         : null;
       const verified = requirement.scopeHints?.length
         ? Boolean(scoped)
-        : this.connectionRepo
-          .findAllByProvider(requirement.provider)
-          .some((c) => c.status === 'verified');
+        : connectionProviders.some((connectionProvider) =>
+          this.connectionRepo.findAllByProvider(connectionProvider).some((connection) => connection.status === 'verified')
+        );
       if (!verified) {
         const scope = requirement.scopeHints?.[0];
         blocked.push({
@@ -569,9 +595,9 @@ export class PlanService {
   providerPreflight(providers: string[]): Array<{ provider: string; reason: string; policy: 'hard' }> {
     const blocked: Array<{ provider: string; reason: string; policy: 'hard' }> = [];
     for (const provider of [...new Set(providers)].sort()) {
-      const verified = this.connectionRepo
-        .findAllByProvider(provider)
-        .some((connection) => connection.status === 'verified');
+      const verified = providerRegistry.connectionProviders(provider).some((connectionProvider) =>
+        this.connectionRepo.findAllByProvider(connectionProvider).some((connection) => connection.status === 'verified')
+      );
       if (!verified) {
         blocked.push({
           provider,

@@ -241,11 +241,11 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
   commands.register(
     'hv_connections',
-    'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages one connection. With provider, action="add" is the default, while "verify", "remove", and "prepare" are explicit. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred.',
+    'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages one connection. With provider, action="add" is the default, while "verify", "remove", and "prepare" are explicit. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers that declare native CLI authentication may omit credentials to use the active local/default credential chain.',
     {
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
       action: z.enum(['add', 'verify', 'remove', 'prepare']).optional().describe('With provider: operation to perform (default: "add")'),
-      credentials: z.record(z.unknown()).optional().describe('action="add": provider-specific credentials object. credentialsRef is recommended, but raw credentials are accepted when the user intentionally wants to enter them in chat.'),
+      credentials: z.record(z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
       credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, or secret-manager refs like 1password://vault/item#field. The resolved value may be a JSON credentials object or a scalar.'),
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. Optional for common single-token providers.'),
       credentialsMap: z.record(z.string()).optional().describe('action="add": for credentialsRef="dotenv:/path/.env", maps provider credential keys to .env variable names, e.g. {"apiToken":"GITHUB_TOKEN","packageReadToken":"GITHUB_PACKAGES_TOKEN"}.'),
@@ -352,7 +352,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         if (credentials && credentialsRef) {
           return commandError('VALIDATION', 'Pass either credentials or credentialsRef, not both.');
         }
-        if (!credentials && !credentialsRef) {
+        const nativeCliAuth = providerRegistry.getMetadata(provider)?.credentials?.supportsNativeCliAuth === true;
+        if (!credentials && !credentialsRef && !nativeCliAuth) {
           return commandError('VALIDATION', 'credentials are required for action="add".', {
             details: setupDetails(provider, scope, project?.name),
             hint: `Recommended: use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, or credentialsRef="file:/absolute/path" for JSON credentials. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
@@ -366,7 +367,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
             ? await parseCredentialRef(provider, credentialsRef, credentialsKey, credentialsMap, {
               ...(projectForSecretRef ? { projectId: projectForSecretRef.id } : {}),
             })
-            : credentials!;
+            : credentials ?? { authMode: 'default' };
         } catch (error) {
           return commandError('VALIDATION', error instanceof Error ? error.message : String(error), {
             details: setupDetails(provider, scope, project?.name),
@@ -398,6 +399,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           status: 'verified',
           message: verified.message,
           ...(credentialsRef ? { credentialsSource: refKind(credentialsRef) } : {}),
+          ...(!credentials && !credentialsRef && nativeCliAuth ? { credentialsSource: 'native-cli' } : {}),
           ...verified.data,
           ...(saved.dependenciesInstalled ? { dependenciesInstalled: saved.dependenciesInstalled } : {}),
           ...(saved.dependencyErrors ? { dependencyErrors: saved.dependencyErrors } : {}),

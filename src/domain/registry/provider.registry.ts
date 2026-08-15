@@ -33,12 +33,16 @@ export interface ProviderMetadata {
   setupHelpUrl?: string;
   credentials?: {
     defaultScalarKey?: string;
+    /** The adapter can authenticate through the provider's native local CLI/default chain. */
+    supportsNativeCliAuth?: boolean;
     /**
      * Environment-variable names which may resolve the same credential value.
      * Exact requested names win; aliases are only fallbacks.
      */
     environmentVariableAliases?: string[][];
   };
+  /** Existing provider connections whose authentication shape this adapter can reuse. */
+  connectionAliases?: string[];
   orchestration?: ProviderOrchestrationMetadata;
   lifecycle?: {
     /** Hosting lifecycle exists only when the provider is valid in environments.*.hosting. */
@@ -173,6 +177,12 @@ export class ProviderRegistry {
    */
   names(): string[] {
     return [...this.providers.keys()];
+  }
+
+  /** Exact connection provider first, followed by explicitly compatible aliases. */
+  connectionProviders(name: string): string[] {
+    const aliases = this.providers.get(name)?.metadata.connectionAliases ?? [];
+    return [name, ...aliases.filter((alias) => alias !== name)];
   }
 
   /**

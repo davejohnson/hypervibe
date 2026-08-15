@@ -338,13 +338,20 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
   const items = Array.from(required.values())
     .sort((a, b) => a.provider.localeCompare(b.provider))
     .map((entry) => {
-      const connections = ctx.repos.connections.findAllByProvider(entry.provider);
+      const connectionProviders = providerRegistry.connectionProviders(entry.provider);
+      const connections = connectionProviders.flatMap((connectionProvider) =>
+        ctx.repos.connections.findAllByProvider(connectionProvider)
+      );
       const scopeHints = Array.from(entry.scopeHints);
       const scopedConnection = scopeHints.length > 0
-        ? ctx.repos.connections.findBestMatchFromHints(entry.provider, scopeHints)
+        ? connectionProviders
+          .map((connectionProvider) => ctx.repos.connections.findBestMatchFromHints(connectionProvider, scopeHints))
+          .find((candidate) => candidate !== null) ?? null
         : null;
       const verifiedScopedConnection = scopeHints.length > 0
-        ? ctx.repos.connections.findBestVerifiedMatchFromHints(entry.provider, scopeHints)
+        ? connectionProviders
+          .map((connectionProvider) => ctx.repos.connections.findBestVerifiedMatchFromHints(connectionProvider, scopeHints))
+          .find((candidate) => candidate !== null) ?? null
         : null;
       const verified = scopeHints.length > 0
         ? Boolean(verifiedScopedConnection)

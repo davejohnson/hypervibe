@@ -391,17 +391,39 @@ function summarizeValue(value: unknown): string {
   return `${Object.keys(record).length} field(s)`;
 }
 
+function summarizeStorage(value: unknown): string {
+  if (!isRecord(value)) return summarizeValue(value);
+  const scope = isRecord(value.instanceScope) ? value.instanceScope : undefined;
+  const scopeText = scope
+    ? Object.entries(scope)
+      .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+      .map(([key, entry]) => `${key}=${entry}`)
+      .join(' / ')
+    : '';
+  return [
+    typeof value.name === 'string' ? value.name : undefined,
+    typeof value.provider === 'string' ? `provider ${value.provider}` : undefined,
+    typeof value.externalId === 'string' ? `resource ${value.externalId}` : undefined,
+    scopeText ? `scope ${scopeText}` : undefined,
+    typeof value.status === 'string' ? `status ${value.status}` : undefined,
+    typeof value.objectCount === 'number' ? `${value.objectCount} object(s)` : undefined,
+    typeof value.sizeBytes === 'number' ? `${value.sizeBytes} byte(s)` : undefined,
+  ].filter(Boolean).join(', ');
+}
+
 function formatArray(key: string, values: unknown[]): string[] {
   if (values.length === 0) return [`${titleForKey(key)}: none`];
   const lines = [`${titleForKey(key)}: ${values.length}`];
   const formatter =
     ['actions', 'drift', 'unmanaged', 'blocked', 'actionScopedBlocked'].includes(key)
       ? summarizeAction
-      : key === 'receipts'
-        ? summarizeReceipt
-        : ['required', 'missing', 'connections'].includes(key)
-          ? summarizeConnection
-          : summarizeValue;
+      : key === 'storage'
+        ? summarizeStorage
+        : key === 'receipts'
+          ? summarizeReceipt
+          : ['required', 'missing', 'connections'].includes(key)
+            ? summarizeConnection
+            : summarizeValue;
   for (const item of values.slice(0, 12)) {
     lines.push(`  - ${formatter(item)}`);
   }
@@ -500,6 +522,17 @@ function formatRecordLines(record: Record<string, unknown>): string[] {
       lines.push(...formatConnections(value));
     } else if (key === 'connectionSetup') {
       lines.push(...formatConnectionSetup(value));
+    } else if (key === 'observed' && isRecord(value)) {
+      lines.push(`${titleForKey(key)}: ${summarizeValue(value)}`);
+      const simpleEntries = Object.entries(value)
+        .filter(([, entry]) => entry === null || typeof entry !== 'object')
+        .slice(0, 8);
+      for (const [entryKey, entryValue] of simpleEntries) {
+        lines.push(`  - ${entryKey}: ${scalarText(entryValue)}`);
+      }
+      if (Array.isArray(value.storage)) {
+        lines.push(...formatArray('storage', value.storage));
+      }
     } else if (Array.isArray(value)) {
       lines.push(...formatArray(key, value));
     } else if (isRecord(value)) {

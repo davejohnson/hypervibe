@@ -770,8 +770,8 @@ export const queueSpecSchema = z.object({
 
 /**
  * Named, durable object storage. Provider adapters own provisioning and data
- * plane translation; services receive the conventional S3-compatible runtime
- * variables currently used by the supported storage adapters.
+ * plane translation; services receive the selected provider's explicit native
+ * runtime contract, plus provider-neutral bucket/provider identifiers.
  */
 export const storageSpecSchema = z.object({
   provider: providerIdSchema,

@@ -18,6 +18,9 @@ import '../adapters/providers/gcp/cloudsql.adapter.js';
 import '../adapters/providers/gcp/memorystore.adapter.js';
 import '../adapters/providers/aws/rds.adapter.js';
 import '../adapters/providers/aws/elasticache.adapter.js';
+import '../adapters/providers/aws/s3.adapter.js';
+import '../adapters/providers/gcp/gcs.adapter.js';
+import '../adapters/providers/azure/azure-blob.adapter.js';
 import '../adapters/providers/neon/neon.adapter.js';
 import '../adapters/providers/digitalocean/digitalocean.adapter.js';
 

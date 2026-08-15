@@ -27,6 +27,18 @@ describe('repo bindings delegated metadata', () => {
       platformBindings: {
         provider: 'railway',
         apiToken: 'must-never-be-written',
+        storageProviders: {
+          railway: { projectId: 'railway-project', environmentId: 'railway-production' },
+        },
+        storage: {
+          documents: {
+            provider: 'railway',
+            externalId: 'bucket-documents',
+            region: 'sjc',
+            services: ['web'],
+            envKeys: ['AWS_S3_BUCKET_NAME'],
+          },
+        },
         delegatedEnvBindings: [{
           name: 'ANTHROPIC_API_KEY',
           principal: 'github:alice',
@@ -50,6 +62,11 @@ describe('repo bindings delegated metadata', () => {
 
       expect(serialized).not.toContain('must-never-be-written');
       expect(document.environments.production.platformBindings.apiToken).toBeUndefined();
+      expect(document.environments.production.platformBindings.storage.documents).toMatchObject({
+        provider: 'railway',
+        externalId: 'bucket-documents',
+        instanceScope: { projectId: 'railway-project', environmentId: 'railway-production' },
+      });
       expect(document.environments.production.platformBindings.delegatedEnvBindings).toEqual([
         expect.objectContaining({
           name: 'ANTHROPIC_API_KEY',

@@ -123,8 +123,9 @@ export class AdapterFactory {
    * Check if a platform has a verified connection.
    */
   hasVerifiedConnection(providerName: string): boolean {
-    const connection = this.connectionRepo.findByProvider(providerName);
-    return connection?.status === 'verified';
+    return providerRegistry.connectionProviders(providerName).some((connectionProvider) =>
+      this.connectionRepo.findAllByProvider(connectionProvider).some((connection) => connection.status === 'verified')
+    );
   }
 
   /**
@@ -174,7 +175,11 @@ export class AdapterFactory {
     }
 
     // Look up connection
-    const connection = this.connectionRepo.findBestMatchFromHints(providerName, scopeHints);
+    const connectionCandidates = providerRegistry.connectionProviders(providerName)
+      .map((connectionProvider) => this.connectionRepo.findBestMatchFromHints(connectionProvider, scopeHints))
+      .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
+    const connection = connectionCandidates.find((candidate) => candidate.status === 'verified')
+      ?? connectionCandidates[0];
     if (!connection) {
       return {
         success: false,

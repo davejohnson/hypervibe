@@ -1,13 +1,53 @@
+import { DefaultAzureCredential } from '@azure/identity';
+
 const AZURE_MANAGEMENT_URL = 'https://management.azure.com';
 const AZURE_RESOURCE_API_VERSION = '2024-11-01';
 const PAGE_CAP = 1000;
 
-export interface AzureResourceManagerCredentials {
+export type AzureResourceManagerCredentials = {
+  authMode?: 'servicePrincipal';
   tenantId: string;
   subscriptionId: string;
   clientId: string;
   clientSecret: string;
   resourceGroup?: string;
+} | {
+  authMode: 'default';
+  subscriptionId: string;
+  resourceGroup?: string;
+};
+
+type AzureDefaultTokenProvider = () => Promise<string>;
+
+async function defaultAzureTokenProvider(): Promise<string> {
+  const access = await new DefaultAzureCredential().getToken('https://management.azure.com/.default');
+  if (!access?.token) throw new Error('Azure default credential chain did not return an ARM access token.');
+  return access.token;
+}
+
+export async function resolveAzureDefaultSubscription(
+  preferredSubscriptionId?: string,
+  dependencies: { tokenProvider?: AzureDefaultTokenProvider; fetch?: typeof fetch } = {}
+): Promise<{ authMode: 'default'; subscriptionId: string }> {
+  if (preferredSubscriptionId) {
+    if (!/^[0-9a-f-]{36}$/i.test(preferredSubscriptionId)) throw new Error('Azure subscription ID must be a UUID.');
+    return { authMode: 'default', subscriptionId: preferredSubscriptionId };
+  }
+  const token = await (dependencies.tokenProvider ?? defaultAzureTokenProvider)();
+  const response = await (dependencies.fetch ?? fetch)(
+    `${AZURE_MANAGEMENT_URL}/subscriptions?api-version=2022-12-01`,
+    { headers: { Accept: 'application/json', Authorization: `Bearer ${token}` } }
+  );
+  if (!response.ok) throw new AzureResourceManagerError(response.status);
+  const payload = await response.json() as { value?: Array<{ subscriptionId?: unknown; state?: unknown }> };
+  const subscriptions = (payload.value ?? [])
+    .filter((item) => String(item.state ?? '').toLowerCase() === 'enabled')
+    .flatMap((item) => typeof item.subscriptionId === 'string' && /^[0-9a-f-]{36}$/i.test(item.subscriptionId)
+      ? [item.subscriptionId]
+      : []);
+  if (subscriptions.length === 1) return { authMode: 'default', subscriptionId: subscriptions[0]! };
+  if (subscriptions.length === 0) throw new Error('Azure default credential chain did not expose an enabled subscription.');
+  throw new Error('Azure default credential chain can access multiple subscriptions. Reconnect with credentials={"authMode":"default","subscriptionId":"<id>"} to select one explicitly.');
 }
 
 interface AzureCollection<T> {
@@ -34,8 +74,13 @@ export interface AzureArmResourceIdentity {
 export class AzureResourceManagerClient {
   private accessToken: string | null = null;
   private accessTokenPromise: Promise<string> | null = null;
+  private readonly defaultCredential: DefaultAzureCredential | null;
 
-  constructor(readonly credentials: AzureResourceManagerCredentials) {}
+  constructor(readonly credentials: AzureResourceManagerCredentials) {
+    this.defaultCredential = credentials.authMode === 'default'
+      ? new DefaultAzureCredential()
+      : null;
+  }
 
   async verifySubscription(): Promise<void> {
     await this.request(
@@ -269,6 +314,11 @@ export class AzureResourceManagerClient {
   }
 
   private async requestAccessToken(): Promise<string> {
+    if (this.credentials.authMode === 'default') {
+      const access = await this.defaultCredential!.getToken('https://management.azure.com/.default');
+      if (!access?.token) throw new Error('Azure default credential chain did not return an ARM access token.');
+      return access.token;
+    }
     const form = new URLSearchParams({
       client_id: this.credentials.clientId,
       client_secret: this.credentials.clientSecret,

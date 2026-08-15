@@ -3,6 +3,7 @@ import path from 'path';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import { findRepoRoot, repoSpecEnabled } from './repo-spec-file.js';
+import { withStorageInstanceScopes } from '../services/storage-instance-identity.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -48,6 +49,16 @@ function sanitize(value: unknown): unknown {
     sanitized[key] = sanitize(child);
   }
   return sanitized;
+}
+
+function presentStorageInstanceScopes(platformBindings: Record<string, unknown>): Record<string, unknown> {
+  const storage = asRecord(platformBindings.storage);
+  const providerContexts = asRecord(platformBindings.storageProviders);
+  if (!storage || !providerContexts) return platformBindings;
+  return {
+    ...platformBindings,
+    storage: withStorageInstanceScopes(storage, providerContexts),
+  };
 }
 
 function normalizeDocument(raw: unknown, projectName: string): RepoBindingsFile {
@@ -107,7 +118,9 @@ export function writeRepoBindingsForEnvironment(project: Project, environment: E
     return null;
   }
 
-  const platformBindings = sanitize(environment.platformBindings) as Record<string, unknown>;
+  const platformBindings = presentStorageInstanceScopes(
+    sanitize(environment.platformBindings) as Record<string, unknown>
+  );
   current.environments[environment.name] = { platformBindings };
   const dir = path.dirname(file);
   mkdirSync(dir, { recursive: true });

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
@@ -10,6 +11,7 @@ import { createCommandContext } from '../context.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import type { DatabaseAccessLease } from '../../domain/services/database-access.service.js';
 import type { IDatabaseAdapter } from '../../domain/ports/database.port.js';
+import type { IStorageAdapter, StorageContext, StorageObjectClient } from '../../domain/ports/storage.port.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 
@@ -45,7 +47,7 @@ function lease(url: string): DatabaseAccessLease {
   };
 }
 
-describe('applyDataMigrationAction database copy', () => {
+describe('applyDataMigrationAction', () => {
   beforeEach(() => {
     SqliteAdapter.resetInstance();
     SqliteAdapter.getInstance(path.join(mkdtempSync(path.join(tmpdir(), 'hypervibe-data-migration-')), 'test.db')).migrate();
@@ -186,4 +188,144 @@ describe('applyDataMigrationAction database copy', () => {
     expect(targetAdapter.destroy).toHaveBeenCalledWith(expect.objectContaining({ externalId: 'new-production-db' }));
     expect(new ComponentRepository().findByEnvironmentAndType(fixture.targetEnvironment.id, 'data-migration:initial-launch:postgres')).toBeNull();
   });
+
+  it('passes opaque provider scopes through a cross-provider storage migration', async () => {
+    const project = new ProjectRepository().create({ name: 'storage-migration-apply', defaultPlatform: 'railway' });
+    const sourceContext = { projectId: 'gcp-project', location: 'northamerica-northeast1' };
+    const targetContext = { accountId: 'aws-account', region: 'us-west-2' };
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        storageProviders: { gcs: sourceContext },
+        storage: {
+          documents: {
+            provider: 'gcs', externalId: 'gcp-documents', region: sourceContext.location,
+            services: ['web'], envKeys: [], updatedAt: '2026-08-13T00:00:00.000Z',
+          },
+        },
+      },
+    });
+    const targetEnvironment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        storageProviders: { s3: targetContext },
+        storage: {
+          documents: {
+            provider: 's3', externalId: 'old-aws-documents', region: targetContext.region,
+            services: [], envKeys: [], updatedAt: '2026-08-13T00:00:00.000Z',
+          },
+        },
+      },
+    });
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' }, services: { web: {} },
+          storage: { documents: { provider: 'gcs', type: 'bucket', region: sourceContext.location, injectInto: ['web'] } },
+        },
+        production: {
+          hosting: { provider: 'railway' }, services: { web: {} },
+          storage: { documents: { provider: 's3', type: 'bucket', region: targetContext.region, injectInto: ['web'] } },
+          dataMigration: {
+            id: 'initial-launch', fromEnvironment: 'staging',
+            include: { database: false, storage: ['documents'] },
+          },
+        },
+      },
+    });
+    const action: PlanAction = {
+      id: 'data-migration:initial-launch:storage:documents',
+      type: 'update',
+      resource: { kind: 'storage', name: 'documents', provider: 's3' },
+      verified: true,
+      reason: 'copy',
+      dataBearing: true,
+      billable: true,
+      requiresConfirm: true,
+      metadata: {
+        operation: 'dataMigrationStorageCopy', migrationId: 'initial-launch', storageName: 'documents',
+        sourceEnvironment: 'staging', targetEnvironment: 'production', sourceProvider: 'gcs', targetProvider: 's3',
+        sourceExternalId: 'gcp-documents', sourceWritesMustBeStopped: true,
+      },
+    };
+    const sourceClient = objectClient({ 'document.pdf': Buffer.from('provider-neutral') });
+    const targetClient = objectClient({});
+    const sourceAdapter = storageAdapter('gcs', sourceContext, sourceClient, 'unused');
+    const targetAdapter = storageAdapter('s3', targetContext, targetClient, 'new-aws-documents');
+    vi.spyOn(adapterFactory, 'getStorageAdapter').mockImplementation(async (provider) => ({
+      success: true,
+      adapter: provider === 'gcs' ? sourceAdapter : targetAdapter,
+    }));
+
+    const result = await applyDataMigrationAction({
+      ctx: createCommandContext(), project, spec, targetEnvironmentName: 'production', action,
+    });
+
+    expect(result).toMatchObject({ success: true, data: { objectCount: 1, totalBytes: '16' } });
+    expect(sourceAdapter.openObjectTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'staging' }), sourceContext, 'gcp-documents'
+    );
+    expect(targetAdapter.ensureBucket).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'production' }), targetContext, expect.any(String), targetContext.region
+    );
+    expect(targetAdapter.openObjectTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'production' }), targetContext, 'new-aws-documents'
+    );
+    expect(targetClient.objects).toEqual(sourceClient.objects);
+    expect(new EnvironmentRepository().findById(targetEnvironment.id)!.platformBindings).toMatchObject({
+      storage: {
+        documents: {
+          provider: 's3',
+          externalId: 'new-aws-documents',
+          instanceScope: targetContext,
+          envKeys: ['OBJECT_STORAGE_BUCKET'],
+          previousTarget: { provider: 's3', externalId: 'old-aws-documents', instanceScope: targetContext },
+        },
+      },
+    });
+  });
 });
+
+function objectClient(initial: Record<string, Buffer>): StorageObjectClient & { objects: Record<string, Buffer> } {
+  const objects = { ...initial };
+  return {
+    objects,
+    list: async () => Object.entries(objects).map(([key, value]) => ({ key, size: value.byteLength })),
+    get: async (key) => ({ body: Readable.from(objects[key]), size: objects[key].byteLength }),
+    put: async (key, payload) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of payload.body as Readable) chunks.push(Buffer.from(chunk));
+      objects[key] = Buffer.concat(chunks);
+    },
+    destroy: vi.fn(),
+  };
+}
+
+function storageAdapter(
+  name: string,
+  context: StorageContext,
+  client: StorageObjectClient,
+  externalId: string
+): IStorageAdapter {
+  return {
+    name,
+    capabilities: {
+      kind: 'object', regions: [], privateOnly: true,
+      supportsUsageObservation: true, supportsObjectTransfer: true,
+    },
+    runtimeEnvKeys: vi.fn(() => ['OBJECT_STORAGE_BUCKET']),
+    connect: vi.fn(async () => undefined),
+    verify: vi.fn(async () => ({ success: true })),
+    ensureContext: vi.fn(async () => ({ receipt: { success: true, message: 'context ready' }, context })),
+    observe: vi.fn(async () => []),
+    ensureBucket: vi.fn(async () => ({ receipt: { success: true, message: 'bucket ready' }, externalId, context })),
+    getRuntimeEnv: vi.fn(async () => ({ OBJECT_STORAGE_BUCKET: externalId })),
+    getCredentials: vi.fn(async () => { throw new Error('native stream expected'); }),
+    openObjectTransfer: vi.fn(async () => client),
+    destroyBucket: vi.fn(async () => ({ success: true, message: 'destroyed' })),
+  };
+}

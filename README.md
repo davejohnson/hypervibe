@@ -19,8 +19,9 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 
 **Infrastructure Providers**
 - **Railway** - Deploy apps, Postgres databases, Redis caches, private S3-compatible storage buckets, cron jobs, queues
-- **Google Cloud** - Cloud Run hosting and Cloud SQL Postgres
-- **Amazon RDS** - Managed Postgres with operation-scoped diagnostic ingress
+- **Google Cloud** - Cloud Run hosting, Cloud SQL Postgres, and private Cloud Storage buckets
+- **AWS** - ECS hosting, RDS Postgres, ElastiCache, and private S3 buckets
+- **Azure** - Container Apps hosting, managed PostgreSQL/Redis, and private Blob Storage containers
 - **Supabase** - Managed Postgres with direct or pooled connectivity
 - **Cloudflare** - DNS management, domain configuration
 - **Stripe** - Payment integration, webhooks, products
@@ -36,7 +37,9 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 **Workloads & Queues**
 - Services declare `workloadKind: web | worker | cron`. Workers are always-on background consumers (on Cloud Run: internal-only ingress, minimum one instance; they must still listen on `PORT`).
 - `queues` in the spec declares named message queues: Cloud Run environments get real Pub/Sub topics + subscriptions (apps receive `QUEUE_TOPIC_*` / `QUEUE_SUBSCRIPTION_*`); Railway environments are postgres-backed (pg-boss model — requires a declared database; apps consume via `DATABASE_URL`). Every queue environment gets `QUEUE_BACKEND` and `QUEUE_NAMES`.
-- `storage` declares named private object buckets and an explicit `injectInto` service list. Railway is the first storage provider and works with Railway or cross-provider hosting. Selected services receive the standard `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET_NAME`, `AWS_DEFAULT_REGION`, and `AWS_S3_URL_STYLE` variables; credentials never appear in specs, bindings, plans, or tool output. Bucket deletion is data-bearing and confirmation-gated.
+- `storage` declares named private object buckets and an explicit `injectInto` service list. Supported providers are Railway (`railway`), Amazon S3 (`s3`), Google Cloud Storage (`gcs`), and Azure Blob Storage (`azureblob`), independent of the hosting provider. Railway/S3 wire the established `AWS_*` contract; GCS and Azure wire explicit provider-native variables plus `OBJECT_STORAGE_PROVIDER` and `OBJECT_STORAGE_BUCKET`. Credentials never appear in specs, bindings, plans, receipts, or logs. Bucket deletion is data-bearing and confirmation-gated.
+- Existing `ecs`, `cloudrun`, and `azure-container-apps` connections are reused automatically for their matching storage provider. Otherwise the standalone storage connection accepts the same cloud authentication fields. Region/location is desired state in the spec; Hypervibe creates provider resources and derives workload credentials, so operators do not obtain separate bucket HMAC keys, Azure account keys, or storage-specific settings.
+- Standalone S3/GCS/Azure Blob connections can also use the normal local cloud login with no credential value: AWS profiles/SSO through the default SDK chain, `gcloud auth application-default login`, or Azure's default credential chain (including `az login`). Explicit credential files remain supported for CI. Expiring local sessions are used for lifecycle and migration only and are never copied into deployed services.
 - `cache: { provider: "railway", engine: "redis" }` declares Redis independently from SQL/document databases. Hypervibe wires `REDIS_URL`; cache deletion is data-bearing and confirmation-gated.
 
   ```json
@@ -50,7 +53,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
   }
   ```
 
-  `region` is physical Railway placement (`sjc`, `iad`, `ams`, or `sin`). Railway's S3 credentials still expose signing region `auto`, which Hypervibe passes through as `AWS_DEFAULT_REGION`.
+  `region` is the provider-native immutable location: Railway placement (`sjc`, `iad`, `ams`, or `sin`), an AWS region such as `us-west-2`, a GCS location such as `us-central1`, or an Azure location such as `westus2`. Railway's S3 credentials expose signing region `auto`, which Hypervibe passes through as `AWS_DEFAULT_REGION`.
 
 **Developer Experience**
 - **CLI and MCP parity** - Every supported command is available through both interfaces

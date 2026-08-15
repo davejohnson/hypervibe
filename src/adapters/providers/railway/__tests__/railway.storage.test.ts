@@ -40,7 +40,17 @@ describe('Railway storage buckets', () => {
 
     const result = await adapter.observe(environment());
 
-    expect(result.storage).toEqual([{ provider: 'railway', kind: 'object', externalId: 'bucket-docs', name: 'documents', region: 'sjc', status: 'ready', objectCount: 3, sizeBytes: 42 }]);
+    expect(result.storage).toEqual([{
+      provider: 'railway',
+      kind: 'object',
+      externalId: 'bucket-docs',
+      instanceScope: { projectId: 'rp', environmentId: 're' },
+      name: 'documents',
+      region: 'sjc',
+      status: 'ready',
+      objectCount: 3,
+      sizeBytes: 42,
+    }]);
   });
 
   it('creates a project bucket and commits its environment instance', async () => {

@@ -6,6 +6,7 @@ import { createHash } from 'crypto';
 import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
+import '../../../adapters/providers/aws/s3.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
@@ -13,6 +14,7 @@ import { ConnectionRepository } from '../../../adapters/db/repositories/connecti
 import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
 import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
 import { SpecStore } from '../../spec/spec.store.js';
+import { environmentSpecSchema } from '../../spec/spec.schema.js';
 import { adapterFactory } from '../../services/adapter.factory.js';
 import { PlanService } from '../plan.service.js';
 import { orderActions } from '../converge.executor.js';
@@ -1236,6 +1238,51 @@ describe('PlanService.plan', () => {
     expect(storageAdapter).not.toHaveBeenCalled();
   });
 
+  it('resolves standalone storage scope read-only before first-use observation', async () => {
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: { provider: 'railway', projectId: 'rp', environmentId: 're' },
+    });
+    const environmentSpec = environmentSpecSchema.parse({
+      hosting: { provider: 'railway' },
+      services: { web: {} },
+      storage: {
+        documents: { provider: 's3', type: 'bucket', region: 'us-west-2', injectInto: ['web'] },
+      },
+      email: { enabled: false },
+      envVars: {},
+    });
+    mockObservingAdapter({
+      provider: 'railway', observedAt: new Date().toISOString(), projectExists: true,
+      projectId: 'rp', environmentId: 're', services: [], databases: [], storage: [],
+      completeness: {
+        project: 'complete', environment: 'complete', services: 'complete',
+        databases: 'complete', caches: 'complete', storage: 'complete',
+      },
+      partial: false, warnings: [],
+    });
+    const resolveObservationContext = vi.fn(async () => ({
+      receipt: { success: true, message: 'scope resolved read-only' },
+      context: { accountId: '123456789012', region: 'us-west-2' },
+    }));
+    const observe = vi.fn(async () => []);
+    vi.spyOn(adapterFactory, 'getStorageAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 's3',
+        resolveObservationContext,
+        observe,
+      },
+    } as never);
+
+    const result = await new PlanService().observeEnvironment(project, environment, environmentSpec);
+
+    expect(resolveObservationContext).toHaveBeenCalledWith(project.name, environment, 'us-west-2');
+    expect(observe).toHaveBeenCalledWith(environment, { accountId: '123456789012', region: 'us-west-2' });
+    expect(result.observed?.completeness?.storage).toBe('complete');
+  });
+
   it('does not guess the shared provider project when sibling environment bindings disagree', async () => {
     new SpecStore().replace(project, {
       version: 1,
@@ -1359,6 +1406,16 @@ describe('PlanService.plan', () => {
     const result = await new PlanService().plan(project, 'staging');
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.blocked).toContainEqual(expect.objectContaining({ provider: 'railway' }));
+  });
+
+  it('accepts an existing primary cloud connection for its storage adapter', () => {
+    const connection = new ConnectionRepository().create({
+      provider: 'ecs',
+      credentialsEncrypted: 'encrypted-for-preflight-only',
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
+
+    expect(new PlanService().providerPreflight(['s3'])).toEqual([]);
   });
 
   it('requires a Cloudflare connection that matches the requested domain scope', () => {

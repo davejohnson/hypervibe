@@ -241,6 +241,7 @@ export async function importRailwayProject(
       if (!bucket || !instance || instance.isDeleted === true || !instance.region) return [];
       return [[desiredName, {
         provider: 'railway', externalId: bucket.id, region: instance.region,
+        instanceScope: { projectId: details.id, environmentId: railwayEnv.node.id },
         services: [], envKeys: [], updatedAt: new Date().toISOString(),
       }] as const];
     });

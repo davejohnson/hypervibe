@@ -58,4 +58,16 @@ describe('transferObjectStorage', () => {
       createClient: () => clients.shift()!,
     })).rejects.toThrow('target keys or object sizes differ');
   });
+
+  it('treats provider-native listing order as irrelevant to the manifest', async () => {
+    const source = client({ a: Buffer.from('one'), b: Buffer.from('two') });
+    const target = client({});
+    source.list = async () => [{ key: 'b', size: 3 }, { key: 'a', size: 3 }];
+    target.list = async () => [{ key: 'a', size: 3 }, { key: 'b', size: 3 }];
+    const clients = [source, target];
+
+    await expect(transferObjectStorage(credentials, credentials, {
+      createClient: () => clients.shift()!,
+    })).resolves.toMatchObject({ objectCount: 2, totalBytes: '6' });
+  });
 });

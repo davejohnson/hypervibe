@@ -165,6 +165,7 @@ export function fingerprintObservedState(observed: ObservedState): string {
         provider: item.provider,
         kind: item.kind,
         externalId: item.externalId,
+        instanceScope: item.instanceScope ?? null,
         name: item.name,
         region: item.region ?? null,
         status: item.status,

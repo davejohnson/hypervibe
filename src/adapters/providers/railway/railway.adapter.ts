@@ -4353,6 +4353,7 @@ export class RailwayAdapter implements IProviderAdapter {
         provider: 'railway',
         kind: 'object',
         externalId: edge.node.id,
+        instanceScope: { projectId, environmentId },
         name: edge.node.name,
         region: instance.region,
         status: 'ready',

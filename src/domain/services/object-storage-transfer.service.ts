@@ -32,6 +32,7 @@ export function createS3ObjectClient(credentials: StorageCredentials): StorageOb
     credentials: {
       accessKeyId: credentials.accessKeyId,
       secretAccessKey: credentials.secretAccessKey,
+      ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
     },
   });
   return {
@@ -84,7 +85,7 @@ export function createS3ObjectClient(credentials: StorageCredentials): StorageOb
 function manifest(objects: StorageObjectRecord[]): ObjectStorageTransferResult {
   let totalBytes = 0n;
   const digest = createHash('sha256');
-  for (const object of objects) {
+  for (const object of [...objects].sort((left, right) => left.key.localeCompare(right.key))) {
     totalBytes += BigInt(object.size);
     digest.update(object.key);
     digest.update('\0');
