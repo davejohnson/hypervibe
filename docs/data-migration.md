@@ -58,11 +58,13 @@ so Railway, RDS, Cloud SQL, Azure Database for PostgreSQL, Supabase, Neon, and
 other PostgreSQL providers use the same transfer engine. Installed PostgreSQL
 client tools must be compatible with the source server version.
 
-Object transfer uses a provider-neutral streaming port. S3-compatible adapters
-can use the built-in AWS SDK implementation; native GCP or Azure adapters expose
-the same list/get/put stream without changing migration orchestration. A storage
-provider name is valid only when Hypervibe has a registered adapter for it;
-unsupported providers block rather than silently falling back.
+Object transfer uses a provider-neutral streaming port. Railway and Amazon S3
+use the built-in S3 stream; Google Cloud Storage and Azure Blob Storage expose
+their native list/get/put streams through the same contract. A migration can
+therefore copy among `railway`, `s3`, `gcs`, and `azureblob` without changing
+the orchestration. A storage provider name is valid only when Hypervibe has a
+registered adapter for it; unsupported providers block rather than silently
+falling back.
 
 ## Read replicas
 

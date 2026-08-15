@@ -15,6 +15,7 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
+import { S3StorageAdapter } from '../../adapters/providers/aws/s3.adapter.js';
 import '../../adapters/providers/secretmanagers/onepassword.adapter.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../context.js';
@@ -72,6 +73,33 @@ async function makeClient() {
 }
 
 describe('hv_connections', () => {
+  it('adds a native-CLI storage connection without asking for a credential value', async () => {
+    vi.spyOn(S3StorageAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      email: 'AWS account 123456789012',
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 's3' });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.credentialsSource).toBe('native-cli');
+    const connection = new ConnectionRepository().findByProvider('s3')!;
+    expect(getSecretStore().decryptObject(connection.credentialsEncrypted)).toEqual({
+      authMode: 'default',
+    });
+    await t.close();
+  });
+
+  it('still requires credentials for providers without a native CLI credential chain', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'railway' });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toContain('credentials are required');
+    await t.close();
+  });
+
   it('accepts explicit project context for add and returns it without changing provider scope', async () => {
     const project = new ProjectRepository().create({ name: 'connection-app', defaultPlatform: 'railway' });
     vi.spyOn(RailwayAdapter.prototype, 'connect').mockResolvedValue();

@@ -93,6 +93,8 @@ export interface ObservedStorage {
   provider: string;
   kind: 'object';
   externalId: string;
+  /** Opaque, non-secret provider scope that makes this resource id an instance identity. */
+  instanceScope?: Record<string, string>;
   name: string;
   region?: string;
   status: string;

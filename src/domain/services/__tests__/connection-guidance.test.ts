@@ -31,7 +31,8 @@ describe('connection guidance', () => {
       expect(record.credentialExample, provider).toContain('hv_connections provider=');
       expect(
         record.credentialExample.includes('credentialsRef=')
-        || record.credentialExample.includes('credentials='),
+        || record.credentialExample.includes('credentials=')
+        || providerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true,
         provider
       ).toBe(true);
       expect(formatted).toContain('Token/credential type:');
@@ -395,6 +396,26 @@ describe('connection guidance', () => {
         'listKeys',
         'credentialsRef="file:/absolute/path/azure-managed-redis.json"',
       ],
+      s3: [
+        'https://console.aws.amazon.com/iam/home#/security_credentials',
+        's3:CreateBucket',
+        's3:PutBucketPublicAccessBlock',
+        'AWS_PROFILE',
+        'hv_connections provider="s3"',
+      ],
+      gcs: [
+        'https://console.cloud.google.com/iam-admin/serviceaccounts',
+        'roles/storage.admin',
+        'gcloud auth application-default login',
+        'hv_connections provider="gcs"',
+      ],
+      azureblob: [
+        'Microsoft Entra service principal',
+        'Storage Account Contributor',
+        'listKeys',
+        'several are accessible',
+        'hv_connections provider="azureblob"',
+      ],
     };
 
     for (const [provider, expectedSnippets] of Object.entries(expectations)) {
@@ -418,6 +439,9 @@ describe('credentialFieldsFromSchema', () => {
       cloudrun: ['projectId', 'credentials'],
       ecs: ['accessKeyId', 'secretAccessKey'],
       'azure-container-apps': ['tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
+      s3: ['authMode', 'accessKeyId', 'secretAccessKey'],
+      gcs: ['authMode', 'credentials'],
+      azureblob: ['authMode', 'tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
       digitalocean: ['apiToken'],
     };
 
@@ -425,6 +449,12 @@ describe('credentialFieldsFromSchema', () => {
       const schema = providerRegistry.get(provider)!.metadata.credentialsSchema;
       expect(credentialFieldsFromSchema(schema)?.map(({ name }) => name), provider).toEqual(fields);
     }
+  });
+
+  it('lets storage adapters reuse the matching primary cloud connection', () => {
+    expect(providerRegistry.connectionProviders('s3')).toEqual(['s3', 'ecs']);
+    expect(providerRegistry.connectionProviders('gcs')).toEqual(['gcs', 'cloudrun']);
+    expect(providerRegistry.connectionProviders('azureblob')).toEqual(['azureblob', 'azure-container-apps']);
   });
 
   it('describes required, optional, secret, multiline, and choice fields', () => {

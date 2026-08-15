@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Environment } from '../../entities/environment.entity.js';
 import type { ObservedState } from '../../ports/observe.port.js';
 import { environmentSpecSchema } from '../../spec/spec.schema.js';
-import { planStorage, storageEnvKeys } from '../storage-plan.service.js';
+import { parseStorageBindings, planStorage, storageEnvKeys } from '../storage-plan.service.js';
 
 const spec = environmentSpecSchema.parse({
   hosting: { provider: 'railway' }, services: { api: {} },
@@ -22,9 +22,54 @@ function observed(storage: ObservedState['storage'] = [], envVarKeys: string[] =
 }
 
 describe('storage-plan.service', () => {
+  it('presents legacy storage bindings with their provider instance scope', () => {
+    const environment = env({
+      storageProviders: { railway: { projectId: 'rp', environmentId: 're' } },
+      storage: {
+        uploads: {
+          provider: 'railway', externalId: 'bucket-1', region: 'sjc', services: [], envKeys: [],
+        },
+      },
+    });
+
+    expect(parseStorageBindings(environment).uploads).toMatchObject({
+      externalId: 'bucket-1',
+      instanceScope: { projectId: 'rp', environmentId: 're' },
+    });
+  });
+
+  it('preserves provider-native scope fields for non-Railway storage identities', () => {
+    const environment = env({
+      storageProviders: {
+        s3: { accountId: 'aws-account', region: 'us-west-2' },
+        gcs: { projectId: 'gcp-project', location: 'northamerica-northeast1' },
+        azureblob: {
+          subscriptionId: 'azure-subscription',
+          resourceGroup: 'app-production',
+          storageAccount: 'appdocuments',
+        },
+      },
+      storage: {
+        awsDocuments: { provider: 's3', externalId: 'aws-bucket', region: 'us-west-2', services: [], envKeys: [] },
+        gcpDocuments: { provider: 'gcs', externalId: 'gcp-bucket', region: 'northamerica-northeast1', services: [], envKeys: [] },
+        azureDocuments: { provider: 'azureblob', externalId: 'documents', region: 'westus2', services: [], envKeys: [] },
+      },
+    });
+
+    const bindings = parseStorageBindings(environment);
+    expect(bindings.awsDocuments.instanceScope).toEqual({ accountId: 'aws-account', region: 'us-west-2' });
+    expect(bindings.gcpDocuments.instanceScope).toEqual({ projectId: 'gcp-project', location: 'northamerica-northeast1' });
+    expect(bindings.azureDocuments.instanceScope).toEqual({
+      subscriptionId: 'azure-subscription',
+      resourceGroup: 'app-production',
+      storageAccount: 'appdocuments',
+    });
+  });
+
   it('uses the standard AWS S3 runtime variable contract', () => {
     expect(storageEnvKeys('uploads')).toEqual([
       'AWS_ENDPOINT_URL', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
+      'AWS_SESSION_TOKEN',
       'AWS_S3_BUCKET_NAME', 'AWS_DEFAULT_REGION', 'AWS_S3_URL_STYLE',
     ]);
   });
@@ -55,6 +100,31 @@ describe('storage-plan.service', () => {
     });
     expect(result.actions.find((item) => item.id === 'storage:uploads')).toMatchObject({ metadata: expect.objectContaining({ blockedReason: 'immutable_region' }) });
     expect(result.actions.find((item) => item.id.endsWith('wiring:api'))?.type).toBe('noop');
+  });
+
+  it('requires an explicit data migration before changing a bound storage provider', () => {
+    const targetSpec = environmentSpecSchema.parse({
+      hosting: { provider: 'railway' },
+      services: { api: {} },
+      storage: { uploads: { provider: 's3', type: 'bucket', region: 'us-west-2', injectInto: ['api'] } },
+    });
+    const environment = env({
+      storageProviders: { railway: { projectId: 'rp', environmentId: 're' } },
+      storage: {
+        uploads: {
+          provider: 'railway', externalId: 'bucket-1', region: 'sjc', services: ['api'],
+          envKeys: storageEnvKeys('uploads'),
+        },
+      },
+    });
+
+    const result = planStorage({ environmentSpec: targetSpec, environment, observed: observed() });
+
+    expect(result.actions.find((item) => item.id === 'storage:uploads')).toMatchObject({
+      type: 'update',
+      metadata: expect.objectContaining({ blockedReason: 'provider_migration_required' }),
+      reason: expect.stringContaining('dataMigration'),
+    });
   });
 
   it('confirmation-gates managed bucket deletion after unwiring', () => {

@@ -296,6 +296,39 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Client secrets expire. Store this JSON outside the repository, rotate before expiry, and reconnect with the replacement value.',
     ],
   },
+  azureblob: {
+    provider: 'azureblob',
+    displayName: 'Azure Blob Storage',
+    tokenType: 'Azure default credential chain (including Azure CLI login), or a Microsoft Entra service principal for unattended automation',
+    setupUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+    setupUrls: [
+      {
+        label: 'Create or review the Microsoft Entra application',
+        url: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+      },
+      {
+        label: 'Microsoft Entra service-principal setup guide',
+        url: 'https://learn.microsoft.com/en-us/entra/identity-platform/howto-create-service-principal-portal',
+      },
+      {
+        label: 'Azure Storage Account Contributor role',
+        url: 'https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/storage',
+      },
+    ],
+    permissions: [
+      'Reuse the Azure Container Apps service principal when available; its reviewed subscription-level Contributor setup already covers the deterministic environment resource group and storage accounts.',
+      'For a storage-only principal, grant Microsoft.Resources/subscriptions/resourceGroups/read and write, Microsoft.Storage/register/action, and the Storage Account Contributor actions required to create, tag, inspect, and delete accounts in Hypervibe-named resource groups. Subscription Contributor is the broader built-in fallback.',
+      'Allow Microsoft.Storage/storageAccounts/listKeys/action so Hypervibe can stream migrations and wire the private container into selected workloads.',
+    ],
+    credentialExample: 'hv_connections provider="azureblob"',
+    notes: [
+      'If the project already has a verified azure-container-apps connection, Hypervibe reuses it; no separate Blob Storage connection or account key is required.',
+      'For local use, authenticate through the Azure default credential chain (for example az login), then add the connection without credentials. Hypervibe discovers a sole enabled subscription; when several are accessible, select one with credentials={"authMode":"default","subscriptionId":"<id>"}.',
+      'For unattended automation, a standalone connection JSON may contain tenantId, subscriptionId, clientId, and clientSecret. Storage location comes from the spec, and Hypervibe deterministically reuses or creates the environment resource group.',
+      'Hypervibe creates a dedicated storage account per declared bucket, disables public blob access, requires HTTPS/TLS 1.2, and creates one private container. The boundary keeps each generated account key scoped to one Hypervibe storage resource.',
+      'The account key and generated connection string are runtime secrets. They never enter specs, bindings, plans, receipts, or logs.',
+    ],
+  },
   'azure-container-apps': {
     provider: 'azure-container-apps',
     displayName: 'Azure Container Apps',
@@ -534,6 +567,34 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     credentialExample: 'hv_connections provider="doppler" credentialsRef="env:DOPPLER_TOKEN"',
     notes: ['Service tokens start with dp.st. and are scoped to a single config.'],
   },
+  gcs: {
+    provider: 'gcs',
+    displayName: 'Google Cloud Storage',
+    tokenType: 'Google Application Default Credentials, or service-account JSON for unattended automation',
+    setupUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    setupUrls: [
+      {
+        label: 'Create or review a dedicated Google Cloud service account',
+        url: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+      },
+      {
+        label: 'Cloud Storage IAM roles',
+        url: 'https://cloud.google.com/storage/docs/access-control/iam-roles',
+      },
+    ],
+    permissions: [
+      'Grant roles/storage.admin to the dedicated service account on the target project so Hypervibe can create, label, inspect, empty, and delete its buckets.',
+      'Enable storage.googleapis.com in the target project before connecting.',
+    ],
+    credentialExample: 'hv_connections provider="gcs"',
+    notes: [
+      'If the project already has a verified cloudrun connection, Hypervibe reuses it; no separate Cloud Storage connection or HMAC key is required.',
+      'For local use, run gcloud auth application-default login and gcloud config set project <project-id>, then add the connection without credentials.',
+      'For unattended automation, pass the service-account JSON key file directly; Hypervibe derives the project id from that signed credential. Storage location comes from the spec.',
+      'Hypervibe enforces uniform bucket-level access and public-access prevention. The service-account JSON is supplied only to selected workloads as a runtime secret and never enters repo bindings or output.',
+      'Application Default Credentials can manage and migrate data, but a local gcloud user session is never copied into a workload. Runtime access uses a matching Cloud Run identity or an explicit service account for cross-cloud hosting.',
+    ],
+  },
   github: {
     provider: 'github',
     displayName: 'GitHub',
@@ -601,6 +662,35 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Scope RDS mutation permissions to the intended DB instance ARNs and EC2 mutation permissions to security groups in the intended account, region, and VPC. AWS describe actions generally require Resource="*".',
       'Hypervibe-created RDS instances are publicly addressable but start with no public ingress. hv_db_query adds only the current caller IPv4 /32 and removes it after the query. Private-only RDS requires a durable VPC/SSM path declared outside this diagnostic call.',
       'Prefer temporary STS credentials. IAM user secret access keys are shown only once when created and should be rotated regularly.',
+    ],
+  },
+  s3: {
+    provider: 's3',
+    displayName: 'Amazon S3',
+    tokenType: 'AWS default credential chain (AWS CLI profile, SSO, environment, or instance identity), or an explicit access-key pair for automation',
+    setupUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+    setupUrls: [
+      {
+        label: 'Create or rotate an IAM access key',
+        url: 'https://console.aws.amazon.com/iam/home#/security_credentials',
+      },
+      {
+        label: 'Amazon S3 API permissions reference',
+        url: 'https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazons3.html',
+      },
+    ],
+    permissions: [
+      'Grant sts:GetCallerIdentity and s3:ListAllMyBuckets for connection verification and managed-bucket discovery.',
+      'Grant s3:CreateBucket, s3:GetBucketLocation, s3:GetBucketTagging, s3:PutBucketTagging, s3:PutBucketPublicAccessBlock, s3:PutEncryptionConfiguration, and s3:DeleteBucket for lifecycle management.',
+      'On Hypervibe-created hv-* buckets, grant s3:ListBucket, s3:ListBucketVersions, s3:GetObject, s3:GetObjectVersion, s3:PutObject, s3:DeleteObject, and s3:DeleteObjectVersion for usage observation, migration, and confirmed teardown.',
+    ],
+    credentialExample: 'hv_connections provider="s3"',
+    notes: [
+      'If the project already has a verified ecs connection, Hypervibe reuses it; no separate S3 connection or bucket access key is required.',
+      'For local use, authenticate normally with the AWS CLI and select a profile through AWS_PROFILE when needed; then add the connection without credentials. Hypervibe uses the AWS SDK default credential chain.',
+      'For unattended automation, a standalone connection JSON may contain accessKeyId and secretAccessKey. Storage region comes from the spec. Never use root-user access keys.',
+      'Hypervibe creates a private, public-access-blocked, AES-256-encrypted bucket and refuses to adopt an untagged name collision.',
+      'Temporary CLI/SSO credentials can manage and migrate data but are never copied into a deployed service. Runtime access uses workload identity or an explicit durable credential.',
     ],
   },
   railway: {

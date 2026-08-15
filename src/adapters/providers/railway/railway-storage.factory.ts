@@ -1,5 +1,10 @@
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { IStorageAdapter, StorageContext, StorageEnsureResult } from '../../../domain/ports/storage.port.js';
+import {
+  railwayStorageRuntimeEnv,
+  S3_STORAGE_RUNTIME_ENV_KEYS,
+  s3StorageRuntimeEnv,
+} from '../../../domain/services/storage-runtime-env.js';
 import { RailwayAdapter } from './railway.adapter.js';
 
 function virtualEnvironment(environment: Environment, context: StorageContext): Environment {
@@ -16,6 +21,7 @@ export function createRailwayStorageAdapter(railway: RailwayAdapter): IStorageAd
       supportsUsageObservation: true,
       supportsObjectTransfer: true,
     },
+    runtimeEnvKeys: () => [...S3_STORAGE_RUNTIME_ENV_KEYS],
     connect: (credentials) => railway.connect(credentials),
     verify: () => railway.verify(),
     disconnect: () => railway.disconnect(),
@@ -33,6 +39,14 @@ export function createRailwayStorageAdapter(railway: RailwayAdapter): IStorageAd
     async observe(environment, context) {
       const observed = await railway.observe(virtualEnvironment(environment, context));
       return observed.storage ?? [];
+    },
+    async getRuntimeEnv(environment, context, externalId, name) {
+      const provider = typeof environment.platformBindings.provider === 'string'
+        ? environment.platformBindings.provider
+        : undefined;
+      if (provider === 'railway') return railwayStorageRuntimeEnv(name);
+      const credentials = await railway.getStorageCredentials(virtualEnvironment(environment, context), externalId);
+      return s3StorageRuntimeEnv(credentials);
     },
     getCredentials: (environment, context, externalId) => railway.getStorageCredentials(virtualEnvironment(environment, context), externalId),
     destroyBucket: (environment, context, externalId) => railway.destroyStorage(virtualEnvironment(environment, context), externalId),

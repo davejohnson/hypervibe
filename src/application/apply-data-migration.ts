@@ -22,7 +22,6 @@ import {
 import {
   parseStorageBindings,
   parseStorageProviderContexts,
-  storageEnvKeys,
   type StorageBinding,
 } from '../domain/services/storage-plan.service.js';
 import type { StorageContext } from '../domain/ports/storage.port.js';
@@ -509,7 +508,12 @@ async function applyStorageMigration(params: {
   }
 
   let targetContext = contexts[identity.targetProvider];
-  const contextResult = await targetAdapter.ensureContext(params.project.name, targetEnvironment, targetContext);
+  const contextResult = await targetAdapter.ensureContext(
+    params.project.name,
+    targetEnvironment,
+    targetContext,
+    targetStorageSpec.region
+  );
   if (!contextResult.receipt.success || !contextResult.context) {
     return { success: false, message: 'Could not resolve target storage context', error: 'No storage binding was changed.' };
   }
@@ -544,10 +548,14 @@ async function applyStorageMigration(params: {
     const [sourceClient, targetClient] = await Promise.all([
       sourceAdapter.openObjectTransfer
         ? sourceAdapter.openObjectTransfer(sourceEnvironment, sourceContext, sourceBinding.externalId)
-        : sourceAdapter.getCredentials(sourceEnvironment, sourceContext, sourceBinding.externalId).then(createS3ObjectClient),
+        : sourceAdapter.getCredentials
+          ? sourceAdapter.getCredentials(sourceEnvironment, sourceContext, sourceBinding.externalId).then(createS3ObjectClient)
+          : Promise.reject(new Error('Source storage adapter exposes no object transfer data plane.')),
       targetAdapter.openObjectTransfer
         ? targetAdapter.openObjectTransfer(targetEnvironment, targetContext, candidate.externalId)
-        : targetAdapter.getCredentials(targetEnvironment, targetContext, candidate.externalId).then(createS3ObjectClient),
+        : targetAdapter.getCredentials
+          ? targetAdapter.getCredentials(targetEnvironment, targetContext, candidate.externalId).then(createS3ObjectClient)
+          : Promise.reject(new Error('Target storage adapter exposes no object transfer data plane.')),
     ]);
     transfer = await transferObjectStorageClients(sourceClient, targetClient);
   } catch {
@@ -617,9 +625,10 @@ async function applyStorageMigration(params: {
   const nextBinding: StorageBinding = {
     provider: identity.targetProvider,
     externalId: candidate.externalId,
+    instanceScope: targetContext,
     region: targetStorageSpec.region,
     services: [],
-    envKeys: storageEnvKeys(storageName),
+    envKeys: targetAdapter.runtimeEnvKeys(storageName),
     updatedAt: new Date().toISOString(),
     dataMigration: {
       id: identity.migrationId,
@@ -634,6 +643,7 @@ async function applyStorageMigration(params: {
           previousTarget: {
             provider: existing.provider,
             externalId: existing.externalId,
+            instanceScope: existing.instanceScope ?? contexts[existing.provider],
             region: existing.region,
           },
         }
@@ -746,7 +756,7 @@ async function destroyPreviousStorageTarget(params: {
   const marker = asRecord(binding?.dataMigration);
   const previous = binding?.previousTarget;
   const previousExternalId = stringField(asRecord(params.action.metadata), 'previousExternalId');
-  const context = previous ? contexts[previous.provider] : undefined;
+  const context = previous?.instanceScope ?? (previous ? contexts[previous.provider] : undefined);
   if (
     binding
     && stringField(marker, 'id') === identity.migrationId

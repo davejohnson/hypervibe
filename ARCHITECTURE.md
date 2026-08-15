@@ -35,6 +35,12 @@ Desired infrastructure state is repo-backed when Hypervibe runs inside a git wor
 
 - `.hypervibe/spec.json` is the committed source of truth for infrastructure shape.
 - `.hypervibe/bindings.json` stores non-secret provider identity bindings needed for team members to observe the same live resources.
+- Scoped storage identity is the composite of the provider resource id and its
+  provider-native context. Keep `externalId` provider-native and present the
+  opaque, non-secret `instanceScope` beside it. Railway uses project and
+  environment ids; cloud adapters may use account/project, region, resource
+  group, storage-account, or similar coordinates. Matching unscoped ids alone
+  do not prove that two environments share one data instance.
 - Local SQLite is a cache/history/secrets store for revisions, runs, receipts, and local credentials.
 - Provider APIs are observed live state.
 
@@ -925,6 +931,28 @@ offer separate confirm-gated deletion of retained rollback targets. Provider
 adapters own provisioning and bounded/native data-plane access while generic
 transfer engines own PostgreSQL snapshot and object streaming semantics. See
 `docs/data-migration.md` for the operator contract.
+
+Object-storage lifecycle is implemented for Railway, Amazon S3, Google Cloud
+Storage, and Azure Blob Storage. Each adapter owns provider-native private
+resource creation, ownership metadata, live usage observation, runtime-secret
+wiring, streaming transfer, and confirmed teardown. Azure uses one dedicated
+storage account per declared bucket so its account key and deletion boundary do
+not span unrelated Hypervibe storage resources. Generic orchestration must not
+pretend that accepting a provider id is equivalent to implementing this full
+contract.
+
+Storage connections reuse compatible primary cloud authentication (`ecs` for
+S3, `cloudrun` for GCS, and `azure-container-apps` for Blob Storage) when it is
+already verified. Standalone storage connections accept the same authentication
+shape, not a second storage-specific key. For local operation they also use the
+provider-native credential path: the AWS SDK default profile/SSO chain, Google
+Application Default Credentials, or the Azure default credential chain. Explicit
+credentials remain available for unattended automation. Region/location remains in the spec;
+first-use observation resolves account/project/subscription scope through an
+explicitly read-only adapter method, while provider registration, resource-group
+creation, and credential derivation remain inside the reviewed apply action.
+Temporary CLI sessions may provision, observe, and migrate storage, but are not
+projected into deployed workloads as long-lived secrets.
 
 ## Database Tasks And Seed Data
 

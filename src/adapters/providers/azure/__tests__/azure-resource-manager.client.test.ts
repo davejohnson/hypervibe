@@ -4,6 +4,7 @@ import { AzureDatastoreCredentialsSchema } from '../azure-datastore.credentials.
 import {
   AzureResourceManagerClient,
   AzureResourceManagerError,
+  resolveAzureDefaultSubscription,
 } from '../azure-resource-manager.client.js';
 
 const SUBSCRIPTION_ID = '22222222-2222-4222-8222-222222222222';
@@ -46,6 +47,31 @@ afterEach(() => {
 });
 
 describe('AzureResourceManagerClient', () => {
+  it('derives an unambiguous subscription from the Azure default credential chain', async () => {
+    const request = vi.fn(async () => jsonResponse({
+      value: [{ subscriptionId: SUBSCRIPTION_ID, state: 'Enabled' }],
+    }));
+
+    await expect(resolveAzureDefaultSubscription(undefined, {
+      tokenProvider: async () => 'default-chain-token',
+      fetch: request as typeof fetch,
+    })).resolves.toEqual({ authMode: 'default', subscriptionId: SUBSCRIPTION_ID });
+    expect(request).toHaveBeenCalledWith(
+      'https://management.azure.com/subscriptions?api-version=2022-12-01',
+      { headers: { Accept: 'application/json', Authorization: 'Bearer default-chain-token' } }
+    );
+  });
+
+  it('requires an explicit subscription when the default identity can access several', async () => {
+    await expect(resolveAzureDefaultSubscription(undefined, {
+      tokenProvider: async () => 'default-chain-token',
+      fetch: (async () => jsonResponse({ value: [
+        { subscriptionId: SUBSCRIPTION_ID, state: 'Enabled' },
+        { subscriptionId: '55555555-5555-4555-8555-555555555555', state: 'Enabled' },
+      ] })) as typeof fetch,
+    })).rejects.toThrow(/multiple subscriptions/);
+  });
+
   it('uses client credentials and follows every exact-collection page', async () => {
     const firstId = `${COLLECTION}/one`;
     const secondId = `${COLLECTION}/two`;

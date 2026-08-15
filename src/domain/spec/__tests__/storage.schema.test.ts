@@ -22,6 +22,9 @@ describe('storage spec', () => {
     expect(storageSpecSchema.safeParse({
       provider: 'gcs', type: 'bucket', region: 'northamerica-northeast1', injectInto: [],
     }).success).toBe(true);
+    expect(storageSpecSchema.safeParse({
+      provider: 'azureblob', type: 'bucket', region: 'westus2', injectInto: ['api'],
+    }).success).toBe(true);
   });
 
   it('rejects storage targets that are not declared services', () => {
