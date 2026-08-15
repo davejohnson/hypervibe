@@ -29,6 +29,7 @@ describe('Stripe environment sync spec', () => {
             products: {
               starter: {
                 name: 'Starter',
+                taxCode: 'txcd_10103001',
                 prices: {
                   monthly: {
                     unitAmount: 4900,
@@ -46,7 +47,37 @@ describe('Stripe environment sync spec', () => {
 
     const stripe = parsed.environments.staging.payments?.stripe;
     expect(stripe?.credentials?.secretKeyEnvVar).toBe('STRIPE_SECRET_KEY');
+    expect(stripe?.catalog?.products.starter.taxCode).toBe('txcd_10103001');
     expect(stripe?.catalog?.products.starter.prices.monthly.currency).toBe('cad');
+  });
+
+  it('rejects an invalid Stripe product tax code', () => {
+    const parsed = projectSpecSchema.safeParse(project({
+      payments: {
+        stripe: {
+          catalog: {
+            products: {
+              starter: {
+                name: 'Starter',
+                taxCode: '10103001',
+                prices: {
+                  monthly: {
+                    unitAmount: 4900,
+                    interval: 'month',
+                    envVar: 'STRIPE_STARTER_MONTHLY_PRICE_ID',
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    }));
+
+    expect(parsed.success).toBe(false);
+    expect(parsed.success ? '' : parsed.error.message).toContain(
+      'taxCode must be a Stripe tax code id such as txcd_10103001'
+    );
   });
 
   it('allows catalog-only sync when runtime Stripe credentials are managed elsewhere', () => {

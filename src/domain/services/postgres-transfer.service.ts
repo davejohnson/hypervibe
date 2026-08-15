@@ -176,7 +176,7 @@ export async function transferPostgresDatabase(
   const createClient = dependencies.createClient ?? ((connectionString: string): SnapshotClient => {
     const client = new Client({ connectionString });
     return {
-      connect: () => client.connect(),
+      connect: async () => { await client.connect(); },
       end: () => client.end(),
       query: async (sql: string) => {
         const result = await client.query(sql);

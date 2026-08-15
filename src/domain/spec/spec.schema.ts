@@ -858,6 +858,13 @@ export const stripeCatalogPriceSpecSchema = z.object({
 export const stripeCatalogProductSpecSchema = z.object({
   name: z.string().min(1),
   description: z.string().min(1).optional(),
+  /** Stripe Tax Code id used to classify this product for tax calculation. */
+  taxCode: z.string()
+    .regex(
+      /^txcd_[0-9]{8}$/,
+      'taxCode must be a Stripe tax code id such as txcd_10103001'
+    )
+    .optional(),
   prices: z.record(stripeCatalogIdSchema, stripeCatalogPriceSpecSchema),
 }).strict().superRefine((product, ctx) => {
   if (Object.keys(product.prices).length === 0) {
