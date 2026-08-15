@@ -5,6 +5,11 @@ import type { ComponentType } from '../../../domain/entities/component.entity.js
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import { serviceWorkloadKind, type Service } from '../../../domain/entities/service.entity.js';
 import { parseHostingBindings } from '../../../domain/ports/hosting.port.js';
+import type {
+  IWorkloadMaintenanceAdapter,
+  MaintenanceWorkloadObservation,
+  MaintenanceWorkloadSnapshot,
+} from '../../../domain/ports/maintenance.port.js';
 import {
   hashEnvValue,
   type ObservedService,
@@ -85,7 +90,7 @@ type AzureProject = {
   resourceGroupName: string;
 };
 
-export class AzureContainerAppsAdapter implements IProviderAdapter {
+export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMaintenanceAdapter {
   readonly name = 'azure-container-apps';
 
   readonly capabilities: ProviderCapabilities = {
@@ -99,6 +104,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter {
     managedTls: true,
     supportsObserve: true,
     supportsDeferredDeploy: true,
+    supportsMaintenance: true,
   };
 
   private credentials: ConnectedAzureContainerAppsCredentials | null = null;
@@ -689,6 +695,12 @@ export class AzureContainerAppsAdapter implements IProviderAdapter {
         status: app.properties?.provisioningState === 'Succeeded'
           ? (container?.image === BOOTSTRAP_IMAGE ? 'empty' : 'running')
           : app.properties?.provisioningState === 'Failed' ? 'failed' : 'unknown',
+        maintenance: {
+          state: app.properties?.runningStatus === 'Stopped' ? 'suspended'
+            : app.properties?.runningStatus === 'Running' ? 'running'
+              : 'unknown',
+          providerState: { runningStatus: app.properties?.runningStatus ?? 'unknown' },
+        },
       });
     }
     return {
@@ -706,6 +718,77 @@ export class AzureContainerAppsAdapter implements IProviderAdapter {
         ...warnings,
       ],
     };
+  }
+
+  async observeMaintenanceWorkload(
+    environment: Environment,
+    serviceId: string,
+    workloadKind: MaintenanceWorkloadSnapshot['workloadKind']
+  ): Promise<MaintenanceWorkloadObservation> {
+    const binding = Object.values(parseHostingBindings(environment).services ?? {})
+      .find((candidate) => candidate.serviceId === serviceId);
+    if (!binding) {
+      return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_workload_unbound' };
+    }
+    const app = await this.getResource(serviceId, CONTAINER_APPS_API);
+    if (!app || !this.isOwned(app, environment.id)) {
+      return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_workload_identity_unknown' };
+    }
+    const runningStatus = String(app.properties?.runningStatus ?? 'unknown');
+    return {
+      serviceId,
+      workloadKind,
+      wasRunning: runningStatus === 'Running',
+      state: runningStatus === 'Stopped' ? 'suspended'
+        : runningStatus === 'Running' ? 'running'
+          : 'unknown',
+      providerState: { runningStatus },
+    };
+  }
+
+  async suspendMaintenanceWorkload(
+    environment: Environment,
+    expected: MaintenanceWorkloadSnapshot
+  ): Promise<Receipt> {
+    const current = await this.observeMaintenanceWorkload(
+      environment,
+      expected.serviceId,
+      expected.workloadKind
+    );
+    if (current.state === 'suspended') {
+      return { success: true, message: `Container App ${expected.serviceId} is already stopped`, data: { applied: 0, skipped: 1 } };
+    }
+    if (current.state !== 'running') {
+      return this.failedReceipt('Container App was not stopped', 'The bound workload state is unknown.');
+    }
+    await this.connected().client.request('POST', `${expected.serviceId}/stop`, CONTAINER_APPS_API);
+    const verified = await this.waitForRunningStatus(expected.serviceId, 'Stopped');
+    return verified
+      ? { success: true, message: `Stopped Container App ${expected.serviceId}`, data: { applied: 1, skipped: 0 } }
+      : this.failedReceipt('Container App stop was not verified', 'The provider did not report Stopped before the verification deadline.');
+  }
+
+  async resumeMaintenanceWorkload(
+    environment: Environment,
+    snapshot: MaintenanceWorkloadSnapshot
+  ): Promise<Receipt> {
+    const current = await this.observeMaintenanceWorkload(environment, snapshot.serviceId, snapshot.workloadKind);
+    if (!snapshot.wasRunning) {
+      return current.state === 'suspended'
+        ? { success: true, message: `Container App ${snapshot.serviceId} was stopped before maintenance`, data: { applied: 0, skipped: 1 } }
+        : this.failedReceipt('Container App restoration was blocked', 'A workload that was previously stopped is now running.');
+    }
+    if (current.state === 'running') {
+      return { success: true, message: `Container App ${snapshot.serviceId} is already running`, data: { applied: 0, skipped: 1 } };
+    }
+    if (current.state !== 'suspended') {
+      return this.failedReceipt('Container App was not started', 'The bound workload state is unknown.');
+    }
+    await this.connected().client.request('POST', `${snapshot.serviceId}/start`, CONTAINER_APPS_API);
+    const verified = await this.waitForRunningStatus(snapshot.serviceId, 'Running');
+    return verified
+      ? { success: true, message: `Started Container App ${snapshot.serviceId}`, data: { applied: 1, skipped: 0 } }
+      : this.failedReceipt('Container App start was not verified', 'The provider did not report Running before the verification deadline.');
   }
 
   private connected(): { client: AzureResourceManagerClient; credentials: ConnectedAzureContainerAppsCredentials } {
@@ -910,6 +993,18 @@ export class AzureContainerAppsAdapter implements IProviderAdapter {
       if (attempt < 180) await this.delay();
     }
     throw new Error(`Azure resource ${id} did not finish provisioning.`);
+  }
+
+  private async waitForRunningStatus(id: string, expected: 'Running' | 'Stopped'): Promise<boolean> {
+    for (let attempt = 1; attempt <= 180; attempt += 1) {
+      const resource = await this.getResource(id, CONTAINER_APPS_API);
+      if (!resource) return false;
+      const state = String(resource.properties?.runningStatus ?? 'unknown');
+      if (state === expected) return true;
+      if (!['Progressing', 'Running', 'Stopped'].includes(state)) return false;
+      if (attempt < 180) await this.delay();
+    }
+    return false;
   }
 
   private async getResource(id: string, apiVersion: string): Promise<AzureResource | null> {
@@ -1172,7 +1267,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { customDomains: 'managed', domainTrafficProxy: 'dns-only' },
+      hosting: { customDomains: 'managed', domainTrafficProxy: 'dns-only', maintenance: 'managed' },
     },
   },
   factory: (credentials) => {

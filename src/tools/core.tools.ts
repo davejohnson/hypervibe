@@ -61,6 +61,8 @@ import {
   type EnvironmentVariableCoverageReport,
 } from '../domain/services/environment-variable-coverage.service.js';
 import { planProviderNativeDeploySources } from '../domain/services/provider-native-deploy-source.service.js';
+import { planMaintenance } from '../domain/services/maintenance-plan.service.js';
+import { parseEnvironmentMaintenanceBinding } from '../domain/services/environment-maintenance.service.js';
 
 // Re-exported for existing test imports; implementation lives in apply-plan.ts.
 export { bootstrapActionResultFromSummary } from '../application/apply-plan.js';
@@ -806,6 +808,15 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         nonNativeSourcePolicy: hostingMetadata?.orchestration?.nativeBranchDeploy?.nonNativeSourcePolicy,
       });
       const nativeDeploySourceDrift = nativeDeploySources.actions.filter((action) => action.type !== 'noop');
+      const maintenance = observed && environment
+        ? planMaintenance({
+            environmentName: envName,
+            environmentSpec: envSpec,
+            environment,
+            observed,
+          })
+        : { actions: [] as PlanAction[], pending: false, providers: [] as string[], warnings: [] as string[] };
+      const maintenanceDrift = maintenance.actions.filter((action) => action.type !== 'noop');
 
       const expectedSource = planService.expectedDeploySource(projectForStatus, envName, envSpec);
       const observedSources = Object.fromEntries(
@@ -970,10 +981,19 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               }),
             }
             : {}),
-          inSync: !observationIncomplete && drift.length === 0 && cacheDrift.length === 0 && databaseResilienceDrift.length === 0 && nativeDeploySourceDrift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0 && messagingDrift.length === 0,
+          inSync: !observationIncomplete && maintenanceDrift.length === 0 && drift.length === 0 && cacheDrift.length === 0 && databaseResilienceDrift.length === 0 && nativeDeploySourceDrift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0 && messagingDrift.length === 0,
           runtimeHealth: runtimeHealthSummary(observed),
-          summary: summarizeActions([...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
-          drift: [...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
+          ...(envSpec.maintenance || parseEnvironmentMaintenanceBinding(environment)
+            ? {
+                maintenance: {
+                  desired: envSpec.maintenance?.enabled === true,
+                  observed: observed?.maintenance?.state ?? 'unknown',
+                  stage: observed?.maintenance?.stage ?? 'unknown',
+                },
+              }
+            : {}),
+          summary: summarizeActions([...maintenance.actions, ...nativeDeploySources.actions, ...diff.actions, ...cache.actions, ...databaseResilience.actions, ...ios.actions, ...queues.actions, ...storage.actions, ...delegatedSecrets.actions, ...stripeSync.actions, ...email.actions, ...messaging.actions]),
+          drift: [...maintenanceDrift, ...nativeDeploySourceDrift, ...drift, ...cacheDrift, ...databaseResilienceDrift, ...iosDrift, ...queueDrift, ...storageDrift, ...delegatedSecretDrift, ...stripeDrift, ...emailDrift, ...messagingDrift],
           unmanaged: [...diff.unmanaged, ...cache.unmanaged, ...databaseResilience.unmanaged, ...storage.unmanaged],
           ...(envSpec.database?.resilience
             ? {
@@ -1002,7 +1022,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           },
         },
         {
-          warnings: [...warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings],
+          warnings: [...warnings, ...maintenance.warnings, ...nativeDeploySources.warnings, ...diff.warnings, ...cache.warnings, ...databaseResilience.warnings, ...sourceWarnings, ...ciDeploy.warnings, ...ios.warnings, ...queues.warnings, ...storage.warnings, ...delegatedSecrets.warnings, ...stripeSync.warnings, ...email.warnings, ...messaging.warnings],
           hint: blocked.length > 0
             ? connectionRecoveryHint(blocked, {
               project: project.name,
@@ -1015,7 +1035,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
               : delegatedSecrets.inputRequired.length > 0
                 ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
-              : nativeDeploySourceDrift.length > 0 || drift.length > 0 || cacheDrift.length > 0 || databaseResilienceDrift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 || emailDrift.length > 0 || messagingDrift.length > 0
+              : maintenanceDrift.length > 0 || nativeDeploySourceDrift.length > 0 || drift.length > 0 || cacheDrift.length > 0 || databaseResilienceDrift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 || emailDrift.length > 0 || messagingDrift.length > 0
                 ? 'Run hv_plan to get an executable plan for this drift.'
                 : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.',
           next: blocked.length > 0 ? ['hv_connections'] : undefined,

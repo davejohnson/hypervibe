@@ -63,6 +63,22 @@ already-attached hostname without the durable binding blocks for explicit
 DNS-only traffic; Railway, DigitalOcean, and Vercel may opt into proxying only
 after direct certificate validation succeeds.
 
+### Environment maintenance and data cutover
+
+Maintenance is an environment lifecycle capability, not a Railway special case.
+The shared contract requires a bound Cloudflare static 503 edge, ordered
+cron/worker/web suspension, a PostgreSQL write fence, fresh tri-state
+observation after every boundary, exact restoration snapshots, and edge removal
+only after normal workload/database state is verified. Migration copy authority
+requires active source and target maintenance observations and hashes both into
+the reviewed action; apply re-observes both before creating a fresh data target.
+
+Railway, Cloud Run, and Azure Container Apps expose the workload-maintenance
+port. ECS Express, DigitalOcean App Platform, and Vercel explicitly report
+`maintenance: unsupported`, so generic planning blocks before mutation. Each
+unsupported provider needs its own mocked and opt-in live entry/noop/exit
+contract before promotion.
+
 Redis/Valkey starts with Railway, Memorystore, DigitalOcean, ElastiCache,
 and Azure Managed Redis. Railway is the first implemented
 adapter slice. It is `ready-for-live`, not `supported`, until the opt-in live

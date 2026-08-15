@@ -3,7 +3,7 @@ import type { Component } from '../entities/component.entity.js';
 
 export type PlanActionType = 'create' | 'update' | 'replace' | 'destroy' | 'noop';
 
-export type PlanResourceKind = 'project' | 'environment' | 'service' | 'database' | 'cache' | 'storage' | 'load-balancer' | 'domain' | 'email' | 'messaging' | 'ci' | 'repo' | 'ios' | 'queue' | 'secret' | 'payment';
+export type PlanResourceKind = 'project' | 'environment' | 'service' | 'database' | 'cache' | 'storage' | 'load-balancer' | 'domain' | 'email' | 'messaging' | 'ci' | 'repo' | 'ios' | 'queue' | 'secret' | 'payment' | 'maintenance';
 
 export interface PlanFieldDiff {
   /** Field name; env vars appear as "env:KEY" with no values. */
@@ -67,6 +67,7 @@ export interface LocalSnapshot {
       services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
     };
     storage?: Record<string, { provider?: string; externalId?: string; region?: string }>;
+    maintenance?: Record<string, unknown>;
   };
 }
 

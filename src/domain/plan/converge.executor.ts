@@ -16,7 +16,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   id: z.string().min(1),
   type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({
-    kind: z.enum(['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'domain', 'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment']),
+    kind: z.enum(['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'domain', 'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
     name: z.string().min(1),
     provider: z.string().min(1),
   }),
@@ -148,6 +148,7 @@ export function fingerprintObservedState(observed: ObservedState): string {
         source: s.source ?? null,
         sourceState: s.sourceState ?? null,
         envVarHashes: Object.fromEntries(Object.entries(s.envVarHashes).sort(([a], [b]) => a.localeCompare(b))),
+        maintenance: s.maintenance ?? null,
       })),
     databases: [...observed.databases]
       .sort((a, b) => a.externalId.localeCompare(b.externalId))
@@ -173,6 +174,7 @@ export function fingerprintObservedState(observed: ObservedState): string {
         sizeBytes: item.sizeBytes ?? null,
       })),
     completeness: observed.completeness ?? null,
+    maintenance: observed.maintenance ?? null,
   };
   return createHash('sha256').update(JSON.stringify(essence), 'utf8').digest('hex');
 }

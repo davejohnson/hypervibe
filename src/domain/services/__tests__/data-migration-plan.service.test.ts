@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Component } from '../../entities/component.entity.js';
 import type { Environment } from '../../entities/environment.entity.js';
+import type { EnvironmentMaintenanceObservation } from '../../ports/observe.port.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import {
   DATA_MIGRATION_OPERATIONS,
@@ -17,6 +18,18 @@ function component(id: string, environmentId: string, bindings: Record<string, u
   return { id, environmentId, type: 'postgres', bindings, externalId: `${id}-external`, createdAt: now, updatedAt: now };
 }
 
+function activeMaintenance(hostname: string): EnvironmentMaintenanceObservation {
+  return {
+    state: 'active',
+    stage: 'verified',
+    edge: { state: 'active', hostname, markerVerified: true },
+    workloads: {
+      web: { state: 'suspended', serviceId: 'web-id', workloadKind: 'web' },
+    },
+    database: { state: 'fenced' },
+  };
+}
+
 function fixture() {
   const spec = projectSpecSchema.parse({
     version: 1,
@@ -26,6 +39,7 @@ function fixture() {
         hosting: { provider: 'railway' },
         services: { web: {} },
         database: { provider: 'railway', engine: 'postgres' },
+        maintenance: { enabled: true },
         storage: {
           documents: { provider: 'railway', type: 'bucket', region: 'sjc', injectInto: ['web'] },
         },
@@ -34,6 +48,7 @@ function fixture() {
         hosting: { provider: 'ecs' },
         services: { web: {} },
         database: { provider: 'rds', engine: 'postgres' },
+        maintenance: { enabled: true },
         storage: {
           documents: { provider: 'railway', type: 'bucket', region: 'iad', injectInto: ['web'] },
         },
@@ -65,10 +80,12 @@ describe('planDataMigration', () => {
       sourceSpec: spec.environments.staging,
       sourceEnvironment,
       sourceComponents: [component('source-db', 'source', { provider: 'railway' })],
+      sourceMaintenance: activeMaintenance('staging.example.com'),
+      targetMaintenance: activeMaintenance('app.example.com'),
     });
 
     expect(result.pending).toBe(true);
-    expect(result.providers).toEqual(['railway', 'rds']);
+    expect(result.providers).toEqual(['cloudflare', 'ecs', 'railway', 'rds']);
     expect(result.actions).toHaveLength(2);
     expect(result.actions.map((action) => action.metadata?.operation)).toEqual([
       DATA_MIGRATION_OPERATIONS.databaseCopy,
@@ -98,6 +115,8 @@ describe('planDataMigration', () => {
       sourceSpec: spec.environments.staging,
       sourceEnvironment,
       sourceComponents: [component('source-db', 'source', { provider: 'railway' })],
+      sourceMaintenance: activeMaintenance('staging.example.com'),
+      targetMaintenance: activeMaintenance('app.example.com'),
     });
 
     expect(result.pending).toBe(false);
@@ -115,9 +134,29 @@ describe('planDataMigration', () => {
       sourceSpec: spec.environments.staging,
       sourceEnvironment,
       sourceComponents: [],
+      sourceMaintenance: activeMaintenance('staging.example.com'),
+      targetMaintenance: activeMaintenance('app.example.com'),
     });
 
     expect(result.actions.find((action) => action.resource.kind === 'database')?.metadata?.blockedReason)
       .toBe('source_database_not_tracked');
+  });
+
+  it('blocks copy when either environment is not provider-verified in maintenance', () => {
+    const { spec, sourceEnvironment } = fixture();
+    const result = planDataMigration({
+      targetEnvironmentName: 'production',
+      targetSpec: spec.environments.production,
+      targetEnvironment: environment('target', 'production'),
+      targetComponents: [],
+      sourceSpec: spec.environments.staging,
+      sourceEnvironment,
+      sourceComponents: [component('source-db', 'source', { provider: 'railway' })],
+      sourceMaintenance: activeMaintenance('staging.example.com'),
+    });
+
+    expect(result.actions.every((action) =>
+      action.metadata?.blockedReason === 'target_maintenance_not_verified'
+    )).toBe(true);
   });
 });

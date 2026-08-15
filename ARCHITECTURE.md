@@ -932,6 +932,26 @@ adapters own provisioning and bounded/native data-plane access while generic
 transfer engines own PostgreSQL snapshot and object streaming semantics. See
 `docs/data-migration.md` for the operator contract.
 
+Environment maintenance is a provider-neutral desired-state boundary under
+`environments.<name>.maintenance.enabled`. Entry is ordered and verified:
+Cloudflare publishes a bound static 503 Worker route, cron/worker/web workloads
+are suspended in that order with exact restoration snapshots, PostgreSQL sets
+`default_transaction_read_only` for the bound role and database, and a final
+fresh observation records the active state. Exit reverses the database and
+workload changes before removing the exact bound edge route. Every stage stores
+only durable provider identity and non-secret restoration state, and a failed
+or unknown observation blocks the next mutation. Migration copy actions carry
+fresh source and target maintenance fingerprints and re-observe both immediately
+before provisioning a candidate target.
+
+The workload port is implemented by Railway, GCP Cloud Run, and Azure Container
+Apps. Cloudflare supplies the common public edge and PostgreSQL supplies the
+provider-independent write fence. ECS Express, DigitalOcean App Platform, and
+Vercel explicitly declare maintenance unsupported until they can prove all
+background and direct-origin workloads are reversibly stopped. Generic planning
+must fail closed for those providers; capability presence is never inferred from
+a provider name.
+
 Object-storage lifecycle is implemented for Railway, Amazon S3, Google Cloud
 Storage, and Azure Blob Storage. Each adapter owns provider-native private
 resource creation, ownership metadata, live usage observation, runtime-secret

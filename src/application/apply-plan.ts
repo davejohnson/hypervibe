@@ -100,6 +100,7 @@ import type { CommandContext } from './context.js';
 import { resolvePlanActionAuthority } from '../domain/plan/action-authority.js';
 import { applyDatabaseResilienceAction } from './apply-database-resilience.js';
 import { applyDataMigrationAction } from './apply-data-migration.js';
+import { applyMaintenanceAction } from './apply-maintenance.js';
 
 /**
  * The shared plan-apply pipeline: connection gating, TOCTOU re-observe,
@@ -715,6 +716,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     const capability = authority.capability;
 
+    if (capability.startsWith('maintenance.')) {
+      return await applyMaintenanceAction({
+        ctx,
+        project: applyProject,
+        environmentName: envName,
+        environmentSpec: envSpec,
+        action,
+      }) ?? {
+        success: false,
+        status: 'blocked',
+        message: `Maintenance action ${action.id} was not recognized`,
+        error: 'Re-run hv_plan with the current Hypervibe version.',
+      };
+    }
     if (capability === 'hosting.environment.ensure') {
       return ensureHostingEnvironment(ctx, applyProject, envName, action);
     }

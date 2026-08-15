@@ -67,6 +67,9 @@ export interface ProviderCapabilities {
 
   /** Whether bounded operations can temporarily expose an internal database. */
   supportsTemporaryDatabaseAccess?: boolean;
+
+  /** Whether the adapter can provider-verify reversible workload suspension. */
+  supportsMaintenance?: boolean;
 }
 
 export interface ComponentResult {

@@ -59,6 +59,10 @@ import {
   DATA_MIGRATION_OPERATIONS,
   isDataMigrationAction,
 } from '../services/data-migration-plan.service.js';
+import {
+  MAINTENANCE_OPERATIONS,
+  isMaintenanceAction,
+} from '../services/maintenance-plan.service.js';
 
 export type PlanMutationCapability =
   | 'hosting.environment.ensure'
@@ -100,6 +104,10 @@ export type PlanMutationCapability =
   | 'storage.migrate'
   | 'database.migration-target.destroy'
   | 'storage.migration-target.destroy'
+  | 'maintenance.edge.mutate'
+  | 'maintenance.workload.mutate'
+  | 'maintenance.database-fence.mutate'
+  | 'maintenance.verify'
   | 'hosting.task-service.destroy'
   | 'hosting.previous-service.destroy'
   | 'hosting.service.destroy'
@@ -408,6 +416,45 @@ export function resolvePlanActionAuthority(
     return authority(action, 'queue.mutate');
   }
   if (
+    isMaintenanceAction(action)
+    && exactResource(action, 'maintenance')
+    && action.type === 'update'
+    && metadataString(action, 'environmentName')
+  ) {
+    const operation = action.metadata?.operation;
+    if (
+      (operation === MAINTENANCE_OPERATIONS.edgeEnable
+        || operation === MAINTENANCE_OPERATIONS.edgeDisable)
+      && action.resource.provider === 'cloudflare'
+      && action.resource.name === metadataString(action, 'hostname')
+    ) {
+      return authority(action, 'maintenance.edge.mutate');
+    }
+    if (
+      (operation === MAINTENANCE_OPERATIONS.workloadSuspend
+        || operation === MAINTENANCE_OPERATIONS.workloadResume)
+      && action.resource.name === metadataString(action, 'serviceName')
+      && metadataString(action, 'serviceId')
+      && ['web', 'worker', 'cron'].includes(metadataString(action, 'workloadKind') ?? '')
+    ) {
+      return authority(action, 'maintenance.workload.mutate');
+    }
+    if (
+      operation === MAINTENANCE_OPERATIONS.databaseFence
+      || operation === MAINTENANCE_OPERATIONS.databaseUnfence
+    ) {
+      return authority(action, 'maintenance.database-fence.mutate');
+    }
+    if (
+      (operation === MAINTENANCE_OPERATIONS.verifyEnter
+        || operation === MAINTENANCE_OPERATIONS.verifyExit)
+      && action.resource.provider === 'local'
+    ) {
+      return authority(action, 'maintenance.verify');
+    }
+    return null;
+  }
+  if (
     isDataMigrationAction(action)
     && metadataString(action, 'migrationId')
     && metadataString(action, 'sourceEnvironment')
@@ -423,6 +470,8 @@ export function resolvePlanActionAuthority(
       && metadataString(action, 'sourceComponentId')
       && metadataString(action, 'sourceProvider')
       && metadataString(action, 'targetProvider') === action.resource.provider
+      && metadataString(action, 'sourceMaintenanceFingerprint')
+      && metadataString(action, 'targetMaintenanceFingerprint')
     ) {
       return authority(action, 'database.migrate');
     }
@@ -436,6 +485,8 @@ export function resolvePlanActionAuthority(
       && metadataString(action, 'sourceExternalId')
       && metadataString(action, 'sourceProvider')
       && metadataString(action, 'targetProvider') === action.resource.provider
+      && metadataString(action, 'sourceMaintenanceFingerprint')
+      && metadataString(action, 'targetMaintenanceFingerprint')
     ) {
       return authority(action, 'storage.migrate');
     }

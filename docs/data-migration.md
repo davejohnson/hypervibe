@@ -8,8 +8,19 @@ should replace its database and/or named buckets.
 ```json
 {
   "environments": {
+    "staging": {
+      "hosting": { "provider": "railway" },
+      "domain": "staging.example.com",
+      "services": { "web": {}, "worker": { "workloadKind": "worker" } },
+      "database": { "provider": "railway", "engine": "postgres" },
+      "maintenance": { "enabled": true }
+    },
     "production": {
+      "hosting": { "provider": "cloudrun" },
+      "domain": "example.com",
+      "services": { "web": {}, "worker": { "workloadKind": "worker" } },
       "database": { "provider": "rds", "engine": "postgres" },
+      "maintenance": { "enabled": true },
       "dataMigration": {
         "id": "initial-production-launch",
         "fromEnvironment": "staging",
@@ -28,8 +39,12 @@ Use a new id for a new migration event.
 
 1. Deploy and verify the exact application SHA intended for production while
    it still uses the existing production data bindings.
-2. Put the source environment into maintenance mode and stop every writer,
-   including workers, cron jobs, external ingestion, and direct operator writes.
+2. Declare `maintenance.enabled: true` on both source and target. Plan and apply
+   each environment until `hv_status` reports `maintenance.state: active` and
+   `stage: verified`. Hypervibe must prove the Cloudflare 503 marker, suspend
+   every cron/worker/web workload, and enable the PostgreSQL write fence. Do not
+   copy data based on a manually displayed maintenance page or an application
+   flag.
 3. Run `hv_plan` for the target. A pending migration produces an isolated,
    confirmation-required plan; ordinary service, DNS, CI, and datastore actions
    are excluded from this apply.
@@ -37,18 +52,46 @@ Use a new id for a new migration event.
    apply the plan. Hypervibe creates fresh unreachable targets, streams data,
    verifies database table counts/extensions and storage key/size manifests,
    and only then records the new bindings.
-5. Run `hv_plan` again. This plan rewires services and deploys the exact desired
-   SHA. Apply it, verify health and application-level smoke checks, then switch
-   production DNS if the hostname is not already managed by production.
-6. Run `hv_plan` once more after cutover convergence. Hypervibe can now offer
+5. Keep both environments in desired maintenance and run `hv_plan` again. This
+   plan rewires services and deploys the exact desired SHA while the public edge
+   and database write fence remain active. Apply it and verify provider health
+   and the migration receipt.
+6. Set `maintenance.enabled: false` on production and apply the reviewed exit.
+   Hypervibe removes the database fence, restores exact pre-maintenance workload
+   settings, and removes only its bound Cloudflare route after fresh verification.
+   Keep staging in maintenance until production is accepted or rollback is no
+   longer required.
+7. Run `hv_plan` once more after cutover convergence. Hypervibe can now offer
    separate confirmation-required deletion actions for any previous production
    database or bucket retained as a rollback target.
-7. Remove `dataMigration` after the receipt and retained-target lifecycle are
+8. Remove `dataMigration` after the receipt and retained-target lifecycle are
    complete. The receipt remains in Hypervibe state.
 
 Failed copies never replace active bindings. Hypervibe attempts to destroy a
 failed fresh target; if provider cleanup fails, it retains the exact candidate
 identity and blocks another candidate until cleanup succeeds.
+
+## Maintenance provider support
+
+The edge and database controls are portable: Cloudflare uses the connected API
+token already used for DNS, with `Zone > Workers Routes > Edit` and
+`Account > Workers Scripts > Edit` added to that token; PostgreSQL uses the
+operation-scoped database access already owned by the database adapter. No
+second Cloudflare key or provider-specific maintenance credential is required.
+Workload suspension is currently:
+
+| Hosting provider | Maintenance behavior |
+| --- | --- |
+| Railway | Removes the exact active deployment, preserves replicas/sleep/cron settings, and redeploys it on exit. |
+| GCP Cloud Run | Sets manual service scaling to zero, pauses scheduler jobs, and restores the exact prior scaling/schedule state. |
+| Azure Container Apps | Uses the provider stop/start lifecycle and verifies terminal running state. |
+| AWS ECS Express | Unsupported; plans fail closed. |
+| DigitalOcean App Platform | Unsupported; plans fail closed. |
+| Vercel | Unsupported; plans fail closed. |
+
+This matrix is deliberate. A provider is not marked supported until Hypervibe
+can stop background work and direct origins, retain exact restoration state,
+and verify both directions using its ordinary connection credentials.
 
 ## Provider portability
 

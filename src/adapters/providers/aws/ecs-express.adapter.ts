@@ -1515,7 +1515,11 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { customDomains: 'managed', domainTrafficProxy: 'dns-only' },
+      hosting: {
+        customDomains: 'managed',
+        domainTrafficProxy: 'dns-only',
+        maintenance: 'unsupported',
+      },
     },
   },
   factory: (credentials) => {

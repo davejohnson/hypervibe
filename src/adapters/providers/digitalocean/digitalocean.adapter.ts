@@ -1446,7 +1446,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { customDomains: 'managed' },
+      hosting: { customDomains: 'managed', maintenance: 'unsupported' },
       databaseEngines: ['postgres'],
       cacheEngines: ['redis'],
     },

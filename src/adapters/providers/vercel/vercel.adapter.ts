@@ -1241,7 +1241,7 @@ providerRegistry.register({
       ],
     },
     lifecycle: {
-      hosting: { customDomains: 'managed' },
+      hosting: { customDomains: 'managed', maintenance: 'unsupported' },
     },
     orchestration: {
       project: { shareAcrossEnvironments: true },
