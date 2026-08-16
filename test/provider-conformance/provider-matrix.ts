@@ -53,7 +53,7 @@ export interface HostingProviderContract {
   /** Whether the provider certificate path permits proxied traffic DNS. */
   domainTrafficProxy: 'supported' | 'dns-only';
   /** Reversible, provider-verified suspension of every declared workload. */
-  maintenance: 'managed' | 'unsupported';
+  maintenance: 'managed' | 'ready-for-live' | 'unsupported';
   credentials: ProviderCredentialField[];
   /** Opt-in managed GitHub workflow live-test profile. */
   managedWorkflow?: ManagedWorkflowFixture;
@@ -259,7 +259,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'ready-for-live',
     customDomains: 'managed',
     domainTrafficProxy: 'supported',
-    maintenance: 'unsupported',
+    maintenance: 'ready-for-live',
     credentials: vercelCredentials,
     managedWorkflow: {
       environmentName: 'production',
@@ -280,7 +280,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
       },
     },
     implementationNote:
-      'The source-less Project lifecycle adapter, personal/team token guidance, mocked safety contracts, native-Git-source guard, exact-file REST deployment workflow, and review-gated managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run.',
+      'The source-less Project lifecycle adapter, personal/team token guidance, mocked safety contracts, exact-ID pause/unpause maintenance contract, native-Git-source guard, exact-file REST deployment workflow, and review-gated managed-workflow live harness are implemented. Maintenance remains ready-for-live until its opt-in entry/noop/exit scenario passes; provider promotion still requires a successful create/deploy/noop/update/destroy run.',
   },
 ];
 

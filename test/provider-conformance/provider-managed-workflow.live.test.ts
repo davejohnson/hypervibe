@@ -9,6 +9,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import '../../src/application/providers.js';
+import type { Environment } from '../../src/domain/entities/environment.entity.js';
+import { supportsWorkloadMaintenance } from '../../src/domain/ports/maintenance.port.js';
+import { providerRegistry } from '../../src/domain/registry/provider.registry.js';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import {
   cacheProviderContracts,
@@ -506,6 +510,87 @@ async function verifyHealth(): Promise<void> {
   expect(health.data.check).toMatchObject({ ok: true });
 }
 
+async function verifyOptInMaintenanceLifecycle(): Promise<void> {
+  if (process.env.HYPERVIBE_LIVE_MAINTENANCE !== '1') return;
+  const fixture = contract!.managedWorkflow!;
+  if (contract!.maintenance === 'unsupported') {
+    throw new Error(
+      `${contract!.provider} does not expose a live-ready maintenance contract.`
+    );
+  }
+  const bindingsPath = path.join(workspace, '.hypervibe/bindings.json');
+  if (!existsSync(bindingsPath)) {
+    throw new Error('The live maintenance scenario requires repo-backed provider bindings.');
+  }
+  const bindings = JSON.parse(readFileSync(bindingsPath, 'utf8')) as JsonObject;
+  const platformBindings = bindings.environments?.[fixture.environmentName]
+    ?.platformBindings as Record<string, unknown> | undefined;
+  const serviceId = (
+    platformBindings?.services as Record<string, JsonObject> | undefined
+  )?.[fixture.serviceName]?.serviceId;
+  if (!platformBindings || typeof serviceId !== 'string') {
+    throw new Error(
+      `The live maintenance scenario could not resolve the exact ${fixture.serviceName} service binding.`
+    );
+  }
+  const registered = providerRegistry.get(contract!.provider);
+  if (!registered) {
+    throw new Error(`Provider ${contract!.provider} is not registered.`);
+  }
+  const adapter = registered.factory(requiredCredentials(contract!.credentials));
+  if (!supportsWorkloadMaintenance(adapter)) {
+    throw new Error(
+      `Provider ${contract!.provider} does not implement the workload-maintenance port.`
+    );
+  }
+  const now = new Date();
+  const environment: Environment = {
+    id: `live-${fixture.environmentName}`,
+    projectId: projectName,
+    name: fixture.environmentName,
+    platformBindings,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const snapshot = await adapter.observeMaintenanceWorkload(
+    environment,
+    serviceId,
+    fixture.service.workloadKind
+  );
+  expect(snapshot).toMatchObject({
+    serviceId,
+    workloadKind: fixture.service.workloadKind,
+    state: 'running',
+    wasRunning: true,
+  });
+
+  try {
+    const entry = await adapter.suspendMaintenanceWorkload(environment, snapshot);
+    expect(entry).toMatchObject({
+      success: true,
+      data: { applied: 1, skipped: 0 },
+    });
+    await expect(adapter.observeMaintenanceWorkload(
+      environment,
+      serviceId,
+      fixture.service.workloadKind
+    )).resolves.toMatchObject({ state: 'suspended' });
+    await expect(adapter.suspendMaintenanceWorkload(environment, snapshot))
+      .resolves.toMatchObject({
+        success: true,
+        data: { applied: 0, skipped: 1 },
+      });
+  } finally {
+    await expect(adapter.resumeMaintenanceWorkload(environment, snapshot))
+      .resolves.toMatchObject({ success: true });
+  }
+  await expect(adapter.observeMaintenanceWorkload(
+    environment,
+    serviceId,
+    fixture.service.workloadKind
+  )).resolves.toMatchObject({ state: 'running' });
+}
+
 async function verifyCommittedFixture(): Promise<void> {
   const fixture = contract!.managedWorkflow!;
   const specPath = path.join(workspace, '.hypervibe/spec.json');
@@ -703,6 +788,7 @@ liveDescribe('live managed provider workflow contract', () => {
       event: 'workflow_dispatch',
     });
     await verifyHealth();
+    await verifyOptInMaintenanceLifecycle();
 
     const noop = await plan();
     expect(nonNoopActions(noop)).toEqual([]);

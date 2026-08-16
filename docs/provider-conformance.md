@@ -73,8 +73,12 @@ only after normal workload/database state is verified. Migration copy authority
 requires active source and target maintenance observations and hashes both into
 the reviewed action; apply re-observes both before creating a fresh data target.
 
-Railway, Cloud Run, and Azure Container Apps expose the workload-maintenance
-port. ECS Express, DigitalOcean App Platform, and Vercel explicitly report
+Railway, Cloud Run, Azure Container Apps, and Vercel expose the
+workload-maintenance port. Vercel resolves only its durable Project binding,
+verifies the documented paused state and direct production origins, preserves
+Projects paused before Hypervibe maintenance, and resumes without a deployment.
+Its conformance entry remains `maintenance: ready-for-live` until the opt-in
+entry/noop/exit path passes. ECS Express and DigitalOcean App Platform report
 `maintenance: unsupported`, so generic planning blocks before mutation. Each
 unsupported provider needs its own mocked and opt-in live entry/noop/exit
 contract before promotion.
@@ -492,6 +496,10 @@ export HYPERVIBE_TEST_VERCEL_ACCESS_TOKEN="<Vercel personal or Team token>"
 # Required only when the token should operate in a Team:
 export HYPERVIBE_TEST_VERCEL_TEAM_ID="team_..."
 HYPERVIBE_LIVE_MANAGED_HOSTING=vercel npm run test:providers:managed-live
+
+# Add this explicit opt-in to pause, verify, retry, and unpause the disposable
+# Vercel Project after its exact-SHA health check:
+HYPERVIBE_LIVE_MANAGED_HOSTING=vercel HYPERVIBE_LIVE_MAINTENANCE=1 npm run test:providers:managed-live
 
 # Or, after exporting the provider variables described below:
 HYPERVIBE_LIVE_MANAGED_HOSTING=digitalocean npm run test:providers:managed-live
