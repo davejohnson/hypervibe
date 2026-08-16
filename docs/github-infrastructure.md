@@ -163,6 +163,21 @@ Checks also support `lint`, `typecheck`, `build`, `dependency-audit`,
 per stable finding and closes it after one complete clean audit; failed or
 partial audit runs never close findings.
 
+A code audit may add bounded `instructions` for a reviewed repository-specific
+contract. When that contract needs current public documentation, declare exact
+lowercase hosts in `documentationDomains`. Hypervibe generates a named Codex
+profile that extends `:read-only`, activates the network proxy, and permits only
+those hosts. It does not give the audit a provider credential or GitHub write
+token; the separate issue job remains the only writer. This follows the
+[Codex permission-profile contract](https://developers.openai.com/codex/permissions),
+where domain rules are enforced only while the network proxy is active.
+
+Audit output distinguishes complete and partial runs. Findings from a partial
+run may be published, but prior findings are preserved and the run fails. An
+empty result closes prior findings only when the agent explicitly reports that
+the complete requested audit succeeded. Fetched pages and repository files are
+always evidence, never instructions.
+
 Checks default to `changeScope: "application"`. Pull requests that change only
 `.hypervibe` desired state or Hypervibe-managed GitHub files keep the required
 check alive but skip checkout, dependency installation, and application
