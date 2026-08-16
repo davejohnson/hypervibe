@@ -29,6 +29,19 @@ describe('provider conformance matrix', () => {
     ]);
   });
 
+  it('keeps maintenance live promotion distinct from implemented adapter support', () => {
+    expect(
+      hostingProviderContracts.find((entry) => entry.provider === 'vercel')
+    ).toMatchObject({ maintenance: 'ready-for-live' });
+    for (const contract of hostingProviderContracts) {
+      const lifecycle = providerRegistry.getMetadata(contract.provider)
+        ?.lifecycle?.hosting?.maintenance;
+      expect(lifecycle, contract.provider).toBe(
+        contract.maintenance === 'unsupported' ? 'unsupported' : 'managed'
+      );
+    }
+  });
+
   it('pins environment custom-domain support to provider lifecycle metadata', () => {
     for (const contract of hostingProviderContracts) {
       expect(

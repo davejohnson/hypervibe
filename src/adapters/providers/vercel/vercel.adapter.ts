@@ -6,6 +6,10 @@ import {
   type Service,
 } from '../../../domain/entities/service.entity.js';
 import { parseHostingBindings } from '../../../domain/ports/hosting.port.js';
+import type {
+  MaintenanceWorkloadObservation,
+  MaintenanceWorkloadSnapshot,
+} from '../../../domain/ports/maintenance.port.js';
 import {
   hashEnvValue,
   type ObservedService,
@@ -41,6 +45,7 @@ import {
   formatVercelScopeBinding,
   formatVercelServiceBinding,
   parseVercelServiceBinding,
+  type VercelServiceBinding,
 } from './vercel.binding.js';
 
 const START_COMMAND_KEY = 'HYPERVIBE_START_COMMAND';
@@ -67,6 +72,17 @@ interface ObservedVercelService {
   unknownKeys: string[];
 }
 
+interface ResolvedVercelMaintenanceProject {
+  binding: VercelServiceBinding;
+  project: VercelProject;
+  scope: VercelScope;
+}
+
+interface VercelMaintenanceUrl {
+  kind: 'custom' | 'direct';
+  url: string;
+}
+
 export class VercelAdapter implements IProviderAdapter {
   readonly name = 'vercel';
 
@@ -81,6 +97,7 @@ export class VercelAdapter implements IProviderAdapter {
     managedTls: true,
     supportsObserve: true,
     supportsDeferredDeploy: true,
+    supportsMaintenance: true,
   };
 
   private credentials: VercelCredentials | null = null;
@@ -609,6 +626,236 @@ export class VercelAdapter implements IProviderAdapter {
     }
   }
 
+  async observeMaintenanceWorkload(
+    environment: Environment,
+    serviceId: string,
+    workloadKind: MaintenanceWorkloadSnapshot['workloadKind']
+  ): Promise<MaintenanceWorkloadObservation> {
+    try {
+      const resolved = await this.resolveMaintenanceProject(
+        environment,
+        serviceId,
+        workloadKind
+      );
+      if ('reason' in resolved) {
+        return {
+          serviceId,
+          workloadKind,
+          wasRunning: false,
+          state: 'unknown',
+          reason: resolved.reason,
+        };
+      }
+      if (typeof resolved.project.paused !== 'boolean') {
+        return {
+          serviceId,
+          workloadKind,
+          wasRunning: false,
+          state: 'unknown',
+          reason: 'maintenance_project_pause_state_unknown',
+          providerState: this.maintenanceProviderState(resolved),
+        };
+      }
+      if (
+        resolved.project.paused
+        && !await this.verifyResolvedMaintenanceUrls(resolved, 'suspended')
+      ) {
+        return {
+          serviceId,
+          workloadKind,
+          wasRunning: false,
+          state: 'unknown',
+          reason: 'maintenance_origin_state_unverified',
+          providerState: this.maintenanceProviderState(resolved),
+        };
+      }
+      return {
+        serviceId,
+        workloadKind,
+        wasRunning: !resolved.project.paused,
+        state: resolved.project.paused ? 'suspended' : 'running',
+        providerState: this.maintenanceProviderState(resolved),
+      };
+    } catch {
+      return {
+        serviceId,
+        workloadKind,
+        wasRunning: false,
+        state: 'unknown',
+        reason: 'maintenance_workload_identity_unknown',
+      };
+    }
+  }
+
+  async suspendMaintenanceWorkload(
+    environment: Environment,
+    expected: MaintenanceWorkloadSnapshot
+  ): Promise<Receipt> {
+    if (!this.client) {
+      return this.maintenanceFailure(
+        'Vercel workload was not suspended',
+        'Not connected. Call connect() first.'
+      );
+    }
+    const current = await this.observeMaintenanceWorkload(
+      environment,
+      expected.serviceId,
+      expected.workloadKind
+    );
+    const identityError = this.maintenanceIdentityError(expected, current);
+    if (identityError) {
+      return this.maintenanceFailure('Vercel workload was not suspended', identityError);
+    }
+    try {
+      if (
+        current.reason === 'maintenance_origin_state_unverified'
+        && current.providerState?.paused === true
+      ) {
+        const verified = await this.waitForMaintenanceState(
+          environment,
+          expected,
+          'suspended'
+        );
+        return verified
+          ? {
+              success: true,
+              message: `Vercel project ${String(current.providerState.projectId)} is already paused`,
+              data: { applied: 0, skipped: 1 },
+            }
+          : this.maintenanceFailure(
+              'Vercel suspension was not verified',
+              'One or more production origins did not return a provider-verified maintenance response.'
+            );
+      }
+      if (current.state === 'suspended') {
+        return {
+          success: true,
+          message: `Vercel project ${String(current.providerState?.projectId)} is already paused`,
+          data: { applied: 0, skipped: 1 },
+        };
+      }
+      if (current.state !== 'running') {
+        return this.maintenanceFailure(
+          'Vercel workload was not suspended',
+          'The exact bound Vercel project state is unknown.'
+        );
+      }
+      await this.client.pauseProject(String(current.providerState!.projectId));
+      const verified = await this.waitForMaintenanceState(
+        environment,
+        expected,
+        'suspended'
+      );
+      return verified
+        ? {
+            success: true,
+            message: `Paused Vercel project ${String(current.providerState!.projectId)}`,
+            data: { applied: 1, skipped: 0 },
+          }
+        : this.maintenanceFailure(
+            'Vercel suspension was not verified',
+            'Vercel did not report the project paused with every production origin in maintenance before the verification deadline.'
+          );
+    } catch (error) {
+      return this.maintenanceFailure(
+        'Vercel workload was not suspended',
+        this.formatError(error)
+      );
+    }
+  }
+
+  async resumeMaintenanceWorkload(
+    environment: Environment,
+    snapshot: MaintenanceWorkloadSnapshot
+  ): Promise<Receipt> {
+    if (!this.client) {
+      return this.maintenanceFailure(
+        'Vercel workload was not restored',
+        'Not connected. Call connect() first.'
+      );
+    }
+    const current = await this.observeMaintenanceWorkload(
+      environment,
+      snapshot.serviceId,
+      snapshot.workloadKind
+    );
+    const identityError = this.maintenanceIdentityError(snapshot, current);
+    if (identityError) {
+      return this.maintenanceFailure('Vercel workload was not restored', identityError);
+    }
+    try {
+      const currentlyPaused = current.state === 'suspended'
+        || (
+          current.reason === 'maintenance_origin_state_unverified'
+          && current.providerState?.paused === true
+        );
+      if (!snapshot.wasRunning) {
+        if (!currentlyPaused) {
+          return this.maintenanceFailure(
+            'Vercel restoration was blocked',
+            'A Vercel project that was paused before maintenance is now running.'
+          );
+        }
+        if (current.state !== 'suspended') {
+          return this.maintenanceFailure(
+            'Vercel restoration was blocked',
+            'The previously paused Vercel project no longer has provider-verified maintenance origins.'
+          );
+        }
+        return {
+          success: true,
+          message: `Vercel project ${String(current.providerState?.projectId)} was paused before maintenance`,
+          data: { applied: 0, skipped: 1 },
+        };
+      }
+      if (current.state === 'running') {
+        const verified = await this.verifyMaintenanceUrls(
+          environment,
+          snapshot.serviceId,
+          snapshot.workloadKind,
+          'running'
+        );
+        return verified
+          ? {
+              success: true,
+              message: `Vercel project ${String(current.providerState?.projectId)} is already running`,
+              data: { applied: 0, skipped: 1 },
+            }
+          : this.maintenanceFailure(
+              'Vercel restoration was not verified',
+              'A direct Vercel production origin still reports DEPLOYMENT_PAUSED.'
+            );
+      }
+      if (!currentlyPaused) {
+        return this.maintenanceFailure(
+          'Vercel workload was not restored',
+          'The exact bound Vercel project state is unknown.'
+        );
+      }
+      await this.client.unpauseProject(String(current.providerState!.projectId));
+      const verified = await this.waitForMaintenanceState(
+        environment,
+        snapshot,
+        'running'
+      );
+      return verified
+        ? {
+            success: true,
+            message: `Unpaused Vercel project ${String(current.providerState!.projectId)}`,
+            data: { applied: 1, skipped: 0 },
+          }
+        : this.maintenanceFailure(
+            'Vercel restoration was not verified',
+            'Vercel did not report the project and its direct production origins running before the verification deadline.'
+          );
+    } catch (error) {
+      return this.maintenanceFailure(
+        'Vercel workload was not restored',
+        this.formatError(error)
+      );
+    }
+  }
+
   async observe(environment: Environment): Promise<ObservedState> {
     if (!this.client) {
       throw new Error('Not connected. Call connect() first.');
@@ -777,6 +1024,216 @@ export class VercelAdapter implements IProviderAdapter {
       },
       unknownKeys: Array.from(new Set(unknownKeys)).sort(),
     };
+  }
+
+  private async resolveMaintenanceProject(
+    environment: Environment,
+    serviceId: string,
+    workloadKind: MaintenanceWorkloadSnapshot['workloadKind']
+  ): Promise<ResolvedVercelMaintenanceProject | { reason: string }> {
+    if (!this.client) return { reason: 'maintenance_provider_not_connected' };
+    if (workloadKind !== 'web') {
+      return { reason: 'maintenance_workload_kind_unsupported' };
+    }
+    const bindings = parseHostingBindings(environment);
+    const exactBinding = Object.values(bindings.services ?? {})
+      .find((candidate) => candidate.serviceId === serviceId);
+    if (!exactBinding) return { reason: 'maintenance_workload_unbound' };
+    const scope = await this.assertScopeBinding(bindings.projectId);
+    const binding = parseVercelServiceBinding(serviceId);
+    this.assertServiceScopeBinding(binding.scope.binding, scope);
+    const project = await this.client.getProject(binding.projectId);
+    if (!project) return { reason: 'maintenance_project_missing' };
+    this.assertProjectScope(project, scope);
+    return { binding, project, scope };
+  }
+
+  private maintenanceProviderState(
+    resolved: ResolvedVercelMaintenanceProject
+  ): Record<string, unknown> {
+    return {
+      scopeBinding: resolved.scope.binding,
+      projectId: resolved.binding.projectId,
+      accountId: resolved.project.accountId,
+      ...(typeof resolved.project.paused === 'boolean'
+        ? { paused: resolved.project.paused }
+        : {}),
+    };
+  }
+
+  private maintenanceIdentityError(
+    expected: MaintenanceWorkloadSnapshot,
+    current: MaintenanceWorkloadObservation
+  ): string | undefined {
+    if (
+      current.state === 'unknown'
+      && current.reason !== 'maintenance_origin_state_unverified'
+    ) {
+      return 'The exact bound Vercel project identity or pause state could not be verified.';
+    }
+    for (const key of ['scopeBinding', 'projectId', 'accountId'] as const) {
+      const expectedValue = expected.providerState?.[key];
+      const currentValue = current.providerState?.[key];
+      if (
+        typeof expectedValue !== 'string'
+        || typeof currentValue !== 'string'
+        || expectedValue !== currentValue
+      ) {
+        return `The reviewed Vercel maintenance ${key} no longer matches live state.`;
+      }
+    }
+    return undefined;
+  }
+
+  private async waitForMaintenanceState(
+    environment: Environment,
+    snapshot: MaintenanceWorkloadSnapshot,
+    expected: 'running' | 'suspended'
+  ): Promise<boolean> {
+    const attempts = this.positiveIntegerEnv(
+      'HYPERVIBE_VERCEL_MAINTENANCE_ATTEMPTS',
+      120
+    );
+    const delayMs = this.nonNegativeIntegerEnv(
+      'HYPERVIBE_VERCEL_MAINTENANCE_DELAY_MS',
+      1000
+    );
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const observed = await this.observeMaintenanceWorkload(
+        environment,
+        snapshot.serviceId,
+        snapshot.workloadKind
+      );
+      if (
+        observed.reason !== 'maintenance_origin_state_unverified'
+        && this.maintenanceIdentityError(snapshot, observed)
+      ) return false;
+      if (
+        observed.state === expected
+        && (
+          expected === 'suspended'
+          || await this.verifyMaintenanceUrls(
+            environment,
+            snapshot.serviceId,
+            snapshot.workloadKind,
+            expected
+          )
+        )
+      ) {
+        return true;
+      }
+      if (attempt < attempts) await this.delay(delayMs);
+    }
+    return false;
+  }
+
+  private async verifyMaintenanceUrls(
+    environment: Environment,
+    serviceId: string,
+    workloadKind: MaintenanceWorkloadSnapshot['workloadKind'],
+    expected: 'running' | 'suspended'
+  ): Promise<boolean> {
+    const resolved = await this.resolveMaintenanceProject(
+      environment,
+      serviceId,
+      workloadKind
+    );
+    if ('reason' in resolved) return false;
+    if (
+      typeof resolved.project.paused !== 'boolean'
+      || resolved.project.paused !== (expected === 'suspended')
+    ) {
+      return false;
+    }
+    return this.verifyResolvedMaintenanceUrls(resolved, expected);
+  }
+
+  private async verifyResolvedMaintenanceUrls(
+    resolved: ResolvedVercelMaintenanceProject,
+    expected: 'running' | 'suspended'
+  ): Promise<boolean> {
+    const timeoutMs = this.positiveIntegerEnv(
+      'HYPERVIBE_VERCEL_MAINTENANCE_HTTP_TIMEOUT_MS',
+      10_000
+    );
+    try {
+      const urls = await this.maintenanceUrls(resolved.project);
+      if (!urls.some(({ kind }) => kind === 'direct')) return false;
+      const results = await Promise.all(urls.map(async (target) => {
+        if (expected === 'running' && target.kind === 'custom') return true;
+        const response = await fetch(target.url, {
+          redirect: 'manual',
+          headers: { 'Cache-Control': 'no-cache' },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        const vercelMarker = await this.isVercelPausedResponse(response);
+        if (expected === 'running') return !vercelMarker;
+        if (target.kind === 'direct') return vercelMarker;
+        return vercelMarker || (
+          response.status === 503
+          && Boolean(response.headers.get('x-hypervibe-maintenance'))
+        );
+      }));
+      return results.every(Boolean);
+    } catch {
+      return false;
+    }
+  }
+
+  private async maintenanceUrls(
+    project: VercelProject
+  ): Promise<VercelMaintenanceUrl[]> {
+    const [domains, deployments] = await Promise.all([
+      this.client!.listProjectDomains(project.id),
+      this.client!.listDeployments(project.id),
+    ]);
+    const deployment = deployments.find(({ readyState }) => readyState === 'READY');
+    const byUrl = new Map<string, VercelMaintenanceUrl>();
+    const add = (domain: string, kind: VercelMaintenanceUrl['kind']) => {
+      const normalized = domain
+        .trim()
+        .replace(/^https?:\/\//i, '')
+        .replace(/\/+$/, '')
+        .toLowerCase();
+      if (!normalized || normalized.includes('/')) {
+        throw new Error('Vercel returned an invalid production origin hostname.');
+      }
+      const url = `https://${normalized}/`;
+      const existing = byUrl.get(url);
+      if (!existing || kind === 'direct') byUrl.set(url, { kind, url });
+    };
+    for (const alias of project.alias ?? []) {
+      if (
+        alias.environment.toLowerCase() === 'production'
+        || alias.target.toUpperCase() === 'PRODUCTION'
+      ) {
+        add(
+          alias.domain,
+          alias.domain.toLowerCase().endsWith('.vercel.app')
+            ? 'direct'
+            : 'custom'
+        );
+      }
+    }
+    for (const domain of domains) {
+      if (domain.verified) add(domain.name, 'custom');
+    }
+    if (deployment?.url) add(deployment.url, 'direct');
+    return Array.from(byUrl.values()).sort((left, right) => (
+      left.url.localeCompare(right.url)
+    ));
+  }
+
+  private async isVercelPausedResponse(response: Response): Promise<boolean> {
+    if (response.status !== 503) return false;
+    if (response.headers.get('x-vercel-error') === 'DEPLOYMENT_PAUSED') {
+      return true;
+    }
+    return (await response.text()).includes('DEPLOYMENT_PAUSED');
+  }
+
+  private maintenanceFailure(message: string, error: string): Receipt {
+    return { success: false, message, error };
   }
 
   private async syncProjectEnvironmentVariables(
@@ -1241,7 +1698,7 @@ providerRegistry.register({
       ],
     },
     lifecycle: {
-      hosting: { customDomains: 'managed', maintenance: 'unsupported' },
+      hosting: { customDomains: 'managed', maintenance: 'managed' },
     },
     orchestration: {
       project: { shareAcrossEnvironments: true },

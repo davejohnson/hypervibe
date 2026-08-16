@@ -235,4 +235,31 @@ describe('VercelClient', () => {
     const [deleteUrl] = fetchMock.mock.calls[3] as unknown as [URL, RequestInit];
     expect(deleteUrl.pathname).toBe(`/v9/projects/${PROJECT_ID}/domains/${domain.name}`);
   });
+
+  it('pauses and unpauses one exact team-scoped project without a deployment mutation', async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new VercelClient({
+      accessToken: 'vercel-secret-token',
+      teamId: TEAM_ID,
+    });
+
+    await expect(client.pauseProject(PROJECT_ID)).resolves.toBeUndefined();
+    await expect(client.unpauseProject(PROJECT_ID)).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const calls = fetchMock.mock.calls as unknown as Array<[URL, RequestInit]>;
+    for (const [input, init] of calls) {
+      expect(init.method).toBe('POST');
+      expect(input.searchParams.get('teamId')).toBe(TEAM_ID);
+      expect(new Headers(init.headers).get('Authorization')).toBe(
+        'Bearer vercel-secret-token'
+      );
+      expect(init.body).toBeUndefined();
+    }
+    expect(calls[0]![0].pathname)
+      .toBe(`/v1/projects/${PROJECT_ID}/pause`);
+    expect(calls[1]![0].pathname)
+      .toBe(`/v1/projects/${PROJECT_ID}/unpause`);
+  });
 });

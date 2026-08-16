@@ -94,6 +94,29 @@ describe('planDataMigration', () => {
     expect(result.actions.every((action) => action.dataBearing && action.requiresConfirm)).toBe(true);
   });
 
+  it('keeps database and storage copy provider-neutral when Vercel hosts both environments', () => {
+    const { spec, sourceEnvironment } = fixture();
+    spec.environments.staging.hosting.provider = 'vercel';
+    spec.environments.production.hosting.provider = 'vercel';
+    const result = planDataMigration({
+      targetEnvironmentName: 'production',
+      targetSpec: spec.environments.production,
+      targetEnvironment: environment('target', 'production'),
+      targetComponents: [],
+      sourceSpec: spec.environments.staging,
+      sourceEnvironment,
+      sourceComponents: [component('source-db', 'source', { provider: 'railway' })],
+      sourceMaintenance: activeMaintenance('staging.example.com'),
+      targetMaintenance: activeMaintenance('app.example.com'),
+    });
+
+    expect(result.pending).toBe(true);
+    expect(result.providers).toEqual(['cloudflare', 'railway', 'rds', 'vercel']);
+    expect(result.actions).toHaveLength(2);
+    expect(result.actions.every((action) => action.metadata?.blockedReason === undefined))
+      .toBe(true);
+  });
+
   it('is a no-op for an already completed one-use migration id', () => {
     const { spec, sourceEnvironment } = fixture();
     const targetEnvironment = environment('target', 'production', {

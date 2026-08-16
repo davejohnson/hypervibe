@@ -28,10 +28,19 @@ export interface VercelProjectLink {
   sourceless?: boolean;
 }
 
+export interface VercelProjectAlias {
+  domain: string;
+  environment: 'preview' | 'production' | string;
+  target: 'PREVIEW' | 'PRODUCTION' | 'STAGING' | string;
+}
+
 export interface VercelProject {
   id: string;
   accountId: string;
   name: string;
+  paused?: boolean;
+  live?: boolean;
+  alias?: VercelProjectAlias[];
   link?: VercelProjectLink;
   framework?: string | null;
   buildCommand?: string | null;
@@ -191,6 +200,20 @@ export class VercelClient {
     await this.request(
       'DELETE',
       `/v9/projects/${encodeURIComponent(projectIdOrName)}`
+    );
+  }
+
+  async pauseProject(projectId: string): Promise<void> {
+    await this.request(
+      'POST',
+      `/v1/projects/${encodeURIComponent(projectId)}/pause`
+    );
+  }
+
+  async unpauseProject(projectId: string): Promise<void> {
+    await this.request(
+      'POST',
+      `/v1/projects/${encodeURIComponent(projectId)}/unpause`
     );
   }
 
@@ -508,6 +531,33 @@ export class VercelClient {
       || typeof project.name !== 'string'
     ) {
       throw new Error('Vercel returned an incomplete project identity.');
+    }
+    if (project.paused !== undefined && typeof project.paused !== 'boolean') {
+      throw new Error('Vercel returned an invalid project pause state.');
+    }
+    if (project.live !== undefined && typeof project.live !== 'boolean') {
+      throw new Error('Vercel returned an invalid project live state.');
+    }
+    if (project.alias !== undefined) {
+      if (!Array.isArray(project.alias)) {
+        throw new Error('Vercel returned an invalid project alias collection.');
+      }
+      const domains = new Set<string>();
+      for (const alias of project.alias) {
+        if (
+          !alias
+          || typeof alias.domain !== 'string'
+          || typeof alias.environment !== 'string'
+          || typeof alias.target !== 'string'
+        ) {
+          throw new Error('Vercel returned an incomplete project alias.');
+        }
+        const domain = alias.domain.toLowerCase();
+        if (domains.has(domain)) {
+          throw new Error(`Vercel returned duplicate project alias ${alias.domain}.`);
+        }
+        domains.add(domain);
+      }
     }
   }
 

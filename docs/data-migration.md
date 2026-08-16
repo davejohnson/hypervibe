@@ -87,7 +87,7 @@ Workload suspension is currently:
 | Azure Container Apps | Uses the provider stop/start lifecycle and verifies terminal running state. |
 | AWS ECS Express | Unsupported; plans fail closed. |
 | DigitalOcean App Platform | Unsupported; plans fail closed. |
-| Vercel | Unsupported; plans fail closed. |
+| Vercel | Pauses the exact bound Project, verifies direct production origins, preserves an already-paused Project, and unpauses without redeploying. Ready for opt-in live maintenance conformance. |
 
 This matrix is deliberate. A provider is not marked supported until Hypervibe
 can stop background work and direct origins, retain exact restoration state,

@@ -944,13 +944,15 @@ or unknown observation blocks the next mutation. Migration copy actions carry
 fresh source and target maintenance fingerprints and re-observe both immediately
 before provisioning a candidate target.
 
-The workload port is implemented by Railway, GCP Cloud Run, and Azure Container
-Apps. Cloudflare supplies the common public edge and PostgreSQL supplies the
-provider-independent write fence. ECS Express, DigitalOcean App Platform, and
-Vercel explicitly declare maintenance unsupported until they can prove all
-background and direct-origin workloads are reversibly stopped. Generic planning
-must fail closed for those providers; capability presence is never inferred from
-a provider name.
+The workload port is implemented by Railway, GCP Cloud Run, Azure Container
+Apps, and Vercel. Vercel pauses and unpauses only the exact bound Project,
+preserves a Project that was already paused, and verifies provider pause state
+on its direct production origins before entry succeeds. Cloudflare supplies the
+common public edge and PostgreSQL supplies the provider-independent write
+fence. ECS Express and DigitalOcean App Platform explicitly declare maintenance
+unsupported until they can prove all background and direct-origin workloads are
+reversibly stopped. Generic planning must fail closed for those providers;
+capability presence is never inferred from a provider name.
 
 Object-storage lifecycle is implemented for Railway, Amazon S3, Google Cloud
 Storage, and Azure Blob Storage. Each adapter owns provider-native private
