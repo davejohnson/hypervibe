@@ -86,7 +86,7 @@ Workload suspension is currently:
 | GCP Cloud Run | Sets manual service scaling to zero, pauses scheduler jobs, and restores the exact prior scaling/schedule state. |
 | Azure Container Apps | Uses the provider stop/start lifecycle and verifies terminal running state. |
 | AWS ECS Express | Unsupported; plans fail closed. |
-| DigitalOcean App Platform | Unsupported; plans fail closed. |
+| DigitalOcean App Platform | Archives the exact bound app, verifies that App Platform reports zero running component instances, and restores the exact prior maintenance spec without changing component scaling, autoscaling, schedules, ingress, or commands. Ready for opt-in live maintenance conformance. |
 | Vercel | Pauses the exact bound Project, verifies direct production origins, preserves an already-paused Project, and unpauses without redeploying. Ready for opt-in live maintenance conformance. |
 
 This matrix is deliberate. A provider is not marked supported until Hypervibe

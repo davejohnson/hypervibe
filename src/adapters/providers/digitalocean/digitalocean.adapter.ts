@@ -16,6 +16,11 @@ import type {
   VerifyResult,
 } from '../../../domain/ports/provider.port.js';
 import { parseHostingBindings } from '../../../domain/ports/hosting.port.js';
+import type {
+  IWorkloadMaintenanceAdapter,
+  MaintenanceWorkloadObservation,
+  MaintenanceWorkloadSnapshot,
+} from '../../../domain/ports/maintenance.port.js';
 import { parseGitHubRepoFromRemote } from '../../../lib/git-remote.js';
 import {
   hashEnvValue,
@@ -31,6 +36,7 @@ import {
   type DigitalOceanAppDomain,
   type DigitalOceanAppEnv,
   type DigitalOceanAppImage,
+  type DigitalOceanAppMaintenance,
   type DigitalOceanAppSpec,
 } from './digitalocean.client.js';
 import { DigitalOceanDatabaseAdapter } from './digitalocean-database.adapter.js';
@@ -51,7 +57,23 @@ interface ComponentMatch {
   component: DigitalOceanAppComponent;
 }
 
-export class DigitalOceanAdapter implements IProviderAdapter {
+interface ResolvedMaintenanceWorkload {
+  app: DigitalOceanApp;
+  collection: ComponentCollection;
+  componentName: string;
+  maintenancePresent: boolean;
+  maintenance?: DigitalOceanAppMaintenance;
+  archived: boolean;
+  transitionPending: boolean;
+  runningInstanceCount: number;
+}
+
+interface DigitalOceanMaintenanceSnapshotState {
+  maintenancePresent: boolean;
+  maintenance?: DigitalOceanAppMaintenance;
+}
+
+export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenanceAdapter {
   readonly name = 'digitalocean';
 
   readonly capabilities: ProviderCapabilities = {
@@ -65,6 +87,7 @@ export class DigitalOceanAdapter implements IProviderAdapter {
     managedTls: true,
     supportsObserve: true,
     supportsDeferredDeploy: true,
+    supportsMaintenance: true,
   };
 
   private credentials: DigitalOceanRuntimeCredentials | null = null;
@@ -753,6 +776,509 @@ export class DigitalOceanAdapter implements IProviderAdapter {
       },
       partial: false,
       warnings: [],
+    };
+  }
+
+  async observeMaintenanceWorkload(
+    environment: Environment,
+    serviceId: string,
+    workloadKind: MaintenanceWorkloadSnapshot['workloadKind']
+  ): Promise<MaintenanceWorkloadObservation> {
+    try {
+      const resolved = await this.resolveMaintenanceWorkload(
+        environment,
+        serviceId,
+        workloadKind
+      );
+      if ('reason' in resolved) {
+        return {
+          serviceId,
+          workloadKind,
+          wasRunning: false,
+          state: 'unknown',
+          reason: resolved.reason,
+        };
+      }
+      return this.maintenanceObservation(serviceId, workloadKind, resolved);
+    } catch {
+      return {
+        serviceId,
+        workloadKind,
+        wasRunning: false,
+        state: 'unknown',
+        reason: 'maintenance_workload_observation_failed',
+      };
+    }
+  }
+
+  async suspendMaintenanceWorkload(
+    environment: Environment,
+    expected: MaintenanceWorkloadSnapshot
+  ): Promise<Receipt> {
+    if (!this.client) {
+      return this.maintenanceFailure(
+        'DigitalOcean app was not archived',
+        'Not connected. Call connect() first.'
+      );
+    }
+    try {
+      const baseline = this.snapshotMaintenanceState(expected);
+      if ('reason' in baseline) {
+        return this.maintenanceFailure('DigitalOcean app was not archived', baseline.reason);
+      }
+      const resolved = await this.resolveMaintenanceWorkload(
+        environment,
+        expected.serviceId,
+        expected.workloadKind
+      );
+      if ('reason' in resolved) {
+        return this.maintenanceFailure('DigitalOcean app was not archived', resolved.reason);
+      }
+      const identityError = this.maintenanceIdentityError(expected, resolved);
+      if (identityError) {
+        return this.maintenanceFailure('DigitalOcean app was not archived', identityError);
+      }
+      if (resolved.archived) {
+        if (!this.archivedMaintenanceMatches(resolved.maintenance, baseline.maintenance)) {
+          return this.maintenanceFailure(
+            'DigitalOcean app was not archived',
+            'The archived app maintenance settings no longer match the exact pre-maintenance snapshot.'
+          );
+        }
+        const verified = await this.waitForMaintenanceState(
+          environment,
+          expected,
+          baseline,
+          'suspended'
+        );
+        return verified
+          ? {
+              success: true,
+              message: `DigitalOcean app ${resolved.app.id} is already archived`,
+              data: { applied: 0, skipped: 1, appId: resolved.app.id },
+            }
+          : this.maintenanceFailure(
+              'DigitalOcean archive was not verified',
+              'The app remained in transition or still reported running component instances.'
+            );
+      }
+      if (!expected.wasRunning) {
+        return this.maintenanceFailure(
+          'DigitalOcean app was not archived',
+          'An app recorded as archived before maintenance is now active.'
+        );
+      }
+      if (!this.maintenanceMatches(resolved.maintenance, baseline.maintenance)) {
+        return this.maintenanceFailure(
+          'DigitalOcean app was not archived',
+          'The live app maintenance settings changed after the restoration snapshot was recorded.'
+        );
+      }
+
+      await this.client.updateApp(resolved.app.id, {
+        ...resolved.app.spec,
+        maintenance: {
+          ...(resolved.maintenance ?? {}),
+          archive: true,
+        },
+      });
+      const verified = await this.waitForMaintenanceState(
+        environment,
+        expected,
+        baseline,
+        'suspended'
+      );
+      return verified
+        ? {
+            success: true,
+            message: `Archived DigitalOcean app ${resolved.app.id} and verified zero running component instances`,
+            data: { applied: 1, skipped: 0, appId: resolved.app.id },
+          }
+        : this.maintenanceFailure(
+            'DigitalOcean archive was not verified',
+            'The app remained in transition or still reported running component instances.'
+          );
+    } catch (error) {
+      return this.maintenanceFailure(
+        'DigitalOcean app was not archived',
+        this.formatError(error)
+      );
+    }
+  }
+
+  async resumeMaintenanceWorkload(
+    environment: Environment,
+    snapshot: MaintenanceWorkloadSnapshot
+  ): Promise<Receipt> {
+    if (!this.client) {
+      return this.maintenanceFailure(
+        'DigitalOcean app was not restored',
+        'Not connected. Call connect() first.'
+      );
+    }
+    try {
+      const baseline = this.snapshotMaintenanceState(snapshot);
+      if ('reason' in baseline) {
+        return this.maintenanceFailure('DigitalOcean app was not restored', baseline.reason);
+      }
+      const resolved = await this.resolveMaintenanceWorkload(
+        environment,
+        snapshot.serviceId,
+        snapshot.workloadKind
+      );
+      if ('reason' in resolved) {
+        return this.maintenanceFailure('DigitalOcean app was not restored', resolved.reason);
+      }
+      const identityError = this.maintenanceIdentityError(snapshot, resolved);
+      if (identityError) {
+        return this.maintenanceFailure('DigitalOcean app was not restored', identityError);
+      }
+
+      if (!snapshot.wasRunning) {
+        if (!resolved.archived) {
+          return this.maintenanceFailure(
+            'DigitalOcean restoration was blocked',
+            'An app that was archived before Hypervibe maintenance is now active.'
+          );
+        }
+        const verified = await this.waitForMaintenanceState(
+          environment,
+          snapshot,
+          baseline,
+          'suspended'
+        );
+        return verified
+          ? {
+              success: true,
+              message: `DigitalOcean app ${resolved.app.id} was archived before maintenance`,
+              data: { applied: 0, skipped: 1, appId: resolved.app.id },
+            }
+          : this.maintenanceFailure(
+              'DigitalOcean restoration was blocked',
+              'The previously archived app still reports running component instances or an incomplete deployment.'
+            );
+      }
+
+      if (!resolved.archived) {
+        if (!this.maintenanceMatches(resolved.maintenance, baseline.maintenance)) {
+          return this.maintenanceFailure(
+            'DigitalOcean restoration was blocked',
+            'The active app maintenance settings do not match the exact pre-maintenance snapshot.'
+          );
+        }
+        const verified = await this.waitForMaintenanceState(
+          environment,
+          snapshot,
+          baseline,
+          'running'
+        );
+        return verified
+          ? {
+              success: true,
+              message: `DigitalOcean app ${resolved.app.id} is already restored`,
+              data: { applied: 0, skipped: 1, appId: resolved.app.id },
+            }
+          : this.maintenanceFailure(
+              'DigitalOcean restoration was not verified',
+              'The app did not return to a terminal active deployment.'
+            );
+      }
+      if (!this.archivedMaintenanceMatches(resolved.maintenance, baseline.maintenance)) {
+        return this.maintenanceFailure(
+          'DigitalOcean restoration was blocked',
+          'The archived app maintenance settings no longer match the exact pre-maintenance snapshot.'
+        );
+      }
+
+      const nextSpec: DigitalOceanAppSpec = { ...resolved.app.spec };
+      if (baseline.maintenancePresent) {
+        nextSpec.maintenance = { ...(baseline.maintenance ?? {}) };
+      } else {
+        delete nextSpec.maintenance;
+      }
+      await this.client.updateApp(resolved.app.id, nextSpec);
+      const verified = await this.waitForMaintenanceState(
+        environment,
+        snapshot,
+        baseline,
+        'running'
+      );
+      return verified
+        ? {
+            success: true,
+            message: `Restored DigitalOcean app ${resolved.app.id} from its exact maintenance snapshot`,
+            data: { applied: 1, skipped: 0, appId: resolved.app.id },
+          }
+        : this.maintenanceFailure(
+            'DigitalOcean restoration was not verified',
+            'The app did not return to a terminal active deployment.'
+          );
+    } catch (error) {
+      return this.maintenanceFailure(
+        'DigitalOcean app was not restored',
+        this.formatError(error)
+      );
+    }
+  }
+
+  private async resolveMaintenanceWorkload(
+    environment: Environment,
+    serviceId: string,
+    workloadKind: MaintenanceWorkloadSnapshot['workloadKind']
+  ): Promise<ResolvedMaintenanceWorkload | { reason: string }> {
+    if (!this.client) return { reason: 'maintenance_provider_unavailable' };
+    const bindings = parseHostingBindings(environment);
+    const identity = this.parseServiceExternalId(serviceId);
+    if (
+      bindings.provider !== this.name
+      || !identity
+      || bindings.projectId !== identity.appId
+      || identity.collection !== this.collectionFor(workloadKind)
+    ) {
+      return { reason: 'maintenance_workload_identity_unknown' };
+    }
+    const boundMatches = Object.values(bindings.services ?? {})
+      .filter((binding) => binding.serviceId === serviceId);
+    if (boundMatches.length === 0) {
+      return { reason: 'maintenance_workload_unbound' };
+    }
+    if (boundMatches.length > 1) {
+      return { reason: 'maintenance_workload_ambiguous' };
+    }
+    const app = await this.client.getApp(identity.appId);
+    if (!app) return { reason: 'maintenance_workload_missing' };
+    const componentMatches = this.componentMatches(app.spec, identity.componentName);
+    if (componentMatches.length !== 1) {
+      return {
+        reason: componentMatches.length === 0
+          ? 'maintenance_workload_missing'
+          : 'maintenance_workload_ambiguous',
+      };
+    }
+    if (componentMatches[0]!.collection !== identity.collection) {
+      return { reason: 'maintenance_workload_identity_unknown' };
+    }
+    const maintenance = this.liveMaintenanceState(app.spec);
+    if ('reason' in maintenance) return maintenance;
+    const instances = await this.client.listAppInstances(app.id);
+    const archived = maintenance.maintenance?.archive === true;
+    const activePhase = app.active_deployment?.phase?.toUpperCase();
+    const transitionPending = Boolean(app.in_progress_deployment)
+      || (!archived && activePhase !== 'ACTIVE');
+    return {
+      app,
+      collection: identity.collection,
+      componentName: identity.componentName,
+      ...maintenance,
+      archived,
+      transitionPending,
+      runningInstanceCount: instances.length,
+    };
+  }
+
+  private maintenanceObservation(
+    serviceId: string,
+    workloadKind: MaintenanceWorkloadSnapshot['workloadKind'],
+    resolved: ResolvedMaintenanceWorkload
+  ): MaintenanceWorkloadObservation {
+    const providerState = this.maintenanceProviderState(resolved);
+    if (resolved.transitionPending) {
+      return {
+        serviceId,
+        workloadKind,
+        wasRunning: !resolved.archived,
+        state: 'unknown',
+        reason: 'maintenance_app_transition_pending',
+        providerState,
+      };
+    }
+    if (resolved.archived && resolved.runningInstanceCount > 0) {
+      return {
+        serviceId,
+        workloadKind,
+        wasRunning: false,
+        state: 'unknown',
+        reason: 'maintenance_running_instances_present',
+        providerState,
+      };
+    }
+    return {
+      serviceId,
+      workloadKind,
+      wasRunning: !resolved.archived,
+      state: resolved.archived ? 'suspended' : 'running',
+      providerState,
+    };
+  }
+
+  private maintenanceProviderState(
+    resolved: ResolvedMaintenanceWorkload
+  ): Record<string, unknown> {
+    return {
+      appId: resolved.app.id,
+      collection: resolved.collection,
+      componentName: resolved.componentName,
+      maintenancePresent: resolved.maintenancePresent,
+      ...(resolved.maintenancePresent
+        ? { maintenance: { ...(resolved.maintenance ?? {}) } }
+        : {}),
+      archived: resolved.archived,
+    };
+  }
+
+  private liveMaintenanceState(
+    spec: DigitalOceanAppSpec
+  ): DigitalOceanMaintenanceSnapshotState | { reason: string } {
+    const maintenancePresent = Object.prototype.hasOwnProperty.call(
+      spec,
+      'maintenance'
+    );
+    const raw = (spec as Record<string, unknown>).maintenance;
+    return this.parseMaintenanceState(maintenancePresent, raw);
+  }
+
+  private snapshotMaintenanceState(
+    snapshot: MaintenanceWorkloadSnapshot
+  ): DigitalOceanMaintenanceSnapshotState | { reason: string } {
+    const providerState = this.record(snapshot.providerState);
+    if (!providerState || typeof providerState.maintenancePresent !== 'boolean') {
+      return { reason: 'The exact DigitalOcean maintenance restoration snapshot is missing.' };
+    }
+    return this.parseMaintenanceState(
+      providerState.maintenancePresent,
+      providerState.maintenance
+    );
+  }
+
+  private parseMaintenanceState(
+    maintenancePresent: boolean,
+    raw: unknown
+  ): DigitalOceanMaintenanceSnapshotState | { reason: string } {
+    if (!maintenancePresent) {
+      return raw === undefined
+        ? { maintenancePresent: false }
+        : { reason: 'maintenance_app_state_unknown' };
+    }
+    const source = this.record(raw);
+    if (!source) return { reason: 'maintenance_app_state_unknown' };
+    const supported = new Set(['archive', 'enabled', 'offline_page_url']);
+    if (Object.keys(source).some((key) => !supported.has(key))) {
+      return { reason: 'maintenance_app_state_unknown' };
+    }
+    if (source.archive !== undefined && typeof source.archive !== 'boolean') {
+      return { reason: 'maintenance_app_state_unknown' };
+    }
+    if (source.enabled !== undefined && typeof source.enabled !== 'boolean') {
+      return { reason: 'maintenance_app_state_unknown' };
+    }
+    if (
+      source.offline_page_url !== undefined
+      && typeof source.offline_page_url !== 'string'
+    ) {
+      return { reason: 'maintenance_app_state_unknown' };
+    }
+    const maintenance: DigitalOceanAppMaintenance = {
+      ...(typeof source.archive === 'boolean' ? { archive: source.archive } : {}),
+      ...(typeof source.enabled === 'boolean' ? { enabled: source.enabled } : {}),
+      ...(typeof source.offline_page_url === 'string'
+        ? { offline_page_url: source.offline_page_url }
+        : {}),
+    };
+    return { maintenancePresent: true, maintenance };
+  }
+
+  private maintenanceIdentityError(
+    snapshot: MaintenanceWorkloadSnapshot,
+    resolved: ResolvedMaintenanceWorkload
+  ): string | undefined {
+    const providerState = this.record(snapshot.providerState);
+    if (
+      providerState?.appId !== resolved.app.id
+      || providerState.collection !== resolved.collection
+      || providerState.componentName !== resolved.componentName
+    ) {
+      return 'The exact DigitalOcean app or component identity changed after planning.';
+    }
+    return undefined;
+  }
+
+  private maintenanceMatches(
+    left: DigitalOceanAppMaintenance | undefined,
+    right: DigitalOceanAppMaintenance | undefined
+  ): boolean {
+    return JSON.stringify(this.effectiveMaintenance(left))
+      === JSON.stringify(this.effectiveMaintenance(right));
+  }
+
+  private archivedMaintenanceMatches(
+    current: DigitalOceanAppMaintenance | undefined,
+    baseline: DigitalOceanAppMaintenance | undefined
+  ): boolean {
+    return this.maintenanceMatches(current, {
+      ...(baseline ?? {}),
+      archive: true,
+    });
+  }
+
+  private effectiveMaintenance(
+    maintenance: DigitalOceanAppMaintenance | undefined
+  ): { archive: boolean; enabled: boolean; offlinePageUrl: string | null } {
+    const archive = maintenance?.archive === true;
+    return {
+      archive,
+      enabled: archive || maintenance?.enabled === true,
+      offlinePageUrl: maintenance?.offline_page_url ?? null,
+    };
+  }
+
+  private async waitForMaintenanceState(
+    environment: Environment,
+    snapshot: MaintenanceWorkloadSnapshot,
+    baseline: DigitalOceanMaintenanceSnapshotState,
+    expected: 'running' | 'suspended'
+  ): Promise<boolean> {
+    const attempts = this.positiveIntegerEnv(
+      'HYPERVIBE_DIGITALOCEAN_MAINTENANCE_ATTEMPTS',
+      300
+    );
+    const delayMs = this.nonNegativeIntegerEnv(
+      'HYPERVIBE_DIGITALOCEAN_MAINTENANCE_DELAY_MS',
+      2000
+    );
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const current = await this.resolveMaintenanceWorkload(
+        environment,
+        snapshot.serviceId,
+        snapshot.workloadKind
+      );
+      if (!('reason' in current) && !this.maintenanceIdentityError(snapshot, current)) {
+        const observation = this.maintenanceObservation(
+          snapshot.serviceId,
+          snapshot.workloadKind,
+          current
+        );
+        const settingsMatch = expected === 'suspended'
+          ? this.archivedMaintenanceMatches(current.maintenance, baseline.maintenance)
+          : this.maintenanceMatches(current.maintenance, baseline.maintenance);
+        if (observation.state === expected && settingsMatch) return true;
+      }
+      if (attempt < attempts) await this.delay(delayMs);
+    }
+    return false;
+  }
+
+  private record(value: unknown): Record<string, unknown> | undefined {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined;
+  }
+
+  private maintenanceFailure(message: string, error: string): Receipt {
+    return {
+      success: false,
+      message,
+      error,
+      data: { applied: 0, skipped: 0 },
     };
   }
 
@@ -1446,7 +1972,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { customDomains: 'managed', maintenance: 'unsupported' },
+      hosting: { customDomains: 'managed', maintenance: 'managed' },
       databaseEngines: ['postgres'],
       cacheEngines: ['redis'],
     },

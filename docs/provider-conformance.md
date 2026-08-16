@@ -73,15 +73,23 @@ only after normal workload/database state is verified. Migration copy authority
 requires active source and target maintenance observations and hashes both into
 the reviewed action; apply re-observes both before creating a fresh data target.
 
-Railway, Cloud Run, Azure Container Apps, and Vercel expose the
-workload-maintenance port. Vercel resolves only its durable Project binding,
-verifies the documented paused state and direct production origins, preserves
-Projects paused before Hypervibe maintenance, and resumes without a deployment.
-Its conformance entry remains `maintenance: ready-for-live` until the opt-in
-entry/noop/exit path passes. ECS Express and DigitalOcean App Platform report
-`maintenance: unsupported`, so generic planning blocks before mutation. Each
-unsupported provider needs its own mocked and opt-in live entry/noop/exit
-contract before promotion.
+Railway, Cloud Run, Azure Container Apps, DigitalOcean App Platform, and Vercel
+expose the workload-maintenance port. DigitalOcean resolves the exact bound app
+and component, uses the documented app archive/restore setting, and requires a
+terminal deployment plus zero provider-reported running instances before entry
+converges. The full observed App Spec is preserved during each write, while the
+durable snapshot stores only the prior non-secret maintenance object. Vercel
+resolves only its durable Project binding, verifies the documented paused state
+and direct production origins, preserves Projects paused before Hypervibe
+maintenance, and resumes without a deployment. DigitalOcean and Vercel remain
+`maintenance: ready-for-live` until their opt-in entry/noop/exit paths pass. ECS
+Express reports `maintenance: unsupported`, so generic planning blocks before
+mutation.
+
+The DigitalOcean contract follows the provider's documented
+[archive/restore App Spec operation](https://docs.digitalocean.com/products/app-platform/how-to/archive-restore/)
+and verifies terminal shutdown through the Apps API
+[running-instances endpoint](https://docs.digitalocean.com/reference/api/reference/apps/#get-retrieve-app-instances).
 
 Redis/Valkey starts with Railway, Memorystore, DigitalOcean, ElastiCache,
 and Azure Managed Redis. Railway is the first implemented

@@ -837,10 +837,11 @@ The copy is authorized only while both source and target declare
 `"maintenance": { "enabled": true }` and Hypervibe freshly verifies the full
 boundary: a Cloudflare-owned static 503 marker, every hosting workload stopped,
 and PostgreSQL defaulting new sessions to read-only. Railway, GCP Cloud Run,
-Azure Container Apps, and Vercel implement reversible workload maintenance.
-AWS ECS Express and DigitalOcean App Platform currently fail closed before the
-copy. Vercel's exact-ID pause/unpause path is implemented and remains behind its
-opt-in live maintenance promotion gate.
+Azure Container Apps, DigitalOcean App Platform, and Vercel implement reversible
+workload maintenance. AWS ECS Express currently fails closed before the copy.
+DigitalOcean's exact-app archive/restore path and Vercel's exact-ID pause/unpause
+path are implemented and remain behind their opt-in live maintenance promotion
+gates.
 No application maintenance flag, email dry-run switch, or AI dry-run switch is
 introduced.
 

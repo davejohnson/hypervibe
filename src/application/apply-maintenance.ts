@@ -176,14 +176,6 @@ export async function applyMaintenanceAction(params: {
       return blocked('Maintenance workload target changed', 'The reviewed service identity or workload kind no longer matches desired state.');
     }
     if (operation === MAINTENANCE_OPERATIONS.workloadSuspend) {
-      const existingSnapshot = currentBinding?.workloads?.[serviceName];
-      const observed = await adapter.observeMaintenanceWorkload(environment, serviceId, workloadKind);
-      if (observed.state === 'unknown') {
-        return blocked(`Cannot suspend ${serviceName}`, 'The provider could not prove the current workload state.');
-      }
-      if (observed.state === 'suspended' && !existingSnapshot) {
-        return blocked(`Cannot adopt suspended workload ${serviceName}`, 'The exact pre-maintenance restoration state is not bound locally.');
-      }
       const fresh = await observeEnvironmentMaintenance({
         project: params.project,
         environment,
@@ -193,23 +185,52 @@ export async function applyMaintenanceAction(params: {
       if (fresh.edge.state !== 'active' || !fresh.edge.markerVerified) {
         return blocked(`Cannot suspend ${serviceName}`, 'The public maintenance marker is not currently provider-verified.');
       }
+      const snapshots = { ...(currentBinding?.workloads ?? {}) };
+      for (const [name, spec] of Object.entries(params.environmentSpec.services)) {
+        const observed = fresh.workloads[name];
+        if (
+          !observed
+          || observed.state === 'unknown'
+          || !observed.serviceId
+          || observed.workloadKind !== spec.workloadKind
+        ) {
+          return blocked(
+            `Cannot suspend ${serviceName}`,
+            `The provider could not prove the current state and identity of workload ${name}.`
+          );
+        }
+        if (!snapshots[name]) {
+          if (observed.state === 'suspended') {
+            return blocked(
+              `Cannot adopt suspended workload ${name}`,
+              'The exact pre-maintenance restoration state is not bound locally.'
+            );
+          }
+          snapshots[name] = {
+            ...observed,
+            workloadKind: spec.workloadKind,
+            wasRunning: observed.state === 'running',
+          };
+        }
+      }
+      const observed = fresh.workloads[serviceName];
+      if (observed?.serviceId !== serviceId) {
+        return blocked(
+          `Cannot suspend ${serviceName}`,
+          'The reviewed service identity no longer matches provider observation.'
+        );
+      }
       const rank = (kind: string): number => kind === 'cron' ? 0 : kind === 'worker' ? 1 : 2;
       const earlier = Object.entries(params.environmentSpec.services)
         .filter(([name, spec]) => name !== serviceName && rank(spec.workloadKind) < rank(workloadKind));
       if (earlier.some(([name]) => fresh.workloads[name]?.state !== 'suspended')) {
         return blocked(`Cannot suspend ${serviceName}`, 'An earlier workload suspension stage is no longer provider-verified.');
       }
-      const snapshot = existingSnapshot ?? {
-        ...observed,
-        wasRunning: observed.state === 'running',
-      };
+      const snapshot = snapshots[serviceName]!;
       environment = saveBinding(params.ctx, environment, {
         ...currentBinding,
         state: 'entering',
-        workloads: {
-          ...(currentBinding?.workloads ?? {}),
-          [serviceName]: snapshot,
-        },
+        workloads: snapshots,
         updatedAt: new Date().toISOString(),
       });
       const receipt = await adapter.suspendMaintenanceWorkload(environment, snapshot);

@@ -241,7 +241,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     status: 'ready-for-live',
     customDomains: 'managed',
     domainTrafficProxy: 'supported',
-    maintenance: 'unsupported',
+    maintenance: 'ready-for-live',
     credentials: digitalOceanCredentials,
     managedWorkflow: {
       ...dockerWebManagedWorkflow('deploy-digitalocean-production.yml'),
@@ -249,7 +249,7 @@ export const hostingProviderContracts: HostingProviderContract[] = [
       cache: { provider: 'digitalocean', engine: 'redis' },
     },
     implementationNote:
-      'The credential schema, App Platform adapter, automatic free Starter registry bootstrap, derived PostgreSQL and Valkey adapters, guidance, mocked lifecycle, exact-SHA CI workflow, and review-gated full-stack managed-workflow live harness are implemented. Promotion requires a successful opt-in create/deploy/noop/update/destroy run against an isolated DigitalOcean team.',
+      'The credential schema, App Platform adapter, automatic free Starter registry bootstrap, derived PostgreSQL and Valkey adapters, guidance, mocked lifecycle, exact-SHA CI workflow, exact-app archive/restore maintenance contract, and review-gated full-stack managed-workflow live harness are implemented. Maintenance remains ready-for-live until its opt-in entry/noop/exit scenario passes; provider promotion still requires a successful create/deploy/noop/update/destroy run against an isolated DigitalOcean team.',
   },
   {
     kind: 'hosting',

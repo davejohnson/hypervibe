@@ -13,6 +13,7 @@ describe('hosting maintenance provider support', () => {
     ['railway', new RailwayAdapter()],
     ['cloudrun', new CloudRunAdapter()],
     ['azure-container-apps', new AzureContainerAppsAdapter()],
+    ['digitalocean', new DigitalOceanAdapter()],
     ['vercel', new VercelAdapter()],
   ])('%s exposes the provider-neutral reversible workload contract', (provider, adapter) => {
     expect(adapter.capabilities.supportsMaintenance).toBe(true);
@@ -22,7 +23,6 @@ describe('hosting maintenance provider support', () => {
 
   it.each([
     ['ecs', new EcsExpressAdapter()],
-    ['digitalocean', new DigitalOceanAdapter()],
   ])('%s fails closed until reversible suspension is implemented', (provider, adapter) => {
     expect(adapter.capabilities.supportsMaintenance).not.toBe(true);
     expect(supportsWorkloadMaintenance(adapter)).toBe(false);

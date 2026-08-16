@@ -31,8 +31,13 @@ describe('provider conformance matrix', () => {
 
   it('keeps maintenance live promotion distinct from implemented adapter support', () => {
     expect(
-      hostingProviderContracts.find((entry) => entry.provider === 'vercel')
-    ).toMatchObject({ maintenance: 'ready-for-live' });
+      hostingProviderContracts
+        .filter((entry) => ['digitalocean', 'vercel'].includes(entry.provider))
+        .map((entry) => [entry.provider, entry.maintenance])
+    ).toEqual([
+      ['digitalocean', 'ready-for-live'],
+      ['vercel', 'ready-for-live'],
+    ]);
     for (const contract of hostingProviderContracts) {
       const lifecycle = providerRegistry.getMetadata(contract.provider)
         ?.lifecycle?.hosting?.maintenance;
