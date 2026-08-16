@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parse as parseDomain } from 'tldts';
 
 /**
  * The canonical desired-state document ("spec") for a project — the single
@@ -327,6 +328,50 @@ const githubAiAgentSchema = z.object({
   effort: z.enum(['low', 'medium', 'high', 'xhigh']).default('high'),
 }).strict().default({});
 
+const githubAuditInstructionsSchema = z.string().min(1).max(12_000).superRefine((value, ctx) => {
+  if (value.includes('${{') || /[\0]/.test(value)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'code-audit instructions cannot contain GitHub expressions or null bytes',
+    });
+  }
+});
+
+const githubAuditDocumentationDomainSchema = z.string().min(1).max(253).superRefine((value, ctx) => {
+  const labels = value.split('.');
+  const parsed = parseDomain(value, { detectSpecialUse: true });
+  const unsafe = value !== value.trim().toLowerCase()
+    || value.includes('${{')
+    || value.includes('*')
+    || labels.length < 2
+    || labels.some((label) => (
+      label.length === 0
+      || label.length > 63
+      || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+    ))
+    || parsed.hostname !== value
+    || parsed.isIp
+    || parsed.isSpecialUse
+    || parsed.isIcann !== true;
+  if (unsafe) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'code-audit documentationDomains must contain exact lowercase public hostnames without schemes, paths, credentials, expressions, wildcards, or local/private suffixes',
+    });
+  }
+});
+
+const githubAuditDocumentationDomainsSchema = z.array(githubAuditDocumentationDomainSchema)
+  .max(32)
+  .superRefine((domains, ctx) => {
+    if (new Set(domains).size !== domains.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'code-audit documentationDomains cannot contain duplicate hostnames',
+      });
+    }
+  });
+
 export const githubCheckAutomationSpecSchema = z.object({
   kind: z.literal('check'),
   enabled: z.boolean().default(true),
@@ -371,6 +416,10 @@ export const githubCodeAuditAutomationSpecSchema = z.object({
   enabled: z.boolean().default(true),
   schedule: githubScheduleSpecSchema,
   agent: githubAiAgentSchema,
+  /** Additional reviewed audit rules. Repository and fetched content remain untrusted evidence. */
+  instructions: githubAuditInstructionsSchema.optional(),
+  /** Exact public documentation hosts available to the read-only Codex network profile. */
+  documentationDomains: githubAuditDocumentationDomainsSchema.default([]),
   /** Stable issue-per-finding lifecycle; line numbers are deliberately excluded from fingerprints. */
   findings: z.object({
     createIssues: z.literal(true).default(true),
