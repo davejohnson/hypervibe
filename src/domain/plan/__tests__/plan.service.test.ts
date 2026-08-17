@@ -2277,6 +2277,61 @@ describe('PlanService.plan', () => {
     }
   });
 
+  it('blocks a second hosting-provider switch while the first provider cleanup is still retained', async () => {
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+        },
+      },
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'current-gcp-project',
+        environmentId: 'us-central1',
+        services: { web: { serviceId: 'current-gcp-web' } },
+        previousHosting: {
+          provider: 'vercel',
+          projectId: 'vercel-team',
+          services: { web: { serviceId: 'vercel-team:old-vercel-web' } },
+        },
+      },
+    });
+    mockObservingAdapter({
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: false,
+      services: [],
+      databases: [],
+      completeness: {
+        project: 'complete',
+        environment: 'complete',
+        services: 'complete',
+        databases: 'complete',
+        storage: 'complete',
+      },
+      partial: false,
+      warnings: [],
+    });
+
+    const result = await new PlanService().plan(project, 'staging');
+
+    expect(result).toMatchObject({
+      error: expect.stringContaining('vercel'),
+    });
+    expect((new EnvironmentRepository().findByProjectAndName(project.id, 'staging')!
+      .platformBindings as Record<string, unknown>)).toMatchObject({
+      provider: 'cloudrun',
+      previousHosting: { provider: 'vercel' },
+    });
+  });
+
   it('replans CI deploys when a previously synced GitHub Actions secret value is stale', async () => {
     const ciProject = new ProjectRepository().create({
       name: 'ci-stale-secret-app',

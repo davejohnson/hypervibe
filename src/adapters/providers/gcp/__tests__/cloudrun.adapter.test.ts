@@ -5,8 +5,110 @@ import type { Service } from '../../../../domain/entities/service.entity.js';
 
 describe('CloudRunAdapter', () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
 });
+
+  it('forensically lists a migrated environment without a retained binding or mutations', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const pathname = new URL(url).pathname;
+      expect(init?.method ?? 'GET').toBe('GET');
+      if (pathname.endsWith('/services')) {
+        return Response.json({
+          services: [{
+            name: 'projects/gcp-project/locations/us-central1/services/hls-property-care-web',
+            uri: 'https://hls-property-care-web.run.app',
+            labels: {
+              'infraprint-environment': 'production',
+              'infraprint-service': 'web',
+            },
+          }],
+        });
+      }
+      if (pathname.endsWith('/jobs')) return Response.json({ jobs: [] });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await adapter.inspectEnvironmentResources({
+      resource: 'environment',
+      limit: 25,
+      project: { id: 'local-project', name: 'hls-property-care' },
+      environment: { id: 'local-environment', projectId: 'local-project', name: 'production' },
+    });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      resource: 'environment',
+      project: { id: 'gcp-project' },
+      environment: { name: 'production', region: 'us-central1' },
+      services: [{
+        id: 'hls-property-care-web',
+        name: 'web',
+        managedByHypervibe: true,
+      }],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('recognizes legacy unlabeled resources from deterministic service identities', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'hls-property-care',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account', project_id: 'hls-property-care', private_key: 'dummy',
+        client_email: 'deploy@hls-property-care.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const pathname = new URL(String(input)).pathname;
+      if (pathname.endsWith('/services')) {
+        return Response.json({ services: [] });
+      }
+      if (pathname.endsWith('/jobs')) return Response.json({ jobs: [{
+        name: 'projects/hls-property-care/locations/us-central1/jobs/hls-property-care-production-web-migration',
+      }] });
+      if (new URL(String(input)).hostname === 'cloudscheduler.googleapis.com') {
+        return Response.json({}, { status: 404 });
+      }
+      throw new Error(`Unexpected fetch: ${String(input)}`);
+    }));
+
+    const result = await adapter.inspectEnvironmentResources({
+      resource: 'environment',
+      limit: 25,
+      project: { id: 'local-project', name: 'hls-property-care' },
+      environment: { id: 'local-environment', projectId: 'local-project', name: 'production' },
+      serviceNames: ['web'],
+    });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      services: [{
+        id: 'hls-property-care-production-web-migration',
+        name: 'web-migration',
+        resourceType: 'taskJob',
+        managedByHypervibe: true,
+      }],
+    });
+  });
 
 describe('CloudRunAdapter maintenance', () => {
   afterEach(() => {

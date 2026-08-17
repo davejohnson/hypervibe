@@ -80,6 +80,35 @@ afterEach(() => {
 });
 
 describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
+  it('forensically inventories an abandoned environment from logical context only', async () => {
+    const adapter = await connectedAdapter();
+    const internal = adapter as any;
+    vi.spyOn(internal, 'getResource').mockImplementation(async (...args: unknown[]) => ({
+      id: String(args[0]),
+      name: String(args[0]).split('/').at(-1),
+      tags: { 'managed-by': 'hypervibe' },
+      properties: {},
+    }));
+    vi.spyOn(internal, 'listApps').mockResolvedValue([{
+      id: APP_ID,
+      name: 'hv-web',
+      tags: { 'managed-by': 'hypervibe' },
+      properties: { runningStatus: 'Running' },
+    }]);
+
+    await expect(adapter.inspectEnvironmentResources({
+      resource: 'environment',
+      limit: 25,
+      project: { id: 'project-local', name: 'app' },
+      environment: { id: 'environment-local', projectId: 'project-local', name: 'production' },
+    })).resolves.toMatchObject({
+      observation: 'present',
+      resource: 'environment',
+      managedByHypervibe: true,
+      services: [{ id: APP_ID, managedByHypervibe: true }],
+    });
+  });
+
   it('keeps location out of credentials while accepting a legacy value during migration', () => {
     expect(AzureContainerAppsCredentialsSchema.parse(credentials)).toEqual({
       tenantId: TENANT_ID,

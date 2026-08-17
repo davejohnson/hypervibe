@@ -168,7 +168,12 @@ export async function inspectRailwayResources(
   if (request.resource && !['project', 'environment'].includes(request.resource)) {
     throw new Error(`Unsupported Railway inspection resource "${request.resource}". Use project or environment.`);
   }
-  if (!request.id && !request.name) {
+  const bindingProjectId = typeof request.binding?.projectId === 'string'
+    ? request.binding.projectId
+    : undefined;
+  const selectedId = request.id ?? bindingProjectId;
+  const selectedName = request.name ?? request.project?.name;
+  if (!selectedId && !selectedName) {
     return {
       observation: 'present',
       resource: 'project',
@@ -176,18 +181,18 @@ export async function inspectRailwayResources(
     };
   }
 
-  let projectId = request.id;
+  let projectId = selectedId;
   let matches: Array<{ id: string; name: string }> = [];
   if (!projectId) {
-    matches = await adapter.findProjectsByName(request.name!);
+    matches = await adapter.findProjectsByName(selectedName!);
     if (matches.length === 0) {
-      return { observation: 'absent', resource: 'project', name: request.name };
+      return { observation: 'absent', resource: request.resource ?? 'project', name: selectedName };
     }
     if (matches.length > 1) {
       return {
         observation: 'ambiguous',
-        resource: 'project',
-        name: request.name,
+        resource: request.resource ?? 'project',
+        name: selectedName,
         projects: matches.slice(0, request.limit).map((project) => ({ id: project.id, name: project.name })),
       };
     }
@@ -196,7 +201,52 @@ export async function inspectRailwayResources(
 
   const inspection = await inspectRailwayProject(adapter, projectId);
   if (!inspection) {
-    return { observation: 'absent', resource: 'project', id: projectId };
+    return { observation: 'absent', resource: request.resource ?? 'project', id: projectId };
+  }
+  if (request.resource === 'environment') {
+    const boundEnvironmentId = typeof request.binding?.environmentId === 'string'
+      ? request.binding.environmentId
+      : undefined;
+    const candidates = inspection.environments.filter((environment) => (
+      boundEnvironmentId
+        ? environment.railwayId === boundEnvironmentId
+        : environment.name === request.environment?.name
+    ));
+    if (candidates.length === 0) {
+      return {
+        observation: 'absent',
+        resource: 'environment',
+        project: { id: inspection.details.id, name: inspection.details.name },
+        name: request.environment?.name,
+      };
+    }
+    if (candidates.length > 1) {
+      return {
+        observation: 'ambiguous',
+        resource: 'environment',
+        project: { id: inspection.details.id, name: inspection.details.name },
+        environments: candidates.map((environment) => ({ id: environment.railwayId, name: environment.name })),
+      };
+    }
+    const selectedEnvironment = candidates[0]!;
+    return {
+      observation: 'present',
+      resource: 'environment',
+      project: { id: inspection.details.id, name: inspection.details.name },
+      environment: { id: selectedEnvironment.railwayId, name: selectedEnvironment.name },
+      services: inspection.services
+        .filter((service) => Boolean(service.instancesByEnv[selectedEnvironment.railwayId]))
+        .map((service) => ({
+          id: service.railwayId,
+          name: service.name,
+          instance: service.instancesByEnv[selectedEnvironment.railwayId],
+          datastoreEngine: service.datastoreEngine,
+        })),
+      components: inspection.components.map((component) => ({ id: component.railwayId, name: component.name, type: component.type })),
+      storage: inspection.storage
+        .filter((bucket) => bucket.environments.some((environment) => environment.name === selectedEnvironment.name))
+        .map((bucket) => ({ id: bucket.railwayId, name: bucket.name })),
+    };
   }
   return {
     observation: 'present',

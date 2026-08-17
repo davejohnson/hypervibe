@@ -11,7 +11,7 @@ import type {
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import { serviceWorkloadKind, type Service } from '../../../domain/entities/service.entity.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
 import { buildCloudRunGitHubActionsSteps, CLOUDRUN_CI_REQUIRED_SECRETS } from './cloudrun-ci.workflow.js';
 import { parseHostingBindings, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
 import * as pubsub from './pubsub.api.js';
@@ -2018,6 +2018,128 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
         storage: 'complete',
       },
       partial: warnings.length > 0,
+      warnings,
+    };
+  }
+
+  async inspectEnvironmentResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const boundRegion = typeof request.binding?.environmentId === 'string'
+      ? request.binding.environmentId
+      : undefined;
+    if (boundRegion) this.configureTarget({ region: boundRegion });
+
+    const token = await this.getAccessToken();
+    const environmentLabel = request.environment
+      ? this.labelValue(request.environment.name)
+      : undefined;
+    const rawServiceBindings = request.binding?.services;
+    const serviceBindings = rawServiceBindings && typeof rawServiceBindings === 'object' && !Array.isArray(rawServiceBindings)
+      ? rawServiceBindings as Record<string, Record<string, unknown>>
+      : {};
+    const boundIds = new Set(Object.values(serviceBindings).flatMap((binding) => [
+      typeof binding.serviceId === 'string' ? binding.serviceId : undefined,
+      typeof binding.jobName === 'string' ? binding.jobName : undefined,
+      typeof binding.schedulerJobName === 'string' ? binding.schedulerJobName : undefined,
+    ].filter((value): value is string => Boolean(value))));
+    const deterministicNames = new Map<string, { name: string; resourceType: 'service' | 'scheduledJob' | 'taskJob' }>();
+    const deterministicPrefixes = new Set([
+      this.credentials.projectId,
+      ...(request.project && request.environment
+        ? [this.sanitizeName(`${request.project.name}-${request.environment.name}`)]
+        : []),
+    ]);
+    for (const serviceName of request.serviceNames ?? []) {
+      for (const prefix of deterministicPrefixes) {
+        const providerName = this.sanitizeName(`${prefix}-${serviceName}`);
+        deterministicNames.set(providerName, { name: serviceName, resourceType: 'service' });
+        deterministicNames.set(this.sanitizeName(`${providerName}-schedule`), { name: serviceName, resourceType: 'scheduledJob' });
+        deterministicNames.set(this.sanitizeName(`${providerName}-migration`), { name: `${serviceName}-migration`, resourceType: 'taskJob' });
+      }
+    }
+    const [liveServices, liveJobs] = await Promise.all([
+      this.listCloudRunServices(token),
+      this.listCloudRunJobs(token),
+    ]);
+    const warnings: string[] = [];
+    const resources: Array<Record<string, unknown>> = [];
+
+    for (const liveService of liveServices) {
+      const id = this.lastPathSegment(liveService.name);
+      if (!id) continue;
+      const managedEnvironment = liveService.labels?.['infraprint-environment'];
+      const deterministicService = deterministicNames.get(id);
+      resources.push({
+        id,
+        name: liveService.labels?.['infraprint-service'] ?? deterministicService?.name ?? id,
+        workloadKind: liveService.ingress === 'INGRESS_TRAFFIC_INTERNAL_ONLY' ? 'worker' : 'web',
+        resourceType: 'service',
+        managedByHypervibe: Boolean(managedEnvironment || deterministicService),
+        managedEnvironment: managedEnvironment ?? null,
+        matchesEnvironment: Boolean(
+          boundIds.has(id)
+          || Boolean(deterministicService)
+          || (environmentLabel && managedEnvironment === environmentLabel)
+        ),
+        ...(liveService.uri ? { url: liveService.uri } : {}),
+      });
+    }
+
+    for (const liveJob of liveJobs) {
+      const jobName = this.lastPathSegment(liveJob.name);
+      if (!jobName) continue;
+      const schedulerJobName = this.sanitizeName(`${jobName}-schedule`);
+      let schedulerJob: CloudSchedulerJob | null = null;
+      try {
+        schedulerJob = await this.getCloudSchedulerJob(schedulerJobName, token);
+      } catch (error) {
+        warnings.push(`Failed to inspect Cloud Scheduler job ${schedulerJobName}: ${this.formatError(error)}`);
+      }
+      const managedEnvironment = liveJob.labels?.['infraprint-environment'];
+      const deterministicService = deterministicNames.get(jobName)
+        ?? deterministicNames.get(schedulerJobName);
+      resources.push({
+        id: schedulerJob ? schedulerJobName : jobName,
+        name: liveJob.labels?.['infraprint-service'] ?? deterministicService?.name ?? jobName,
+        workloadKind: 'cron',
+        resourceType: deterministicService?.resourceType ?? 'scheduledJob',
+        jobName,
+        schedulerJobName: schedulerJob ? schedulerJobName : null,
+        schedulerState: schedulerJob?.state ?? null,
+        managedByHypervibe: Boolean(managedEnvironment || deterministicService),
+        managedEnvironment: managedEnvironment ?? null,
+        matchesEnvironment: Boolean(
+          boundIds.has(jobName)
+          || boundIds.has(schedulerJobName)
+          || Boolean(deterministicService)
+          || (environmentLabel && managedEnvironment === environmentLabel)
+        ),
+      });
+    }
+
+    const matched = resources.filter((resource) => resource.matchesEnvironment === true);
+    const selected = matched.slice(0, request.limit);
+    const otherResources = resources
+      .filter((resource) => resource.matchesEnvironment !== true)
+      .slice(0, request.limit)
+      .map(({ matchesEnvironment: _matchesEnvironment, ...resource }) => resource);
+    return {
+      observation: selected.length > 0 ? 'present' : 'absent',
+      resource: 'environment',
+      project: { id: this.credentials.projectId },
+      environment: {
+        name: request.environment?.name,
+        region: this.credentials.region,
+      },
+      services: selected,
+      otherResources,
+      completeness: {
+        services: 'complete',
+        scheduler: warnings.length > 0 ? 'unknown' : 'complete',
+      },
+      partial: selected.length < matched.length || otherResources.length < resources.length - matched.length || warnings.length > 0,
       warnings,
     };
   }
@@ -4158,6 +4280,7 @@ providerRegistry.register({
         customDomains: 'managed',
         domainTrafficProxy: 'dns-only',
         maintenance: 'managed',
+        teardownBoundary: 'services',
       },
     },
     orchestration: {
@@ -4183,5 +4306,11 @@ providerRegistry.register({
     const adapter = new CloudRunAdapter();
     adapter.connect(credentials);
     return adapter;
+  },
+  inspection: {
+    resources: ['environment'],
+    inspect: (adapter, request) => (
+      adapter as CloudRunAdapter
+    ).inspectEnvironmentResources(request),
   },
 });

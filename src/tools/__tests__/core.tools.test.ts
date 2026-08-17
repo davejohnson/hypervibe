@@ -3009,6 +3009,15 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
     });
     verifyRailwayConnection();
+    const cloudrunConnection = new ConnectionRepository().create({
+      provider: 'cloudrun',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        projectId: 'gcp-project',
+        region: 'us-central1',
+        credentials: '{}',
+      }),
+    });
+    new ConnectionRepository().updateStatus(cloudrunConnection.id, 'verified');
     const project = new ProjectRepository().findByName('previous-teardown-app')!;
     const environment = new EnvironmentRepository().create({
       projectId: project.id,
@@ -3112,6 +3121,65 @@ describe('hv_plan / hv_status / hv_apply', () => {
 
     const updated = new EnvironmentRepository().findById(environment.id)!;
     expect((updated.platformBindings as Record<string, unknown>).previousHosting ?? null).toBeNull();
+    await t.close();
+  });
+
+  it('uses an exact environment boundary for abandoned shared-project hosting', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec', { spec: {
+      project: 'previous-railway-environment-app',
+      environments: { production: {
+        hosting: { provider: 'cloudrun' },
+        services: { web: { startCommand: 'npm start' } },
+      } },
+    } });
+    verifyConnection('cloudrun', { projectId: 'gcp-project', credentials: '{}' });
+    verifyRailwayConnection();
+    const project = new ProjectRepository().findByName('previous-railway-environment-app')!;
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun', projectId: 'gcp-project', environmentId: 'us-central1',
+        services: { web: { serviceId: 'gcp-web' } },
+        previousHosting: {
+          provider: 'railway', projectId: 'railway-project', environmentId: 'railway-production',
+          services: { web: { serviceId: 'shared-railway-web' }, postgres: { serviceId: 'shared-railway-postgres' } },
+        },
+      },
+    });
+
+    const observedState: ObservedState = {
+      provider: 'cloudrun', observedAt: new Date().toISOString(), projectExists: true,
+      projectId: 'gcp-project', environmentId: 'us-central1', databases: [], partial: false, warnings: [],
+      services: [{
+        name: 'web', externalId: 'gcp-web', workloadKind: 'web', customDomains: [],
+        config: { startCommand: 'npm start' }, sourceState: 'disconnected',
+        envVarKeys: [], envVarHashes: {}, status: 'running',
+      }],
+    };
+
+    const deleteEnvironment = vi.fn()
+      .mockResolvedValueOnce({ success: false, error: 'absence could not be verified' })
+      .mockResolvedValueOnce({ success: true });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockImplementation(async (provider: string) => provider === 'railway'
+      ? { success: true, adapter: { name: 'railway', deleteEnvironment } } as any
+      : { success: true, adapter: { name: 'cloudrun', capabilities: { supportsObserve: true }, observe: async () => observedState } } as any);
+
+    const plan = await t.call('hv_plan', { project: project.name, env: 'production' });
+    const cleanupId = 'environment:production:railway:previous-destroy';
+    expect(plan.data.actions.filter((action: PlanAction) => action.id.endsWith(':previous-destroy')))
+      .toEqual([expect.objectContaining({ id: cleanupId, resource: { kind: 'environment', name: 'production', provider: 'railway' } })]);
+
+    const failed = await t.call('hv_apply', { project: project.name, planId: plan.data.planId, confirmActions: [cleanupId] });
+    expect(failed.data.receipts).toContainEqual(expect.objectContaining({ actionId: cleanupId, status: 'failed' }));
+    expect((new EnvironmentRepository().findById(environment.id)!.platformBindings as any).previousHosting)
+      .toMatchObject({ provider: 'railway', environmentId: 'railway-production' });
+
+    const retryPlan = await t.call('hv_plan', { project: project.name, env: 'production' });
+    await t.call('hv_apply', { project: project.name, planId: retryPlan.data.planId, confirmActions: [cleanupId] });
+    expect(deleteEnvironment).toHaveBeenNthCalledWith(2, 'railway-project', 'railway-production');
+    expect((new EnvironmentRepository().findById(environment.id)!.platformBindings as any).previousHosting ?? null).toBeNull();
     await t.close();
   });
 
