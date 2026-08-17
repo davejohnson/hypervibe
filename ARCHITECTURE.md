@@ -970,14 +970,18 @@ fresh source and target maintenance fingerprints and re-observe both immediately
 before provisioning a candidate target.
 
 The workload port is implemented by Railway, GCP Cloud Run, Azure Container
-Apps, and Vercel. Vercel pauses and unpauses only the exact bound Project,
+Apps, DigitalOcean App Platform, and Vercel. DigitalOcean archives and restores
+only the exact bound app, preserves the complete live App Spec on both writes,
+and verifies a terminal archived state with zero running instances before entry
+succeeds. Every component restoration snapshot is durable before that atomic
+app-level mutation. Vercel pauses and unpauses only the exact bound Project,
 preserves a Project that was already paused, and verifies provider pause state
 on its direct production origins before entry succeeds. Cloudflare supplies the
 common public edge and PostgreSQL supplies the provider-independent write
-fence. ECS Express and DigitalOcean App Platform explicitly declare maintenance
-unsupported until they can prove all background and direct-origin workloads are
-reversibly stopped. Generic planning must fail closed for those providers;
-capability presence is never inferred from a provider name.
+fence. ECS Express explicitly declares maintenance unsupported until it can
+prove all background and direct-origin workloads are reversibly stopped.
+Generic planning must fail closed for unsupported providers; capability
+presence is never inferred from a provider name.
 
 Object-storage lifecycle is implemented for Railway, Amazon S3, Google Cloud
 Storage, and Azure Blob Storage. Each adapter owns provider-native private

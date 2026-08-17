@@ -96,6 +96,12 @@ export interface DigitalOceanAppDomain {
   };
 }
 
+export interface DigitalOceanAppMaintenance {
+  archive?: boolean;
+  enabled?: boolean;
+  offline_page_url?: string;
+}
+
 export interface DigitalOceanAppSpec {
   name: string;
   region?: string;
@@ -104,7 +110,15 @@ export interface DigitalOceanAppSpec {
   workers?: DigitalOceanAppComponent[];
   jobs?: DigitalOceanAppComponent[];
   envs?: DigitalOceanAppEnv[];
+  maintenance?: DigitalOceanAppMaintenance;
   [key: string]: unknown;
+}
+
+export interface DigitalOceanAppInstance {
+  component_name?: string;
+  component_type?: 'SERVICE' | 'WORKER' | 'JOB' | string;
+  instance_alias?: string;
+  instance_name?: string;
 }
 
 export interface DigitalOceanApp {
@@ -158,6 +172,10 @@ interface ListAppsResponse {
 
 interface AppResponse {
   app: DigitalOceanApp;
+}
+
+interface AppInstancesResponse {
+  instances?: DigitalOceanAppInstance[];
 }
 
 interface ContainerRegistryResponse {
@@ -320,6 +338,17 @@ export class DigitalOceanClient {
     return (await this.listApps()).filter(
       (app) => app.spec?.name?.toLowerCase() === normalized
     );
+  }
+
+  async listAppInstances(appId: string): Promise<DigitalOceanAppInstance[]> {
+    const response = await this.request<AppInstancesResponse>(
+      'GET',
+      `/v2/apps/${encodeURIComponent(appId)}/instances`
+    );
+    if (!Array.isArray(response.instances)) {
+      throw new Error(`DigitalOcean returned an invalid running-instance list for app ${appId}.`);
+    }
+    return response.instances;
   }
 
   async createApp(spec: DigitalOceanAppSpec): Promise<DigitalOceanApp> {
