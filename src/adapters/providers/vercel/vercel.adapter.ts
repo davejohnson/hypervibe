@@ -24,7 +24,8 @@ import type {
   Receipt,
   VerifyResult,
 } from '../../../domain/ports/provider.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
+import { environmentForInspection } from '../../../domain/registry/provider-inspection.js';
 import {
   VercelClient,
   type VercelDomainConfig,
@@ -942,6 +943,39 @@ export class VercelAdapter implements IProviderAdapter {
     };
   }
 
+  async inspectEnvironmentResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const environment = environmentForInspection(request);
+    const bindings = parseHostingBindings(environment);
+    const scope = await this.scope();
+    const boundProjectIds = new Set(Object.values(bindings.services ?? {}).flatMap((binding) => {
+      if (!binding.serviceId) return [];
+      return [parseVercelServiceBinding(binding.serviceId).projectId];
+    }));
+    const prefix = this.servicePrefix(environment);
+    const projects = (await this.client.listProjects()).filter((project) => (
+      boundProjectIds.has(project.id) || project.name.startsWith(prefix)
+    ));
+    return {
+      observation: projects.length > 0 ? 'present' : 'absent',
+      resource: 'environment',
+      project: { id: scope.binding, name: scope.label },
+      environment: { name: environment.name },
+      services: projects.slice(0, request.limit).map((project) => ({
+        id: formatVercelServiceBinding(scope.binding, project.id),
+        projectId: project.id,
+        name: project.name,
+        workloadKind: 'web',
+        resourceType: 'vercel-project',
+        managedByHypervibe: project.name.startsWith(prefix),
+        sourceState: project.link ? 'connected' : 'disconnected',
+      })),
+      partial: projects.length > request.limit,
+    };
+  }
+
   private async observedService(
     logicalName: string,
     serviceBinding: string,
@@ -1698,7 +1732,7 @@ providerRegistry.register({
       ],
     },
     lifecycle: {
-      hosting: { customDomains: 'managed', maintenance: 'managed' },
+      hosting: { customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'services' },
     },
     orchestration: {
       project: { shareAcrossEnvironments: true },
@@ -1724,5 +1758,11 @@ providerRegistry.register({
     const adapter = new VercelAdapter();
     void adapter.connect(validated);
     return adapter;
+  },
+  inspection: {
+    resources: ['environment'],
+    inspect: (adapter, request) => (
+      adapter as VercelAdapter
+    ).inspectEnvironmentResources(request),
   },
 });

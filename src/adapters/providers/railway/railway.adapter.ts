@@ -1567,6 +1567,61 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
     return { success: false, error: errors.join(' | ') };
   }
 
+  async deleteEnvironment(
+    projectId: string,
+    environmentId: string
+  ): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }> {
+    if (!this.client) {
+      return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+    const existing = await this.environmentExists(projectId, environmentId);
+    if (existing.state === 'absent') {
+      return { success: true, alreadyAbsent: true };
+    }
+    if (existing.state === 'unknown') {
+      return {
+        success: false,
+        error: `environment absence is unknown (${environmentId}): ${existing.error}`,
+      };
+    }
+
+    try {
+      const mutation = gql`
+        mutation DeleteEnvironment($id: String!) {
+          environmentDelete(id: $id)
+        }
+      `;
+      const result = await this.client.request<Record<string, unknown>>(mutation, { id: environmentId });
+      if (!this.isDeleteAccepted(result, 'environmentDelete')) {
+        return { success: false, error: 'environmentDelete.id: delete mutation returned unsuccessful payload' };
+      }
+      const attempts = Number(process.env.HYPERVIBE_RAILWAY_DELETE_ATTEMPTS ?? 40);
+      const delayMs = Number(process.env.HYPERVIBE_RAILWAY_DELETE_DELAY_MS ?? 500);
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const existence = await this.environmentExists(projectId, environmentId);
+        if (existence.state === 'absent') return { success: true };
+        if (existence.state === 'unknown') {
+          return {
+            success: false,
+            error: `environment absence is unknown (${environmentId}): ${existence.error}`,
+          };
+        }
+        if (attempt < attempts - 1) {
+          await this.sleep(Math.min(delayMs * (2 ** attempt), 2000));
+        }
+      }
+      return {
+        success: false,
+        error: `environment still exists after ${attempts} observation attempts (${environmentId})`,
+      };
+    } catch (error) {
+      if (this.describeError(error).toLowerCase().includes('not found')) {
+        return { success: true, alreadyAbsent: true };
+      }
+      return { success: false, error: `environmentDelete.id: ${this.describeError(error)}` };
+    }
+  }
+
   async deleteService(serviceId: string): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }> {
     if (!this.client) {
       return { success: false, error: 'Not connected. Call connect() first.' };
@@ -1610,7 +1665,10 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
     }
   }
 
-  private isDeleteAccepted(payload: Record<string, unknown>, field: 'projectDelete' | 'serviceDelete'): boolean {
+  private isDeleteAccepted(
+    payload: Record<string, unknown>,
+    field: 'projectDelete' | 'environmentDelete' | 'serviceDelete'
+  ): boolean {
     const value = payload[field];
     if (typeof value === 'boolean') return value;
     if (typeof value === 'number') return value !== 0;
@@ -1703,6 +1761,36 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
       `;
       const result = await this.client.request<{ service: { id: string } | null }>(query, { id: serviceId });
       return result.service?.id ? { state: 'present' } : { state: 'absent' };
+    } catch (error) {
+      const message = this.describeError(error);
+      if (message.toLowerCase().includes('not found')) return { state: 'absent' };
+      return { state: 'unknown', error: message };
+    }
+  }
+
+  private async environmentExists(projectId: string, environmentId: string): Promise<ResourceExistence> {
+    if (!this.client) {
+      return { state: 'unknown', error: 'Not connected. Call connect() first.' };
+    }
+    try {
+      const query = gql`
+        query GetProjectEnvironment($projectId: String!) {
+          project(id: $projectId) {
+            id
+            environments {
+              edges {
+                node { id }
+              }
+            }
+          }
+        }
+      `;
+      const result = await this.client.request<{
+        project: { id: string; environments?: { edges?: Array<{ node?: { id?: string } }> } } | null;
+      }>(query, { projectId });
+      if (!result.project) return { state: 'absent' };
+      const exists = result.project.environments?.edges?.some((edge) => edge.node?.id === environmentId) ?? false;
+      return { state: exists ? 'present' : 'absent' };
     } catch (error) {
       const message = this.describeError(error);
       if (message.toLowerCase().includes('not found')) return { state: 'absent' };
@@ -4935,7 +5023,7 @@ providerRegistry.register({
       defaultScalarKey: 'apiToken',
     },
     lifecycle: {
-      hosting: { customDomains: 'managed', maintenance: 'managed' },
+      hosting: { customDomains: 'managed', maintenance: 'managed', teardownBoundary: 'environment' },
       databaseEngines: ['postgres'],
       cacheEngines: ['redis'],
     },

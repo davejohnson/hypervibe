@@ -38,6 +38,15 @@ accepts the matrix credential shape, and has been promoted to `supported`.
 Those failures are the implementation queue; they must not be added to the
 ordinary CI gate until the corresponding provider is fully supported.
 
+Hypervibe's own repository declares two daily, read-only safeguards. A focused
+check reruns the matrix/registry contract, and a provider-truth code audit
+compares every registered capability and public claim with current official
+provider documentation and the available live-conformance evidence. The AI
+audit does not replace a live contract: adapter code and mocked tests can move
+a provider only to `ready-for-live`, while `supported` still requires concrete,
+recent live evidence. Missing or stale proof is reported as a durable finding;
+the daily job never receives provider credentials or mutates infrastructure.
+
 ### Environment custom domains
 
 `test/provider-conformance/domain-lifecycle.spec.json` is the isolated live

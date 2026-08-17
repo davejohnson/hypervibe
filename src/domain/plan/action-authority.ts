@@ -110,6 +110,8 @@ export type PlanMutationCapability =
   | 'maintenance.verify'
   | 'hosting.task-service.destroy'
   | 'hosting.previous-service.destroy'
+  | 'hosting.previous-environment.destroy'
+  | 'hosting.previous-project.destroy'
   | 'hosting.service.destroy'
   | 'domain.configure'
   | 'email.runtime.sync'
@@ -267,6 +269,29 @@ export function resolvePlanActionAuthority(
   if (action.type === 'noop') return null;
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
+  }
+
+  if (
+    action.type === 'destroy'
+    && action.metadata?.operation === 'previousHostingDestroy'
+    && metadataString(action, 'previousProvider') === action.resource.provider
+  ) {
+    const boundary = metadataString(action, 'cleanupBoundary');
+    if (
+      boundary === 'environment'
+      && exactResource(action, 'environment')
+      && metadataString(action, 'projectId')
+      && metadataString(action, 'environmentId')
+    ) {
+      return authority(action, 'hosting.previous-environment.destroy');
+    }
+    if (
+      boundary === 'project'
+      && exactResource(action, 'project')
+      && metadataString(action, 'projectId')
+    ) {
+      return authority(action, 'hosting.previous-project.destroy');
+    }
   }
 
   if (
@@ -716,7 +741,11 @@ export function resolvePlanActionAuthority(
     ) {
       return authority(action, 'hosting.task-service.destroy');
     }
-    if (action.metadata?.operation === 'previousHostingDestroy') {
+    if (
+      action.metadata?.operation === 'previousHostingDestroy'
+      && metadataString(action, 'previousProvider') === action.resource.provider
+      && ['services', 'project'].includes(metadataString(action, 'cleanupBoundary') ?? '')
+    ) {
       return authority(action, 'hosting.previous-service.destroy');
     }
     if (action.metadata?.operation) return null;

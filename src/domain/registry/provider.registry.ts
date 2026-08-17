@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
 import type { ProviderDatabaseRestoreDrillMetadata } from '../ports/database-restore-drill.port.js';
 import type { Project } from '../entities/project.entity.js';
+import type { Environment } from '../entities/environment.entity.js';
 
 export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
 export type ProviderLifecycleCapability = 'hosting' | 'database' | 'cache' | 'storage';
@@ -15,8 +16,18 @@ export interface ProviderInspectionRequest {
   id?: string;
   /** Exact provider resource name when an id is not known. */
   name?: string;
+  /** Explicit non-secret provider placement selector for regional environment forensics. */
+  region?: string;
   /** Hard output bound for list operations. */
   limit: number;
+  /** Logical Hypervibe project context for provider-scoped environment forensics. */
+  project?: Pick<Project, 'id' | 'name'>;
+  /** Logical Hypervibe environment context; never carries another provider's bindings. */
+  environment?: Pick<Environment, 'id' | 'projectId' | 'name'>;
+  /** Sanitized binding belonging to the selected provider, when one was retained. */
+  binding?: Record<string, unknown>;
+  /** Logical services used only to recognize deterministic legacy resource names. */
+  serviceNames?: string[];
 }
 
 export interface ProviderInspectionCapability {
@@ -53,6 +64,8 @@ export interface ProviderMetadata {
       domainTrafficProxy?: 'supported' | 'dns-only';
       /** Provider-owned direct-origin and background-workload suspension. */
       maintenance?: 'managed' | 'unsupported';
+      /** Smallest provider-owned boundary that completely removes one Hypervibe environment. */
+      teardownBoundary: 'services' | 'environment' | 'project';
     };
     /** Engines this provider can reconcile through its database adapter. */
     databaseEngines?: string[];

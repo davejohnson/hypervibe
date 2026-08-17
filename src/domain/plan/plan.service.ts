@@ -933,6 +933,26 @@ export class PlanService {
       }
       : environment?.platformBindings;
     const effectiveBindingRecord = effectiveBindings ?? {};
+    const boundHostingProvider = recordValue(effectiveBindingRecord, 'provider');
+    const retainedPreviousHosting = recordMapValue(effectiveBindingRecord, 'previousHosting');
+    const retainedPreviousProvider = recordValue(retainedPreviousHosting, 'provider');
+    const previousHostingTeardownBoundary = retainedPreviousProvider
+      ? providerRegistry.getMetadata(retainedPreviousProvider)?.lifecycle?.hosting?.teardownBoundary
+      : undefined;
+    if (retainedPreviousProvider && !previousHostingTeardownBoundary) {
+      return {
+        error: `Cannot plan cleanup for retained hosting provider ${retainedPreviousProvider} because it does not declare a complete teardown boundary. Hypervibe will not guess which provider resource is safe to delete.`,
+      };
+    }
+    if (
+      boundHostingProvider
+      && boundHostingProvider !== environmentSpec.hosting.provider
+      && retainedPreviousProvider
+    ) {
+      return {
+        error: `Cannot switch hosting from ${boundHostingProvider} to ${environmentSpec.hosting.provider} while cleanup from ${retainedPreviousProvider} is still retained. Finish or explicitly resolve the previous-provider teardown first so Hypervibe does not lose its only cleanup binding.`,
+      };
+    }
     let environmentForObserve = environment;
     if (sharedProjectBinding.bindings) {
       if (environment) {
@@ -1086,6 +1106,7 @@ export class PlanService {
       observed,
       local,
       providerBehavior: hostingMetadata?.orchestration?.diff,
+      previousHostingTeardownBoundary,
       customDomainManagement: hostingMetadata?.lifecycle?.hosting?.customDomains,
       customDomainTrafficProxy: hostingMetadata?.lifecycle?.hosting?.domainTrafficProxy,
       expectedSource: this.expectedDeploySource(projectForPlan, environmentName, environmentSpec),
@@ -1663,16 +1684,17 @@ export class PlanService {
       );
     }
 
-    const plannedMigrationCleanupProviders = actions
+    const plannedCleanupProviders = actions
       .filter((action) =>
         action.type === 'destroy'
         && (
           action.metadata?.operation === 'dataMigrationDatabasePreviousDestroy'
           || action.metadata?.operation === 'dataMigrationStoragePreviousDestroy'
+          || action.metadata?.operation === 'previousHostingDestroy'
         )
       )
       .map((action) => action.resource.provider);
-    for (const block of this.providerPreflight(plannedMigrationCleanupProviders)) {
+    for (const block of this.providerPreflight(plannedCleanupProviders)) {
       if (!blocked.some((existing) => existing.provider === block.provider && existing.reason === block.reason)) {
         blocked.push(block);
       }

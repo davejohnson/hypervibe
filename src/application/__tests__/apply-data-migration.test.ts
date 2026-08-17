@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -14,6 +15,7 @@ import type { IDatabaseAdapter } from '../../domain/ports/database.port.js';
 import type { IStorageAdapter, StorageContext, StorageObjectClient } from '../../domain/ports/storage.port.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
+import * as environmentMaintenanceService from '../../domain/services/environment-maintenance.service.js';
 
 vi.mock('../../domain/services/database-access.service.js', async (original) => {
   const actual = await original<typeof import('../../domain/services/database-access.service.js')>();
@@ -47,10 +49,36 @@ function lease(url: string): DatabaseAccessLease {
   };
 }
 
+function activeMaintenance(environmentName: string) {
+  return {
+    state: 'active' as const,
+    stage: 'verified' as const,
+    edge: {
+      state: 'active' as const,
+      hostname: `${environmentName}.example.com`,
+      markerVerified: true,
+    },
+    workloads: {},
+    database: { state: 'fenced' as const },
+  };
+}
+
+function maintenanceFingerprint(environmentName: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify(activeMaintenance(environmentName)))
+    .digest('hex');
+}
+
 describe('applyDataMigrationAction', () => {
   beforeEach(() => {
     SqliteAdapter.resetInstance();
     SqliteAdapter.getInstance(path.join(mkdtempSync(path.join(tmpdir(), 'hypervibe-data-migration-')), 'test.db')).migrate();
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: { name: 'railway', configureTarget: vi.fn() },
+    } as any);
+    vi.spyOn(environmentMaintenanceService, 'observeEnvironmentMaintenance')
+      .mockImplementation(async ({ environment }) => activeMaintenance(environment.name));
   });
 
   afterEach(() => {
@@ -83,10 +111,12 @@ describe('applyDataMigrationAction', () => {
         staging: {
           hosting: { provider: 'railway' }, services: { web: {} },
           database: { provider: 'railway', engine: 'postgres' },
+          maintenance: { enabled: true },
         },
         production: {
           hosting: { provider: 'railway' }, services: { web: {} },
           database: { provider: 'rds', engine: 'postgres' },
+          maintenance: { enabled: true },
           dataMigration: {
             id: 'initial-launch', fromEnvironment: 'staging',
             include: { database: true, storage: [] },
@@ -112,6 +142,8 @@ describe('applyDataMigrationAction', () => {
         targetProvider: 'rds',
         sourceComponentId: source.id,
         sourceExternalId: source.externalId,
+        sourceMaintenanceFingerprint: maintenanceFingerprint('staging'),
+        targetMaintenanceFingerprint: maintenanceFingerprint('production'),
         engine: 'postgres',
       },
     };
@@ -225,10 +257,12 @@ describe('applyDataMigrationAction', () => {
       environments: {
         staging: {
           hosting: { provider: 'railway' }, services: { web: {} },
+          maintenance: { enabled: true },
           storage: { documents: { provider: 'gcs', type: 'bucket', region: sourceContext.location, injectInto: ['web'] } },
         },
         production: {
           hosting: { provider: 'railway' }, services: { web: {} },
+          maintenance: { enabled: true },
           storage: { documents: { provider: 's3', type: 'bucket', region: targetContext.region, injectInto: ['web'] } },
           dataMigration: {
             id: 'initial-launch', fromEnvironment: 'staging',
@@ -250,6 +284,8 @@ describe('applyDataMigrationAction', () => {
         operation: 'dataMigrationStorageCopy', migrationId: 'initial-launch', storageName: 'documents',
         sourceEnvironment: 'staging', targetEnvironment: 'production', sourceProvider: 'gcs', targetProvider: 's3',
         sourceExternalId: 'gcp-documents', sourceWritesMustBeStopped: true,
+        sourceMaintenanceFingerprint: maintenanceFingerprint('staging'),
+        targetMaintenanceFingerprint: maintenanceFingerprint('production'),
       },
     };
     const sourceClient = objectClient({ 'document.pdf': Buffer.from('provider-neutral') });

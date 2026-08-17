@@ -216,9 +216,14 @@ hv_secrets project="my-app" env="staging"           # masked hosting-variable na
 hv_inspect                                          # provider/capability discovery; no parameters
 hv_inspect provider="railway"                       # provider-account inspection
 hv_inspect provider="railway" project="my-app" env="staging"  # full live environment
+
+# Recover an abandoned host from a migration that predates retained bindings.
+hv_inspect provider="cloudrun" project="my-app" env="production" region="us-central1"
+hv_import provider="cloudrun" mode="retained-cleanup" project="my-app" env="production" region="us-central1" confirm=true
+hv_plan project="my-app" env="production"           # review exact confirm-gated cleanup actions
 ```
 
-For `hv_inspect`, any bounded selector requires `provider`; `project` plus `env` never replaces it. For hosting-variable mode, `hv_secrets` requires an explicit `env` and does not infer staging from `project` alone.
+For `hv_inspect`, any bounded selector requires `provider`; `project` plus `env` never replaces it. Selecting a non-current hosting provider runs read-only provider-scoped environment forensics and never passes the current provider's binding to that adapter. `hv_import mode="retained-cleanup"` only records a complete inspected identity locally; it does not delete anything until a later plan is explicitly confirmed. For hosting-variable mode, `hv_secrets` requires an explicit `env` and does not infer staging from `project` alone.
 
 - Full generated MCP/CLI catalog: `docs/TOOLS.md`
 - Regenerate after tool changes: `npm run build && npm run docs:tools`

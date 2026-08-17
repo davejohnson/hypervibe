@@ -178,6 +178,34 @@ describe('VercelAdapter', () => {
     vi.unstubAllEnvs();
   });
 
+  it('forensically inventories deterministic abandoned projects without mutations', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const identity = identityResponse(url);
+      if (identity) return identity;
+      if (url.pathname === '/v10/projects') {
+        return jsonResponse(projectsResponse([project()]));
+      }
+      throw new Error(`unexpected request: ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    await expect(adapter.inspectEnvironmentResources({
+      resource: 'environment',
+      limit: 25,
+      project: { id: 'project-1', name: 'app' },
+      environment: { id: 'env-1', projectId: 'project-1', name: 'production' },
+    })).resolves.toMatchObject({
+      observation: 'present',
+      resource: 'environment',
+      project: { id: SCOPE_BINDING },
+      services: [{ id: SERVICE_BINDING, name: expectedServiceName(), managedByHypervibe: true }],
+    });
+    expect(mutationCalls(fetchMock)).toEqual([]);
+  });
+
+
   it('binds a verified existing account scope without provider mutations', async () => {
     const fetchMock = vi.fn(async (
       input: string | URL | Request

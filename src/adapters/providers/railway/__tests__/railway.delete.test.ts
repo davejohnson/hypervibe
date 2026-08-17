@@ -55,6 +55,35 @@ describe('RailwayAdapter delete verification', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it('deletes one exact environment and verifies absence without deleting shared services', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({ project: { id: 'project-1', environments: { edges: [{ node: { id: 'environment-1' } }] } } })
+      .mockResolvedValueOnce({ environmentDelete: true })
+      .mockResolvedValueOnce({ project: { id: 'project-1', environments: { edges: [] } } });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.deleteEnvironment('project-1', 'environment-1')).resolves.toEqual({ success: true });
+
+    expect(String(request.mock.calls[1]?.[0])).toContain('environmentDelete(id: $id)');
+    expect(String(request.mock.calls[1]?.[0])).not.toContain('serviceDelete');
+    expect(request.mock.calls[1]?.[1]).toEqual({ id: 'environment-1' });
+  });
+
+  it('preserves an environment binding when post-delete absence is unknown', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({ project: { id: 'project-1', environments: { edges: [{ node: { id: 'environment-1' } }] } } })
+      .mockResolvedValueOnce({ environmentDelete: true })
+      .mockRejectedValueOnce(new Error('Railway API unavailable'));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.deleteEnvironment('project-1', 'environment-1');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('absence is unknown');
+  });
+
   it('keeps polling beyond the old three-second verification window', async () => {
     vi.stubEnv('HYPERVIBE_RAILWAY_DELETE_ATTEMPTS', '12');
     vi.stubEnv('HYPERVIBE_RAILWAY_DELETE_DELAY_MS', '0');

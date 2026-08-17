@@ -15,7 +15,7 @@ function provider(
       credentialsSchema: z.object({ token: z.string() }),
       lifecycle: {
         ...(category === 'deployment'
-          ? { hosting: { customDomains: 'unsupported' as const } }
+          ? { hosting: { customDomains: 'unsupported' as const, teardownBoundary: 'services' as const } }
           : {}),
         ...(category === 'database' || derivedAdapters?.database
           ? { databaseEngines: ['postgres'] }

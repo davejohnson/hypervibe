@@ -102,6 +102,49 @@ describe('github desired state', () => {
     expect(spec.github?.actions.infrastructure).toMatchObject({ changeScope: 'all' });
   });
 
+  it('accepts bounded code-audit instructions and explicit documentation domains', () => {
+    const spec = projectSpecSchema.parse(baseSpec({
+      actions: {
+        truth: {
+          kind: 'code-audit',
+          schedule: { cron: '0 6 * * *' },
+          instructions: 'Compare provider claims with current official documentation.',
+          documentationDomains: ['docs.aws.amazon.com', 'learn.microsoft.com'],
+        },
+      },
+    }));
+
+    expect(spec.github?.actions.truth).toMatchObject({
+      instructions: 'Compare provider claims with current official documentation.',
+      documentationDomains: ['docs.aws.amazon.com', 'learn.microsoft.com'],
+    });
+  });
+
+  it('rejects unsafe code-audit instructions and documentation destinations', () => {
+    for (const audit of [
+      { instructions: '${{ secrets.OPENAI_API_KEY }}' },
+      { instructions: 'x'.repeat(12_001) },
+      { documentationDomains: ['https://docs.aws.amazon.com'] },
+      { documentationDomains: ['*.example.com'] },
+      { documentationDomains: ['localhost'] },
+      { documentationDomains: ['127.0.0.1'] },
+      { documentationDomains: ['docs.example.com/${{ github.token }}'] },
+      { documentationDomains: ['metadata.google.internal'] },
+      { documentationDomains: ['router.home.arpa'] },
+      { documentationDomains: ['docs.aws.amazon.com', 'docs.aws.amazon.com'] },
+    ]) {
+      expect(projectSpecSchema.safeParse(baseSpec({
+        actions: {
+          truth: {
+            kind: 'code-audit',
+            schedule: { cron: '0 6 * * *' },
+            ...audit,
+          },
+        },
+      }))).toMatchObject({ success: false });
+    }
+  });
+
   it('accepts concrete project runtimes and rejects ranges or image-tag injection', () => {
     const node = projectSpecSchema.parse({
       ...baseSpec({}),

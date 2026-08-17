@@ -15,10 +15,32 @@ export interface InspectProviderInput {
   resource?: string;
   id?: string;
   name?: string;
+  region?: string;
   limit?: number;
 }
 
 const ENVIRONMENT_INSPECTION_RESOURCES = new Set(['environment', 'database', 'cache', 'storage']);
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function hostingProvider(environment: Environment): string | undefined {
+  const provider = environment.platformBindings.provider;
+  return typeof provider === 'string' && provider ? provider : undefined;
+}
+
+function hostingBindingForProvider(
+  environment: Environment,
+  provider: string
+): Record<string, unknown> | undefined {
+  const current = asRecord(environment.platformBindings);
+  if (current?.provider === provider) return current;
+  const previous = asRecord(current?.previousHosting);
+  return previous?.provider === provider ? previous : undefined;
+}
 
 function advertisedResources(providerName: string): string[] {
   const registered = providerRegistry.get(providerName);
@@ -152,12 +174,30 @@ export async function inspectProvider(
       hint: 'Pass both project and an existing environment name.',
     });
   }
+  const hostingForensics = Boolean(
+    environment
+    && providerRegistry.supports(providerName, 'hosting')
+    && (!input.resource || input.resource === 'environment')
+    && hostingProvider(environment) !== providerName
+  );
+  const hostingEnvironmentInspection = Boolean(
+    environment
+    && providerRegistry.supports(providerName, 'hosting')
+    && (!input.resource || input.resource === 'environment')
+  );
+
+  if (input.region && !hostingEnvironmentInspection) {
+    throw new HvError('VALIDATION', 'region is only supported for a hosting environment inspection.', {
+      hint: 'Pass provider, project, and env for the hosting environment whose provider region should be inspected.',
+    });
+  }
 
   if (input.resource === 'connection') {
     const invalid = [
       input.env !== undefined ? 'env' : undefined,
       input.id !== undefined ? 'id' : undefined,
       input.name !== undefined ? 'name' : undefined,
+      input.region !== undefined ? 'region' : undefined,
       input.limit !== undefined ? 'limit' : undefined,
     ].filter((field): field is string => Boolean(field));
     if (invalid.length > 0) {
@@ -180,7 +220,7 @@ export async function inspectProvider(
       : [
         input.id !== undefined ? 'id' : undefined,
         (!input.resource || input.resource === 'environment') && input.name !== undefined ? 'name' : undefined,
-        input.limit !== undefined ? 'limit' : undefined,
+        input.limit !== undefined && !hostingForensics ? 'limit' : undefined,
       ].filter((field): field is string => Boolean(field));
     if (invalid.length > 0) {
       throw new HvError('VALIDATION', 'Live environment inspection received unsupported selectors.', {
@@ -211,25 +251,50 @@ export async function inspectProvider(
 
   const adapter = resolved.adapter as unknown as Record<string, unknown>;
   const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
+  const currentHostingProvider = environment ? hostingProvider(environment) : undefined;
+  const inspectionResource = hostingForensics ? 'environment' : input.resource;
   const request: ProviderInspectionRequest = {
     scope: requestedScope,
-    resource: input.resource,
+    resource: inspectionResource,
     id: input.id,
     name: input.name,
+    region: input.region,
     limit,
+    ...(project ? { project: { id: project.id, name: project.name } } : {}),
+    ...(project ? { serviceNames: ctx.repos.services.findByProjectId(project.id).map((service) => service.name) } : {}),
+    ...(environment
+      ? {
+          environment: {
+            id: environment.id,
+            projectId: environment.projectId,
+            name: environment.name,
+          },
+          binding: hostingBindingForProvider(environment, providerName),
+        }
+      : {}),
   };
 
   try {
+    if (input.region) {
+      const configureTarget = adapter.configureTarget;
+      if (typeof configureTarget !== 'function') {
+        throw new HvError('UNSUPPORTED', `${registered.metadata.displayName} does not support explicit regional inspection.`, {
+          hint: 'Remove region, or use a provider connection/binding already scoped to the intended location.',
+        });
+      }
+      await (configureTarget as (target: { region: string }) => void | Promise<void>)
+        .call(resolved.adapter, { region: input.region });
+    }
     const providerInspection = registered.inspection;
     const useProviderInspection = input.resource !== 'connection'
-      && !environment
       && Boolean(providerInspection)
-      && (!input.resource || providerInspection!.resources.includes(input.resource));
+      && (!inspectionResource || providerInspection!.resources.includes(inspectionResource))
+      && (!environment || hostingForensics);
     if (useProviderInspection && providerInspection) {
       const inspected = await providerInspection.inspect(resolved.adapter, request);
-      if (input.resource && inspected.resource !== input.resource) {
+      if (inspectionResource && inspected.resource !== inspectionResource) {
         throw new HvError('PROVIDER_ERROR', `${registered.metadata.displayName} returned the wrong inspection resource.`, {
-          details: { requested: input.resource, returned: inspected.resource ?? null },
+          details: { requested: inspectionResource, returned: inspected.resource ?? null },
           hint: 'Treat this as an adapter contract failure; no provider state was changed.',
         });
       }
@@ -240,6 +305,18 @@ export async function inspectProvider(
           next: ['hv_inspect'],
         });
       }
+      if (hostingForensics && environment) {
+        return {
+          provider: providerName,
+          category: registered.metadata.category,
+          mode: 'environment-forensics',
+          project: project?.name,
+          environment: environment.name,
+          currentHostingProvider: currentHostingProvider ?? null,
+          retainedBinding: Boolean(request.binding),
+          inspected,
+        };
+      }
       return {
         provider: providerName,
         category: registered.metadata.category,
@@ -248,6 +325,13 @@ export async function inspectProvider(
         imported: false,
         ...inspected,
       };
+    }
+
+    if (hostingForensics && environment) {
+      throw new HvError('UNSUPPORTED', `${registered.metadata.displayName} cannot inspect an environment after a hosting-provider migration.`, {
+        details: { resources, currentHostingProvider: currentHostingProvider ?? null },
+        hint: 'The provider must implement provider-scoped environment forensics; Hypervibe will not pass another platform\'s bindings into its observe method.',
+      });
     }
 
     if (environment) {

@@ -274,6 +274,31 @@ when the account has none. Provider CI only discovers and uses that reviewed
 registry; it must never create registry infrastructure. Environment teardown
 does not delete the shared account registry.
 
+Hosting-provider migrations retain the abandoned provider identity until
+cleanup is provider-confirmed. Every hosting adapter declares its smallest
+complete teardown boundary: Cloud Run and Vercel own individual services,
+Railway owns one environment inside a shared project, and ECS Express, Azure
+Container Apps, and DigitalOcean App Platform own one project/app boundary per
+Hypervibe environment. Planning must use that declaration; generic code must
+never infer deletion scope from a provider name. Project-boundary cleanup
+deletes exact services first and then the owned project. Railway cleanup deletes
+the exact environment and must not delete shared Railway services. Every action
+is confirmation-gated, provider absence must be verified before the retained
+binding is cleared, and a second provider switch is blocked while an earlier
+cleanup identity remains.
+
+`hv_inspect` environment forensics are provider-scoped. When the selected host
+is not the current host, the selected adapter receives only its own retained
+binding (when present), logical project/environment context, and bounded
+service-name hints. It must never receive another provider's platform binding.
+All hosting adapters expose this read-only inventory contract. For migrations
+that predate retained bindings, `hv_import mode="retained-cleanup"` reruns that
+inventory, rejects partial, ambiguous, or explicitly unowned results, and
+confirmation-gates recording the exact cleanup target. It never mutates the
+provider; deletion remains a separately reviewed `hv_plan`/`hv_apply` action.
+This migration-recovery lifecycle is distinct from the future general
+environment desired-absent lifecycle.
+
 When an attached Railway domain remains provider-unverified, the reviewed
 domain update first calls Railway's non-destructive `customDomainUpdate` for
 the same environment to refresh provider verification before rewriting DNS.

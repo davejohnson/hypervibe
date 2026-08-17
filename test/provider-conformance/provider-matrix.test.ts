@@ -18,6 +18,39 @@ const providerIdPattern = /^[a-z][a-z0-9-]*$/;
 const environmentVariablePattern = /^[A-Z][A-Z0-9_]*$/;
 
 describe('provider conformance matrix', () => {
+  it('keeps a daily deterministic check and independent provider-truth audit in desired state', () => {
+    const repositorySpec = projectSpecSchema.parse(JSON.parse(readFileSync(
+      path.resolve('.hypervibe/spec.json'),
+      'utf8'
+    )));
+    const actions = repositorySpec.github?.actions ?? {};
+
+    expect(actions['provider-conformance']).toMatchObject({
+      kind: 'check',
+      triggers: { schedule: { cron: expect.any(String) } },
+      commands: ['npm test -- test/provider-conformance/provider-matrix.test.ts'],
+    });
+    expect(actions['provider-truth']).toMatchObject({
+      kind: 'code-audit',
+      schedule: { cron: expect.any(String) },
+      documentationDomains: expect.arrayContaining([
+        'docs.railway.com',
+        'cloud.google.com',
+        'docs.aws.amazon.com',
+        'learn.microsoft.com',
+        'docs.digitalocean.com',
+        'vercel.com',
+      ]),
+    });
+    const instructions = actions['provider-truth'].kind === 'code-audit'
+      ? actions['provider-truth'].instructions
+      : '';
+    expect(instructions).toContain('providerContracts');
+    expect(instructions).toContain('providerRegistry');
+    expect(instructions).toContain('ready-for-live');
+    expect(instructions).toContain('live-conformance evidence');
+  });
+
   it('covers the requested hosting providers', () => {
     expect(hostingProviderContracts.map((entry) => entry.vendor)).toEqual([
       'Railway',
