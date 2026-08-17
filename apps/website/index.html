@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>hypervibe — infrastructure control loop, in progress</title>
-  <meta name="description" content="Hypervibe is a pre-release desired-state infrastructure orchestrator with one command core shared by its CLI and MCP server.">
+  <title>hypervibe — ship your app with Codex or Claude</title>
+  <meta name="description" content="Hypervibe gives Codex and Claude one workflow to set up hosting, databases, domains, and deploys.">
   <style>
     :root {
       --bg: #080b0d;
@@ -173,8 +173,9 @@
     }
 
     .prompt { color: var(--amber); }
-    .command, .ok { color: var(--green); }
-    .info, .url { color: var(--cyan); }
+    .user-input, .tool, .ok { color: var(--green); }
+    .agent, .info, .url { color: var(--cyan); }
+    .text { color: var(--text); }
     .muted { color: var(--muted); }
     .warn { color: var(--amber); }
 
@@ -202,13 +203,27 @@
     h2 { margin: 0; color: #e2e8eb; font-size: clamp(25px, 3.3vw, 38px); font-weight: 500; line-height: 1.2; letter-spacing: -0.035em; }
     .section-copy { max-width: 650px; margin: 0; color: var(--muted); }
 
+    .chores { margin-top: 12px; border-top: 1px solid var(--line); }
+    .chore {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 24px;
+      padding: 18px 0;
+      border-bottom: 1px solid var(--line-soft);
+      align-items: baseline;
+    }
+    .chore-name { color: var(--green); font-size: 12px; }
+    .chore p { margin: 0; color: var(--text); font-size: 13px; }
+    .chore-close { max-width: 720px; margin: 26px 0 0 auto; color: var(--muted); font-size: 13px; }
+
     .loop { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); background: var(--panel); }
     .loop-step { min-height: 186px; padding: 21px; border-right: 1px solid var(--line); }
     .loop-step:last-child { border-right: 0; }
     .loop-number { color: var(--muted); font-size: 10px; }
     .loop-command { display: block; margin: 17px 0 10px; color: var(--green); font-size: 15px; }
-    .loop-command::before { content: "$ "; color: var(--amber); }
+    .loop-command::before { content: "→ "; color: var(--amber); }
     .loop-step p { margin: 0; color: var(--muted); font-size: 12px; }
+    .loop-step p strong { color: var(--text); font-weight: 600; }
 
     .boundary-note {
       margin-top: 16px;
@@ -281,6 +296,7 @@
       .loop-step:nth-child(3) { border-bottom: 1px solid var(--line); }
       .ledger-row { grid-template-columns: 1fr auto; gap: 6px 14px; }
       .ledger-detail { grid-column: 1 / -1; }
+      .chore { grid-template-columns: 1fr; gap: 4px; }
       .principles { grid-template-columns: 1fr; }
       footer .shell { display: block; }
       footer .right { margin-top: 8px; }
@@ -297,10 +313,10 @@
     <div class="shell">
       <a class="brand" href="#top" aria-label="Hypervibe home">hypervibe</a>
       <div class="nav">
-        <a href="#model">model</a>
-        <a href="#build">current build</a>
-        <a href="#limits">limits</a>
-        <a class="status-chip" href="#release">pre-release</a>
+        <a href="#model">how it works</a>
+        <a href="#build">capabilities</a>
+        <a href="#limits">guardrails</a>
+        <a href="https://github.com/davejohnson/hypervibe">GitHub ↗</a>
       </div>
     </div>
   </nav>
@@ -308,86 +324,119 @@
   <main id="top">
     <header class="shell hero">
       <div>
-        <div class="eyebrow">v0.1.9 / active development</div>
-        <h1>Desired state in. Reviewed provider actions out.</h1>
-        <p class="lede"><strong>Hypervibe is an infrastructure control loop.</strong> A CLI and an MCP server share one command core, one persisted plan boundary, and one redacted result contract. It is being built in public, but it is not ready to pretend everything works.</p>
+        <div class="eyebrow">v0.1.9 / hosting tools for Codex and Claude</div>
+        <h1>Ship your app with Codex or Claude.</h1>
+        <p class="lede"><strong>Hypervibe gives Codex and Claude one workflow for hosting, databases, domains, and deploys.</strong> Describe where the app should run, see exactly what will change, and ship it.</p>
         <div class="hero-actions">
-          <a class="button primary" href="https://github.com/davejohnson/hypervibe/blob/main/ARCHITECTURE.md">read the architecture</a>
-          <a class="button" href="https://github.com/davejohnson/hypervibe">browse source</a>
+          <a class="button primary" href="https://github.com/davejohnson/hypervibe">view on GitHub</a>
+          <a class="button" href="https://github.com/davejohnson/hypervibe/blob/main/ARCHITECTURE.md">read the architecture</a>
         </div>
         <ul class="facts" aria-label="Project facts">
-          <li>19 shared commands</li>
-          <li>repo-backed JSON intent</li>
+          <li>app hosting</li>
+          <li>databases + domains</li>
+          <li>CLI + MCP</li>
           <li>Apache-2.0</li>
-          <li>no public release yet</li>
         </ul>
       </div>
 
-      <div class="terminal" aria-label="Illustrative Hypervibe terminal session">
+      <div class="terminal" aria-label="Illustrative Codex session using Hypervibe tools">
         <div class="terminal-bar">
           <span class="terminal-dot"></span><span class="terminal-dot"></span><span class="terminal-dot"></span>
-          <span class="terminal-title">~/serious-api</span>
-          <span class="terminal-mode">illustrative session / gcp</span>
+          <span class="terminal-title">codex · ~/serious-api</span>
+          <span class="terminal-mode">hypervibe mcp / gcp</span>
         </div>
         <pre class="terminal-body" id="demo"><span class="cursor"></span></pre>
       </div>
     </header>
 
+    <section id="chores">
+      <div class="shell">
+        <div class="section-head">
+          <div class="section-label">the unfun bit</div>
+          <div>
+            <h2>The app works. Time to lose an afternoon to DNS.</h2>
+            <p class="section-copy">Shipping should be the satisfying part. Somehow it turns into six dashboards, twelve tabs, and a growing suspicion that you’re in the wrong account.</p>
+          </div>
+        </div>
+
+        <div class="chores">
+          <div class="chore">
+            <span class="chore-name">DNS</span>
+            <p>A record? CNAME? Proxy on? Proxy off? Great. Now wait an unspecified amount of time.</p>
+          </div>
+          <div class="chore">
+            <span class="chore-name">AWS</span>
+            <p>The setting exists. It’s in one of these 200 services, in the correct account, in the wrong region.</p>
+          </div>
+          <div class="chore">
+            <span class="chore-name">GCP</span>
+            <p>Cloud Run, App Engine, or GKE? You wanted to ship an app. You got a product strategy meeting.</p>
+          </div>
+          <div class="chore">
+            <span class="chore-name">secrets</span>
+            <p>Copy the key. Don’t paste it into chat. Don’t commit it. Also, somehow, never lose it.</p>
+          </div>
+        </div>
+
+        <p class="chore-close">Hypervibe gives Codex or Claude the provider-specific tools. You ask them to ship the app, see what they’re going to set up, and let them handle the tedious part.</p>
+      </div>
+    </section>
+
     <section id="model">
       <div class="shell">
         <div class="section-head">
-          <div class="section-label">00 / the control loop</div>
+          <div class="section-label">00 / from idea to live</div>
           <div>
-            <h2>Intent is cheap. Mutation needs a receipt.</h2>
-            <p class="section-copy">Hypervibe observes live infrastructure, computes drift, persists an executable plan, and applies only the actions that plan authorized. MCP and CLI are adapters over that same lifecycle.</p>
+            <h2>Your app, online, right from the conversation.</h2>
+            <p class="section-copy">Tell Codex or Claude where you want to ship. Hypervibe handles the hosting setup while you see and approve each change along the way.</p>
           </div>
         </div>
 
         <div class="loop">
           <div class="loop-step">
-            <span class="loop-number">01 / intent</span>
-            <span class="loop-command">hypervibe spec</span>
-            <p>Write or inspect desired services, data, deploys, domains, email, and environment contracts.</p>
+            <span class="loop-number">01 / start with your app</span>
+            <span class="loop-command">Tell it what you want</span>
+            <p>Ask Codex or Claude to ship the app. Add a database, domain, or anything else it needs.</p>
           </div>
           <div class="loop-step">
-            <span class="loop-number">02 / observation</span>
-            <span class="loop-command">hypervibe plan</span>
-            <p>Compare desired state with provider-confirmed state and persist the exact proposed actions.</p>
+            <span class="loop-number">02 / see the setup</span>
+            <span class="loop-command">Preview everything</span>
+            <p>See where the app will run and what will be created before anything changes.</p>
           </div>
           <div class="loop-step">
-            <span class="loop-number">03 / mutation</span>
-            <span class="loop-command">hypervibe apply</span>
-            <p>Converge the reviewed plan. Billable, destructive, and data-bearing work has explicit gates.</p>
+            <span class="loop-number">03 / go live</span>
+            <span class="loop-command">Ship it</span>
+            <p>Give the go-ahead and Hypervibe sets up the hosting, data, and connections shown in the preview.</p>
           </div>
           <div class="loop-step">
-            <span class="loop-number">04 / evidence</span>
-            <span class="loop-command">hypervibe status</span>
-            <p>Re-observe drift. Configuration sync is separate from runtime health and deploy evidence.</p>
+            <span class="loop-number">04 / know it worked</span>
+            <span class="loop-command">Open your app</span>
+            <p>Hypervibe checks the live setup and gives you the URL when the app is ready.</p>
           </div>
         </div>
-        <div class="boundary-note">A timeout is not absence. A noop is not permission to repair. A persisted plan is the mutation boundary.</div>
+        <div class="boundary-note">You stay in the loop for paid or destructive changes. If a hosting provider can’t be checked, Hypervibe stops instead of guessing.</div>
       </div>
     </section>
 
     <section id="build">
       <div class="shell">
         <div class="section-head">
-          <div class="section-label">01 / current build</div>
+          <div class="section-label">01 / what it handles</div>
           <div>
-            <h2>A build ledger, not a feature wall.</h2>
-            <p class="section-copy">These are the surfaces currently represented in the codebase. Support still varies by provider and lifecycle contract; pre-release means the sharp edges are real.</p>
+            <h2>One workflow from repo to running app.</h2>
+            <p class="section-copy">Use Hypervibe from Codex or Claude, or run the same commands yourself in the terminal. Either way, it follows the same steps and safety checks.</p>
           </div>
         </div>
 
         <div class="ledger" role="table" aria-label="Current Hypervibe capability ledger">
-          <div class="ledger-row" role="row"><span class="ledger-area">command core</span><span class="ledger-state live">implemented</span><span class="ledger-detail">19 commands registered once and routed through both CLI and MCP.</span></div>
-          <div class="ledger-row" role="row"><span class="ledger-area">hosting</span><span class="ledger-state live">implemented</span><span class="ledger-detail">Railway and Google Cloud Run adapters behind the lifecycle boundary.</span></div>
-          <div class="ledger-row" role="row"><span class="ledger-area">postgres</span><span class="ledger-state live">implemented</span><span class="ledger-detail">Railway, Cloud SQL, Supabase, and RDS lifecycle paths.</span></div>
-          <div class="ledger-row" role="row"><span class="ledger-area">dns + domains</span><span class="ledger-state live">implemented</span><span class="ledger-detail">Cloudflare-backed desired state, planning, and verification.</span></div>
-          <div class="ledger-row" role="row"><span class="ledger-area">email</span><span class="ledger-state live">implemented</span><span class="ledger-detail">SendGrid sender identities, aliases, domain authentication, and inbound parsing declarations.</span></div>
-          <div class="ledger-row" role="row"><span class="ledger-area">secret input</span><span class="ledger-state narrow">read boundary</span><span class="ledger-detail">Environment files and lazy secret-manager references resolve values without exposing them in output.</span></div>
-          <div class="ledger-row" role="row"><span class="ledger-area">deploy automation</span><span class="ledger-state live">implemented</span><span class="ledger-detail">GitHub Actions workflows are generated as reviewed repository infrastructure.</span></div>
-          <div class="ledger-row" role="row"><span class="ledger-area">public release</span><span class="ledger-state narrow">not yet</span><span class="ledger-detail">Development build only. The public quickstart waits for a smaller, proven surface.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">Codex + Claude</span><span class="ledger-state live">MCP</span><span class="ledger-detail">Give them tools to set up, ship, check, and troubleshoot your app.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">command line</span><span class="ledger-state live">CLI</span><span class="ledger-detail">Run the same workflow yourself from the terminal.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">hosting</span><span class="ledger-state live">apps</span><span class="ledger-detail">Create, update, and remove apps on your connected hosting provider.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">data</span><span class="ledger-state live">services</span><span class="ledger-detail">Set up Postgres, storage, caches, and queues alongside the app.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">domains + email</span><span class="ledger-state live">setup</span><span class="ledger-detail">Connect custom domains, DNS records, senders, aliases, and inbound email.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">deploys + CI</span><span class="ledger-state live">checks</span><span class="ledger-detail">Create GitHub workflows, check deploys, read failures, and run health checks.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">secrets</span><span class="ledger-state narrow">private</span><span class="ledger-detail">Use secret references without printing their values in plans, logs, or results.</span></div>
+          <div class="ledger-row" role="row"><span class="ledger-area">live setup</span><span class="ledger-state live">checked</span><span class="ledger-detail">Compare what you asked for with what is actually running.</span></div>
         </div>
       </div>
     </section>
@@ -395,18 +444,18 @@
     <section id="limits">
       <div class="shell">
         <div class="section-head">
-          <div class="section-label">02 / non-goals</div>
+          <div class="section-label">02 / guardrails</div>
           <div>
-            <h2>Not a bag of cloud shortcuts.</h2>
-            <p class="section-copy">Provider differences are real. Hypervibe tries to make the safety model consistent without flattening those differences into an interface that lies.</p>
+            <h2>What Hypervibe won’t do.</h2>
+            <p class="section-copy">Codex or Claude can ship the app, but they can’t create extras you didn’t review, hide a failed check, or reach outside the change list.</p>
           </div>
         </div>
 
         <div class="principles">
-          <div class="principle"><h3>No provider CLI backdoors</h3><p>Infrastructure mutations flow through adapters and recorded connections so state, drift, and audit history remain coherent.</p></div>
-          <div class="principle"><h3>No optimistic observation</h3><p>Permissions, malformed responses, timeouts, and unsupported reads stay unknown or blocked. They do not quietly become “not found.”</p></div>
-          <div class="principle"><h3>No implied cross-resource work</h3><p>A service action cannot silently create a database, attach unrelated infrastructure, or clean up a dependency outside its plan edge.</p></div>
-          <div class="principle"><h3>No secrets in the interface</h3><p>Specs declare ownership and references. Results, logs, plans, snapshots, CLI JSON, and MCP structured output stay on the same redacted boundary.</p></div>
+          <div class="principle"><h3>Use a saved connection</h3><p>Every change goes through the hosting accounts you connected to Hypervibe.</p></div>
+          <div class="principle"><h3>Stop when a check fails</h3><p>A timeout or permission error stops the job. It never gets treated as “nothing exists.”</p></div>
+          <div class="principle"><h3>Make only the listed changes</h3><p>Setting up an app can’t quietly add a database or remove something else.</p></div>
+          <div class="principle"><h3>Don’t print secrets</h3><p>Passwords and API keys stay out of plans, logs, snapshots, and command results.</p></div>
         </div>
       </div>
     </section>
@@ -415,18 +464,18 @@
       <div class="shell release">
         <dl class="release-state">
           <div><dt>version</dt><dd>0.1.9</dd></div>
-          <div><dt>channel</dt><dd class="pending">development</dd></div>
-          <div><dt>public package</dt><dd class="pending">pending</dd></div>
-          <div><dt>spec format</dt><dd>JSON</dd></div>
-          <div><dt>interfaces</dt><dd>CLI / MCP</dd></div>
+          <div><dt>workflow</dt><dd>preview before changes</dd></div>
+          <div><dt>works with</dt><dd>Codex / Claude / terminal</dd></div>
+          <div><dt>app setup</dt><dd>saved with your repo</dd></div>
+          <div><dt>license</dt><dd>Apache-2.0</dd></div>
         </dl>
         <div class="release-copy">
-          <div class="section-label">03 / coming soon</div>
-          <h2>The small, reliable version ships first.</h2>
-          <p>Hypervibe is still being reduced and hardened: fewer commands, declarative resource lifecycles, typed provider boundaries, and tests that prove a noop cannot mutate anything. There is no fake waitlist and no public install command yet.</p>
+          <div class="section-label">03 / source</div>
+          <h2>See how Hypervibe is built.</h2>
+          <p>The repository has the source, command guide, provider code, and tests that show exactly how it works.</p>
           <div class="hero-actions">
-            <a class="button primary" href="https://github.com/davejohnson/hypervibe#readme">follow the repository</a>
-            <a class="button" href="https://github.com/davejohnson/hypervibe/blob/main/docs/TOOLS.md">inspect the command catalog</a>
+            <a class="button primary" href="https://github.com/davejohnson/hypervibe#readme">open the repository</a>
+            <a class="button" href="https://github.com/davejohnson/hypervibe/blob/main/docs/TOOLS.md">browse the commands</a>
           </div>
         </div>
       </div>
@@ -435,8 +484,8 @@
 
   <footer>
     <div class="shell">
-      <div>hypervibe / work in progress / Apache-2.0</div>
-      <div class="right">desired state → observed drift → reviewed actions → receipts</div>
+      <div>hypervibe / ship apps with Codex or Claude / Apache-2.0</div>
+      <div class="right">ask → preview → approve → ship</div>
     </div>
   </footer>
 
@@ -444,22 +493,28 @@
     const demo = document.querySelector('#demo');
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const tokens = [
-      ['prompt', '$ '], ['command', 'hypervibe spec --file .hypervibe/spec.json\n'],
-      ['ok', '✓ desired state saved'], ['muted', '  serious-api / staging\n\n'],
-      ['prompt', '$ '], ['command', 'hypervibe plan --project serious-api --env staging\n'],
-      ['muted', 'observing cloud-run + cloud-sql ...\n'],
-      ['info', '+ cloud-run service api       create\n'],
-      ['info', '+ cloud-sql postgres primary  create  [confirmation required]\n'],
-      ['info', '+ api DATABASE_URL            attach\n'],
-      ['muted', 'plan '], ['warn', 'plan_7f3a'], ['muted', ' persisted / 3 actions / nothing executed\n\n'],
-      ['prompt', '$ '], ['command', 'hypervibe apply --plan-id plan_7f3a \\\n  --confirm-action db_primary_create\n'],
-      ['ok', '✓ cloud-sql primary provisioned\n'],
-      ['ok', '✓ DATABASE_URL attached without disclosure\n'],
-      ['ok', '✓ cloud-run api converged\n\n'],
-      ['prompt', '$ '], ['command', 'hypervibe status --project serious-api --env staging\n'],
-      ['ok', 'in sync'], ['muted', '  configuration converged / runtime health unverified\n\n'],
-      ['prompt', '$ '], ['command', 'hypervibe health --project serious-api --env staging --service api\n'],
-      ['ok', 'healthy'], ['muted', '  HTTP 200  '], ['url', 'https://api-4k3uuc.a.run.app\n']
+      ['prompt', 'you   › '], ['user-input', 'Deploy this app to staging on Cloud Run with Postgres.\n\n'],
+      ['agent', 'codex › '], ['text', 'I’ll check the repo, work out what the app needs, then show you exactly what would change.\n'],
+      ['tool', '  → hv_spec'], ['muted', '  save app setup\n'],
+      ['ok', '  ✓ app setup saved\n\n'],
+      ['agent', 'codex › '], ['text', 'Checking the connected GCP project.\n'],
+      ['tool', '  → hv_plan'], ['muted', '  preview changes\n'],
+      ['muted', '    observing cloud-run + cloud-sql ...\n'],
+      ['info', '    + cloud-run service api       create\n'],
+      ['info', '    + cloud-sql postgres primary  create  [db_primary_create]\n'],
+      ['info', '    + api DATABASE_URL            attach\n'],
+      ['muted', '    preview saved / nothing changed\n\n'],
+      ['agent', 'codex › '], ['text', 'Three actions. Confirm db_primary_create to continue.\n\n'],
+      ['prompt', 'you   › '], ['user-input', 'Go ahead. Confirm db_primary_create.\n\n'],
+      ['tool', '  → hv_apply'], ['muted', '  ship approved changes\n'],
+      ['ok', '  ✓ postgres provisioned\n'],
+      ['ok', '  ✓ DATABASE_URL attached without disclosure\n'],
+      ['ok', '  ✓ cloud-run api converged\n'],
+      ['tool', '  → hv_status'], ['muted', '  check live setup\n'],
+      ['ok', '  ✓ in sync'], ['muted', '  configuration converged\n'],
+      ['tool', '  → hv_health'], ['muted', '  test app URL\n'],
+      ['ok', '  ✓ healthy'], ['muted', '  HTTP 200  '], ['url', 'https://api-4k3uuc.a.run.app\n\n'],
+      ['agent', 'codex › '], ['text', 'Staging matches your setup and the health check is green.\n']
     ];
 
     const cursor = document.createElement('span');
@@ -482,7 +537,7 @@
         const span = document.createElement('span');
         span.className = className;
         demo.insertBefore(span, cursor);
-        const typed = className === 'command';
+        const typed = className === 'user-input';
         if (typed) {
           for (const character of text) {
             span.textContent += character;
