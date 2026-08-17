@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 
 import { tmpdir } from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
+import { execFileSync } from 'child_process';
 import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
@@ -2806,8 +2807,15 @@ describe('PlanService.plan', () => {
     it('creates the environment-specific env file from base .env before loading deploy vars', async () => {
       const oldCwd = process.cwd();
       const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-env-fallback-plan-'));
-      mkdirSync(path.join(root, '.git'));
       mkdirSync(path.join(root, 'app'));
+      execFileSync('git', ['init'], { cwd: root, stdio: 'ignore' });
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:davejohnson/plan-test.git'], {
+        cwd: root,
+        stdio: 'ignore',
+      });
+      project = new ProjectRepository().update(project.id, {
+        gitRemoteUrl: 'https://github.com/davejohnson/plan-test',
+      })!;
       const realRoot = realpathSync(root);
       const baseEnvFile = path.join(realRoot, '.env');
       const stagingEnvFile = path.join(realRoot, '.env.staging');
@@ -2851,6 +2859,105 @@ describe('PlanService.plan', () => {
         const overrides = doc.overrides as Record<string, unknown>;
         expect(overrides.envFilePath).toBe(stagingEnvFile);
         expect(overrides.envFileKeys).toEqual(['SENDGRID_API_KEY']);
+      } finally {
+        process.chdir(oldCwd);
+      }
+    });
+
+    it('refuses implicit env-file access when the selected project belongs to a different repository', async () => {
+      const oldCwd = process.cwd();
+      const root = mkdtempSync(path.join(tmpdir(), 'hypervibe-cross-project-env-'));
+      mkdirSync(path.join(root, 'app'));
+      execFileSync('git', ['init'], { cwd: root, stdio: 'ignore' });
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:davejohnson/invoice-express.git'], {
+        cwd: root,
+        stdio: 'ignore',
+      });
+      writeFileSync(path.join(root, '.env'), 'SENDGRID_API_KEY=SG.invoice-perfect\n');
+      const environmentEnvFile = path.join(realpathSync(root), '.env.staging');
+      project = new ProjectRepository().update(project.id, {
+        gitRemoteUrl: 'git@github.com:davejohnson/hls-property-care.git',
+      })!;
+      new EnvironmentRepository().create({
+        projectId: project.id,
+        name: 'staging',
+        platformBindings: { provider: 'railway', projectId: 'rp-1', environmentId: 're-1', services: { web: { serviceId: 's-1' } } },
+      });
+      new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+      mockObservingAdapter({
+        provider: 'railway',
+        observedAt: new Date().toISOString(),
+        projectExists: true,
+        projectId: 'rp-1',
+        environmentId: 're-1',
+        services: [{
+          name: 'web',
+          externalId: 's-1',
+          workloadKind: 'web',
+          customDomains: [],
+          config: { startCommand: 'npm start' },
+          envVarKeys: ['NODE_ENV'],
+          envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+          status: 'running',
+        }],
+        databases: [],
+        partial: false,
+        warnings: [],
+      });
+
+      try {
+        process.chdir(path.join(root, 'app'));
+        const result = await new PlanService().plan(project, 'staging');
+
+        expect(result).toEqual({
+          error: expect.stringContaining('Refusing implicit deploy env-file access'),
+        });
+        expect((result as { error: string }).error).toContain('davejohnson/invoice-express');
+        expect((result as { error: string }).error).toContain('davejohnson/hls-property-care');
+        expect(existsSync(environmentEnvFile)).toBe(false);
+        expect(new RunRepository().findByProjectId(project.id)).toEqual([]);
+
+        project = new ProjectRepository().update(project.id, {
+          gitRemoteUrl: '../hls-property-care.git',
+        })!;
+        const unverifiable = await new PlanService().plan(project, 'staging');
+        expect(unverifiable).toEqual({
+          error: expect.stringContaining('selected project "plan-test" repository "unknown"'),
+        });
+        expect(existsSync(environmentEnvFile)).toBe(false);
+        expect(new RunRepository().findByProjectId(project.id)).toEqual([]);
+
+        project = new ProjectRepository().update(project.id, {
+          gitRemoteUrl: 'git@github.com:davejohnson/hls-property-care.git',
+        })!;
+
+        const skipped = await new PlanService().plan(project, 'staging', { includeEnvFile: false });
+        expect(skipped).not.toHaveProperty('error');
+        expect(existsSync(environmentEnvFile)).toBe(false);
+
+        const explicit = await new PlanService().plan(project, 'staging', {
+          envFile: path.join(root, '.env'),
+        });
+        expect(explicit).not.toHaveProperty('error');
+        expect((explicit as Exclude<typeof explicit, { error: string }>).warnings).toContainEqual(
+          expect.stringContaining(`Loaded 1 deploy env var(s) from ${path.join(root, '.env')}`)
+        );
+
+        new SpecStore().replace(project, {
+          version: 1,
+          project: project.name,
+          environments: {
+            staging: {
+              hosting: { provider: 'railway' },
+              services: { web: { startCommand: 'npm start' } },
+              envVars: { NODE_ENV: 'staging' },
+              envFile: { mode: 'off' },
+            },
+          },
+        });
+        const disabledByPolicy = await new PlanService().plan(project, 'staging');
+        expect(disabledByPolicy).not.toHaveProperty('error');
+        expect(existsSync(environmentEnvFile)).toBe(false);
       } finally {
         process.chdir(oldCwd);
       }

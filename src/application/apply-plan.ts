@@ -458,6 +458,8 @@ export async function executePlanApply(ctx: CommandContext, params: {
     return { kind: 'plan_not_found', error: loaded.error };
   }
   const envName = loaded.document.environmentName;
+  const planScope = loaded.document.scope ?? 'full';
+  const retainedCleanupOnly = planScope === 'retained-cleanup';
   if (loaded.document.inputRequired?.length) {
     return {
       kind: 'input_required',
@@ -506,7 +508,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
       )
     )
     .map((action) => action.resource.provider);
-  const blocked = migrationActions.length > 0
+  const blocked = retainedCleanupOnly
+    ? planService.providerPreflight([
+        envSpec.hosting.provider,
+        ...cleanupProviders,
+      ])
+    : migrationActions.length > 0
     ? planService.providerPreflight(migrationProviders)
     : [
         ...planService.preflight(envSpec, envName),
@@ -521,7 +528,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   let freshIntegrationFingerprints: Record<string, string> | undefined;
   const stripeSpec = envSpec.payments?.stripe;
-  if (stripeSpec || loaded.document.integrationFingerprints?.stripe) {
+  if (!retainedCleanupOnly && (stripeSpec || loaded.document.integrationFingerprints?.stripe)) {
     const stripeResolution = await resolveStripeIntegrationState({
       environmentName: envName,
       spec: stripeSpec,
@@ -543,7 +550,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       stripe: stripeIntegrationFingerprint(stripeResolution),
     };
   }
-  if (envSpec.email.enabled || loaded.document.integrationFingerprints?.email) {
+  if (!retainedCleanupOnly && (envSpec.email.enabled || loaded.document.integrationFingerprints?.email)) {
     const emailState = await resolveEmailIntegrationState({
       project: projectForPreflight,
       environmentSpec: envSpec,
@@ -553,7 +560,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       email: emailIntegrationFingerprint(emailState),
     };
   }
-  if (envSpec.messaging || loaded.document.integrationFingerprints?.messaging) {
+  if (!retainedCleanupOnly && (envSpec.messaging || loaded.document.integrationFingerprints?.messaging)) {
     if (!envSpec.messaging) {
       return {
         kind: 'blocked',
@@ -574,15 +581,22 @@ export async function executePlanApply(ctx: CommandContext, params: {
     `${entry.reason} This blocks only the related action; independent service and CI actions will still be applied.`
   );
 
-  const projectForApply = syncProjectGitRemoteUrl(ctx, project, spec);
+  const projectForApply = retainedCleanupOnly
+    ? project
+    : syncProjectGitRemoteUrl(ctx, project, spec);
 
   // Re-observe for the TOCTOU fingerprint check.
-  const { observed } = await planService.observeEnvironment(projectForApply, environment, envSpec);
+  const { observed } = await planService.observeEnvironment(
+    projectForApply,
+    environment,
+    envSpec,
+    { hostingOnly: retainedCleanupOnly }
+  );
   const freshFingerprint = observed ? fingerprintObservedState(observed) : null;
 
   // The bootstrap path derives the hosting adapter from project.defaultPlatform.
   let applyProject: Project = projectForApply;
-  if (projectForApply.defaultPlatform !== envSpec.hosting.provider) {
+  if (!retainedCleanupOnly && projectForApply.defaultPlatform !== envSpec.hosting.provider) {
     applyProject = ctx.repos.projects.update(projectForApply.id, { defaultPlatform: envSpec.hosting.provider }) ?? projectForApply;
   }
 

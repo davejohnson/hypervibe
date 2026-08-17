@@ -33,6 +33,8 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
 /** Runtime-validated document stored in runs.plan for type 'plan' runs. */
 export const planRunDocumentSchema = z.object({
   kind: z.literal('hv_plan'),
+  /** Omitted by plans created before scoped planning; those remain full plans. */
+  scope: z.enum(['full', 'retained-cleanup']).optional(),
   environmentName: z.string().min(1),
   specRevision: z.number().int().nonnegative(),
   observedFingerprint: z.string().nullable(),
@@ -52,7 +54,32 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretKeys: z.array(z.string()).optional(),
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
-}).passthrough();
+}).passthrough().superRefine((document, ctx) => {
+  if (document.scope !== 'retained-cleanup') return;
+
+  const invalidAction = document.actions.find((action) =>
+    action.type !== 'destroy'
+    || action.metadata?.operation !== 'previousHostingDestroy'
+  );
+  if (invalidAction) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['actions'],
+      message: `retained-cleanup plan contains unrelated action ${invalidAction.id}`,
+    });
+  }
+  if (
+    document.integrationFingerprints
+    || document.overrides
+    || document.inputRequired?.length
+    || document.lockEnvironmentIds?.length
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'retained-cleanup plan contains unrelated integration, deploy-input, or environment-lock state',
+    });
+  }
+});
 
 export type PlanRunDocument = z.infer<typeof planRunDocumentSchema>;
 

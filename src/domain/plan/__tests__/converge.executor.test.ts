@@ -131,6 +131,49 @@ describe('ConvergeExecutor staleness', () => {
     expect(runRepo().findByEnvironmentId(environmentId).filter((run) => run.type === 'apply')).toEqual([]);
   });
 
+  it.each([
+    {
+      label: 'an unrelated action',
+      actions: [action({ id: 'service:web', type: 'update' })],
+      overrides: {},
+    },
+    {
+      label: 'deploy overrides',
+      actions: [action({
+        id: 'service:web:previous-destroy',
+        type: 'destroy',
+        resource: { kind: 'service', name: 'web', provider: 'cloudrun' },
+        requiresConfirm: true,
+        metadata: {
+          operation: 'previousHostingDestroy',
+          previousProvider: 'cloudrun',
+          cleanupBoundary: 'services',
+          serviceId: 'old-cloudrun-web',
+        },
+      })],
+      overrides: { overrides: { services: ['web'] } },
+    },
+  ])('rejects a persisted retained-cleanup plan containing $label', async ({ actions, overrides }) => {
+    const handler = vi.fn();
+    const planId = storePlan(actions, {
+      scope: 'retained-cleanup',
+      ...overrides,
+    });
+
+    const result = await new ConvergeExecutor().execute({
+      planRunId: planId,
+      currentSpecRevision: 1,
+      handler,
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: expect.stringContaining('not a valid persisted hv_plan'),
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(runRepo().findByEnvironmentId(environmentId).filter((run) => run.type === 'apply')).toEqual([]);
+  });
+
   it('rejects plans against a superseded spec revision', async () => {
     const planId = storePlan([action({ id: 'service:web' })], { specRevision: 1 });
     const result = await new ConvergeExecutor().execute({

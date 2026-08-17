@@ -588,20 +588,41 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. Missing connections block unsafe work. Delegated values are accepted only through secretRefs and are encrypted into the stored plan, never returned. Optional services restricts the plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="retained-cleanup" isolates confirm-gated destruction of the exact abandoned hosting identity retained after a provider migration; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Delegated values are accepted only through secretRefs and are encrypted into the stored plan, never returned. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
+      scope: z.enum(['full', 'retained-cleanup']).optional().describe('Default full. Use retained-cleanup to persist only the retained abandoned-host destroy actions after a provider migration.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
       includeEnvFile: z.boolean().optional().describe('Set false to skip the default repo .env deploy input.'),
       secretRefs: z.record(z.string()).optional().describe('Chat-safe local/secret-manager references for delegated secret slots, keyed by declared env var name. Values are resolved locally and encrypted into this plan; never pass raw secrets here.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, services, envVars, envFile, includeEnvFile, secretRefs }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, scope, services, envVars, envFile, includeEnvFile, secretRefs }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      if (scope === 'retained-cleanup') {
+        const incompatibleInputs = [
+          services !== undefined ? 'services' : null,
+          envVars !== undefined ? 'envVars' : null,
+          envFile !== undefined ? 'envFile' : null,
+          includeEnvFile !== undefined ? 'includeEnvFile' : null,
+          secretRefs !== undefined ? 'secretRefs' : null,
+        ].filter((name): name is string => Boolean(name));
+        if (incompatibleInputs.length > 0) {
+          return commandError(
+            'VALIDATION',
+            `scope="retained-cleanup" does not accept deploy inputs: ${incompatibleInputs.join(', ')}.`,
+            {
+              hint: 'Remove deploy inputs so the plan can authorize only retained previous-host teardown actions.',
+              next: ['hv_plan'],
+            }
+          );
+        }
+      }
       const currentSpec = specStore.get(project)?.spec;
       const result = await planService.plan(project, currentSpec ? commandEnvironment(currentSpec, env) : env?.trim() || 'staging', {
+        ...(scope ? { scope } : {}),
         ...(services?.length ? { serviceFilter: services } : {}),
         ...(envVars && Object.keys(envVars).length > 0 ? { envVarOverrides: envVars } : {}),
         ...(envFile ? { envFile } : {}),
@@ -668,6 +689,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       return commandSuccess(
         {
           planId: result.planRunId,
+          scope: result.scope,
           environment: result.environmentName,
           ...(plannedEnvironmentSpec && managedDatabaseContract(plannedEnvironmentSpec)
             ? { managedDatabase: managedDatabaseContract(plannedEnvironmentSpec) }

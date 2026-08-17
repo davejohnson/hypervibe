@@ -99,6 +99,8 @@ describe('server tool surface', () => {
     expect(registry.get('hv_inspect')?.description).toContain('{provider,project,env}');
     expect(registry.get('hv_secrets')?.access).toBe('read');
     expect(registry.get('hv_plan')?.cliPath).toEqual(['plan']);
+    expect(registry.get('hv_plan')?.inputShape.scope).toBeDefined();
+    expect(registry.get('hv_plan')?.description).toContain('scope="retained-cleanup"');
     expect(registry.get('hv_db_query')?.cliPath).toEqual(['db', 'query']);
     expect(registry.get('hv_db_migrate')).toBeUndefined();
   });
