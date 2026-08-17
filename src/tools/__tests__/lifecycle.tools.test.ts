@@ -15,6 +15,7 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter, type RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
+import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { NeonAdapter } from '../../adapters/providers/neon/neon.adapter.js';
@@ -304,6 +305,158 @@ describe('hv_inspect / hv_import', () => {
       expect.objectContaining({ provider: 'railway', resources: expect.arrayContaining(['project', 'environment']) }),
     ]));
     expect(providerRegistry.namesFor('storage').sort()).toEqual(['azureblob', 'gcs', 'railway', 's3']);
+    for (const provider of providerRegistry.namesFor('hosting')) {
+      expect(providerRegistry.get(provider)?.inspection?.resources, provider)
+        .toContain('environment');
+      expect(
+        providerRegistry.getMetadata(provider)?.lifecycle?.hosting?.teardownBoundary,
+        provider
+      ).toMatch(/^(services|environment|project)$/);
+    }
+    await t.close();
+  });
+
+  it('hv_inspect uses provider-scoped forensics instead of passing a current-provider binding to an abandoned provider', async () => {
+    const project = new ProjectRepository().create({ name: 'migrated-inspect-app' });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'railway-project',
+        environmentId: 'railway-environment-uuid',
+        services: { web: { serviceId: 'railway-web' } },
+      },
+    });
+    const connections = new ConnectionRepository();
+    const connection = connections.create({
+      provider: 'cloudrun',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        projectId: 'gcp-project',
+        credentials: '{}',
+      }),
+    });
+    connections.updateStatus(connection.id, 'verified');
+    vi.spyOn(CloudRunAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(CloudRunAdapter.prototype, 'disconnect').mockResolvedValue();
+    const configureTarget = vi.spyOn(CloudRunAdapter.prototype, 'configureTarget')
+      .mockImplementation(() => undefined);
+    const inspectEnvironmentResources = vi.spyOn(
+      CloudRunAdapter.prototype as any,
+      'inspectEnvironmentResources'
+    ).mockResolvedValue({
+      observation: 'present',
+      resource: 'environment',
+      project: { id: 'gcp-project' },
+      environment: { name: 'production', region: 'us-central1' },
+      services: [{ id: 'legacy-web', name: 'web', workloadKind: 'web' }],
+    });
+    const observe = vi.spyOn(CloudRunAdapter.prototype, 'observe')
+      .mockRejectedValue(new Error('current Railway bindings must not reach Cloud Run observe'));
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', {
+      provider: 'cloudrun',
+      project: project.name,
+      env: 'production',
+      region: 'europe-west1',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      provider: 'cloudrun',
+      mode: 'environment-forensics',
+      project: project.name,
+      environment: 'production',
+      currentHostingProvider: 'railway',
+      inspected: {
+        observation: 'present',
+        resource: 'environment',
+        services: [{ id: 'legacy-web', name: 'web' }],
+      },
+    });
+    expect(inspectEnvironmentResources).toHaveBeenCalledWith(expect.objectContaining({
+      project: expect.objectContaining({ id: project.id, name: project.name }),
+      environment: expect.objectContaining({ name: 'production' }),
+      binding: undefined,
+    }));
+    expect(observe).not.toHaveBeenCalled();
+    expect(configureTarget).toHaveBeenCalledWith({ region: 'europe-west1' });
+    await t.close();
+  });
+
+  it('hv_import can confirmation-gate and retain provider-neutral forensic results for cleanup', async () => {
+    const project = new ProjectRepository().create({ name: 'migrated-cleanup-app' });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'railway-project',
+        environmentId: 'railway-environment',
+        services: { web: { serviceId: 'railway-web' } },
+      },
+    });
+    const connections = new ConnectionRepository();
+    const connection = connections.create({
+      provider: 'cloudrun',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
+    });
+    connections.updateStatus(connection.id, 'verified');
+    vi.spyOn(CloudRunAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(CloudRunAdapter.prototype, 'disconnect').mockResolvedValue();
+    const configureTarget = vi.spyOn(CloudRunAdapter.prototype, 'configureTarget')
+      .mockImplementation(() => undefined);
+    vi.spyOn(CloudRunAdapter.prototype, 'inspectEnvironmentResources').mockResolvedValue({
+      observation: 'present',
+      resource: 'environment',
+      project: { id: 'gcp-project' },
+      environment: { name: 'production', region: 'us-central1' },
+      services: [
+        { id: 'legacy-web', name: 'web', workloadKind: 'web', resourceType: 'service', managedByHypervibe: true },
+        {
+          id: 'legacy-daily-schedule', name: 'daily', workloadKind: 'cron', resourceType: 'scheduledJob',
+          jobName: 'legacy-daily', schedulerJobName: 'legacy-daily-schedule', managedByHypervibe: true,
+        },
+      ],
+      partial: false,
+    });
+    const t = await makeClient();
+    const input = {
+      provider: 'cloudrun',
+      mode: 'retained-cleanup',
+      project: project.name,
+      env: environment.name,
+      region: 'europe-west1',
+    };
+
+    const preview = await t.call('hv_import', input);
+    expect(preview.ok).toBe(false);
+    expect(preview.error.code).toBe('CONFIRM_REQUIRED');
+    expect((new EnvironmentRepository().findById(environment.id)!.platformBindings as Record<string, unknown>)
+      .previousHosting).toBeUndefined();
+
+    const retained = await t.call('hv_import', { ...input, confirm: true });
+    expect(retained.ok).toBe(true);
+    expect(retained.data).toMatchObject({
+      retainedCleanup: { provider: 'cloudrun', project: project.name, environment: 'production' },
+    });
+    expect((new EnvironmentRepository().findById(environment.id)!.platformBindings as Record<string, unknown>)
+      .previousHosting).toMatchObject({
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        environmentId: 'us-central1',
+        services: {
+          web: { serviceId: 'legacy-web', resourceType: 'service' },
+          daily: {
+            serviceId: 'legacy-daily-schedule',
+            jobName: 'legacy-daily',
+            schedulerJobName: 'legacy-daily-schedule',
+            resourceType: 'scheduledJob',
+          },
+        },
+      });
+    expect(configureTarget).toHaveBeenCalledWith({ region: 'europe-west1' });
     await t.close();
   });
 

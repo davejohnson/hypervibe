@@ -24,7 +24,8 @@ import type {
   Receipt,
   VerifyResult,
 } from '../../../domain/ports/provider.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
+import { environmentForInspection } from '../../../domain/registry/provider-inspection.js';
 import {
   AZURE_CONTAINER_APPS_CI_REQUIRED_SECRETS,
   azureRegistryName,
@@ -720,6 +721,43 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
     };
   }
 
+  async inspectEnvironmentResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    const environment = environmentForInspection(request);
+    const bindings = parseHostingBindings(environment);
+    const project = bindings.projectId
+      ? this.projectFromResourceGroup(bindings.projectId)
+      : this.desiredProject(request.project!.name, environment);
+    const group = await this.getResource(project.resourceGroupId, RESOURCE_API);
+    if (!group) {
+      return {
+        observation: 'absent',
+        resource: 'environment',
+        project: { id: project.resourceGroupId, name: project.resourceGroupName },
+        environment: { id: project.environmentId, name: environment.name, region: this.connected().credentials.location },
+        services: [],
+      };
+    }
+    const apps = await this.listApps(project.resourceGroupId);
+    return {
+      observation: 'present',
+      resource: 'environment',
+      project: { id: project.resourceGroupId, name: project.resourceGroupName },
+      environment: { id: project.environmentId, name: environment.name, region: this.connected().credentials.location },
+      services: apps.slice(0, request.limit).map((app) => ({
+        id: app.id,
+        name: app.name,
+        workloadKind: 'web',
+        resourceType: 'container-app',
+        managedByHypervibe: this.hasManagedTag(app),
+        status: app.properties?.runningStatus ?? app.properties?.provisioningState ?? null,
+      })),
+      managedByHypervibe: this.hasManagedTag(group),
+      partial: apps.length > request.limit,
+    };
+  }
+
   async observeMaintenanceWorkload(
     environment: Environment,
     serviceId: string,
@@ -1267,12 +1305,18 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { customDomains: 'managed', domainTrafficProxy: 'dns-only', maintenance: 'managed' },
+      hosting: { customDomains: 'managed', domainTrafficProxy: 'dns-only', maintenance: 'managed', teardownBoundary: 'project' },
     },
   },
   factory: (credentials) => {
     const adapter = new AzureContainerAppsAdapter();
     void adapter.connect(credentials);
     return adapter;
+  },
+  inspection: {
+    resources: ['environment'],
+    inspect: (adapter, request) => (
+      adapter as AzureContainerAppsAdapter
+    ).inspectEnvironmentResources(request),
   },
 });

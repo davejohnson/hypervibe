@@ -82,7 +82,8 @@ import type {
   Receipt,
   VerifyResult,
 } from '../../../domain/ports/provider.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
+import { environmentForInspection } from '../../../domain/registry/provider-inspection.js';
 import {
   buildEcsExpressGitHubActionsSteps,
   ECS_EXPRESS_CI_REQUIRED_SECRETS,
@@ -822,6 +823,50 @@ export class EcsExpressAdapter implements IProviderAdapter {
     };
   }
 
+  async inspectEnvironmentResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    const environment = environmentForInspection(request);
+    const bindings = parseHostingBindings(environment);
+    const accountId = await this.resolveAccountId();
+    const clusterArn = bindings.projectId
+      ?? this.projectResources(
+        accountId,
+        this.clusterName(request.project!.name, environment)
+      ).clusterArn;
+    const cluster = await this.getCluster(clusterArn);
+    if (!cluster) {
+      return {
+        observation: 'absent',
+        resource: 'environment',
+        project: { id: clusterArn },
+        environment: { name: environment.name, region: this.connected().credentials.region },
+        services: [],
+      };
+    }
+    const serviceArns = await this.listServiceArns(clusterArn);
+    const services = (await Promise.all(serviceArns.slice(0, request.limit).map(async (serviceArn) => {
+      const service = await this.getExpressService(serviceArn);
+      return {
+        id: serviceArn,
+        name: serviceArn.split('/').pop() ?? serviceArn,
+        workloadKind: 'web',
+        resourceType: 'express-service',
+        managedByHypervibe: Boolean(service && this.hasManagedTag(service.tags)),
+        status: service?.status?.statusCode ?? null,
+      };
+    })));
+    return {
+      observation: 'present',
+      resource: 'environment',
+      project: { id: clusterArn },
+      environment: { name: environment.name, region: this.connected().credentials.region },
+      services,
+      managedByHypervibe: this.hasManagedTag(cluster.tags),
+      partial: serviceArns.length > request.limit,
+    };
+  }
+
   private async resolveAccountId(): Promise<string> {
     if (this.accountId) return this.accountId;
     const identity = await this.connected().clients.sts.send(new GetCallerIdentityCommand({}));
@@ -1519,6 +1564,7 @@ providerRegistry.register({
         customDomains: 'managed',
         domainTrafficProxy: 'dns-only',
         maintenance: 'unsupported',
+        teardownBoundary: 'project',
       },
     },
   },
@@ -1526,5 +1572,11 @@ providerRegistry.register({
     const adapter = new EcsExpressAdapter();
     void adapter.connect(credentials);
     return adapter;
+  },
+  inspection: {
+    resources: ['environment'],
+    inspect: (adapter, request) => (
+      adapter as EcsExpressAdapter
+    ).inspectEnvironmentResources(request),
   },
 });

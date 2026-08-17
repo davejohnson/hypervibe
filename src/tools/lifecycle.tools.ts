@@ -24,6 +24,7 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
       resource: z.string().trim().min(1).optional().describe('Provider-owned resource class returned by the provider listing, such as project, ref, pages, zone, or dns.'),
       id: z.string().trim().min(1).optional().describe('Exact durable provider resource id.'),
       name: z.string().trim().min(1).optional().describe('Exact provider resource name when an id is not known.'),
+      region: z.string().trim().min(1).optional().describe('Explicit provider region for hosting environment forensics. Requires provider, project, and env.'),
       limit: z.number().int().min(1).max(100).optional().describe('Maximum list results (default 25, hard maximum 100).'),
     },
     wrapCommandHandler(async (input) => commandSuccess(await inspectProvider(ctx, input)))
@@ -31,9 +32,13 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
 
   commands.register(
     'hv_import',
-    'Adopt already-deployed provider infrastructure into Hypervibe local/repo state through a provider-declared adoption capability. Adoption writes explicit Hypervibe project/environment/resource bindings. For read-only provider data, use hv_inspect. Not for creating new infrastructure (use hv_spec + hv_apply).',
+    'Import provider identity into Hypervibe. mode="adopt" adopts an existing provider project through a provider-declared driver. mode="retained-cleanup" confirmation-gates recovery of an abandoned hosting provider discovered by hv_inspect so plan/apply can delete it safely. Never creates provider infrastructure.',
     {
       provider: z.string().trim().min(1).describe('Registered source provider. Providers without a tested adoption driver return UNSUPPORTED.'),
+      mode: z.enum(['adopt', 'retained-cleanup']).optional().describe('Default adopt. Use retained-cleanup only to recover an abandoned hosting binding after a provider migration.'),
+      project: projectField.optional().describe('Current Hypervibe project; required for retained-cleanup.'),
+      env: envField.optional().describe('Current Hypervibe environment; required for retained-cleanup.'),
+      region: z.string().trim().min(1).optional().describe('Explicit old-provider region for retained-cleanup discovery.'),
       name: z.string().optional().describe('Existing provider project name to adopt. Use hv_inspect first if you only need to read provider state.'),
       id: z.string().optional().describe('Exact durable provider project id. Use this when multiple provider projects have the same display name.'),
       force: z.boolean().optional().describe('Set true to override the safety check when a Hypervibe project with the same name already exists.'),

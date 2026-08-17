@@ -241,6 +241,12 @@ export interface IHostingAdapter {
    */
   deleteProject?(projectId: string): Promise<{ success: boolean; error?: string }>;
 
+  /** Delete one provider-native environment without deleting its shared project. */
+  deleteEnvironment?(
+    projectId: string,
+    environmentId: string
+  ): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }>;
+
   /**
    * Delete a provider service/resource that was created by Hypervibe.
    * Optional because not all hosting providers expose this operation.

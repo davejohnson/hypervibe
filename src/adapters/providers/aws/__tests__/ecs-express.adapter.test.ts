@@ -73,6 +73,37 @@ function service(): Service {
 }
 
 describe('EcsExpressAdapter lifecycle boundaries', () => {
+  it('forensically inventories an abandoned environment from logical context only', async () => {
+    const adapter = await adapterWithSend(async () => ({}));
+    const internal = adapter as any;
+    const getCluster = vi.spyOn(internal, 'getCluster').mockImplementation(async (...args: unknown[]) => ({
+      clusterArn: String(args[0]),
+      status: 'ACTIVE',
+      tags: [{ key: 'managed-by', value: 'hypervibe' }],
+    }));
+    vi.spyOn(internal, 'listServiceArns').mockResolvedValue([SERVICE_ARN]);
+    vi.spyOn(internal, 'getExpressService').mockResolvedValue({
+      serviceArn: SERVICE_ARN,
+      status: { statusCode: 'ACTIVE' },
+      tags: [{ key: 'managed-by', value: 'hypervibe' }],
+    });
+
+    const inspected = await adapter.inspectEnvironmentResources({
+      resource: 'environment',
+      limit: 25,
+      project: { id: 'project-local', name: 'app' },
+      environment: { id: 'environment-local', projectId: 'project-local', name: 'production' },
+    });
+
+    expect(inspected).toMatchObject({
+      observation: 'present',
+      resource: 'environment',
+      managedByHypervibe: true,
+      services: [{ id: SERVICE_ARN, managedByHypervibe: true }],
+    });
+    expect(getCluster).toHaveBeenCalledOnce();
+  });
+
   it('keeps region out of credentials while accepting a legacy value during migration', () => {
     expect(EcsExpressCredentialsSchema.parse(credentials)).toEqual({
       accessKeyId: credentials.accessKeyId,

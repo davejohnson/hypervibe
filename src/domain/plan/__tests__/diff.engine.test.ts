@@ -1573,6 +1573,79 @@ describe('diffEnvironment — abandoned provider teardown', () => {
     const result = diffEnvironment({ spec: spec(), envName: 'production', observed: observed(), local: local() });
     expect(result.actions.some((a) => a.metadata?.operation === 'previousHostingDestroy')).toBe(false);
   });
+
+  it('uses one environment-boundary destroy for an abandoned shared-project provider', () => {
+    const result = diffEnvironment({
+      spec: spec({ hosting: { provider: 'cloudrun' } }),
+      envName: 'production',
+      observed: observed({ provider: 'cloudrun', services: [] }),
+      previousHostingTeardownBoundary: 'environment',
+      local: local({
+        bindings: {
+          provider: 'cloudrun',
+          projectId: 'gcp-project',
+          services: {},
+          previousHosting: {
+            provider: 'railway',
+            projectId: 'railway-project',
+            environmentId: 'railway-environment',
+            services: {
+              web: { serviceId: 'shared-railway-service' },
+              postgres: { serviceId: 'shared-railway-postgres' },
+            },
+          },
+        },
+      }),
+    });
+
+    expect(result.actions.filter((action) => action.metadata?.operation === 'previousHostingDestroy')).toEqual([
+      expect.objectContaining({
+        id: 'environment:production:railway:previous-destroy',
+        type: 'destroy',
+        resource: { kind: 'environment', name: 'production', provider: 'railway' },
+        requiresConfirm: true,
+        metadata: expect.objectContaining({
+          operation: 'previousHostingDestroy',
+          cleanupBoundary: 'environment',
+          projectId: 'railway-project',
+          environmentId: 'railway-environment',
+        }),
+      }),
+    ]);
+  });
+
+  it('deletes abandoned services before their provider-owned project boundary', () => {
+    const result = diffEnvironment({
+      spec: spec({ hosting: { provider: 'railway' } }),
+      envName: 'production',
+      observed: observed(),
+      previousHostingTeardownBoundary: 'project',
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'railway-project',
+          services: { web: { serviceId: 'railway-web' } },
+          previousHosting: {
+            provider: 'ecs',
+            projectId: 'ecs-cluster',
+            services: { web: { serviceId: 'ecs-web' } },
+          },
+        },
+      }),
+    });
+    const cleanup = result.actions.filter((action) => action.metadata?.operation === 'previousHostingDestroy');
+
+    expect(cleanup).toContainEqual(expect.objectContaining({
+      id: 'service:web:previous-destroy',
+      metadata: expect.objectContaining({ cleanupBoundary: 'project' }),
+    }));
+    expect(cleanup).toContainEqual(expect.objectContaining({
+      id: 'project:ecs:previous-destroy',
+      resource: { kind: 'project', name: 'production', provider: 'ecs' },
+      dependsOn: ['service:web:previous-destroy'],
+      metadata: expect.objectContaining({ projectId: 'ecs-cluster', cleanupBoundary: 'project' }),
+    }));
+  });
 });
 
 describe('diffEnvironment — release-command migrations', () => {

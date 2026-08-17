@@ -85,6 +85,40 @@ describe('DigitalOceanAdapter', () => {
     vi.unstubAllEnvs();
   });
 
+  it('forensically inventories a deterministic abandoned app without mutations', async () => {
+    const environment = makeEnvironment();
+    const app = {
+      id: 'do-app-legacy',
+      spec: {
+        name: expectedAppName(environment),
+        region: 'sfo',
+        services: [{ name: 'web' }],
+      },
+    };
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v2/apps') return jsonResponse({ apps: [app], links: {} });
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    await expect(adapter.inspectEnvironmentResources({
+      resource: 'environment',
+      limit: 25,
+      project: { id: environment.projectId, name: 'app' },
+      environment: { id: environment.id, projectId: environment.projectId, name: environment.name },
+    })).resolves.toMatchObject({
+      observation: 'present',
+      resource: 'environment',
+      project: { id: app.id, name: app.spec.name },
+      managedByHypervibe: true,
+      services: [{ id: 'do-app-legacy:services:web', name: 'web', managedByHypervibe: true }],
+    });
+    expect(mutationCalls(fetchMock)).toEqual([]);
+  });
+
+
   it('verifies App Platform and Managed Database access with one bearer token', async () => {
     const fetchMock = vi.fn(async (
       input: string | URL | Request,

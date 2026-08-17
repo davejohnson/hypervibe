@@ -527,7 +527,32 @@ const authorized: AuthorizedCase[] = [
   {
     label: 'previous provider service destroy',
     capability: 'hosting.previous-service.destroy',
-    action: action({ type: 'destroy', operation: 'previousHostingDestroy' }),
+    action: action({ type: 'destroy', operation: 'previousHostingDestroy', metadata: { cleanupBoundary: 'services', previousProvider: 'railway' } }),
+  },
+  {
+    label: 'previous provider environment destroy',
+    capability: 'hosting.previous-environment.destroy',
+    action: action({
+      id: 'environment:production:railway:previous-destroy',
+      type: 'destroy',
+      kind: 'environment',
+      name: 'production',
+      operation: 'previousHostingDestroy',
+      metadata: { cleanupBoundary: 'environment', previousProvider: 'railway', projectId: 'project-1', environmentId: 'environment-1' },
+    }),
+  },
+  {
+    label: 'previous provider project destroy',
+    capability: 'hosting.previous-project.destroy',
+    action: action({
+      id: 'project:ecs:previous-destroy',
+      type: 'destroy',
+      kind: 'project',
+      name: 'production',
+      provider: 'ecs',
+      operation: 'previousHostingDestroy',
+      metadata: { cleanupBoundary: 'project', previousProvider: 'ecs', projectId: 'project-1' },
+    }),
   },
   {
     label: 'hosting service destroy',

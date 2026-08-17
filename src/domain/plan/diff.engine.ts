@@ -45,6 +45,8 @@ export function diffEnvironment(input: {
     workloadKindObservation?: 'exact' | 'cron-only';
     presenceOnlyManagedEnvVar?: (params: { key: string; value: string }) => boolean;
   };
+  /** Provider-declared ownership boundary for the retained, abandoned host. */
+  previousHostingTeardownBoundary?: 'services' | 'environment' | 'project';
   /** Provider-declared environment custom-domain lifecycle. Omission fails closed. */
   customDomainManagement?: 'managed' | 'unsupported';
   customDomainTrafficProxy?: 'supported' | 'dns-only';
@@ -410,23 +412,63 @@ export function diffEnvironment(input: {
   const previousHosting = local.bindings?.previousHosting;
   if (previousHosting?.provider && previousHosting.provider !== provider) {
     const previousServices = Object.entries(previousHosting.services ?? {});
-    if (previousServices.length > 0) {
+    const cleanupBoundary = input.previousHostingTeardownBoundary ?? 'services';
+    if (previousServices.length > 0 || cleanupBoundary !== 'services') {
       warnings.push(
-        `${previousServices.length} service(s) are still running on ${previousHosting.provider} from before the switch to ${provider} — they keep billing until destroyed. Confirm the previous-provider destroy actions when the ${provider} deployment is verified.`
+        `${previousServices.length} service binding(s) are still running on ${previousHosting.provider}, with the ${cleanupBoundary} cleanup boundary retained from before the switch to ${provider} — they may keep billing until destroyed. Confirm the previous-provider destroy actions when the ${provider} deployment is verified.`
       );
-      for (const [name, binding] of previousServices) {
-        const serviceId = binding?.serviceId ?? binding?.jobName;
+      const serviceDestroyIds: string[] = [];
+      if (cleanupBoundary !== 'environment') {
+        for (const [name, binding] of previousServices) {
+          const serviceId = binding?.serviceId ?? binding?.jobName;
+          const actionId = `service:${name}:previous-destroy`;
+          serviceDestroyIds.push(actionId);
+          actions.push({
+            id: actionId,
+            type: 'destroy',
+            resource: { kind: 'service', name, provider: previousHosting.provider },
+            verified: false,
+            reason: `Service "${name}" is still running on ${previousHosting.provider} (abandoned by the switch to ${provider}). Confirm to delete it there.`,
+            requiresConfirm: true,
+            metadata: {
+              operation: 'previousHostingDestroy',
+              previousProvider: previousHosting.provider,
+              cleanupBoundary,
+              ...(serviceId ? { serviceId } : {}),
+            },
+          });
+        }
+      }
+      if (cleanupBoundary === 'environment') {
         actions.push({
-          id: `service:${name}:previous-destroy`,
+          id: `environment:${envName}:${previousHosting.provider}:previous-destroy`,
           type: 'destroy',
-          resource: { kind: 'service', name, provider: previousHosting.provider },
+          resource: { kind: 'environment', name: envName, provider: previousHosting.provider },
           verified: false,
-          reason: `Service "${name}" is still running on ${previousHosting.provider} (abandoned by the switch to ${provider}). Confirm to delete it there.`,
+          reason: `Environment "${envName}" is still present on ${previousHosting.provider}. Confirm to delete that exact abandoned environment without deleting shared project services.`,
           requiresConfirm: true,
           metadata: {
             operation: 'previousHostingDestroy',
             previousProvider: previousHosting.provider,
-            ...(serviceId ? { serviceId } : {}),
+            cleanupBoundary,
+            ...(previousHosting.projectId ? { projectId: previousHosting.projectId } : {}),
+            ...(previousHosting.environmentId ? { environmentId: previousHosting.environmentId } : {}),
+          },
+        });
+      } else if (cleanupBoundary === 'project') {
+        actions.push({
+          id: `project:${previousHosting.provider}:previous-destroy`,
+          type: 'destroy',
+          resource: { kind: 'project', name: envName, provider: previousHosting.provider },
+          verified: false,
+          reason: `Provider-owned project boundary for "${envName}" is still present on ${previousHosting.provider}. Confirm to delete it after its services are absent.`,
+          requiresConfirm: true,
+          ...(serviceDestroyIds.length > 0 ? { dependsOn: serviceDestroyIds } : {}),
+          metadata: {
+            operation: 'previousHostingDestroy',
+            previousProvider: previousHosting.provider,
+            cleanupBoundary,
+            ...(previousHosting.projectId ? { projectId: previousHosting.projectId } : {}),
           },
         });
       }

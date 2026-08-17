@@ -22,7 +22,8 @@ import {
   type ObservedService,
   type ObservedState,
 } from '../../../domain/ports/observe.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
+import { environmentForInspection } from '../../../domain/registry/provider-inspection.js';
 import { DigitalOceanCacheAdapter } from './digitalocean-cache.adapter.js';
 import {
   DigitalOceanClient,
@@ -756,6 +757,51 @@ export class DigitalOceanAdapter implements IProviderAdapter {
     };
   }
 
+  async inspectEnvironmentResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const environment = environmentForInspection(request);
+    const bindings = parseHostingBindings(environment);
+    const apps = bindings.projectId
+      ? [await this.client.getApp(bindings.projectId)].filter((app): app is DigitalOceanApp => Boolean(app))
+      : (await this.client.listApps()).filter((app) => app.spec.name === this.appName(environment));
+    if (apps.length > 1) {
+      return {
+        observation: 'ambiguous',
+        resource: 'environment',
+        environments: apps.slice(0, request.limit).map((app) => ({ id: app.id, name: app.spec.name })),
+      };
+    }
+    const app = apps[0];
+    if (!app) {
+      return {
+        observation: 'absent',
+        resource: 'environment',
+        environment: { name: environment.name, region: this.credentials?.appRegion },
+        services: [],
+      };
+    }
+    const services = this.collections().flatMap((collection) => (
+      (app.spec[collection] ?? []).map((component) => ({
+        id: this.serviceExternalId(app.id, collection, component.name),
+        name: component.name,
+        workloadKind: collection === 'workers' ? 'worker' : collection === 'jobs' ? 'cron' : 'web',
+        resourceType: collection,
+        managedByHypervibe: app.spec.name === this.appName(environment),
+      }))
+    ));
+    return {
+      observation: 'present',
+      resource: 'environment',
+      project: { id: app.id, name: app.spec.name },
+      environment: { name: environment.name, region: app.spec.region },
+      services: services.slice(0, request.limit),
+      managedByHypervibe: app.spec.name === this.appName(environment),
+      partial: services.length > request.limit,
+    };
+  }
+
   private async mutateComponentEnvironment(
     environment: Environment,
     service: Service,
@@ -1446,7 +1492,7 @@ providerRegistry.register({
       },
     },
     lifecycle: {
-      hosting: { customDomains: 'managed', maintenance: 'unsupported' },
+      hosting: { customDomains: 'managed', maintenance: 'unsupported', teardownBoundary: 'project' },
       databaseEngines: ['postgres'],
       cacheEngines: ['redis'],
     },
@@ -1455,6 +1501,12 @@ providerRegistry.register({
     const adapter = new DigitalOceanAdapter();
     void adapter.connect(credentials);
     return adapter;
+  },
+  inspection: {
+    resources: ['environment'],
+    inspect: (adapter, request) => (
+      adapter as DigitalOceanAdapter
+    ).inspectEnvironmentResources(request),
   },
   derivedAdapters: {
     database: (adapter) =>
