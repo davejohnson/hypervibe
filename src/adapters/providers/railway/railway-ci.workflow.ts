@@ -97,6 +97,7 @@ export function buildRailwayGitHubActionsSteps(target: BranchDeployTarget): Bran
   ];
   return {
     displayName: 'Railway',
+    releaseImageUri: "${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.release_image.outputs.image_uri }}",
     reviewDetails: [
       'Retries short-lived Railway network, rate-limit, and server errors while checking deployment progress.',
       'Waits for every Railway service to finish and includes recent provider logs when a deployment fails.',
@@ -108,6 +109,7 @@ export function buildRailwayGitHubActionsSteps(target: BranchDeployTarget): Bran
 `,
     steps: `      - name: Resolve image URI
         id: image
+        if: steps.deploy.outputs.operation != 'rollback'
         uses: actions/github-script@v8
         env:
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
@@ -117,12 +119,16 @@ export function buildRailwayGitHubActionsSteps(target: BranchDeployTarget): Bran
             const repo = process.env.GITHUB_REPOSITORY.toLowerCase();
             core.setOutput('uri', 'ghcr.io/' + repo + ':' + process.env.DEPLOY_SHA);
       - uses: docker/login-action@v3
+        if: steps.deploy.outputs.operation != 'rollback'
         with:
           registry: ghcr.io
           username: \${{ github.actor }}
           password: \${{ secrets.GITHUB_TOKEN }}
-${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
+${buildDockerfileStep(target, "steps.deploy.outputs.operation != 'rollback'")}      - uses: docker/setup-buildx-action@v3
+        if: steps.deploy.outputs.operation != 'rollback'
       - uses: docker/build-push-action@v6
+        id: image_publish
+        if: steps.deploy.outputs.operation != 'rollback'
         with:
           context: .
           file: \${{ steps.dockerfile.outputs.path }}
@@ -130,14 +136,32 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           tags: \${{ steps.image.outputs.uri }}
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
+      - name: Resolve immutable Railway image
+        id: release_image
+        if: steps.deploy.outputs.operation != 'rollback'
+        uses: actions/github-script@v8
+        env:
+          IMAGE_TAG: \${{ steps.image.outputs.uri }}
+          IMAGE_DIGEST: \${{ steps.image_publish.outputs.digest }}
+        with:
+          script: |
+            const tag = (process.env.IMAGE_TAG || '').trim();
+            const digest = (process.env.IMAGE_DIGEST || '').trim().toLowerCase();
+            if (!tag || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+              throw new Error('Railway image publication did not return an immutable digest');
+            }
+            const repository = tag.replace(/:[^/:]+$/, '');
+            core.setOutput('image_uri', repository + '@' + digest);
       - name: Verify Railway image pull credentials
+        if: steps.deploy.outputs.operation != 'rollback'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: \${{ secrets.IMAGE_REGISTRY_USERNAME }}
           password: \${{ secrets.IMAGE_REGISTRY_TOKEN }}
       - name: Verify Railway can read image
-        run: docker buildx imagetools inspect "\${{ steps.image.outputs.uri }}" >/dev/null
+        if: steps.deploy.outputs.operation != 'rollback'
+        run: docker buildx imagetools inspect "\${{ steps.release_image.outputs.image_uri }}" >/dev/null
       - name: Deploy image to Railway
         uses: actions/github-script@v8
         env:
@@ -146,7 +170,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           RAILWAY_SERVICE_IDS: ${railwayServiceIds}
           IMAGE_REGISTRY_USERNAME: \${{ secrets.IMAGE_REGISTRY_USERNAME }}
           IMAGE_REGISTRY_TOKEN: \${{ secrets.IMAGE_REGISTRY_TOKEN }}
-          IMAGE_URI: \${{ steps.image.outputs.uri }}
+          IMAGE_URI: \${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.release_image.outputs.image_uri }}
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |

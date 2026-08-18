@@ -29,7 +29,7 @@ export function providerListValueOrVariable(values: string[], variableName: stri
  * A repo Dockerfile is never required for declared runtimes: Hypervibe can
  * generate a minimal image on the runner. A repo-owned Dockerfile always wins.
  */
-export function buildDockerfileStep(target: BranchDeployTarget): string {
+export function buildDockerfileStep(target: BranchDeployTarget, ifCondition?: string): string {
   const startCommand = target.webStartCommand?.trim() || 'npm start';
   const runtime = effectiveProjectRuntime(target.runtime);
   const cmdLine = `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`;
@@ -72,7 +72,7 @@ export function buildDockerfileStep(target: BranchDeployTarget): string {
               > Dockerfile.hypervibe`;
   return `      - name: Resolve Dockerfile
         id: dockerfile
-        run: |
+${ifCondition ? `        if: ${ifCondition}\n` : ''}        run: |
           if [ -f Dockerfile ]; then
             echo "path=Dockerfile" >> "$GITHUB_OUTPUT"
           elif ${manifestCondition}; then
