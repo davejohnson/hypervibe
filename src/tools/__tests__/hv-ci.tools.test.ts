@@ -15,8 +15,12 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
+import { GitLabAdapter } from '../../adapters/providers/gitlab/gitlab.adapter.js';
+import '../../application/devops-providers.js';
 import { createToolContext } from '../context.js';
 import { registerHvCiTools } from '../hv-ci.tools.js';
+import { SpecStore } from '../../domain/spec/spec.store.js';
+import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 
 let tempDir: string;
 
@@ -452,6 +456,112 @@ describe('hv_ci_trigger', () => {
     const res = await t.call('hv_ci_trigger', { project: 'no-remote-app', workflow: 'deploy.yml' });
     expect(res.ok).toBe(false);
     expect(res.error.code).toBe('VALIDATION');
+    await t.close();
+  });
+});
+
+describe('canonical provider-neutral CI routing', () => {
+  function seedGitLabProject() {
+    const project = new ProjectRepository().create({
+      name: 'gitlab-app',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://gitlab.com/acme/gitlab-app.git',
+    });
+    new SpecStore().replace(project, {
+      version: 1,
+      project: project.name,
+      gitRemoteUrl: project.gitRemoteUrl,
+      devops: {
+        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/gitlab-app' },
+        ci: { provider: 'gitlab-ci' },
+      },
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: { web: { startCommand: 'npm start' } },
+        },
+      },
+    });
+    const connection = new ConnectionRepository().create({
+      provider: 'gitlab',
+      scope: 'https://gitlab.com/acme/gitlab-app',
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'gitlab-token' }),
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
+    return project;
+  }
+
+  const repository = {
+    provider: 'gitlab',
+    nativeId: '42',
+    instanceScope: 'https://gitlab.com',
+    canonicalScope: 'https://gitlab.com/acme/gitlab-app',
+    path: 'acme/gitlab-app',
+    defaultBranch: 'main',
+    webUrl: 'https://gitlab.com/acme/gitlab-app',
+    cloneUrls: [
+      'https://gitlab.com/acme/gitlab-app.git',
+      'git@gitlab.com:acme/gitlab-app.git',
+    ],
+  };
+
+  it('normalizes GitLab definitions through the shared status command', async () => {
+    seedGitLabProject();
+    vi.spyOn(GitLabAdapter.prototype, 'observeRepository').mockResolvedValue({ state: 'present', value: repository });
+    vi.spyOn(GitLabAdapter.prototype, 'listDefinitions').mockResolvedValue([{
+      id: '.gitlab-ci.yml',
+      name: 'GitLab pipeline',
+      path: '.gitlab-ci.yml',
+      state: 'active',
+      webUrl: 'https://gitlab.com/acme/gitlab-app/-/pipelines',
+    }]);
+    const t = await makeClient();
+
+    const result = await t.call('hv_ci_status', { project: 'gitlab-app', include: ['definitions'] });
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        codeProvider: 'gitlab',
+        ciProvider: 'gitlab-ci',
+        repository: { id: '42', path: 'acme/gitlab-app' },
+        definitions: [{ id: '.gitlab-ci.yml', state: 'active' }],
+      },
+    });
+    await t.close();
+  });
+
+  it('dispatches GitLab with exact-SHA authority and audits input names only', async () => {
+    seedGitLabProject();
+    vi.spyOn(GitLabAdapter.prototype, 'observeRepository').mockResolvedValue({ state: 'present', value: repository });
+    const dispatch = vi.spyOn(GitLabAdapter.prototype, 'dispatch').mockResolvedValue({
+      id: '99',
+      name: 'Pipeline 99',
+      phase: 'queued',
+      nativeStatus: 'pending',
+      sha: 'a'.repeat(40),
+      ref: 'main',
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_ci_trigger', {
+      project: 'gitlab-app',
+      definition: '.gitlab-ci.yml',
+      ref: 'main',
+      sha: 'a'.repeat(40),
+      inputs: { environment: 'staging', commit_sha: 'a'.repeat(40) },
+    });
+
+    expect(result).toMatchObject({ ok: true, data: { ciProvider: 'gitlab-ci', run: { id: '99' } } });
+    expect(dispatch).toHaveBeenCalledWith(repository, {
+      definition: '.gitlab-ci.yml',
+      ref: 'main',
+      sha: 'a'.repeat(40),
+      inputs: { environment: 'staging', commit_sha: 'a'.repeat(40) },
+    });
+    const audit = new AuditRepository().findByAction('hv.ci_trigger')[0];
+    expect(audit.details).toMatchObject({ inputNames: ['commit_sha', 'environment'] });
+    expect(JSON.stringify(audit.details)).not.toContain('staging');
     await t.close();
   });
 });

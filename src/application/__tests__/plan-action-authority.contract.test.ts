@@ -37,6 +37,11 @@ import {
   resolvePlanActionAuthority,
   type PlanMutationCapability,
 } from '../../domain/plan/action-authority.js';
+import {
+  CI_APPLIED_SPEC_SYNC_OPERATION,
+  CI_CONFIGURATION_SYNC_OPERATION,
+  CI_VARIABLE_SYNC_OPERATION,
+} from '../../domain/services/managed-ci.contract.js';
 
 function action(params: {
   id?: string;
@@ -165,6 +170,71 @@ const authorized: AuthorizedCase[] = [
       provider: 'github',
       operation: APPLIED_SPEC_HASH_OPERATION,
       metadata: { repository: 'owner/repo', environmentName: 'production', desiredHash: 'spec-hash' },
+    }),
+  },
+  {
+    label: 'provider-neutral CI configuration sync',
+    capability: 'ci.configuration.sync',
+    action: action({
+      id: 'ci:gitlab-ci:configuration',
+      type: 'update',
+      kind: 'ci',
+      name: 'configuration',
+      provider: 'gitlab-ci',
+      operation: CI_CONFIGURATION_SYNC_OPERATION,
+      metadata: {
+        ciProvider: 'gitlab-ci',
+        repositoryId: '42',
+        instanceScope: 'https://gitlab.com',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        baseSha: 'a'.repeat(40),
+        programHash: 'b'.repeat(64),
+      },
+    }),
+  },
+  {
+    label: 'provider-neutral CI variable sync',
+    capability: 'ci.variable.sync',
+    action: action({
+      id: 'ci:gitlab-ci:production:variable:RAILWAY_API_TOKEN',
+      type: 'create',
+      kind: 'secret',
+      name: 'production:RAILWAY_API_TOKEN',
+      provider: 'gitlab-ci',
+      operation: CI_VARIABLE_SYNC_OPERATION,
+      metadata: {
+        ciProvider: 'gitlab-ci',
+        repositoryId: '42',
+        environmentName: 'production',
+        environmentScope: 'production',
+        variableKey: 'RAILWAY_API_TOKEN',
+        valueHash: 'b'.repeat(64),
+        valueSource: 'connection:railway.apiToken',
+      },
+    }),
+  },
+  {
+    label: 'provider-neutral applied-spec variable sync',
+    capability: 'ci.applied-spec-hash.sync',
+    action: action({
+      id: 'ci:gitlab-ci:production:variable:HYPERVIBE_ABC_APPLIED_SPEC_HASH',
+      type: 'update',
+      kind: 'secret',
+      name: 'production:HYPERVIBE_ABC_APPLIED_SPEC_HASH',
+      provider: 'gitlab-ci',
+      operation: CI_APPLIED_SPEC_SYNC_OPERATION,
+      metadata: {
+        ciProvider: 'gitlab-ci',
+        repositoryId: '42',
+        instanceScope: 'https://gitlab.com',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        environmentName: 'production',
+        environmentScope: '*',
+        variableKey: 'HYPERVIBE_ABC_APPLIED_SPEC_HASH',
+        valueHash: 'b'.repeat(64),
+        valueSource: 'desired:deployment-contract',
+        programHash: 'c'.repeat(64),
+      },
     }),
   },
   {

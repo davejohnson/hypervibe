@@ -596,6 +596,45 @@ export const githubSpecSchema = z.object({
   }
 });
 
+/**
+ * Provider-neutral repository and primary application-CI selection.
+ * Project-level GitHub feature desired state remains on the legacy `github`
+ * block during the compatibility slice; new providers must not introduce a
+ * parallel top-level block.
+ */
+const devopsScopeSchema = z.string().trim().min(1).max(2_048).superRefine((scope, ctx) => {
+  if (/[\0\r\n]/.test(scope)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'devops.code.scope cannot contain control characters' });
+    return;
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(scope)) {
+    try {
+      const url = new URL(scope);
+      if (url.username || url.password || url.search || url.hash) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'devops.code.scope cannot contain credentials, query parameters, or fragments',
+        });
+      }
+    } catch {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'devops.code.scope URL is invalid' });
+    }
+  }
+});
+
+export const devopsSpecSchema = z.object({
+  code: z.object({
+    provider: providerIdSchema,
+    /** Provider-owned canonical repository scope (URL for GitLab, owner/repo for GitHub). */
+    scope: devopsScopeSchema,
+  }).strict(),
+  ci: z.object({
+    provider: providerIdSchema,
+  }).strict().optional(),
+  /** Environment that owns project-level DevOps lifecycle actions. */
+  canonicalEnvironment: z.string().min(1).optional(),
+}).strict();
+
 export const envFileSpecSchema = z.object({
   /**
    * runtime: include high-confidence app runtime keys from .env (default).
@@ -1842,6 +1881,8 @@ export const projectSpecSchema = z.object({
   gitRemoteUrl: z.string().min(1).optional(),
   /** Project-wide build and automation runtime desired state. */
   runtime: projectRuntimeSpecSchema.optional(),
+  /** Canonical provider-neutral code-host and primary application-CI selection. */
+  devops: devopsSpecSchema.optional(),
   github: githubSpecSchema.optional(),
   /** @deprecated Use github.collaboration. Accepted for one compatibility period. */
   collaboration: collaborationSpecSchema.optional(),
@@ -1894,6 +1935,39 @@ export const projectSpecSchema = z.object({
       message: 'Use github.collaboration; github and legacy top-level collaboration cannot both be declared',
       path: ['collaboration'],
     });
+  }
+  if (spec.github && spec.devops) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Legacy github and canonical devops cannot both be declared',
+      path: ['devops'],
+    });
+  }
+  if (
+    spec.devops?.canonicalEnvironment
+    && spec.devops.canonicalEnvironment !== 'repository'
+    && !spec.environments[spec.devops.canonicalEnvironment]
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `devops.canonicalEnvironment targets unknown environment "${spec.devops.canonicalEnvironment}"`,
+      path: ['devops', 'canonicalEnvironment'],
+    });
+  }
+  if (!spec.devops?.ci) {
+    for (const [environmentName, environment] of Object.entries(spec.environments)) {
+      if (
+        spec.devops
+        && environment.deploy?.strategy === 'branch'
+        && environment.deploy.trigger !== 'native'
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'deploy.trigger="ci" requires devops.ci.provider',
+          path: ['environments', environmentName, 'deploy', 'trigger'],
+        });
+      }
+    }
   }
   if (
     spec.github?.canonicalEnvironment
@@ -2090,5 +2164,6 @@ export type GitHubScheduleSpec = z.infer<typeof githubScheduleSpecSchema>;
 export type GitHubAutomationSpec = z.infer<typeof githubAutomationSpecSchema>;
 export type GitHubPagesSpec = z.infer<typeof githubPagesSpecSchema>;
 export type GitHubSpec = z.infer<typeof githubSpecSchema>;
+export type DevOpsSpec = z.infer<typeof devopsSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;

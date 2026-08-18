@@ -63,6 +63,11 @@ import {
   MAINTENANCE_OPERATIONS,
   isMaintenanceAction,
 } from '../services/maintenance-plan.service.js';
+import {
+  CI_APPLIED_SPEC_SYNC_OPERATION,
+  CI_CONFIGURATION_SYNC_OPERATION,
+  CI_VARIABLE_SYNC_OPERATION,
+} from '../services/managed-ci.contract.js';
 
 export type PlanMutationCapability =
   | 'hosting.environment.ensure'
@@ -71,6 +76,9 @@ export type PlanMutationCapability =
   | 'github.ci.rollback'
   | 'github.ci.release'
   | 'github.applied-spec-hash.sync'
+  | 'ci.configuration.sync'
+  | 'ci.variable.sync'
+  | 'ci.applied-spec-hash.sync'
   | 'github.collaboration.sync'
   | 'github.infrastructure.sync'
   | 'github.openai-secret.sync'
@@ -317,6 +325,49 @@ export function resolvePlanActionAuthority(
     && metadataString(action, 'repository')
   ) {
     return authority(action, 'github.ci.sync');
+  }
+  if (
+    action.metadata?.operation === CI_CONFIGURATION_SYNC_OPERATION
+    && exactResource(action, 'ci')
+    && action.resource.provider === metadataString(action, 'ciProvider')
+    && action.resource.name === 'configuration'
+    && action.type === 'update'
+    && metadataString(action, 'repositoryId')
+    && metadataString(action, 'instanceScope')
+    && metadataString(action, 'repositoryScope')
+    && metadataString(action, 'baseSha')
+    && metadataString(action, 'programHash')
+  ) {
+    return authority(action, 'ci.configuration.sync');
+  }
+  if (
+    action.metadata?.operation === CI_VARIABLE_SYNC_OPERATION
+    && exactResource(action, 'secret')
+    && action.resource.provider === metadataString(action, 'ciProvider')
+    && hasType(action, 'create', 'update')
+    && action.resource.name === `${metadataString(action, 'environmentName') ?? ''}:${metadataString(action, 'variableKey') ?? ''}`
+    && metadataString(action, 'repositoryId')
+    && metadataString(action, 'environmentScope') === metadataString(action, 'environmentName')
+    && metadataString(action, 'valueHash')
+    && metadataString(action, 'valueSource')
+  ) {
+    return authority(action, 'ci.variable.sync');
+  }
+  if (
+    action.metadata?.operation === CI_APPLIED_SPEC_SYNC_OPERATION
+    && exactResource(action, 'secret')
+    && action.resource.provider === metadataString(action, 'ciProvider')
+    && hasType(action, 'create', 'update')
+    && action.resource.name === `${metadataString(action, 'environmentName') ?? ''}:${metadataString(action, 'variableKey') ?? ''}`
+    && metadataString(action, 'repositoryId')
+    && metadataString(action, 'instanceScope')
+    && metadataString(action, 'repositoryScope')
+    && metadataString(action, 'environmentScope')
+    && metadataString(action, 'valueHash')
+    && metadataString(action, 'valueSource') === 'desired:deployment-contract'
+    && metadataString(action, 'programHash')
+  ) {
+    return authority(action, 'ci.applied-spec-hash.sync');
   }
   if (
     action.metadata?.operation === GITHUB_ACTIONS_ROLLBACK_OPERATION

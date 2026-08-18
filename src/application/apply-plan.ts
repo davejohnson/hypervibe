@@ -33,6 +33,12 @@ import {
   applyGitHubActionsRelease,
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
+import { applyManagedCiAction } from '../domain/services/managed-ci.service.js';
+import {
+  CI_APPLIED_SPEC_SYNC_OPERATION,
+  CI_CONFIGURATION_SYNC_OPERATION,
+  CI_VARIABLE_SYNC_OPERATION,
+} from '../domain/services/managed-ci.contract.js';
 import {
   applyGitHubCollaboration,
   resolveCollaborationRepository,
@@ -516,7 +522,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
     : migrationActions.length > 0
     ? planService.providerPreflight(migrationProviders)
     : [
-        ...planService.preflight(envSpec, envName),
+        ...planService.preflight(envSpec, envName, spec),
         ...planService.projectPreflight(projectForPreflight, spec, envName),
         ...planService.providerPreflight(cleanupProviders),
       ];
@@ -790,6 +796,25 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentSpec: envSpec,
       });
     }
+    if (capability === 'ci.configuration.sync' || capability === 'ci.variable.sync') {
+      const expectedOperation = capability === 'ci.configuration.sync'
+        ? CI_CONFIGURATION_SYNC_OPERATION
+        : CI_VARIABLE_SYNC_OPERATION;
+      if (
+        action.metadata?.operation !== expectedOperation
+        || action.metadata?.ciProvider !== action.resource.provider
+      ) {
+        return blockedActionIdentity(action, 'The reviewed CI provider, operation, or resource identity no longer matches.');
+      }
+      return applyManagedCiAction({
+        project: applyProject,
+        spec,
+        environmentName: envName,
+        environmentSpec: envSpec,
+        action,
+        appliedSpecHash: false,
+      });
+    }
     if (capability === 'github.applied-spec-hash.sync') {
       const desiredHash = stringField(asRecord(action.metadata), 'desiredHash');
       const expectedRepository = parseGitHubRepoFromRemote(applyProject.gitRemoteUrl);
@@ -810,6 +835,23 @@ export async function executePlanApply(ctx: CommandContext, params: {
         project: applyProject,
         environmentName: envName,
         desiredHash,
+      });
+    }
+    if (capability === 'ci.applied-spec-hash.sync') {
+      if (
+        action.metadata?.operation !== CI_APPLIED_SPEC_SYNC_OPERATION
+        || action.metadata?.ciProvider !== action.resource.provider
+        || action.metadata?.environmentName !== envName
+      ) {
+        return blockedActionIdentity(action, 'The reviewed applied-spec CI action no longer matches the environment or provider.');
+      }
+      return applyManagedCiAction({
+        project: applyProject,
+        spec,
+        environmentName: envName,
+        environmentSpec: envSpec,
+        action,
+        appliedSpecHash: true,
       });
     }
     if (capability === 'github.ci.release') {

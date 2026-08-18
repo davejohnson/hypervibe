@@ -18,6 +18,7 @@ import {
 } from '../application/apply-plan.js';
 import { projectField, envField, confirmField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
+import { resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
 
 function assertConfirmed(project: Project, environment: Environment, confirm: boolean | undefined, action: string): void {
   if (requiresProductionConfirm(project, environment.name) && !confirm) {
@@ -33,7 +34,12 @@ function defaultBranchForEnvironment(envName: string): string {
   return envName.toLowerCase().includes('prod') ? 'main' : 'staging';
 }
 
-function ciBranchDeployGuidance(project: Project, envName: string): { branch: string; workflow: string; providerName: string } | null {
+function ciBranchDeployGuidance(project: Project, envName: string): {
+  branch: string;
+  ciProvider: string;
+  providerName: string;
+  legacyGitHubWorkflow?: string;
+} | null {
   const specResult = new SpecStore().get(project);
   const envSpec = specResult?.spec.environments[envName];
   if (
@@ -46,11 +52,16 @@ function ciBranchDeployGuidance(project: Project, envName: string): { branch: st
   }
 
   const branch = envSpec.deploy.branch ?? defaultBranchForEnvironment(envName);
-  const workflowKind = envName.toLowerCase().includes('prod') ? 'production' : 'staging';
+  const selection = resolveDevOpsSelection(specResult.spec);
+  const ciProvider = selection?.ci?.provider;
+  if (!ciProvider) return null;
   return {
     branch,
-    workflow: `deploy-${envSpec.hosting.provider}-${workflowKind}.yml`,
-    providerName: providerRegistry.getMetadata(envSpec.hosting.provider)?.displayName ?? envSpec.hosting.provider,
+    ciProvider,
+    providerName: ciProvider,
+    ...(selection?.source === 'legacy-github'
+      ? { legacyGitHubWorkflow: `deploy-${envSpec.hosting.provider}-${envName}.yml` }
+      : {}),
   };
 }
 
@@ -103,9 +114,11 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
       if (ciDeploy) {
         return commandError(
           'VALIDATION',
-          `Environment "${envName}" uses ${ciDeploy.providerName} GitHub Actions branch deploys. hv_deploy does not build or push the image for this mode.`,
+          `Environment "${envName}" uses ${ciDeploy.providerName} managed branch deploys. hv_deploy does not build or push the image for this mode.`,
           {
-            hint: `Run hv_plan/hv_apply to sync the workflow, then push to ${ciDeploy.branch} or run hv_ci_trigger workflow="${ciDeploy.workflow}" ref="${ciDeploy.branch}". Check progress with hv_ci_status, then hv_health.`,
+            hint: ciDeploy.legacyGitHubWorkflow
+              ? `Run hv_plan/hv_apply to sync ${ciDeploy.legacyGitHubWorkflow}, then push to ${ciDeploy.branch}; for a manual run use hv_ci_trigger workflow="${ciDeploy.legacyGitHubWorkflow}" ref="${ciDeploy.branch}". Check progress with hv_ci_status, then hv_health.`
+              : `Run hv_plan/hv_apply to sync the reviewed CI configuration, then push to ${ciDeploy.branch}; for a manual run, list definitions with hv_ci_status and pass the selected id to hv_ci_trigger definition=<id> ref="${ciDeploy.branch}". Check progress with hv_ci_status, then hv_health.`,
             next: ['hv_plan', 'hv_apply', 'hv_ci_trigger', 'hv_ci_status'],
           }
         );
@@ -224,7 +237,7 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
 
   commands.register(
     'hv_rollback',
-    'Rollback an environment through one plan-authorized command. Managed GitHub Actions deploys restore the previous verified exact-SHA release (or toSha) and return pending until the workflow is verified with hv_ci_status; direct provider deploys retain toRunId rollback. Database migrations and provider-side manual configuration are never reversed implicitly. Protected environments require confirm=true.',
+    'Rollback an environment through one plan-authorized command. Managed CI providers with a verified release-evidence implementation restore the previous exact-SHA release (or toSha) and return pending until verified with hv_ci_status; unsupported CI providers fail closed. Direct provider deploys retain toRunId rollback. Database migrations and provider-side manual configuration are never reversed implicitly. Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
@@ -247,7 +260,8 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         ...(services ? { services } : {}),
       });
       if (!result.ok) {
-        const code = result.reason === 'no_adapter' ? 'MISSING_CONNECTION'
+        const code = result.reason === 'unsupported' ? 'UNSUPPORTED'
+          : result.reason === 'no_adapter' ? 'MISSING_CONNECTION'
           : ['invalid_run', 'invalid_target', 'workflow_drift', 'workflow_inactive', 'rollback_in_progress'].includes(result.reason)
             ? 'VALIDATION'
             : result.reason === 'observation_failed' ? 'PROVIDER_ERROR'

@@ -14,6 +14,7 @@ import {
 import { providerRegistry } from '../registry/provider.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { buildIosReleaseWorkflow } from './ios-release-workflow.service.js';
+import { resolveReviewedBranchDeployTargets } from './managed-ci-targets.js';
 export { IOS_RELEASE_REQUIRED_SECRETS } from './ios-release-workflow.service.js';
 import type {
   BranchDeployEnvironmentKind,
@@ -135,75 +136,7 @@ export function resolveBranchDeployTargets(project: Project): {
   const specRow = projectSpecRepo.findLatest(project.id);
   const parsedSpec = specRow ? projectSpecSchema.safeParse(specRow.document) : null;
   if (parsedSpec?.success) {
-    const targetsByEnvironment = new Map<string, BranchDeployTarget>();
-    const skippedEnvironments: string[] = [];
-    const desiredBranches: Record<string, string | undefined> = {};
-    let migration: { includeStep: boolean; command?: string; note?: string } = { includeStep: false };
-    const runtime = effectiveProjectRuntime(parsedSpec.data.runtime);
-
-    for (const [environmentName, envSpec] of Object.entries(parsedSpec.data.environments)) {
-      const kind = classifyEnvironmentName(environmentName);
-      if (!kind) {
-        skippedEnvironments.push(environmentName);
-        continue;
-      }
-      if (envSpec.deploy?.strategy !== 'branch') {
-        skippedEnvironments.push(environmentName);
-        continue;
-      }
-      if (envSpec.deploy.trigger === 'native') {
-        skippedEnvironments.push(environmentName);
-        continue;
-      }
-      const branch = envSpec.deploy.branch ?? 'main';
-      const autoDeployOnPush = envSpec.deploy.autoDeploy ?? kind !== 'production';
-      desiredBranches[environmentName] = branch;
-      const serviceNames = Object.keys(envSpec.services);
-      const bindings = environmentBindings(project.id, environmentName, new Set(serviceNames));
-      const runtimeServiceNames = Object.entries(envSpec.services)
-        .filter(([, service]) => service.workloadKind !== 'cron')
-        .map(([name]) => name);
-      const jobServiceNames = Object.entries(envSpec.services)
-        .filter(([, service]) => service.workloadKind === 'cron')
-        .map(([name]) => name);
-      const webService = Object.values(envSpec.services).find((service) => service.workloadKind === 'web');
-      targetsByEnvironment.set(environmentName, {
-        environmentName,
-        kind,
-        branch,
-        autoDeployOnPush,
-        ...(kind === 'production' && !autoDeployOnPush
-          ? { promoteFromEnvironment: envSpec.deploy.promoteFrom ?? 'staging' }
-          : {}),
-        serviceNames: serviceNames.length > 0 ? serviceNames : bindings.boundServiceNames,
-        providerProjectId: bindings.providerProjectId,
-        providerEnvironmentId: bindings.providerEnvironmentId,
-        ...(envSpec.hosting.region ? { providerRegion: envSpec.hosting.region } : {}),
-        providerServiceIds: bindings.providerServiceIds,
-        providerJobNames: bindings.providerJobNames,
-        needsServiceNames: runtimeServiceNames.length > 0 || (serviceNames.length === 0 && bindings.providerServiceIds.length > 0),
-        needsJobNames: jobServiceNames.length > 0 || (serviceNames.length === 0 && bindings.providerJobNames.length > 0),
-        webStartCommand: webService?.startCommand,
-        runtime,
-      });
-
-      if (!migration.includeStep && envSpec.migrations?.mode === 'tool' && envSpec.migrations.runInDeploy !== false && envSpec.migrations.command) {
-        migration = { includeStep: true, command: envSpec.migrations.command };
-      } else if (!migration.note && envSpec.migrations?.mode === 'releaseCommand') {
-        migration = {
-          includeStep: false,
-          note: 'Project uses release-command migrations; branch workflows will not run migrations in GitHub Actions.',
-        };
-      }
-    }
-
-    const order: BranchDeployEnvironmentKind[] = ['development', 'test', 'staging', 'production', 'custom'];
-    const targets = Array.from(targetsByEnvironment.values()).sort((a, b) =>
-      order.indexOf(a.kind) - order.indexOf(b.kind)
-      || a.environmentName.localeCompare(b.environmentName)
-    );
-
-    return { targets, desiredBranches, migration, skippedEnvironments };
+    return resolveReviewedBranchDeployTargets(project, parsedSpec.data);
   }
 
   const desiredState = asRecord(project.policies?.desiredState);

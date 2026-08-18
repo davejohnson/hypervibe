@@ -47,6 +47,32 @@ a provider only to `ready-for-live`, while `supported` still requires concrete,
 recent live evidence. Missing or stale proof is reported as a durable finding;
 the daily job never receives provider credentials or mutates infrastructure.
 
+### Code-host and CI conformance
+
+Code hosting and primary CI use separate open registries and normalized ports;
+they are not hosting-provider lifecycle ids. GitHub/GitHub Actions retain the
+legacy compatibility route. GitLab/GitLab CI is currently `ready-for-live` for
+one bounded profile: an existing initialized GitLab.com 18.1+ SHA-1 repository,
+reviewed whole-root CI configuration, the tagged GitLab-hosted Linux runner,
+GitLab project registry, protected branch and production environment policy,
+environment-scoped variables, and Railway OCI deploys. Self-managed deploys
+remain blocked until their runner identity and execution capabilities can be
+bound and observed explicitly.
+
+Mocked contracts cover tri-state repository/file observation, nested project
+identity, atomic merge-request configuration, exact CI Lint include provenance,
+unowned/overlapping variable refusal, one-variable-per-action mutation,
+exact-SHA dispatch, normalized runs/jobs/logs/artifacts, secret erasure, and
+zero-mutation noop. Runner observation also rejects project/group runners that
+could claim the trusted hosted-runner tag. A Bitbucket-shaped fake provider is registerable without
+editing the spec schema, generic tools, hosting adapter, or application router.
+
+This does not establish public GitLab support. There is no recent live
+GitLab/Railway lifecycle receipt, and rollback/teardown plus additional hosting
+recipes remain fail-closed gaps. Self-managed evidence must also name the exact
+GitLab version/edition; GitLab.com evidence does not promote self-managed
+instances. See [the accepted GitLab architecture and evidence boundary](gitlab-integration.md).
+
 ### Environment custom domains
 
 `test/provider-conformance/domain-lifecycle.spec.json` is the isolated live

@@ -28,6 +28,14 @@ export const GITHUB_TOKEN_URLS = {
   railwayAppScope: 'https://github.com/settings/tokens/new?scopes=repo&description=Hypervibe%20Railway%20app%20scope',
 } as const;
 
+/** GitLab documents these query parameters for pre-filled personal tokens. */
+export const GITLAB_TOKEN_URLS = {
+  api: 'https://gitlab.com/-/user_settings/personal_access_tokens?name=Hypervibe&description=Manage+GitLab+repository+and+CI+with+Hypervibe&scopes=api',
+  personalTokenDocs: 'https://docs.gitlab.com/user/profile/personal_access_tokens/',
+  projectTokenDocs: 'https://docs.gitlab.com/user/project/settings/project_access_tokens/',
+  deployTokenDocs: 'https://docs.gitlab.com/user/project/deploy_tokens/',
+} as const;
+
 export interface ConnectionGuidance {
   provider: string;
   displayName: string;
@@ -621,6 +629,30 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'The fine-grained creation link pre-fills the token name, 90-day expiry, and core repository permissions. You must still choose the resource owner and only the repositories Hypervibe should manage.',
       'Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.',
       `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
+    ],
+  },
+  gitlab: {
+    provider: 'gitlab',
+    displayName: 'GitLab',
+    tokenType: 'GitLab project access token (preferred) or personal access token with api, plus a separate project deploy token with read_registry for durable Railway image pulls',
+    setupUrl: GITLAB_TOKEN_URLS.api,
+    setupUrls: [
+      { label: 'Create pre-filled GitLab.com personal access token', url: GITLAB_TOKEN_URLS.api },
+      { label: 'GitLab personal access token guide', url: GITLAB_TOKEN_URLS.personalTokenDocs },
+      { label: 'GitLab project access token guide', url: GITLAB_TOKEN_URLS.projectTokenDocs },
+      { label: 'GitLab deploy token guide', url: GITLAB_TOKEN_URLS.deployTokenDocs },
+    ],
+    permissions: [
+      'Scope the API token to the exact project, grant api, and give its principal Maintainer access. On GitLab.com, project access tokens require Premium or Ultimate; use a personal access token on Free.',
+      'For Railway private-image pulls, create a project deploy token in the exact project with read_registry only. Store its generated username as registryUsername and token as registryReadToken.',
+    ],
+    credentialExample: 'hv_connections provider="gitlab" scope="https://gitlab.com/group/project" credentialsRef="file:/absolute/path/gitlab-connection.json"',
+    notes: [
+      'The JSON contains apiToken, optional instanceUrl for self-managed GitLab, and registryUsername/registryReadToken for Railway. Keep it outside the repository.',
+      'Choose explicit expiries for both tokens and rotate them before expiry. A GitLab deploy token value is shown only when created.',
+      'For self-managed GitLab, use the same officially documented personal-token path on the declared HTTPS instance and set instanceUrl; do not use the GitLab.com creation link.',
+      'The initial managed Railway deploy profile requires GitLab.com 18.1+ and its tagged hosted Linux runner. Self-managed code/status access works, but deploy rendering fails closed until Hypervibe supports an explicit trusted-runner binding.',
+      'The exact project deploy-token page is <project web URL>/-/settings/repository under Deploy tokens; availability and placement can vary by GitLab version.',
     ],
   },
   openai: {

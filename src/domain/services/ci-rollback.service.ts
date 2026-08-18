@@ -32,7 +32,8 @@ export type CiRollbackFailureReason =
   | 'observation_failed'
   | 'rollback_in_progress'
   | 'workflow_drift'
-  | 'workflow_inactive';
+  | 'workflow_inactive'
+  | 'unsupported';
 
 export type CiRollbackFailure = {
   ok: false;

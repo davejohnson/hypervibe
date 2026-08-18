@@ -9,6 +9,7 @@ import {
   credentialFieldsFromSchema,
   formatConnectionGuidance,
   GITHUB_TOKEN_URLS,
+  GITLAB_TOKEN_URLS,
   getConnectionGuidance,
 } from '../connection-guidance.js';
 
@@ -183,6 +184,26 @@ describe('connection guidance', () => {
     expect(new URL(GITHUB_TOKEN_URLS.packageRead).searchParams.get('scopes')).toBe('read:packages');
     expect(new URL(GITHUB_TOKEN_URLS.combined).searchParams.get('scopes')).toBe('repo,workflow,read:packages');
     expect(new URL(GITHUB_TOKEN_URLS.railwayAppScope).searchParams.get('scopes')).toBe('repo');
+  });
+
+  it('provides exact GitLab API and registry token guidance without asking for chat secrets', () => {
+    const guidance = formatConnectionGuidance('gitlab', {
+      scope: 'https://gitlab.com/acme/storefront',
+    });
+    const apiUrl = new URL(GITLAB_TOKEN_URLS.api);
+
+    expect(apiUrl.pathname).toBe('/-/user_settings/personal_access_tokens');
+    expect(apiUrl.searchParams.get('name')).toBe('Hypervibe');
+    expect(apiUrl.searchParams.get('description')).toContain('Hypervibe');
+    expect(apiUrl.searchParams.get('scopes')).toBe('api');
+    expect(guidance).toContain(GITLAB_TOKEN_URLS.api);
+    expect(guidance).toContain('Maintainer');
+    expect(guidance).toContain('read_registry');
+    expect(guidance).toContain('registryUsername');
+    expect(guidance).toContain('registryReadToken');
+    expect(guidance).toContain('credentialsRef="file:');
+    expect(guidance).toContain('scope="https://gitlab.com/acme/storefront"');
+    expect(guidance).toContain('Self-managed code/status access works');
   });
 
   it('explains where every Twilio credential and optional provider id comes from', () => {

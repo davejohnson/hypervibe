@@ -57,6 +57,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 
 **Developer Experience**
 - **CLI and MCP parity** - Every supported command is available through both interfaces
+- **Provider-neutral DevOps** - Canonical code-host and CI interfaces cover GitHub/GitHub Actions and an initial GitLab/GitLab CI Railway slice without coupling hosting to either vendor
 - **Human and JSON output** - Readable terminal output by default, stable redacted envelopes with `--json`
 - **Natural language** - No YAML, no clicking through dashboards
 - **Auto-wiring** - DATABASE_URL connected automatically
@@ -1142,9 +1143,55 @@ What hypervibe uses the GitHub token for, and the permission each operation need
 
 Fine-grained PATs can work for some GitHub API operations when granted the permissions in the table, but GitHub Packages/GHCR package authentication still requires a classic PAT. If you use a fine-grained PAT as `apiToken`, still provide a classic PAT with `read:packages` as `packageReadToken` for Railway GHCR deploys.
 
+### GitLab CI (ready for live validation)
+
+GitLab is selected through the canonical provider-neutral block, not a second
+top-level vendor object:
+
+```json
+{
+  "gitRemoteUrl": "https://gitlab.com/acme/storefront.git",
+  "devops": {
+    "code": {
+      "provider": "gitlab",
+      "scope": "https://gitlab.com/acme/storefront"
+    },
+    "ci": { "provider": "gitlab-ci" },
+    "canonicalEnvironment": "production"
+  }
+}
+```
+
+The initial deploy path manages an existing initialized GitLab.com project on
+GitLab 18.1 or newer, uses the tagged GitLab-hosted Linux runner, and targets
+Railway branch deploys. Self-managed instances can use the code-host/status
+facets, but managed deploy rendering blocks until Hypervibe has an explicit
+trusted-runner binding. Create an exact-project API token with `api` and Maintainer
+access (the [GitLab.com pre-filled PAT link](https://gitlab.com/-/user_settings/personal_access_tokens?name=Hypervibe&description=Manage+GitLab+repository+and+CI+with+Hypervibe&scopes=api)), plus a project deploy token with `read_registry` for Railway's durable private-image pull. Store them outside the repository:
+
+```text
+hv_connections provider="gitlab" scope="https://gitlab.com/acme/storefront" credentialsRef="file:/absolute/path/gitlab-connection.json"
+```
+
+The JSON contains `apiToken`, optional `instanceUrl`, and the deploy token's
+`registryUsername`/`registryReadToken`. The first apply creates one atomic
+configuration commit and merge request, then stops pending human review. After
+merge, re-run plan/apply; Hypervibe proves the exact files and CI Lint include
+graph before creating project-specific, environment-scoped variables.
+
+The project must disable pipeline-variable overrides, enable its container
+registry, protect deploy branches against direct/force pushes, and—for
+production—protect the GitLab environment for Maintainers. Hypervibe also
+proves that no project/group runner can claim the managed GitLab-hosted runner
+tag before it syncs deploy variables. Status, bounded
+logs/artifacts, and exact-SHA manual trigger use the same `hv_ci_status` and
+`hv_ci_trigger` commands as GitHub. GitLab rollback and teardown are still
+explicitly unsupported, and the slice is not advertised as supported until a
+recent opt-in live GitLab/Railway lifecycle contract passes.
+
 ### Push deploys
 
-`deploy.strategy: "branch"` defaults to `deploy.trigger: "ci"`. Hypervibe sets up push deploys by writing GitHub Actions workflows that call provider APIs directly; it does not install or depend on provider CLIs.
+`deploy.strategy: "branch"` defaults to `deploy.trigger: "ci"`. Hypervibe sets up push deploys through the selected CI provider and calls hosting APIs directly; it does not install or depend on provider CLIs.
 
 Provider-native source ownership is exclusive. Only an explicit
 `deploy.trigger: "native"` may keep a repository connected at the hosting
