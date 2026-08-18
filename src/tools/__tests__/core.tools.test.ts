@@ -3000,10 +3000,38 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.call('hv_spec', {
       spec: {
         project: 'previous-teardown-app',
+        gitRemoteUrl: 'https://github.com/davejohnson/previous-teardown-app',
         environments: {
           production: {
             hosting: { provider: 'railway' },
+            database: { provider: 'supabase' },
             services: { web: { startCommand: 'npm start' } },
+            domain: 'previous-teardown.example.com',
+            email: { enabled: true },
+            messaging: {
+              services: ['web'],
+              service: { name: 'Previous teardown messages' },
+            },
+            payments: {
+              stripe: {
+                catalog: {
+                  products: {
+                    starter: {
+                      name: 'Starter',
+                      prices: {
+                        monthly: {
+                          unitAmount: 1000,
+                          currency: 'usd',
+                          interval: 'month',
+                          envVar: 'STRIPE_STARTER_PRICE_ID',
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
           },
         },
       },
@@ -3034,8 +3062,8 @@ describe('hv_plan / hv_status / hv_apply', () => {
         },
       },
     });
-    // Railway side is fully in sync, so the only pending action is the
-    // confirm-gated teardown of the abandoned Cloud Run service.
+    // Deliberately leave the current Railway service drifted. A retained-cleanup
+    // plan must still authorize only the abandoned Cloud Run teardown.
     const observedState: ObservedState = {
       provider: 'railway',
       observedAt: new Date().toISOString(),
@@ -3044,7 +3072,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       environmentId: 'rail-env-1',
       services: [{
         name: 'web', externalId: 'svc-1', workloadKind: 'web', customDomains: [],
-        config: { startCommand: 'npm start' },
+        config: { startCommand: 'npm run stale-start' },
         sourceState: 'disconnected',
         envVarKeys: [], envVarHashes: {},
         status: 'running',
@@ -3087,14 +3115,24 @@ describe('hv_plan / hv_status / hv_apply', () => {
         : { success: true, adapter: railwayAdapter }
     ) as any);
 
-    const plan = await t.call('hv_plan', { project: 'previous-teardown-app', env: 'production' });
+    const plan = await t.call('hv_plan', {
+      project: 'previous-teardown-app',
+      env: 'production',
+      scope: 'retained-cleanup',
+    });
     expect(plan.ok).toBe(true);
-    expect(plan.data.actions).toContainEqual(expect.objectContaining({
+    expect(plan.data.scope).toBe('retained-cleanup');
+    expect(plan.data.blocked).toEqual([]);
+    expect(plan.data.actions).toEqual([expect.objectContaining({
       id: 'service:web:previous-destroy',
       type: 'destroy',
       requiresConfirm: true,
       resource: { kind: 'service', name: 'web', provider: 'cloudrun' },
-    }));
+    })]);
+    const persistedPlan = new RunRepository().findById(plan.data.planId)?.plan;
+    expect(persistedPlan).toMatchObject({ scope: 'retained-cleanup' });
+    expect(persistedPlan).not.toHaveProperty('integrationFingerprints');
+    expect(persistedPlan).not.toHaveProperty('overrides');
 
     const unconfirmed = await t.call('hv_apply', { project: 'previous-teardown-app', planId: plan.data.planId });
     expect(unconfirmed.ok).toBe(true);
@@ -3105,11 +3143,31 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(deleteService).not.toHaveBeenCalled();
 
     // Plans are single-use: re-plan before the confirmed apply.
-    const plan2 = await t.call('hv_plan', { project: 'previous-teardown-app', env: 'production' });
+    const plan2 = await t.call('hv_plan', {
+      project: 'previous-teardown-app',
+      env: 'production',
+      scope: 'retained-cleanup',
+    });
     expect(plan2.ok).toBe(true);
-    const confirmed = await t.call('hv_apply', {
+    observedState.services[0]!.config = { startCommand: 'npm run changed-after-cleanup-plan' };
+    const stale = await t.call('hv_apply', {
       project: 'previous-teardown-app',
       planId: plan2.data.planId,
+      confirmActions: ['service:web:previous-destroy'],
+    });
+    expect(stale.ok).toBe(false);
+    expect(stale.error.message).toContain('Live infrastructure changed since this plan was created');
+    expect(deleteService).not.toHaveBeenCalled();
+
+    const plan3 = await t.call('hv_plan', {
+      project: 'previous-teardown-app',
+      env: 'production',
+      scope: 'retained-cleanup',
+    });
+    expect(plan3.ok).toBe(true);
+    const confirmed = await t.call('hv_apply', {
+      project: 'previous-teardown-app',
+      planId: plan3.data.planId,
       confirmActions: ['service:web:previous-destroy'],
     });
     expect(confirmed.ok).toBe(true);

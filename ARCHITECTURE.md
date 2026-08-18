@@ -296,6 +296,12 @@ that predate retained bindings, `hv_import mode="retained-cleanup"` reruns that
 inventory, rejects partial, ambiguous, or explicitly unowned results, and
 confirmation-gates recording the exact cleanup target. It never mutates the
 provider; deletion remains a separately reviewed `hv_plan`/`hv_apply` action.
+`hv_plan scope="retained-cleanup"` persists an isolated plan containing only
+those previous-host destroy actions. It observes the current host for the usual
+stale-plan fingerprint, preflights only the current and retained hosting
+providers, and neither loads deploy env files nor resolves unrelated
+integrations. `hv_apply` derives that isolation from the persisted plan scope,
+not caller input.
 This migration-recovery lifecycle is distinct from the future general
 environment desired-absent lifecycle.
 

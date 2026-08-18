@@ -16,6 +16,32 @@ export function detectGitRemoteUrl(): string | null {
 }
 
 /**
+ * Normalize a Git remote to a credential-free host/path identity for comparison.
+ * Supports URL and scp-style SSH remotes without assuming a hosting provider.
+ */
+export function normalizeGitRemoteIdentity(remoteUrl?: string): string | null {
+  if (!remoteUrl) return null;
+  const normalized = remoteUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
+  if (!normalized) return null;
+  if (/^(?:\.\.?[\\/]|[\\/]|[A-Za-z]:[\\/])/.test(normalized)) return null;
+
+  try {
+    const url = new URL(normalized);
+    const host = url.host.toLowerCase();
+    const repoPath = url.pathname.replace(/^\/+/, '').replace(/\/+$/, '');
+    return host && repoPath ? `${host}/${repoPath}` : null;
+  } catch {
+    // Not a URL format, continue with SSH-like parsing.
+  }
+
+  const sshMatch = normalized.match(/^(?:ssh:\/\/)?(?:[^@/]+@)?([^/:]+)[:/](.+)$/i);
+  if (!sshMatch) return null;
+  const host = sshMatch[1].toLowerCase();
+  const repoPath = sshMatch[2].replace(/^\/+/, '').replace(/\/+$/, '');
+  return host && repoPath ? `${host}/${repoPath}` : null;
+}
+
+/**
  * Parse an "owner/repo" pair from a GitHub remote URL.
  * Supports https, ssh://, and scp-style (git@github.com:owner/repo) remotes.
  * Returns null for non-GitHub remotes.

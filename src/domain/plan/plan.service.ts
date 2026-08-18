@@ -18,10 +18,14 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import { parseHostingBindings } from '../ports/hosting.port.js';
-import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
+import {
+  detectGitRemoteUrl,
+  normalizeGitRemoteIdentity,
+  parseGitHubRepoFromRemote,
+} from '../../lib/git-remote.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { classifyDeployEnvironment, resolveGitDeploySource } from '../services/deploy-source.js';
-import { diffEnvironment } from './diff.engine.js';
+import { diffEnvironment, diffRetainedHostingCleanup } from './diff.engine.js';
 import type { DiffResult, LocalSnapshot, PlanAction } from './plan.types.js';
 import {
   fingerprintObservedState,
@@ -55,7 +59,7 @@ import {
   storageEnvKeys,
 } from '../services/storage-plan.service.js';
 import { formatConnectionGuidance } from '../services/connection-guidance.js';
-import { loadDeployEnvFile } from '../services/deploy-env-file.js';
+import { defaultDeployEnvFilePath, loadDeployEnvFile } from '../services/deploy-env-file.js';
 import { cloudflareScopeHintsForDomain } from '../services/domain-scope.js';
 import {
   delegatedSecretInputsForEnvironment,
@@ -96,6 +100,8 @@ import {
 } from '../services/environment-maintenance.service.js';
 
 export interface PlanOptions {
+  /** Restrict the plan to one lifecycle stage. Omission preserves full-plan behavior. */
+  scope?: 'full' | 'retained-cleanup';
   /** Restrict the plan to these spec services (partial deploy); must be a subset of the spec. */
   serviceFilter?: string[];
   /** One-off env var overrides merged over spec.envVars, frozen (encrypted) into the plan. */
@@ -110,6 +116,7 @@ export interface PlanOptions {
 
 export interface EnvironmentPlan {
   planRunId: string;
+  scope: 'full' | 'retained-cleanup';
   specRevision: number;
   specSource?: { kind: 'repo'; path: string } | { kind: 'local' };
   environmentName: string;
@@ -176,7 +183,8 @@ export class PlanService {
   async observeEnvironment(
     project: Project,
     environment: Environment | null,
-    environmentSpec: EnvironmentSpec
+    environmentSpec: EnvironmentSpec,
+    options: { hostingOnly?: boolean } = {}
   ): Promise<{ observed: ObservedState | null; warnings: string[] }> {
     const warnings: string[] = [];
     if (!environment) {
@@ -252,6 +260,10 @@ export class PlanService {
         caches: observed.completeness?.caches ?? 'complete',
         storage: observed.completeness?.storage ?? 'complete',
       };
+
+      if (options.hostingOnly) {
+        return { observed, warnings };
+      }
 
       // Observe declared databases through their lifecycle adapter even when
       // hosting and database share one provider connection. Hosting adapters
@@ -751,6 +763,7 @@ export class PlanService {
       : [];
     const document: PlanRunDocument = {
       kind: 'hv_plan',
+      scope: 'full',
       environmentName,
       specRevision: specResult.revision,
       observedFingerprint: null,
@@ -771,6 +784,7 @@ export class PlanService {
 
     return {
       planRunId: run.id,
+      scope: 'full',
       specRevision: specResult.revision,
       specSource: specResult.source ?? { kind: 'local' },
       environmentName,
@@ -787,6 +801,128 @@ export class PlanService {
     };
   }
 
+  private async planRetainedHostingCleanup(
+    project: Project,
+    environmentName: string,
+    specResult: SpecResult,
+    environmentSpec: EnvironmentSpec
+  ): Promise<EnvironmentPlan | { error: string }> {
+    const projectForPlan = projectWithSpecGitRemoteUrl(project, specResult.spec);
+    const environment = this.envRepo.findByProjectAndName(project.id, environmentName);
+    if (!environment) {
+      return {
+        error: `Environment "${environmentName}" has no retained hosting binding to clean up.`,
+      };
+    }
+
+    const local = this.buildLocalSnapshot(projectForPlan, environment);
+    const boundHostingProvider = local.bindings?.provider;
+    const previousHosting = local.bindings?.previousHosting;
+    const previousProvider = previousHosting?.provider;
+    if (!previousProvider || previousProvider === environmentSpec.hosting.provider) {
+      return {
+        error: `Environment "${environmentName}" has no abandoned hosting provider retained for cleanup.`,
+      };
+    }
+    if (boundHostingProvider && boundHostingProvider !== environmentSpec.hosting.provider) {
+      return {
+        error: `The current hosting binding is ${boundHostingProvider}, but the spec selects ${environmentSpec.hosting.provider}. Reconcile that provider switch with a full plan before cleaning up ${previousProvider}.`,
+      };
+    }
+
+    const teardownBoundary = providerRegistry.getMetadata(previousProvider)
+      ?.lifecycle?.hosting?.teardownBoundary;
+    if (!teardownBoundary) {
+      return {
+        error: `Cannot plan cleanup for retained hosting provider ${previousProvider} because it does not declare a complete teardown boundary. Hypervibe will not guess which provider resource is safe to delete.`,
+      };
+    }
+    const retainedServices = Object.entries(previousHosting.services ?? {});
+    const incompleteServices = retainedServices
+      .filter(([, binding]) => !binding?.serviceId && !binding?.jobName)
+      .map(([name]) => name);
+    if (
+      (teardownBoundary === 'services' && retainedServices.length === 0)
+      || ((teardownBoundary === 'services' || teardownBoundary === 'project') && incompleteServices.length > 0)
+      || ((teardownBoundary === 'environment' || teardownBoundary === 'project') && !previousHosting.projectId)
+      || (teardownBoundary === 'environment' && !previousHosting.environmentId)
+    ) {
+      return {
+        error: `The retained ${previousProvider} binding is incomplete for its ${teardownBoundary} cleanup boundary. Re-import the exact provider identity before planning deletion${incompleteServices.length > 0 ? ` (services missing an id: ${incompleteServices.join(', ')})` : ''}.`,
+      };
+    }
+
+    const { observed, warnings: observeWarnings } = await this.observeEnvironment(
+      projectForPlan,
+      environment,
+      environmentSpec,
+      { hostingOnly: true }
+    );
+    const cleanup = diffRetainedHostingCleanup({
+      envName: environmentName,
+      currentProvider: environmentSpec.hosting.provider,
+      previousHosting,
+      teardownBoundary,
+    });
+    if (cleanup.actions.length === 0) {
+      return {
+        error: `The retained ${previousProvider} binding contains no complete ${teardownBoundary} cleanup target. Re-import the exact retained cleanup identity before planning deletion.`,
+      };
+    }
+    try {
+      orderActions(cleanup.actions);
+    } catch (error) {
+      return {
+        error: `Hypervibe generated an invalid retained-cleanup action graph. No plan was saved or provider mutation authorized. ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    const specWarnings = specResult.adopted && specResult.source?.kind === 'repo'
+      ? [`${specResult.source.path} changed outside hypervibe; recorded as revision ${specResult.revision}.`]
+      : [];
+    const warnings = Array.from(new Set([
+      ...specWarnings,
+      ...observeWarnings,
+      ...(observed?.warnings ?? []),
+      ...cleanup.warnings,
+    ]));
+    const document: PlanRunDocument = {
+      kind: 'hv_plan',
+      scope: 'retained-cleanup',
+      environmentName,
+      specRevision: specResult.revision,
+      observedFingerprint: observed ? fingerprintObservedState(observed) : null,
+      actions: cleanup.actions,
+      unmanaged: [],
+      warnings,
+    };
+    const run = this.runRepo.create({
+      projectId: project.id,
+      environmentId: environment.id,
+      type: 'plan',
+      plan: document as unknown as Record<string, unknown>,
+    });
+    this.runRepo.updateStatus(run.id, 'succeeded');
+
+    return {
+      planRunId: run.id,
+      scope: 'retained-cleanup',
+      specRevision: specResult.revision,
+      specSource: specResult.source ?? { kind: 'local' },
+      environmentName,
+      verified: observed !== null && !observed.partial,
+      observed,
+      actions: cleanup.actions,
+      unmanaged: [],
+      warnings,
+      inputRequired: [],
+      blocked: this.providerPreflight([
+        environmentSpec.hosting.provider,
+        previousProvider,
+      ]),
+    };
+  }
+
   async plan(
     project: Project,
     environmentName: string,
@@ -796,9 +932,29 @@ export class PlanService {
     if (!specResult) {
       return { error: `Project "${project.name}" has no spec. Set one with hv_spec.` };
     }
+    const scope = options?.scope ?? 'full';
+    if (scope === 'retained-cleanup') {
+      const incompatibleInputs = [
+        options && Object.prototype.hasOwnProperty.call(options, 'serviceFilter') ? 'services' : null,
+        options && Object.prototype.hasOwnProperty.call(options, 'envVarOverrides') ? 'envVars' : null,
+        options && Object.prototype.hasOwnProperty.call(options, 'envFile') ? 'envFile' : null,
+        options && Object.prototype.hasOwnProperty.call(options, 'includeEnvFile') ? 'includeEnvFile' : null,
+        options && Object.prototype.hasOwnProperty.call(options, 'secretRefs') ? 'secretRefs' : null,
+      ].filter((name): name is string => Boolean(name));
+      if (incompatibleInputs.length > 0) {
+        return {
+          error: `scope="retained-cleanup" does not accept deploy inputs: ${incompatibleInputs.join(', ')}. Remove them so the plan can authorize only retained previous-host teardown actions.`,
+        };
+      }
+    }
     const projectForPlan = projectWithSpecGitRemoteUrl(project, specResult.spec);
     const environmentSpec = specResult.spec.environments[environmentName];
     if (!environmentSpec) {
+      if (scope === 'retained-cleanup') {
+        return {
+          error: `scope="retained-cleanup" requires a declared environment; spec has no environment "${environmentName}".`,
+        };
+      }
       if (shouldPlanGitHubInfrastructure(specResult.spec, environmentName)) {
         return this.planRepositoryInfrastructure(project, environmentName, specResult, options);
       }
@@ -806,6 +962,9 @@ export class PlanService {
       return {
         error: `Spec has no environment "${environmentName}". Available: ${available.join(', ') || '(none)'}.`,
       };
+    }
+    if (scope === 'retained-cleanup') {
+      return this.planRetainedHostingCleanup(project, environmentName, specResult, environmentSpec);
     }
     const serviceFilter = options?.serviceFilter?.length ? options.serviceFilter : undefined;
     if (serviceFilter) {
@@ -893,6 +1052,20 @@ export class PlanService {
     let envFile: ReturnType<typeof loadDeployEnvFile> = null;
     try {
       const envFilePolicy = environmentSpec.envFile;
+      const implicitEnvFilePath = !options?.envFile
+        && options?.includeEnvFile !== false
+        && envFilePolicy?.mode !== 'off'
+        ? defaultDeployEnvFilePath(undefined, environmentName)
+        : null;
+      const selectedRepository = normalizeGitRemoteIdentity(projectForPlan.gitRemoteUrl);
+      if (implicitEnvFilePath) {
+        const currentRepository = normalizeGitRemoteIdentity(detectGitRemoteUrl() ?? undefined);
+        if (!currentRepository || !selectedRepository || currentRepository !== selectedRepository) {
+          return {
+            error: `Refusing implicit deploy env-file access to ${implicitEnvFilePath}: current repository "${currentRepository ?? 'unknown'}" does not match selected project "${project.name}" repository "${selectedRepository ?? 'unknown'}". Run Hypervibe from the selected project's checkout, pass an explicit envFile, set includeEnvFile=false, or configure envFile.mode="off". No env file was loaded or created.`,
+          };
+        }
+      }
       const excludedEnvKeys = Array.from(new Set([
         ...(envFilePolicy?.exclude ?? []),
         ...delegatedSecretSlots.keys(),
@@ -1776,6 +1949,7 @@ export class PlanService {
 
     const document: PlanRunDocument = {
       kind: 'hv_plan',
+      scope: 'full',
       environmentName,
       specRevision: specResult.revision,
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
@@ -1813,6 +1987,7 @@ export class PlanService {
 
     return {
       planRunId: run.id,
+      scope: 'full',
       specRevision: specResult.revision,
       specSource: specResult.source ?? { kind: 'local' },
       environmentName,
