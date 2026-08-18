@@ -47,6 +47,8 @@ export interface BranchDeployStepResult {
   steps: string;
   requiredSecrets: string[];
   requiredVariables: string[];
+  /** Exact immutable image expression persisted after a verified deployment. */
+  releaseImageUri?: string;
   permissions?: string;
   displayName?: string;
   reviewDetails?: string[];

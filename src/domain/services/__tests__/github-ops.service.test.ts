@@ -179,7 +179,7 @@ describe('github tools', () => {
     expect(workflow.content).toContain('password: ${{ secrets.GITHUB_TOKEN }}');
     expect(workflow.content).toContain('Verify Railway image pull credentials');
     expect(workflow.content).toContain('username: ${{ secrets.IMAGE_REGISTRY_USERNAME }}');
-    expect(workflow.content).toContain('docker buildx imagetools inspect "${{ steps.image.outputs.uri }}"');
+    expect(workflow.content).toContain('docker buildx imagetools inspect "${{ steps.release_image.outputs.image_uri }}"');
     expect(workflow.content).toContain('serviceInstanceUpdate');
     expect(workflow.content).toContain('IMAGE_REGISTRY_USERNAME: ${{ secrets.IMAGE_REGISTRY_USERNAME }}');
     expect(workflow.content).toContain('IMAGE_REGISTRY_TOKEN: ${{ secrets.IMAGE_REGISTRY_TOKEN }}');
@@ -203,6 +203,91 @@ describe('github tools', () => {
     expect(workflow.content).not.toContain('railway-github-action');
     expect(workflow.content).not.toContain('vars.MIGRATION_COMMAND');
     expect(workflow.content).toContain('retention-days: 90');
+  });
+
+  it('restores a verified Railway image digest without rebuilding the target SHA', () => {
+    const target = {
+      environmentName: 'production',
+      kind: 'production' as const,
+      branch: 'main',
+      autoDeployOnPush: false,
+      serviceNames: ['web'],
+      providerProjectId: 'rail-project',
+      providerEnvironmentId: 'rail-env',
+      providerServiceIds: ['rail-web'],
+      providerJobNames: [],
+    };
+    const content = buildBranchDeployWorkflow(
+      'railway',
+      target,
+      { includeStep: true, command: 'npm run migrate' }
+    ).content;
+    const checkoutStep = content.slice(
+      content.indexOf('      - uses: actions/checkout@v4'),
+      content.indexOf('\n      - ', content.indexOf('      - uses: actions/checkout@v4') + 1)
+    );
+    const buildAction = content.indexOf('uses: docker/build-push-action@v6');
+    const buildStep = content.slice(
+      content.lastIndexOf('      - ', buildAction),
+      content.indexOf('\n      - ', buildAction)
+    );
+
+    expect(content).toContain('name: Download rollback release evidence');
+    expect(content).toContain('id: rollback_evidence');
+    expect(content).toContain("evidence.server.imageUri");
+    expect(checkoutStep).toContain("if: steps.deploy.outputs.operation != 'rollback'");
+    expect(buildStep).toContain("if: steps.deploy.outputs.operation != 'rollback'");
+    expect(content).toContain(
+      "IMAGE_URI: ${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.release_image.outputs.image_uri }}"
+    );
+    expect(content).toContain('imageUri: process.env.HYPERVIBE_RELEASE_IMAGE_URI');
+  });
+
+  it('resolves the exact rollback image from downloaded release evidence', async () => {
+    const targetSha = '0123456789abcdef0123456789abcdef01234567';
+    const imageUri = `ghcr.io/dave/app@sha256:${'a'.repeat(64)}`;
+    const target = {
+      environmentName: 'production',
+      kind: 'production' as const,
+      branch: 'main',
+      autoDeployOnPush: false,
+      serviceNames: ['web'],
+      providerProjectId: 'rail-project',
+      providerEnvironmentId: 'rail-env',
+      providerServiceIds: ['rail-web'],
+      providerJobNames: [],
+    };
+    const content = buildBranchDeployWorkflow('railway', target, { includeStep: false }).content;
+    const script = extractGitHubScript(content, 'Resolve immutable rollback image');
+    const evidencePath = path.join(tempDir, 'hypervibe-server-release.json');
+    fs.writeFileSync(evidencePath, JSON.stringify({
+      version: 2,
+      environment: 'production',
+      server: { repository: 'dave/app', sha: targetSha, imageUri },
+      services: ['web'],
+    }));
+    const core = { setOutput: vi.fn(), info: vi.fn() };
+    const execute = new AsyncFunction('require', 'process', 'core', script);
+
+    await expect(execute(
+      (moduleName: string) => {
+        if (moduleName === 'fs') return { readFileSync: fs.readFileSync };
+        throw new Error(`Unexpected module request: ${moduleName}`);
+      },
+      {
+        env: {
+          HYPERVIBE_RELEASE_EVIDENCE_PATH: evidencePath,
+          HYPERVIBE_ENVIRONMENT: 'production',
+          HYPERVIBE_ROLLBACK_SHA: targetSha,
+          HYPERVIBE_SERVICES: JSON.stringify(['web']),
+          GITHUB_REPOSITORY: 'dave/app',
+        },
+      },
+      core
+    )).resolves.toBeUndefined();
+
+    expect(core.setOutput).toHaveBeenCalledWith('image_uri', imageUri);
+    expect(core.info).toHaveBeenCalledWith(`Resolved immutable rollback image ${imageUri}`);
   });
 
   it('retries transient Railway reads without replaying deploy mutations', async () => {

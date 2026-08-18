@@ -367,9 +367,9 @@ function buildWorkflowTrigger(target: BranchDeployTarget): string {
 ${dispatch}`;
 }
 
-function buildDeploymentContractStep(environmentName: string): string {
+function buildDeploymentContractStep(environmentName: string, ifCondition?: string): string {
   return `      - name: "Deployment safety gate: verify Hypervibe reconciliation"
-        uses: actions/github-script@v8
+${ifCondition ? `        if: ${ifCondition}\n` : ''}        uses: actions/github-script@v8
         env:
           HYPERVIBE_ENVIRONMENT: ${JSON.stringify(environmentName)}
           HYPERVIBE_APPLIED_SPEC_HASH: \${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}
@@ -465,6 +465,92 @@ function buildDeploymentContractStep(environmentName: string): string {
 `;
 }
 
+function buildImmutableRollbackEvidenceSteps(target: BranchDeployTarget): string {
+  return `      - name: Download rollback release evidence
+        if: steps.deploy.outputs.operation == 'rollback'
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: \${{ inputs.source_artifact_id }}
+          run-id: \${{ inputs.source_workflow_run_id }}
+          github-token: \${{ github.token }}
+          path: \${{ runner.temp }}/hypervibe-rollback-evidence
+          merge-multiple: true
+      - name: Resolve immutable rollback image
+        id: rollback_evidence
+        if: steps.deploy.outputs.operation == 'rollback'
+        uses: actions/github-script@v8
+        env:
+          HYPERVIBE_RELEASE_EVIDENCE_PATH: \${{ runner.temp }}/hypervibe-rollback-evidence/hypervibe-server-release.json
+          HYPERVIBE_ENVIRONMENT: ${JSON.stringify(target.environmentName)}
+          HYPERVIBE_ROLLBACK_SHA: \${{ steps.deploy.outputs.sha }}
+          HYPERVIBE_SERVICES: ${JSON.stringify(JSON.stringify(target.serviceNames))}
+        with:
+          script: |
+            const { readFileSync } = require('fs');
+            let evidence;
+            try {
+              evidence = JSON.parse(readFileSync(process.env.HYPERVIBE_RELEASE_EVIDENCE_PATH, 'utf8'));
+            } catch {
+              throw new Error('Rollback release evidence is missing or invalid JSON');
+            }
+            const expectedServices = JSON.parse(process.env.HYPERVIBE_SERVICES);
+            const actualServices = Array.isArray(evidence.services) ? evidence.services : [];
+            const servicesMatch = JSON.stringify([...actualServices].sort()) === JSON.stringify([...expectedServices].sort());
+            if (evidence.version !== 2
+                || evidence.environment !== process.env.HYPERVIBE_ENVIRONMENT
+                || evidence.server?.repository !== process.env.GITHUB_REPOSITORY
+                || evidence.server?.sha !== process.env.HYPERVIBE_ROLLBACK_SHA
+                || !servicesMatch) {
+              throw new Error('Rollback release evidence content does not match the reviewed environment, repository, SHA, and services');
+            }
+            const imageUri = String(evidence.server.imageUri || '').trim().toLowerCase();
+            if (!/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(imageUri)) {
+              throw new Error('Rollback release evidence does not contain an immutable image digest');
+            }
+            core.setOutput('image_uri', imageUri);
+            core.info('Resolved immutable rollback image ' + imageUri);
+`;
+}
+
+function buildServerReleaseEvidenceStep(
+  target: BranchDeployTarget,
+  releaseImageUri?: string
+): string {
+  if (!releaseImageUri) {
+    return `      - name: Write server release evidence
+        shell: bash
+        env:
+          HYPERVIBE_RELEASE_SHA: \${{ steps.deploy.outputs.sha }}
+        run: |
+          node -e 'const fs=require("fs"); fs.writeFileSync("hypervibe-server-release.json", JSON.stringify({version:1,environment:${JSON.stringify(target.environmentName)},server:{repository:process.env.GITHUB_REPOSITORY,sha:process.env.HYPERVIBE_RELEASE_SHA},services:${JSON.stringify(target.serviceNames)},verifiedAt:new Date().toISOString()}, null, 2)+"\\n")'
+`;
+  }
+  return `      - name: Write server release evidence
+        uses: actions/github-script@v8
+        env:
+          HYPERVIBE_RELEASE_SHA: \${{ steps.deploy.outputs.sha }}
+          HYPERVIBE_RELEASE_IMAGE_URI: ${releaseImageUri}
+        with:
+          script: |
+            const { writeFileSync } = require('fs');
+            const imageUri = String(process.env.HYPERVIBE_RELEASE_IMAGE_URI || '').trim().toLowerCase();
+            if (!/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(imageUri)) {
+              throw new Error('Verified deployment did not produce an immutable image digest');
+            }
+            writeFileSync('hypervibe-server-release.json', JSON.stringify({
+              version: 2,
+              environment: ${JSON.stringify(target.environmentName)},
+              server: {
+                repository: process.env.GITHUB_REPOSITORY,
+                sha: process.env.HYPERVIBE_RELEASE_SHA,
+                imageUri: process.env.HYPERVIBE_RELEASE_IMAGE_URI,
+              },
+              services: ${JSON.stringify(target.serviceNames)},
+              verifiedAt: new Date().toISOString(),
+            }, null, 2) + '\\n');
+`;
+}
+
 function buildDeploymentFailureEvidenceJob(environmentName: string): string {
   return `
   failure_evidence:
@@ -547,6 +633,14 @@ export function buildBranchDeployWorkflow(
     ? buildMigrationStep(migration.command, target.runtime ?? LEGACY_PROJECT_RUNTIME)
     : '';
   const deployBlock = buildProviderDeploySteps(provider, target);
+  const immutableRollback = Boolean(deployBlock.releaseImageUri);
+  const sourcePreparationCondition = immutableRollback
+    ? "steps.deploy.outputs.operation != 'rollback'"
+    : undefined;
+  const rollbackEvidenceSteps = immutableRollback
+    ? buildImmutableRollbackEvidenceSteps(target)
+    : '';
+  const releaseEvidenceStep = buildServerReleaseEvidenceStep(target, deployBlock.releaseImageUri);
   const providerName = deployBlock.displayName ?? providerRegistry.getMetadata(provider)?.displayName ?? provider;
   let requiredSecrets = migrationStep
     ? [...deployBlock.requiredSecrets, 'DATABASE_URL']
@@ -649,16 +743,10 @@ ${permissionsBlock.trimEnd()}
               throw new Error('Rollback evidence for ' + targetSha + ' did not come from a successful run of ' + workflowPath);
             }
             core.info('Verified rollback evidence from successful workflow run ' + run.data.id);
-      - uses: actions/checkout@v4
-        with:
+${rollbackEvidenceSteps}      - uses: actions/checkout@v4
+${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:
           ref: \${{ steps.deploy.outputs.sha }}
-${buildDeploymentContractStep(target.environmentName)}${migrationStep}${deployBlock.steps}      - name: Write server release evidence
-        shell: bash
-        env:
-          HYPERVIBE_RELEASE_SHA: \${{ steps.deploy.outputs.sha }}
-        run: |
-          node -e 'const fs=require("fs"); fs.writeFileSync("hypervibe-server-release.json", JSON.stringify({version:1,environment:${JSON.stringify(target.environmentName)},server:{repository:process.env.GITHUB_REPOSITORY,sha:process.env.HYPERVIBE_RELEASE_SHA},services:${JSON.stringify(target.serviceNames)},verifiedAt:new Date().toISOString()}, null, 2)+"\\n")'
-      - name: Upload server release evidence
+${buildDeploymentContractStep(target.environmentName, sourcePreparationCondition)}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}      - name: Upload server release evidence
         uses: actions/upload-artifact@v4
         with:
           name: hypervibe-server-release-${safeEnvironment}-\${{ steps.deploy.outputs.sha }}
@@ -688,7 +776,9 @@ ${buildDeploymentFailureEvidenceJob(target.environmentName)}`;
     `Builds and deploys ${serviceLabel}, then waits for ${providerName} to confirm the result.`,
     ...(migrationStep ? ['Runs the declared database migration before deploying the services.'] : []),
     ...(deployBlock.reviewDetails ?? []),
-    'Saves a release record showing the environment, commit, and services that were successfully deployed.',
+    deployBlock.releaseImageUri
+      ? 'Saves a release record with the exact deployed image digest, environment, commit, and services so rollback never rebuilds it.'
+      : 'Saves a release record showing the environment, commit, and services that were successfully deployed.',
     'Uploads safe failure details when the deployment does not complete.',
   ];
   return {

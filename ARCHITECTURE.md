@@ -773,6 +773,10 @@ Do not default to a long-lived `staging` branch. `main` is the accepted-code bra
 Managed CI rollback is an explicit operational action over that same exact-SHA
 release boundary. `hv_rollback` must select only unexpired server-release
 evidence emitted by a successful run of the exact managed environment workflow.
+When a provider exposes immutable image evidence (currently Railway), the
+release record includes the exact registry digest; rollback downloads and
+validates it, skips source checkout and image rebuilding, and deploys the
+recorded immutable image URI.
 After a failed promotion it restores the latest known-good release; after a
 successful promotion it selects the previous distinct successful release unless
 the caller names another previously verified full SHA. The repository, workflow,
