@@ -34,9 +34,12 @@ import {
   isGitHubActionsDeployAction,
 } from '../domain/services/ci-deploy.service.js';
 import { applyManagedCiAction } from '../domain/services/managed-ci.service.js';
+import { applyManagedCodeRepositoryAction } from '../domain/services/managed-code-repository.service.js';
 import {
   CI_APPLIED_SPEC_SYNC_OPERATION,
+  CI_BINDING_REMOVE_OPERATION,
   CI_CONFIGURATION_SYNC_OPERATION,
+  CI_VARIABLE_DELETE_OPERATION,
   CI_VARIABLE_SYNC_OPERATION,
 } from '../domain/services/managed-ci.contract.js';
 import {
@@ -385,6 +388,18 @@ async function executeRepositoryPlanApply(
         error: 'Re-run hv_plan.',
       };
     }
+    if (
+      authority.capability === 'code.repository.create'
+      || authority.capability === 'code.repository.destroy'
+      || authority.capability === 'code.repository.binding.remove'
+    ) {
+      return applyManagedCodeRepositoryAction({
+        project: projectForApply,
+        spec: params.spec,
+        environmentName: params.envName,
+        action,
+      });
+    }
     if (action.resource.name !== expectedRepository && authority.capability !== 'github.pages-dns.sync') {
       return blockedActionIdentity(
         action,
@@ -475,7 +490,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const envSpec = spec.environments[envName];
   if (!envSpec) {
-    return shouldPlanGitHubInfrastructure(spec, envName)
+    const repositoryLifecycleOnly = loaded.document.actions.length > 0
+      && loaded.document.actions.every((action) => {
+        const capability = resolvePlanActionAuthority(action)?.capability;
+        return capability === 'code.repository.create'
+          || capability === 'code.repository.destroy'
+          || capability === 'code.repository.binding.remove';
+      });
+    return shouldPlanGitHubInfrastructure(spec, envName) || repositoryLifecycleOnly
       ? executeRepositoryPlanApply(ctx, {
           project,
           spec,
@@ -738,6 +760,19 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     const capability = authority.capability;
 
+    if (
+      capability === 'code.repository.create'
+      || capability === 'code.repository.destroy'
+      || capability === 'code.repository.binding.remove'
+    ) {
+      return applyManagedCodeRepositoryAction({
+        project: applyProject,
+        spec,
+        environmentName: envName,
+        action,
+      });
+    }
+
     if (capability.startsWith('maintenance.')) {
       return await applyMaintenanceAction({
         ctx,
@@ -796,10 +831,19 @@ export async function executePlanApply(ctx: CommandContext, params: {
         environmentSpec: envSpec,
       });
     }
-    if (capability === 'ci.configuration.sync' || capability === 'ci.variable.sync') {
+    if (
+      capability === 'ci.configuration.sync'
+      || capability === 'ci.variable.sync'
+      || capability === 'ci.variable.delete'
+      || capability === 'ci.binding.remove'
+    ) {
       const expectedOperation = capability === 'ci.configuration.sync'
         ? CI_CONFIGURATION_SYNC_OPERATION
-        : CI_VARIABLE_SYNC_OPERATION;
+        : capability === 'ci.variable.sync'
+          ? CI_VARIABLE_SYNC_OPERATION
+          : capability === 'ci.variable.delete'
+            ? CI_VARIABLE_DELETE_OPERATION
+            : CI_BINDING_REMOVE_OPERATION;
       if (
         action.metadata?.operation !== expectedOperation
         || action.metadata?.ciProvider !== action.resource.provider

@@ -627,9 +627,53 @@ export const devopsSpecSchema = z.object({
     provider: providerIdSchema,
     /** Provider-owned canonical repository scope (URL for GitLab, owner/repo for GitHub). */
     scope: devopsScopeSchema,
+    /**
+     * Repository lifecycle is explicit. The default preserves the existing
+     * repository contract; managed creation and deletion are never inferred
+     * from a missing project or from repository file writes.
+     */
+    repository: z.object({
+      state: z.enum(['present', 'absent']).default('present'),
+      management: z.enum(['external', 'managed']).default('external'),
+      visibility: z.enum(['private', 'internal', 'public']).default('private'),
+      defaultBranch: z.string().min(1).max(255).superRefine((branch, ctx) => {
+        const components = branch.split('/');
+        if (
+          branch === '@'
+          || /[\x00-\x20\x7f~^:?*\[\\]/.test(branch)
+          || branch.includes('..')
+          || branch.includes('@{')
+          || components.some((component) => (
+            component.length === 0
+            || component.startsWith('.')
+            || component.endsWith('.')
+            || component.endsWith('.lock')
+          ))
+        ) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'defaultBranch must be a safe Git ref name' });
+        }
+      })
+        .default('main'),
+    }).strict().default({}),
   }).strict(),
   ci: z.object({
     provider: providerIdSchema,
+    runner: z.discriminatedUnion('mode', [
+      z.object({
+        mode: z.literal('provider-hosted'),
+      }).strict(),
+      z.object({
+        mode: z.literal('self-managed'),
+        /** Exact GitLab runner id; never select a runner by tag alone. */
+        runnerId: z.string().regex(/^[1-9]\d*$/, 'runnerId must be a positive numeric provider id'),
+        /** Exact manager machine identity observed through the provider API. */
+        managerSystemId: z.string().min(1).max(255),
+        /** Dedicated tag that no other runner assigned to the project may claim. */
+        tag: z.string().regex(/^[A-Za-z0-9_.-]{1,255}$/, 'runner tag contains unsupported characters'),
+        /** Operator-owned, provider-observed execution-capability attestation. */
+        capabilities: z.array(z.enum(['linux-amd64', 'docker-privileged'])).min(1),
+      }).strict(),
+    ]).default({ mode: 'provider-hosted' }),
   }).strict().optional(),
   /** Environment that owns project-level DevOps lifecycle actions. */
   canonicalEnvironment: z.string().min(1).optional(),
@@ -1965,6 +2009,31 @@ export const projectSpecSchema = z.object({
           code: z.ZodIssueCode.custom,
           message: 'deploy.trigger="ci" requires devops.ci.provider',
           path: ['environments', environmentName, 'deploy', 'trigger'],
+        });
+      }
+    }
+  }
+  if (spec.devops?.code.repository.state === 'absent') {
+    if (spec.devops.code.repository.management !== 'managed') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'devops.code.repository.state="absent" requires management="managed"; Hypervibe never deletes an externally managed repository',
+        path: ['devops', 'code', 'repository', 'management'],
+      });
+    }
+    if (spec.devops.ci) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'devops.ci must be removed before the managed code repository can be declared absent',
+        path: ['devops', 'ci'],
+      });
+    }
+    for (const [environmentName, environment] of Object.entries(spec.environments)) {
+      if (environment.deploy?.strategy === 'branch') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'branch deploys must be removed before the managed code repository can be declared absent',
+          path: ['environments', environmentName, 'deploy', 'strategy'],
         });
       }
     }

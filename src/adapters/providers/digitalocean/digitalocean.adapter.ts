@@ -21,7 +21,7 @@ import type {
   MaintenanceWorkloadObservation,
   MaintenanceWorkloadSnapshot,
 } from '../../../domain/ports/maintenance.port.js';
-import { parseGitHubRepoFromRemote } from '../../../lib/git-remote.js';
+import { parseRepositoryPathFromRemote } from '../../../lib/git-remote.js';
 import {
   hashEnvValue,
   type ObservedService,
@@ -50,6 +50,7 @@ import {
   buildDigitalOceanGitHubActionsSteps,
   DIGITALOCEAN_CI_REQUIRED_SECRETS,
 } from './digitalocean-ci.workflow.js';
+import { buildDigitalOceanPortableRecipe } from './digitalocean-ci.recipe.js';
 
 type ComponentCollection = 'services' | 'workers' | 'jobs';
 
@@ -306,13 +307,13 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
       if (options.deferDeployment) {
         const registry = (await this.resolveContainerRegistry(false)).name;
         if (!existing?.component.image) {
-          const repository = parseGitHubRepoFromRemote(
+          const repository = parseRepositoryPathFromRemote(
             envVars.HYPERVIBE_SOURCE_REPO_URL
           );
           if (!repository) {
             return this.failedDeploy(
               service,
-              'DigitalOcean CI deploys require a GitHub gitRemoteUrl so Hypervibe can reserve the exact DOCR repository that the generated workflow will publish.',
+              'DigitalOcean CI deploys require a hosted gitRemoteUrl so Hypervibe can reserve the exact DOCR repository that the generated workflow will publish.',
               appId
             );
           }
@@ -392,7 +393,7 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
             componentName,
             resourceType: targetCollection,
             createdService: !existing,
-            ...(!pendingImage && imageUri ? { imageUri } : {}),
+            ...(imageUri ? { imageUri } : {}),
             ...(options.deferDeployment
               ? {
                   deploymentDeferred: true,
@@ -2012,6 +2013,8 @@ providerRegistry.register({
           DIGITALOCEAN_TOKEN: 'apiToken',
         },
         buildGitHubActionsSteps: buildDigitalOceanGitHubActionsSteps,
+        buildPortableRecipe: buildDigitalOceanPortableRecipe,
+        portableRunnerCapabilities: ['linux-amd64', 'docker-privileged'],
       },
       nativeBranchDeploy: {
         nonNativeSourcePolicy: 'block',

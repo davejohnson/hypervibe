@@ -95,4 +95,99 @@ describe('canonical devops desired state', () => {
     });
     expect(devOpsScopeMatchesRemote(parsed)).toBe(true);
   });
+
+  it('defaults repository lifecycle to external and runner selection to provider-hosted', () => {
+    const parsed = projectSpecSchema.parse({
+      ...base(),
+      devops: {
+        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/apps/devops-app' },
+        ci: { provider: 'gitlab-ci' },
+      },
+    });
+    expect(parsed.devops?.code.repository).toEqual({
+      state: 'present',
+      management: 'external',
+      visibility: 'private',
+      defaultBranch: 'main',
+    });
+    expect(parsed.devops?.ci?.runner).toEqual({ mode: 'provider-hosted' });
+  });
+
+  it('requires a fully identified self-managed runner and rejects runner id zero', () => {
+    const valid = projectSpecSchema.safeParse({
+      ...base(),
+      devops: {
+        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/apps/devops-app' },
+        ci: {
+          provider: 'gitlab-ci',
+          runner: {
+            mode: 'self-managed',
+            runnerId: '71',
+            managerSystemId: 's_runner-host-1',
+            tag: 'hypervibe-production',
+            capabilities: ['linux-amd64', 'docker-privileged'],
+          },
+        },
+      },
+    });
+    expect(valid.success).toBe(true);
+    const invalid = projectSpecSchema.safeParse({
+      ...base(),
+      devops: {
+        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/apps/devops-app' },
+        ci: {
+          provider: 'gitlab-ci',
+          runner: {
+            mode: 'self-managed',
+            runnerId: '0',
+            managerSystemId: 's_runner-host-1',
+            tag: 'hypervibe-production',
+            capabilities: ['linux-amd64'],
+          },
+        },
+      },
+    });
+    expect(invalid.success).toBe(false);
+  });
+
+  it('forces explicit two-stage CI teardown before managed repository deletion', () => {
+    const result = projectSpecSchema.safeParse({
+      ...base(),
+      devops: {
+        code: {
+          provider: 'gitlab',
+          scope: 'https://gitlab.com/acme/apps/devops-app',
+          repository: { state: 'absent', management: 'managed' },
+        },
+        ci: { provider: 'gitlab-ci' },
+      },
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: ['devops', 'ci'] }),
+      expect.objectContaining({ path: ['environments', 'staging', 'deploy', 'strategy'] }),
+    ]));
+  });
+
+  it.each(['feature bad', 'feature//bad', 'feature.lock', 'feature.', '@', 'feature\u0007bad'])(
+    'rejects unsafe managed default branch %j',
+    (defaultBranch) => {
+      const result = projectSpecSchema.safeParse({
+        ...base(),
+        devops: {
+          code: {
+            provider: 'gitlab',
+            scope: 'https://gitlab.com/acme/apps/devops-app',
+            repository: { state: 'present', management: 'managed', defaultBranch },
+          },
+          ci: { provider: 'gitlab-ci' },
+        },
+      });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues).toContainEqual(expect.objectContaining({
+        path: ['devops', 'code', 'repository', 'defaultBranch'],
+        message: expect.stringContaining('safe Git ref'),
+      }));
+    }
+  );
 });

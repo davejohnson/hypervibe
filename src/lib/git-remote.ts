@@ -74,6 +74,18 @@ export function parseGitHubRepoFromRemote(remoteUrl?: string): string | null {
 }
 
 /**
+ * Parse the repository path from a remote without assuming a hosting provider.
+ * Preserves nested namespaces used by GitLab and other Git hosts.
+ */
+export function parseRepositoryPathFromRemote(remoteUrl?: string): string | null {
+  const identity = normalizeGitRemoteIdentity(remoteUrl);
+  if (!identity) return null;
+  const slash = identity.indexOf('/');
+  const repositoryPath = slash >= 0 ? identity.slice(slash + 1) : '';
+  return repositoryPath || null;
+}
+
+/**
  * Normalize a git remote to a canonical https clone URL for build systems.
  * GitHub remotes become https://github.com/owner/repo.git; anything else
  * passes through trimmed.

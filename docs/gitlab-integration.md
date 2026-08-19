@@ -1,6 +1,6 @@
 # General DevOps architecture and GitLab parity proposal
 
-**Status:** Accepted architecture; initial GitLab/Railway slice is
+**Status:** Accepted architecture; the expanded mocked GitLab lifecycle is
 `ready-for-live`, not yet `supported`
 **Goal:** Establish provider-neutral code-hosting and CI/CD interfaces, migrate
 GitHub onto them, and add GitLab as the second implementation without copying
@@ -9,18 +9,20 @@ the orchestration stack or pretending platforms have identical features.
 The provider-neutral decisions in this document are incorporated into
 `ARCHITECTURE.md`, which remains the source of truth. The first implementation
 slice includes canonical `devops` selection, separate code-host/CI registries,
-GitHub compatibility adapters, GitLab repository and CI operations, reviewed
-whole-root GitLab configuration, environment-scoped physical variables, and a
-Railway image deploy recipe. Mocked lifecycle contracts are green.
+GitHub compatibility adapters, explicit GitLab project lifecycle, reviewed
+whole-root GitLab configuration and teardown, environment-scoped physical
+variables, exact-evidence rollback, trusted-runner selection, and portable
+deploy recipes for every current non-native hosting adapter. Mocked lifecycle
+contracts are green.
 
 This is deliberately a lower evidence state than public support. No recent
-live GitLab/Railway lifecycle run is recorded yet. The deploy profile is
-currently GitLab.com 18.1+ with the tagged GitLab-hosted Linux runner;
-self-managed code/status facets remain instance-aware, but managed deploys
-block until a trusted runner can be bound and observed. GitLab rollback,
-removal of obsolete managed files/variables, repository collaboration settings,
-Pages, security products, iOS release, database seed/release jobs, and
-non-Railway hosting paths fail closed or remain outside this slice.
+live project create/delete, deploy, rollback, teardown, or self-managed runner
+lifecycle is recorded yet. GitLab.com 18.1+ can use the exact hosted-runner
+tag. Self-managed deploys require one exact locked project runner, one exact
+online linux/amd64 manager, a dedicated uncontested tag, protected-ref-only
+execution, and an explicit maintenance-note capability attestation. Repository
+collaboration settings, Pages, security products, iOS release, database
+seed/release jobs, and database restore drills remain outside this slice.
 
 ## Product decision
 
@@ -435,7 +437,11 @@ not treated as writable merely because its repository can be observed.
 Repository create/settings/delete is its own lifecycle facet; file or ref
 capabilities cannot create a missing project as a bootstrap side effect.
 Repository deletion is data-bearing, exact-action-id confirmed, retry-safe,
-terminally observed, and removes bindings only after proven absence.
+terminally observed, and removes bindings only after proven absence. The local
+deletion-attempt marker is written before the provider call, so a scheduled
+self-managed deletion followed by a failed permanent-removal request retains
+its durable identity and can only continue through another confirmed exact-id
+destroy action.
 
 A provider registration may contribute code-host capabilities, CI
 capabilities, or both. GitHub and GitHub Actions can share an HTTP client and a
@@ -918,8 +924,12 @@ Runner capability and trust are observed inputs. A program that needs Linux,
 macOS, container builds, privileged execution, or specific architecture cannot
 be rendered onto an arbitrary tag and hoped to work. Provider-hosted runners
 must advertise the required capability; self-managed runners require an exact
-approved binding and safe executor observation. Hypervibe never enables
-privileged Docker execution or broad runner access as a hidden bootstrap step.
+approved binding. GitLab exposes runner/manager identity, tags, protection,
+platform, and architecture, but not executor type or privileged-Docker mode
+through these APIs. Hypervibe therefore requires the operator's exact
+`hypervibe-capabilities:` maintenance-note attestation and reports it as an
+attestation, never provider proof. Hypervibe never enables privileged Docker
+execution or broad runner access as a hidden bootstrap step.
 
 `CiConcurrency` describes the required safety outcome, not a vendor keyword.
 Adapters may implement it with a queue, paused deployment, cancellation group,
@@ -1188,9 +1198,13 @@ application outcomes.
 
 `hv_rollback` uses a provider-neutral release-evidence port. It verifies the
 target artifact, exact SHA, successful pipeline/job, current managed config,
-and absence of a newer/in-progress conflicting deploy before dispatch. The
-existing warning remains unchanged: application rollback does not reverse
-database migrations or provider-side manual changes.
+and absence of a newer/in-progress conflicting deploy, then creates a
+deterministic protected tag and dispatches a new typed-input pipeline. The
+rollback wildcard must grant creation only to the exact authenticated GitLab
+user. `resource_group`, forward-deployment protection, disabled rollback
+retries, and apply-time re-observation close races. The existing warning remains
+unchanged: application rollback does not reverse database migrations or
+provider-side manual changes.
 
 ## Capability parity
 
@@ -1198,13 +1212,14 @@ database migrations or provider-side manual changes.
 | --- | --- | --- |
 | Exact project identity | Project API plus durable numeric project id | MVP |
 | Managed repository files | atomic commit on reviewed branch and merge request | MVP |
-| Managed Railway deploy CI | neutral Railway recipe rendered by GitLab CI adapter | MVP |
+| Managed deploy CI | neutral Railway, Vercel, DigitalOcean, Cloud Run, Azure Container Apps, and ECS Express recipes rendered by GitLab CI | MVP |
 | CI variables/secrets | scoped variables; raw values erased after internal fingerprinting | MVP |
 | Pipeline status, jobs, logs, artifacts | normalized GitLab APIs | MVP |
 | Manual deploy and exact-SHA release evidence | pipeline dispatch and job artifact | MVP |
-| Managed Railway rollback | shared verified release-evidence contract | MVP |
-| Remaining managed hosting deploys | migrate each host once to the neutral recipe contract | Next |
-| Repository create/settings/destroy | separate code-repository lifecycle with namespace scope and destructive confirmation | Later |
+| Managed deploy rollback | shared verified release evidence, deterministic protected tag, typed-input pipeline | MVP |
+| CI teardown | reviewed file removal, active-job gate, exact owned-variable deletion, binding removal | MVP |
+| Repository create/destroy | separate isolated lifecycle with namespace/project authority, durable id, destructive confirmation, and terminal absence | MVP |
+| Repository collaboration settings | separately registered code-host capabilities | Later |
 | Branch protection management | protected branches capability; observed protection is already an MVP deploy precondition | Next |
 | Production deploy authorization | observed protected environment on Premium/Ultimate; Free blocks without another proven mechanism | MVP precondition |
 | Required reviews | merge request approval rules; Premium/Ultimate only | Next |
@@ -1297,14 +1312,18 @@ without depending on two-provider coincidences.
 The smallest useful end-to-end MVP is:
 
 1. GitLab.com and self-managed project connection/verification.
-2. GitLab remote parsing and durable project binding for an existing,
-   initialized repository with a provider-observed default branch; empty-project
-   bootstrap is outside the MVP and never an implicit file-write side effect.
+2. GitLab remote parsing and durable project binding for an existing initialized
+   repository, plus explicit managed creation/deletion. Creation verifies the
+   exact parent namespace, initializes the declared default branch, and records
+   the numeric project id. It never pushes or rewrites local Git history.
+   Deletion requires explicit absent state, exact action confirmation, prior CI
+   teardown, and terminal provider absence before binding removal.
 3. Provider-neutral code-host and CI ports with GitHub and GitHub Actions
    migrated behind them without changing existing outcomes.
 4. The neutral CI program, a GitHub Actions renderer, and a GitLab CI renderer.
-5. Railway migrated from GitHub-specific steps to one neutral deploy recipe;
-   the same recipe compiles for Actions and GitLab CI.
+5. Railway, Vercel, DigitalOcean, Cloud Run, Azure Container Apps, and ECS
+   Express expose provider-neutral deploy recipes; the GitLab renderer has no
+   hosting-provider switch and CI never creates missing hosting infrastructure.
 6. Reviewed GitLab merge request for managed deploy configuration, including
    root include ownership/blocking and exact-commit CI Lint verification.
 7. GitLab CI variables with transport-level value erasure.
@@ -1314,13 +1333,11 @@ The smallest useful end-to-end MVP is:
    pipeline-variable-override observation as required preconditions for
    privileged deploy jobs; management of those settings remains the next
    slice.
-10. Mocked lifecycle contracts plus one opt-in live managed-config/variable/
-   deploy/noop/update/rollback/teardown run in an isolated, pre-provisioned
-   GitLab project. Repository project creation/destruction is not smuggled into
-   this fixture contract. The run can promote the GitLab/Railway capability
-   only for the exact GitLab offering/version and hosting path exercised; a
-   GitLab.com run does not promote self-managed support. It is not a claim of
-   full GitLab parity.
+10. Mocked lifecycle contracts plus separate opt-in live project-lifecycle and
+   managed-config/variable/deploy/noop/update/rollback/teardown runs. A live run
+   promotes only the exact GitLab offering/version, runner mode, and hosting
+   recipe exercised; GitLab.com evidence never promotes self-managed support or
+   another host. It is not a claim of full GitLab parity.
 
 The MVP excludes repository collaboration settings, GitLab Pages, dependency
 updates, GitLab security products, agent-authored merge requests, iOS release,
@@ -1494,8 +1511,9 @@ following are true:
   runners, or inability to isolate deploy secrets block before secret sync;
 - direct push or force push through any exact, wildcard, role, group, user, or
   deploy-key rule blocks privileged deployment;
-- the same neutral Railway recipe renders through GitHub Actions and GitLab CI
-  without a hosting-provider case in either CI adapter;
+- each advertised neutral hosting recipe renders through GitLab CI without a
+  hosting-provider case in the CI adapter, and Railway retains its unchanged
+  GitHub Actions outcome;
 - unknown observation never authorizes create, overwrite, dispatch, or delete;
 - every provider mutation is named by the current non-noop persisted action;
 - GitLab variable values and all credentials are absent from every output

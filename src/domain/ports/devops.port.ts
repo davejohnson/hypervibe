@@ -7,6 +7,7 @@ export interface CodeRepositoryIdentity {
   canonicalScope: string;
   path: string;
   defaultBranch: string;
+  visibility?: 'private' | 'internal' | 'public';
   webUrl: string;
   cloneUrls: string[];
 }
@@ -71,6 +72,35 @@ export interface CodeHostIdentityPort {
   observeRepository(scope: string): Promise<Observation<CodeRepositoryIdentity>>;
 }
 
+export interface ManagedCodeRepositoryRequest {
+  scope: string;
+  defaultBranch: string;
+  visibility: 'private' | 'internal' | 'public';
+}
+
+/** Repository create/delete is deliberately separate from identity and files. */
+export interface CodeRepositoryLifecyclePort extends CodeHostIdentityPort {
+  observeRepositoryById(nativeId: string): Promise<Observation<CodeRepositoryIdentity>>;
+  /** Proves the exact parent scope and lifecycle authority without mutating it. */
+  verifyCreateTarget(request: ManagedCodeRepositoryRequest): Promise<{
+    success: boolean;
+    error?: string;
+  }>;
+  /** Proves delete authority over the exact durable identity without mutating it. */
+  verifyDeleteTarget(identity: CodeRepositoryIdentity): Promise<{
+    success: boolean;
+    error?: string;
+  }>;
+  createRepository(request: ManagedCodeRepositoryRequest): Promise<CodeRepositoryIdentity>;
+  /** Acknowledgement is not convergence; callers must re-observe exact absence. */
+  deleteRepository(identity: CodeRepositoryIdentity): Promise<{
+    scheduled: boolean;
+    permanentRequested: boolean;
+    /** A partial acknowledgement that must be retained and retried safely. */
+    error?: string;
+  }>;
+}
+
 export type CiPhase = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'skipped' | 'unknown';
 
 export interface CiDefinitionSummary {
@@ -120,7 +150,7 @@ export interface CiDispatchRequest {
   definition: string;
   ref: string;
   sha?: string;
-  inputs?: Record<string, string>;
+  inputs?: Record<string, string | number | boolean>;
 }
 
 export interface CiOperationsPort {

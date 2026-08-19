@@ -139,7 +139,15 @@ export class GitHubActionsOperationsAdapter implements CiOperationsPort {
       const ref = await this.adapter.getRef(owner, repo, `heads/${request.ref}`);
       if (!ref || ref.object.sha !== request.sha) throw new Error(`GitHub ref ${request.ref} is not at reviewed commit ${request.sha}`);
     }
-    await this.adapter.triggerWorkflow(owner, repo, request.definition, request.ref, request.inputs);
+    await this.adapter.triggerWorkflow(
+      owner,
+      repo,
+      request.definition,
+      request.ref,
+      request.inputs
+        ? Object.fromEntries(Object.entries(request.inputs).map(([key, value]) => [key, String(value)]))
+        : undefined
+    );
     for (let attempt = 0; attempt < 4; attempt++) {
       const runs = await this.listRuns(repository, request.definition, 20);
       const observed = runs.find((run) => run.ref === request.ref && (!request.sha || run.sha === request.sha));

@@ -785,7 +785,11 @@ that accept replacement configuration at dispatch time are never used.
 Run, job, pipeline, artifact, and attempt ids are bounded opaque strings scoped
 by provider instance and execution identity. Native queue/pause/cancel behavior
 is normalized but never trusted as the only concurrency gate: every privileged
-job rejects a stale/superseded run immediately before provider mutation.
+job rejects a stale/superseded run immediately before provider mutation. The
+GitLab renderer does this with the short-lived job token and the environment's
+provider deployment history, proving the exact current job/pipeline/SHA and
+that no newer deployment exists before exposing provider credentials to its
+runtime.
 Artifact size and retention are observed capabilities, and release evidence
 includes the exact run, job, attempt, SHA, program fingerprint, and provider
 revision.
@@ -794,13 +798,54 @@ GitLab Cloud/self-managed code hosting and GitLab CI are separate registered
 capability sets that may share one verified connection. Self-managed instances
 require an explicit non-secret instance URL and tested version/capability
 range. GitLab projects bind by durable numeric project id first; project path
-and clone URLs are current display/location data. The initial GitLab vertical
-slice is an existing initialized GitLab.com 18.1+ project, the specifically
-tagged GitLab-hosted Linux runner, and Railway managed CI. A project/group runner
-that can claim that tag blocks secret sync. Self-managed deploys require a
-future explicit trusted-runner binding; other hosting providers, collaboration,
-Pages, and advanced GitLab features remain unsupported until their own
-capability and live lifecycle evidence exist.
+and clone URLs are current display/location data. Repository lifecycle is
+explicit under `devops.code.repository`: external is the compatibility default,
+while managed create/delete uses isolated confirmation-gated actions, verifies
+the exact parent namespace or project authority, never adopts a name match, and
+retains the durable binding until exact provider absence is proven. GitLab.com
+scheduled deletion retains that binding through the provider's 30-day
+retention window; self-managed permanent deletion is re-observed before local
+state is removed. Deletion intent is persisted before the first provider call;
+if self-managed GitLab schedules deletion but permanent removal fails, the
+binding is retained and the next separately confirmed destroy retries the exact
+numeric id and full path. Managed creation initializes the declared default branch;
+the resulting default branch and visibility are observed and must converge. If
+GitLab acknowledges the exact project but those settings or clone identities do
+not converge, Hypervibe retains the durable id for recovery and blocks instead
+of retrying creation. In-place repository-setting updates are not part of this
+slice, so later drift blocks explicitly rather than being reported as a noop.
+moving existing local history into that new remote remains separate source
+coordination, not an implicit infrastructure side effect.
+
+GitLab CI renders the registered provider-neutral recipes for Railway, Vercel,
+DigitalOcean App Platform, Cloud Run, Azure Container Apps, and ECS Express.
+CI may build and copy an exact-SHA image, but it mutates only pre-existing bound
+hosting resources and registries; it never bootstraps hosting infrastructure.
+Cloud Run, Azure Container Apps, and ECS Express deploy the registry-returned
+image digest, while provider APIs that accept a tag are pinned to the full Git
+SHA and re-observed with release markers.
+GitLab-hosted runners are accepted only on GitLab.com under the dedicated
+hosted tag, and a project/group runner that can claim that tag blocks secret
+sync. Self-managed execution requires one exact locked project runner id, one
+exact online linux/amd64 manager system id, a dedicated uncontested tag,
+protected-ref-only jobs, and a provider-observed maintenance-note capability
+attestation. GitLab does not expose executor type or privileged-Docker mode in
+these project APIs, so `docker-privileged` remains an explicit operator
+attestation and must not be described as provider-proven.
+
+GitLab rollback selects only an unexpired successful managed release artifact,
+creates a deterministic exact-SHA protected tag, and dispatches a new typed-
+input pipeline. The tag wildcard must allow only the exact authenticated GitLab
+user—not the Maintainer role generally—so another Maintainer cannot manufacture
+a privileged rollback ref. Per-environment `resource_group` serialization,
+forward-deployment protection, disabled rollback retries, and fresh evidence
+observation close deploy races. Teardown first removes managed jobs through one
+reviewed merge request, proves them absent and no relevant job active, deletes
+one exact owned variable per confirmation-gated action, and only then removes
+the local CI binding. These paths remain `ready-for-live`, not `supported`,
+until recent live lifecycle evidence exists for the exact GitLab offering,
+version, runner mode, and hosting recipe. Collaboration, Pages, and advanced
+GitLab features remain separate capabilities.
 
 Deployment ownership is exclusive. Only an explicit `deploy.strategy: "branch"`
 with `deploy.trigger: "native"` may retain a provider-native repository source.

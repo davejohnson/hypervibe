@@ -634,7 +634,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
   gitlab: {
     provider: 'gitlab',
     displayName: 'GitLab',
-    tokenType: 'GitLab project access token (preferred) or personal access token with api, plus a separate project deploy token with read_registry for durable Railway image pulls',
+    tokenType: 'GitLab project access token for an existing project, or a personal access token with api for managed project lifecycle; Railway also needs a separate read_registry project deploy token',
     setupUrl: GITLAB_TOKEN_URLS.api,
     setupUrls: [
       { label: 'Create pre-filled GitLab.com personal access token', url: GITLAB_TOKEN_URLS.api },
@@ -643,7 +643,8 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       { label: 'GitLab deploy token guide', url: GITLAB_TOKEN_URLS.deployTokenDocs },
     ],
     permissions: [
-      'Scope the API token to the exact project, grant api, and give its principal Maintainer access. On GitLab.com, project access tokens require Premium or Ultimate; use a personal access token on Free.',
+      'For an existing project, grant api and give the token principal Maintainer access. Managed project creation/deletion instead requires a personal access token whose user owns the exact parent namespace (Owner for a group); Hypervibe verifies this before planning either mutation.',
+      'For managed rollback, GitLab Premium or Ultimate must protect each hypervibe-rollback-<environment>-* wildcard so only the exact authenticated token user can create it. Role-wide Maintainer access is rejected because it would let another Maintainer manufacture a privileged rollback ref.',
       'For Railway private-image pulls, create a project deploy token in the exact project with read_registry only. Store its generated username as registryUsername and token as registryReadToken.',
     ],
     credentialExample: 'hv_connections provider="gitlab" scope="https://gitlab.com/group/project" credentialsRef="file:/absolute/path/gitlab-connection.json"',
@@ -651,7 +652,8 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'The JSON contains apiToken, optional instanceUrl for self-managed GitLab, and registryUsername/registryReadToken for Railway. Keep it outside the repository.',
       'Choose explicit expiries for both tokens and rotate them before expiry. A GitLab deploy token value is shown only when created.',
       'For self-managed GitLab, use the same officially documented personal-token path on the declared HTTPS instance and set instanceUrl; do not use the GitLab.com creation link.',
-      'The initial managed Railway deploy profile requires GitLab.com 18.1+ and its tagged hosted Linux runner. Self-managed code/status access works, but deploy rendering fails closed until Hypervibe supports an explicit trusted-runner binding.',
+      'GitLab.com 18.1+ can use the observed hosted Linux runner. Self-managed deploys require one exact locked project runner id, one exact online linux/amd64 manager system id, a dedicated tag, protected-ref-only jobs, and the exact hypervibe-capabilities maintenance-note attestation declared in devops.ci.runner.',
+      'GitLab does not expose executor type or Docker privileged mode through these project APIs. The docker-privileged capability is therefore an operator attestation, not provider proof; protect runner administration and verify its config.toml out of band.',
       'The exact project deploy-token page is <project web URL>/-/settings/repository under Deploy tokens; availability and placement can vary by GitLab version.',
     ],
   },

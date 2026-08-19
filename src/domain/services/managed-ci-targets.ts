@@ -31,6 +31,7 @@ export function managedCiEnvironmentBindings(
   providerProjectId?: string;
   providerEnvironmentId?: string;
   providerServiceIds: string[];
+  providerImageUris: string[];
   providerJobNames: string[];
   boundServiceNames: string[];
 } {
@@ -39,6 +40,7 @@ export function managedCiEnvironmentBindings(
   const services = asRecord(bindings?.services);
   const boundServiceNames = Object.keys(services ?? {});
   const providerServiceIds: string[] = [];
+  const providerImageUris: string[] = [];
   const providerJobNames: string[] = [];
   for (const [serviceName, service] of Object.entries(services ?? {})) {
     if (desiredServiceNames && !desiredServiceNames.has(serviceName)) continue;
@@ -49,6 +51,10 @@ export function managedCiEnvironmentBindings(
     const jobName = typeof record?.jobName === 'string' && record.jobName.trim().length > 0
       ? record.jobName.trim()
       : undefined;
+    const imageUri = typeof record?.imageUri === 'string' && record.imageUri.trim().length > 0
+      ? record.imageUri.trim()
+      : undefined;
+    if (imageUri) providerImageUris.push(imageUri);
     const isScheduledJob = record?.resourceType === 'scheduledJob' || Boolean(jobName);
     if (isScheduledJob) {
       const target = jobName ?? serviceId;
@@ -61,6 +67,7 @@ export function managedCiEnvironmentBindings(
     providerProjectId: typeof bindings?.projectId === 'string' ? bindings.projectId : undefined,
     providerEnvironmentId: typeof bindings?.environmentId === 'string' ? bindings.environmentId : undefined,
     providerServiceIds,
+    providerImageUris,
     providerJobNames,
     boundServiceNames,
   };
@@ -110,6 +117,7 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       providerEnvironmentId: bindings.providerEnvironmentId,
       ...(environment.hosting.region ? { providerRegion: environment.hosting.region } : {}),
       providerServiceIds: bindings.providerServiceIds,
+      providerImageUris: bindings.providerImageUris,
       providerJobNames: bindings.providerJobNames,
       needsServiceNames: runtimeServiceNames.length > 0
         || (serviceNames.length === 0 && bindings.providerServiceIds.length > 0),

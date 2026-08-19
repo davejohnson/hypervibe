@@ -15,6 +15,16 @@ function actions(result: CiLifecycleResult): PlanAction[] {
   return [...(result.actions ?? []), ...(result.action ? [result.action] : [])];
 }
 
+function hasRetainedCiBinding(environment: Environment | null): boolean {
+  const ci = environment?.platformBindings.ci;
+  return Boolean(
+    ci
+    && typeof ci === 'object'
+    && !Array.isArray(ci)
+    && Object.values(ci as Record<string, unknown>).some((value) => value !== null && value !== undefined)
+  );
+}
+
 export async function planManagedCiDeploy(params: {
   project: Project;
   spec: ProjectSpec;
@@ -25,7 +35,15 @@ export async function planManagedCiDeploy(params: {
   bindingsWillChange?: boolean;
 }): Promise<{ actions: PlanAction[]; warnings: string[]; error?: string }> {
   const selection = resolveDevOpsSelection(params.spec);
-  if (!selection?.ci) return { actions: [], warnings: [] };
+  if (!selection?.ci) {
+    return hasRetainedCiBinding(params.environment)
+      ? {
+          actions: [],
+          warnings: [],
+          error: 'Managed CI bindings still exist. Keep the current devops.ci provider selected, change this environment deploy strategy to manual, and apply the explicit configuration/variable teardown before removing devops.ci.',
+        }
+      : { actions: [], warnings: [] };
+  }
 
   // This is pinned compatibility behavior, not provider inference for new
   // desired state. It can be deleted when legacy specs are migrated.
@@ -113,4 +131,3 @@ export async function applyManagedCiAction(params: {
   }
   return registration.lifecycle.applyDeploy(params);
 }
-

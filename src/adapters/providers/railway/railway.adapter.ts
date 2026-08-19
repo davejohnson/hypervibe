@@ -23,6 +23,7 @@ import {
   diagnoseRailwayWorkflowLog,
   RAILWAY_CI_REQUIRED_SECRETS,
 } from './railway-ci.workflow.js';
+import { buildRailwayPortableRecipe } from './railway-ci.recipe.js';
 import {
   normalizeProviderDnsRecord,
   providerDnsRecordsAreConfigured,
@@ -5052,6 +5053,8 @@ providerRegistry.register({
         },
         requiresGitHubPackagePull: true,
         buildGitHubActionsSteps: buildRailwayGitHubActionsSteps,
+        buildPortableRecipe: buildRailwayPortableRecipe,
+        portableRunnerCapabilities: ['linux-amd64', 'docker-privileged'],
         diagnoseWorkflowLog: diagnoseRailwayWorkflowLog,
       },
       nativeBranchDeploy: {

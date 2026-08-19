@@ -11,6 +11,7 @@ import {
   type GitLabCredentials,
 } from '../adapters/providers/gitlab/gitlab.adapter.js';
 import { gitLabCiLifecycle } from '../adapters/providers/gitlab/gitlab-ci.lifecycle.js';
+import { executeGitLabCiRollback } from '../adapters/providers/gitlab/gitlab-ci.rollback.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
 import {
   applyGitHubActionsAppliedSpecHash,
@@ -79,6 +80,11 @@ devOpsProviderRegistry.registerCodeHost({
     adapter.connect(credentials as GitLabCredentials);
     return adapter;
   },
+  createLifecycle(credentials: unknown) {
+    const adapter = new GitLabAdapter();
+    adapter.connect(credentials as GitLabCredentials);
+    return adapter;
+  },
 });
 
 devOpsProviderRegistry.registerCiProvider({
@@ -91,5 +97,5 @@ devOpsProviderRegistry.registerCiProvider({
     return adapter;
   },
   lifecycle: gitLabCiLifecycle,
+  rollback: executeGitLabCiRollback,
 });
-

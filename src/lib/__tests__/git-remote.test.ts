@@ -3,6 +3,7 @@ import {
   normalizeGitRemoteForBuild,
   normalizeGitRemoteIdentity,
   parseGitHubRepoFromRemote,
+  parseRepositoryPathFromRemote,
 } from '../git-remote.js';
 
 describe('normalizeGitRemoteIdentity', () => {
@@ -28,6 +29,24 @@ describe('normalizeGitRemoteIdentity', () => {
     expect(normalizeGitRemoteIdentity('')).toBeNull();
     expect(normalizeGitRemoteIdentity('not-a-remote')).toBeNull();
     expect(normalizeGitRemoteIdentity('../local-repository.git')).toBeNull();
+  });
+});
+
+describe('parseRepositoryPathFromRemote', () => {
+  it('preserves nested namespaces across hosted git providers', () => {
+    expect(
+      parseRepositoryPathFromRemote(
+        'git@gitlab.example.com:Acme/Platform/Invoice-Perfect.git'
+      )
+    ).toBe('Acme/Platform/Invoice-Perfect');
+    expect(
+      parseRepositoryPathFromRemote('https://bitbucket.org/acme/storefront.git')
+    ).toBe('acme/storefront');
+  });
+
+  it('rejects local and malformed remotes', () => {
+    expect(parseRepositoryPathFromRemote('../local-repository.git')).toBeNull();
+    expect(parseRepositoryPathFromRemote('not-a-remote')).toBeNull();
   });
 });
 

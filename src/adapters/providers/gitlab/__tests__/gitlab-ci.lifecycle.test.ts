@@ -11,6 +11,7 @@ import { SecretStore, getSecretStore } from '../../../secrets/secret-store.js';
 import { SpecStore } from '../../../../domain/spec/spec.store.js';
 import { projectSpecSchema } from '../../../../domain/spec/spec.schema.js';
 import { gitLabCiLifecycle } from '../gitlab-ci.lifecycle.js';
+import '../../railway/railway.adapter.js';
 import {
   buildRailwayGitLabImageRuntime,
   gitLabShellLiteral,
@@ -27,6 +28,7 @@ const projectPayload = {
   permissions: { project_access: { access_level: 40 } },
   ci_pipeline_variables_minimum_override_role: 'no_one_allowed',
   ci_forward_deployment_enabled: true,
+  ci_forward_deployment_rollback_allowed: false,
   container_registry_access_level: 'private',
 };
 const commitSha = 'a'.repeat(40);
@@ -179,6 +181,9 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       if (method === 'GET' && decodedPath.endsWith('/jwt/auth')) {
         return response({ token: registryPullToken(projectPayload.path_with_namespace) });
       }
+      if (method === 'GET' && decodedPath.endsWith('/user')) {
+        return response({ id: 3, username: 'hypervibe' });
+      }
 
       if (method === 'GET' && /\/api\/v4\/projects\/(?:42|acme\/storefront)$/.test(decodedPath)) {
         return response(projectPayload);
@@ -210,7 +215,10 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       }
       if (method === 'POST' && decodedPath.endsWith('/repository/commits')) {
         const body = JSON.parse(String(init?.body));
-        for (const action of body.actions) committed.set(action.file_path, action.content);
+        for (const action of body.actions) {
+          if (action.action === 'delete') committed.delete(action.file_path);
+          else committed.set(action.file_path, action.content);
+        }
         return response({ id: 'b'.repeat(40), web_url: `${projectPayload.web_url}/-/commit/${'b'.repeat(40)}` });
       }
       if (method === 'GET' && decodedPath.endsWith('/merge_requests')) {
@@ -267,11 +275,20 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       if (method === 'GET' && decodedPath.endsWith('/protected_branches')) {
         return response([{ name: 'main', push_access_levels: [{ access_level: 0 }], allow_force_push: false }]);
       }
+      if (method === 'GET' && decodedPath.endsWith('/protected_tags')) {
+        return response([
+          { name: 'hypervibe-rollback-production-*', create_access_levels: [{ access_level: null, user_id: 3 }] },
+          { name: 'hypervibe-rollback-staging-*', create_access_levels: [{ access_level: null, user_id: 3 }] },
+        ]);
+      }
       if (method === 'GET' && decodedPath.endsWith('/protected_environments/production')) {
         return response({ deploy_access_levels: [{ access_level: 40 }] });
       }
       if (method === 'GET' && decodedPath.endsWith('/variables')) {
         return response([...variables.values()]);
+      }
+      if (method === 'GET' && decodedPath.endsWith('/pipelines')) {
+        return response([]);
       }
       if (method === 'POST' && decodedPath.endsWith('/variables')) {
         const body = JSON.parse(String(init?.body));
@@ -281,6 +298,11 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
           masked: body.masked === true || body.masked_and_hidden === true,
         });
         return response(body, 201);
+      }
+      if (method === 'DELETE' && decodedPath.includes('/variables/')) {
+        const key = decodedPath.slice(decodedPath.lastIndexOf('/') + 1);
+        variables.delete(`${key}:${url.searchParams.get('filter[environment_scope]')}`);
+        return new Response(undefined, { status: 204 });
       }
       throw new Error(`Unexpected GitLab request: ${method} ${url}`);
     });
@@ -329,11 +351,13 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     const commitBody = JSON.parse(commitRequests[0].body!);
     expect(commitBody.actions.map((action: { file_path: string }) => action.file_path)).toEqual([
       '.gitlab-ci.yml',
-      '.gitlab/hypervibe/build-image.sh',
+      '.gitlab/hypervibe/build-railway-production.sh',
+      '.gitlab/hypervibe/build-railway-staging.sh',
       '.gitlab/hypervibe/deploy-railway-production.yml',
       '.gitlab/hypervibe/deploy-railway-staging.yml',
       '.gitlab/hypervibe/manifest.yml',
       '.gitlab/hypervibe/railway-deploy.mjs',
+      '.gitlab/hypervibe/verify-deployment-order.mjs',
     ]);
     const committedFiles = Object.fromEntries(commitBody.actions.map((action: { file_path: string; content: string }) => (
       [action.file_path, action.content]
@@ -343,15 +367,21 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
       'test "$HYPERVIBE_'
     );
     expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
-      'sh .gitlab/hypervibe/build-image.sh "$[[ inputs.commit_sha ]]"'
+      'sh .gitlab/hypervibe/build-railway-production.sh "$[[ inputs.commit_sha ]]"'
     );
-    expect(committedFiles['.gitlab/hypervibe/build-image.sh']).toContain(
-      'The checked-out Git SHA does not match the reviewed deploy SHA'
+    expect(committedFiles['.gitlab/hypervibe/build-railway-production.sh']).toContain(
+      'The checked-out Git SHA does not match the reviewed full deploy SHA'
     );
-    expect(committedFiles['.gitlab/hypervibe/build-image.sh']).toContain(
+    expect(committedFiles['.gitlab/hypervibe/build-railway-production.sh']).toContain(
       'Dockerfile and .dockerignore must not be symbolic links'
     );
-    expect(committedFiles['.gitlab/hypervibe/build-image.sh']).toContain("cat >> \"$ignorefile\"");
+    expect(committedFiles['.gitlab/hypervibe/build-railway-production.sh']).toContain("cat >> \"$ignorefile\"");
+    expect(committedFiles['.gitlab/hypervibe/deploy-railway-production.yml']).toContain(
+      'node .gitlab/hypervibe/verify-deployment-order.mjs'
+    );
+    expect(committedFiles['.gitlab/hypervibe/verify-deployment-order.mjs']).toContain(
+      "'JOB-TOKEN': process.env.CI_JOB_TOKEN"
+    );
     expect(JSON.stringify(commitBody)).not.toContain('gitlab-api-token');
     expect(JSON.stringify(commitBody)).not.toContain('railway-api-token');
 
@@ -432,7 +462,7 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
         environmentSpec: spec.environments.production,
         action,
       });
-      expect(result).toMatchObject({ success: true });
+      expect(result, JSON.stringify(result)).toMatchObject({ success: true });
       expect(JSON.stringify(result)).not.toContain('railway-api-token');
       expect(JSON.stringify(result)).not.toContain('gitlab-registry-read-token');
     }
@@ -478,5 +508,69 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     });
     expect(converged).toEqual({ actions: [], warnings: [] });
     expect(mutationCalls).toEqual([]);
+
+    const teardownSpec = projectSpecSchema.parse({
+      ...spec,
+      environments: {
+        staging: { ...spec.environments.staging, deploy: { strategy: 'manual' } },
+        production: { ...spec.environments.production, deploy: { strategy: 'manual' } },
+      },
+    });
+    merged = true;
+    mergeRequestCreated = false;
+    mutationCalls.length = 0;
+    const teardownConfig = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: teardownSpec,
+      environmentName: 'production',
+      environmentSpec: teardownSpec.environments.production,
+      environment,
+    });
+    expect(teardownConfig.error).toBeUndefined();
+    expect(teardownConfig.actions).toHaveLength(1);
+    expect(teardownConfig.actions?.[0]?.metadata).toMatchObject({
+      operation: 'ciConfigurationSync',
+      removedPaths: expect.arrayContaining(['.gitlab-ci.yml']),
+    });
+    const proposedTeardown = await gitLabCiLifecycle.applyDeploy({
+      project,
+      spec: teardownSpec,
+      environmentName: 'production',
+      environmentSpec: teardownSpec.environments.production,
+      action: teardownConfig.actions![0],
+    });
+    expect(proposedTeardown).toMatchObject({ success: false, status: 'pending' });
+    const teardownCommit = mutationCalls
+      .filter((call) => call.method === 'POST' && call.url.includes('/repository/commits'))
+      .at(-1);
+    expect(JSON.parse(teardownCommit!.body!).actions.every((action: { action: string }) => action.action === 'delete')).toBe(true);
+
+    merged = true;
+    mutationCalls.length = 0;
+    const teardownVariables = await gitLabCiLifecycle.planDeploy({
+      project,
+      spec: teardownSpec,
+      environmentName: 'production',
+      environmentSpec: teardownSpec.environments.production,
+      environment,
+    });
+    expect(teardownVariables.error).toBeUndefined();
+    expect(teardownVariables.actions?.slice(0, -1).every((action) => (
+      action.type === 'destroy' && action.dataBearing && action.requiresConfirm
+    ))).toBe(true);
+    expect(teardownVariables.actions?.at(-1)?.metadata?.operation).toBe('ciBindingRemove');
+    for (const action of teardownVariables.actions ?? []) {
+      const result = await gitLabCiLifecycle.applyDeploy({
+        project,
+        spec: teardownSpec,
+        environmentName: 'production',
+        environmentSpec: teardownSpec.environments.production,
+        action,
+      });
+      expect(result, JSON.stringify(result)).toMatchObject({ success: true });
+    }
+    expect(variables.size).toBe(0);
+    expect(new EnvironmentRepository().findByProjectAndName(project.id, 'production')?.platformBindings)
+      .toMatchObject({ ci: { gitlabCi: null } });
   });
 });

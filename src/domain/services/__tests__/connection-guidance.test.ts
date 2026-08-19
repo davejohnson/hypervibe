@@ -198,12 +198,14 @@ describe('connection guidance', () => {
     expect(apiUrl.searchParams.get('scopes')).toBe('api');
     expect(guidance).toContain(GITLAB_TOKEN_URLS.api);
     expect(guidance).toContain('Maintainer');
+    expect(guidance).toContain('Owner');
     expect(guidance).toContain('read_registry');
     expect(guidance).toContain('registryUsername');
     expect(guidance).toContain('registryReadToken');
     expect(guidance).toContain('credentialsRef="file:');
     expect(guidance).toContain('scope="https://gitlab.com/acme/storefront"');
-    expect(guidance).toContain('Self-managed code/status access works');
+    expect(guidance).toContain('one exact locked project runner id');
+    expect(guidance).toContain('operator attestation');
   });
 
   it('explains where every Twilio credential and optional provider id comes from', () => {

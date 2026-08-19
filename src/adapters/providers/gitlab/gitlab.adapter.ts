@@ -10,6 +10,7 @@ import type {
   CiVariableObservation,
   CodeChangeRequest,
   CodeHostPort,
+  CodeRepositoryLifecyclePort,
   CodeRepositoryCommitAction,
   CodeRepositoryFile,
   CodeRepositoryIdentity,
@@ -64,9 +65,12 @@ export interface GitLabProject {
   };
   ci_pipeline_variables_minimum_override_role?: string;
   ci_forward_deployment_enabled?: boolean;
+  ci_forward_deployment_rollback_allowed?: boolean;
   container_registry_access_level?: 'disabled' | 'private' | 'enabled';
   container_registry_enabled?: boolean;
   repository_object_format?: 'sha1' | 'sha256';
+  marked_for_deletion_on?: string | null;
+  visibility?: 'private' | 'internal' | 'public';
 }
 
 export interface GitLabRunnerSummary {
@@ -75,6 +79,23 @@ export interface GitLabRunnerSummary {
   status: string;
   paused: boolean;
   tags: string[];
+}
+
+export interface GitLabRunnerDetails extends GitLabRunnerSummary {
+  locked: boolean;
+  runUntagged: boolean;
+  accessLevel: string;
+  maintenanceNote?: string;
+}
+
+export interface GitLabRunnerManager {
+  id: string;
+  systemId: string;
+  version?: string;
+  platform?: string;
+  architecture?: string;
+  status: string;
+  contactedAt?: string;
 }
 
 interface GitLabPipeline {
@@ -205,7 +226,7 @@ function mergeRequest(value: GitLabMergeRequest): CodeChangeRequest {
   };
 }
 
-export class GitLabAdapter implements CodeHostPort, CiOperationsPort {
+export class GitLabAdapter implements CodeHostPort, CodeRepositoryLifecyclePort, CiOperationsPort {
   readonly name = 'gitlab';
   private credentials: GitLabCredentials | null = null;
 
@@ -302,25 +323,36 @@ export class GitLabAdapter implements CodeHostPort, CiOperationsPort {
     warning?: string;
   }> {
     try {
-      const user = await this.request<{ id: number; username: string; email?: string }>('GET', '/user');
+      const user = await this.request<{
+        id: number;
+        username: string;
+        email?: string;
+        can_create_project?: boolean;
+        is_admin?: boolean;
+      }>('GET', '/user');
       let warning: string | undefined;
       if (scope) {
         const observation = await this.observeRepository(scope);
-        if (observation.state !== 'present') {
+        if (observation.state === 'absent') {
+          const target = await this.verifyCreateTargetWithUser(scope, user);
+          if (!target.success) {
+            return { success: false, error: target.error };
+          }
+          warning = `GitLab project ${scope} is absent; verified exact parent namespace lifecycle authority for managed creation.`;
+        } else if (observation.state === 'unknown') {
           return {
             success: false,
-            error: observation.state === 'absent'
-              ? `GitLab project ${scope} was not found`
-              : observation.reason,
+            error: observation.reason,
           };
-        }
-        const project = await this.getProject(observation.value.nativeId);
-        const accessLevel = Math.max(
-          project.permissions?.project_access?.access_level ?? 0,
-          project.permissions?.group_access?.access_level ?? 0
-        );
-        if (accessLevel < 40) {
-          warning = 'The token can read the project but Maintainer-or-higher access was not proven; managed CI mutations will block.';
+        } else {
+          const project = await this.getProject(observation.value.nativeId);
+          const accessLevel = Math.max(
+            project.permissions?.project_access?.access_level ?? 0,
+            project.permissions?.group_access?.access_level ?? 0
+          );
+          if (accessLevel < 40) {
+            warning = 'The token can read the project but Maintainer-or-higher access was not proven; managed CI mutations will block.';
+          }
         }
       }
       return {
@@ -340,6 +372,14 @@ export class GitLabAdapter implements CodeHostPort, CiOperationsPort {
       ? String(idOrScope)
       : this.projectPath(String(idOrScope));
     return this.request('GET', this.projectRoute(id));
+  }
+
+  async getCurrentUser(): Promise<{ id: string; username: string }> {
+    const user = await this.request<{ id: number; username: string }>('GET', '/user');
+    if (!Number.isInteger(user.id) || user.id <= 0 || !user.username) {
+      throw new Error('GitLab did not expose one authenticated user identity');
+    }
+    return { id: String(user.id), username: user.username };
   }
 
   async verifyRegistryPull(project: GitLabProject): Promise<{ success: true } | { success: false; error: string }> {
@@ -402,27 +442,266 @@ export class GitLabAdapter implements CodeHostPort, CiOperationsPort {
   async observeRepository(scope: string): Promise<Observation<CodeRepositoryIdentity>> {
     try {
       const project = await this.getProject(scope);
-      if (!project.default_branch) {
-        return { state: 'unknown', reason: `GitLab project ${project.path_with_namespace} is not initialized with a default branch` };
-      }
-      const { instanceUrl } = this.connected();
-      return {
-        state: 'present',
-        value: {
-          provider: 'gitlab',
-          nativeId: String(project.id),
-          instanceScope: instanceUrl,
-          canonicalScope: project.web_url,
-          path: project.path_with_namespace,
-          defaultBranch: project.default_branch,
-          webUrl: project.web_url,
-          cloneUrls: [project.http_url_to_repo, project.ssh_url_to_repo],
-        },
-      };
+      return this.repositoryObservation(project);
     } catch (error) {
       if (error instanceof GitLabHttpError && error.status === 404) return { state: 'absent' };
       return { state: 'unknown', reason: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  async observeRepositoryById(nativeId: string): Promise<Observation<CodeRepositoryIdentity>> {
+    if (!/^\d+$/.test(nativeId)) {
+      return { state: 'unknown', reason: 'GitLab project id must be numeric' };
+    }
+    try {
+      return this.repositoryObservation(await this.getProject(nativeId));
+    } catch (error) {
+      if (error instanceof GitLabHttpError && error.status === 404) return { state: 'absent' };
+      return { state: 'unknown', reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private async verifyCreateTargetWithUser(
+    scope: string,
+    user: {
+      id: number;
+      username: string;
+      can_create_project?: boolean;
+      is_admin?: boolean;
+    }
+  ): Promise<{ success: true; namespaceId: number } | { success: false; error: string }> {
+    try {
+      if (!Number.isInteger(user.id) || user.id <= 0 || !user.username) {
+        return { success: false, error: 'GitLab did not expose one authenticated user identity for project lifecycle' };
+      }
+      if (user.can_create_project !== true && user.is_admin !== true) {
+        return { success: false, error: 'The authenticated GitLab identity is not allowed to create projects' };
+      }
+      const path = this.projectPath(scope);
+      const segments = path.split('/').filter(Boolean);
+      segments.pop();
+      const namespacePath = segments.join('/');
+      if (!namespacePath) {
+        return { success: false, error: 'GitLab managed project scope must include an exact parent namespace' };
+      }
+      const namespace = await this.request<{
+        id: number;
+        full_path?: string;
+        path?: string;
+        kind?: string;
+      }>('GET', `/namespaces/${encodeURIComponent(namespacePath)}`);
+      const observedPath = namespace.full_path ?? namespace.path;
+      if (!Number.isInteger(namespace.id) || namespace.id <= 0 || observedPath !== namespacePath) {
+        return { success: false, error: `GitLab namespace observation did not resolve the exact parent ${namespacePath}` };
+      }
+      if (namespace.kind === 'user') {
+        if (namespacePath !== user.username && user.is_admin !== true) {
+          return { success: false, error: `GitLab user namespace ${namespacePath} is not owned by the authenticated identity` };
+        }
+        return { success: true, namespaceId: namespace.id };
+      }
+      if (namespace.kind !== 'group') {
+        return { success: false, error: `GitLab namespace ${namespacePath} has unsupported kind ${namespace.kind ?? 'unknown'}` };
+      }
+      if (user.is_admin !== true) {
+        const group = await this.request<{
+          id: number;
+          full_path?: string;
+          project_creation_level?: string;
+        }>('GET', `/groups/${namespace.id}`);
+        if (group.id !== namespace.id || group.full_path !== namespacePath) {
+          return { success: false, error: `GitLab group observation did not preserve exact namespace ${namespacePath}` };
+        }
+        if (group.project_creation_level === 'noone') {
+          return { success: false, error: `GitLab group ${namespacePath} disables project creation` };
+        }
+        const membership = await this.request<{ access_level?: number }>(
+          'GET',
+          `/groups/${namespace.id}/members/all/${user.id}`
+        );
+        if (membership.access_level !== 50) {
+          return { success: false, error: `GitLab project lifecycle requires Owner access to exact group ${namespacePath}` };
+        }
+      }
+      return { success: true, namespaceId: namespace.id };
+    } catch (error) {
+      return {
+        success: false,
+        error: `GitLab parent namespace lifecycle verification failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  async verifyCreateTarget(request: {
+    scope: string;
+    defaultBranch: string;
+    visibility: 'private' | 'internal' | 'public';
+  }): Promise<{ success: boolean; error?: string }> {
+    if (request.visibility === 'internal' && this.connected().instanceUrl === 'https://gitlab.com') {
+      return { success: false, error: 'GitLab.com does not support internal project visibility' };
+    }
+    try {
+      const user = await this.request<{
+        id: number;
+        username: string;
+        can_create_project?: boolean;
+        is_admin?: boolean;
+      }>('GET', '/user');
+      const result = await this.verifyCreateTargetWithUser(request.scope, user);
+      return result.success ? { success: true } : result;
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async verifyDeleteTarget(identity: CodeRepositoryIdentity): Promise<{ success: boolean; error?: string }> {
+    if (
+      identity.provider !== 'gitlab'
+      || identity.instanceScope !== this.connected().instanceUrl
+      || !/^[1-9]\d*$/.test(identity.nativeId)
+    ) {
+      return { success: false, error: 'GitLab project deletion requires one exact instance-scoped numeric project identity' };
+    }
+    try {
+      const project = await this.getProject(identity.nativeId);
+      const observed = this.repositoryObservation(project);
+      if (
+        observed.state !== 'present'
+        || observed.value.nativeId !== identity.nativeId
+        || observed.value.instanceScope !== identity.instanceScope
+        || observed.value.path !== identity.path
+        || observed.value.canonicalScope !== identity.canonicalScope
+      ) {
+        return { success: false, error: 'GitLab project identity changed before deletion authority could be verified' };
+      }
+      const user = await this.request<{ id: number; username: string; is_admin?: boolean }>('GET', '/user');
+      const accessLevel = Math.max(
+        project.permissions?.project_access?.access_level ?? 0,
+        project.permissions?.group_access?.access_level ?? 0
+      );
+      const parentPath = project.path_with_namespace.split('/').slice(0, -1).join('/');
+      const ownsPersonalNamespace = parentPath === user.username;
+      if (user.is_admin !== true && accessLevel < 50 && !ownsPersonalNamespace) {
+        return { success: false, error: `GitLab project deletion requires Owner access to exact project ${identity.nativeId}` };
+      }
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: `GitLab project deletion authority is unknown: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+
+  async createRepository(request: {
+    scope: string;
+    defaultBranch: string;
+    visibility: 'private' | 'internal' | 'public';
+  }): Promise<CodeRepositoryIdentity> {
+    if (request.visibility === 'internal' && this.connected().instanceUrl === 'https://gitlab.com') {
+      throw new Error('GitLab.com does not support internal project visibility');
+    }
+    const user = await this.request<{
+      id: number;
+      username: string;
+      can_create_project?: boolean;
+      is_admin?: boolean;
+    }>('GET', '/user');
+    const target = await this.verifyCreateTargetWithUser(request.scope, user);
+    if (!target.success) throw new Error(target.error);
+    const path = this.projectPath(request.scope);
+    const segments = path.split('/').filter(Boolean);
+    const projectPath = segments.pop();
+    const namespacePath = segments.join('/');
+    if (!projectPath || !namespacePath) {
+      throw new Error('GitLab managed project scope must include an existing parent namespace and project path');
+    }
+    const created = await this.request<GitLabProject>('POST', '/projects', {
+      name: projectPath,
+      path: projectPath,
+      namespace_id: target.namespaceId,
+      visibility: request.visibility,
+      initialize_with_readme: true,
+      default_branch: request.defaultBranch,
+      auto_devops_enabled: false,
+      ci_pipeline_variables_minimum_override_role: 'no_one_allowed',
+      ci_forward_deployment_enabled: true,
+      ci_forward_deployment_rollback_allowed: false,
+      container_registry_access_level: 'enabled',
+    });
+    if (created.path_with_namespace !== path || !Number.isInteger(created.id) || created.id <= 0) {
+      throw new Error('GitLab acknowledged project creation outside the exact reviewed repository scope');
+    }
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const observed = await this.observeRepositoryById(String(created.id));
+      if (observed.state === 'present') {
+        return observed.value;
+      }
+      if (observed.state === 'unknown') {
+        throw new Error(`GitLab project creation acknowledgement could not be verified: ${observed.reason}`);
+      }
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error('GitLab acknowledged project creation, but the exact project did not become observable; do not retry blindly');
+  }
+
+  async deleteRepository(identity: CodeRepositoryIdentity): Promise<{ scheduled: boolean; permanentRequested: boolean; error?: string }> {
+    if (
+      identity.provider !== 'gitlab'
+      || identity.instanceScope !== this.connected().instanceUrl
+      || !/^\d+$/.test(identity.nativeId)
+    ) {
+      throw new Error('GitLab repository deletion requires an exact numeric GitLab project identity');
+    }
+    try {
+      await this.response('DELETE', this.projectRoute(identity.nativeId));
+    } catch (error) {
+      // The exact durable id can become hidden as soon as a prior scheduled
+      // deletion is acknowledged. Retrying the reviewed deletion must still
+      // be able to request terminal removal without inventing a replacement.
+      if (!(error instanceof GitLabHttpError && error.status === 404)) throw error;
+    }
+    if (this.connected().instanceUrl === 'https://gitlab.com') {
+      return { scheduled: true, permanentRequested: false };
+    }
+    try {
+      await this.response(
+        'DELETE',
+        this.projectRoute(identity.nativeId),
+        undefined,
+        new URLSearchParams({ permanently_remove: 'true', full_path: identity.path })
+      );
+    } catch (error) {
+      // Some self-managed instances complete the first delete immediately.
+      // A 404 for the exact durable id is terminal absence, not a failed retry.
+      if (error instanceof GitLabHttpError && error.status === 404) {
+        return { scheduled: false, permanentRequested: true };
+      }
+      return {
+        scheduled: true,
+        permanentRequested: false,
+        error: `GitLab acknowledged scheduled project deletion, but permanent removal failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    return { scheduled: false, permanentRequested: true };
+  }
+
+  private repositoryObservation(project: GitLabProject): Observation<CodeRepositoryIdentity> {
+    if (!project.default_branch) {
+      return { state: 'unknown', reason: `GitLab project ${project.path_with_namespace} is not initialized with a default branch` };
+    }
+    const { instanceUrl } = this.connected();
+    return {
+      state: 'present',
+      value: {
+        provider: 'gitlab',
+        nativeId: String(project.id),
+        instanceScope: instanceUrl,
+        canonicalScope: project.web_url,
+        path: project.path_with_namespace,
+        defaultBranch: project.default_branch,
+        ...(project.visibility ? { visibility: project.visibility } : {}),
+        webUrl: project.web_url,
+        cloneUrls: [project.http_url_to_repo, project.ssh_url_to_repo],
+      },
+    };
   }
 
   async observeFile(identity: CodeRepositoryIdentity, path: string, ref: string): Promise<Observation<CodeRepositoryFile>> {
@@ -464,6 +743,36 @@ export class GitLabAdapter implements CodeHostPort, CiOperationsPort {
     } catch (error) {
       if (error instanceof GitLabHttpError && error.status === 404) return { state: 'absent' };
       return { state: 'unknown', reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async observeTag(identity: CodeRepositoryIdentity, tag: string): Promise<Observation<{ name: string; sha: string }>> {
+    try {
+      const value = await this.request<{ name: string; target?: string; commit?: { id?: string } }>(
+        'GET',
+        `${this.projectRoute(identity.nativeId)}/repository/tags/${encodeURIComponent(tag)}`
+      );
+      const sha = value.commit?.id ?? value.target;
+      if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) {
+        return { state: 'unknown', reason: `GitLab tag ${tag} did not expose one full commit SHA` };
+      }
+      return { state: 'present', value: { name: value.name, sha } };
+    } catch (error) {
+      if (error instanceof GitLabHttpError && error.status === 404) return { state: 'absent' };
+      return { state: 'unknown', reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async createTag(identity: CodeRepositoryIdentity, tag: string, sha: string): Promise<void> {
+    if (!/^[0-9a-f]{40}$/i.test(sha)) throw new Error('GitLab tag target must be a full commit SHA');
+    const value = await this.request<{ name: string; target?: string; commit?: { id?: string } }>(
+      'POST',
+      `${this.projectRoute(identity.nativeId)}/repository/tags`,
+      undefined,
+      new URLSearchParams({ tag_name: tag, ref: sha })
+    );
+    if (value.name !== tag || (value.commit?.id ?? value.target) !== sha) {
+      throw new Error('GitLab acknowledged a rollback tag with a different identity or target');
     }
   }
 
@@ -656,7 +965,7 @@ export class GitLabAdapter implements CodeHostPort, CiOperationsPort {
   }
 
   async deleteVariable(projectId: string, key: string, environmentScope: string): Promise<void> {
-    await this.request(
+    await this.response(
       'DELETE',
       `${this.projectRoute(projectId)}/variables/${encodeURIComponent(key)}`,
       undefined,
@@ -686,6 +995,25 @@ export class GitLabAdapter implements CodeHostPort, CiOperationsPort {
     }));
   }
 
+  async listProtectedTags(projectId: string): Promise<Array<{
+    name: string;
+    createAccessLevels: Array<{ accessLevel?: number; userId?: number; groupId?: number; deployKeyId?: number }>;
+  }>> {
+    const values = await this.paginated<{
+      name: string;
+      create_access_levels?: Array<{ access_level?: number | null; user_id?: number | null; group_id?: number | null; deploy_key_id?: number | null }>;
+    }>(`${this.projectRoute(projectId)}/protected_tags`, new URLSearchParams());
+    return values.map((value) => ({
+      name: value.name,
+      createAccessLevels: (value.create_access_levels ?? []).map((level) => ({
+        ...(typeof level.access_level === 'number' ? { accessLevel: level.access_level } : {}),
+        ...(typeof level.user_id === 'number' ? { userId: level.user_id } : {}),
+        ...(typeof level.group_id === 'number' ? { groupId: level.group_id } : {}),
+        ...(typeof level.deploy_key_id === 'number' ? { deployKeyId: level.deploy_key_id } : {}),
+      })),
+    }));
+  }
+
   async listProjectRunners(projectId: string, tag: string): Promise<GitLabRunnerSummary[]> {
     const values = await this.paginated<{
       id: number;
@@ -703,6 +1031,55 @@ export class GitLabAdapter implements CodeHostPort, CiOperationsPort {
       status: value.status ?? 'unknown',
       paused: value.paused !== false,
       tags: value.tag_list ?? [],
+    }));
+  }
+
+  async getRunner(runnerId: string): Promise<GitLabRunnerDetails> {
+    if (!/^\d+$/.test(runnerId)) throw new Error('GitLab runner id must be numeric');
+    const value = await this.request<{
+      id: number;
+      runner_type?: string;
+      status?: string;
+      paused?: boolean;
+      tag_list?: string[];
+      locked?: boolean;
+      run_untagged?: boolean;
+      access_level?: string;
+      maintenance_note?: string;
+    }>('GET', `/runners/${runnerId}`);
+    if (String(value.id) !== runnerId) throw new Error('GitLab returned a different runner identity');
+    return {
+      id: runnerId,
+      runnerType: value.runner_type ?? 'unknown',
+      status: value.status ?? 'unknown',
+      paused: value.paused !== false,
+      tags: value.tag_list ?? [],
+      locked: value.locked === true,
+      runUntagged: value.run_untagged === true,
+      accessLevel: value.access_level ?? 'unknown',
+      ...(value.maintenance_note ? { maintenanceNote: value.maintenance_note } : {}),
+    };
+  }
+
+  async listRunnerManagers(runnerId: string): Promise<GitLabRunnerManager[]> {
+    if (!/^\d+$/.test(runnerId)) throw new Error('GitLab runner id must be numeric');
+    const values = await this.paginated<{
+      id: number;
+      system_id?: string;
+      version?: string;
+      platform?: string;
+      architecture?: string;
+      status?: string;
+      contacted_at?: string;
+    }>(`/runners/${runnerId}/managers`, new URLSearchParams());
+    return values.map((value) => ({
+      id: String(value.id),
+      systemId: value.system_id ?? '',
+      ...(value.version ? { version: value.version } : {}),
+      ...(value.platform ? { platform: value.platform } : {}),
+      ...(value.architecture ? { architecture: value.architecture } : {}),
+      status: value.status ?? 'unknown',
+      ...(value.contacted_at ? { contactedAt: value.contacted_at } : {}),
     }));
   }
 
@@ -778,6 +1155,42 @@ export class GitLabAdapter implements CodeHostPort, CiOperationsPort {
     return this.requestText('GET', `${this.projectRoute(repository.nativeId)}/jobs/${jobId}/trace`);
   }
 
+  async readJobArtifactFile(
+    repository: CodeRepositoryIdentity,
+    jobId: string,
+    artifactPath: string,
+    maxBytes = 65_536
+  ): Promise<Observation<string>> {
+    if (!/^\d+$/.test(jobId)) return { state: 'unknown', reason: 'GitLab job id must be numeric' };
+    if (
+      !artifactPath
+      || artifactPath.startsWith('/')
+      || artifactPath.split('/').some((part) => part === '..' || part === '.')
+      || artifactPath.includes('\\')
+    ) return { state: 'unknown', reason: 'GitLab artifact path is unsafe' };
+    try {
+      const response = await this.response(
+        'GET',
+        `${this.projectRoute(repository.nativeId)}/jobs/${jobId}/artifacts/${artifactPath.split('/').map(encodeURIComponent).join('/')}`,
+        undefined,
+        undefined,
+        'text/plain'
+      );
+      const declared = Number(response.headers.get('content-length') ?? 0);
+      if (Number.isFinite(declared) && declared > maxBytes) {
+        return { state: 'unknown', reason: `GitLab artifact exceeds the ${maxBytes}-byte release-evidence limit` };
+      }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length > maxBytes) {
+        return { state: 'unknown', reason: `GitLab artifact exceeds the ${maxBytes}-byte release-evidence limit` };
+      }
+      return { state: 'present', value: bytes.toString('utf8') };
+    } catch (error) {
+      if (error instanceof GitLabHttpError && error.status === 404) return { state: 'absent' };
+      return { state: 'unknown', reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   async listArtifacts(repository: CodeRepositoryIdentity, runId?: string, limit = 100): Promise<CiArtifactSummary[]> {
     let resolvedRunId = runId;
     if (!resolvedRunId) {
@@ -812,7 +1225,12 @@ export class GitLabAdapter implements CodeHostPort, CiOperationsPort {
       throw new Error('GitLab pipeline dispatch requires an exact reviewed commit SHA');
     }
     const branch = await this.observeBranch(repository, request.ref);
-    if (branch.state !== 'present' || branch.value.sha !== request.sha) {
+    const tag = branch.state === 'absent' ? await this.observeTag(repository, request.ref) : null;
+    const resolvedRef = branch.state === 'present' ? branch : tag;
+    if (branch.state === 'unknown' || tag?.state === 'unknown') {
+      throw new Error(`GitLab ref ${request.ref} observation is unknown`);
+    }
+    if (resolvedRef?.state !== 'present' || resolvedRef.value.sha !== request.sha) {
       throw new Error(`GitLab ref ${request.ref} is not at reviewed commit ${request.sha}`);
     }
     const pipeline = await this.request<GitLabPipeline>(

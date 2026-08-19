@@ -547,7 +547,7 @@ describe('DigitalOceanAdapter', () => {
         services: {},
       }),
       {
-        HYPERVIBE_SOURCE_REPO_URL: 'https://github.com/Acme/Invoice-Perfect.git',
+        HYPERVIBE_SOURCE_REPO_URL: 'git@gitlab.example.com:Acme/Platform/Invoice-Perfect.git',
         NODE_ENV: 'production',
       },
       { deferDeployment: true }
@@ -564,11 +564,12 @@ describe('DigitalOceanAdapter', () => {
           createdService: true,
           deploymentDeferred: true,
           pendingImage: true,
+          imageUri:
+            'registry.digitalocean.com/hypervibe/acme/platform/invoice-perfect:hypervibe-pending',
         },
       },
     });
     expect(result.receipt.message).toContain('exact-SHA CI');
-    expect(result.receipt.data).not.toHaveProperty('imageUri');
     const putCall = fetchMock.mock.calls.find((call) =>
       (call[1] as RequestInit | undefined)?.method === 'PUT'
     ) as [string, RequestInit] | undefined;
@@ -576,13 +577,10 @@ describe('DigitalOceanAdapter', () => {
     expect(body.spec.services[0].image).toEqual({
       registry_type: 'DOCR',
       registry: 'hypervibe',
-      repository: 'acme/invoice-perfect',
+      repository: 'acme/platform/invoice-perfect',
       tag: 'hypervibe-pending',
       deploy_on_push: { enabled: false },
     });
-    expect(JSON.stringify(result.receipt)).not.toContain(
-      'registry.digitalocean.com'
-    );
   });
 
   it('treats an unauthorized registry observation as unknown and does not update the app', async () => {

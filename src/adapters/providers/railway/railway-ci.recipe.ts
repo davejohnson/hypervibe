@@ -1,3 +1,4 @@
+import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
 import type { ProjectRuntime } from '../../../domain/spec/project-runtime.js';
 
 export const RAILWAY_DEPLOY_RUNTIME_PATH = '.gitlab/hypervibe/railway-deploy.mjs';
@@ -227,4 +228,27 @@ await writeFile('.hypervibe-release.json', JSON.stringify(evidence) + '\\n', { m
 
 export function gitLabShellLiteral(value: string): string {
   return shellSingleQuoted(value);
+}
+
+export function buildRailwayPortableRecipe(target: BranchDeployTarget): PortableCiDeployRecipe {
+  if (!target.providerEnvironmentId || target.providerServiceIds.length === 0) {
+    throw new Error(`Railway bindings for ${target.environmentName} are incomplete; apply hosting first, then re-plan CI`);
+  }
+  return {
+    version: 1,
+    provider: 'railway',
+    kind: 'container',
+    runnerCapabilities: ['linux-amd64', 'docker-privileged'],
+    values: [
+      { name: 'RAILWAY_API_TOKEN', source: { kind: 'connection', provider: 'railway', credentialKey: 'apiToken' }, secret: true },
+      { name: 'IMAGE_REGISTRY_USERNAME', source: { kind: 'connection', provider: 'gitlab', credentialKey: 'registryUsername' }, secret: false },
+      { name: 'IMAGE_REGISTRY_TOKEN', source: { kind: 'connection', provider: 'gitlab', credentialKey: 'registryReadToken' }, secret: true },
+      { name: 'RAILWAY_ENVIRONMENT_ID', source: { kind: 'literal', value: target.providerEnvironmentId }, secret: false },
+      { name: 'RAILWAY_SERVICE_IDS', source: { kind: 'literal', value: [...target.providerServiceIds].sort().join(',') }, secret: false },
+    ],
+    runtime: {
+      path: RAILWAY_DEPLOY_RUNTIME_PATH,
+      content: buildRailwayDeployRuntime(),
+    },
+  };
 }

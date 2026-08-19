@@ -104,6 +104,93 @@ describe('GitLab repository identity', () => {
       }],
     });
   });
+
+  it('creates one exact initialized project and verifies its durable id', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ id: 3, username: 'owner', can_create_project: true }))
+      .mockResolvedValueOnce(json({ id: 8, full_path: 'acme/apps', kind: 'group' }))
+      .mockResolvedValueOnce(json({ id: 8, full_path: 'acme/apps', project_creation_level: 'developer' }))
+      .mockResolvedValueOnce(json({ access_level: 50 }))
+      .mockResolvedValueOnce(json(project, 201))
+      .mockResolvedValueOnce(json(project));
+
+    await expect(adapter().createRepository({
+      scope: project.web_url,
+      defaultBranch: 'main',
+      visibility: 'private',
+    })).resolves.toMatchObject({ nativeId: '42', path: 'acme/apps/storefront' });
+
+    const create = fetchMock.mock.calls[4];
+    expect(create?.[0]).toBe('https://gitlab.example.com/gitlab/api/v4/projects');
+    expect(JSON.parse(String(create?.[1]?.body))).toMatchObject({
+      path: 'storefront',
+      namespace_id: 8,
+      initialize_with_readme: true,
+      default_branch: 'main',
+      auto_devops_enabled: false,
+      ci_pipeline_variables_minimum_override_role: 'no_one_allowed',
+      ci_forward_deployment_enabled: true,
+      ci_forward_deployment_rollback_allowed: false,
+      container_registry_access_level: 'enabled',
+    });
+    expect(fetchMock.mock.calls[5]?.[0]).toBe(
+      'https://gitlab.example.com/gitlab/api/v4/projects/42'
+    );
+  });
+
+  it('verifies an absent managed-project target through its exact parent namespace', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ id: 3, username: 'owner', can_create_project: true }))
+      .mockResolvedValueOnce(json({ message: 'not found' }, 404))
+      .mockResolvedValueOnce(json({ id: 8, full_path: 'acme/apps', kind: 'group' }))
+      .mockResolvedValueOnce(json({ id: 8, full_path: 'acme/apps', project_creation_level: 'developer' }))
+      .mockResolvedValueOnce(json({ access_level: 50 }));
+
+    await expect(adapter().verify(project.web_url)).resolves.toMatchObject({
+      success: true,
+      warning: expect.stringContaining('absent'),
+    });
+    expect(fetchMock.mock.calls[4]?.[0]).toBe(
+      'https://gitlab.example.com/gitlab/api/v4/groups/8/members/all/3'
+    );
+  });
+
+  it('rejects managed project lifecycle when exact group Owner access is absent', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ id: 3, username: 'maintainer', can_create_project: true }))
+      .mockResolvedValueOnce(json({ id: 8, full_path: 'acme/apps', kind: 'group' }))
+      .mockResolvedValueOnce(json({ id: 8, full_path: 'acme/apps', project_creation_level: 'developer' }))
+      .mockResolvedValueOnce(json({ access_level: 40 }));
+
+    await expect(adapter().verifyCreateTarget({
+      scope: project.web_url,
+      defaultBranch: 'main',
+      visibility: 'private',
+    })).resolves.toEqual({
+      success: false,
+      error: 'GitLab project lifecycle requires Owner access to exact group acme/apps',
+    });
+  });
+
+  it('treats immediate self-managed deletion as converged acknowledgement', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(undefined, { status: 202 }))
+      .mockResolvedValueOnce(json({ message: 'not found' }, 404));
+    await expect(adapter().deleteRepository({
+      provider: 'gitlab',
+      nativeId: '42',
+      instanceScope: 'https://gitlab.example.com/gitlab',
+      canonicalScope: project.web_url,
+      path: project.path_with_namespace,
+      defaultBranch: 'main',
+      webUrl: project.web_url,
+      cloneUrls: [project.http_url_to_repo],
+    })).resolves.toEqual({ scheduled: false, permanentRequested: true });
+    expect(fetchMock.mock.calls).toHaveLength(2);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain(
+      'permanently_remove=true&full_path=acme%2Fapps%2Fstorefront'
+    );
+  });
 });
 
 describe('GitLab CI variables', () => {
@@ -201,6 +288,43 @@ describe('GitLab runner trust observation', () => {
       expect.stringContaining('/projects/42/runners?tag_list=saas-linux-small-amd64'),
       expect.objectContaining({ method: 'GET' })
     );
+  });
+
+  it('observes the exact self-managed runner and manager machine identity', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({
+        id: 7,
+        runner_type: 'project_type',
+        status: 'online',
+        paused: false,
+        locked: true,
+        run_untagged: false,
+        access_level: 'ref_protected',
+        tag_list: ['hypervibe-prod'],
+        maintenance_note: 'hypervibe-capabilities:docker-privileged,linux-amd64',
+      }))
+      .mockResolvedValueOnce(json([{
+        id: 9,
+        system_id: 's_runner-host-1',
+        platform: 'linux',
+        architecture: 'amd64',
+        status: 'online',
+      }], 200, { 'x-next-page': '' }));
+
+    await expect(adapter().getRunner('7')).resolves.toMatchObject({
+      id: '7',
+      runnerType: 'project_type',
+      locked: true,
+      runUntagged: false,
+      accessLevel: 'ref_protected',
+    });
+    await expect(adapter().listRunnerManagers('7')).resolves.toEqual([expect.objectContaining({
+      id: '9',
+      systemId: 's_runner-host-1',
+      platform: 'linux',
+      architecture: 'amd64',
+      status: 'online',
+    })]);
   });
 });
 

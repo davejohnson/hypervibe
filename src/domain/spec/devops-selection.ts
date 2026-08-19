@@ -41,8 +41,8 @@ function legacyGitHubNeedsActions(spec: ProjectSpec): boolean {
 export function resolveDevOpsSelection(spec: ProjectSpec): DevOpsSelection | null {
   if (spec.devops) {
     return {
-      code: { ...spec.devops.code },
-      ...(spec.devops.ci ? { ci: { ...spec.devops.ci } } : {}),
+      code: { provider: spec.devops.code.provider, scope: spec.devops.code.scope },
+      ...(spec.devops.ci ? { ci: { provider: spec.devops.ci.provider } } : {}),
       ...(spec.devops.canonicalEnvironment
         ? { canonicalEnvironment: spec.devops.canonicalEnvironment }
         : {}),

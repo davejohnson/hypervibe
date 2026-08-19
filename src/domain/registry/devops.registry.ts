@@ -1,8 +1,9 @@
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import type { PlanAction } from '../plan/plan.types.js';
-import type { CodeHostIdentityPort, CiOperationsPort } from '../ports/devops.port.js';
+import type { CodeHostIdentityPort, CodeRepositoryLifecyclePort, CiOperationsPort } from '../ports/devops.port.js';
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
+import type { CiRollbackFailure, CiRollbackResult } from '../services/ci-rollback.service.js';
 
 export interface CiLifecycleResult {
   /** One provider mutation per action; secret/config bundles are never implicit. */
@@ -60,6 +61,8 @@ export interface CodeHostRegistration {
   connectionProvider: string;
   suggestedCiProvider?: string;
   create(credentials: unknown): CodeHostIdentityPort;
+  /** Optional explicit repository lifecycle; file ports never bootstrap projects. */
+  createLifecycle?: (credentials: unknown) => CodeRepositoryLifecyclePort;
 }
 
 export interface CiProviderRegistration {
@@ -68,6 +71,11 @@ export interface CiProviderRegistration {
   compatibleCodeProviders: readonly string[];
   create(credentials: unknown): CiOperationsPort;
   lifecycle: CiLifecyclePort;
+  rollback?: (params: {
+    project: Project;
+    environment: Environment;
+    toSha?: string;
+  }) => Promise<CiRollbackFailure | CiRollbackResult>;
 }
 
 export class DevOpsProviderRegistry {
