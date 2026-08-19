@@ -19,6 +19,8 @@ import {
   type CiRollbackFailure,
   type CiRollbackResult,
 } from './ci-rollback.service.js';
+import { resolveDevOpsSelection } from '../spec/devops-selection.js';
+import { devOpsProviderRegistry } from '../registry/devops.registry.js';
 
 const runRepo = new RunRepository();
 const serviceRepo = new ServiceRepository();
@@ -154,7 +156,8 @@ export async function executeRollback(params: {
 }): Promise<RollbackFailure | RollbackSuccess | CiRollbackFailure | CiRollbackResult> {
   const { project, environment } = params;
 
-  const environmentSpec = new SpecStore().get(project)?.spec.environments[environment.name];
+  const storedSpec = new SpecStore().get(project)?.spec;
+  const environmentSpec = storedSpec?.environments[environment.name];
   const usesManagedCi = environmentSpec?.deploy?.strategy === 'branch'
     && (environmentSpec.deploy.trigger ?? 'ci') === 'ci';
   if (usesManagedCi) {
@@ -170,6 +173,20 @@ export async function executeRollback(params: {
         ok: false,
         reason: 'invalid_target',
         error: 'Managed CI rollback restores the complete verified release; per-service rollback is not supported.',
+      };
+    }
+    const ciProvider = storedSpec ? resolveDevOpsSelection(storedSpec)?.ci?.provider : undefined;
+    if (ciProvider !== 'github-actions') {
+      const rollback = ciProvider
+        ? devOpsProviderRegistry.ciProvider(ciProvider)?.rollback
+        : undefined;
+      if (rollback) {
+        return rollback({ project, environment, toSha: params.toSha });
+      }
+      return {
+        ok: false,
+        reason: 'unsupported',
+        error: `Managed rollback is not implemented for ${ciProvider ?? 'the selected CI provider'} yet. Inspect the exact release with hv_ci_status; Hypervibe will not dispatch an unverified rollback through a GitHub-specific path.`,
       };
     }
     return executeManagedCiRollback({ project, environment, toSha: params.toSha });

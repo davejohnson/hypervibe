@@ -32,14 +32,15 @@ export type CiRollbackFailureReason =
   | 'observation_failed'
   | 'rollback_in_progress'
   | 'workflow_drift'
-  | 'workflow_inactive';
+  | 'workflow_inactive'
+  | 'unsupported';
 
 export type CiRollbackFailure = {
   ok: false;
   reason: CiRollbackFailureReason;
   error: string;
   hint?: string;
-  provider?: 'github';
+  provider?: string;
 };
 
 type ReleaseEvidence = {
@@ -80,9 +81,9 @@ export type CiRollbackResult = {
   environment: string;
   rollbackToSha: string;
   currentSha?: string;
-  sourceArtifactId: number;
-  sourceWorkflowRunId: number;
-  observedLatestWorkflowRunId: number;
+  sourceArtifactId: string | number;
+  sourceWorkflowRunId: string | number;
+  observedLatestWorkflowRunId: string | number;
   selection: RollbackSelection;
   receipts: Awaited<ReturnType<ConvergeExecutor['execute']>>['receipts'];
   errors?: string[];

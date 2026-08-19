@@ -88,6 +88,7 @@ import {
   buildEcsExpressGitHubActionsSteps,
   ECS_EXPRESS_CI_REQUIRED_SECRETS,
 } from './ecs-express-ci.workflow.js';
+import { buildEcsExpressPortableRecipe } from './ecs-express-ci.recipe.js';
 
 const BOOTSTRAP_IMAGE = 'public.ecr.aws/docker/library/node:20-alpine';
 const BOOTSTRAP_COMMAND = [
@@ -1557,6 +1558,8 @@ providerRegistry.register({
           AWS_SECRET_ACCESS_KEY: 'secretAccessKey',
         },
         buildGitHubActionsSteps: buildEcsExpressGitHubActionsSteps,
+        buildPortableRecipe: buildEcsExpressPortableRecipe,
+        portableRunnerCapabilities: ['linux-amd64', 'docker-privileged'],
       },
     },
     lifecycle: {

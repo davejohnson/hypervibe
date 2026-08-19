@@ -13,6 +13,7 @@ import { serviceWorkloadKind, type Service } from '../../../domain/entities/serv
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
 import { buildCloudRunGitHubActionsSteps, CLOUDRUN_CI_REQUIRED_SECRETS } from './cloudrun-ci.workflow.js';
+import { buildCloudRunPortableRecipe } from './cloudrun-ci.recipe.js';
 import { parseHostingBindings, type GetLogsOptions, type LogEntry } from '../../../domain/ports/hosting.port.js';
 import * as pubsub from './pubsub.api.js';
 import { pubsubQueueResourceIds } from '../../../domain/services/queue-env.js';
@@ -4299,6 +4300,8 @@ providerRegistry.register({
           GCP_PROJECT_ID: 'projectId',
         },
         buildGitHubActionsSteps: buildCloudRunGitHubActionsSteps,
+        buildPortableRecipe: buildCloudRunPortableRecipe,
+        portableRunnerCapabilities: ['linux-amd64', 'docker-privileged'],
       },
     },
   },

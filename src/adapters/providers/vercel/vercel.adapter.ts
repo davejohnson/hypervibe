@@ -38,6 +38,7 @@ import {
   buildVercelGitHubActionsSteps,
   VERCEL_CI_REQUIRED_SECRETS,
 } from './vercel-ci.workflow.js';
+import { buildVercelPortableRecipe } from './vercel-ci.recipe.js';
 import {
   VercelCredentialsSchema,
   type VercelCredentials,
@@ -1747,6 +1748,8 @@ providerRegistry.register({
           VERCEL_ACCESS_TOKEN: 'accessToken',
         },
         buildGitHubActionsSteps: buildVercelGitHubActionsSteps,
+        buildPortableRecipe: buildVercelPortableRecipe,
+        portableRunnerCapabilities: ['linux-amd64'],
       },
       nativeBranchDeploy: {
         nonNativeSourcePolicy: 'block',

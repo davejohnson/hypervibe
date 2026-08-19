@@ -19,10 +19,9 @@ import {
   delegatedSecretsForEnvironment,
   planDelegatedSecrets,
 } from '../domain/services/delegated-secret.service.js';
-import {
-  environmentUsesGitHubActionsDeploy,
-  planGitHubActionsDeploy,
-} from '../domain/services/ci-deploy.service.js';
+import { planManagedCiDeploy } from '../domain/services/managed-ci.service.js';
+import { resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
+import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { CommandContext } from '../application/context.js';
@@ -76,13 +75,17 @@ function validateInstalledProviders(spec: ProjectSpec): void {
     'VALIDATION',
     engineIssue
       ? `${issue.provider} does not support ${label} engine "${issue.engine}" in environment "${issue.environment}".`
-      : `Unknown ${label} provider "${issue.provider}" in environment "${issue.environment}".`,
+      : issue.field.startsWith('devops.')
+        ? `Unknown or incompatible ${label} provider "${issue.provider}".`
+        : `Unknown ${label} provider "${issue.provider}" in environment "${issue.environment}".`,
     {
       hint: engineIssue
         ? `Supported ${label} engines for ${issue.provider}: ${issue.available.join(', ') || 'none'}.`
         : `Available ${label} providers: ${issue.available.join(', ')}.`,
       details: {
-        path: `environments.${issue.environment}.${issue.field}`,
+        path: issue.field.startsWith('devops.')
+          ? issue.field
+          : `environments.${issue.environment}.${issue.field}`,
         capability: issue.capability,
         ...(issue.engine ? { engine: issue.engine } : {}),
       },
@@ -305,6 +308,7 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
     required.set(key, existing);
   };
 
+  const devops = resolveDevOpsSelection(spec);
   for (const [envName, envSpec] of Object.entries(spec.environments)) {
     add(envSpec.hosting.provider, envName, 'hosting');
     if (envSpec.database) add(envSpec.database.provider, envName, 'database');
@@ -316,7 +320,15 @@ function requiredConnectionChecklist(ctx: CommandContext, spec: ProjectSpec) {
     }
     if (envSpec.email.enabled) add('sendgrid', envName, 'transactional email');
     if (envSpec.messaging) add('twilio', envName, 'programmable messaging');
-    if (environmentUsesGitHubActionsDeploy(envSpec)) add('github', envName, 'GitHub Actions deploy workflow');
+    if (envSpec.deploy?.strategy === 'branch' && envSpec.deploy.trigger !== 'native' && devops?.ci) {
+      const registration = devOpsProviderRegistry.ciProvider(devops.ci.provider);
+      add(
+        registration?.connectionProvider ?? devops.ci.provider,
+        envName,
+        `${devops.ci.provider} deploy workflow`,
+        [devops.code.scope]
+      );
+    }
     if (envSpec.ios) add('appstoreconnect', envName, 'iOS bundle ID / TestFlight', [envSpec.ios.bundleId]);
     if (envSpec.queues && Object.keys(envSpec.queues).length > 0) add(envSpec.hosting.provider, envName, 'queues');
     for (const storage of Object.values(envSpec.storage ?? {})) add(storage.provider, envName, 'object storage');
@@ -865,24 +877,26 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const deployStrategy = envSpec.deploy?.strategy ?? 'manual';
       const deployTrigger = deployStrategy === 'branch' ? envSpec.deploy?.trigger ?? 'ci' : undefined;
       const ciDeploy = deployTrigger === 'ci'
-        ? await planGitHubActionsDeploy({
+        ? await planManagedCiDeploy({
           project: projectForStatus,
+          spec: specResult.spec,
           environmentName: envName,
           environmentSpec: envSpec,
           environment,
         })
-        : { warnings: [] as string[] };
-      const ciAction = ciDeploy.action;
+        : { actions: [] as PlanAction[], warnings: [] as string[] };
+      const ciAction = ciDeploy.actions[0];
       const ciMetadata = asRecord(ciAction?.metadata);
       const ciWorkflow = asRecord(ciMetadata?.workflow);
       const ciNeedsSync = Boolean(ciAction && ciAction.type !== 'noop');
-      const ciAutoDeployOnPush = booleanField(ciWorkflow, 'autoDeployOnPush') ?? false;
+      const ciAutoDeployOnPush = booleanField(ciWorkflow, 'autoDeployOnPush')
+        ?? (envSpec.deploy?.autoDeploy ?? !envName.toLowerCase().includes('prod'));
+      const ciProvider = resolveDevOpsSelection(specResult.spec)?.ci?.provider;
       const ciDeploySource = deployStrategy === 'branch' && deployTrigger === 'ci'
         ? {
-          provider: 'github-actions',
-          setup: ciAction
-            ? (ciNeedsSync ? 'needs-sync' : 'in-sync')
-            : 'unavailable',
+          provider: ciProvider ?? 'unavailable',
+          setup: ciDeploy.error ? 'blocked' : ciNeedsSync ? 'needs-sync' : 'in-sync',
+          ...(ciDeploy.error ? { error: ciDeploy.error } : {}),
           ...(ciWorkflow
             ? {
               workflow: {
@@ -903,7 +917,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             : {}),
         }
         : undefined;
-      const ciPushToDeploy = Boolean(deployStrategy === 'branch' && deployTrigger === 'ci' && ciAction?.type === 'noop' && ciAutoDeployOnPush);
+      const ciPushToDeploy = Boolean(deployStrategy === 'branch' && deployTrigger === 'ci' && !ciDeploy.error && !ciNeedsSync && ciAutoDeployOnPush);
 
       // iOS drift (identity + TestFlight) when the environment declares it.
       const ios = envSpec.ios
@@ -950,7 +964,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed.partial
         || Object.values(observed.completeness ?? {}).includes('unknown')
       );
-      const blocked = planService.preflight(envSpec, envName);
+      const blocked = planService.preflight(envSpec, envName, specResult.spec);
       for (const stripeBlock of stripeSync.blocked) {
         if (!blocked.some((entry) => entry.provider === 'stripe' && entry.scope === stripeBlock.scope)) {
           blocked.push(stripeBlock);
@@ -1053,8 +1067,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             })
             : sourceWarnings.length > 0
               ? `Fix ${hostingMetadata?.displayName ?? envSpec.hosting.provider} native repository access and contributor permissions, then rerun hv_status or hv_plan.`
-              : deployStrategy === 'branch' && deployTrigger === 'ci' && ciNeedsSync
-                ? 'Run hv_plan and hv_apply to converge the GitHub Actions provider-API deploy workflow; use hv_ci_status for workflow runs.'
+              : deployStrategy === 'branch' && deployTrigger === 'ci' && (ciNeedsSync || ciDeploy.error)
+                ? 'Run hv_plan and hv_apply to converge the selected managed CI provider; use hv_ci_status for runs after configuration is active.'
               : delegatedSecrets.inputRequired.length > 0
                 ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
               : maintenanceDrift.length > 0 || nativeDeploySourceDrift.length > 0 || drift.length > 0 || cacheDrift.length > 0 || databaseResilienceDrift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 || emailDrift.length > 0 || messagingDrift.length > 0

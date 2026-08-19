@@ -737,7 +737,115 @@ TestFlight upload, or TestFlight distribution commands.
 
 ## CI And Push Deploys
 
-For push deploys, `deploy.trigger: "ci"` is the portable default. It means Hypervibe manages generated GitHub Actions workflows that call provider APIs directly.
+For push deploys, `deploy.trigger: "ci"` is the portable default. The canonical
+`devops.code` and optional `devops.ci` blocks select independently registered
+code-host and CI providers. Legacy top-level `github` desired state remains
+readable through one lossless compatibility normalization to `github` plus
+`github-actions`; new providers must not add parallel top-level blocks.
+
+Code-host and CI provider ids are open registry values. Generic plan/apply,
+hosting, tool, CLI, and MCP code routes through provider capabilities and does
+not branch on GitHub, GitLab, or provider-native API fields. Code identity and
+CI execution identity are separate durable bindings even when one vendor
+supplies both. A CI provider must prove compatibility with the exact bound code
+repository before any configuration, variable, dispatch, or evidence action.
+
+`devops.ci` names one primary application release authority. Project features
+such as GitHub Pages may use a separate feature-scoped executor, but that
+executor has disjoint files and secrets and cannot own application deploy
+variables, release evidence, promotion, or rollback. Pages retains separate
+content-source, static-hosting-target, and optional publication-executor
+bindings; its target need not be the application repository.
+
+Hosting providers emit provider-neutral, versioned deploy recipes. CI adapters
+render those recipes and operate definitions/runs; hosting code never emits
+GitHub Actions or GitLab CI syntax. The neutral program has typed triggers,
+runner requirements, logical variables/secrets, semantic steps, concurrency,
+and release evidence. It has no raw provider-YAML or privileged free-form-shell
+escape hatch. An unknown program/step version or unsupported semantic returns
+`UNSUPPORTED` before mutation.
+
+CI configuration is an observed authority graph, not just a file hash. The CI
+adapter owns whole-root, provider-proven composable-include, or provider-managed
+configuration semantics and must observe all import and transformation layers
+that can alter privileged jobs. Unknown effective configuration blocks secret
+sync, dispatch, and release evidence. The initial GitLab MVP supports only a
+Hypervibe-owned root `.gitlab-ci.yml`; a pre-existing unmanaged root is
+preserved and blocks with review guidance.
+
+CI variables are observed with provider-native scope, precedence, protection,
+and value visibility (`plaintext`, `redacted`, `omitted`, or `unknown`). Raw
+values are fingerprinted, if available, and erased inside the adapter response
+boundary. Every higher-precedence value or dispatch input that can shadow a
+commit, applied-spec, promotion, or renderer control value must be proven safe;
+unknown or overrideable gates block privileged work. Dispatch may reference
+only the bound reviewed definition and exact provider-observed revision. APIs
+that accept replacement configuration at dispatch time are never used.
+
+Run, job, pipeline, artifact, and attempt ids are bounded opaque strings scoped
+by provider instance and execution identity. Native queue/pause/cancel behavior
+is normalized but never trusted as the only concurrency gate: every privileged
+job rejects a stale/superseded run immediately before provider mutation. The
+GitLab renderer does this with the short-lived job token and the environment's
+provider deployment history, proving the exact current job/pipeline/SHA and
+that no newer deployment exists before exposing provider credentials to its
+runtime.
+Artifact size and retention are observed capabilities, and release evidence
+includes the exact run, job, attempt, SHA, program fingerprint, and provider
+revision.
+
+GitLab Cloud/self-managed code hosting and GitLab CI are separate registered
+capability sets that may share one verified connection. Self-managed instances
+require an explicit non-secret instance URL and tested version/capability
+range. GitLab projects bind by durable numeric project id first; project path
+and clone URLs are current display/location data. Repository lifecycle is
+explicit under `devops.code.repository`: external is the compatibility default,
+while managed create/delete uses isolated confirmation-gated actions, verifies
+the exact parent namespace or project authority, never adopts a name match, and
+retains the durable binding until exact provider absence is proven. GitLab.com
+scheduled deletion retains that binding through the provider's 30-day
+retention window; self-managed permanent deletion is re-observed before local
+state is removed. Deletion intent is persisted before the first provider call;
+if self-managed GitLab schedules deletion but permanent removal fails, the
+binding is retained and the next separately confirmed destroy retries the exact
+numeric id and full path. Managed creation initializes the declared default branch;
+the resulting default branch and visibility are observed and must converge. If
+GitLab acknowledges the exact project but those settings or clone identities do
+not converge, Hypervibe retains the durable id for recovery and blocks instead
+of retrying creation. In-place repository-setting updates are not part of this
+slice, so later drift blocks explicitly rather than being reported as a noop.
+moving existing local history into that new remote remains separate source
+coordination, not an implicit infrastructure side effect.
+
+GitLab CI renders the registered provider-neutral recipes for Railway, Vercel,
+DigitalOcean App Platform, Cloud Run, Azure Container Apps, and ECS Express.
+CI may build and copy an exact-SHA image, but it mutates only pre-existing bound
+hosting resources and registries; it never bootstraps hosting infrastructure.
+Cloud Run, Azure Container Apps, and ECS Express deploy the registry-returned
+image digest, while provider APIs that accept a tag are pinned to the full Git
+SHA and re-observed with release markers.
+GitLab-hosted runners are accepted only on GitLab.com under the dedicated
+hosted tag, and a project/group runner that can claim that tag blocks secret
+sync. Self-managed execution requires one exact locked project runner id, one
+exact online linux/amd64 manager system id, a dedicated uncontested tag,
+protected-ref-only jobs, and a provider-observed maintenance-note capability
+attestation. GitLab does not expose executor type or privileged-Docker mode in
+these project APIs, so `docker-privileged` remains an explicit operator
+attestation and must not be described as provider-proven.
+
+GitLab rollback selects only an unexpired successful managed release artifact,
+creates a deterministic exact-SHA protected tag, and dispatches a new typed-
+input pipeline. The tag wildcard must allow only the exact authenticated GitLab
+user—not the Maintainer role generally—so another Maintainer cannot manufacture
+a privileged rollback ref. Per-environment `resource_group` serialization,
+forward-deployment protection, disabled rollback retries, and fresh evidence
+observation close deploy races. Teardown first removes managed jobs through one
+reviewed merge request, proves them absent and no relevant job active, deletes
+one exact owned variable per confirmation-gated action, and only then removes
+the local CI binding. These paths remain `ready-for-live`, not `supported`,
+until recent live lifecycle evidence exists for the exact GitLab offering,
+version, runner mode, and hosting recipe. Collaboration, Pages, and advanced
+GitLab features remain separate capabilities.
 
 Deployment ownership is exclusive. Only an explicit `deploy.strategy: "branch"`
 with `deploy.trigger: "native"` may retain a provider-native repository source.

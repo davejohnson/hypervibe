@@ -49,4 +49,40 @@ describe('validateProjectSpecProviders', () => {
     expect(issues[2].available).toContain('railway');
   });
 
+  it('validates open DevOps provider ids and code-host compatibility through the separate registry', () => {
+    const base = {
+      version: 1 as const,
+      project: 'devops-provider-contract',
+      gitRemoteUrl: 'https://gitlab.com/acme/app.git',
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: {},
+          deploy: { strategy: 'branch' as const, trigger: 'ci' as const },
+        },
+      },
+    };
+    const gitlab = projectSpecSchema.parse({
+      ...base,
+      devops: {
+        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/app' },
+        ci: { provider: 'gitlab-ci' },
+      },
+    });
+    expect(validateProjectSpecProviders(gitlab)).toEqual([]);
+
+    const incompatible = projectSpecSchema.parse({
+      ...base,
+      devops: {
+        code: { provider: 'gitlab', scope: 'https://gitlab.com/acme/app' },
+        ci: { provider: 'github-actions' },
+      },
+    });
+    expect(validateProjectSpecProviders(incompatible)).toContainEqual(expect.objectContaining({
+      field: 'devops.ci.provider',
+      provider: 'github-actions',
+      capability: 'ci',
+    }));
+  });
+
 });

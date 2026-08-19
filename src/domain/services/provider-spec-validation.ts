@@ -3,13 +3,14 @@ import {
   providerRegistry,
   type ProviderLifecycleCapability,
 } from '../registry/provider.registry.js';
+import { devOpsProviderRegistry } from '../registry/devops.registry.js';
 
 export interface ProviderSpecIssue {
   environment: string;
-  field: 'hosting.provider' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine';
+  field: 'hosting.provider' | 'database.provider' | 'database.engine' | 'cache.provider' | 'cache.engine' | 'devops.code.provider' | 'devops.ci.provider';
   provider: string;
   engine?: string;
-  capability: ProviderLifecycleCapability;
+  capability: ProviderLifecycleCapability | 'code-host' | 'ci';
   available: string[];
 }
 
@@ -21,6 +22,36 @@ export interface ProviderSpecIssue {
  */
 export function validateProjectSpecProviders(spec: ProjectSpec): ProviderSpecIssue[] {
   const issues: ProviderSpecIssue[] = [];
+  if (spec.devops && !devOpsProviderRegistry.codeHost(spec.devops.code.provider)) {
+    issues.push({
+      environment: 'project',
+      field: 'devops.code.provider',
+      provider: spec.devops.code.provider,
+      capability: 'code-host',
+      available: devOpsProviderRegistry.codeHostIds(),
+    });
+  }
+  if (spec.devops?.ci && !devOpsProviderRegistry.ciProvider(spec.devops.ci.provider)) {
+    issues.push({
+      environment: 'project',
+      field: 'devops.ci.provider',
+      provider: spec.devops.ci.provider,
+      capability: 'ci',
+      available: devOpsProviderRegistry.ciProviderIds(),
+    });
+  } else if (
+    spec.devops?.ci
+    && !devOpsProviderRegistry.compatible(spec.devops.code.provider, spec.devops.ci.provider)
+  ) {
+    issues.push({
+      environment: 'project',
+      field: 'devops.ci.provider',
+      provider: spec.devops.ci.provider,
+      capability: 'ci',
+      available: devOpsProviderRegistry.ciProviderIds()
+        .filter((provider) => devOpsProviderRegistry.compatible(spec.devops!.code.provider, provider)),
+    });
+  }
   for (const [environment, environmentSpec] of Object.entries(spec.environments)) {
     if (!providerRegistry.supports(environmentSpec.hosting.provider, 'hosting')) {
       issues.push({

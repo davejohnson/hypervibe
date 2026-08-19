@@ -13,21 +13,104 @@ import type { CiWorkflowDiagnostic } from '../domain/ports/ci-deploy.port.js';
 import type { CommandContext } from '../application/context.js';
 import { projectField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
+import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
+import { getSecretStore } from '../adapters/secrets/secret-store.js';
+import { normalizeGitRemoteIdentity } from '../lib/git-remote.js';
+import type { CiOperationsPort, CodeRepositoryIdentity } from '../domain/ports/devops.port.js';
 
 const repoField = z
   .string()
   .optional()
-  .describe('GitHub repository as "owner/repo". Defaults from the project gitRemoteUrl.');
+  .describe('Deprecated repository override for legacy GitHub projects. Canonical devops projects use the reviewed devops.code.scope.');
 
-const numericIdField = z.preprocess(
+const opaqueIdField = z.preprocess(
   (value) => {
-    if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
-      return Number(value.trim());
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
+      return String(value);
     }
     return value;
   },
-  z.number().int().positive()
+  z.string().trim().min(1)
 );
+
+interface CanonicalCiContext {
+  project: ReturnType<CommandContext['resolveProjectOrThrow']>;
+  repository: CodeRepositoryIdentity;
+  ci: CiOperationsPort;
+  ciProvider: string;
+}
+
+async function canonicalCiContextOrNull(
+  ctx: CommandContext,
+  projectRef: string | undefined,
+  repoOverride?: string
+): Promise<CanonicalCiContext | null> {
+  const project = ctx.resolveProjectOrThrow({ project: projectRef });
+  const spec = new SpecStore().get(project)?.spec;
+  if (!spec?.devops) return null;
+  if (!spec.devops.ci) {
+    throw new HvError('UNSUPPORTED', 'The project has no primary CI provider in devops.ci.');
+  }
+  if (repoOverride && repoOverride !== spec.devops.code.scope) {
+    throw new HvError('VALIDATION', 'repo cannot override canonical devops.code.scope.', {
+      hint: `Use the reviewed repository scope ${spec.devops.code.scope}.`,
+    });
+  }
+  const codeRegistration = devOpsProviderRegistry.codeHost(spec.devops.code.provider);
+  const ciRegistration = devOpsProviderRegistry.ciProvider(spec.devops.ci.provider);
+  if (!codeRegistration) throw new HvError('UNSUPPORTED', `Code-host provider "${spec.devops.code.provider}" is not registered.`);
+  if (!ciRegistration) throw new HvError('UNSUPPORTED', `CI provider "${spec.devops.ci.provider}" is not registered.`);
+  if (!devOpsProviderRegistry.compatible(spec.devops.code.provider, spec.devops.ci.provider)) {
+    throw new HvError('UNSUPPORTED', `${spec.devops.ci.provider} is not compatible with ${spec.devops.code.provider}.`);
+  }
+  const codeConnection = ctx.repos.connections.findBestVerifiedMatch(
+    codeRegistration.connectionProvider,
+    spec.devops.code.scope
+  );
+  if (!codeConnection) {
+    throw new HvError('MISSING_CONNECTION', `No verified ${codeRegistration.connectionProvider} connection found.`, {
+      ...connectionSetupOptions(codeRegistration.connectionProvider, {
+        project: project.name,
+        scope: spec.devops.code.scope,
+      }),
+    });
+  }
+  const codeCredentials = getSecretStore().decryptObject<unknown>(codeConnection.credentialsEncrypted);
+  const code = codeRegistration.create(codeCredentials);
+  const observed = await code.observeRepository(spec.devops.code.scope);
+  if (observed.state !== 'present') {
+    throw new HvError('PROVIDER_ERROR', observed.state === 'absent'
+      ? `Repository ${spec.devops.code.scope} was not found.`
+      : observed.reason);
+  }
+  const selectedRemote = normalizeGitRemoteIdentity(project.gitRemoteUrl);
+  const cloneIdentities = observed.value.cloneUrls
+    .map((value) => normalizeGitRemoteIdentity(value))
+    .filter((value): value is string => Boolean(value));
+  if (!selectedRemote || !cloneIdentities.includes(selectedRemote)) {
+    throw new HvError('VALIDATION', 'The selected project remote does not match the provider-observed repository identity.');
+  }
+  const ciConnection = ctx.repos.connections.findBestVerifiedMatch(
+    ciRegistration.connectionProvider,
+    spec.devops.code.scope
+  );
+  if (!ciConnection) {
+    throw new HvError('MISSING_CONNECTION', `No verified ${ciRegistration.connectionProvider} connection found.`, {
+      ...connectionSetupOptions(ciRegistration.connectionProvider, {
+        project: project.name,
+        scope: spec.devops.code.scope,
+      }),
+    });
+  }
+  const ciCredentials = getSecretStore().decryptObject<unknown>(ciConnection.credentialsEncrypted);
+  return {
+    project,
+    repository: observed.value,
+    ci: ciRegistration.create(ciCredentials),
+    ciProvider: spec.devops.ci.provider,
+  };
+}
 
 interface RepoRef {
   project: string;
@@ -188,18 +271,80 @@ function diagnoseWorkflowLog(text: string): CiWorkflowDiagnostic[] {
 export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_ci_status',
-    'Authoritative inspection path for Hypervibe-managed GitHub Actions deploys and iOS releases. Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls. Returns workflows, recent runs, run jobs/steps, bounded job log tails, release artifact provenance, GitHub Pages status, and branch protection rules through Hypervibe\'s stored GitHub connection.',
+    'Authoritative provider-neutral inspection path for Hypervibe-managed CI. Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls. The same connection and audit boundary applies to GitLab. Returns definitions, recent runs, jobs, bounded job log tails, and artifact provenance through the project\'s reviewed code-host and CI bindings. GitHub Pages and branch protection remain feature-scoped GitHub observations.',
     {
       project: projectField,
       repo: repoField,
-      include: z.array(z.enum(['workflows', 'runs', 'jobs', 'logs', 'artifacts', 'pages', 'branch-protection'])).optional().describe('Sections to include (default: ["workflows"]). jobs/logs require runId. artifacts exposes names/provenance but never artifact contents. logs returns a bounded tail, not a full archive.'),
-      workflow: z.string().optional().describe('Workflow id or filename (required when include contains "runs")'),
-      runId: numericIdField.optional().describe('GitHub Actions run id, required when include contains "jobs" or "logs".'),
-      jobId: numericIdField.optional().describe('Optional GitHub Actions job id for include=["logs"]. Defaults to failed jobs for the run, or the first job if none failed.'),
+      include: z.array(z.enum(['definitions', 'workflows', 'runs', 'jobs', 'logs', 'artifacts', 'pages', 'branch-protection'])).optional().describe('Sections to include (default: ["definitions"] for canonical devops specs and ["workflows"] for legacy GitHub). jobs/logs require runId. artifacts exposes names/provenance but never artifact contents.'),
+      definition: z.string().optional().describe('Provider-native definition id or path (required when include contains "runs").'),
+      workflow: z.string().optional().describe('Deprecated alias for definition; retained for GitHub compatibility.'),
+      runId: opaqueIdField.optional().describe('Opaque provider-native run id, required when include contains "jobs" or "logs".'),
+      jobId: opaqueIdField.optional().describe('Optional opaque provider-native job id for include=["logs"]. Defaults to failed jobs, or the first job.'),
       logLines: z.number().int().positive().max(500).optional().describe('Number of log lines to return per job for include=["logs"] (default 120, max 500).'),
       branch: z.string().optional().describe('Branch for branch-protection (default "main")'),
     },
-    wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, include, workflow, runId, jobId, logLines, branch }) => {
+    wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, include, definition, workflow, runId, jobId, logLines, branch }) => {
+      const canonical = await canonicalCiContextOrNull(ctx, projectRef, repoOverride);
+      if (canonical) {
+        const sections = include?.length ? include : ['definitions' as const];
+        const data: Record<string, unknown> = {
+          codeProvider: canonical.repository.provider,
+          ciProvider: canonical.ciProvider,
+          repository: {
+            id: canonical.repository.nativeId,
+            scope: canonical.repository.canonicalScope,
+            path: canonical.repository.path,
+          },
+        };
+        for (const section of sections) {
+          if (section === 'pages' || section === 'branch-protection') {
+            throw new HvError('UNSUPPORTED', `${section} is a code-host feature, not a primary-CI section for ${canonical.ciProvider}.`);
+          }
+          try {
+            if (section === 'definitions' || section === 'workflows') {
+              const values = await canonical.ci.listDefinitions(canonical.repository);
+              data[section] = values;
+            } else if (section === 'runs') {
+              const selected = definition ?? workflow;
+              if (!selected) throw new HvError('VALIDATION', 'definition is required when include contains "runs".');
+              data.runs = await canonical.ci.listRuns(canonical.repository, selected, 10);
+            } else if (section === 'jobs') {
+              if (!runId) throw new HvError('VALIDATION', 'runId is required when include contains "jobs".');
+              data.jobs = await canonical.ci.listJobs(canonical.repository, runId, 100);
+            } else if (section === 'logs') {
+              if (!runId) throw new HvError('VALIDATION', 'runId is required when include contains "logs".');
+              const jobs = await canonical.ci.listJobs(canonical.repository, runId, 100);
+              const selectedJobs = jobId
+                ? jobs.filter((job) => job.id === jobId)
+                : jobs.filter((job) => ['failed', 'canceled', 'unknown'].includes(job.phase)).slice(0, 3);
+              const jobsForLogs = selectedJobs.length > 0 ? selectedJobs : jobs.slice(0, 1);
+              const entries = await Promise.all(jobsForLogs.map(async (job) => {
+                try {
+                  const text = await canonical.ci.getJobLog(canonical.repository, job.id);
+                  return { jobId: job.id, name: job.name, phase: job.phase, ...tailLogText(text, logLines ?? 120) };
+                } catch (error) {
+                  return { jobId: job.id, name: job.name, phase: job.phase, error: error instanceof Error ? error.message : String(error) };
+                }
+              }));
+              data.logs = entries;
+              const diagnostics = entries.flatMap((entry) => (
+                'text' in entry && typeof entry.text === 'string'
+                  ? diagnoseWorkflowLog(entry.text).map((diagnostic) => ({ ...diagnostic, jobId: entry.jobId, jobName: entry.name }))
+                  : []
+              ));
+              if (diagnostics.length > 0) data.diagnostics = diagnostics;
+            } else if (section === 'artifacts') {
+              data.artifacts = await canonical.ci.listArtifacts(canonical.repository, runId, 100);
+            }
+          } catch (error) {
+            if (error instanceof HvError) throw error;
+            data[section === 'workflows' ? 'definitions' : section] = {
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+        return commandSuccess(data);
+      }
       const repoRef = resolveRepoOrThrow(ctx, projectRef, repoOverride);
       const { owner, repo } = repoRef;
       const adapter = githubAdapterOrThrow(repoRef);
@@ -209,9 +354,10 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
       for (const section of sections) {
         try {
           switch (section) {
+            case 'definitions':
             case 'workflows': {
               const workflows = await adapter.listWorkflows(owner, repo);
-              data.workflows = workflows.workflows.map((w) => ({ id: w.id, name: w.name, path: w.path, state: w.state }));
+              data[section] = workflows.workflows.map((w) => ({ id: w.id, name: w.name, path: w.path, state: w.state }));
               break;
             }
             case 'runs': {
@@ -240,7 +386,8 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
                   hint: 'Get the run id from hv_ci_status include=["runs"], then rerun with include=["jobs"] and runId=<id>.',
                 });
               }
-              const jobs = await adapter.listWorkflowRunJobs(owner, repo, runId, { per_page: 100 });
+              const legacyRunId = /^\d+$/.test(runId) ? Number(runId) : runId;
+              const jobs = await adapter.listWorkflowRunJobs(owner, repo, legacyRunId, { per_page: 100 });
               data.jobs = jobs.jobs.map(summarizeWorkflowJob);
               break;
             }
@@ -250,14 +397,15 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
                   hint: 'Get the run id from hv_ci_status include=["runs"], then rerun with include=["logs"] and runId=<id>.',
                 });
               }
-              const jobs = await adapter.listWorkflowRunJobs(owner, repo, runId, { per_page: 100 });
+              const legacyRunId = /^\d+$/.test(runId) ? Number(runId) : runId;
+              const jobs = await adapter.listWorkflowRunJobs(owner, repo, legacyRunId, { per_page: 100 });
               const targetJobs = jobId
-                ? jobs.jobs.filter((job) => job.id === jobId)
+                ? jobs.jobs.filter((job) => String(job.id) === jobId)
                 : jobs.jobs.filter(isUnsuccessfulJob).slice(0, 3);
               const jobsForLogs = targetJobs.length > 0
                 ? targetJobs
                 : (jobId
-                    ? [{ id: jobId, name: `job ${jobId}`, status: 'unknown', conclusion: null }]
+                    ? [{ id: Number(jobId), name: `job ${jobId}`, status: 'unknown', conclusion: null }]
                     : jobs.jobs.slice(0, 1));
               const resolvedLogLines = logLines ?? 120;
               const logEntries = await Promise.all(jobsForLogs.map(async (job) => {
@@ -359,29 +507,65 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_ci_trigger',
-    'Manually trigger a GitHub Actions workflow (requires a workflow_dispatch trigger in the workflow). For production promotion, trigger the deploy-<provider>-production.yml workflow on ref="main" and pass inputs.commit_sha when promoting a specific SHA that already passed staging.',
+    'Manually trigger the project\'s reviewed primary CI definition. The provider must support dispatch; GitLab requires an exact reviewed SHA and verifies it before and after dispatch.',
     {
       project: projectField,
       repo: repoField,
-      workflow: z.string().describe('Workflow id or filename (e.g. "deploy.yml")'),
-      ref: z.string().optional().describe('Git ref to run on (default "main")'),
-      inputs: z.record(z.string()).optional().describe('Workflow inputs as key-value pairs'),
+      definition: z.string().optional().describe('Provider-native definition id or path.'),
+      workflow: z.string().optional().describe('Deprecated alias for definition; retained for GitHub compatibility.'),
+      ref: z.string().optional().describe('Git ref to run on (default: the observed repository default branch).'),
+      sha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Exact reviewed commit SHA. Required by GitLab; other providers may allow ref-only dispatch.'),
+      inputs: z.record(z.string()).optional().describe('Typed, non-secret CI inputs as key-value pairs. Values are not written to audit output.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, workflow, ref, inputs }) => {
+    wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, definition, workflow, ref, sha, inputs }) => {
+      const selectedDefinition = definition ?? workflow;
+      if (!selectedDefinition) throw new HvError('VALIDATION', 'definition is required.');
+      const canonical = await canonicalCiContextOrNull(ctx, projectRef, repoOverride);
+      if (canonical) {
+        const selectedRef = ref ?? canonical.repository.defaultBranch;
+        const run = await canonical.ci.dispatch(canonical.repository, {
+          definition: selectedDefinition,
+          ref: selectedRef,
+          ...(sha ? { sha } : {}),
+          ...(inputs ? { inputs } : {}),
+        });
+        ctx.repos.audit.create({
+          action: 'hv.ci_trigger',
+          resourceType: 'ci_definition',
+          resourceId: `${canonical.ciProvider}/${canonical.repository.nativeId}/${selectedDefinition}`,
+          details: {
+            ciProvider: canonical.ciProvider,
+            definition: selectedDefinition,
+            ref: selectedRef,
+            ...(sha ? { sha } : {}),
+            inputNames: Object.keys(inputs ?? {}).sort(),
+          },
+        });
+        return commandSuccess(
+          {
+            ciProvider: canonical.ciProvider,
+            repository: canonical.repository.canonicalScope,
+            definition: selectedDefinition,
+            ref: selectedRef,
+            run,
+          },
+          { hint: 'CI run dispatched. Check progress with hv_ci_status include=["runs"].', next: ['hv_ci_status'] }
+        );
+      }
       const repoRef = resolveRepoOrThrow(ctx, projectRef, repoOverride);
       const { owner, repo } = repoRef;
       const adapter = githubAdapterOrThrow(repoRef);
 
-      await adapter.triggerWorkflow(owner, repo, workflow, ref ?? 'main', inputs);
+      await adapter.triggerWorkflow(owner, repo, selectedDefinition, ref ?? 'main', inputs);
       ctx.repos.audit.create({
         action: 'hv.ci_trigger',
         resourceType: 'github_workflow',
-        resourceId: `${owner}/${repo}/${workflow}`,
-        details: { workflow, ref: ref ?? 'main', inputs },
+        resourceId: `${owner}/${repo}/${selectedDefinition}`,
+        details: { workflow: selectedDefinition, ref: ref ?? 'main', inputNames: Object.keys(inputs ?? {}).sort() },
       });
 
       return commandSuccess(
-        { repository: `${owner}/${repo}`, workflow, ref: ref ?? 'main' },
+        { repository: `${owner}/${repo}`, workflow: selectedDefinition, ref: ref ?? 'main' },
         { hint: 'Workflow dispatched. Check progress with hv_ci_status include=["runs"].', next: ['hv_ci_status'] }
       );
     })
