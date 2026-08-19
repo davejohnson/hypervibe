@@ -817,6 +817,7 @@ const authorized: AuthorizedCase[] = [
       operation: 'customDomainAdopt',
       metadata: {
         providerDomainId: 'domain-1',
+        projectId: 'project-1',
         serviceName: 'web',
         serviceId: 'service-1',
         environmentId: 'environment-1',

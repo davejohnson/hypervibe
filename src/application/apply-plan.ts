@@ -1686,6 +1686,7 @@ async function applyDomain(
   const metadata = asRecord(action.metadata);
   if (metadata?.operation === DOMAIN_ADOPT_OPERATION) {
     const providerDomainId = stringField(metadata, 'providerDomainId');
+    const projectId = stringField(metadata, 'projectId');
     const serviceName = stringField(metadata, 'serviceName');
     const serviceId = stringField(metadata, 'serviceId');
     const environmentId = stringField(metadata, 'environmentId');
@@ -1693,14 +1694,15 @@ async function applyDomain(
     const serviceBinding = serviceName ? bindings.services?.[serviceName] : undefined;
     const exactLegacyBinding = Boolean(
       providerDomainId
+      && projectId
       && serviceName
       && serviceId
       && environmentId
       && bindings.provider === action.resource.provider
+      && bindings.projectId === projectId
       && bindings.environmentId === environmentId
       && (!bindings.domainDns?.name || bindings.domainDns.name === action.resource.name)
       && serviceBinding?.serviceId === serviceId
-      && serviceBinding.customDomains?.includes(action.resource.name)
     );
     if (!exactLegacyBinding) {
       return {
@@ -1757,6 +1759,7 @@ async function applyDomain(
     if (
       observed.partial
       || observed.completeness?.services === 'unknown'
+      || observed.projectId !== projectId
       || observed.environmentId !== environmentId
     ) {
       return {
@@ -1820,6 +1823,7 @@ async function applyDomain(
         skipped: 0,
         providerMutations: 0,
         providerDomainId,
+        projectId,
         serviceName,
         serviceId,
         environmentId,

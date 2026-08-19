@@ -757,16 +757,17 @@ export function diffEnvironment(input: {
     const legacyServiceBinding = attachedService
       ? localServiceBindings[attachedService.name]
       : undefined;
-    const legacyDomainAdoption = Boolean(
+    const boundServiceDomainAdoption = Boolean(
       observed
       && attachedServices.length === 1
       && !domainBindingPresent
       && (!boundDomainDns?.name || boundDomainDns.name === spec.domain)
       && domainStatus?.providerDomainId
+      && domainStatus.providerVerified === true
+      && local.bindings?.projectId === observed.projectId
       && observed.environmentId
       && local.bindings?.environmentId === observed.environmentId
       && legacyServiceBinding?.serviceId === attachedService?.externalId
-      && legacyServiceBinding?.customDomains?.includes(spec.domain)
     );
     const ambiguousDomainAttachment = attachedServices.length > 1;
     const dnsConfigured = domainStatus?.dnsConfigured;
@@ -815,8 +816,8 @@ export function diffEnvironment(input: {
         ? `Domain ${spec.domain} has an unapplied recreate revision`
         : ambiguousDomainAttachment
           ? `Multiple provider services have a custom-domain attachment matching ${spec.domain}; Hypervibe will not choose one`
-        : legacyDomainAdoption
-          ? `Domain ${spec.domain} matches its legacy binding on ${attachedService!.name}; adopt the exact provider identity without changing the provider attachment`
+        : boundServiceDomainAdoption
+          ? `Domain ${spec.domain} is verified on the exact bound ${attachedService!.name} service; adopt the provider identity without changing the provider attachment`
         : attached
         ? !domainBindingPresent
           ? `Domain ${spec.domain} exists on ${provider}, but its durable provider identity is not bound locally; use hv_import or remove the unmanaged attachment before applying`
@@ -840,16 +841,17 @@ export function diffEnvironment(input: {
         ...(customDomainsManaged && ambiguousDomainAttachment
           ? { blockedReason: 'ambiguous_domain_identity' }
           : {}),
-        ...(customDomainsManaged && legacyDomainAdoption
+        ...(customDomainsManaged && boundServiceDomainAdoption
           ? {
             operation: DOMAIN_ADOPT_OPERATION,
             providerDomainId: domainStatus!.providerDomainId,
+            projectId: observed!.projectId,
             serviceName: attachedService!.name,
             serviceId: attachedService!.externalId,
             environmentId: observed!.environmentId,
           }
           : {}),
-        ...(customDomainsManaged && attached && !domainBindingPresent && !legacyDomainAdoption && !ambiguousDomainAttachment
+        ...(customDomainsManaged && attached && !domainBindingPresent && !boundServiceDomainAdoption && !ambiguousDomainAttachment
           ? { blockedReason: 'domain_binding_missing' }
           : {}),
         ...(domainStatus?.dnsRecords ? { dnsRecords: domainStatus.dnsRecords } : {}),

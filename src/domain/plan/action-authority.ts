@@ -946,6 +946,7 @@ export function resolvePlanActionAuthority(
     && action.type === 'update'
     && action.metadata?.operation === DOMAIN_ADOPT_OPERATION
     && metadataString(action, 'providerDomainId')
+    && metadataString(action, 'projectId')
     && metadataString(action, 'serviceName')
     && metadataString(action, 'serviceId')
     && metadataString(action, 'environmentId')

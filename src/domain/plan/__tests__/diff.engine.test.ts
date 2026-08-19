@@ -890,7 +890,7 @@ describe('diffEnvironment — domain and workload', () => {
     expect(attached.actions.find((a) => a.id === 'domain:myapp.dev')!.type).toBe('noop');
   });
 
-  it('plans local-only adoption for an exact provider domain already recorded by a legacy service binding', () => {
+  it('plans local-only adoption for a verified provider domain on the exact bound service', () => {
     const result = diffEnvironment({
       spec: spec({ domain: 'myapp.dev' }),
       envName: 'production',
@@ -914,7 +914,6 @@ describe('diffEnvironment — domain and workload', () => {
           services: {
             web: {
               serviceId: 'svc-1',
-              customDomains: ['myapp.dev'],
             },
           },
         },
@@ -927,15 +926,16 @@ describe('diffEnvironment — domain and workload', () => {
       metadata: {
         operation: 'customDomainAdopt',
         providerDomainId: 'provider-domain-1',
+        projectId: 'rail-proj-1',
         serviceName: 'web',
         serviceId: 'svc-1',
         environmentId: 'rail-env-1',
       },
-      reason: expect.stringContaining('legacy binding'),
+      reason: expect.stringContaining('exact bound'),
     });
   });
 
-  it('still requires explicit import for an unmanaged attached domain', () => {
+  it('still requires explicit import when the attached domain service is not locally bound', () => {
     const result = diffEnvironment({
       spec: spec({ domain: 'myapp.dev' }),
       envName: 'production',
@@ -951,7 +951,14 @@ describe('diffEnvironment — domain and workload', () => {
           },
         })],
       }),
-      local: local(),
+      local: local({
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'rail-env-1',
+          services: { web: { serviceId: 'different-service' } },
+        },
+      }),
       customDomainManagement: 'managed',
     });
 
