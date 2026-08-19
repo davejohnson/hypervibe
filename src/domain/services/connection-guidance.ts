@@ -28,6 +28,14 @@ export const GITHUB_TOKEN_URLS = {
   railwayAppScope: 'https://github.com/settings/tokens/new?scopes=repo&description=Hypervibe%20Railway%20app%20scope',
 } as const;
 
+/** GitLab documents these query parameters for pre-filled personal tokens. */
+export const GITLAB_TOKEN_URLS = {
+  api: 'https://gitlab.com/-/user_settings/personal_access_tokens?name=Hypervibe&description=Manage+GitLab+repository+and+CI+with+Hypervibe&scopes=api',
+  personalTokenDocs: 'https://docs.gitlab.com/user/profile/personal_access_tokens/',
+  projectTokenDocs: 'https://docs.gitlab.com/user/project/settings/project_access_tokens/',
+  deployTokenDocs: 'https://docs.gitlab.com/user/project/deploy_tokens/',
+} as const;
+
 export interface ConnectionGuidance {
   provider: string;
   displayName: string;
@@ -621,6 +629,32 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'The fine-grained creation link pre-fills the token name, 90-day expiry, and core repository permissions. You must still choose the resource owner and only the repositories Hypervibe should manage.',
       'Fine-grained PAT responses do not expose classic OAuth scopes. Hypervibe verifies identity and discovers missing endpoint permissions during plan/apply.',
       `A classic apiToken remains supported for compatibility and needs repo + workflow (${GITHUB_TOKEN_URLS.api}); security endpoints may also need security_events.`,
+    ],
+  },
+  gitlab: {
+    provider: 'gitlab',
+    displayName: 'GitLab',
+    tokenType: 'GitLab project access token for an existing project, or a personal access token with api for managed project lifecycle; Railway also needs a separate read_registry project deploy token',
+    setupUrl: GITLAB_TOKEN_URLS.api,
+    setupUrls: [
+      { label: 'Create pre-filled GitLab.com personal access token', url: GITLAB_TOKEN_URLS.api },
+      { label: 'GitLab personal access token guide', url: GITLAB_TOKEN_URLS.personalTokenDocs },
+      { label: 'GitLab project access token guide', url: GITLAB_TOKEN_URLS.projectTokenDocs },
+      { label: 'GitLab deploy token guide', url: GITLAB_TOKEN_URLS.deployTokenDocs },
+    ],
+    permissions: [
+      'For an existing project, grant api and give the token principal Maintainer access. Managed project creation/deletion instead requires a personal access token whose user owns the exact parent namespace (Owner for a group); Hypervibe verifies this before planning either mutation.',
+      'For managed rollback, GitLab Premium or Ultimate must protect each hypervibe-rollback-<environment>-* wildcard so only the exact authenticated token user can create it. Role-wide Maintainer access is rejected because it would let another Maintainer manufacture a privileged rollback ref.',
+      'For Railway private-image pulls, create a project deploy token in the exact project with read_registry only. Store its generated username as registryUsername and token as registryReadToken.',
+    ],
+    credentialExample: 'hv_connections provider="gitlab" scope="https://gitlab.com/group/project" credentialsRef="file:/absolute/path/gitlab-connection.json"',
+    notes: [
+      'The JSON contains apiToken, optional instanceUrl for self-managed GitLab, and registryUsername/registryReadToken for Railway. Keep it outside the repository.',
+      'Choose explicit expiries for both tokens and rotate them before expiry. A GitLab deploy token value is shown only when created.',
+      'For self-managed GitLab, use the same officially documented personal-token path on the declared HTTPS instance and set instanceUrl; do not use the GitLab.com creation link.',
+      'GitLab.com 18.1+ can use the observed hosted Linux runner. Self-managed deploys require one exact locked project runner id, one exact online linux/amd64 manager system id, a dedicated tag, protected-ref-only jobs, and the exact hypervibe-capabilities maintenance-note attestation declared in devops.ci.runner.',
+      'GitLab does not expose executor type or Docker privileged mode through these project APIs. The docker-privileged capability is therefore an operator attestation, not provider proof; protect runner administration and verify its config.toml out of band.',
+      'The exact project deploy-token page is <project web URL>/-/settings/repository under Deploy tokens; availability and placement can vary by GitLab version.',
     ],
   },
   openai: {

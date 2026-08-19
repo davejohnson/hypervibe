@@ -596,6 +596,89 @@ export const githubSpecSchema = z.object({
   }
 });
 
+/**
+ * Provider-neutral repository and primary application-CI selection.
+ * Project-level GitHub feature desired state remains on the legacy `github`
+ * block during the compatibility slice; new providers must not introduce a
+ * parallel top-level block.
+ */
+const devopsScopeSchema = z.string().trim().min(1).max(2_048).superRefine((scope, ctx) => {
+  if (/[\0\r\n]/.test(scope)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'devops.code.scope cannot contain control characters' });
+    return;
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(scope)) {
+    try {
+      const url = new URL(scope);
+      if (url.username || url.password || url.search || url.hash) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'devops.code.scope cannot contain credentials, query parameters, or fragments',
+        });
+      }
+    } catch {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'devops.code.scope URL is invalid' });
+    }
+  }
+});
+
+export const devopsSpecSchema = z.object({
+  code: z.object({
+    provider: providerIdSchema,
+    /** Provider-owned canonical repository scope (URL for GitLab, owner/repo for GitHub). */
+    scope: devopsScopeSchema,
+    /**
+     * Repository lifecycle is explicit. The default preserves the existing
+     * repository contract; managed creation and deletion are never inferred
+     * from a missing project or from repository file writes.
+     */
+    repository: z.object({
+      state: z.enum(['present', 'absent']).default('present'),
+      management: z.enum(['external', 'managed']).default('external'),
+      visibility: z.enum(['private', 'internal', 'public']).default('private'),
+      defaultBranch: z.string().min(1).max(255).superRefine((branch, ctx) => {
+        const components = branch.split('/');
+        if (
+          branch === '@'
+          || /[\x00-\x20\x7f~^:?*\[\\]/.test(branch)
+          || branch.includes('..')
+          || branch.includes('@{')
+          || components.some((component) => (
+            component.length === 0
+            || component.startsWith('.')
+            || component.endsWith('.')
+            || component.endsWith('.lock')
+          ))
+        ) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'defaultBranch must be a safe Git ref name' });
+        }
+      })
+        .default('main'),
+    }).strict().default({}),
+  }).strict(),
+  ci: z.object({
+    provider: providerIdSchema,
+    runner: z.discriminatedUnion('mode', [
+      z.object({
+        mode: z.literal('provider-hosted'),
+      }).strict(),
+      z.object({
+        mode: z.literal('self-managed'),
+        /** Exact GitLab runner id; never select a runner by tag alone. */
+        runnerId: z.string().regex(/^[1-9]\d*$/, 'runnerId must be a positive numeric provider id'),
+        /** Exact manager machine identity observed through the provider API. */
+        managerSystemId: z.string().min(1).max(255),
+        /** Dedicated tag that no other runner assigned to the project may claim. */
+        tag: z.string().regex(/^[A-Za-z0-9_.-]{1,255}$/, 'runner tag contains unsupported characters'),
+        /** Operator-owned, provider-observed execution-capability attestation. */
+        capabilities: z.array(z.enum(['linux-amd64', 'docker-privileged'])).min(1),
+      }).strict(),
+    ]).default({ mode: 'provider-hosted' }),
+  }).strict().optional(),
+  /** Environment that owns project-level DevOps lifecycle actions. */
+  canonicalEnvironment: z.string().min(1).optional(),
+}).strict();
+
 export const envFileSpecSchema = z.object({
   /**
    * runtime: include high-confidence app runtime keys from .env (default).
@@ -1842,6 +1925,8 @@ export const projectSpecSchema = z.object({
   gitRemoteUrl: z.string().min(1).optional(),
   /** Project-wide build and automation runtime desired state. */
   runtime: projectRuntimeSpecSchema.optional(),
+  /** Canonical provider-neutral code-host and primary application-CI selection. */
+  devops: devopsSpecSchema.optional(),
   github: githubSpecSchema.optional(),
   /** @deprecated Use github.collaboration. Accepted for one compatibility period. */
   collaboration: collaborationSpecSchema.optional(),
@@ -1894,6 +1979,64 @@ export const projectSpecSchema = z.object({
       message: 'Use github.collaboration; github and legacy top-level collaboration cannot both be declared',
       path: ['collaboration'],
     });
+  }
+  if (spec.github && spec.devops) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Legacy github and canonical devops cannot both be declared',
+      path: ['devops'],
+    });
+  }
+  if (
+    spec.devops?.canonicalEnvironment
+    && spec.devops.canonicalEnvironment !== 'repository'
+    && !spec.environments[spec.devops.canonicalEnvironment]
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `devops.canonicalEnvironment targets unknown environment "${spec.devops.canonicalEnvironment}"`,
+      path: ['devops', 'canonicalEnvironment'],
+    });
+  }
+  if (!spec.devops?.ci) {
+    for (const [environmentName, environment] of Object.entries(spec.environments)) {
+      if (
+        spec.devops
+        && environment.deploy?.strategy === 'branch'
+        && environment.deploy.trigger !== 'native'
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'deploy.trigger="ci" requires devops.ci.provider',
+          path: ['environments', environmentName, 'deploy', 'trigger'],
+        });
+      }
+    }
+  }
+  if (spec.devops?.code.repository.state === 'absent') {
+    if (spec.devops.code.repository.management !== 'managed') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'devops.code.repository.state="absent" requires management="managed"; Hypervibe never deletes an externally managed repository',
+        path: ['devops', 'code', 'repository', 'management'],
+      });
+    }
+    if (spec.devops.ci) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'devops.ci must be removed before the managed code repository can be declared absent',
+        path: ['devops', 'ci'],
+      });
+    }
+    for (const [environmentName, environment] of Object.entries(spec.environments)) {
+      if (environment.deploy?.strategy === 'branch') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'branch deploys must be removed before the managed code repository can be declared absent',
+          path: ['environments', environmentName, 'deploy', 'strategy'],
+        });
+      }
+    }
   }
   if (
     spec.github?.canonicalEnvironment
@@ -2090,5 +2233,6 @@ export type GitHubScheduleSpec = z.infer<typeof githubScheduleSpecSchema>;
 export type GitHubAutomationSpec = z.infer<typeof githubAutomationSpecSchema>;
 export type GitHubPagesSpec = z.infer<typeof githubPagesSpecSchema>;
 export type GitHubSpec = z.infer<typeof githubSpecSchema>;
+export type DevOpsSpec = z.infer<typeof devopsSpecSchema>;
 export type EnvironmentSpec = z.infer<typeof environmentSpecSchema>;
 export type ProjectSpec = z.infer<typeof projectSpecSchema>;

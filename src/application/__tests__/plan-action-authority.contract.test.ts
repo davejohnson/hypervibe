@@ -28,7 +28,11 @@ import {
 import { HOSTING_ENV_REMOVE_OPERATION } from '../../domain/services/hosting-env.service.js';
 import { PROVIDER_NATIVE_SOURCE_DISCONNECT_OPERATION } from '../../domain/services/provider-native-deploy-source.service.js';
 import { CACHE_OPERATIONS } from '../../domain/services/cache-plan.service.js';
-import { GITHUB_ACTIONS_ROLLBACK_OPERATION } from '../../domain/services/ci-rollback.contract.js';
+import {
+  GITHUB_ACTIONS_ROLLBACK_OPERATION,
+  GITLAB_CI_ROLLBACK_OPERATION,
+  GITLAB_ROLLBACK_REF_ENSURE_OPERATION,
+} from '../../domain/services/ci-rollback.contract.js';
 import { DATABASE_RESILIENCE_OPERATIONS } from '../../domain/services/database-resilience-plan.service.js';
 import { LOAD_BALANCER_OPERATIONS } from '../../domain/services/load-balancer-plan.service.js';
 import { MESSAGING_OPERATIONS } from '../../domain/services/twilio-messaging.service.js';
@@ -37,6 +41,18 @@ import {
   resolvePlanActionAuthority,
   type PlanMutationCapability,
 } from '../../domain/plan/action-authority.js';
+import {
+  CI_APPLIED_SPEC_SYNC_OPERATION,
+  CI_BINDING_REMOVE_OPERATION,
+  CI_CONFIGURATION_SYNC_OPERATION,
+  CI_VARIABLE_DELETE_OPERATION,
+  CI_VARIABLE_SYNC_OPERATION,
+} from '../../domain/services/managed-ci.contract.js';
+import {
+  CODE_REPOSITORY_BINDING_REMOVE_OPERATION,
+  CODE_REPOSITORY_CREATE_OPERATION,
+  CODE_REPOSITORY_DESTROY_OPERATION,
+} from '../../domain/services/managed-code-repository.contract.js';
 
 function action(params: {
   id?: string;
@@ -46,6 +62,8 @@ function action(params: {
   provider?: string;
   operation?: string;
   metadata?: Record<string, unknown>;
+  dataBearing?: boolean;
+  requiresConfirm?: boolean;
 } = {}): PlanAction {
   return {
     id: params.id ?? 'service:web',
@@ -57,6 +75,8 @@ function action(params: {
     },
     verified: true,
     reason: 'contract fixture',
+    ...(params.dataBearing ? { dataBearing: true } : {}),
+    ...(params.requiresConfirm ? { requiresConfirm: true } : {}),
     ...(
       params.operation || params.metadata
         ? {
@@ -136,6 +156,55 @@ const authorized: AuthorizedCase[] = [
     }),
   },
   {
+    label: 'GitLab immutable rollback ref',
+    capability: 'gitlab.rollback-ref.ensure',
+    action: action({
+      id: 'repo:gitlab:rollback-ref:hypervibe-rollback-production-aaaaaaaaaaaa-17',
+      type: 'create',
+      kind: 'repo',
+      name: 'hypervibe-rollback-production-aaaaaaaaaaaa-17',
+      provider: 'gitlab',
+      operation: GITLAB_ROLLBACK_REF_ENSURE_OPERATION,
+      metadata: {
+        repositoryId: '42',
+        instanceScope: 'https://gitlab.com',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        rollbackRef: 'hypervibe-rollback-production-aaaaaaaaaaaa-17',
+        targetSha: 'a'.repeat(40),
+        targetArtifactId: '17:.hypervibe-release.json',
+        targetJobId: '17',
+        targetPipelineId: '27',
+        observedLatestPipelineId: '37',
+      },
+    }),
+  },
+  {
+    label: 'GitLab exact-SHA rollback dispatch',
+    capability: 'gitlab.ci.rollback',
+    action: action({
+      id: 'ci:gitlab-ci:production:rollback',
+      type: 'update',
+      kind: 'ci',
+      name: 'deploy-branch:production',
+      provider: 'gitlab-ci',
+      operation: GITLAB_CI_ROLLBACK_OPERATION,
+      metadata: {
+        repositoryId: '42',
+        instanceScope: 'https://gitlab.com',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        definition: '.gitlab-ci.yml',
+        environmentName: 'production',
+        rollbackRef: 'hypervibe-rollback-production-aaaaaaaaaaaa-17',
+        targetSha: 'a'.repeat(40),
+        targetArtifactId: '17:.hypervibe-release.json',
+        targetJobId: '17',
+        targetPipelineId: '27',
+        observedLatestPipelineId: '37',
+        programHash: 'b'.repeat(64),
+      },
+    }),
+  },
+  {
     label: 'GitHub Actions exact-SHA release',
     capability: 'github.ci.release',
     action: action({
@@ -168,6 +237,116 @@ const authorized: AuthorizedCase[] = [
     }),
   },
   {
+    label: 'provider-neutral CI configuration sync',
+    capability: 'ci.configuration.sync',
+    action: action({
+      id: 'ci:gitlab-ci:configuration',
+      type: 'update',
+      kind: 'ci',
+      name: 'configuration',
+      provider: 'gitlab-ci',
+      operation: CI_CONFIGURATION_SYNC_OPERATION,
+      metadata: {
+        ciProvider: 'gitlab-ci',
+        repositoryId: '42',
+        instanceScope: 'https://gitlab.com',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        baseSha: 'a'.repeat(40),
+        programHash: 'b'.repeat(64),
+      },
+    }),
+  },
+  {
+    label: 'provider-neutral CI variable sync',
+    capability: 'ci.variable.sync',
+    action: action({
+      id: 'ci:gitlab-ci:production:variable:RAILWAY_API_TOKEN',
+      type: 'create',
+      kind: 'secret',
+      name: 'production:RAILWAY_API_TOKEN',
+      provider: 'gitlab-ci',
+      operation: CI_VARIABLE_SYNC_OPERATION,
+      metadata: {
+        ciProvider: 'gitlab-ci',
+        repositoryId: '42',
+        environmentName: 'production',
+        environmentScope: 'production',
+        variableKey: 'RAILWAY_API_TOKEN',
+        valueHash: 'b'.repeat(64),
+        valueSource: 'connection:railway.apiToken',
+      },
+    }),
+  },
+  {
+    label: 'provider-neutral CI variable delete',
+    capability: 'ci.variable.delete',
+    action: action({
+      id: 'ci:gitlab-ci:production:variable:HYPERVIBE_ABC_TOKEN:destroy',
+      type: 'destroy',
+      kind: 'secret',
+      name: 'production:HYPERVIBE_ABC_TOKEN',
+      provider: 'gitlab-ci',
+      operation: CI_VARIABLE_DELETE_OPERATION,
+      dataBearing: true,
+      requiresConfirm: true,
+      metadata: {
+        ciProvider: 'gitlab-ci',
+        repositoryId: '42',
+        instanceScope: 'https://gitlab.com',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        environmentName: 'production',
+        environmentScope: 'production',
+        variableKey: 'HYPERVIBE_ABC_TOKEN',
+        valueHash: 'b'.repeat(64),
+        programHash: 'c'.repeat(64),
+      },
+    }),
+  },
+  {
+    label: 'provider-neutral CI binding removal',
+    capability: 'ci.binding.remove',
+    action: action({
+      id: 'ci:gitlab-ci:production:binding:remove',
+      type: 'update',
+      kind: 'ci',
+      name: 'binding:production',
+      provider: 'gitlab-ci',
+      operation: CI_BINDING_REMOVE_OPERATION,
+      metadata: {
+        ciProvider: 'gitlab-ci',
+        repositoryId: '42',
+        instanceScope: 'https://gitlab.com',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        environmentName: 'production',
+        programHash: 'c'.repeat(64),
+      },
+    }),
+  },
+  {
+    label: 'provider-neutral applied-spec variable sync',
+    capability: 'ci.applied-spec-hash.sync',
+    action: action({
+      id: 'ci:gitlab-ci:production:variable:HYPERVIBE_ABC_APPLIED_SPEC_HASH',
+      type: 'update',
+      kind: 'secret',
+      name: 'production:HYPERVIBE_ABC_APPLIED_SPEC_HASH',
+      provider: 'gitlab-ci',
+      operation: CI_APPLIED_SPEC_SYNC_OPERATION,
+      metadata: {
+        ciProvider: 'gitlab-ci',
+        repositoryId: '42',
+        instanceScope: 'https://gitlab.com',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        environmentName: 'production',
+        environmentScope: '*',
+        variableKey: 'HYPERVIBE_ABC_APPLIED_SPEC_HASH',
+        valueHash: 'b'.repeat(64),
+        valueSource: 'desired:deployment-contract',
+        programHash: 'c'.repeat(64),
+      },
+    }),
+  },
+  {
     label: 'GitHub collaboration',
     capability: 'github.collaboration.sync',
     action: action({
@@ -178,6 +357,70 @@ const authorized: AuthorizedCase[] = [
       provider: 'github',
       operation: 'githubCollaboration',
       metadata: { repository: 'owner/repo' },
+    }),
+  },
+  {
+    label: 'managed code repository create',
+    capability: 'code.repository.create',
+    action: action({
+      id: 'repo:gitlab:create',
+      type: 'create',
+      kind: 'repo',
+      name: 'https://gitlab.com/acme/app',
+      provider: 'gitlab',
+      operation: CODE_REPOSITORY_CREATE_OPERATION,
+      dataBearing: true,
+      requiresConfirm: true,
+      metadata: {
+        codeProvider: 'gitlab',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        repositoryConfigHash: 'a'.repeat(64),
+        desiredState: 'present',
+        management: 'managed',
+      },
+    }),
+  },
+  {
+    label: 'managed code repository destroy',
+    capability: 'code.repository.destroy',
+    action: action({
+      id: 'repo:gitlab:destroy',
+      type: 'destroy',
+      kind: 'repo',
+      name: 'https://gitlab.com/acme/app',
+      provider: 'gitlab',
+      operation: CODE_REPOSITORY_DESTROY_OPERATION,
+      dataBearing: true,
+      requiresConfirm: true,
+      metadata: {
+        codeProvider: 'gitlab',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        repositoryConfigHash: 'a'.repeat(64),
+        desiredState: 'absent',
+        management: 'managed',
+        repositoryId: '42',
+        instanceScope: 'https://gitlab.com',
+      },
+    }),
+  },
+  {
+    label: 'managed code repository binding removal',
+    capability: 'code.repository.binding.remove',
+    action: action({
+      id: 'repo:gitlab:binding-remove',
+      type: 'update',
+      kind: 'repo',
+      name: 'https://gitlab.com/acme/app',
+      provider: 'gitlab',
+      operation: CODE_REPOSITORY_BINDING_REMOVE_OPERATION,
+      metadata: {
+        codeProvider: 'gitlab',
+        repositoryScope: 'https://gitlab.com/acme/app',
+        repositoryConfigHash: 'a'.repeat(64),
+        desiredState: 'absent',
+        repositoryId: '42',
+        instanceScope: 'https://gitlab.com',
+      },
     }),
   },
   {

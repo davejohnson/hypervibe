@@ -353,7 +353,12 @@ export class GitHubAdapter {
   }
 
   async getRepository(owner: string, repo: string): Promise<{
+    id?: number;
+    full_name?: string;
     default_branch: string;
+    html_url?: string;
+    clone_url?: string;
+    ssh_url?: string;
     private?: boolean;
     security_and_analysis?: {
       advanced_security?: { status: 'enabled' | 'disabled' };

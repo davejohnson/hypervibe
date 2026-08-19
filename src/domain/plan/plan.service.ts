@@ -46,10 +46,16 @@ import {
 } from '../services/domain-registration.service.js';
 import {
   environmentUsesGitHubActionsDeploy,
-  planGitHubActionsAppliedSpecHash,
-  planGitHubActionsDeploy,
   planGitHubActionsRelease,
 } from '../services/ci-deploy.service.js';
+import {
+  planManagedCiAppliedSpecHash,
+  planManagedCiDeploy,
+} from '../services/managed-ci.service.js';
+import { CI_CONFIGURATION_SYNC_OPERATION } from '../services/managed-ci.contract.js';
+import { planManagedCodeRepository } from '../services/managed-code-repository.service.js';
+import { environmentUsesManagedCi, resolveDevOpsSelection } from '../spec/devops-selection.js';
+import { devOpsProviderRegistry } from '../registry/devops.registry.js';
 import { planIos } from '../services/appstore-plan.service.js';
 import { planQueues } from '../services/queue-plan.service.js';
 import { queueEnvVarSuffix, resolveQueueEnvVars } from '../services/queue-env.js';
@@ -552,7 +558,7 @@ export class PlanService {
   }
 
   /** Connections that must exist+verify before apply can run. */
-  preflight(environmentSpec: EnvironmentSpec, environmentName?: string): Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }> {
+  preflight(environmentSpec: EnvironmentSpec, environmentName?: string, projectSpec?: ProjectSpec): Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }> {
     const blocked: Array<{ provider: string; reason: string; scope?: string; policy?: 'hard' | 'action-scoped-if-independent-actions' }> = [];
     const required: Array<{ provider: string; scopeHints?: string[] }> = [
       { provider: environmentSpec.hosting.provider },
@@ -566,7 +572,18 @@ export class PlanService {
     }
     if (environmentSpec.email.enabled) required.push({ provider: 'sendgrid' });
     if (environmentSpec.messaging) required.push({ provider: 'twilio' });
-    if (environmentUsesGitHubActionsDeploy(environmentSpec)) required.push({ provider: 'github' });
+    if (environmentSpec.deploy?.strategy === 'branch' && environmentSpec.deploy.trigger !== 'native') {
+      const selection = projectSpec ? resolveDevOpsSelection(projectSpec) : null;
+      if (selection?.ci) {
+        const registration = devOpsProviderRegistry.ciProvider(selection.ci.provider);
+        required.push({
+          provider: registration?.connectionProvider ?? selection.ci.provider,
+          scopeHints: [selection.code.scope],
+        });
+      } else if (environmentUsesGitHubActionsDeploy(environmentSpec)) {
+        required.push({ provider: 'github' });
+      }
+    }
     if (environmentSpec.ios) {
       required.push({
         provider: 'appstoreconnect',
@@ -948,6 +965,68 @@ export class PlanService {
       }
     }
     const projectForPlan = projectWithSpecGitRemoteUrl(project, specResult.spec);
+    if (scope !== 'retained-cleanup') {
+      const codeRepository = await planManagedCodeRepository({
+        project: projectForPlan,
+        spec: specResult.spec,
+        environmentName,
+      });
+      if (codeRepository.error) return { error: codeRepository.error };
+      if (codeRepository.stageRequired && codeRepository.action) {
+        const incompatibleInputs = [
+          options?.serviceFilter?.length ? 'services' : null,
+          Object.keys(options?.envVarOverrides ?? {}).length > 0 ? 'envVars' : null,
+          options?.envFile ? 'envFile' : null,
+          options?.includeEnvFile === false ? 'includeEnvFile' : null,
+          Object.keys(options?.secretRefs ?? {}).length > 0 ? 'secretRefs' : null,
+        ].filter((name): name is string => Boolean(name));
+        if (incompatibleInputs.length > 0) {
+          return {
+            error: `Repository lifecycle is an isolated plan stage and does not accept deploy inputs: ${incompatibleInputs.join(', ')}.`,
+          };
+        }
+        const actions = [codeRepository.action];
+        const warnings = [
+          ...(specResult.adopted && specResult.source?.kind === 'repo'
+            ? [`${specResult.source.path} changed outside hypervibe; recorded as revision ${specResult.revision}.`]
+            : []),
+          ...(codeRepository.warning ? [codeRepository.warning] : []),
+        ];
+        const document: PlanRunDocument = {
+          kind: 'hv_plan',
+          scope: 'full',
+          environmentName,
+          specRevision: specResult.revision,
+          observedFingerprint: null,
+          actions,
+          unmanaged: [],
+          warnings,
+        };
+        const lifecycleEnvironment = this.envRepo.findByProjectAndName(project.id, environmentName)
+          ?? this.envRepo.create({ projectId: project.id, name: environmentName });
+        const run = this.runRepo.create({
+          projectId: project.id,
+          environmentId: lifecycleEnvironment.id,
+          type: 'plan',
+          plan: document as unknown as Record<string, unknown>,
+        });
+        this.runRepo.updateStatus(run.id, 'succeeded');
+        return {
+          planRunId: run.id,
+          scope: 'full',
+          specRevision: specResult.revision,
+          specSource: specResult.source ?? { kind: 'local' },
+          environmentName,
+          verified: codeRepository.action.verified,
+          observed: null,
+          actions,
+          unmanaged: [],
+          warnings,
+          inputRequired: [],
+          blocked: [],
+        };
+      }
+    }
     const environmentSpec = specResult.spec.environments[environmentName];
     if (!environmentSpec) {
       if (scope === 'retained-cleanup') {
@@ -1316,7 +1395,7 @@ export class PlanService {
       : dataMigration.pending
       ? this.providerPreflight(dataMigration.providers)
       : [
-          ...this.preflight(environmentSpec, environmentName),
+          ...this.preflight(environmentSpec, environmentName, specResult.spec),
           ...this.projectPreflight(projectForPlan, specResult.spec, environmentName),
         ];
     const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
@@ -1634,20 +1713,22 @@ export class PlanService {
     const ciBindingsWillChange = actions.some((action) =>
       action.resource.kind === 'service' && (action.type === 'create' || action.type === 'replace')
     );
-    const ciDeploy = await planGitHubActionsDeploy({
+    const ciDeploy = await planManagedCiDeploy({
       project: projectForPlan,
+      spec: specResult.spec,
       environmentName,
       environmentSpec,
       environment,
       dependsOn: ciDependsOn,
       bindingsWillChange: ciBindingsWillChange,
     });
-    if (ciDeploy.action) {
+    if (ciDeploy.error) return { error: ciDeploy.error };
+    if (ciDeploy.actions.length > 0) {
       const firstDomainIndex = actions.findIndex((action) => action.resource.kind === 'domain');
       if (firstDomainIndex === -1) {
-        actions.push(ciDeploy.action);
+        actions.push(...ciDeploy.actions);
       } else {
-        actions.splice(firstDomainIndex, 0, ciDeploy.action);
+        actions.splice(firstDomainIndex, 0, ...ciDeploy.actions);
       }
     }
 
@@ -1705,26 +1786,37 @@ export class PlanService {
     const managedCiSeedAction = actions.find((action) =>
       action.type !== 'noop'
       && action.metadata?.operation === 'databaseSeed'
-      && environmentUsesGitHubActionsDeploy(environmentSpec)
+      && environmentUsesManagedCi(specResult.spec, environmentName)
     );
     const appliedSpecHashDependsOn = actions
       .filter((action) => action.type !== 'noop' && action.id !== managedCiSeedAction?.id)
       .map((action) => action.id);
-    const appliedSpecHash = await planGitHubActionsAppliedSpecHash({
-      project: projectForPlan,
-      spec: specResult.spec,
-      environmentName,
-      environmentSpec,
-      environment,
-      dependsOn: appliedSpecHashDependsOn,
-    });
-    if (appliedSpecHash.action) {
-      actions.push(appliedSpecHash.action);
+    const ciConfigurationPending = ciDeploy.actions.some((action) => (
+      action.type !== 'noop' && action.metadata?.operation === CI_CONFIGURATION_SYNC_OPERATION
+    ));
+    const appliedSpecHash = ciConfigurationPending
+      ? {
+          actions: [] as PlanAction[],
+          warnings: ['Applied deployment-contract sync is deferred until the reviewed CI configuration is merged and re-observed.'],
+        }
+      : await planManagedCiAppliedSpecHash({
+          project: projectForPlan,
+          spec: specResult.spec,
+          environmentName,
+          environmentSpec,
+          environment,
+          dependsOn: appliedSpecHashDependsOn,
+        });
+    if (appliedSpecHash.error) return { error: appliedSpecHash.error };
+    if (appliedSpecHash.actions.length > 0) {
+      actions.push(...appliedSpecHash.actions);
     }
-    const releaseDependsOn = appliedSpecHash.action && appliedSpecHash.action.type !== 'noop'
-      ? [appliedSpecHash.action.id]
+    const appliedSpecHashChanges = appliedSpecHash.actions.filter((action) => action.type !== 'noop');
+    const releaseDependsOn = appliedSpecHashChanges.length > 0
+      ? appliedSpecHashChanges.map((action) => action.id)
       : appliedSpecHashDependsOn;
     const managedSeedRelease = managedCiSeedAction
+      && resolveDevOpsSelection(specResult.spec)?.ci?.provider === 'github-actions'
       ? await planGitHubActionsRelease({
         project: projectForPlan,
         environmentName,

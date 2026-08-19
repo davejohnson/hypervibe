@@ -47,6 +47,38 @@ a provider only to `ready-for-live`, while `supported` still requires concrete,
 recent live evidence. Missing or stale proof is reported as a durable finding;
 the daily job never receives provider credentials or mutates infrastructure.
 
+### Code-host and CI conformance
+
+Code hosting and primary CI use separate open registries and normalized ports;
+they are not hosting-provider lifecycle ids. GitHub/GitHub Actions retain the
+legacy compatibility route. GitLab/GitLab CI is currently `ready-for-live` for
+mocked project create/delete, reviewed whole-root configuration and teardown,
+environment-scoped variables, exact-SHA dispatch/evidence/rollback, and the
+portable Railway, Vercel, DigitalOcean, Cloud Run, Azure Container Apps, and ECS
+Express deploy recipes. GitLab.com 18.1+ uses its exact hosted-runner tag.
+Self-managed execution requires one exact locked project runner and manager,
+an uncontested tag, protected-ref-only execution, and an operator capability
+attestation; GitLab's project APIs do not prove executor or privileged-Docker
+configuration.
+
+Mocked contracts cover tri-state repository/file observation, nested durable
+identity, exact namespace/project lifecycle authority, confirmed destructive
+actions, atomic merge-request configuration and removal, exact CI Lint include
+provenance, unowned/overlapping variable refusal, one-variable-per-action
+mutation/deletion, exact-SHA dispatch, evidence-bound rollback-tag creation,
+normalized runs/jobs/logs/artifacts, secret erasure, and zero-mutation noop.
+Runner observation rejects project/group runners that can claim the hosted tag
+and multiple managers for a self-managed runner. A Bitbucket-shaped fake
+provider remains registerable without editing the spec schema, generic tools,
+hosting adapter, or application router.
+
+This does not establish public GitLab support. There is no recent live receipt
+for project lifecycle, rollback/teardown, any portable hosting recipe, or a
+self-managed runner. Live evidence must name the exact GitLab offering,
+version/edition, runner mode, and hosting recipe; GitLab.com evidence never
+promotes self-managed instances or a different host. See [the accepted GitLab
+architecture and evidence boundary](gitlab-integration.md).
+
 ### Environment custom domains
 
 `test/provider-conformance/domain-lifecycle.spec.json` is the isolated live

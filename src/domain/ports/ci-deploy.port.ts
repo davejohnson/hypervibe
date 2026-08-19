@@ -15,6 +15,8 @@ export interface BranchDeployTarget {
   /** Non-secret desired hosting placement from the environment spec. */
   providerRegion?: string;
   providerServiceIds: string[];
+  /** Provider-observed image locations retained in hosting service bindings. */
+  providerImageUris?: string[];
   providerJobNames?: string[];
   needsServiceNames?: boolean;
   needsJobNames?: boolean;
@@ -68,5 +70,34 @@ export interface ProviderCiDeployMetadata {
   secretCredentialKeys?: Record<string, string>;
   requiresGitHubPackagePull?: boolean;
   buildGitHubActionsSteps: (target: BranchDeployTarget) => BranchDeployStepResult;
+  /** Provider-neutral recipe consumed by non-GitHub CI renderers. */
+  buildPortableRecipe?: (target: BranchDeployTarget) => PortableCiDeployRecipe;
+  /** Static runner trust requirements used before provider bindings are available. */
+  portableRunnerCapabilities?: Array<'linux-amd64' | 'docker-privileged'>;
   diagnoseWorkflowLog?: (text: string) => CiWorkflowDiagnostic[];
+}
+
+export type PortableCiValueSource =
+  | { kind: 'connection'; provider: string; credentialKey: string }
+  | { kind: 'literal'; value: string };
+
+export interface PortableCiValue {
+  name: string;
+  source: PortableCiValueSource;
+  secret: boolean;
+  /** Encoding applied before the value crosses the CI variable boundary. */
+  transform?: 'base64';
+}
+
+export interface PortableCiDeployRecipe {
+  version: 1;
+  provider: string;
+  kind: 'container' | 'repository';
+  runnerCapabilities: Array<'linux-amd64' | 'docker-privileged'>;
+  values: PortableCiValue[];
+  runtime: {
+    path: string;
+    content: string;
+    npmPackages?: string[];
+  };
 }
