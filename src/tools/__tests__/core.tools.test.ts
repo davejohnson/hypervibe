@@ -889,7 +889,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('adopts an exact legacy Railway domain binding locally and then reports it in sync', async () => {
+  it('adopts an exact Railway domain on a bound service even when the legacy binding omitted its hostname', async () => {
     const t = await makeClient();
     await t.call('hv_spec', {
       spec: {
@@ -922,7 +922,6 @@ describe('hv_plan / hv_status / hv_apply', () => {
         services: {
           web: {
             serviceId: 'svc-1',
-            customDomains: ['staging.example.com'],
           },
         },
       },
@@ -973,6 +972,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       metadata: expect.objectContaining({
         operation: 'customDomainAdopt',
         providerDomainId: 'provider-domain-1',
+        projectId: 'rp-1',
         serviceName: 'web',
         serviceId: 'svc-1',
         environmentId: 're-1',

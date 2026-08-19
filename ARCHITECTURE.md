@@ -202,13 +202,15 @@ domain id, service and environment ids, Cloudflare zone id, and every managed
 DNS record id before it may converge. An observed provider attachment without
 that durable binding is normally an adoption candidate and blocks with
 `hv_import` guidance; it is never silently adopted. The compatibility exception
-is a legacy service binding that already records the exact domain plus the same
-durable service and environment ids. When one provider attachment matches and
-the provider exposes its durable domain id, planning emits an explicit
-local-only adoption action. Apply re-observes every identity before recording
-the provider domain id and makes no provider or DNS mutation. It does not claim
+requires exact local project, environment, and service bindings plus one live,
+provider-verified attachment of the desired domain to that same service. A
+legacy service binding may omit the hostname because the reviewed spec and
+provider observation supply that evidence; a matching hostname alone is never
+identity. Planning emits an explicit local-only adoption action carrying every
+durable provider id. Apply re-observes those identities before recording the
+provider domain id and makes no provider or DNS mutation. It does not claim
 unrecorded DNS identities, so a later detach still blocks until the exact DNS
-binding is restored. Missing legacy ownership evidence, duplicate attachments,
+binding is restored. Missing ownership evidence, duplicate attachments,
 partial observation, or conflicting bindings continue to block. Removing `environment.domain` plans a
 confirmation-gated detach of only those exact identities, with provider absence
 verified before DNS deletion. A provider attachment accepted before its DNS
