@@ -84,6 +84,10 @@ case "$image_uri" in
 esac
 docker build --pull --file "$dockerfile" --tag "$image_uri" .
 docker push "$image_uri"
+docker_path="$(command -v docker)"
+test -n "$docker_path"
+cp "$docker_path" .hypervibe-docker
+chmod 700 .hypervibe-docker
 printf '%s\n' "$image_uri" > .hypervibe-image-uri
 printf '%s\n' "$deploy_sha" > .hypervibe-deploy-sha
 `;
