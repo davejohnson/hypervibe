@@ -160,6 +160,8 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
     );
     const checked = spawnSync('sh', ['-n'], { input: script, encoding: 'utf8' });
     expect(checked.status, checked.stderr).toBe(0);
+    expect(script).toContain('cp "$docker_path" .hypervibe-docker');
+    expect(script).toContain('chmod 700 .hypervibe-docker');
   });
 
   it('publishes one atomic reviewed change, then performs zero mutations at exact convergence', async () => {
