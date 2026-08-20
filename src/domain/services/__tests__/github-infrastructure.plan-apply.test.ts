@@ -12,10 +12,15 @@ import {
   GitHubAdapter,
   type GitHubPullRequestSummary,
 } from '../../../adapters/providers/github/github.adapter.js';
+import '../../../adapters/providers/openai/openai.adapter.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { executePlanApply } from '../../../application/apply-plan.js';
+import { createToolContext } from '../../../tools/context.js';
 import type { Project } from '../../entities/project.entity.js';
+import { PlanService } from '../../plan/plan.service.js';
 import type { PlanAction } from '../../plan/plan.types.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
+import { SpecStore } from '../../spec/spec.store.js';
 import {
   applyGitHubInfrastructure,
   applyGitHubDelegatedSecret,
@@ -277,6 +282,82 @@ describe('GitHub infrastructure plan/apply', () => {
       type: 'update', billable: true, requiresConfirm: true,
     });
     expect(result.actions.find((action) => action.id === 'repo:github-actions-pr-permission')?.type).toBe('update');
+  });
+
+  it('applies the OpenAI Actions secret from a repository-only plan using repository metadata authority', async () => {
+    const repositoryProject = new ProjectRepository().create({
+      name: 'repository-openai-secret',
+      gitRemoteUrl: `https://github.com/${REPOSITORY}.git`,
+    });
+    const desiredSpec = projectSpecSchema.parse({
+      version: 1,
+      project: repositoryProject.name,
+      gitRemoteUrl: repositoryProject.gitRemoteUrl,
+      github: {
+        repository: REPOSITORY,
+        canonicalEnvironment: 'repository',
+        collaboration: {
+          issues: { enabled: false, templates: false },
+          pullRequests: { requirePr: false },
+        },
+        actions: {
+          audit: {
+            kind: 'code-audit',
+            schedule: { cron: '17 5 * * *', timezone: 'UTC' },
+            instructions: 'Audit provider claims without modifying the repository.',
+          },
+        },
+      },
+      environments: {},
+    });
+    const stored = new SpecStore().replace(repositoryProject, desiredSpec);
+    const openAI = new ConnectionRepository().create({
+      provider: 'openai',
+      scope: REPOSITORY,
+      credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'openai-test-key' }),
+    });
+    new ConnectionRepository().updateStatus(openAI.id, 'verified');
+
+    const desiredFiles = new Map(
+      compileManagedGitHubFiles(desiredSpec.github!).map((file) => [file.path, file.content])
+    );
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent')
+      .mockImplementation(async (_owner, _repo, filePath) => desiredFiles.get(filePath) ?? null);
+    vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets').mockResolvedValue([]);
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({
+      default_branch: 'main',
+      private: false,
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listLabels').mockResolvedValue([]);
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret').mockResolvedValue();
+
+    const planned = await new PlanService().plan(repositoryProject, 'repository');
+    expect(planned).not.toHaveProperty('error');
+    const plan = planned as Exclude<typeof planned, { error: string }>;
+    expect(plan.actions.find((action) => action.id === GITHUB_OPENAI_SECRET_ACTION_ID)).toMatchObject({
+      type: 'update',
+      resource: { kind: 'secret', name: 'OPENAI_API_KEY', provider: 'github' },
+      metadata: { repository: REPOSITORY },
+    });
+
+    const outcome = await executePlanApply(createToolContext(), {
+      project: repositoryProject,
+      spec: stored.spec,
+      specRevision: stored.revision,
+      planId: plan.planRunId,
+      confirmActions: [],
+    });
+
+    expect(outcome).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: true,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({ actionId: GITHUB_OPENAI_SECRET_ACTION_ID, status: 'succeeded' }),
+        ]),
+      },
+    });
+    expect(setSecret).toHaveBeenCalledWith('owner', 'example', 'OPENAI_API_KEY', 'openai-test-key');
   });
 
   it('plans and applies declared GitHub Actions secrets from encrypted plan input', async () => {

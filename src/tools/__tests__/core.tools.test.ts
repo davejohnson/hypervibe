@@ -656,6 +656,13 @@ describe('hv_spec', () => {
     expect(plan.data.actions).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'repo:github-infrastructure-pr', type: 'update' }),
     ]));
+
+    const withoutDeployEnvFile = await t.call('hv_plan', {
+      project: 'pages-only-app',
+      includeEnvFile: false,
+    });
+    expect(withoutDeployEnvFile.ok).toBe(true);
+    expect(withoutDeployEnvFile.data.environment).toBe('repository');
     await t.close();
   });
 

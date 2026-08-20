@@ -752,7 +752,6 @@ export class PlanService {
       options?.serviceFilter?.length
       || Object.keys(options?.envVarOverrides ?? {}).length > 0
       || options?.envFile
-      || options?.includeEnvFile === false
       || Object.keys(options?.secretRefs ?? {}).length > 0
     ) {
       return {
