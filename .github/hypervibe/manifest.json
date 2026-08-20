@@ -2,6 +2,8 @@
   "version": 1,
   "managedBy": "hypervibe",
   "files": [
-    ".github/workflows/hypervibe-pages.yml"
+    ".github/hypervibe/codex-provider-truth/config.toml",
+    ".github/workflows/hypervibe-provider-conformance.yml",
+    ".github/workflows/hypervibe-provider-truth.yml"
   ]
 }

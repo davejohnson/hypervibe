@@ -1,0 +1,45 @@
+# Managed by Hypervibe. Change desired state with hv_spec; manual edits will be reconciled.
+name: "Hypervibe / provider-conformance"
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+      timezone: "UTC"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install dependencies
+        run: |
+          npm ci
+      - name: Prepare failure evidence
+        run: mkdir -p hypervibe-failure-evidence
+      - name: "test 1"
+        shell: bash
+        run: |
+          set -o pipefail
+          (
+            npm test -- test/provider-conformance/provider-matrix.test.ts
+          ) 2>&1 | tee hypervibe-failure-evidence/1.log
+      - name: Upload non-secret failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "provider-conformance-failure-evidence"
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            hypervibe-failure-evidence/**
