@@ -63,7 +63,8 @@ describe('command presentation', () => {
     expect(output).toContain('✅  HYPERVIBE · IN SYNC');
     expect(output).toContain('staging · spec r7');
     expect(output).toContain('0 changes · 1 service · provider verified');
-    expect(output).toContain('🟢 web · running · https://staging.example.com');
+    expect(output).toMatch(/RESULT\s+SERVICE\s+STATUS\s+URL/);
+    expect(output).toMatch(/🟢\s+web\s+running\s+https:\/\/staging\.example\.com/);
     expect(output).toContain('Runtime Health:');
   });
 
@@ -117,7 +118,8 @@ describe('command presentation', () => {
 
     expect(output).toContain('❌  HYPERVIBE · APPLY STOPPED');
     expect(output).toContain('1 succeeded action · 1 pending action');
-    expect(output).toContain('✅ service:web · succeeded');
+    expect(output).toContain('✅ service:web');
+    expect(output).not.toContain('service:web · succeeded');
     expect(output).toContain('⏳ domain:example.com · pending');
     expect(output).toContain('🛑  AGENT INSTRUCTION');
   });
@@ -144,13 +146,16 @@ describe('command presentation', () => {
   it('gives every command a command-aware shared success presentation', () => {
     const output = formatCommandResult('hv_inspect', commandSuccess({
       provider: 'gitlab',
-      resources: [{ id: '1', status: 'active' }],
+      resources: [{ id: '1', name: 'web', status: 'success', url: 'https://example.com/web' }],
     }));
 
     expect(output).toContain('✅  HYPERVIBE · INSPECT COMPLETE');
     expect(output).toContain('📦  RESULT');
     expect(output).toContain('gitlab');
     expect(output).toContain('Resources: 1');
+    expect(output).toMatch(/RESULT\s+NAME\s+URL\s+ID/);
+    expect(output).toMatch(/✅\s+web\s+https:\/\/example\.com\/web\s+1/);
+    expect(output).not.toContain('success');
   });
 
   it('uses pending rather than success styling for acknowledged async work', () => {
@@ -222,7 +227,8 @@ describe('command presentation', () => {
 
     expect(output).toContain('✅  HYPERVIBE · CI STATUS');
     expect(output).toContain('📜  LOGS');
-    expect(output).toContain('❌ critical journey · failed · job 96485414159');
+    expect(output).toContain('❌ critical journey · job 96485414159');
+    expect(output).not.toContain('critical journey · failed');
     expect(output).toContain('2 returned · 200 total · tail truncated');
     expect(output).toContain('  │ Run npm test');
     expect(output).toContain('  │ Error: expected 200');
@@ -240,6 +246,8 @@ describe('command presentation', () => {
           id: 32403831183,
           status: 'completed',
           conclusion: 'success',
+          branch: 'main',
+          createdAt: '2026-08-20T18:00:00Z',
           url: firstUrl,
         },
         {
@@ -247,17 +255,21 @@ describe('command presentation', () => {
           id: 32403414765,
           status: 'completed',
           conclusion: 'failure',
+          branch: 'main',
+          createdAt: '2026-08-20T17:00:00Z',
           url: secondUrl,
         },
       ],
     }));
 
     expect(output).toContain('2 runs · staging critical journey');
-    expect(output).toContain('ID           STATUS     CONCLUSION  URL');
-    expect(output).toContain(`32403831183  completed  success     ${firstUrl}`);
-    expect(output).toContain(`32403414765  completed  failure     ${secondUrl}`);
+    expect(output).toMatch(/RESULT\s+STATUS\s+BRANCH\s+CREATED\s+URL\s+RUN ID/);
+    expect(output).toMatch(new RegExp(`✅\\s+completed\\s+main\\s+2026-08-20T18:00:00Z\\s+${firstUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+32403831183`));
+    expect(output).toMatch(new RegExp(`❌\\s+completed\\s+main\\s+2026-08-20T17:00:00Z\\s+${secondUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+32403414765`));
     expect(output).not.toContain('name: staging critical journey');
     expect(output).not.toContain('status: completed');
+    expect(output).not.toContain('success');
+    expect(output).not.toContain('failure');
   });
 
   it('renders provider-neutral CI run fields in the same table', () => {
@@ -273,9 +285,69 @@ describe('command presentation', () => {
     }));
 
     expect(output).toContain('1 run · GitLab pipeline');
-    expect(output).toContain('ID           STATUS     URL');
-    expect(output).toContain('pipeline-42  succeeded  https://gitlab.example.com/group/project/-/pipelines/42');
-    expect(output).not.toContain('CONCLUSION');
+    expect(output).toMatch(/RESULT\s+URL\s+RUN ID/);
+    expect(output).toMatch(/✅\s+https:\/\/gitlab\.example\.com\/group\/project\/-\/pipelines\/42\s+pipeline-42/);
+    expect(output).not.toContain('succeeded');
+    expect(output).not.toMatch(/^RESULT\s+STATUS/m);
+  });
+
+  it('uses the same outcome-first ordering for CI jobs and artifacts', () => {
+    const output = formatCommandResult('hv_ci_status', commandSuccess({
+      repository: 'davejohnson/invoice-express',
+      jobs: [{
+        id: 'job-99',
+        name: 'test',
+        status: 'completed',
+        conclusion: 'failure',
+        startedAt: '2026-08-20T18:00:00Z',
+        completedAt: '2026-08-20T18:02:00Z',
+      }],
+      artifacts: [{
+        id: 'artifact-7',
+        name: 'failure-evidence',
+        expired: false,
+        createdAt: '2026-08-20T18:02:00Z',
+      }],
+    }));
+
+    expect(output).toMatch(/RESULT\s+NAME\s+STATUS\s+STARTED AT\s+COMPLETED AT\s+ID/);
+    expect(output).toMatch(/❌\s+test\s+completed\s+2026-08-20T18:00:00Z\s+2026-08-20T18:02:00Z\s+job-99/);
+    expect(output).toMatch(/RESULT\s+NAME\s+CREATED AT\s+ID/);
+    expect(output).toMatch(/✅\s+failure-evidence\s+2026-08-20T18:02:00Z\s+artifact-7/);
+    expect(output).not.toContain('failure     ');
+    expect(output).not.toContain('Expired: false');
+  });
+
+  it('tables connection lists with result first and opaque details last', () => {
+    const output = formatCommandResult('hv_connections', commandSuccess({
+      connections: [
+        { provider: 'github', scope: 'davejohnson/hypervibe', status: 'verified', lastVerifiedAt: '2026-08-20T18:00:00Z' },
+        { provider: 'cloudflare', scope: 'example.com', status: 'failed', lastVerifiedAt: '2026-08-20T17:00:00Z' },
+      ],
+    }));
+
+    expect(output).toContain('Connections: 2');
+    expect(output).toMatch(/RESULT\s+PROVIDER\s+SCOPE\s+LAST VERIFIED AT/);
+    expect(output).toMatch(/✅\s+github\s+davejohnson\/hypervibe\s+2026-08-20T18:00:00Z/);
+    expect(output).toMatch(/❌\s+cloudflare\s+example\.com\s+2026-08-20T17:00:00Z/);
+    expect(output).not.toContain('verified');
+    expect(output).not.toContain('failed');
+  });
+
+  it('preserves database query column order instead of reinterpreting row data', () => {
+    const output = formatCommandResult('hv_db_query', commandSuccess({
+      rowCount: 2,
+      rows: [
+        { id: 1, status: 'success', total: 42 },
+        { id: 2, status: 'failure', total: 7 },
+      ],
+      fields: ['id', 'status', 'total'],
+    }));
+
+    expect(output).toMatch(/ID\s+STATUS\s+TOTAL/);
+    expect(output).toMatch(/1\s+success\s+42/);
+    expect(output).toMatch(/2\s+failure\s+7/);
+    expect(output).not.toContain('RESULT  ID');
   });
 
   it('does not show a green success check when a requested CI section failed to load', () => {

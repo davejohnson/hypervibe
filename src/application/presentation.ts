@@ -1,8 +1,13 @@
 import {
+  formatCommandTable,
   formatCommandDataLines,
   formatCommandGuidanceLines,
   formatHypervibeHeader,
+  formatTableCell,
+  isOutcomeOnlyStatus,
+  statusSymbol,
   type CommandEnvelope,
+  type CommandTableColumn,
 } from './results.js';
 
 type PresentationTone = 'success' | 'info' | 'warning' | 'danger';
@@ -62,25 +67,6 @@ const ACTION_ICONS: Record<string, string> = {
   delete: '🧨',
   replace: '♻️',
   noop: '✅',
-};
-
-const STATUS_ICONS: Record<string, string> = {
-  succeeded: '✅',
-  success: '✅',
-  completed: '✅',
-  complete: '✅',
-  healthy: '💚',
-  running: '🟢',
-  active: '🟢',
-  pending: '⏳',
-  queued: '⏳',
-  blocked: '🚧',
-  skipped_requires_confirm: '🔐',
-  failed: '❌',
-  failure: '❌',
-  canceled: '❌',
-  cancelled: '❌',
-  unknown: '❔',
 };
 
 function record(value: unknown): DataRecord | undefined {
@@ -146,19 +132,28 @@ function receiptRows(receipts: unknown[]): string[] {
     const status = stringValue(receipt.status)?.toLowerCase() ?? 'unknown';
     const actionId = stringValue(receipt.actionId) ?? 'action';
     const message = stringValue(receipt.error) ?? stringValue(receipt.message);
-    return `${STATUS_ICONS[status] ?? '•'} ${actionId} · ${status}${message ? ` · ${message}` : ''}`;
+    const statusText = isOutcomeOnlyStatus(status) ? '' : ` · ${status}`;
+    return `${statusSymbol(status)} ${actionId}${statusText}${message ? ` · ${message}` : ''}`;
   });
 }
 
 function serviceRows(services: unknown[]): string[] {
-  return services.map((value) => {
-    const service = record(value);
-    if (!service) return `• ${String(value)}`;
-    const status = stringValue(service.status)?.toLowerCase() ?? 'unknown';
-    const name = stringValue(service.name) ?? 'service';
-    const url = stringValue(service.url);
-    return `${STATUS_ICONS[status] ?? '•'} ${name} · ${status}${url ? ` · ${url}` : ''}`;
-  });
+  const parsed = services.map(record);
+  if (parsed.some((service) => !service)) return services.map((value) => `• ${String(value)}`);
+  const records = parsed.filter((service): service is DataRecord => Boolean(service)).slice(0, 12);
+  const hasStatus = records.some((service) => service.status !== undefined && !isOutcomeOnlyStatus(service.status));
+  const hasUrl = records.some((service) => stringValue(service.url));
+  const hasId = records.some((service) => service.id !== undefined);
+  const columns: CommandTableColumn[] = [
+    { header: 'RESULT', value: (service) => statusSymbol(service.status), maxWidth: 6 },
+    { header: 'SERVICE', value: (service) => service.name, maxWidth: 40 },
+    ...(hasStatus ? [{ header: 'STATUS', value: (service: DataRecord) => service.status, maxWidth: 20 }] : []),
+    ...(hasUrl ? [{ header: 'URL', value: (service: DataRecord) => service.url, maxWidth: 120 }] : []),
+    ...(hasId ? [{ header: 'SERVICE ID', value: (service: DataRecord) => service.id, maxWidth: 48 }] : []),
+  ];
+  const lines = formatCommandTable(records, columns);
+  if (services.length > records.length) lines.push(`… ${services.length - records.length} more services`);
+  return lines;
 }
 
 function genericLines(data: DataRecord, omitted: Set<string>): string[] {
@@ -435,7 +430,8 @@ function ciLogRows(logs: unknown[]): string[] {
     const phase = stringValue(entry.phase) ?? stringValue(entry.status) ?? 'unknown';
     const name = stringValue(entry.name) ?? 'job';
     const jobId = compactId(entry.jobId);
-    lines.push(`${STATUS_ICONS[phase.toLowerCase()] ?? '⚙️'} ${name} · ${phase}${jobId ? ` · job ${jobId}` : ''}`);
+    const phaseText = isOutcomeOnlyStatus(phase) ? '' : ` · ${phase}`;
+    lines.push(`${statusSymbol(phase)} ${name}${phaseText}${jobId ? ` · job ${jobId}` : ''}`);
     if (typeof entry.error === 'string') {
       lines.push(`  ❌ ${entry.error}`);
       return;
@@ -459,13 +455,6 @@ function ciLogRows(logs: unknown[]): string[] {
   return lines;
 }
 
-function tableCell(value: unknown, maxLength: number): string {
-  if (value === null || value === undefined) return '';
-  const text = String(value).replace(/\s+/g, ' ').trim();
-  if (text.length <= maxLength) return text;
-  return `${text.slice(0, maxLength - 1)}…`;
-}
-
 function ciRunRows(runs: unknown[]): string[] {
   if (runs.length === 0) return ['No runs returned.'];
   const parsed = runs.map(record);
@@ -474,34 +463,35 @@ function ciRunRows(runs: unknown[]): string[] {
   }
 
   const records = parsed as DataRecord[];
-  const names = records.map((run) => tableCell(run.name, Number.MAX_SAFE_INTEGER));
+  const names = records.map((run) => formatTableCell(run.name, Number.MAX_SAFE_INTEGER));
   const sharedName = names.length > 0
     && names.every((name) => name.length > 0 && name === names[0])
-      ? tableCell(names[0], 40)
+      ? formatTableCell(names[0], 40)
       : undefined;
   const visible = records.slice(0, 12);
-  const hasConclusion = visible.some((run) => tableCell(run.conclusion, 16).length > 0);
-  const hasUrl = visible.some((run) => tableCell(run.url ?? run.webUrl, 160).length > 0);
-  const columns = [
-    ...(!sharedName ? [{ header: 'NAME', value: (run: DataRecord) => tableCell(run.name, 40) || '—' }] : []),
-    { header: 'ID', value: (run: DataRecord) => tableCell(run.id, 48) || '—' },
-    { header: 'STATUS', value: (run: DataRecord) => tableCell(run.status ?? run.phase ?? run.nativeStatus, 20) || 'unknown' },
-    ...(hasConclusion ? [{ header: 'CONCLUSION', value: (run: DataRecord) => tableCell(run.conclusion, 20) || '—' }] : []),
-    ...(hasUrl ? [{ header: 'URL', value: (run: DataRecord) => tableCell(run.url ?? run.webUrl, 160) || '—' }] : []),
+  const resultValue = (run: DataRecord) => run.conclusion ?? run.phase ?? run.status ?? run.nativeStatus;
+  const stateValue = (run: DataRecord) => {
+    const state = run.status ?? run.phase ?? run.nativeStatus;
+    return run.conclusion !== null && run.conclusion !== undefined
+      ? state
+      : isOutcomeOnlyStatus(state) ? undefined : state;
+  };
+  const hasState = visible.some((run) => stateValue(run) !== undefined);
+  const hasBranch = visible.some((run) => formatTableCell(run.branch ?? run.ref, 32).length > 0);
+  const hasCreatedAt = visible.some((run) => formatTableCell(run.createdAt, 28).length > 0);
+  const hasUrl = visible.some((run) => formatTableCell(run.url ?? run.webUrl, 160).length > 0);
+  const columns: CommandTableColumn[] = [
+    { header: 'RESULT', value: (run) => statusSymbol(resultValue(run)), maxWidth: 6 },
+    ...(!sharedName ? [{ header: 'NAME', value: (run: DataRecord) => run.name, maxWidth: 40 }] : []),
+    ...(hasState ? [{ header: 'STATUS', value: stateValue, maxWidth: 20 }] : []),
+    ...(hasBranch ? [{ header: 'BRANCH', value: (run: DataRecord) => run.branch ?? run.ref, maxWidth: 32 }] : []),
+    ...(hasCreatedAt ? [{ header: 'CREATED', value: (run: DataRecord) => run.createdAt, maxWidth: 28 }] : []),
+    ...(hasUrl ? [{ header: 'URL', value: (run: DataRecord) => run.url ?? run.webUrl, maxWidth: 160 }] : []),
+    { header: 'RUN ID', value: (run) => run.id, maxWidth: 48 },
   ];
-  const rows = visible.map((run) => columns.map((column) => column.value(run)));
-  const widths = columns.map((column, index) => Math.max(
-    column.header.length,
-    ...rows.map((row) => row[index].length)
-  ));
-  const formatRow = (cells: string[]) => cells
-    .map((cell, index) => index === cells.length - 1 ? cell : cell.padEnd(widths[index]))
-    .join('  ');
   const lines = [
     `${plural(runs.length, 'run')}${sharedName ? ` · ${sharedName}` : ''}`,
-    formatRow(columns.map((column) => column.header)),
-    formatRow(widths.map((width) => '─'.repeat(width))),
-    ...rows.map(formatRow),
+    ...formatCommandTable(visible, columns),
   ];
   if (records.length > visible.length) lines.push(`… ${records.length - visible.length} more runs`);
   return lines;
@@ -509,16 +499,24 @@ function ciRunRows(runs: unknown[]): string[] {
 
 function deploymentRows(deployments: unknown[]): string[] {
   if (deployments.length === 0) return ['(no deployments returned)'];
-  return deployments.map((value) => {
-    const deployment = record(value);
-    if (!deployment) return `• ${String(value)}`;
-    const status = stringValue(deployment.status) ?? 'unknown';
-    const id = compactId(deployment.id) ?? 'deployment';
-    const service = stringValue(deployment.service);
-    const createdAt = stringValue(deployment.createdAt);
-    const url = stringValue(deployment.url);
-    return `${STATUS_ICONS[status.toLowerCase()] ?? '•'} ${id} · ${status}${service ? ` · ${service}` : ''}${createdAt ? ` · ${createdAt}` : ''}${url ? ` · ${url}` : ''}`;
-  });
+  const parsed = deployments.map(record);
+  if (parsed.some((deployment) => !deployment)) return deployments.map((value) => `• ${String(value)}`);
+  const records = parsed.filter((deployment): deployment is DataRecord => Boolean(deployment)).slice(0, 12);
+  const hasStatus = records.some((deployment) => deployment.status !== undefined && !isOutcomeOnlyStatus(deployment.status));
+  const hasService = records.some((deployment) => stringValue(deployment.service));
+  const hasCreatedAt = records.some((deployment) => stringValue(deployment.createdAt));
+  const hasUrl = records.some((deployment) => stringValue(deployment.url));
+  const columns: CommandTableColumn[] = [
+    { header: 'RESULT', value: (deployment) => statusSymbol(deployment.status), maxWidth: 6 },
+    ...(hasService ? [{ header: 'SERVICE', value: (deployment: DataRecord) => deployment.service, maxWidth: 40 }] : []),
+    ...(hasStatus ? [{ header: 'STATUS', value: (deployment: DataRecord) => deployment.status, maxWidth: 20 }] : []),
+    ...(hasCreatedAt ? [{ header: 'CREATED', value: (deployment: DataRecord) => deployment.createdAt, maxWidth: 28 }] : []),
+    ...(hasUrl ? [{ header: 'URL', value: (deployment: DataRecord) => deployment.url, maxWidth: 120 }] : []),
+    { header: 'DEPLOYMENT ID', value: (deployment) => deployment.id, maxWidth: 48 },
+  ];
+  const lines = formatCommandTable(records, columns);
+  if (deployments.length > records.length) lines.push(`… ${deployments.length - records.length} more deployments`);
+  return lines;
 }
 
 function logsPresentation(data: DataRecord): CommandPresentation {

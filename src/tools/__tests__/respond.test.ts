@@ -112,7 +112,7 @@ describe('toolSuccess', () => {
     expect(rendered(response)).not.toContain('**');
   });
 
-  it('renders CI conclusions and bounded log text in the human response', () => {
+  it('renders CI outcomes as symbols and preserves bounded log text in the human response', () => {
     const response = toolSuccess({
       runs: [{ name: 'Deploy staging', id: 123, status: 'completed', conclusion: 'failure' }],
       logs: [{
@@ -128,7 +128,8 @@ describe('toolSuccess', () => {
     });
 
     const text = rendered(response);
-    expect(text).toContain('conclusion: failure');
+    expect(text).toContain('❌');
+    expect(text).not.toContain('conclusion: failure');
     expect(text).toContain('Run npm test');
     expect(text).toContain('Error: expected 200');
   });

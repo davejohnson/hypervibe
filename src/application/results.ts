@@ -234,19 +234,77 @@ function titleForKey(key: string): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function statusIcon(status?: string): string {
-  const normalized = status?.toLowerCase();
+export function statusSymbol(status: unknown): string {
+  if (typeof status === 'boolean') return status ? '✅' : '❌';
+  const normalized = typeof status === 'string' ? status.toLowerCase() : '';
   if (!normalized) return '•';
-  if (['ok', 'success', 'succeeded', 'complete', 'completed', 'verified', 'active', 'running', 'in_sync'].includes(normalized)) {
+  if (['ok', 'success', 'succeeded', 'complete', 'completed', 'verified', 'healthy', 'passed', 'pass', 'in_sync', 'ready'].includes(normalized)) {
     return '✅';
   }
-  if (['failed', 'failure', 'error', 'errored', 'rejected', 'missing', 'unverified', 'blocked'].includes(normalized)) {
+  if (['failed', 'failure', 'error', 'errored', 'rejected', 'missing', 'unverified', 'unhealthy', 'canceled', 'cancelled', 'aborted', 'expired'].includes(normalized)) {
     return '❌';
   }
-  if (['warning', 'warn', 'skipped', 'noop', 'pending', 'queued', 'unknown'].includes(normalized)) {
+  if (['pending', 'queued', 'in_progress'].includes(normalized)) {
+    return '⏳';
+  }
+  if (['running', 'active'].includes(normalized)) {
+    return '🟢';
+  }
+  if (normalized === 'blocked') {
+    return '🚧';
+  }
+  if (normalized === 'skipped_requires_confirm') {
+    return '🔐';
+  }
+  if (['warning', 'warn', 'skipped', 'noop'].includes(normalized)) {
     return '⚠️';
   }
+  if (normalized === 'unknown') return '❔';
   return '•';
+}
+
+export function isOutcomeOnlyStatus(status: unknown): boolean {
+  if (typeof status === 'boolean') return true;
+  if (typeof status !== 'string') return false;
+  return [
+    'ok', 'success', 'succeeded', 'complete', 'verified', 'healthy', 'passed', 'pass',
+    'failed', 'failure', 'error', 'errored', 'rejected', 'unverified', 'unhealthy',
+  ].includes(status.toLowerCase());
+}
+
+export interface CommandTableColumn {
+  header: string;
+  value: (record: Record<string, unknown>) => unknown;
+  maxWidth?: number;
+}
+
+export function formatTableCell(value: unknown, maxWidth = 40): string {
+  if (value === null || value === undefined) return '';
+  const text = scalarText(value).replace(/\s+/g, ' ').trim();
+  if (text.length <= maxWidth) return text;
+  return `${text.slice(0, maxWidth - 1)}…`;
+}
+
+export function formatCommandTable(
+  records: Array<Record<string, unknown>>,
+  columns: CommandTableColumn[]
+): string[] {
+  if (records.length === 0 || columns.length === 0) return [];
+  const rows = records.map((entry) => columns.map((column) => (
+    formatTableCell(column.value(entry), column.maxWidth) || '—'
+  )));
+  const widths = columns.map((column, index) => Math.max(
+    column.header.length,
+    ...rows.map((row) => row[index].length)
+  ));
+  const formatRow = (cells: string[]) => cells
+    .map((cell, index) => index === cells.length - 1 ? cell : cell.padEnd(widths[index]))
+    .join('  ');
+  return [
+    formatRow(columns.map((column) => column.header)),
+    formatRow(widths.map((width) => '─'.repeat(width))),
+    ...rows.map(formatRow),
+  ];
 }
 
 function actionIcon(type?: string): string {
@@ -355,7 +413,7 @@ function summarizeReceipt(value: unknown): string {
   const status = typeof value.status === 'string' ? value.status : undefined;
   const message = typeof value.message === 'string' ? value.message : undefined;
   const error = typeof value.error === 'string' ? `error: ${value.error}` : undefined;
-  return [statusIcon(status), actionId ? `\`${actionId}\`` : 'receipt', status, message, error].filter(Boolean).join(' - ');
+  return [statusSymbol(status), actionId ? `\`${actionId}\`` : 'receipt', isOutcomeOnlyStatus(status) ? undefined : status, message, error].filter(Boolean).join(' - ');
 }
 
 function summarizeConnection(value: unknown): string {
@@ -364,7 +422,7 @@ function summarizeConnection(value: unknown): string {
   const status = typeof value.status === 'string' ? value.status : undefined;
   const scope = typeof value.scope === 'string' ? `for ${value.scope}` : undefined;
   const reasons = Array.isArray(value.reasons) ? `(${value.reasons.join(', ')})` : undefined;
-  return [statusIcon(status), provider, scope, status, reasons].filter(Boolean).join(' ');
+  return [statusSymbol(status), provider, scope, isOutcomeOnlyStatus(status) ? undefined : status, reasons].filter(Boolean).join(' ');
 }
 
 function summarizeValue(value: unknown): string {
@@ -372,6 +430,12 @@ function summarizeValue(value: unknown): string {
   if (Array.isArray(value)) return `${value.length} item(s)`;
   if (value instanceof Date) return value.toISOString();
   const record = value as Record<string, unknown>;
+  const outcome = outcomeValue(record);
+  const result = statusSymbol(outcome);
+  const omitOutcome = new Set<string>(['conclusion', 'success', 'ok', 'healthy', 'verified', 'expired']);
+  if (isOutcomeOnlyStatus(record.status)) omitOutcome.add('status');
+  if (isOutcomeOnlyStatus(record.phase)) omitOutcome.add('phase');
+  if (isOutcomeOnlyStatus(record.state)) omitOutcome.add('state');
   const preferred = [
     'name',
     'id',
@@ -386,9 +450,9 @@ function summarizeValue(value: unknown): string {
     'count',
   ];
   const parts = preferred
-    .filter((key) => record[key] !== undefined && (record[key] === null || typeof record[key] !== 'object'))
+    .filter((key) => !omitOutcome.has(key) && record[key] !== undefined && (record[key] === null || typeof record[key] !== 'object'))
     .map((key) => `${key}: ${scalarText(record[key])}`);
-  if (parts.length > 0) return parts.slice(0, 4).join(', ');
+  if (parts.length > 0) return [result === '•' ? undefined : result, parts.slice(0, 4).join(', ')].filter(Boolean).join(' ');
   return `${Object.keys(record).length} field(s)`;
 }
 
@@ -400,11 +464,14 @@ function formatLogs(values: unknown[]): string[] {
       lines.push(`  - ${summarizeValue(value)}`);
       continue;
     }
+    const status = typeof value.status === 'string' ? value.status : undefined;
+    const conclusion = typeof value.conclusion === 'string' ? value.conclusion : undefined;
+    const result = conclusion ?? status;
     const summary = [
+      statusSymbol(result),
       typeof value.name === 'string' ? value.name : 'job',
       value.jobId !== undefined ? `job ${scalarText(value.jobId)}` : undefined,
-      typeof value.status === 'string' ? value.status : undefined,
-      typeof value.conclusion === 'string' ? `conclusion: ${value.conclusion}` : undefined,
+      status && (conclusion || !isOutcomeOnlyStatus(status)) ? status : undefined,
       typeof value.returnedLines === 'number' && typeof value.lineCount === 'number'
         ? `${value.returnedLines}/${value.lineCount} lines${value.truncated === true ? ' (truncated)' : ''}`
         : undefined,
@@ -420,6 +487,7 @@ function formatLogs(values: unknown[]): string[] {
 
 function summarizeStorage(value: unknown): string {
   if (!isRecord(value)) return summarizeValue(value);
+  const status = typeof value.status === 'string' ? value.status : undefined;
   const scope = isRecord(value.instanceScope) ? value.instanceScope : undefined;
   const scopeText = scope
     ? Object.entries(scope)
@@ -428,20 +496,135 @@ function summarizeStorage(value: unknown): string {
       .join(' / ')
     : '';
   return [
+    statusSymbol(status),
     typeof value.name === 'string' ? value.name : undefined,
     typeof value.provider === 'string' ? `provider ${value.provider}` : undefined,
     typeof value.externalId === 'string' ? `resource ${value.externalId}` : undefined,
     scopeText ? `scope ${scopeText}` : undefined,
-    typeof value.status === 'string' ? `status ${value.status}` : undefined,
+    status && !isOutcomeOnlyStatus(status) ? status : undefined,
     typeof value.objectCount === 'number' ? `${value.objectCount} object(s)` : undefined,
     typeof value.sizeBytes === 'number' ? `${value.sizeBytes} byte(s)` : undefined,
   ].filter(Boolean).join(', ');
+}
+
+const OUTCOME_KEYS = ['conclusion', 'success', 'ok', 'healthy', 'verified', 'expired', 'status', 'phase', 'state', 'severity'] as const;
+const ID_KEYS = ['id', 'actionId', 'runId', 'jobId', 'artifactId', 'deploymentId', 'externalId', 'providerId'] as const;
+const IDENTITY_KEYS = ['name', 'key', 'label', 'service', 'environment', 'provider', 'type', 'kind'] as const;
+const STATE_KEYS = ['status', 'phase', 'state', 'severity'] as const;
+const CONTEXT_KEYS = ['scope', 'platform', 'version', 'path', 'branch', 'ref', 'source'] as const;
+const DESCRIPTION_KEYS = ['message', 'summary', 'reason', 'evidence'] as const;
+const TIME_KEYS = ['timestamp', 'createdAt', 'startedAt', 'updatedAt', 'completedAt', 'lastVerifiedAt', 'expiresAt'] as const;
+const LINK_KEYS = ['url', 'webUrl'] as const;
+
+function isTableScalar(value: unknown): boolean {
+  return value === null
+    || value === undefined
+    || typeof value === 'string'
+    || typeof value === 'number'
+    || typeof value === 'boolean'
+    || value instanceof Date;
+}
+
+function outcomeValue(entry: Record<string, unknown>): unknown {
+  for (const key of OUTCOME_KEYS) {
+    const value = entry[key];
+    if (value === null || value === undefined || value === '') continue;
+    if (key === 'expired' && typeof value === 'boolean') return !value;
+    return value;
+  }
+  return undefined;
+}
+
+function columnWidth(key: string): number {
+  if (LINK_KEYS.includes(key as typeof LINK_KEYS[number])) return 120;
+  if (DESCRIPTION_KEYS.includes(key as typeof DESCRIPTION_KEYS[number])) return 64;
+  if (TIME_KEYS.includes(key as typeof TIME_KEYS[number])) return 28;
+  if (ID_KEYS.includes(key as typeof ID_KEYS[number])) return 48;
+  if (['name', 'label', 'path'].includes(key)) return 40;
+  return 30;
+}
+
+function orderedTableKeys(key: string, records: Array<Record<string, unknown>>): string[] {
+  const discovered = Array.from(new Set(records.flatMap((entry) => (
+    Object.entries(entry)
+      .filter(([, value]) => isTableScalar(value))
+      .map(([entryKey]) => entryKey)
+  ))));
+  if (key === 'rows') return discovered;
+
+  const hasExplicitOutcome = records.some((entry) => (
+    ['conclusion', 'success', 'ok', 'healthy', 'verified', 'expired']
+      .some((entryKey) => entry[entryKey] !== null && entry[entryKey] !== undefined)
+  ));
+  const omit = new Set<string>(['conclusion', 'success', 'ok', 'healthy', 'verified', 'expired']);
+  if (discovered.includes('nativeStatus') && discovered.some((entryKey) => ['status', 'phase'].includes(entryKey))) {
+    omit.add('nativeStatus');
+  }
+  for (const stateKey of STATE_KEYS) {
+    const values = records
+      .map((entry) => entry[stateKey])
+      .filter((value) => value !== null && value !== undefined && value !== '');
+    if (!hasExplicitOutcome && values.length > 0 && values.every(isOutcomeOnlyStatus)) {
+      omit.add(stateKey);
+    }
+  }
+
+  const earlyPriority: readonly string[] = [
+    ...IDENTITY_KEYS,
+    ...STATE_KEYS,
+    ...CONTEXT_KEYS,
+  ];
+  const latePriority: readonly string[] = [
+    ...DESCRIPTION_KEYS,
+    ...TIME_KEYS,
+    ...LINK_KEYS,
+    ...ID_KEYS,
+  ];
+  const categorized = new Set([...earlyPriority, ...latePriority]);
+  return [
+    ...earlyPriority.filter((entryKey, index) => (
+      earlyPriority.indexOf(entryKey) === index && discovered.includes(entryKey) && !omit.has(entryKey)
+    )),
+    ...discovered.filter((entryKey) => !categorized.has(entryKey) && !omit.has(entryKey)),
+    ...latePriority.filter((entryKey, index) => (
+      latePriority.indexOf(entryKey) === index && discovered.includes(entryKey) && !omit.has(entryKey)
+    )),
+  ];
+}
+
+function formatRecordTable(key: string, values: unknown[]): string[] | null {
+  const parsed = values.map((value) => isRecord(value) ? value : null);
+  if (parsed.some((entry) => !entry)) return null;
+  const records = parsed.filter(isRecord).slice(0, 12);
+  const keys = orderedTableKeys(key, records);
+  if (keys.length === 0) return null;
+  const hasResult = key !== 'rows' && records.some((entry) => statusSymbol(outcomeValue(entry)) !== '•');
+  const columns: CommandTableColumn[] = [
+    ...(hasResult
+      ? [{ header: 'RESULT', value: (entry: Record<string, unknown>) => statusSymbol(outcomeValue(entry)), maxWidth: 6 }]
+      : []),
+    ...keys.map((entryKey) => ({
+      header: titleForKey(entryKey).toUpperCase(),
+      value: (entry: Record<string, unknown>) => entry[entryKey],
+      maxWidth: columnWidth(entryKey),
+    })),
+  ];
+  return formatCommandTable(records, columns);
 }
 
 function formatArray(key: string, values: unknown[]): string[] {
   if (values.length === 0) return [`${titleForKey(key)}: none`];
   if (key === 'logs') return formatLogs(values);
   const lines = [`${titleForKey(key)}: ${values.length}`];
+  const preserveAsRows = ['actions', 'drift', 'unmanaged', 'blocked', 'actionScopedBlocked', 'storage', 'receipts', 'required', 'missing'];
+  if (!preserveAsRows.includes(key)) {
+    const table = formatRecordTable(key, values);
+    if (table) {
+      lines.push(...table);
+      if (values.length > 12) lines.push(`… ${values.length - 12} more ${titleForKey(key).toLowerCase()}`);
+      return lines;
+    }
+  }
   const formatter =
     ['actions', 'drift', 'unmanaged', 'blocked', 'actionScopedBlocked'].includes(key)
       ? summarizeAction
@@ -449,7 +632,7 @@ function formatArray(key: string, values: unknown[]): string[] {
         ? summarizeStorage
         : key === 'receipts'
           ? summarizeReceipt
-          : ['required', 'missing', 'connections'].includes(key)
+          : ['required', 'missing'].includes(key)
             ? summarizeConnection
             : summarizeValue;
   for (const item of values.slice(0, 12)) {
@@ -460,6 +643,7 @@ function formatArray(key: string, values: unknown[]): string[] {
 }
 
 function formatConnections(value: unknown): string[] {
+  if (Array.isArray(value)) return formatArray('connections', value);
   if (!isRecord(value)) return [`Connections: ${summarizeValue(value)}`];
   const required = Array.isArray(value.required) ? value.required : [];
   const missing = Array.isArray(value.missing) ? value.missing : [];
@@ -511,6 +695,25 @@ function formatConnectionSetup(value: unknown): string[] {
   return lines;
 }
 
+function appendNestedArrayLines(
+  lines: string[],
+  value: Record<string, unknown>,
+  excluded = new Set<string>()
+): void {
+  const arrays = Object.entries(value)
+    .filter(([key, entry]) => !excluded.has(key) && Array.isArray(entry)) as Array<[string, unknown[]]>;
+  for (const [key, entries] of arrays.slice(0, 8)) {
+    for (const line of formatArray(key, entries)) {
+      lines.push(`  ${line}`);
+      if (lines.length >= 76) {
+        lines.push('  … nested output truncated; structuredContent contains the full redacted envelope.');
+        return;
+      }
+    }
+  }
+  if (arrays.length > 8) lines.push(`  … ${arrays.length - 8} more nested collections`);
+}
+
 function formatRecordLines(record: Record<string, unknown>): string[] {
   const lines: string[] = [];
   const priority = [
@@ -558,9 +761,7 @@ function formatRecordLines(record: Record<string, unknown>): string[] {
       for (const [entryKey, entryValue] of simpleEntries) {
         lines.push(`  - ${entryKey}: ${scalarText(entryValue)}`);
       }
-      if (Array.isArray(value.storage)) {
-        lines.push(...formatArray('storage', value.storage));
-      }
+      appendNestedArrayLines(lines, value);
     } else if (Array.isArray(value)) {
       lines.push(...formatArray(key, value));
     } else if (isRecord(value)) {
@@ -571,6 +772,7 @@ function formatRecordLines(record: Record<string, unknown>): string[] {
       for (const [entryKey, entryValue] of simpleEntries) {
         lines.push(`  - ${entryKey}: ${scalarText(entryValue)}`);
       }
+      appendNestedArrayLines(lines, value);
     } else {
       lines.push(`${titleForKey(key)}: ${scalarText(value)}`);
     }
