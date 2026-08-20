@@ -15,7 +15,7 @@
       }
     },
     "pages": {
-      "enabled": true,
+      "enabled": false,
       "sourcePath": "apps/website",
       "branch": "main",
       "customDomain": "hypervibe.dev",
