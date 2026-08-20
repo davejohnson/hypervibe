@@ -18,6 +18,7 @@ import type { CredentialFieldDescriptor } from '../domain/services/connection-gu
 import type { CommandContext } from '../application/context.js';
 import { projectField, confirmField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler } from '../application/results.js';
+import { suppliedOptionNames } from '../application/command-options.js';
 import { splitFragment } from '../utils/split-fragment.js';
 import type { Project } from '../domain/entities/project.entity.js';
 
@@ -340,6 +341,54 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       if (requestedAction !== 'remove' && !providerNames.includes(provider)) {
         return commandError('VALIDATION', `Unknown provider: ${provider}.`, {
           hint: `Available providers: ${providerNames.join(', ')}`,
+        });
+      }
+      const prepareFields = {
+        gcpProjectId,
+        deployServiceAccountEmail,
+        adminCredentialsJson,
+        adminCredentialsJsonRef,
+        adminAccessToken,
+        adminAccessTokenRef,
+      };
+      const credentialFields = { credentials, credentialsRef, credentialsKey, credentialsMap };
+      const incompatible = suppliedOptionNames(requestedAction === 'prepare'
+        ? { ...credentialFields, scope }
+        : requestedAction === 'remove' || requestedAction === 'verify'
+          ? { ...credentialFields, ...prepareFields, confirm }
+          : { ...prepareFields, confirm });
+      if (incompatible.length > 0) {
+        return commandError(
+          'VALIDATION',
+          `action="${requestedAction}" received options for another connection action: ${incompatible.join(', ')}.`,
+          { hint: `Remove the listed options and pass only fields documented for action="${requestedAction}".` }
+        );
+      }
+      if (requestedAction === 'add' && !credentialsRef && (credentialsKey !== undefined || credentialsMap !== undefined)) {
+        return commandError('VALIDATION', 'credentialsKey and credentialsMap require credentialsRef for action="add".');
+      }
+      if (requestedAction === 'add' && credentialsKey !== undefined && credentialsMap !== undefined) {
+        return commandError('VALIDATION', 'Pass either credentialsKey or credentialsMap for action="add", not both.');
+      }
+      if (requestedAction === 'prepare' && adminCredentialsJson && adminCredentialsJsonRef) {
+        return commandError('VALIDATION', 'Pass either adminCredentialsJson or adminCredentialsJsonRef, not both.');
+      }
+      if (requestedAction === 'prepare' && adminAccessToken && adminAccessTokenRef) {
+        return commandError('VALIDATION', 'Pass either adminAccessToken or adminAccessTokenRef, not both.');
+      }
+      const adminJsonSupplied = adminCredentialsJson !== undefined || adminCredentialsJsonRef !== undefined;
+      const adminTokenSupplied = adminAccessToken !== undefined || adminAccessTokenRef !== undefined;
+      if (requestedAction === 'prepare' && adminJsonSupplied && adminTokenSupplied) {
+        return commandError('VALIDATION', 'Pass one admin authentication method for action="prepare": service-account JSON or an access token, not both.');
+      }
+      if (requestedAction === 'prepare' && !confirm && (adminJsonSupplied || adminTokenSupplied)) {
+        return commandError('VALIDATION', 'Admin credentials are accepted only with confirm=true for action="prepare".', {
+          hint: 'Run the credential-free preview first, then pass exactly one admin credential reference with confirm=true.',
+        });
+      }
+      if (requestedAction === 'prepare' && confirm && !adminJsonSupplied && !adminTokenSupplied) {
+        return commandError('VALIDATION', 'confirm=true requires one admin credential reference for action="prepare".', {
+          hint: 'Pass adminCredentialsJsonRef or adminAccessTokenRef. Raw values remain available when intentionally chosen.',
         });
       }
       const project = projectRef

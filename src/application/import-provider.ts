@@ -2,6 +2,7 @@ import type { CommandContext } from './context.js';
 import { commandError, commandSuccess, type CommandEnvelope } from './results.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
 import { inspectProvider } from './inspect-provider.js';
+import { suppliedOptionNames } from './command-options.js';
 
 export interface ImportProviderInput {
   provider: string;
@@ -200,7 +201,25 @@ export async function importProvider(
       next: ['hv_inspect'],
     });
   }
-  if (input.mode === 'retained-cleanup') {
+  const mode = input.mode ?? 'adopt';
+  const incompatible = suppliedOptionNames(mode === 'retained-cleanup'
+    ? {
+      name: input.name,
+      id: input.id,
+      force: input.force,
+      environmentMappings: input.environmentMappings,
+      storageMappings: input.storageMappings,
+      databaseMappings: input.databaseMappings,
+      cacheMappings: input.cacheMappings,
+    }
+    : { project: input.project, env: input.env, region: input.region });
+  if (incompatible.length > 0) {
+    return commandError('VALIDATION', `mode="${mode}" received options for the other import mode: ${incompatible.join(', ')}.`, {
+      hint: `Remove the listed options before retrying mode="${mode}".`,
+      next: ['hv_import'],
+    });
+  }
+  if (mode === 'retained-cleanup') {
     return retainHostingCleanup(ctx, input, provider);
   }
   const driver = importDrivers.get(provider);

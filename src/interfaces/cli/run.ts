@@ -1,7 +1,8 @@
 import { initializeDatabase } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../../application/context.js';
 import { createCommandRegistry, type CommandRegistry } from '../../application/commands.js';
-import { formatCommandEnvelope, type CommandEnvelope } from '../../application/results.js';
+import type { CommandEnvelope } from '../../application/results.js';
+import { formatCommandResult } from '../../application/presentation.js';
 import { HYPERVIBE_VERSION } from '../../version.js';
 import { createProcessCliIo, type CliIo } from './io.js';
 import { commandHelp, parseCliInvocation, rootHelp } from './parser.js';
@@ -12,10 +13,10 @@ export interface CliRunOptions {
   initialize?: boolean;
 }
 
-function renderResult(result: CommandEnvelope, json: boolean): string {
+function renderResult(commandId: string, result: CommandEnvelope, json: boolean): string {
   return json
     ? `${JSON.stringify(result, null, 2)}\n`
-    : `${formatCommandEnvelope(result)}\n`;
+    : `${formatCommandResult(commandId, result)}\n`;
 }
 
 export async function runCli(
@@ -60,7 +61,7 @@ export async function runCli(
   );
 
   if (canPrompt && result.confirmation) {
-    io.writeOut(renderResult(result, false));
+    io.writeOut(renderResult(invocation.command.id, result, false));
     const confirmed = await io.confirm(result.confirmation.message);
     if (!confirmed) {
       io.writeErr('Confirmation declined; no confirmed action was executed.\n');
@@ -72,6 +73,6 @@ export async function runCli(
     });
   }
 
-  io.writeOut(renderResult(result, invocation.json));
+  io.writeOut(renderResult(invocation.command.id, result, invocation.json));
   return result.ok ? 0 : 1;
 }

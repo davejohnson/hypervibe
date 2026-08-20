@@ -32,6 +32,7 @@ import { PlanService } from '../domain/plan/plan.service.js';
 import { parseEnvironmentMaintenanceBinding } from '../domain/services/environment-maintenance.service.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
+import { ignoredOptionWarnings } from '../application/command-options.js';
 
 function resolveEnvOrThrow(ctx: CommandContext, projectRef: string | undefined, envName: string | undefined) {
   const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -39,6 +40,18 @@ function resolveEnvOrThrow(ctx: CommandContext, projectRef: string | undefined, 
   const bindings = environment.platformBindings as { provider?: string; services?: Record<string, { serviceId: string }> };
   const provider = detectProviderName(project.defaultPlatform, bindings.provider);
   return { project, environment, bindings, provider };
+}
+
+function tailBuildLog(buildLogs: string, requestedLines: number | undefined) {
+  const normalized = buildLogs.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = normalized.split('\n');
+  const tail = requestedLines === undefined ? lines : lines.slice(-requestedLines);
+  return {
+    buildLogs: tail.join('\n'),
+    lineCount: lines.length,
+    returnedLines: tail.length,
+    truncated: lines.length > tail.length,
+  };
 }
 
 async function readProviderLogs<T>(
@@ -61,13 +74,13 @@ async function readProviderLogs<T>(
 export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_logs',
-    'Fetch logs and delivery status: runtime service logs, build logs, recent deployments, or Stripe webhook endpoint status.',
+    'Fetch logs and delivery status: runtime service logs, build logs, recent deployments, or Stripe webhook endpoint status. Recognized read selectors that do not apply to the chosen source are ignored with a visible warning instead of failing the read.',
     {
       project: projectField,
       env: envField,
       service: z.string().optional().describe('Service name. Defaults to the first bound service for source=service/build.'),
       source: z.enum(['service', 'build', 'deployments', 'stripe-webhooks']).describe('What to fetch'),
-      limit: z.number().int().min(1).max(500).optional().describe('Max entries (default 100 for service logs, 10 for deployments)'),
+      limit: z.number().int().min(1).max(500).optional().describe('Max entries for service/deployments, or tail lines for build logs (default 100 service logs, 10 deployments; build logs are unbounded when omitted)'),
       errorsOnly: z.boolean().optional().describe('source=service only: return only error-like lines'),
       deploymentId: z.string().optional().describe('source=build only: specific deployment (defaults to latest)'),
       mode: z.enum(['sandbox', 'live']).optional().describe('source=stripe-webhooks only: optional assertion against the selected environment-scoped connection mode'),
@@ -79,18 +92,12 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
             hint: 'Pass the Hypervibe project and environment whose payments.stripe connection should be inspected.',
           });
         }
-        const invalid = [
-          service !== undefined ? 'service' : undefined,
-          limit !== undefined ? 'limit' : undefined,
-          errorsOnly !== undefined ? 'errorsOnly' : undefined,
-          deploymentId !== undefined ? 'deploymentId' : undefined,
-        ].filter((field): field is string => Boolean(field));
-        if (invalid.length > 0) {
-          throw new HvError('VALIDATION', 'Stripe webhook inspection received selectors for another log source.', {
-            details: { invalid },
-            hint: 'Use only project, env, source="stripe-webhooks", and optional mode.',
-          });
-        }
+        const warnings = ignoredOptionWarnings('hv_logs', `source="${source}"`, {
+          service,
+          limit,
+          errorsOnly,
+          deploymentId,
+        });
         const { project, environment } = resolveEnvOrThrow(ctx, projectRef, env);
         const environmentSpec = new SpecStore().get(project)?.spec.environments[environment.name];
         const stripeEnvironment = environmentSpec?.payments?.stripe
@@ -109,28 +116,24 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
               : {}),
           });
         }
-        return commandSuccess({
-          source,
-          project: project.name,
-          environment: environment.name,
-          stripeEnvironment,
-          mode: result.mode,
-          webhooks: result.webhooks,
-        });
+        return commandSuccess(
+          {
+            source,
+            project: project.name,
+            environment: environment.name,
+            stripeEnvironment,
+            mode: result.mode,
+            webhooks: result.webhooks,
+          },
+          { warnings }
+        );
       }
 
-      const invalid = source === 'service'
-        ? [deploymentId !== undefined ? 'deploymentId' : undefined, mode !== undefined ? 'mode' : undefined]
+      const warnings = ignoredOptionWarnings('hv_logs', `source="${source}"`, source === 'service'
+        ? { deploymentId, mode }
         : source === 'build'
-          ? [limit !== undefined ? 'limit' : undefined, errorsOnly !== undefined ? 'errorsOnly' : undefined, mode !== undefined ? 'mode' : undefined]
-          : [errorsOnly !== undefined ? 'errorsOnly' : undefined, deploymentId !== undefined ? 'deploymentId' : undefined, mode !== undefined ? 'mode' : undefined];
-      const invalidFields = invalid.filter((field): field is string => Boolean(field));
-      if (invalidFields.length > 0) {
-        throw new HvError('VALIDATION', `${source} logs received selectors for another log source.`, {
-          details: { invalid: invalidFields },
-          hint: 'Remove the listed selectors or choose the matching source.',
-        });
-      }
+          ? { errorsOnly, mode }
+          : { errorsOnly, deploymentId, mode });
 
       const { project, environment, bindings, provider } = resolveEnvOrThrow(ctx, projectRef, env);
       const boundServices = Object.keys(bindings.services ?? {});
@@ -145,7 +148,10 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
           project,
           () => fetchProviderDeployments(provider, project, environment, service, limit ?? 10)
         );
-        return commandSuccess({ source, provider, environment: environment.name, deployments });
+        return commandSuccess(
+          { source, provider, environment: environment.name, deployments },
+          { warnings }
+        );
       }
 
       if (!serviceName) {
@@ -163,7 +169,16 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
           project,
           () => fetchProviderBuildLogs(provider, project, environment, serviceName, deploymentId)
         );
-        return commandSuccess({ source, provider, service: serviceName, ...result });
+        return commandSuccess(
+          {
+            source,
+            provider,
+            service: serviceName,
+            deploymentId: result.deploymentId,
+            ...tailBuildLog(result.buildLogs, limit),
+          },
+          { warnings }
+        );
       }
 
       const { logs, deploymentStatus } = await readProviderLogs(
@@ -178,15 +193,18 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
           { errorsOnly }
         )
       );
-      return commandSuccess({
-        source,
-        provider,
-        environment: environment.name,
-        service: serviceName,
-        deploymentStatus,
-        count: logs.length,
-        logs,
-      });
+      return commandSuccess(
+        {
+          source,
+          provider,
+          environment: environment.name,
+          service: serviceName,
+          deploymentStatus,
+          count: logs.length,
+          logs,
+        },
+        { warnings }
+      );
     })
   );
 
@@ -197,11 +215,14 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
       project: projectField,
       env: envField,
       service: z.string().optional().describe('Service name (defaults to web or the first web service)'),
-      url: z.string().url().optional().describe('Explicit URL to check instead of resolving from bindings'),
+      url: z.string().url().optional().describe('Explicit URL to check instead of resolving project/env/service bindings; supplied binding selectors are ignored with a warning'),
       path: z.string().optional().describe('Path to check (defaults to the service healthCheckPath or /)'),
       timeoutMs: z.number().int().min(1000).max(60000).optional(),
     },
     wrapCommandHandler(async ({ project: projectRef, env, service, url, path, timeoutMs = 20000 }) => {
+      const optionWarnings = url
+        ? ignoredOptionWarnings('hv_health', 'with explicit url', { project: projectRef, env, service })
+        : undefined;
       let baseUrl: string;
       let healthPath = path;
       let resolvedService: string | undefined;
@@ -326,9 +347,12 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
             : deploymentFailure
               ? `Latest deployment failure: ${deploymentFailure.environment}/${deploymentFailure.service} on ${deploymentFailure.provider} (${deploymentFailure.status}). Inspect that environment with hv_logs source="deployments" and source="build" where supported.`
               : undefined,
-          warnings: unknownEnvironments.length > 0
-            ? [`Deployment status is unknown for: ${unknownEnvironments.join(', ')}.`]
-            : undefined,
+          warnings: [
+            ...(optionWarnings ?? []),
+            ...(unknownEnvironments.length > 0
+              ? [`Deployment status is unknown for: ${unknownEnvironments.join(', ')}.`]
+              : []),
+          ],
         }
       );
     })

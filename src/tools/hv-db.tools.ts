@@ -22,6 +22,7 @@ import { connectionSetupOptions } from '../domain/services/connection-guidance.j
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
+import { suppliedOptionNames } from '../application/command-options.js';
 
 type ResolvedDatabaseTarget = {
   url: string;
@@ -152,11 +153,24 @@ export function registerHvDbTools(commands: CommandRegistrar, ctx: CommandContex
       sql: z.string().describe('One SQL statement'),
       params: z.array(z.unknown()).optional().describe('Positional query parameters ($1, $2, ...)'),
       allowMutations: z.boolean().optional().describe('Allow mutating statements (default false)'),
-      connectionUrl: z.string().optional().describe('Direct postgres:// URL (overrides project/env)'),
-      connectionName: z.string().optional().describe('Named database connection (overrides project/env)'),
-      service: z.string().optional().describe('Service name when resolving from project bindings'),
+      connectionUrl: z.string().optional().describe('Direct postgres:// URL. Mutually exclusive with connectionName and with env/service selectors; project remains optional audit context.'),
+      connectionName: z.string().optional().describe('Named database connection. Mutually exclusive with connectionUrl and with env/service selectors; project remains optional audit context.'),
+      service: z.string().optional().describe('Service name when resolving a managed database from project/environment bindings'),
     },
     wrapCommandHandler(async ({ project, env, sql, params, allowMutations, connectionUrl, connectionName, service }) => {
+      if (connectionUrl && connectionName) {
+        return commandError('VALIDATION', 'Pass either connectionUrl or connectionName, not both.', {
+          hint: 'Choose one exact database target before running the query.',
+        });
+      }
+      if (connectionUrl || connectionName) {
+        const incompatible = suppliedOptionNames({ env, service });
+        if (incompatible.length > 0) {
+          return commandError('VALIDATION', `Explicit database target received managed-environment selectors: ${incompatible.join(', ')}.`, {
+            hint: 'Use connectionUrl/connectionName for the exact explicit target, or remove it and use project/env/service for a managed database.',
+          });
+        }
+      }
       const dbAdapter = new DatabaseAdapter();
       const analysis = dbAdapter.analyzeQuery(sql);
 

@@ -5,10 +5,8 @@ import type {
   CommandRegistrar,
   CommandRegistry,
 } from '../../application/commands.js';
-import {
-  formatCommandEnvelope,
-  type CommandEnvelope,
-} from '../../application/results.js';
+import type { CommandEnvelope } from '../../application/results.js';
+import { formatCommandResult } from '../../application/presentation.js';
 
 export interface McpToolResponse {
   content: Array<{ type: 'text'; text: string }>;
@@ -17,9 +15,12 @@ export interface McpToolResponse {
   [key: string]: unknown;
 }
 
-export function toMcpToolResponse(envelope: CommandEnvelope): McpToolResponse {
+export function toMcpToolResponse(
+  envelope: CommandEnvelope,
+  commandId = 'unknown'
+): McpToolResponse {
   return {
-    content: [{ type: 'text', text: formatCommandEnvelope(envelope) }],
+    content: [{ type: 'text', text: formatCommandResult(commandId, envelope) }],
     structuredContent: envelope as unknown as Record<string, unknown>,
     ...(envelope.ok ? {} : { isError: true }),
   };
@@ -35,7 +36,8 @@ function registerDefinition(
     definition.description,
     definition.inputShape,
     async (args) => toMcpToolResponse(
-      await registry.execute(definition.id, args)
+      await registry.execute(definition.id, args),
+      definition.id
     )
   );
 }
@@ -74,7 +76,8 @@ export function createMcpCommandRegistrar(server: McpServer): CommandRegistrar {
         description,
         inputShape,
         async (args) => toMcpToolResponse(
-          await handler(args as z.infer<z.ZodObject<Args>>)
+          await handler(args as z.infer<z.ZodObject<Args>>),
+          name
         )
       );
     },

@@ -119,6 +119,60 @@ describe('hv_ci_status', () => {
     await t.close();
   });
 
+  it('warns when harmless selectors do not apply to the requested status sections', async () => {
+    seedProject();
+    vi.spyOn(GitHubAdapter.prototype, 'listWorkflows').mockResolvedValue({ total_count: 0, workflows: [] });
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', {
+      project: 'billforge',
+      include: ['workflows'],
+      runId: '123',
+      logLines: 25,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.warnings).toEqual([
+      'Ignored options for hv_ci_status include=["workflows"]: runId, logLines. The requested read still completed.',
+    ]);
+    await t.close();
+  });
+
+  it('accepts definition as the portable selector for legacy GitHub runs', async () => {
+    seedProject();
+    const listRuns = vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+      total_count: 0,
+      workflow_runs: [],
+    });
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', {
+      project: 'billforge',
+      include: ['runs'],
+      definition: 'deploy.yml',
+    });
+
+    expect(res.ok).toBe(true);
+    expect(listRuns).toHaveBeenCalledWith('davejohnson', 'billforge', 'deploy.yml', { per_page: 10 });
+    await t.close();
+  });
+
+  it('rejects conflicting definition aliases before reading CI', async () => {
+    seedProject();
+    const t = await makeClient();
+    const res = await t.call('hv_ci_status', {
+      project: 'billforge',
+      include: ['runs'],
+      definition: 'deploy.yml',
+      workflow: 'other.yml',
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.error.code).toBe('VALIDATION');
+    expect(res.error.message).toContain('different CI definitions');
+    await t.close();
+  });
+
   it('reports release artifact provenance without downloading contents', async () => {
     seedProject();
     vi.spyOn(GitHubAdapter.prototype, 'listArtifacts').mockResolvedValue({
@@ -150,6 +204,39 @@ describe('hv_ci_status', () => {
       createdAt: '2026-07-01T00:00:00Z',
       workflowRun: { id: 7, headSha: 'b'.repeat(40), headBranch: 'main' },
     }]);
+    await t.close();
+  });
+
+  it('honors runId when filtering legacy GitHub artifacts', async () => {
+    seedProject();
+    vi.spyOn(GitHubAdapter.prototype, 'listArtifacts').mockResolvedValue({
+      total_count: 2,
+      artifacts: [7, 8].map((runId) => ({
+        id: runId,
+        name: `artifact-${runId}`,
+        expired: false,
+        created_at: '2026-07-01T00:00:00Z',
+        updated_at: '2026-07-01T00:00:00Z',
+        workflow_run: {
+          id: runId,
+          repository_id: 1,
+          head_repository_id: 1,
+          head_branch: 'main',
+          head_sha: 'b'.repeat(40),
+        },
+      })),
+    });
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', {
+      project: 'billforge',
+      include: ['artifacts'],
+      runId: '8',
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.data.artifacts).toHaveLength(1);
+    expect(res.data.artifacts[0].id).toBe(8);
     await t.close();
   });
 
@@ -466,6 +553,23 @@ describe('hv_ci_trigger', () => {
     expect(res.data).toMatchObject({ repository: 'davejohnson/billforge', workflow: 'deploy.yml', ref: 'main' });
     expect(res.next).toContain('hv_ci_status');
     expect(trigger).toHaveBeenCalledWith('davejohnson', 'billforge', 'deploy.yml', 'main', { version: '1.2.3' });
+    await t.close();
+  });
+
+  it('does not silently ignore an exact SHA on a legacy GitHub dispatch', async () => {
+    seedProject();
+    const trigger = vi.spyOn(GitHubAdapter.prototype, 'triggerWorkflow').mockResolvedValue();
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_trigger', {
+      project: 'billforge',
+      definition: 'deploy.yml',
+      sha: 'a'.repeat(40),
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.error.code).toBe('UNSUPPORTED');
+    expect(trigger).not.toHaveBeenCalled();
     await t.close();
   });
 

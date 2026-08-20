@@ -19,6 +19,7 @@ import { registerHvObservabilityTools } from '../hv-observability.tools.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
+import '../../adapters/providers/railway/railway.adapter.js';
 
 let tempDir: string;
 
@@ -203,6 +204,7 @@ describe('hv_logs', () => {
       source: 'stripe-webhooks',
       mode: 'live',
     });
+    expect(result.error).toBeUndefined();
     expect(result.ok).toBe(true);
     expect(result.data).toMatchObject({
       project: project.name,
@@ -228,9 +230,60 @@ describe('hv_logs', () => {
       source: 'stripe-webhooks',
       service: 'web',
     });
-    expect(foreignSelector.ok).toBe(false);
-    expect(foreignSelector.error.code).toBe('VALIDATION');
-    expect(foreignSelector.error.details.invalid).toEqual(['service']);
+    expect(foreignSelector.ok).toBe(true);
+    expect(foreignSelector.warnings).toEqual([
+      'Ignored option for hv_logs source="stripe-webhooks": service. The requested read still completed.',
+    ]);
+    await t.close();
+  });
+
+  it('uses limit as a build-log tail and warns instead of failing on harmless extra selectors', async () => {
+    const project = new ProjectRepository().create({
+      name: 'build-log-app',
+      defaultPlatform: 'railway',
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'project-1',
+        environmentId: 'environment-1',
+        services: { web: { serviceId: 'service-1' } },
+      },
+    });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        getDeployments: vi.fn(async () => []),
+        getBuildLogs: vi.fn(async () => 'install\nbuild\ntest\ndeploy'),
+      } as never,
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_logs', {
+      project: project.name,
+      env: 'staging',
+      service: 'web',
+      source: 'build',
+      deploymentId: 'deployment-1',
+      limit: 2,
+      errorsOnly: true,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      source: 'build',
+      deploymentId: 'deployment-1',
+      buildLogs: 'test\ndeploy',
+      lineCount: 4,
+      returnedLines: 2,
+      truncated: true,
+    });
+    expect(result.warnings).toEqual([
+      'Ignored option for hv_logs source="build": errorsOnly. The requested read still completed.',
+    ]);
     await t.close();
   });
 });
@@ -243,6 +296,23 @@ describe('hv_health', () => {
     expect(result.ok).toBe(true);
     expect(result.data.check.ok).toBe(true);
     expect(result.data.check.status).toBe(200);
+    await t.close();
+  });
+
+  it('warns when project selectors are irrelevant to an explicit URL health check', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('ok', { status: 200 })));
+    const t = await makeClient();
+    const result = await t.call('hv_health', {
+      url: 'https://example.com/health',
+      project: 'ignored-project',
+      env: 'staging',
+      service: 'web',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toEqual([
+      'Ignored options for hv_health with explicit url: project, env, service. The requested read still completed.',
+    ]);
     await t.close();
   });
 

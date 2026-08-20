@@ -104,6 +104,20 @@ describe('hv_runs', () => {
     await t.close();
   });
 
+  it('warns instead of rejecting a harmless limit on one run lookup', async () => {
+    const { older } = await seedRuns();
+    const t = await makeClient();
+
+    const get = await t.call('hv_runs', { action: 'get', runId: older.id, limit: 1 });
+
+    expect(get.ok).toBe(true);
+    expect(get.data.run.id).toBe(older.id);
+    expect(get.warnings).toEqual([
+      'Ignored option for hv_runs action="get": limit. The requested read still completed.',
+    ]);
+    await t.close();
+  });
+
   it('constrains run detail to the requested project and environment', async () => {
     const { older } = await seedRuns();
     const otherProject = new ProjectRepository().create({ name: 'other-devx-app' });

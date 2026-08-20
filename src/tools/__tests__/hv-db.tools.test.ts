@@ -168,7 +168,38 @@ function seedRdsDbProject() {
 }
 
 describe('hv_db_query', () => {
+  it('rejects conflicting explicit database targets before connecting', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_db_query', {
+      connectionUrl: URL,
+      connectionName: 'analytics',
+      sql: 'SELECT 1',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('either connectionUrl or connectionName');
+    await t.close();
+  });
+
   const URL = 'postgres://user:pw@localhost:5432/app';
+
+  it('rejects managed-environment selectors alongside an explicit target', async () => {
+    const connect = vi.spyOn(DatabaseAdapter.prototype, 'connect');
+    const t = await makeClient();
+    const result = await t.call('hv_db_query', {
+      connectionUrl: URL,
+      env: 'production',
+      service: 'web',
+      sql: 'SELECT 1',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('managed-environment selectors');
+    expect(connect).not.toHaveBeenCalled();
+    await t.close();
+  });
 
   it('returns project-scoped setup for a missing named database connection', async () => {
     new ProjectRepository().create({ name: 'named-db-app' });

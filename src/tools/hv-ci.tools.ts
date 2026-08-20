@@ -18,6 +18,7 @@ import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { normalizeGitRemoteIdentity } from '../lib/git-remote.js';
 import type { CiOperationsPort, CodeRepositoryIdentity } from '../domain/ports/devops.port.js';
+import { ignoredOptionWarnings } from '../application/command-options.js';
 
 const repoField = z
   .string()
@@ -268,6 +269,31 @@ function diagnoseWorkflowLog(text: string): CiWorkflowDiagnostic[] {
   ];
 }
 
+function ciStatusOptionWarnings(
+  sections: string[],
+  options: {
+    definition?: string;
+    workflow?: string;
+    runId?: string;
+    jobId?: string;
+    logLines?: number;
+    branch?: string;
+  }
+): string[] | undefined {
+  const usesDefinition = sections.includes('runs');
+  const usesRun = sections.some((section) => ['jobs', 'logs', 'artifacts'].includes(section));
+  const usesLogs = sections.includes('logs');
+  const usesBranch = sections.includes('branch-protection');
+  return ignoredOptionWarnings('hv_ci_status', `include=${JSON.stringify(sections)}`, {
+    definition: usesDefinition ? undefined : options.definition,
+    workflow: usesDefinition ? undefined : options.workflow,
+    runId: usesRun ? undefined : options.runId,
+    jobId: usesLogs ? undefined : options.jobId,
+    logLines: usesLogs ? undefined : options.logLines,
+    branch: usesBranch ? undefined : options.branch,
+  });
+}
+
 export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_ci_status',
@@ -276,17 +302,24 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
       project: projectField,
       repo: repoField,
       include: z.array(z.enum(['definitions', 'workflows', 'runs', 'jobs', 'logs', 'artifacts', 'pages', 'branch-protection'])).optional().describe('Sections to include (default: ["definitions"] for canonical devops specs and ["workflows"] for legacy GitHub). jobs/logs require runId. artifacts exposes names/provenance but never artifact contents.'),
-      definition: z.string().optional().describe('Provider-native definition id or path (required when include contains "runs").'),
-      workflow: z.string().optional().describe('Deprecated alias for definition; retained for GitHub compatibility.'),
-      runId: opaqueIdField.optional().describe('Opaque provider-native run id, required when include contains "jobs" or "logs".'),
+      definition: z.string().optional().describe('Provider-native definition id or path (required when include contains "runs"). Prefer this portable field; do not pass a different workflow alias.'),
+      workflow: z.string().optional().describe('Deprecated alias for definition; retained for GitHub compatibility. Omit when definition is supplied.'),
+      runId: opaqueIdField.optional().describe('Opaque provider-native run id, required for jobs/logs and optional as an artifacts filter.'),
       jobId: opaqueIdField.optional().describe('Optional opaque provider-native job id for include=["logs"]. Defaults to failed jobs, or the first job.'),
       logLines: z.number().int().positive().max(500).optional().describe('Number of log lines to return per job for include=["logs"] (default 120, max 500).'),
       branch: z.string().optional().describe('Branch for branch-protection (default "main")'),
     },
     wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, include, definition, workflow, runId, jobId, logLines, branch }) => {
+      if (definition && workflow && definition !== workflow) {
+        throw new HvError('VALIDATION', 'definition and workflow select different CI definitions.', {
+          details: { definition, workflow },
+          hint: 'Pass definition only. workflow is a deprecated GitHub compatibility alias.',
+        });
+      }
       const canonical = await canonicalCiContextOrNull(ctx, projectRef, repoOverride);
       if (canonical) {
         const sections = include?.length ? include : ['definitions' as const];
+        const warnings = ciStatusOptionWarnings(sections, { definition, workflow, runId, jobId, logLines, branch });
         const data: Record<string, unknown> = {
           codeProvider: canonical.repository.provider,
           ciProvider: canonical.ciProvider,
@@ -343,12 +376,13 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
             };
           }
         }
-        return commandSuccess(data);
+        return commandSuccess(data, { warnings });
       }
       const repoRef = resolveRepoOrThrow(ctx, projectRef, repoOverride);
       const { owner, repo } = repoRef;
       const adapter = githubAdapterOrThrow(repoRef);
       const sections = include?.length ? include : ['workflows' as const];
+      const warnings = ciStatusOptionWarnings(sections, { definition, workflow, runId, jobId, logLines, branch });
       const data: Record<string, unknown> = { repository: `${owner}/${repo}` };
 
       for (const section of sections) {
@@ -448,7 +482,9 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
             }
             case 'artifacts': {
               const artifacts = await adapter.listArtifacts(owner, repo, 100);
-              data.artifacts = artifacts.artifacts.map((artifact) => ({
+              data.artifacts = artifacts.artifacts
+                .filter((artifact) => !runId || String(artifact.workflow_run?.id) === runId)
+                .map((artifact) => ({
                 id: artifact.id,
                 name: artifact.name,
                 expired: artifact.expired,
@@ -460,7 +496,7 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
                     headBranch: artifact.workflow_run.head_branch,
                   }
                   : null,
-              }));
+                }));
               break;
             }
             case 'pages': {
@@ -502,7 +538,7 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
         }
       }
 
-      return commandSuccess(data);
+      return commandSuccess(data, { warnings });
     })
   );
 
@@ -512,13 +548,19 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
     {
       project: projectField,
       repo: repoField,
-      definition: z.string().optional().describe('Provider-native definition id or path.'),
-      workflow: z.string().optional().describe('Deprecated alias for definition; retained for GitHub compatibility.'),
+      definition: z.string().optional().describe('Provider-native definition id or path. Prefer this portable field; do not pass a different workflow alias.'),
+      workflow: z.string().optional().describe('Deprecated alias for definition; retained for GitHub compatibility. Omit when definition is supplied.'),
       ref: z.string().optional().describe('Git ref to run on (default: the observed repository default branch).'),
-      sha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Exact reviewed commit SHA. Required by GitLab; other providers may allow ref-only dispatch.'),
+      sha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Exact reviewed commit SHA. Required by GitLab and supported only by canonical devops bindings; legacy GitHub workflow dispatch is ref-only.'),
       inputs: z.record(z.string()).optional().describe('Typed, non-secret CI inputs as key-value pairs. Values are not written to audit output.'),
     },
     wrapCommandHandler(async ({ project: projectRef, repo: repoOverride, definition, workflow, ref, sha, inputs }) => {
+      if (definition && workflow && definition !== workflow) {
+        throw new HvError('VALIDATION', 'definition and workflow select different CI definitions.', {
+          details: { definition, workflow },
+          hint: 'Pass definition only. workflow is a deprecated GitHub compatibility alias.',
+        });
+      }
       const selectedDefinition = definition ?? workflow;
       if (!selectedDefinition) throw new HvError('VALIDATION', 'definition is required.');
       const canonical = await canonicalCiContextOrNull(ctx, projectRef, repoOverride);
@@ -556,6 +598,12 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
       const repoRef = resolveRepoOrThrow(ctx, projectRef, repoOverride);
       const { owner, repo } = repoRef;
       const adapter = githubAdapterOrThrow(repoRef);
+
+      if (sha) {
+        throw new HvError('UNSUPPORTED', 'Exact-SHA dispatch is unavailable for legacy GitHub workflow bindings.', {
+          hint: 'Omit sha to dispatch the reviewed branch/tag ref, or migrate the project to canonical devops bindings that verify exact-SHA dispatch.',
+        });
+      }
 
       await adapter.triggerWorkflow(owner, repo, selectedDefinition, ref ?? 'main', inputs);
       ctx.repos.audit.create({

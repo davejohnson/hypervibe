@@ -82,6 +82,29 @@ describe('reduced secret command surface', () => {
 });
 
 describe('secret reads', () => {
+  it('rejects cross-mode selectors instead of silently broadening a secret read', async () => {
+    const t = await makeClient();
+
+    const managerLookup = await t.call('hv_secrets', {
+      provider: '1password',
+      path: 'vault/item',
+      env: 'production',
+    });
+    expect(managerLookup.ok).toBe(false);
+    expect(managerLookup.error.code).toBe('VALIDATION');
+    expect(managerLookup.error.message).toContain('another secret mode');
+
+    const list = await t.call('hv_secrets', {
+      include: ['github'],
+      env: 'production',
+      service: 'web',
+    });
+    expect(list.ok).toBe(false);
+    expect(list.error.code).toBe('VALIDATION');
+    expect(list.error.message).toContain('hosting lookup options');
+    await t.close();
+  });
+
   it('returns project-scoped setup for missing manager and GitHub connections', async () => {
     const project = new ProjectRepository().create({
       name: 'secret-setup-app',

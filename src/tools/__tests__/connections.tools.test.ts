@@ -129,6 +129,63 @@ describe('hv_connections', () => {
     await t.close();
   });
 
+  it('rejects fields for a different connection action before any mutation', async () => {
+    const t = await makeClient();
+    const cases = [
+      { provider: 'railway', action: 'verify', credentials: { apiToken: 'do-not-save' } },
+      { provider: 'railway', action: 'remove', adminAccessTokenRef: 'env:ADMIN_TOKEN' },
+      { provider: 'railway', action: 'add', gcpProjectId: 'wrong-mode' },
+      { provider: 'railway', action: 'prepare', credentialsRef: 'env:RAILWAY_TOKEN' },
+    ];
+
+    for (const input of cases) {
+      const result = await t.call('hv_connections', input);
+      expect(result.ok).toBe(false);
+      expect(result.error.code).toBe('VALIDATION');
+      expect(result.error.message).toContain('options for another connection action');
+    }
+    expect(new ConnectionRepository().findAll()).toEqual([]);
+    await t.close();
+  });
+
+  it('rejects ambiguous or unused credential inputs before resolving secrets', async () => {
+    const t = await makeClient();
+    const cases = [
+      {
+        provider: 'railway',
+        action: 'add',
+        credentialsRef: 'env:HV_TEST_RAILWAY_TOKEN',
+        credentialsKey: 'apiToken',
+        credentialsMap: { apiToken: 'HV_TEST_RAILWAY_TOKEN' },
+      },
+      {
+        provider: 'railway',
+        action: 'prepare',
+        confirm: true,
+        adminCredentialsJsonRef: 'env:ADMIN_JSON',
+        adminAccessTokenRef: 'env:ADMIN_TOKEN',
+      },
+      {
+        provider: 'railway',
+        action: 'prepare',
+        adminAccessTokenRef: 'env:ADMIN_TOKEN',
+      },
+      {
+        provider: 'railway',
+        action: 'prepare',
+        confirm: true,
+      },
+    ];
+
+    for (const input of cases) {
+      const result = await t.call('hv_connections', input);
+      expect(result.ok).toBe(false);
+      expect(result.error.code).toBe('VALIDATION');
+    }
+    expect(new ConnectionRepository().findAll()).toEqual([]);
+    await t.close();
+  });
+
   it('adds a native-CLI storage connection without asking for a credential value', async () => {
     vi.spyOn(S3StorageAdapter.prototype, 'verify').mockResolvedValue({
       success: true,

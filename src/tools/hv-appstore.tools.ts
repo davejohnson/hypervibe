@@ -14,6 +14,7 @@ import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
 import { projectField } from './schemas.js';
+import { ignoredOptionWarnings } from '../application/command-options.js';
 
 const SETUP_HINT =
   `${formatConnectionGuidance('appstoreconnect')} For multiple apps/teams use a scoped connection (scope="<bundle id>"). Uploads additionally require the Xcode command line tools (xcode-select --install).`;
@@ -112,10 +113,20 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
       screenshotDisplayType: z.string().optional().describe('Screenshot display type to inspect for readiness (default: APP_IPHONE_65)'),
       limit: z.number().int().min(1).max(200).optional().describe('Max builds/testers to return (default: 10 builds, 200 testers)'),
     },
-    wrapCommandHandler(async ({ appIdentifier, include, platform, locale = 'en-US', screenshotDisplayType = 'APP_IPHONE_65', limit }) => {
+    wrapCommandHandler(async ({ appIdentifier, include, platform, locale, screenshotDisplayType, limit }) => {
       const adapter = adapterOrThrow(appIdentifier);
       const sections = new Set<StatusSection>(include?.length ? include : STATUS_SECTIONS);
-      const warnings: string[] = [];
+      const selectedSections = [...sections];
+      const resolvedLocale = locale ?? 'en-US';
+      const resolvedScreenshotDisplayType = screenshotDisplayType ?? 'APP_IPHONE_65';
+      const warnings: string[] = [
+        ...(ignoredOptionWarnings('hv_appstore_status', `include=${JSON.stringify(selectedSections)}`, {
+          platform: sections.has('readiness') ? undefined : platform,
+          locale: sections.has('readiness') ? undefined : locale,
+          screenshotDisplayType: sections.has('readiness') ? undefined : screenshotDisplayType,
+          limit: sections.has('builds') || sections.has('testers') ? undefined : limit,
+        }) ?? []),
+      ];
 
       const app = await adapter.findAppByBundleId(appIdentifier);
       if (!app && (sections.has('builds') || sections.has('groups') || sections.has('testers') || sections.has('readiness'))) {
@@ -140,7 +151,11 @@ export function registerHvAppstoreTools(commands: CommandRegistrar, ctx: Command
       });
       await section('groups', () => adapter.listBetaGroups(app!.id));
       await section('testers', () => adapter.listBetaTesters({ appId: app!.id, limit: limit ?? 200 }));
-      await section('readiness', () => computeReadiness(adapter, app!.id, { platform, locale, screenshotDisplayType }));
+      await section('readiness', () => computeReadiness(adapter, app!.id, {
+        platform,
+        locale: resolvedLocale,
+        screenshotDisplayType: resolvedScreenshotDisplayType,
+      }));
       await section('capabilities', async () => {
         const bundleId = await adapter.findBundleIdByIdentifier(appIdentifier);
         if (!bundleId) return { bundleId: null, capabilities: [], note: `Bundle ID not registered: ${appIdentifier}. Declare it in the environment ios spec and run hv_plan/hv_apply.` };

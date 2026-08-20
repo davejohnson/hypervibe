@@ -76,6 +76,23 @@ async function makeFullClient() {
 }
 
 describe('hv_destroy', () => {
+  it('rejects selectors for another destroy scope before confirmation or deletion', async () => {
+    new ProjectRepository().create({ name: 'scope-safe-app' });
+    const t = await makeClient();
+
+    const result = await t.call('hv_destroy', {
+      project: 'scope-safe-app',
+      scope: 'project',
+      env: 'staging',
+      confirm: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(new ProjectRepository().findByName('scope-safe-app')).not.toBeNull();
+    await t.close();
+  });
+
   it('gates project deletion behind confirm and then deletes local records', async () => {
     const t = await makeClient();
     const projectRepo = new ProjectRepository();
@@ -154,6 +171,32 @@ describe('hv_destroy', () => {
 });
 
 describe('hv_inspect / hv_import', () => {
+  it('rejects fields for the other import mode before inspecting or writing state', async () => {
+    const t = await makeClient();
+
+    const retained = await t.call('hv_import', {
+      provider: 'railway',
+      mode: 'retained-cleanup',
+      project: 'app',
+      env: 'production',
+      name: 'wrong-mode-project',
+    });
+    expect(retained.ok).toBe(false);
+    expect(retained.error.code).toBe('VALIDATION');
+    expect(retained.error.message).toContain('other import mode');
+
+    const adopt = await t.call('hv_import', {
+      provider: 'railway',
+      mode: 'adopt',
+      name: 'provider-project',
+      project: 'wrong-mode-project',
+    });
+    expect(adopt.ok).toBe(false);
+    expect(adopt.error.code).toBe('VALIDATION');
+    expect(adopt.error.message).toContain('other import mode');
+    await t.close();
+  });
+
   const details: RailwayProjectDetails = {
     id: 'rp-1',
     name: 'demo-app',

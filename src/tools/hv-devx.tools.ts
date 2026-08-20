@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
+import { ignoredOptionWarnings } from '../application/command-options.js';
 
 /**
  * Redact secret-bearing fields when returning stored run plans to chat.
@@ -46,7 +47,7 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
       runId: z.string().optional().describe('Run id (required for action="get")'),
       project: projectField.describe('Filter or constrain runs by project (action="list" or action="get")'),
       env: envField.describe('Filter or constrain runs by environment name (action="list" or action="get")'),
-      limit: z.number().int().min(1).max(100).optional().describe('Max items to return (default: 20 runs, 50 audit events; maximum 100)'),
+      limit: z.number().int().min(1).max(100).optional().describe('action=list/audit: max items to return (default: 20 runs, 50 audit events; maximum 100). action=get returns one run and ignores limit with a warning.'),
       resourceType: z.string().optional().describe('Audit filter: resource type (project, environment, run, ...)'),
       resourceId: z.string().optional().describe('Audit filter: resource id (used with resourceType)'),
       auditAction: z.string().optional().describe('Audit filter: action name (e.g. deploy.started)'),
@@ -103,7 +104,6 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
 
       if (action === 'get') {
         const invalid = [
-          limit !== undefined ? 'limit' : undefined,
           resourceType !== undefined ? 'resourceType' : undefined,
           resourceId !== undefined ? 'resourceId' : undefined,
           auditAction !== undefined ? 'auditAction' : undefined,
@@ -117,6 +117,7 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
         if (!runId) {
           throw new HvError('VALIDATION', 'runId is required for action="get".');
         }
+        const warnings = ignoredOptionWarnings('hv_runs', 'action="get"', { limit });
         const run = ctx.repos.runs.findById(runId);
         if (!run) {
           return commandError('NOT_FOUND', `Run not found: ${runId}`, { hint: 'List runs with hv_runs action="list".' });
@@ -137,9 +138,12 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
             });
           }
         }
-        return commandSuccess({
-          run: { ...describeRun(run), plan: redactRunPlan(run.plan), receipts: run.receipts, createdAt: run.createdAt },
-        });
+        return commandSuccess(
+          {
+            run: { ...describeRun(run), plan: redactRunPlan(run.plan), receipts: run.receipts, createdAt: run.createdAt },
+          },
+          { warnings }
+        );
       }
 
       // action === 'list'

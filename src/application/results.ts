@@ -276,7 +276,7 @@ function emphasizeLabel(line: string): string {
 function scalarText(value: unknown): string {
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
-  if (typeof value === 'string') return value.length > 140 ? `${value.slice(0, 137)}...` : value;
+  if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   if (value instanceof Date) return value.toISOString();
   return JSON.stringify(value);
@@ -582,6 +582,45 @@ function formatRecordLines(record: Record<string, unknown>): string[] {
   return lines;
 }
 
+/**
+ * Render redacted command data for a human interface. Command-aware
+ * presentations reuse this fallback so uncommon fields are never hidden.
+ */
+export function formatCommandDataLines(data: unknown): string[] {
+  return isRecord(data)
+    ? formatRecordLines(data)
+    : [summarizeValue(data)];
+}
+
+/** One branded header rule for every human-facing command renderer. */
+export function formatHypervibeHeader(icon: string, title: string): string {
+  return `${icon}  HYPERVIBE · ${title}`;
+}
+
+/** Render the safety and next-step portion shared by every human interface. */
+export function formatCommandGuidanceLines(payload: CommandEnvelope): string[] {
+  const lines: string[] = [];
+
+  if (payload.warnings?.length) {
+    lines.push('', '⚠️  WARNINGS');
+    payload.warnings.forEach((warning) => lines.push(`• ${warning}`));
+  }
+
+  if (payload.agentInstruction) {
+    lines.push('', '🛑  AGENT INSTRUCTION', payload.agentInstruction.message);
+  }
+
+  if (payload.hint) {
+    lines.push('', '💡  HINT', payload.hint);
+  }
+
+  if (payload.next?.length) {
+    lines.push('', '➡️  NEXT', payload.next.map((step) => `\`${step}\``).join(' → '));
+  }
+
+  return lines;
+}
+
 export function formatCommandEnvelope(payload: CommandEnvelope): string {
   const lines: string[] = [];
   const appendListLines = (entries: string[]) => {
@@ -594,22 +633,20 @@ export function formatCommandEnvelope(payload: CommandEnvelope): string {
     });
   };
   if (payload.ok) {
-    lines.push('🟢 Hypervibe OK');
+    lines.push(formatHypervibeHeader('✅', 'COMPLETE'));
   } else {
-    lines.push(`🔴 ${payload.error?.code ?? 'UNKNOWN'}`);
-    lines.push(payload.error?.message ?? 'Unknown error');
+    lines.push(formatHypervibeHeader('❌', 'ERROR'));
+    lines.push(`${payload.error?.code ?? 'UNKNOWN'} · ${payload.error?.message ?? 'Unknown error'}`);
   }
 
   if (payload.data !== undefined) {
-    lines.push('', '📦 Data');
-    const dataLines = isRecord(payload.data)
-      ? formatRecordLines(payload.data)
-      : [summarizeValue(payload.data)];
+    lines.push('', '📦 RESULT');
+    const dataLines = formatCommandDataLines(payload.data);
     appendListLines(dataLines);
   }
 
   if (!payload.ok && payload.error?.details !== undefined) {
-    lines.push('', '🔎 Details');
+    lines.push('', '🔎  DETAILS');
     const detailLines = isRecord(payload.error.details)
       ? formatRecordLines(payload.error.details)
       : Array.isArray(payload.error.details)
@@ -618,22 +655,7 @@ export function formatCommandEnvelope(payload: CommandEnvelope): string {
     appendListLines(detailLines);
   }
 
-  if (payload.warnings?.length) {
-    lines.push('', '🟡 Warnings');
-    payload.warnings.forEach((warning) => lines.push(`• ${warning}`));
-  }
-
-  if (payload.agentInstruction) {
-    lines.push('', '🛑 Agent Instruction', payload.agentInstruction.message);
-  }
-
-  if (payload.hint) {
-    lines.push('', '💡 Hint', payload.hint);
-  }
-
-  if (payload.next?.length) {
-    lines.push('', '➡️ Next', payload.next.map((step) => `\`${step}\``).join(' → '));
-  }
+  lines.push(...formatCommandGuidanceLines(payload));
 
   return lines.join('\n');
 }

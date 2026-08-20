@@ -15,8 +15,8 @@ describe('toolSuccess', () => {
     const response = toolSuccess({ id: '1' });
     const body = parse(response);
     expect(body).toEqual({ ok: true, data: { id: '1' } });
-    expect(rendered(response)).toContain('🟢 Hypervibe OK');
-    expect(rendered(response)).toContain('▸ Id: 1');
+    expect(rendered(response)).toContain('✅  HYPERVIBE · COMPLETE');
+    expect(rendered(response)).toContain('Id: 1');
     expect(rendered(response)).not.toContain('**');
     expect(rendered(response).trim().startsWith('{')).toBe(false);
     expect(toMcpToolResponse(response)).not.toHaveProperty('_meta');
@@ -63,7 +63,7 @@ describe('toolSuccess', () => {
     expect(body.agentInstruction).toMatchObject({
       action: 'stop_and_report',
     });
-    expect(rendered(response)).toContain('🛑 Agent Instruction');
+    expect(rendered(response)).toContain('🛑  AGENT INSTRUCTION');
     expect(rendered(response)).toContain('Report which stage receipts succeeded');
   });
 
@@ -133,6 +133,25 @@ describe('toolSuccess', () => {
     expect(text).toContain('Error: expected 200');
   });
 
+  it('uses the command-aware presentation without changing structuredContent', () => {
+    const response = toolSuccess({
+      environment: 'production',
+      planId: 'plan-1',
+      pendingActionCount: 1,
+      noopActionCount: 0,
+      actions: [{
+        id: 'service:web',
+        type: 'create',
+        resource: { kind: 'service', name: 'web', provider: 'railway' },
+      }],
+      blocked: [],
+    });
+
+    const mcp = toMcpToolResponse(response, 'hv_plan');
+    expect(mcp.content[0].text).toContain('📋  HYPERVIBE · PLAN READY');
+    expect(mcp.structuredContent).toEqual(response);
+  });
+
   it('omits empty fields', () => {
     const body = parse(toolSuccess(undefined, { warnings: [] }));
     expect(body).toEqual({ ok: true });
@@ -147,7 +166,8 @@ describe('toolError', () => {
     expect(body.error).toEqual({ code: 'NOT_FOUND', message: 'no such project' });
     expect(body.hint).toBe('list projects with hv_spec');
     expect(toMcpToolResponse(response).isError).toBe(true);
-    expect(rendered(response)).toContain('🔴 NOT_FOUND');
+    expect(rendered(response)).toContain('❌  HYPERVIBE · ERROR');
+    expect(rendered(response)).toContain('NOT_FOUND · no such project');
     expect(rendered(response)).toContain('no such project');
     expect(rendered(response)).not.toContain('**');
   });
