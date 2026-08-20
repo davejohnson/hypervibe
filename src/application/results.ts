@@ -376,6 +376,7 @@ function summarizeValue(value: unknown): string {
     'name',
     'id',
     'status',
+    'conclusion',
     'provider',
     'environment',
     'url',
@@ -389,6 +390,32 @@ function summarizeValue(value: unknown): string {
     .map((key) => `${key}: ${scalarText(record[key])}`);
   if (parts.length > 0) return parts.slice(0, 4).join(', ');
   return `${Object.keys(record).length} field(s)`;
+}
+
+function formatLogs(values: unknown[]): string[] {
+  if (values.length === 0) return ['Logs: none'];
+  const lines = [`Logs: ${values.length}`];
+  for (const value of values.slice(0, 12)) {
+    if (!isRecord(value)) {
+      lines.push(`  - ${summarizeValue(value)}`);
+      continue;
+    }
+    const summary = [
+      typeof value.name === 'string' ? value.name : 'job',
+      value.jobId !== undefined ? `job ${scalarText(value.jobId)}` : undefined,
+      typeof value.status === 'string' ? value.status : undefined,
+      typeof value.conclusion === 'string' ? `conclusion: ${value.conclusion}` : undefined,
+      typeof value.returnedLines === 'number' && typeof value.lineCount === 'number'
+        ? `${value.returnedLines}/${value.lineCount} lines${value.truncated === true ? ' (truncated)' : ''}`
+        : undefined,
+    ].filter(Boolean).join(' · ');
+    lines.push(`  - ${summary}`);
+    if (typeof value.text === 'string') {
+      value.text.split('\n').forEach((line) => lines.push(`  - │ ${line}`));
+    }
+  }
+  if (values.length > 12) lines.push(`  - ... ${values.length - 12} more`);
+  return lines;
 }
 
 function summarizeStorage(value: unknown): string {
@@ -413,6 +440,7 @@ function summarizeStorage(value: unknown): string {
 
 function formatArray(key: string, values: unknown[]): string[] {
   if (values.length === 0) return [`${titleForKey(key)}: none`];
+  if (key === 'logs') return formatLogs(values);
   const lines = [`${titleForKey(key)}: ${values.length}`];
   const formatter =
     ['actions', 'drift', 'unmanaged', 'blocked', 'actionScopedBlocked'].includes(key)

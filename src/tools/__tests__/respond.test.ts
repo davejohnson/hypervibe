@@ -112,6 +112,27 @@ describe('toolSuccess', () => {
     expect(rendered(response)).not.toContain('**');
   });
 
+  it('renders CI conclusions and bounded log text in the human response', () => {
+    const response = toolSuccess({
+      runs: [{ name: 'Deploy staging', id: 123, status: 'completed', conclusion: 'failure' }],
+      logs: [{
+        jobId: 99,
+        name: 'deploy',
+        status: 'completed',
+        conclusion: 'failure',
+        text: 'Run npm test\nError: expected 200',
+        lineCount: 200,
+        returnedLines: 2,
+        truncated: true,
+      }],
+    });
+
+    const text = rendered(response);
+    expect(text).toContain('conclusion: failure');
+    expect(text).toContain('Run npm test');
+    expect(text).toContain('Error: expected 200');
+  });
+
   it('omits empty fields', () => {
     const body = parse(toolSuccess(undefined, { warnings: [] }));
     expect(body).toEqual({ ok: true });
