@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
@@ -88,7 +88,12 @@ function sanitize(value: unknown): unknown {
     if (SENSITIVE_KEY_PATTERN.test(key.replace(/[^a-z0-9]/gi, ''))) {
       continue;
     }
-    sanitized[key] = sanitize(child);
+    const sanitizedChild = sanitize(child);
+    const sanitizedRecord = asRecord(sanitizedChild);
+    if (sanitizedRecord && Object.keys(sanitizedRecord).length === 0) {
+      continue;
+    }
+    sanitized[key] = sanitizedChild;
   }
   return sanitized;
 }
@@ -163,7 +168,15 @@ export function writeRepoBindingsForEnvironment(project: Project, environment: E
   const platformBindings = presentStorageInstanceScopes(
     sanitize(environment.platformBindings) as Record<string, unknown>
   );
-  current.environments[environment.name] = { platformBindings };
+  if (Object.keys(platformBindings).length === 0) {
+    delete current.environments[environment.name];
+  } else {
+    current.environments[environment.name] = { platformBindings };
+  }
+  if (Object.keys(current.environments).length === 0) {
+    if (existsSync(file)) unlinkSync(file);
+    return null;
+  }
   const dir = path.dirname(file);
   mkdirSync(dir, { recursive: true });
   writeFileSync(file, `${JSON.stringify(current, null, 2)}\n`, 'utf8');

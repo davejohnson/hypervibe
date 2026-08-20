@@ -1513,7 +1513,7 @@ export async function planGitHubInfrastructure(params: {
   actions.push(...delegatedSecrets.actions);
   warnings.push(...delegatedSecrets.warnings);
 
-  if (drift.length === 0 && params.spec.github.pages) {
+  if (drift.length === 0) {
     const pages = await planGitHubPages({
       spec: params.spec,
       repository,

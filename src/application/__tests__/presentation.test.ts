@@ -263,14 +263,14 @@ describe('command presentation', () => {
     }));
 
     expect(output).toContain('2 runs · staging critical journey');
-    expect(output).toMatch(/2 runs · staging critical journey\n\nRESULT/);
-    expect(output).toMatch(/RESULT\s+STATUS\s+BRANCH\s+CREATED\s+URL\s+RUN ID/);
-    expect(output).toMatch(new RegExp(`✅\\s+completed\\s+main\\s+2026-08-20T18:00:00Z\\s+${firstUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+32403831183`));
-    expect(output).toMatch(new RegExp(`❌\\s+completed\\s+main\\s+2026-08-20T17:00:00Z\\s+${secondUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+32403414765`));
+    expect(output).toMatch(/2 runs · staging critical journey\n\nOUTCOME/);
+    expect(output).toMatch(/OUTCOME\s+PHASE\s+BRANCH\s+CREATED\s+URL\s+RUN ID/);
+    expect(output).toMatch(new RegExp(`✅ success\\s+completed\\s+main\\s+2026-08-20T18:00:00Z\\s+${firstUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+32403831183`));
+    expect(output).toMatch(new RegExp(`❌ failure\\s+completed\\s+main\\s+2026-08-20T17:00:00Z\\s+${secondUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+32403414765`));
     expect(output).not.toContain('name: staging critical journey');
     expect(output).not.toContain('status: completed');
-    expect(output).not.toContain('success');
-    expect(output).not.toContain('failure');
+    expect(output).toContain('success');
+    expect(output).toContain('failure');
   });
 
   it('renders provider-neutral CI run fields in the same table', () => {
@@ -286,10 +286,9 @@ describe('command presentation', () => {
     }));
 
     expect(output).toContain('1 run · GitLab pipeline');
-    expect(output).toMatch(/RESULT\s+URL\s+RUN ID/);
-    expect(output).toMatch(/✅\s+https:\/\/gitlab\.example\.com\/group\/project\/-\/pipelines\/42\s+pipeline-42/);
-    expect(output).not.toContain('succeeded');
-    expect(output).not.toMatch(/^RESULT\s+STATUS/m);
+    expect(output).toMatch(/OUTCOME\s+URL\s+RUN ID/);
+    expect(output).toMatch(/✅ succeeded\s+https:\/\/gitlab\.example\.com\/group\/project\/-\/pipelines\/42\s+pipeline-42/);
+    expect(output).not.toMatch(/^OUTCOME\s+PHASE/m);
   });
 
   it('uses the same outcome-first ordering for CI jobs and artifacts', () => {

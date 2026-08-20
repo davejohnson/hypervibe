@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import type { Environment } from '../../entities/environment.entity.js';
@@ -130,6 +130,59 @@ describe('repo bindings delegated metadata', () => {
           applyRunId: 'apply-1',
         }),
       ]);
+    } finally {
+      if (oldDisable === undefined) {
+        delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      } else {
+        process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('removes the generated file when an environment has no public bindings left', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-empty-bindings-'));
+    mkdirSync(path.join(root, '.git'));
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    const now = new Date('2026-08-20T00:00:00.000Z');
+    const project: Project = {
+      id: 'project-empty',
+      name: 'empty-bindings-app',
+      defaultPlatform: 'railway',
+      policies: {},
+      createdAt: now,
+      updatedAt: now,
+    };
+    const environment: Environment = {
+      id: 'environment-empty',
+      projectId: project.id,
+      name: 'repository',
+      platformBindings: {
+        github: {
+          pagesCertificateAttempt: {
+            domain: 'old.example.com',
+            attemptedAt: now.toISOString(),
+            mode: 'reattach',
+          },
+        },
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = writeRepoBindingsForEnvironment(project, environment, root)!;
+      expect(existsSync(file)).toBe(true);
+
+      environment.platformBindings = {
+        github: {
+          openAIActionsSecretHash: 'local-only-hash',
+          openAIActionsSecretSyncedAt: now.toISOString(),
+        },
+      };
+      expect(writeRepoBindingsForEnvironment(project, environment, root)).toBeNull();
+      expect(existsSync(file)).toBe(false);
     } finally {
       if (oldDisable === undefined) {
         delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;

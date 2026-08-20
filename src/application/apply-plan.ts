@@ -56,6 +56,7 @@ import {
 } from '../domain/services/github-infrastructure.service.js';
 import {
   applyGitHubPages,
+  applyGitHubPagesBindingCleanup,
   applyGitHubPagesDns,
 } from '../domain/services/github-pages.service.js';
 import { setupCustomDomain, teardownCustomDomain } from '../domain/services/domain.service.js';
@@ -423,6 +424,13 @@ async function executeRepositoryPlanApply(
         return applyGitHubNativeSetting({ action });
       case 'github.pages.sync':
         return applyGitHubPages({
+          spec: params.spec,
+          action,
+          project: projectForApply,
+          environmentName: params.envName,
+        });
+      case 'github.pages-binding.cleanup':
+        return applyGitHubPagesBindingCleanup({
           spec: params.spec,
           action,
           project: projectForApply,
@@ -970,6 +978,21 @@ export async function executePlanApply(ctx: CommandContext, params: {
         );
       }
       return applyGitHubPages({ spec, action, project: applyProject, environmentName: envName });
+    }
+    if (capability === 'github.pages-binding.cleanup') {
+      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
+      if (action.resource.name !== expectedRepository) {
+        return blockedActionIdentity(
+          action,
+          `Reviewed repository is ${action.resource.name}; GitHub Pages binding cleanup currently targets ${expectedRepository ?? 'no repository'}.`
+        );
+      }
+      return applyGitHubPagesBindingCleanup({
+        spec,
+        action,
+        project: applyProject,
+        environmentName: envName,
+      });
     }
     if (capability === 'github.pages-dns.sync') {
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);

@@ -20,6 +20,7 @@ import {
 } from '../services/github-infrastructure.service.js';
 import {
   isGitHubPagesAction,
+  isGitHubPagesBindingCleanupAction,
   isGitHubPagesDnsAction,
 } from '../services/github-pages.service.js';
 import { IOS_OPERATIONS, isIosAction } from '../services/appstore-plan.service.js';
@@ -103,6 +104,7 @@ export type PlanMutationCapability =
   | 'github.delegated-secret.sync'
   | 'github.setting.sync'
   | 'github.pages.sync'
+  | 'github.pages-binding.cleanup'
   | 'github.pages-dns.sync'
   | 'appstore.mutate'
   | 'queue.mutate'
@@ -594,6 +596,16 @@ export function resolvePlanActionAuthority(
     && action.resource.name === metadataString(action, 'repository')
   ) {
     return authority(action, 'github.pages.sync');
+  }
+  if (
+    isGitHubPagesBindingCleanupAction(action)
+    && exactResource(action, 'repo', 'github')
+    && action.type === 'update'
+    && action.resource.name === metadataString(action, 'repository')
+    && typeof action.metadata?.observedCertificateAttempt === 'object'
+    && action.metadata.observedCertificateAttempt !== null
+  ) {
+    return authority(action, 'github.pages-binding.cleanup');
   }
   if (
     isGitHubPagesDnsAction(action)

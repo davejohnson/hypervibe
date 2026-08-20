@@ -470,6 +470,10 @@ function ciRunRows(runs: unknown[]): string[] {
       : undefined;
   const visible = records.slice(0, 12);
   const resultValue = (run: DataRecord) => run.conclusion ?? run.phase ?? run.status ?? run.nativeStatus;
+  const resultCell = (run: DataRecord) => {
+    const result = stringValue(resultValue(run)) ?? 'unknown';
+    return `${statusSymbol(result)} ${result}`;
+  };
   const stateValue = (run: DataRecord) => {
     const state = run.status ?? run.phase ?? run.nativeStatus;
     return run.conclusion !== null && run.conclusion !== undefined
@@ -481,9 +485,9 @@ function ciRunRows(runs: unknown[]): string[] {
   const hasCreatedAt = visible.some((run) => formatTableCell(run.createdAt, 28).length > 0);
   const hasUrl = visible.some((run) => formatTableCell(run.url ?? run.webUrl, 160).length > 0);
   const columns: CommandTableColumn[] = [
-    { header: 'RESULT', value: (run) => statusSymbol(resultValue(run)), maxWidth: 6 },
+    { header: 'OUTCOME', value: resultCell, maxWidth: 24 },
     ...(!sharedName ? [{ header: 'NAME', value: (run: DataRecord) => run.name, maxWidth: 40 }] : []),
-    ...(hasState ? [{ header: 'STATUS', value: stateValue, maxWidth: 20 }] : []),
+    ...(hasState ? [{ header: 'PHASE', value: stateValue, maxWidth: 20 }] : []),
     ...(hasBranch ? [{ header: 'BRANCH', value: (run: DataRecord) => run.branch ?? run.ref, maxWidth: 32 }] : []),
     ...(hasCreatedAt ? [{ header: 'CREATED', value: (run: DataRecord) => run.createdAt, maxWidth: 28 }] : []),
     ...(hasUrl ? [{ header: 'URL', value: (run: DataRecord) => run.url ?? run.webUrl, maxWidth: 160 }] : []),
