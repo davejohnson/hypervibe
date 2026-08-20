@@ -102,6 +102,18 @@ describe('Hypervibe CLI', () => {
     expect(JSON.parse(output.stdout()).data.project).toBe('stdin-project');
   });
 
+  it('uses the same command-aware human presentation as MCP', async () => {
+    const output = makeIo();
+    const exitCode = await runCli(
+      ['spec', '--project', 'invoice-perfect'],
+      { registry: makeRegistry(), io: output.io, initialize: false }
+    );
+
+    expect(exitCode).toBe(0);
+    expect(output.stdout()).toContain('✅  HYPERVIBE · SPEC READY');
+    expect(output.stdout()).not.toMatch(/\u001b\[/);
+  });
+
   it('prompts only on a TTY and retries with the safe confirmation patch', async () => {
     const output = makeIo({ tty: true, confirm: true });
     const exitCode = await runCli(

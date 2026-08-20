@@ -176,6 +176,27 @@ describe('hv_appstore_status', () => {
     await t.close();
   });
 
+  it('warns when readiness and pagination options do not apply to selected sections', async () => {
+    seedConnection();
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'findAppByBundleId').mockResolvedValue(APP);
+    vi.spyOn(AppStoreConnectAdapter.prototype, 'listBetaGroups').mockResolvedValue([GROUP]);
+    const t = await makeClient();
+
+    const status = await t.call('hv_appstore_status', {
+      appIdentifier: 'com.example.app',
+      include: ['groups'],
+      locale: 'fr-CA',
+      screenshotDisplayType: 'APP_IPHONE_67',
+      limit: 5,
+    });
+
+    expect(status.ok).toBe(true);
+    expect(status.warnings).toEqual([
+      'Ignored options for hv_appstore_status include=["groups"]: locale, screenshotDisplayType, limit. The requested read still completed.',
+    ]);
+    await t.close();
+  });
+
   it('returns MISSING_CONNECTION with setup guidance when no connection exists', async () => {
     const t = await makeClient();
     const status = await t.call('hv_appstore_status', { appIdentifier: 'com.example.app' });

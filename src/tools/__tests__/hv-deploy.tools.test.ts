@@ -575,6 +575,21 @@ describe('hv_deploy database env injection', () => {
 });
 
 describe('hv_rollback', () => {
+  it('rejects conflicting rollback target types before resolving the project', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_rollback', {
+      project: 'missing-project',
+      env: 'production',
+      toRunId: '00000000-0000-4000-8000-000000000000',
+      toSha: 'a'.repeat(40),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('either toRunId or toSha');
+    await t.close();
+  });
+
   it('dispatches the previous verified exact-SHA release for managed production CI', async () => {
     const { project, workflow } = seedManagedCiRollbackProject('rollback-ci-app');
     const currentSha = 'b'.repeat(40);

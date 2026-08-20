@@ -241,12 +241,17 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
     {
       project: projectField,
       env: envField,
-      toRunId: z.string().uuid().optional().describe('Specific successful deploy run ID to roll back to'),
-      toSha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Specific previously verified exact Git SHA for a managed CI rollback'),
+      toRunId: z.string().uuid().optional().describe('Specific successful direct-provider deploy run ID. Mutually exclusive with toSha.'),
+      toSha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe('Specific previously verified exact Git SHA for a managed CI rollback. Mutually exclusive with toRunId.'),
       services: z.array(z.string()).optional().describe('Specific services to rollback (default: all in target run)'),
       confirm: confirmField,
     },
     wrapCommandHandler(async ({ project: projectRef, env, toRunId, toSha, services, confirm }) => {
+      if (toRunId && toSha) {
+        throw new HvError('VALIDATION', 'Pass either toRunId or toSha, not both.', {
+          hint: 'Use toRunId for direct-provider deploys or toSha for managed CI deploys.',
+        });
+      }
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const environment = ctx.resolveEnvironmentOrThrow(project, env);
 

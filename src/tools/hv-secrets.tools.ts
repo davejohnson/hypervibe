@@ -15,6 +15,7 @@ import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import { envField, projectField } from './schemas.js';
+import { suppliedOptionNames } from '../application/command-options.js';
 
 const REDACTED = '[redacted]';
 
@@ -98,8 +99,9 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
         : null;
       const managerLookup = path !== undefined || version !== undefined || (provider !== undefined && key !== undefined);
       if (managerLookup) {
-        if (pathPrefix !== undefined || include !== undefined || repo !== undefined) {
-          throw new HvError('VALIDATION', 'Manager value lookup cannot be combined with list parameters.');
+        const incompatible = suppliedOptionNames({ env, service, pathPrefix, include, repo });
+        if (incompatible.length > 0) {
+          throw new HvError('VALIDATION', `Manager value lookup received options for another secret mode: ${incompatible.join(', ')}.`);
         }
         if (!provider || !path) throw new HvError('VALIDATION', 'provider and path must be passed together.');
         const secret = await (await managerAdapter(ctx, provider, selectedProject?.name)).getSecret(path, key, version);
@@ -112,6 +114,12 @@ export function registerHvSecretsTools(commands: CommandRegistrar, ctx: CommandC
       }
 
       if (provider || pathPrefix !== undefined || include !== undefined || repo !== undefined) {
+        const incompatible = suppliedOptionNames({ env, service, key });
+        if (incompatible.length > 0) {
+          throw new HvError('VALIDATION', `Secret listing received hosting lookup options: ${incompatible.join(', ')}.`, {
+            hint: 'Remove the listed options to enumerate names, or remove provider/include/repo/pathPrefix and pass env for masked hosting-variable inspection.',
+          });
+        }
         return listSecrets({ selectedProject, provider, pathPrefix, include, repo });
       }
 

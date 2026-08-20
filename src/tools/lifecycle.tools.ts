@@ -11,6 +11,7 @@ import { projectField, envField, confirmField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler } from '../application/results.js';
 import { inspectProvider } from '../application/inspect-provider.js';
 import { importProvider } from '../application/import-provider.js';
+import { suppliedOptionNames } from '../application/command-options.js';
 
 export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
@@ -63,12 +64,22 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
     'Delete LOCAL Hypervibe records only: a project (cascade), an environment, or a service (including its platform binding). Never touches provider resources — to destroy live infrastructure, remove it from the spec with hv_spec, then run hv_plan and hv_apply with the exact confirmActions ids. Without confirm=true this returns CONFIRM_REQUIRED listing exactly what local records would be deleted.',
     {
       project: projectField,
-      env: envField,
+      env: envField.describe('Environment name; required only for scope="environment". Do not pass it for project or service scope.'),
       scope: z.enum(['project', 'environment', 'service']).describe('What to delete: the whole project record, one environment record, or one service record'),
       name: z.string().optional().describe('Service name (required when scope="service")'),
       confirm: confirmField,
     },
     wrapCommandHandler(async ({ project: projectRef, env, scope, name, confirm }) => {
+      const incompatible = suppliedOptionNames(scope === 'project'
+        ? { env, name }
+        : scope === 'environment'
+          ? { name }
+          : { env });
+      if (incompatible.length > 0) {
+        return commandError('VALIDATION', `scope="${scope}" received options for another destroy scope: ${incompatible.join(', ')}.`, {
+          hint: `Remove the listed options before confirming scope="${scope}".`,
+        });
+      }
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const providerNote = 'Provider resources were not touched — destroy live infrastructure via hv_spec + hv_plan + hv_apply with exact confirmActions ids.';
 

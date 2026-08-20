@@ -9,6 +9,7 @@ import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { HYPERVIBE_VERSION } from '../../version.js';
 import { createCommandContext } from '../../application/context.js';
 import { createCommandRegistry } from '../../application/commands.js';
+import { PRESENTED_COMMAND_IDS } from '../../application/presentation.js';
 
 let tempDir: string;
 
@@ -84,6 +85,7 @@ describe('server tool surface', () => {
     const cliPaths = definitions.map((definition) => definition.cliPath.join(' '));
 
     expect(ids).toEqual(EXPECTED_TOOLS);
+    expect([...PRESENTED_COMMAND_IDS].sort()).toEqual(ids);
     expect(new Set(cliPaths).size).toBe(19);
     expect(registry.get('hv_spec')?.cliPath).toEqual(['spec']);
     expect(registry.get('hv_connections')?.cliPath).toEqual(['connections']);
