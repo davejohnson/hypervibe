@@ -32,6 +32,48 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function mergeSanitizedBindingObject(
+  existing: Record<string, unknown>,
+  repoBindings: Record<string, unknown>
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...repoBindings };
+  for (const [key, existingValue] of Object.entries(existing)) {
+    if (!(key in repoBindings)) {
+      if (SENSITIVE_KEY_PATTERN.test(key.replace(/[^a-z0-9]/gi, ''))) {
+        merged[key] = existingValue;
+      }
+      continue;
+    }
+    const existingRecord = asRecord(existingValue);
+    const repoRecord = asRecord(repoBindings[key]);
+    if (existingRecord && repoRecord) {
+      merged[key] = mergeSanitizedBindingObject(existingRecord, repoRecord);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Overlay the sanitized repository export onto authoritative local bindings.
+ * Top-level bindings absent from the export retain the historical merge
+ * behavior. Within a shared binding, only fields omitted by the sanitizer are
+ * retained so ordinary public metadata can still be removed by the export.
+ */
+export function mergeRepoPlatformBindings(
+  existing: Record<string, unknown>,
+  repoBindings: Record<string, unknown>
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...existing, ...repoBindings };
+  for (const [key, repoValue] of Object.entries(repoBindings)) {
+    const existingRecord = asRecord(existing[key]);
+    const repoRecord = asRecord(repoValue);
+    if (existingRecord && repoRecord) {
+      merged[key] = mergeSanitizedBindingObject(existingRecord, repoRecord);
+    }
+  }
+  return merged;
+}
+
 function sanitize(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(sanitize);

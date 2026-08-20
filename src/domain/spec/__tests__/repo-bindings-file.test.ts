@@ -4,9 +4,64 @@ import os from 'os';
 import path from 'path';
 import type { Environment } from '../../entities/environment.entity.js';
 import type { Project } from '../../entities/project.entity.js';
-import { writeRepoBindingsForEnvironment } from '../repo-bindings-file.js';
+import { mergeRepoPlatformBindings, writeRepoBindingsForEnvironment } from '../repo-bindings-file.js';
 
 describe('repo bindings delegated metadata', () => {
+  it('preserves sanitizer-omitted local fields without preserving removed public fields', () => {
+    expect(mergeRepoPlatformBindings({
+      github: {
+        pagesCertificateAttempt: { domain: 'old.example.com' },
+        publicReceipt: 'remove-me',
+        openAIActionsSecretName: 'OPENAI_API_KEY',
+        openAIActionsSecretHash: 'local-hash',
+        openAIActionsSecretSyncedAt: '2026-08-20T00:00:00.000Z',
+      },
+      localOnlyProvider: { resourceId: 'preserved-top-level' },
+    }, {
+      github: {
+        pagesCertificateAttempt: { domain: 'new.example.com' },
+      },
+    })).toEqual({
+      github: {
+        pagesCertificateAttempt: { domain: 'new.example.com' },
+        openAIActionsSecretName: 'OPENAI_API_KEY',
+        openAIActionsSecretHash: 'local-hash',
+        openAIActionsSecretSyncedAt: '2026-08-20T00:00:00.000Z',
+      },
+      localOnlyProvider: { resourceId: 'preserved-top-level' },
+    });
+  });
+
+  it('preserves nested CI secret hashes stripped from the repository export', () => {
+    expect(mergeRepoPlatformBindings({
+      ci: {
+        deployBranch: {
+          '.github/workflows/deploy.yml': {
+            contentHash: 'old-content',
+            syncedSecretHashes: { IMAGE_REGISTRY_TOKEN: 'local-hash' },
+          },
+        },
+      },
+    }, {
+      ci: {
+        deployBranch: {
+          '.github/workflows/deploy.yml': {
+            contentHash: 'new-content',
+          },
+        },
+      },
+    })).toEqual({
+      ci: {
+        deployBranch: {
+          '.github/workflows/deploy.yml': {
+            contentHash: 'new-content',
+            syncedSecretHashes: { IMAGE_REGISTRY_TOKEN: 'local-hash' },
+          },
+        },
+      },
+    });
+  });
+
   it('persists accepted hashes and principals without persisting secret values', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-delegated-bindings-'));
     mkdirSync(path.join(root, '.git'));
