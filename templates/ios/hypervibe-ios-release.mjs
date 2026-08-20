@@ -367,7 +367,7 @@ async function submitBetaReview(config, build) {
 
 export function buildReleaseManifest(config, serverEvidence, app, build, releasedAt) {
   if (
-    serverEvidence?.version !== 1
+    serverEvidence?.version !== 2
     || serverEvidence.environment !== config.environment
     || serverEvidence.server?.repository !== config.repository
     || serverEvidence.server?.sha !== config.releaseSha
