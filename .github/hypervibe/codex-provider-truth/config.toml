@@ -1,0 +1,34 @@
+# Managed by Hypervibe. Change desired state with hv_spec; manual edits will be reconciled.
+[features]
+network_proxy = true
+
+[permissions.provider-docs]
+extends = ":read-only"
+
+[permissions.provider-docs.network]
+enabled = true
+
+[permissions.provider-docs.network.domains]
+"api-docs.neon.tech" = "allow"
+"bitwarden.com" = "allow"
+"cloud.google.com" = "allow"
+"developer.1password.com" = "allow"
+"developer.apple.com" = "allow"
+"developer.hashicorp.com" = "allow"
+"developers.cloudflare.com" = "allow"
+"developers.openai.com" = "allow"
+"docs.aws.amazon.com" = "allow"
+"docs.cloud.google.com" = "allow"
+"docs.digitalocean.com" = "allow"
+"docs.doppler.com" = "allow"
+"docs.github.com" = "allow"
+"docs.machines.dev" = "allow"
+"docs.railway.com" = "allow"
+"docs.stripe.com" = "allow"
+"fly.io" = "allow"
+"learn.microsoft.com" = "allow"
+"neon.tech" = "allow"
+"platform.openai.com" = "allow"
+"supabase.com" = "allow"
+"vercel.com" = "allow"
+"www.twilio.com" = "allow"
