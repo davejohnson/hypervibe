@@ -301,6 +301,7 @@ export function formatCommandTable(
     .map((cell, index) => index === cells.length - 1 ? cell : cell.padEnd(widths[index]))
     .join('  ');
   return [
+    '',
     formatRow(columns.map((column) => column.header)),
     formatRow(widths.map((width) => '─'.repeat(width))),
     ...rows.map(formatRow),

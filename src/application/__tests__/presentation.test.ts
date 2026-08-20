@@ -263,6 +263,7 @@ describe('command presentation', () => {
     }));
 
     expect(output).toContain('2 runs · staging critical journey');
+    expect(output).toMatch(/2 runs · staging critical journey\n\nRESULT/);
     expect(output).toMatch(/RESULT\s+STATUS\s+BRANCH\s+CREATED\s+URL\s+RUN ID/);
     expect(output).toMatch(new RegExp(`✅\\s+completed\\s+main\\s+2026-08-20T18:00:00Z\\s+${firstUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+32403831183`));
     expect(output).toMatch(new RegExp(`❌\\s+completed\\s+main\\s+2026-08-20T17:00:00Z\\s+${secondUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+32403414765`));
@@ -327,6 +328,7 @@ describe('command presentation', () => {
     }));
 
     expect(output).toContain('Connections: 2');
+    expect(output).toMatch(/Connections: 2\n\nRESULT/);
     expect(output).toMatch(/RESULT\s+PROVIDER\s+SCOPE\s+LAST VERIFIED AT/);
     expect(output).toMatch(/✅\s+github\s+davejohnson\/hypervibe\s+2026-08-20T18:00:00Z/);
     expect(output).toMatch(/❌\s+cloudflare\s+example\.com\s+2026-08-20T17:00:00Z/);
