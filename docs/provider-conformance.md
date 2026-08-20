@@ -5,8 +5,9 @@ schema. Every supported provider must pass the same resource contract through
 the normal desired-state loop.
 
 Catalog and blueprint work is intentionally separate from this contract.
-The active provider scope deliberately excludes Heroku, Render, and Fly.
-Supabase and Neon remain in scope.
+The active provider scope deliberately excludes Heroku and Render. Fly.io Apps,
+Machines, certificates, and Managed Postgres are now in scope as
+`ready-for-live` candidates. Supabase and Neon remain in scope.
 
 ## Contract families
 
@@ -84,9 +85,9 @@ architecture and evidence boundary](gitlab-integration.md).
 `test/provider-conformance/domain-lifecycle.spec.json` is the isolated live
 fixture for environment domains. It declares one DNS-only subdomain under
 `domain-test.hypervibe.dev` for each hosting provider: Railway, Cloud Run,
-AWS ECS Express Mode, Azure Container Apps, DigitalOcean App Platform, and
-Vercel. Run each environment stage-by-stage through `hv_spec`, `hv_plan`,
-`hv_apply`, and `hv_status`; do not apply the entire six-provider fixture as one
+AWS ECS Express Mode, Azure Container Apps, DigitalOcean App Platform, Vercel,
+and Fly.io. Run each environment stage-by-stage through `hv_spec`, `hv_plan`,
+`hv_apply`, and `hv_status`; do not apply the entire seven-provider fixture as one
 opaque batch.
 
 Hosting credential schemas contain authentication and durable account/project
@@ -101,7 +102,7 @@ and record ids, explicit pending certificate receipts, noop convergence, and a
 confirmation-gated exact detach with terminal provider and DNS absence. An
 already-attached hostname without the durable binding blocks for explicit
 `hv_import`. Cloud Run, ECS Express Mode, and Azure Container Apps declare
-DNS-only traffic; Railway, DigitalOcean, and Vercel may opt into proxying only
+DNS-only traffic; Railway, DigitalOcean, Vercel, and Fly.io may opt into proxying only
 after direct certificate validation succeeds.
 
 ### Environment maintenance and data cutover
@@ -124,8 +125,8 @@ resolves only its durable Project binding, verifies the documented paused state
 and direct production origins, preserves Projects paused before Hypervibe
 maintenance, and resumes without a deployment. DigitalOcean and Vercel remain
 `maintenance: ready-for-live` until their opt-in entry/noop/exit paths pass. ECS
-Express reports `maintenance: unsupported`, so generic planning blocks before
-mutation.
+Express and Fly.io report `maintenance: unsupported`, so generic planning
+blocks before mutation.
 
 The DigitalOcean contract follows the provider's documented
 [archive/restore App Spec operation](https://docs.digitalocean.com/products/app-platform/how-to/archive-restore/)
@@ -179,6 +180,33 @@ Managed Valkey create/observe/wire, exact-SHA deploy, noop, update, dependency-
 ordered destruction, and terminal absence. Promotion to `supported` still
 requires one successful opt-in run against an isolated DigitalOcean team.
 
+Fly.io is a combined hosting/database candidate registered under one `fly`
+connection. The hosting adapter uses the Machines HTTP API directly and creates
+one deterministic App per logical service. Apply allocates only the reviewed
+service's shared IPv4/IPv6 ingress, reconciles app secrets, and creates a
+stopped source-less Machine with ownership metadata; it never starts the
+bootstrap image with the application's command. The provider-owned GitHub
+workflow and provider-neutral portable recipe used by GitLab publish the
+checked-out commit, resolve its immutable registry digest, update only the
+single existing owned Machine with optimistic version checking, and wait for
+the exact Machine and health checks to converge. CI cannot create Apps,
+Machines, IPs, certificates, or databases.
+
+The derived Fly Managed Postgres adapter creates one cluster, one logical
+database, and one dedicated `schema_admin` user. If a downstream create step
+fails, it removes the exact partial cluster and verifies absence; if rollback
+cannot be verified, the failed receipt retains the cluster id and explicitly
+requires cleanup. Normal teardown also waits for provider-confirmed absence.
+The cluster endpoints remain private to Fly networking. For each bounded local
+query, seed, or migration operation, Hypervibe now creates one uniquely named
+organization WireGuard peer, re-observes its durable id and public key, starts
+the packaged userspace connector with its private key over stdin, verifies the
+database with `SELECT 1`, and removes the exact peer after the operation. An
+existing matching peer blocks instead of being treated as stale and deleted.
+No Fly CLI or public PostgreSQL proxy is installed or created. The matrix keeps
+both Fly entries at `ready-for-live`; promotion now requires a successful
+isolated hosting/database lifecycle using the packaged connector.
+
 Cloudflare provides the first provider-managed edge load-balancer lifecycle.
 An environment may declare one load balancer at its existing `domain`, with at
 least two public web services as HTTPS origins. Hypervibe owns and observes one
@@ -225,6 +253,15 @@ The extended matrix also includes:
   it cannot apply. Its review-gated managed-workflow harness is now available,
   so the matrix entry is `ready-for-live`; promotion still requires a
   successful opt-in create/deploy/noop/update/destroy run.
+- [Fly.io Machines](https://fly.io/docs/machines/api/) and the
+  [Machines API reference](https://docs.machines.dev/) for hosting, plus
+  [Fly Managed Postgres](https://fly.io/docs/mpg/) for PostgreSQL. Hypervibe
+  uses organization-scoped tokens and provider HTTP APIs rather than `flyctl`.
+  It records the organization scope beside App and cluster identities, blocks
+  name-only adoption, keeps placement in desired state, and uses a packaged
+  userspace WireGuard connector for bounded access to private database
+  endpoints. These are `ready-for-live` entries rather than support claims
+  until their opt-in live lifecycle evidence is complete.
 - [Neon Postgres](https://api-docs.neon.tech/reference/use-cases) as its own
   database provider. Neon owns the project, branch, endpoint, database, and
   deletion lifecycle even when a Vercel integration wires it to an app. Its
@@ -284,8 +321,10 @@ then select exactly one contract:
 
 ```sh
 HYPERVIBE_LIVE_HOSTING=railway npm run test:providers:live
+HYPERVIBE_LIVE_HOSTING=fly npm run test:providers:live
 HYPERVIBE_LIVE_DATABASE=cloudsql npm run test:providers:live
 HYPERVIBE_LIVE_DATABASE=neon npm run test:providers:live
+HYPERVIBE_LIVE_DATABASE=fly npm run test:providers:live
 HYPERVIBE_LIVE_CACHE=railway npm run test:providers:live
 ```
 
@@ -298,6 +337,16 @@ fixture-host credentials. Set `HYPERVIBE_TEST_NEON_ORGANIZATION_ID` when a
 personal Neon key should target an organization, and optionally set
 `HYPERVIBE_TEST_NEON_REGION_ID`. Use only an isolated account/workspace because
 the contract creates and destroys real provider resources.
+
+The Fly contracts require `HYPERVIBE_TEST_FLY_API_TOKEN` and
+`HYPERVIBE_TEST_FLY_ORGANIZATION_SLUG`. Use a short-lived organization-scoped
+token for the exact isolated organization; an app deploy token cannot create
+the reviewed Apps or Managed Postgres cluster. The database contract creates a
+billable Basic Managed Postgres cluster with 10 GB of storage, exercises the
+packaged private WireGuard connector with `SELECT 1`, and verifies terminal
+cluster and peer absence during teardown. Fly prorates clusters deleted during
+the month, but the operator must still explicitly authorize this billable live
+run before starting it.
 
 The runner copies a tiny HTTP fixture into a temporary worktree and writes a
 mode-`0600` temporary credential object. Hypervibe consumes it through

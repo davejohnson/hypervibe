@@ -739,6 +739,21 @@ liveDescribe('live managed provider workflow contract', () => {
     expect(nonNoopActions(first.plan).length).toBeGreaterThan(0);
     assertNoTerminalApplyFailure(first.apply);
     await convergeReviewedInfrastructure(first.apply);
+    if (fixture.database) {
+      const query = await runHypervibe(['db', 'query'], {
+        project: projectName,
+        env: fixture.environmentName,
+        sql: 'SELECT 1::int AS healthy',
+      });
+      expect(query.data).toMatchObject({
+        rowCount: 1,
+        access: {
+          provider: fixture.database.provider,
+          cleanup: expect.not.stringMatching(/^failed$/),
+        },
+      });
+      expect(query.data.rows).toEqual([{ healthy: 1 }]);
+    }
 
     const workflows = await runHypervibe(['ci', 'status'], {
       project: projectName,

@@ -108,6 +108,8 @@ export interface ObservedDatabase {
   provider: string;
   engine: string;
   externalId: string;
+  /** Opaque, non-secret provider scope that disambiguates a provider-native id. */
+  providerScope?: Record<string, string>;
   name?: string;
   status: string;
   resilience?: {

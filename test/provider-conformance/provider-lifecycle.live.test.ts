@@ -331,6 +331,21 @@ liveDescribe('live provider lifecycle contract', () => {
     expect(first.apply?.data.receipts ?? []).not.toContainEqual(
       expect.objectContaining({ status: 'failed' })
     );
+    if (contract.kind === 'database') {
+      const query = await runHypervibe(['db', 'query'], {
+        project: projectName,
+        env: 'conformance',
+        sql: 'SELECT 1::int AS healthy',
+      });
+      expect(query.data).toMatchObject({
+        rowCount: 1,
+        access: {
+          provider: contract.provider,
+          cleanup: expect.not.stringMatching(/^failed$/),
+        },
+      });
+      expect(query.data.rows).toEqual([{ healthy: 1 }]);
+    }
   }, 20 * 60_000);
 
   it('observes an environment-variable update instead of planning a duplicate create', async () => {

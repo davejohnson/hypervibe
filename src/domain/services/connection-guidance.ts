@@ -506,6 +506,35 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'Token scopes cannot be changed after creation, and the token cannot exceed its creator\'s DigitalOcean team role. Create a replacement token if scopes or team access are wrong.',
     ],
   },
+  fly: {
+    provider: 'fly',
+    displayName: 'Fly.io',
+    tokenType: 'Fly.io organization-scoped access token plus the exact organization slug',
+    setupUrl: 'https://fly.io/dashboard',
+    setupUrls: [
+      {
+        label: 'Open the Fly.io dashboard, select the organization, then open Tokens',
+        url: 'https://fly.io/dashboard',
+      },
+      {
+        label: 'Review Fly.io token types and organization-token guidance',
+        url: 'https://fly.io/docs/security/tokens/',
+      },
+    ],
+    permissions: [
+      'Create an organization-scoped token for the one Fly.io organization Hypervibe should manage. Hypervibe needs organization access to list/create/delete Apps, create/update Machines, reconcile app secrets and public IPs, manage TLS certificates, push exact-image digests to registry.fly.io, create/observe/delete Managed Postgres clusters, databases, and users, and create/list/remove operation-scoped WireGuard peers for bounded private database access.',
+      'Do not use fly auth token: Fly.io documents that command as a short-lived user token intended for local use.',
+      'Do not use an app deploy token: it is restricted to one existing App and cannot authorize Hypervibe to create the per-service Apps or Managed Postgres clusters declared in desired state.',
+      'Keep organizationSlug scoped to the same organization that issued the token. Hypervibe records the non-secret organization slug beside every durable App and database identity and refuses cross-organization bindings.',
+    ],
+    credentialExample: 'hv_connections provider="fly" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"FLY_API_TOKEN","organizationSlug":"FLY_ORGANIZATION_SLUG"}',
+    notes: [
+      'Fly.io does not publish a documented pre-filled token-template URL. In the dashboard, select the intended organization, open Tokens, create an organization token, and copy its value once into a dotenv file or secret manager.',
+      'The credential contains only apiToken and organizationSlug. App and Managed Postgres placement belongs in environments.<name>.hosting.region; Hypervibe defaults to iad when it is omitted.',
+      'Hypervibe uses the Machines and Managed Postgres HTTP APIs directly. It does not install or invoke flyctl for infrastructure lifecycle operations.',
+      'Fly Managed Postgres endpoints remain private to Fly networking. For each bounded local query, seed, or migration operation, Hypervibe creates a uniquely named WireGuard peer, starts its packaged userspace connector, verifies PostgreSQL through the tunnel, and removes that exact peer afterward. A matching pre-existing peer blocks for manual inspection instead of being silently deleted.',
+    ],
+  },
   elasticache: {
     provider: 'elasticache',
     displayName: 'Amazon ElastiCache',

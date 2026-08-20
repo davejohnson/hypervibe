@@ -59,6 +59,7 @@
           "docs.aws.amazon.com",
           "docs.cloud.google.com",
           "docs.digitalocean.com",
+          "docs.machines.dev",
           "docs.doppler.com",
           "docs.github.com",
           "docs.railway.com",
@@ -67,6 +68,7 @@
           "neon.tech",
           "platform.openai.com",
           "supabase.com",
+          "fly.io",
           "vercel.com",
           "www.twilio.com"
         ]

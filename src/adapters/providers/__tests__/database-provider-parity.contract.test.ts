@@ -9,6 +9,7 @@ import type { Environment } from '../../../domain/entities/environment.entity.js
 import type { ObservedState } from '../../../domain/ports/observe.port.js';
 import { RdsAdapter } from '../aws/rds.adapter.js';
 import { CloudSqlAdapter } from '../gcp/cloudsql.adapter.js';
+import { FlyDatabaseAdapter } from '../fly/fly-database.adapter.js';
 import { RailwayAdapter } from '../railway/railway.adapter.js';
 import { createRailwayDatabaseAdapter } from '../railway/railway-database.factory.js';
 import { SupabaseAdapter } from '../supabase/supabase.adapter.js';
@@ -35,14 +36,18 @@ function makeEnvironment(
   };
 }
 
-function makeComponent(provider: string, externalId: string): Component {
+function makeComponent(
+  provider: string,
+  externalId: string,
+  bindings: Record<string, unknown> = {}
+): Component {
   const now = new Date();
   return {
     id: 'component-1',
     environmentId: 'env-1',
     type: 'postgres',
     externalId,
-    bindings: { provider },
+    bindings: { provider, ...bindings },
     createdAt: now,
     updatedAt: now,
   };
@@ -116,6 +121,72 @@ async function setupSupabase(
   vi.stubEnv('HYPERVIBE_SUPABASE_DELETE_DELAY_MS', '0');
   const adapter = new SupabaseAdapter();
   await adapter.connect({ accessToken: 'token', organizationId: 'org-1' });
+  return { adapter, ...fetchMetrics(fetchMock) };
+}
+
+async function setupFly(
+  scenario: DatabaseLifecycleParityScenario
+): Promise<DatabaseLifecycleParityFixture> {
+  let itemReads = 0;
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? 'GET';
+
+    if (method === 'GET' && url.pathname === '/v1/postgres') {
+      if (scenario === 'observation_unknown') {
+        return Response.json({ error: 'observation unavailable' }, { status: 503 });
+      }
+      if (scenario === 'identity_conflict') {
+        return Response.json({
+          data: EXTERNAL_IDS.map((id) => ({
+            id,
+            name: RESOURCE_NAME,
+            organization: { slug: 'hypervibe-test' },
+            region: 'iad',
+            plan: 'basic',
+            status: 'ready',
+          })),
+        });
+      }
+    }
+
+    if (url.pathname === `/v1/postgres/${EXTERNAL_IDS[0]}` && method === 'GET') {
+      itemReads += 1;
+      if (scenario === 'already_absent') {
+        return Response.json({ error: 'not found' }, { status: 404 });
+      }
+      if (scenario === 'delete_observation_unknown') {
+        return Response.json({ error: 'observation unavailable' }, { status: 503 });
+      }
+      if (scenario === 'delete_retry' && itemReads >= 3) {
+        return Response.json({ error: 'not found' }, { status: 404 });
+      }
+      return Response.json({
+        data: {
+          id: EXTERNAL_IDS[0],
+          name: RESOURCE_NAME,
+          organization: { slug: 'hypervibe-test' },
+          region: 'iad',
+          plan: 'basic',
+          status: itemReads > 1 ? 'deleting' : 'ready',
+        },
+      });
+    }
+
+    if (url.pathname === `/v1/postgres/${EXTERNAL_IDS[0]}` && method === 'DELETE') {
+      return new Response(null, { status: 202 });
+    }
+
+    throw new Error(`Unexpected Fly.io request: ${method} ${url}`);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  vi.stubEnv('HYPERVIBE_FLY_DATABASE_DELETE_ATTEMPTS', '4');
+  vi.stubEnv('HYPERVIBE_FLY_DATABASE_DELETE_DELAY_MS', '0');
+  const adapter = new FlyDatabaseAdapter();
+  await adapter.connect({
+    apiToken: 'flyv1-test-token',
+    organizationSlug: 'hypervibe-test',
+  });
   return { adapter, ...fetchMetrics(fetchMock) };
 }
 
@@ -326,11 +397,18 @@ const providers: Array<{
   provider: string;
   setup(scenario: DatabaseLifecycleParityScenario): Promise<DatabaseLifecycleParityFixture>;
   platformBindings?: Record<string, unknown>;
+  componentBindings?: Record<string, unknown>;
 }> = [
   { displayName: 'Railway', provider: 'railway', setup: setupRailway, platformBindings: { projectId: 'rail-project', environmentId: 'rail-env' } },
   { displayName: 'Supabase', provider: 'supabase', setup: setupSupabase },
   { displayName: 'Cloud SQL', provider: 'cloudsql', setup: setupCloudSql },
   { displayName: 'Amazon RDS', provider: 'rds', setup: setupRds },
+  {
+    displayName: 'Fly Managed Postgres',
+    provider: 'fly',
+    setup: setupFly,
+    componentBindings: { organizationSlug: 'hypervibe-test' },
+  },
 ];
 
 for (const provider of providers) {
@@ -339,7 +417,11 @@ for (const provider of providers) {
     externalIds: EXTERNAL_IDS,
     resourceName: RESOURCE_NAME,
     makeEnvironment: () => makeEnvironment(provider.platformBindings),
-    makeComponent: (externalId) => makeComponent(provider.provider, externalId),
+    makeComponent: (externalId) => makeComponent(
+      provider.provider,
+      externalId,
+      provider.componentBindings
+    ),
     setup: provider.setup,
   });
 }

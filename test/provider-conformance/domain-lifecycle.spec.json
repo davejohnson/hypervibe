@@ -149,6 +149,30 @@
       "deploy": {
         "strategy": "manual"
       }
+    },
+    "fly": {
+      "hosting": {
+        "provider": "fly"
+      },
+      "services": {
+        "web": {
+          "workloadKind": "web",
+          "startCommand": "node test/provider-conformance/fixture/server.mjs",
+          "healthCheckPath": "/health",
+          "public": true
+        }
+      },
+      "domain": "fly.domain-test.hypervibe.dev",
+      "domainProxy": false,
+      "email": {
+        "enabled": false
+      },
+      "envVars": {
+        "HYPERVIBE_CONFORMANCE_REVISION": "fly-v1"
+      },
+      "deploy": {
+        "strategy": "manual"
+      }
     }
   }
 }

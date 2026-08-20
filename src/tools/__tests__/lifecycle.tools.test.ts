@@ -303,6 +303,7 @@ describe('hv_inspect / hv_import', () => {
       expect.objectContaining({ provider: 'github', resources: expect.arrayContaining(['repository', 'ref', 'pages']) }),
       expect.objectContaining({ provider: 'cloudflare', resources: expect.arrayContaining(['zone', 'dns']) }),
       expect.objectContaining({ provider: 'railway', resources: expect.arrayContaining(['project', 'environment']) }),
+      expect.objectContaining({ provider: 'fly', resources: expect.arrayContaining(['environment', 'database']) }),
     ]));
     expect(providerRegistry.namesFor('storage').sort()).toEqual(['azureblob', 'gcs', 'railway', 's3']);
     for (const provider of providerRegistry.namesFor('hosting')) {
