@@ -35,6 +35,13 @@ export class SecretResolver {
   private async getAdapter(provider: string, scopeHints?: string[]): Promise<ISecretManagerAdapter> {
     const connection = this.connectionRepo.findBestMatchFromHints(provider, scopeHints);
     if (!connection) {
+      const metadata = secretManagerRegistry.getMetadata(provider);
+      if (metadata?.credentials?.supportsNativeCliAuth) {
+        const credentials = { authMode: 'default' };
+        const adapter = secretManagerRegistry.createAdapter(provider, credentials);
+        await adapter.connect(credentials);
+        return adapter;
+      }
       throw new Error(`No connection found for secret manager '${provider}'. ${formatConnectionGuidance(provider)}`);
     }
     if (connection.status !== 'verified') {

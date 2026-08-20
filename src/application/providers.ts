@@ -44,6 +44,7 @@ import '../adapters/providers/secretmanagers/aws-secrets.adapter.js';
 import '../adapters/providers/secretmanagers/doppler.adapter.js';
 import '../adapters/providers/secretmanagers/onepassword.adapter.js';
 import '../adapters/providers/secretmanagers/bitwarden.adapter.js';
+import '../adapters/providers/secretmanagers/stripe-projects.adapter.js';
 
 import { registerProviderImport } from './import-provider.js';
 import { importRailwayProvider } from './provider-imports/railway.js';

@@ -6,6 +6,7 @@ export const SECRET_MANAGER_PROVIDERS = [
   'doppler',
   '1password',
   'bitwarden',
+  'stripe-projects',
 ] as const;
 
 export type SecretManagerProvider = (typeof SECRET_MANAGER_PROVIDERS)[number];
@@ -145,8 +146,14 @@ export const DopplerCredentialsSchema = z.object({
   config: z.string().optional(),
 });
 
+/** Stripe Projects uses the authenticated local Stripe CLI session. */
+export const StripeProjectsCredentialsSchema = z.object({
+  authMode: z.literal('default').default('default'),
+}).strict();
+
 export type VaultCredentials = z.infer<typeof VaultCredentialsSchema>;
 export type AwsSecretsCredentials = z.infer<typeof AwsSecretsCredentialsSchema>;
 export type OnePasswordCredentials = z.infer<typeof OnePasswordCredentialsSchema>;
 export type BitwardenCredentials = z.infer<typeof BitwardenCredentialsSchema>;
 export type DopplerCredentials = z.infer<typeof DopplerCredentialsSchema>;
+export type StripeProjectsCredentials = z.infer<typeof StripeProjectsCredentialsSchema>;

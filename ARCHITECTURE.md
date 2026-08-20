@@ -432,6 +432,28 @@ and `env`.
 
 Secrets never cross output boundaries. Secret values may be accepted through `credentialsRef`, encrypted into plans, or stored as verified connections, but they must not be printed in tool output, committed specs, warnings, logs, receipts, or test snapshots.
 
+Stripe Projects is supported only as a narrow local credential source. A
+`stripe-projects://<environment>/<provider>/<service>` reference must match the
+currently active environment. Hypervibe may invoke only the read-only,
+redacted `stripe projects env show --json` and
+`stripe projects env --service <provider>/<service> --json` metadata paths,
+then select those declared keys from the already-existing Stripe-managed output
+file. That file must resolve inside the linked repository, must be a regular
+non-symlink file, and must be owner-only on POSIX systems. Duplicate matching
+service configurations, absent keys, a different active environment, missing
+output, or unknown CLI output all block without returning a value.
+
+This credential source does not transfer infrastructure or rotation ownership
+to Hypervibe. Resolution must never call Stripe Projects pull, refresh,
+environment use/create/update/delete, provider link, service add/remove, or
+credential rotation paths: pull may rotate expiring provider access behind the
+command. The operator selects and pulls an environment explicitly, then calls
+`hv_connections` with `credentialsMap`; Hypervibe snapshots the mapped provider
+credentials into its encrypted verified connection. After an intentional pull
+or rotation, the operator reruns that destination `hv_connections` call. This
+read-only local credential-source exception does not weaken the provider-CLI
+prohibition for infrastructure operations.
+
 Provider-declared environment-variable aliases may simplify local credential
 references without duplicating secret values. Exact requested names win. When
 an exact name is absent, all populated aliases must contain one distinct value
@@ -459,7 +481,7 @@ When adding or changing token guidance, include all of these details:
 - When a provider officially supports credential-template URLs, guidance must use them with the known required name and least-privilege permissions pre-filled. Do not depend on undocumented dashboard parameters; identify optional permissions that the supported template cannot represent.
 - The exact scopes, roles, IAM permissions, or product permission toggles required, including resource scoping such as repo, zone, project, account, team, or organization.
 - The expected shape, prefix, or caveats when helpful, such as token prefixes, one-time-download keys, required companion ids like `accountId`, package-read tokens, or credentials that cannot support a feature.
-- A safe `hv_connections` example using `credentialsRef` (`env:...`, `dotenv:/absolute/path/.env#KEY`, `file:/absolute/path`, or a secret-manager ref). Use `credentialsMap` when a provider needs multiple fields.
+- A safe `hv_connections` example using `credentialsRef` (`env:...`, `dotenv:/absolute/path/.env#KEY`, `file:/absolute/path`, a secret-manager ref, or the constrained Stripe Projects credential source above). Use `credentialsMap` when a provider needs multiple fields.
 
 Tests should fail if new provider guidance omits these basics. Update `src/domain/services/__tests__/connection-guidance.test.ts` and add provider-specific verification-error assertions for ambiguous or commonly miscreated tokens.
 
