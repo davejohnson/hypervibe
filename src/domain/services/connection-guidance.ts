@@ -861,6 +861,27 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
       'A global legacy connection can still carry sandboxSecretKey/sandboxPublishableKey plus liveSecretKey/livePublishableKey, but separate scoped connections are required when development and staging use different Stripe sandboxes.',
     ],
   },
+  'stripe-projects': {
+    provider: 'stripe-projects',
+    displayName: 'Stripe Projects',
+    tokenType: 'Official Stripe CLI with the Projects plugin, a linked repository, and an already-pulled active project environment; Hypervibe stores no Stripe Projects credential value',
+    setupUrl: 'https://projects.dev/',
+    setupUrls: [
+      { label: 'Install the official Stripe CLI', url: 'https://docs.stripe.com/stripe-cli/install' },
+      { label: 'Set up Stripe Projects', url: 'https://projects.dev/' },
+    ],
+    permissions: [
+      'The local Stripe Projects setup must include the provider/service and environment fields Hypervibe should read.',
+      'Run the explicit Stripe Projects pull as the signed-in operator after selecting the intended environment; Hypervibe reads only that existing local output.',
+    ],
+    credentialExample: 'hv_connections provider="stripe-projects"',
+    notes: [
+      'References use stripe-projects://<environment>/<provider>/<service>, for example stripe-projects://production/cloudflare/workers.',
+      'Map the exact service fields reported by Stripe Projects into the destination provider with credentialsMap, for example hv_connections provider="cloudflare" credentialsRef="stripe-projects://production/cloudflare/workers" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_WORKERS_ACCOUNT_ID"}.',
+      'Hypervibe never runs Stripe Projects pull, refresh, environment selection/update, provider linking, provisioning, or credential rotation. If the selected environment or local output is stale, it stops with the exact explicit Stripe CLI commands for the operator.',
+      'The Stripe-managed output must be a regular, non-symlink file inside the linked repository and owner-only on POSIX systems (chmod 600).',
+    ],
+  },
   supabase: {
     provider: 'supabase',
     displayName: 'Supabase',

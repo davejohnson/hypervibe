@@ -17,6 +17,7 @@ import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { S3StorageAdapter } from '../../adapters/providers/aws/s3.adapter.js';
 import '../../adapters/providers/secretmanagers/onepassword.adapter.js';
+import { StripeProjectsAdapter } from '../../adapters/providers/secretmanagers/stripe-projects.adapter.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../context.js';
 
@@ -73,6 +74,61 @@ async function makeClient() {
 }
 
 describe('hv_connections', () => {
+  it('adds a Stripe Projects credential source without storing a credential value', async () => {
+    vi.spyOn(StripeProjectsAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      identity: 'Stripe Projects environment production',
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'stripe-projects' });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.credentialsSource).toBe('native-cli');
+    expect(result.data.identity).toBe('Stripe Projects environment production');
+    const connection = new ConnectionRepository().findByProvider('stripe-projects')!;
+    expect(getSecretStore().decryptObject(connection.credentialsEncrypted)).toEqual({
+      authMode: 'default',
+    });
+    await t.close();
+  });
+
+  it('maps a Stripe Projects service into provider credentials without a saved source connection', async () => {
+    const stripeSecret = 'cfat_from_stripe_projects';
+    vi.spyOn(StripeProjectsAdapter.prototype, 'getSecret').mockResolvedValue({
+      value: JSON.stringify({
+        CLOUDFLARE_API_TOKEN: stripeSecret,
+        CLOUDFLARE_WORKERS_ACCOUNT_ID: 'account_from_stripe_projects',
+      }),
+    });
+    vi.spyOn(CloudflareAdapter.prototype, 'verify').mockResolvedValue({
+      success: true,
+      tokenKind: 'account',
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_connections', {
+      provider: 'cloudflare',
+      credentialsRef: 'stripe-projects://production/cloudflare/workers',
+      credentialsMap: {
+        apiToken: 'CLOUDFLARE_API_TOKEN',
+        accountId: 'CLOUDFLARE_WORKERS_ACCOUNT_ID',
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data.credentialsSource).toBe('stripe-projects');
+    expect(new ConnectionRepository().findByProvider('stripe-projects')).toBeNull();
+    expect(JSON.stringify(result)).not.toContain(stripeSecret);
+    const connection = new ConnectionRepository().findByProvider('cloudflare')!;
+    expect(getSecretStore().decryptObject(connection.credentialsEncrypted)).toMatchObject({
+      apiToken: stripeSecret,
+      accountId: 'account_from_stripe_projects',
+      apiTokenKind: 'account',
+    });
+    await t.close();
+  });
+
   it('adds a native-CLI storage connection without asking for a credential value', async () => {
     vi.spyOn(S3StorageAdapter.prototype, 'verify').mockResolvedValue({
       success: true,

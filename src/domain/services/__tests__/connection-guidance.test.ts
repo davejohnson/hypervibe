@@ -33,7 +33,8 @@ describe('connection guidance', () => {
       expect(
         record.credentialExample.includes('credentialsRef=')
         || record.credentialExample.includes('credentials=')
-        || providerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true,
+        || providerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true
+        || secretManagerRegistry.get(provider)?.metadata.credentials?.supportsNativeCliAuth === true,
         provider
       ).toBe(true);
       expect(formatted).toContain('Token/credential type:');

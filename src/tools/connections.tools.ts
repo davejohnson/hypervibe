@@ -104,6 +104,33 @@ function parseRawCredentialValue(provider: string, raw: string, credentialsKey: 
   return scalarCredentialObject(provider, trimmed, credentialsKey, source);
 }
 
+function mapStructuredCredentialValue(
+  raw: string,
+  credentialsMap: Record<string, string>,
+  source: string
+): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${source} must resolve to a JSON object when credentialsMap is used.`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${source} must resolve to a JSON object when credentialsMap is used.`);
+  }
+
+  const values = parsed as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const [providerKey, sourceKey] of Object.entries(credentialsMap)) {
+    const value = values[sourceKey];
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`credentialsMap key "${providerKey}" references missing source field "${sourceKey}".`);
+    }
+    output[providerKey] = value;
+  }
+  return output;
+}
+
 function parseDotenvCredentialRef(
   provider: string,
   ref: string,
@@ -152,9 +179,6 @@ async function parseCredentialRef(
   if (ref.trim().startsWith('dotenv:')) {
     return parseDotenvCredentialRef(provider, ref, credentialsKey, credentialsMap);
   }
-  if (credentialsMap) {
-    throw new Error('credentialsMap is only supported with credentialsRef="dotenv:/path/.env".');
-  }
 
   const secretRef = parseSecretRef(ref.trim());
   if (secretRef) {
@@ -162,7 +186,14 @@ async function parseCredentialRef(
     if ('error' in resolved) {
       throw new Error(`Failed to resolve credentialsRef secret: ${resolved.error}`);
     }
+    if (credentialsMap) {
+      return mapStructuredCredentialValue(resolved.value, credentialsMap, 'credentialsRef secret');
+    }
     return parseRawCredentialValue(provider, resolved.value, credentialsKey, 'credentialsRef secret');
+  }
+
+  if (credentialsMap) {
+    throw new Error('credentialsMap is supported with dotenv references or structured secret-manager references.');
   }
 
   const raw = resolveLocalSecretRef(ref, provider);
@@ -174,7 +205,9 @@ function refKind(ref: string): string {
   if (trimmed.startsWith('file:')) return 'file';
   if (trimmed.startsWith('env:')) return 'env';
   if (trimmed.startsWith('dotenv:')) return 'dotenv';
-  if (parseSecretRef(trimmed)) return 'secret-manager';
+  const secretRef = parseSecretRef(trimmed);
+  if (secretRef?.provider === 'stripe-projects') return 'stripe-projects';
+  if (secretRef) return 'secret-manager';
   return 'unknown';
 }
 
@@ -210,6 +243,7 @@ function providerDiscoveryEntry(metadata: {
   credentials?: {
     defaultScalarKey?: string;
     environmentVariableAliases?: string[][];
+    supportsNativeCliAuth?: boolean;
   };
 }): ProviderDiscoveryEntry {
   const guidance = getConnectionGuidance(metadata.name);
@@ -241,14 +275,14 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
   commands.register(
     'hv_connections',
-    'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages one connection. With provider, action="add" is the default, while "verify", "remove", and "prepare" are explicit. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers that declare native CLI authentication may omit credentials to use the active local/default credential chain.',
+    'Connection modes: {} lists every connection/provider; {project} lists in validated project context; {provider,...} manages one connection. With provider, action="add" is the default, while "verify", "remove", and "prepare" are explicit. Project context never changes provider scope. Credentials are encrypted at rest and never returned; credentialsRef is preferred. Providers and credential sources that declare native CLI authentication may omit credentials to use the active local/default credential chain.',
     {
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
       action: z.enum(['add', 'verify', 'remove', 'prepare']).optional().describe('With provider: operation to perform (default: "add")'),
       credentials: z.record(z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
-      credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, or secret-manager refs like 1password://vault/item#field. The resolved value may be a JSON credentials object or a scalar.'),
+      credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, secret-manager refs like 1password://vault/item#field, or an already-pulled active Stripe Projects environment with stripe-projects://<environment>/<provider>/<service>. The resolved value may be a JSON credentials object or a scalar.'),
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. Optional for common single-token providers.'),
-      credentialsMap: z.record(z.string()).optional().describe('action="add": for credentialsRef="dotenv:/path/.env", maps provider credential keys to .env variable names, e.g. {"apiToken":"GITHUB_TOKEN","packageReadToken":"GITHUB_PACKAGES_TOKEN"}.'),
+      credentialsMap: z.record(z.string()).optional().describe('action="add": for dotenv or structured secret-manager references, maps provider credential keys to source fields, e.g. {"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}.'),
       scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global.'),
       project: projectField.describe('Optional Hypervibe project name/id for validated context. With no provider, project-only still lists. Omit for an unscoped list. This never changes provider credential scope.'),
       gcpProjectId: z.string().optional().describe('action="prepare": GCP project ID (defaults to the Cloud Run connection projectId)'),
@@ -352,7 +386,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         if (credentials && credentialsRef) {
           return commandError('VALIDATION', 'Pass either credentials or credentialsRef, not both.');
         }
-        const nativeCliAuth = providerRegistry.getMetadata(provider)?.credentials?.supportsNativeCliAuth === true;
+        const nativeCliAuth = providerRegistry.getMetadata(provider)?.credentials?.supportsNativeCliAuth === true
+          || secretManagerRegistry.getMetadata(provider)?.credentials?.supportsNativeCliAuth === true;
         if (!credentials && !credentialsRef && !nativeCliAuth) {
           return commandError('VALIDATION', 'credentials are required for action="add".', {
             details: setupDetails(provider, scope, project?.name),
@@ -371,7 +406,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         } catch (error) {
           return commandError('VALIDATION', error instanceof Error ? error.message : String(error), {
             details: setupDetails(provider, scope, project?.name),
-            hint: `Use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, or a secret-manager ref like 1password://vault/item#field. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
+            hint: `Use credentialsRef="env:NAME" for exported tokens, credentialsRef="dotenv:/absolute/path/.env#KEY" for existing .env files, credentialsRef="file:/absolute/path" for JSON credentials, a secret-manager ref like 1password://vault/item#field, or stripe-projects://<environment>/<provider>/<service> for an already-pulled active Stripe Projects environment. Raw credentials={...} is still accepted if intentional. ${formatConnectionGuidance(provider, { scope })}`,
           });
         }
 

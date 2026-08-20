@@ -33,6 +33,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 - **HashiCorp Vault** - KV secrets with versioning
 - **AWS Secrets Manager** - Native rotation support
 - **Doppler** - Simple config management
+- **Stripe Projects** - Resolve one service from an already-pulled active local environment
 
 **Workloads & Queues**
 - Services declare `workloadKind: web | worker | cron`. Workers are always-on background consumers (on Cloud Run: internal-only ingress, minimum one instance; they must still listen on `PORT`).
@@ -1040,6 +1041,28 @@ Connect without pasting the token into chat. If the values are in an existing `.
 hv_connections provider=cloudflare scope="example.com" credentialsRef="dotenv:/absolute/path/.env" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}
 ```
 
+If the repository already uses the official Stripe Projects plugin for this
+Cloudflare service, select and pull the environment yourself once, then let
+Hypervibe map only that service's fields from the existing local output:
+
+```text
+stripe projects env use production
+stripe projects env --pull
+hv_connections provider=cloudflare scope="example.com" credentialsRef="stripe-projects://production/cloudflare/workers" credentialsMap={"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_WORKERS_ACCOUNT_ID"}
+```
+
+Use the exact key names reported by
+`stripe projects env --service cloudflare/workers`; Projects may namespace a
+service field to avoid collisions. Hypervibe does not run either setup command,
+refresh the cache, link providers, provision services, or rotate Stripe
+Projects credentials. It checks the
+active environment through redacted metadata, reads only the fields Stripe
+Projects declares for `cloudflare/workers`, and snapshots them into the
+encrypted Cloudflare connection. The output file must be inside the linked
+repository, non-symlinked, and owner-only (`chmod 600`) on POSIX. After an
+intentional Stripe Projects pull or rotation, rerun the same `hv_connections`
+call to update Hypervibe's encrypted snapshot.
+
 Hypervibe accepts either a raw token or a copied authorization value such as `Bearer <token>` for Cloudflare.
 
 If Hypervibe needs Cloudflare Registrar/domain purchase, use a **User API Token** instead because Cloudflare Registrar is not compatible with Account API Tokens. Create it under `My Profile -> API Tokens -> Create Token -> Edit zone DNS`, add the same zone permissions above, and connect it without `accountId`:
@@ -1359,11 +1382,17 @@ If the logs contain `docker buildx imagetools inspect ... ghcr.io ... 403 Forbid
 - After permission changes, wait a few minutes for Railway caches to refresh, then rerun `hv_status` or `hv_plan`.
 - If Railway still cannot see the repo, disconnect/reconnect the service source in Railway, refresh Add -> GitHub Repository, or reinstall the Railway GitHub App.
 
-### Secret managers
+### Secret managers and credential sources
 
 Vault, AWS Secrets Manager, Doppler, 1Password, and Bitwarden are resolve-only.
 Hypervibe reads a referenced value while building an authorized plan and never
 writes, deletes, or rotates manager data. 1Password uses a [service account token](https://developer.1password.com/docs/service-accounts/) scoped only to required vaults. Bitwarden Secrets Manager uses a [machine account access token](https://bitwarden.com/help/access-tokens/) plus the organization id.
+
+Stripe Projects is also resolve-only, but only from an already-pulled active
+environment using
+`stripe-projects://<environment>/<provider>/<service>`. Hypervibe never asks it
+to reveal values through CLI output or perform pull/refresh/rotation work; it
+uses redacted service metadata to select keys from the protected local output.
 
 Runtime values from `.env.<environment>` and `.env` are still synchronized to
 hosting through `hv_plan` and `hv_apply`. The environment-specific file wins,
