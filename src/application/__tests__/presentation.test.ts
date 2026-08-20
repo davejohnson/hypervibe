@@ -229,6 +229,55 @@ describe('command presentation', () => {
     expect(output).not.toContain('Logs: 1');
   });
 
+  it('renders repeated CI runs as a compact table', () => {
+    const firstUrl = 'https://github.com/davejohnson/invoice-express/actions/runs/32403831183';
+    const secondUrl = 'https://github.com/davejohnson/invoice-express/actions/runs/32403414765';
+    const output = formatCommandResult('hv_ci_status', commandSuccess({
+      repository: 'davejohnson/invoice-express',
+      runs: [
+        {
+          name: 'staging critical journey',
+          id: 32403831183,
+          status: 'completed',
+          conclusion: 'success',
+          url: firstUrl,
+        },
+        {
+          name: 'staging critical journey',
+          id: 32403414765,
+          status: 'completed',
+          conclusion: 'failure',
+          url: secondUrl,
+        },
+      ],
+    }));
+
+    expect(output).toContain('2 runs · staging critical journey');
+    expect(output).toContain('ID           STATUS     CONCLUSION  URL');
+    expect(output).toContain(`32403831183  completed  success     ${firstUrl}`);
+    expect(output).toContain(`32403414765  completed  failure     ${secondUrl}`);
+    expect(output).not.toContain('name: staging critical journey');
+    expect(output).not.toContain('status: completed');
+  });
+
+  it('renders provider-neutral CI run fields in the same table', () => {
+    const output = formatCommandResult('hv_ci_status', commandSuccess({
+      repository: { scope: 'group/project' },
+      runs: [{
+        id: 'pipeline-42',
+        name: 'GitLab pipeline',
+        phase: 'succeeded',
+        nativeStatus: 'success',
+        webUrl: 'https://gitlab.example.com/group/project/-/pipelines/42',
+      }],
+    }));
+
+    expect(output).toContain('1 run · GitLab pipeline');
+    expect(output).toContain('ID           STATUS     URL');
+    expect(output).toContain('pipeline-42  succeeded  https://gitlab.example.com/group/project/-/pipelines/42');
+    expect(output).not.toContain('CONCLUSION');
+  });
+
   it('does not show a green success check when a requested CI section failed to load', () => {
     const output = formatCommandResult('hv_ci_status', commandSuccess({
       repository: 'davejohnson/invoice-express',

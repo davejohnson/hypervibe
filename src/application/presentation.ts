@@ -459,6 +459,54 @@ function ciLogRows(logs: unknown[]): string[] {
   return lines;
 }
 
+function tableCell(value: unknown, maxLength: number): string {
+  if (value === null || value === undefined) return '';
+  const text = String(value).replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function ciRunRows(runs: unknown[]): string[] {
+  if (runs.length === 0) return ['No runs returned.'];
+  const parsed = runs.map(record);
+  if (parsed.some((run) => run === undefined)) {
+    return formatCommandDataLines({ runs });
+  }
+
+  const records = parsed as DataRecord[];
+  const names = records.map((run) => tableCell(run.name, Number.MAX_SAFE_INTEGER));
+  const sharedName = names.length > 0
+    && names.every((name) => name.length > 0 && name === names[0])
+      ? tableCell(names[0], 40)
+      : undefined;
+  const visible = records.slice(0, 12);
+  const hasConclusion = visible.some((run) => tableCell(run.conclusion, 16).length > 0);
+  const hasUrl = visible.some((run) => tableCell(run.url ?? run.webUrl, 160).length > 0);
+  const columns = [
+    ...(!sharedName ? [{ header: 'NAME', value: (run: DataRecord) => tableCell(run.name, 40) || '—' }] : []),
+    { header: 'ID', value: (run: DataRecord) => tableCell(run.id, 48) || '—' },
+    { header: 'STATUS', value: (run: DataRecord) => tableCell(run.status ?? run.phase ?? run.nativeStatus, 20) || 'unknown' },
+    ...(hasConclusion ? [{ header: 'CONCLUSION', value: (run: DataRecord) => tableCell(run.conclusion, 20) || '—' }] : []),
+    ...(hasUrl ? [{ header: 'URL', value: (run: DataRecord) => tableCell(run.url ?? run.webUrl, 160) || '—' }] : []),
+  ];
+  const rows = visible.map((run) => columns.map((column) => column.value(run)));
+  const widths = columns.map((column, index) => Math.max(
+    column.header.length,
+    ...rows.map((row) => row[index].length)
+  ));
+  const formatRow = (cells: string[]) => cells
+    .map((cell, index) => index === cells.length - 1 ? cell : cell.padEnd(widths[index]))
+    .join('  ');
+  const lines = [
+    `${plural(runs.length, 'run')}${sharedName ? ` · ${sharedName}` : ''}`,
+    formatRow(columns.map((column) => column.header)),
+    formatRow(widths.map((width) => '─'.repeat(width))),
+    ...rows.map(formatRow),
+  ];
+  if (records.length > visible.length) lines.push(`… ${records.length - visible.length} more runs`);
+  return lines;
+}
+
 function deploymentRows(deployments: unknown[]): string[] {
   if (deployments.length === 0) return ['(no deployments returned)'];
   return deployments.map((value) => {
@@ -546,6 +594,8 @@ function ciPresentation(data: DataRecord): CommandPresentation {
         ? Array.isArray(data.logs)
           ? ciLogRows(data.logs)
           : formatCommandDataLines({ logs: data.logs })
+        : key === 'runs' && Array.isArray(data.runs)
+          ? ciRunRows(data.runs)
         : formatCommandDataLines({ [key]: data[key] }),
     }));
   const details = genericLines(data, new Set([
