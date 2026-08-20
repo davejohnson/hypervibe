@@ -28,6 +28,36 @@ if [ -d dist ]; then
   fi
 fi
 
+FLY_HELPER_TARGETS=(
+  "darwin-x64/hypervibe-fly-wireguard"
+  "darwin-arm64/hypervibe-fly-wireguard"
+  "linux-x64/hypervibe-fly-wireguard"
+  "linux-arm64/hypervibe-fly-wireguard"
+  "win32-x64/hypervibe-fly-wireguard.exe"
+  "win32-arm64/hypervibe-fly-wireguard.exe"
+)
+for helper in "${FLY_HELPER_TARGETS[@]}"; do
+  if [ ! -f "dist/native/fly-wireguard/$helper" ]; then
+    echo "FAIL: Missing Fly.io WireGuard helper target: $helper"
+    exit 1
+  fi
+done
+for license in \
+  coder-websocket-LICENSE \
+  google-btree-LICENSE \
+  golang-x-crypto-LICENSE \
+  golang-x-net-LICENSE \
+  golang-x-sys-LICENSE \
+  golang-x-time-LICENSE \
+  wireguard-go-LICENSE \
+  wintun-LICENSE \
+  gvisor-LICENSE; do
+  if [ ! -f "dist/native/fly-wireguard/licenses/$license" ]; then
+    echo "FAIL: Missing Fly.io WireGuard helper license: $license"
+    exit 1
+  fi
+done
+
 # Print summary
 FILE_COUNT=$(echo "$PACK_OUTPUT" | grep -cE '^\d|^npm' | head -1 || true)
 TOTAL_LINE=$(echo "$PACK_OUTPUT" | tail -1)

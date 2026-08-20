@@ -179,7 +179,14 @@ export function fingerprintObservedState(observed: ObservedState): string {
       })),
     databases: [...observed.databases]
       .sort((a, b) => a.externalId.localeCompare(b.externalId))
-      .map((d) => ({ provider: d.provider, engine: d.engine, externalId: d.externalId })),
+      .map((d) => ({
+        provider: d.provider,
+        engine: d.engine,
+        externalId: d.externalId,
+        providerScope: d.providerScope
+          ? Object.fromEntries(Object.entries(d.providerScope).sort(([a], [b]) => a.localeCompare(b)))
+          : null,
+      })),
     caches: [...(observed.caches ?? [])]
       .sort((a, b) => a.externalId.localeCompare(b.externalId))
       .map((cache) => ({

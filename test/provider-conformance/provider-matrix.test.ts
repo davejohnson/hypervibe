@@ -40,6 +40,8 @@ describe('provider conformance matrix', () => {
         'learn.microsoft.com',
         'docs.digitalocean.com',
         'vercel.com',
+        'fly.io',
+        'docs.machines.dev',
       ]),
     });
     const instructions = actions['provider-truth'].kind === 'code-audit'
@@ -59,6 +61,7 @@ describe('provider conformance matrix', () => {
       'Microsoft Azure',
       'DigitalOcean',
       'Vercel',
+      'Fly.io',
     ]);
   });
 
@@ -93,7 +96,7 @@ describe('provider conformance matrix', () => {
     }
     expect(providerRegistry.supports('github', 'hosting')).toBe(false);
     expect(hostingProviderContracts.filter((entry) => entry.customDomains === 'managed').map((entry) => entry.provider))
-      .toEqual(['railway', 'cloudrun', 'ecs', 'azure-container-apps', 'digitalocean', 'vercel']);
+      .toEqual(['railway', 'cloudrun', 'ecs', 'azure-container-apps', 'digitalocean', 'vercel', 'fly']);
   });
 
   it('keeps one isolated DNS-only domain fixture for every hosting provider', () => {
@@ -119,6 +122,7 @@ describe('provider conformance matrix', () => {
       railway: 'disconnect',
       digitalocean: 'block',
       vercel: 'block',
+      fly: 'block',
     } as const;
 
     for (const contract of hostingProviderContracts) {
@@ -177,6 +181,7 @@ describe('provider conformance matrix', () => {
     expect(databaseProviderContracts.map((entry) => [entry.vendor, entry.engine])).toEqual([
       ['Google Cloud', 'postgres'],
       ['DigitalOcean', 'postgres'],
+      ['Fly.io', 'postgres'],
       ['AWS', 'postgres'],
       ['Railway', 'postgres'],
       ['Supabase', 'postgres'],
@@ -245,7 +250,6 @@ describe('provider conformance matrix', () => {
     const excluded = new Set([
       'heroku',
       'render',
-      'fly',
       'fly-managed-postgres',
     ]);
     expect(providerContracts.some((entry) => excluded.has(entry.provider))).toBe(false);
@@ -255,6 +259,8 @@ describe('provider conformance matrix', () => {
     expect(providerRegistry.supportsEngine('render', 'cache', 'redis')).toBe(false);
     expect(providerRegistry.supports('ecs', 'hosting')).toBe(true);
     expect(providerRegistry.supports('azure-container-apps', 'hosting')).toBe(true);
+    expect(providerRegistry.supports('fly', 'hosting')).toBe(true);
+    expect(providerRegistry.supportsEngine('fly', 'database', 'postgres')).toBe(true);
   });
 
   it('uses stable provider ids and secret-free credential descriptors', () => {
@@ -453,6 +459,37 @@ describe('provider conformance matrix', () => {
       },
     });
     expect(providerRegistry.supports('vercel', 'hosting')).toBe(true);
+  });
+
+  it('exposes the implemented Fly.io hosting and Managed Postgres slices only to live gates', () => {
+    const entries = providerContracts.filter((entry) => entry.provider === 'fly');
+    const hosting = entries.find((entry) => entry.kind === 'hosting');
+    const database = entries.find((entry) => entry.kind === 'database');
+
+    expect(entries).toHaveLength(2);
+    expect(hosting).toMatchObject({
+      status: 'ready-for-live',
+      customDomains: 'managed',
+      maintenance: 'unsupported',
+      credentials: [
+        expect.objectContaining({ field: 'apiToken' }),
+        expect.objectContaining({ field: 'organizationSlug' }),
+      ],
+      managedWorkflow: {
+        environmentName: 'production',
+        workflow: 'deploy-fly-production.yml',
+        database: { provider: 'fly', engine: 'postgres' },
+      },
+    });
+    expect(database).toMatchObject({
+      status: 'ready-for-live',
+      fixtureHostingProvider: 'fly',
+      engine: 'postgres',
+      implementationNote: expect.stringContaining('private to Fly networking'),
+    });
+    expect(database?.implementationNote).toContain('operation-scoped WireGuard peer');
+    expect(providerRegistry.supports('fly', 'hosting')).toBe(true);
+    expect(providerRegistry.supportsEngine('fly', 'database', 'postgres')).toBe(true);
   });
 
 });

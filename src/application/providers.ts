@@ -11,6 +11,7 @@ import '../adapters/providers/azure/azure-container-apps.adapter.js';
 import '../adapters/providers/azure/azure-postgres.adapter.js';
 import '../adapters/providers/azure/azure-managed-redis.adapter.js';
 import '../adapters/providers/vercel/vercel.adapter.js';
+import '../adapters/providers/fly/fly.adapter.js';
 
 // Database providers
 import '../adapters/providers/supabase/supabase.adapter.js';

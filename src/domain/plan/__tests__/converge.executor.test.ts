@@ -626,4 +626,31 @@ describe('fingerprintObservedState', () => {
     };
     expect(fingerprintObservedState(unknown)).not.toBe(fingerprintObservedState(disconnected));
   });
+
+  it('includes provider-native database scope while remaining key-order stable', () => {
+    const scoped: ObservedState = {
+      ...base,
+      databases: [{
+        ...base.databases[0],
+        providerScope: { organizationSlug: 'primary', region: 'iad' },
+      }],
+    };
+    const reorderedScope: ObservedState = {
+      ...base,
+      databases: [{
+        ...base.databases[0],
+        providerScope: { region: 'iad', organizationSlug: 'primary' },
+      }],
+    };
+    const otherOrganization: ObservedState = {
+      ...scoped,
+      databases: [{
+        ...scoped.databases[0],
+        providerScope: { organizationSlug: 'secondary', region: 'iad' },
+      }],
+    };
+
+    expect(fingerprintObservedState(reorderedScope)).toBe(fingerprintObservedState(scoped));
+    expect(fingerprintObservedState(otherOrganization)).not.toBe(fingerprintObservedState(scoped));
+  });
 });

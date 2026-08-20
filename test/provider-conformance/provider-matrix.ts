@@ -150,6 +150,11 @@ const vercelCredentials: ProviderCredentialField[] = [
   { field: 'teamId', environmentVariable: 'HYPERVIBE_TEST_VERCEL_TEAM_ID', optional: true },
 ];
 
+const flyCredentials: ProviderCredentialField[] = [
+  { field: 'apiToken', environmentVariable: 'HYPERVIBE_TEST_FLY_API_TOKEN' },
+  { field: 'organizationSlug', environmentVariable: 'HYPERVIBE_TEST_FLY_ORGANIZATION_SLUG' },
+];
+
 export const managedWorkflowGitHubCredentials: ProviderCredentialField[] = [
   { field: 'apiToken', environmentVariable: 'HYPERVIBE_TEST_GITHUB_API_TOKEN' },
 ];
@@ -282,6 +287,23 @@ export const hostingProviderContracts: HostingProviderContract[] = [
     implementationNote:
       'The source-less Project lifecycle adapter, personal/team token guidance, mocked safety contracts, exact-ID pause/unpause maintenance contract, native-Git-source guard, exact-file REST deployment workflow, and review-gated managed-workflow live harness are implemented. Maintenance remains ready-for-live until its opt-in entry/noop/exit scenario passes; provider promotion still requires a successful create/deploy/noop/update/destroy run.',
   },
+  {
+    kind: 'hosting',
+    provider: 'fly',
+    vendor: 'Fly.io',
+    service: 'Fly Apps and Machines',
+    status: 'ready-for-live',
+    customDomains: 'managed',
+    domainTrafficProxy: 'supported',
+    maintenance: 'unsupported',
+    credentials: flyCredentials,
+    managedWorkflow: {
+      ...dockerWebManagedWorkflow('deploy-fly-production.yml'),
+      database: { provider: 'fly', engine: 'postgres' },
+    },
+    implementationNote:
+      'The organization-scoped credential schema, one-App-per-service Machines adapter, stopped source-less bootstrap, exact-ID IP/secret/certificate lifecycle, immutable-digest GitHub and portable GitLab workflow contracts, derived Managed Postgres adapter, guidance, and mocked safety contracts are implemented. Promotion requires a successful opt-in live create/deploy/noop/update/domain/destroy run; maintenance and provider-native cron schedules remain unsupported.',
+  },
 ];
 
 export const databaseProviderContracts: DatabaseProviderContract[] = [
@@ -306,6 +328,18 @@ export const databaseProviderContracts: DatabaseProviderContract[] = [
     fixtureHostingProvider: 'digitalocean',
     implementationNote:
       'The derived Managed PostgreSQL adapter, mocked lifecycle safety contract, and review-gated full-stack live profile are implemented. Promotion requires one successful complete live stack run.',
+  },
+  {
+    kind: 'database',
+    provider: 'fly',
+    vendor: 'Fly.io',
+    service: 'Managed Postgres',
+    engine: 'postgres',
+    status: 'ready-for-live',
+    credentials: flyCredentials,
+    fixtureHostingProvider: 'fly',
+    implementationNote:
+      'The derived Managed Postgres cluster/database/schema-admin-user lifecycle and mocked safety contract are implemented. Endpoints remain private to Fly networking; bounded local operations create and re-observe an exact operation-scoped WireGuard peer, use the packaged userspace connector, verify PostgreSQL, and remove the exact peer. Promotion requires a successful complete Fly-hosted live stack run using that path.',
   },
   {
     kind: 'database',

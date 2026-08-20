@@ -351,6 +351,20 @@ describe('connection guidance', () => {
         'Full Access is a broader fallback',
         'credentialsRef="file:/absolute/path/digitalocean.json"',
       ],
+      fly: [
+        'https://fly.io/dashboard',
+        'https://fly.io/docs/security/tokens/',
+        'organization-scoped access token',
+        'Do not use fly auth token',
+        'Do not use an app deploy token',
+        'create/update Machines',
+        'Managed Postgres',
+        'organizationSlug',
+        'credentialsMap={"apiToken":"FLY_API_TOKEN","organizationSlug":"FLY_ORGANIZATION_SLUG"}',
+        'private to Fly networking',
+        'operation-scoped WireGuard peers',
+        'packaged userspace connector',
+      ],
       vercel: [
         'https://vercel.com/account/settings/tokens',
         'personal access token',
@@ -453,7 +467,6 @@ describe('connection guidance', () => {
   it('keeps deliberately excluded hosting providers out of connection guidance', () => {
     expect(getConnectionGuidance('heroku')).toBeUndefined();
     expect(getConnectionGuidance('render')).toBeUndefined();
-    expect(getConnectionGuidance('fly')).toBeUndefined();
   });
 });
 
@@ -467,6 +480,7 @@ describe('credentialFieldsFromSchema', () => {
       gcs: ['authMode', 'credentials'],
       azureblob: ['authMode', 'tenantId', 'subscriptionId', 'clientId', 'clientSecret'],
       digitalocean: ['apiToken'],
+      fly: ['apiToken', 'organizationSlug'],
     };
 
     for (const [provider, fields] of Object.entries(expected)) {
