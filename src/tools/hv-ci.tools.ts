@@ -361,12 +361,13 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
               break;
             }
             case 'runs': {
-              if (!workflow) {
-                throw new HvError('VALIDATION', 'workflow is required when include contains "runs".', {
-                  hint: 'Pass workflow as a filename (e.g. "deploy.yml") or numeric id.',
+              const selected = definition ?? workflow;
+              if (!selected) {
+                throw new HvError('VALIDATION', 'definition is required when include contains "runs".', {
+                  hint: 'Pass definition as a filename (e.g. "deploy.yml") or numeric id.',
                 });
               }
-              const runs = await adapter.listWorkflowRuns(owner, repo, workflow, { per_page: 10 });
+              const runs = await adapter.listWorkflowRuns(owner, repo, selected, { per_page: 10 });
               data.runs = runs.workflow_runs.map((r) => ({
                 id: r.id,
                 name: r.name,

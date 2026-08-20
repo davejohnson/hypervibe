@@ -183,6 +183,25 @@ describe('hv_ci_status', () => {
     await t.close();
   });
 
+  it('accepts the portable definition field for legacy GitHub runs', async () => {
+    seedProject();
+    const listRuns = vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRuns').mockResolvedValue({
+      total_count: 0,
+      workflow_runs: [],
+    });
+    const t = await makeClient();
+
+    const res = await t.call('hv_ci_status', {
+      project: 'billforge',
+      include: ['runs'],
+      definition: 'deploy.yml',
+    });
+
+    expect(res.ok).toBe(true);
+    expect(listRuns).toHaveBeenCalledWith('davejohnson', 'billforge', 'deploy.yml', { per_page: 10 });
+    await t.close();
+  });
+
   it('returns GitHub Actions jobs and steps for a workflow run', async () => {
     seedProject();
     const listJobs = vi.spyOn(GitHubAdapter.prototype, 'listWorkflowRunJobs').mockResolvedValue({
