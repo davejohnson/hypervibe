@@ -833,6 +833,8 @@ describe('github tools', () => {
     expect(releaseWorkflow).toContain(
       'fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")'
     );
+    expect(releaseWorkflow).toContain('evidence.version!==2');
+    expect(releaseWorkflow).not.toContain('evidence.version!==1');
     expect(releaseWorkflow).toContain('server evidence repository/SHA mismatch');
     expect(releaseWorkflow).toContain('concurrency:');
     expect(releaseWorkflow).toContain('group: hypervibe-deploy-development');

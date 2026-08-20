@@ -82,7 +82,7 @@ describe('managed iOS release runtime', () => {
   it('builds mobile evidence only from matching server evidence', () => {
     const config = runtime.parseReleaseConfig(validEnvironment, '/repo') as unknown as Record<string, unknown>;
     const evidence = {
-      version: 1,
+      version: 2,
       environment: 'production',
       server: { repository: 'owner/repo', sha: 'a'.repeat(40) },
       services: ['web'],
@@ -97,6 +97,14 @@ describe('managed iOS release runtime', () => {
     expect(manifest.mobile.sha).toBe('a'.repeat(40));
     expect(manifest.server.sha).toBe(manifest.mobile.sha);
     expect(manifest.app.testflightGroups).toEqual(['Internal', 'External']);
+
+    expect(() => runtime.buildReleaseManifest(
+      config,
+      { ...evidence, version: 1 },
+      { id: 'app-1' },
+      { id: 'build-1' },
+      '2026-07-30T00:00:00.000Z'
+    )).toThrow(/no longer matches/);
 
     expect(() => runtime.buildReleaseManifest(
       config,
