@@ -391,6 +391,7 @@ describe('DigitalOceanAdapter', () => {
         },
       },
     });
+    expect(result.receipt.data?.runtimeRolloutRequired).toBeUndefined();
     expect(JSON.stringify(result.receipt)).not.toContain('session-secret-value');
 
     const putCall = fetchMock.mock.calls.find((call) =>
@@ -581,6 +582,76 @@ describe('DigitalOceanAdapter', () => {
       tag: 'hypervibe-pending',
       deploy_on_push: { enabled: false },
     });
+    expect(result.receipt.data?.runtimeRolloutRequired).toBeUndefined();
+  });
+
+  it('waits for a configuration-only deployment before env sync succeeds', async () => {
+    let updatedSpec: Record<string, unknown> | undefined;
+    const initialSpec = {
+      name: 'hv-app',
+      region: 'sfo',
+      services: [{
+        name: 'web',
+        image: {
+          registry_type: 'DOCR',
+          registry: 'hypervibe',
+          repository: 'app/web',
+          digest: 'sha256:old',
+        },
+        envs: [{ key: 'NODE_ENV', value: 'production', type: 'GENERAL', scope: 'RUN_TIME' }],
+      }],
+    };
+    const fetchMock = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      if (url.pathname === '/v2/apps/do-app-1' && method === 'GET') {
+        return jsonResponse({
+          app: {
+            id: 'do-app-1',
+            spec: updatedSpec ?? initialSpec,
+            active_deployment: updatedSpec
+              ? { id: 'deployment-new', phase: 'ACTIVE' }
+              : { id: 'deployment-old', phase: 'ACTIVE' },
+          },
+        });
+      }
+      if (url.pathname === '/v2/apps/do-app-1' && method === 'PUT') {
+        updatedSpec = (JSON.parse(String(init?.body)) as { spec: Record<string, unknown> }).spec;
+        return jsonResponse({
+          app: {
+            id: 'do-app-1',
+            spec: updatedSpec,
+            active_deployment: { id: 'deployment-old', phase: 'ACTIVE' },
+            in_progress_deployment: { id: 'deployment-new', phase: 'DEPLOYING' },
+          },
+        });
+      }
+      throw new Error(`unexpected request: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    const receipt = await adapter.setEnvVars(
+      makeEnvironment({
+        provider: 'digitalocean',
+        projectId: 'do-app-1',
+        services: { web: { serviceId: 'do-app-1:services:web' } },
+      }),
+      makeService(),
+      { SESSION_SECRET: 'rotated-secret' },
+      { deferDeployment: true }
+    );
+
+    expect(receipt.success).toBe(true);
+    expect(receipt.data?.runtimeRolloutRequired).toBeUndefined();
+    expect(fetchMock.mock.calls.filter((call) => (
+      new URL(String(call[0])).pathname === '/v2/apps/do-app-1'
+      && ((call[1] as RequestInit | undefined)?.method ?? 'GET') === 'GET'
+    ))).toHaveLength(2);
+    expect(JSON.stringify(receipt)).not.toContain('rotated-secret');
   });
 
   it('treats an unauthorized registry observation as unknown and does not update the app', async () => {

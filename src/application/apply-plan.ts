@@ -27,6 +27,7 @@ import {
   recordDelegatedSecretBindings,
   type DelegatedSecretInputRequirement,
 } from '../domain/services/delegated-secret.service.js';
+import { recordRuntimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
 import {
   applyGitHubActionsAppliedSpecHash,
   applyGitHubActionsDeploy,
@@ -257,8 +258,16 @@ function bootstrapSuccessData(summary: Record<string, unknown>): Record<string, 
   if (booleanField(summary, 'appDeploymentPending') !== true) {
     return undefined;
   }
-  const data: Record<string, unknown> = { appDeploymentPending: true };
-  for (const key of ['deploymentMode', 'appDeployment', 'deploySource'] as const) {
+  const data: Record<string, unknown> = {
+    appDeploymentPending: true,
+    ...(booleanField(summary, 'deploymentDeferralRequested') === true
+      ? { deploymentDeferred: true }
+      : {}),
+    ...(booleanField(summary, 'runtimeRolloutRequired') === true
+      ? { runtimeRolloutRequired: true }
+      : {}),
+  };
+  for (const key of ['deploymentMode', 'appDeployment', 'deploySource', 'rolloutBaselines'] as const) {
     if (summary[key] !== undefined) {
       data[key] = summary[key];
     }
@@ -1073,6 +1082,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
         };
       }
       const failures: string[] = [];
+      let deploymentDeferred = false;
+      let runtimeRolloutRequired = false;
+      const rolloutBaselines: Record<string, unknown> = {};
       for (const serviceName of destinationServices) {
         const service = ctx.repos.services.findByProjectAndName(project.id, serviceName);
         if (!service) {
@@ -1088,6 +1100,17 @@ export async function executePlanApply(ctx: CommandContext, params: {
         });
         if (!receipt.success) {
           failures.push(`${serviceName}: ${receipt.error ?? receipt.message}`);
+        } else {
+          const receiptData = asRecord(receipt.data);
+          if (receiptData?.deploymentDeferred === true) {
+            deploymentDeferred = true;
+          }
+          if (receiptData?.runtimeRolloutRequired !== true) continue;
+          runtimeRolloutRequired = true;
+          const rolloutBaseline = receiptData.rolloutBaseline;
+          if (rolloutBaseline) {
+            rolloutBaselines[serviceName] = rolloutBaseline;
+          }
         }
       }
       return failures.length > 0
@@ -1099,6 +1122,16 @@ export async function executePlanApply(ctx: CommandContext, params: {
         : {
             success: true,
             message: `Synced delegated secret ${action.resource.name} to ${destinationServices.length} service(s)`,
+            ...(deploymentDeferred || runtimeRolloutRequired
+              ? {
+                data: {
+                  ...(deploymentDeferred ? { deploymentDeferred: true } : {}),
+                  ...(runtimeRolloutRequired ? { runtimeRolloutRequired: true } : {}),
+                  services: destinationServices,
+                  ...(Object.keys(rolloutBaselines).length > 0 ? { rolloutBaselines } : {}),
+                },
+              }
+              : {}),
           };
     }
     if (capability === 'stripe.hosting-env.sync') {
@@ -1352,16 +1385,26 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
   }
 
-  if (result.applyRunId && delegatedSecretEnvVars && Object.keys(delegatedSecretEnvVars).length > 0) {
-    const latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
-    if (latestEnvironment) {
-      recordDelegatedSecretBindings({
+  if (result.applyRunId) {
+    let latestEnvironment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+    if (latestEnvironment && delegatedSecretEnvVars && Object.keys(delegatedSecretEnvVars).length > 0) {
+      latestEnvironment = recordDelegatedSecretBindings({
         environment: latestEnvironment,
         spec,
         environmentName: envName,
         suppliedValues: delegatedSecretEnvVars,
         applyRunId: result.applyRunId,
         receipts: result.receipts,
+      });
+    }
+    if (latestEnvironment) {
+      recordRuntimeRolloutRequirements({
+        environment: latestEnvironment,
+        provider: envSpec.hosting.provider,
+        observed,
+        actions: loaded.document.actions,
+        receipts: result.receipts,
+        applyRunId: result.applyRunId,
       });
     }
   }

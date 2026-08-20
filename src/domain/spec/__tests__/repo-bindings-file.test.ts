@@ -103,6 +103,15 @@ describe('repo bindings delegated metadata', () => {
           applyRunId: 'apply-1',
           actionId: 'secret:ANTHROPIC_API_KEY',
         }],
+        runtimeRollouts: [{
+          service: 'worker',
+          provider: 'railway',
+          serviceExternalId: 'railway-worker',
+          baselineDeployment: { state: 'present', id: 'deployment-before-config' },
+          requiredAt: now.toISOString(),
+          applyRunId: 'apply-1',
+          actionIds: ['secret:ANTHROPIC_API_KEY'],
+        }],
       },
       createdAt: now,
       updatedAt: now,
@@ -128,6 +137,14 @@ describe('repo bindings delegated metadata', () => {
           principal: 'github:alice',
           valueHash: 'sha256-only',
           applyRunId: 'apply-1',
+        }),
+      ]);
+      expect(document.environments.production.platformBindings.runtimeRollouts).toEqual([
+        expect.objectContaining({
+          service: 'worker',
+          provider: 'railway',
+          baselineDeployment: { state: 'present', id: 'deployment-before-config' },
+          actionIds: ['secret:ANTHROPIC_API_KEY'],
         }),
       ]);
     } finally {

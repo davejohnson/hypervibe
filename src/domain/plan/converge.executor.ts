@@ -175,6 +175,7 @@ export function fingerprintObservedState(observed: ObservedState): string {
         source: s.source ?? null,
         sourceState: s.sourceState ?? null,
         envVarHashes: Object.fromEntries(Object.entries(s.envVarHashes).sort(([a], [b]) => a.localeCompare(b))),
+        deployment: s.deployment ?? null,
         maintenance: s.maintenance ?? null,
       })),
     databases: [...observed.databases]

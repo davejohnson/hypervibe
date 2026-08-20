@@ -397,6 +397,8 @@ describe('VercelAdapter', () => {
           resourceType: 'web',
           createdService: true,
           deploymentDeferred: true,
+          runtimeRolloutRequired: true,
+          rolloutBaseline: { state: 'absent' },
           pendingDeployment: true,
         },
       },
@@ -444,6 +446,53 @@ describe('VercelAdapter', () => {
     expect(fetchMock.mock.calls.some((call) =>
       new URL(String(call[0])).pathname === '/v13/deployments'
     )).toBe(false);
+  });
+
+  it('records the exact live deployment when deferred variables need a later deployment', async () => {
+    const fetchMock = vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+      const identity = identityResponse(url);
+      if (identity) return identity;
+      if (url.pathname === `/v9/projects/${PROJECT_ID}`) {
+        return jsonResponse(project());
+      }
+      if (url.pathname === `/v10/projects/${PROJECT_ID}/env` && method === 'GET') {
+        return jsonResponse(envResponse([]));
+      }
+      if (url.pathname === `/v10/projects/${PROJECT_ID}/env` && method === 'POST') {
+        return jsonResponse({});
+      }
+      if (url.pathname === '/v7/deployments') {
+        return jsonResponse({ deployments: [deployment()], pagination: { next: null } });
+      }
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    const receipt = await adapter.setEnvVars(
+      boundEnvironment(),
+      makeService(),
+      { SESSION_SECRET: 'rotated-secret' },
+      { deferDeployment: true }
+    );
+
+    expect(receipt).toMatchObject({
+      success: true,
+      data: {
+        deploymentDeferred: true,
+        runtimeRolloutRequired: true,
+        rolloutBaseline: {
+          state: 'present',
+          deploymentId: 'dpl_1234567890',
+        },
+      },
+    });
+    expect(JSON.stringify(receipt)).not.toContain('rotated-secret');
   });
 
   it('reports a newly created durable ID when later configuration fails', async () => {
@@ -707,6 +756,11 @@ describe('VercelAdapter', () => {
           SESSION_SECRET: hashEnvValue('secret-value'),
         },
         status: 'running',
+        deployment: {
+          id: 'dpl_1234567890',
+          status: 'READY',
+          createdAt: '2023-11-14T22:13:20.000Z',
+        },
       }],
     });
     expect(JSON.stringify(observed)).not.toContain('secret-value');
@@ -837,6 +891,9 @@ describe('VercelAdapter', () => {
       ) {
         return jsonResponse({}, 204);
       }
+      if (url.pathname === '/v7/deployments' && method === 'GET') {
+        return jsonResponse({ deployments: [deployment()], pagination: { next: null } });
+      }
       throw new Error(`unexpected request: ${method} ${url.pathname}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -854,6 +911,12 @@ describe('VercelAdapter', () => {
       data: {
         serviceId: SERVICE_BINDING,
         deletedKeys: ['OLD_VALUE'],
+        deploymentDeferred: true,
+        runtimeRolloutRequired: true,
+        rolloutBaseline: {
+          state: 'present',
+          deploymentId: 'dpl_1234567890',
+        },
       },
     });
     expect(fetchMock.mock.calls.filter((call) =>

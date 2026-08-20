@@ -277,18 +277,24 @@ function statusPresentation(data: DataRecord): CommandPresentation {
   const unmanaged = arrayValue(data.unmanaged);
   const services = arrayValue(data.services);
   const inSync = data.inSync === true;
+  const restartRequired = data.restartRequired === true;
+  const runtimeConfiguration = record(data.runtimeConfiguration);
+  const rolloutServices = arrayValue(runtimeConfiguration?.services);
   const verified = data.verified === true;
   const isBlocked = blocked.length > 0;
   const title = isBlocked
     ? 'STATUS BLOCKED'
-    : inSync
-      ? 'IN SYNC'
-      : drift.length > 0
-        ? 'DRIFT DETECTED'
-        : 'STATUS UNKNOWN';
+    : restartRequired
+      ? 'RESTART REQUIRED'
+      : inSync
+        ? 'IN SYNC'
+        : drift.length > 0
+          ? 'DRIFT DETECTED'
+          : 'STATUS UNKNOWN';
   const summary = [
     plural(drift.length, 'change'),
     services.length > 0 ? plural(services.length, 'service') : undefined,
+    rolloutServices.length > 0 ? `${plural(rolloutServices.length, 'service')} awaiting rollout` : undefined,
     unmanaged.length > 0 ? plural(unmanaged.length, 'unmanaged resource') : undefined,
     verified ? 'provider verified' : 'verification incomplete',
   ].filter(Boolean).join(' · ');
@@ -297,15 +303,18 @@ function statusPresentation(data: DataRecord): CommandPresentation {
   if (blocked.length > 0) {
     sections.push({ title: '🚧  BLOCKED', lines: formatCommandDataLines({ blocked }) });
   }
+  if (rolloutServices.length > 0) {
+    sections.push({ title: '♻️  ROLLOUT', lines: formatCommandDataLines({ runtimeConfiguration }) });
+  }
   if (services.length > 0) sections.push({ title: '🌐  SERVICES', lines: serviceRows(services) });
   const details = genericLines(data, new Set([
-    'environment', 'specRevision', 'verified', 'inSync', 'summary', 'drift', 'blocked',
-    'unmanaged', 'services',
+    'environment', 'specRevision', 'verified', 'inSync', 'restartRequired', 'runtimeConfiguration',
+    'summary', 'drift', 'blocked', 'unmanaged', 'services',
   ]));
   if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
   return {
-    tone: isBlocked ? 'warning' : inSync ? 'success' : 'warning',
-    icon: isBlocked ? '🚧' : inSync ? '✅' : '⚠️',
+    tone: isBlocked ? 'warning' : inSync && !restartRequired ? 'success' : 'warning',
+    icon: isBlocked ? '🚧' : inSync && !restartRequired ? '✅' : restartRequired ? '♻️' : '⚠️',
     title,
     context: [
       stringValue(data.environment),

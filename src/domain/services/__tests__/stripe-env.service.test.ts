@@ -317,7 +317,11 @@ describe('Stripe hosting environment sync', () => {
     const setEnvVars = vi.fn(async () => ({
       success: true,
       message: 'synced',
-      data: { deploymentDeferred: true },
+      data: {
+        deploymentDeferred: true,
+        runtimeRolloutRequired: true,
+        rolloutBaseline: { state: 'present', deploymentId: 'deployment-before-stripe-sync' },
+      },
     }));
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
@@ -406,7 +410,12 @@ describe('Stripe hosting environment sync', () => {
     expect(serialized).not.toContain('sk_test_staging_secret');
     expect(serialized).not.toContain('pk_test_staging_public');
     expect(serialized).not.toContain('price_starter_month');
-    expect(result.data).toMatchObject({ deploymentDeferred: true, variableCount: 3 });
+    expect(result.data).toMatchObject({
+      deploymentDeferred: true,
+      runtimeRolloutRequired: true,
+      rolloutBaseline: { state: 'present', deploymentId: 'deployment-before-stripe-sync' },
+      variableCount: 3,
+    });
   });
 
   it('plans immutable price replacement before hosting projection and archives the old price afterwards', async () => {

@@ -1378,7 +1378,16 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
         match.collection,
         nextComponent
       );
-      await this.client.updateApp(app.id, nextSpec);
+      const baselineDeploymentId = app.active_deployment?.id;
+      const updated = await this.client.updateApp(app.id, nextSpec);
+      await this.waitForConfigurationDeployment({
+        appId: app.id,
+        baselineDeploymentId,
+        expectedDeploymentId: updated.in_progress_deployment?.id
+          ?? (updated.active_deployment?.id !== baselineDeploymentId
+            ? updated.active_deployment?.id
+            : undefined),
+      });
       return {
         success: true,
         message: `Updated DigitalOcean environment variables for ${componentName}`,
@@ -1395,6 +1404,57 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
         error: this.formatError(error),
       };
     }
+  }
+
+  private async waitForConfigurationDeployment(params: {
+    appId: string;
+    baselineDeploymentId?: string;
+    expectedDeploymentId?: string;
+  }): Promise<DigitalOceanApp> {
+    const attempts = this.positiveIntegerEnv(
+      'HYPERVIBE_DIGITALOCEAN_CONFIG_DEPLOY_ATTEMPTS',
+      120
+    );
+    const delayMs = this.nonNegativeIntegerEnv(
+      'HYPERVIBE_DIGITALOCEAN_CONFIG_DEPLOY_DELAY_MS',
+      1000
+    );
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const app = await this.client!.getApp(params.appId);
+      if (!app) {
+        throw new Error(`DigitalOcean app ${params.appId} disappeared while activating runtime configuration.`);
+      }
+      const pending = app.in_progress_deployment;
+      const active = app.active_deployment;
+      const terminalFailure = [pending, active].find((deployment) => (
+        deployment?.id
+        && (!params.expectedDeploymentId || deployment.id === params.expectedDeploymentId)
+        && ['ERROR', 'CANCELED', 'SUPERSEDED'].includes(deployment.phase?.toUpperCase() ?? '')
+      ));
+      if (terminalFailure) {
+        throw new Error(
+          `DigitalOcean configuration deployment ${terminalFailure.id} entered ${terminalFailure.phase ?? 'a failed state'}.`
+        );
+      }
+      const activeChanged = Boolean(
+        active?.id
+        && active.id !== params.baselineDeploymentId
+      );
+      const expectedIsActive = params.expectedDeploymentId
+        ? active?.id === params.expectedDeploymentId
+        : activeChanged;
+      if (
+        expectedIsActive
+        && active?.phase?.toUpperCase() === 'ACTIVE'
+        && pending?.id !== active.id
+      ) {
+        return app;
+      }
+      if (attempt < attempts) await this.delay(delayMs);
+    }
+    throw new Error(
+      `DigitalOcean did not activate a new deployment for runtime configuration on app ${params.appId}.`
+    );
   }
 
   private componentSpec(input: {

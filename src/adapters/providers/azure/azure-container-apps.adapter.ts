@@ -271,6 +271,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       const existingEnvironment = await this.getResource(project.environmentId, CONTAINER_APPS_API);
       if (!existingEnvironment) throw new Error(`Bound managed environment ${project.environmentId} was not found.`);
       const boundId = bindings.services?.[service.name]?.serviceId;
+      let previousReadyRevision: string | undefined;
       let app: AzureResource | null = null;
       if (boundId) {
         this.assertAppScope(boundId, project.resourceGroupId);
@@ -281,6 +282,9 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
           return this.failedDeploy(service, `Bound Container App ${boundId} is not owned by this Hypervibe environment.`);
         }
         attemptedApp = app;
+        previousReadyRevision = typeof app.properties?.latestReadyRevisionName === 'string'
+          ? app.properties.latestReadyRevisionName
+          : undefined;
       } else {
         const name = this.appName(service);
         const appId = `${project.resourceGroupId}/providers/Microsoft.App/containerApps/${name}`;
@@ -315,6 +319,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         envVars,
       }));
       app = await this.waitForProvisioning(app.id, CONTAINER_APPS_API);
+      app = await this.waitForContainerAppRevision(app.id, previousReadyRevision);
       const url = this.appUrl(app);
       return {
         serviceId: service.id,
@@ -361,6 +366,9 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         return this.failedReceipt('Failed to delete Azure environment variables', `Bound Container App ${appId} is not owned by this Hypervibe environment.`);
       }
       const retired = new Set(keys);
+      const previousReadyRevision = typeof app.properties?.latestReadyRevisionName === 'string'
+        ? app.properties.latestReadyRevisionName
+        : undefined;
       const container = this.container(app);
       const secrets = await this.listAppSecrets(appId);
       const secretRefs = new Set(
@@ -382,6 +390,7 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
         },
       });
       await this.waitForProvisioning(appId, CONTAINER_APPS_API);
+      await this.waitForContainerAppRevision(appId, previousReadyRevision);
       return { success: true, message: `Deleted ${keys.length} retired Azure environment variable${keys.length === 1 ? '' : 's'}.` };
     } catch (error) {
       return this.failedReceipt('Failed to delete Azure environment variables', this.formatError(error));
@@ -1032,6 +1041,35 @@ export class AzureContainerAppsAdapter implements IProviderAdapter, IWorkloadMai
       if (attempt < 180) await this.delay();
     }
     throw new Error(`Azure resource ${id} did not finish provisioning.`);
+  }
+
+  private async waitForContainerAppRevision(
+    id: string,
+    previousReadyRevision?: string
+  ): Promise<AzureResource> {
+    for (let attempt = 1; attempt <= 180; attempt += 1) {
+      const app = await this.getResource(id, CONTAINER_APPS_API);
+      if (!app) throw new Error(`Azure Container App ${id} disappeared during revision rollout.`);
+      const provisioningState = String(app.properties?.provisioningState ?? 'unknown');
+      if (['Failed', 'Canceled', 'DeleteFailed'].includes(provisioningState)) {
+        throw new Error(`Azure Container App ${id} is ${provisioningState}.`);
+      }
+      const latestRevision = typeof app.properties?.latestRevisionName === 'string'
+        ? app.properties.latestRevisionName
+        : undefined;
+      const latestReadyRevision = typeof app.properties?.latestReadyRevisionName === 'string'
+        ? app.properties.latestReadyRevisionName
+        : undefined;
+      if (
+        latestRevision
+        && latestReadyRevision === latestRevision
+        && (!previousReadyRevision || latestReadyRevision !== previousReadyRevision)
+      ) {
+        return app;
+      }
+      if (attempt < 180) await this.delay();
+    }
+    throw new Error(`Azure Container App ${id} did not activate a new ready revision.`);
   }
 
   private async waitForRunningStatus(id: string, expected: 'Running' | 'Stopped'): Promise<boolean> {

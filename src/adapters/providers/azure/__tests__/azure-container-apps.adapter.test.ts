@@ -199,6 +199,7 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
     let registry: Record<string, any> | null = null;
     let managedEnvironment: Record<string, any> | null = null;
     let app: Record<string, any> | null = null;
+    let appRevision = 0;
     const roleAssignments = new Map<string, Record<string, any>>();
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
@@ -265,6 +266,7 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
         return json(managedEnvironment, 201);
       }
       if (method === 'PUT' && /\/providers\/Microsoft\.App\/containerApps\/[^/]+$/i.test(path)) {
+        appRevision += 1;
         app = {
           id: path,
           name: path.split('/').at(-1),
@@ -274,6 +276,8 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
           properties: {
             ...body?.properties,
             provisioningState: 'Succeeded',
+            latestRevisionName: `hv-web--${appRevision}`,
+            latestReadyRevisionName: `hv-web--${appRevision}`,
             customDomainVerificationId: 'verification-id',
             configuration: {
               ...body?.properties?.configuration,
@@ -288,6 +292,7 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
         return json(app, 201);
       }
       if (method === 'PATCH' && /\/providers\/Microsoft\.App\/containerApps\/[^/]+$/i.test(path)) {
+        appRevision += 1;
         app = {
           ...app,
           ...body,
@@ -298,6 +303,8 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
             ...app?.properties,
             ...body?.properties,
             provisioningState: 'Succeeded',
+            latestRevisionName: `hv-web--${appRevision}`,
+            latestReadyRevisionName: `hv-web--${appRevision}`,
             configuration: {
               ...body?.properties?.configuration,
               ingress: {
@@ -361,6 +368,7 @@ describe('AzureContainerAppsAdapter lifecycle boundaries', () => {
       status: 'configured',
       receipt: { success: true, data: { createdService: true } },
     });
+    expect(deployed.receipt.data?.runtimeRolloutRequired).toBeUndefined();
     const serviceId = String(deployed.externalId);
     expect((app as Record<string, any> | null)?.id).toBe(serviceId);
     expect(roleAssignments.size).toBe(2);

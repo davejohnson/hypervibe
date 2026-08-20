@@ -1955,6 +1955,8 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
       const allEnvVars = { ...pluginVars, ...envVars }; // User vars override auto-detected
 
       // Set environment variables (including auto-wired plugin connections)
+      let rolloutBaseline: Record<string, unknown> | undefined;
+      let runtimeRolloutRequired = false;
       if (Object.keys(allEnvVars).length > 0) {
         const envForVarSync: Environment = {
           ...environment,
@@ -1992,6 +1994,11 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
             },
           };
         }
+        const envRolloutBaseline = envReceipt.data?.rolloutBaseline;
+        if (envRolloutBaseline && typeof envRolloutBaseline === 'object' && !Array.isArray(envRolloutBaseline)) {
+          rolloutBaseline = envRolloutBaseline as Record<string, unknown>;
+        }
+        runtimeRolloutRequired = envReceipt.data?.runtimeRolloutRequired === true;
       }
 
       // CI-managed branch deploys release an exact SHA after hv_apply. Do not
@@ -2032,7 +2039,17 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
             railwayServiceId,
             environmentId: railwayEnvId,
             createdService,
-            ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
+            ...(runtimeRolloutRequired
+              ? {
+                  runtimeRolloutRequired: true,
+                  ...(rolloutBaseline ? { rolloutBaseline } : {}),
+                }
+              : {}),
+            ...(options.deferDeployment
+              ? {
+                deploymentDeferred: true,
+              }
+              : {}),
             ...(serviceResolution.ignoredBoundServiceId ? { replacedServiceBinding: serviceResolution.ignoredBoundServiceId } : {}),
             ...(url ? { url } : {}),
             ...(domainError ? { domainError } : {}),
@@ -2140,6 +2157,22 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
         };
       }
 
+      let rolloutBaseline: { state: 'present' | 'absent' | 'unknown'; deploymentId?: string } | undefined;
+      if (!options.deferDeployment) {
+        try {
+          const instance = await this.getServiceInstanceDetails(railwayServiceId, environmentId);
+          rolloutBaseline = instance
+            ? instance.latestDeployment?.id
+              ? { state: 'present', deploymentId: instance.latestDeployment.id }
+              : instance.latestDeployment === null
+                ? { state: 'absent' }
+                : { state: 'unknown' }
+            : { state: 'unknown' };
+        } catch {
+          rolloutBaseline = { state: 'unknown' };
+        }
+      }
+
       await this.client.request(mutation, {
         projectId: projectId,
         serviceId: railwayServiceId,
@@ -2148,12 +2181,40 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
         skipDeploys: options.deferDeployment === true,
       });
 
+      if (options.deferDeployment) {
+        try {
+          const instance = await this.getServiceInstanceDetails(railwayServiceId, environmentId);
+          rolloutBaseline = instance
+            ? instance.latestDeployment?.id
+              ? { state: 'present', deploymentId: instance.latestDeployment.id }
+              : instance.latestDeployment === null
+                ? { state: 'absent' }
+                : { state: 'unknown' }
+            : { state: 'unknown' };
+        } catch {
+          // The variable mutation succeeded, but absence was not proven. Keep
+          // rollout verification fail-closed until a later deployment can be
+          // compared with a known baseline.
+          rolloutBaseline = { state: 'unknown' };
+        }
+      }
+
       return {
         success: true,
         message: `Set ${Object.keys(vars).length} environment variables`,
         data: {
           variableCount: Object.keys(vars).length,
-          ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
+          ...(Object.keys(vars).length > 0
+            ? {
+                runtimeRolloutRequired: true,
+                ...(rolloutBaseline ? { rolloutBaseline } : {}),
+              }
+            : {}),
+          ...(options.deferDeployment
+            ? {
+                deploymentDeferred: true,
+              }
+            : {}),
         },
       };
     } catch (error) {
@@ -2227,6 +2288,20 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
         };
       }
 
+      let rolloutBaseline: { state: 'present' | 'absent' | 'unknown'; deploymentId?: string };
+      try {
+        const instance = await this.getServiceInstanceDetails(railwayServiceId, environmentId);
+        rolloutBaseline = instance
+          ? instance.latestDeployment?.id
+            ? { state: 'present', deploymentId: instance.latestDeployment.id }
+            : instance.latestDeployment === null
+              ? { state: 'absent' }
+              : { state: 'unknown' }
+          : { state: 'unknown' };
+      } catch {
+        rolloutBaseline = { state: 'unknown' };
+      }
+
       const mutation = gql`
         mutation DeleteVariable($input: VariableDeleteInput!) {
           variableDelete(input: $input)
@@ -2268,6 +2343,8 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
           // Railway's documented single-variable delete does not expose the
           // skipDeploys option available to variable upserts.
           redeployMayBeTriggered: true,
+          runtimeRolloutRequired: true,
+          rolloutBaseline,
         },
       };
     } catch (error) {
@@ -4603,6 +4680,14 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
         envVarKeys,
         envVarHashes,
         status,
+        ...(deploymentId
+          ? {
+              deployment: {
+                id: deploymentId,
+                ...(deploymentStatus ? { status: deploymentStatus } : {}),
+              },
+            }
+          : {}),
         maintenance: {
           state: !deploymentId || ['REMOVED', 'CANCELLED'].includes(deploymentStatus ?? '')
             ? 'suspended'

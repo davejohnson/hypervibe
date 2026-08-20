@@ -83,6 +83,34 @@ describe('command presentation', () => {
     expect(output).not.toContain('DRIFT DETECTED');
   });
 
+  it('labels deferred runtime configuration as restart required instead of in sync', () => {
+    const output = formatCommandResult('hv_status', commandSuccess({
+      environment: 'production',
+      verified: true,
+      inSync: false,
+      restartRequired: true,
+      runtimeConfiguration: {
+        status: 'restart_required',
+        services: [{
+          service: 'worker',
+          provider: 'railway',
+          requiredSince: '2026-08-20T20:25:00.000Z',
+          reason: 'The service is still running the deployment that was active before the configuration change.',
+          actionIds: ['secret:ANTHROPIC_API_KEY'],
+        }],
+      },
+      drift: [],
+      unmanaged: [],
+      blocked: [],
+      services: [{ name: 'worker', status: 'running' }],
+    }));
+
+    expect(output).toContain('♻️  HYPERVIBE · RESTART REQUIRED');
+    expect(output).toContain('1 service awaiting rollout');
+    expect(output).toContain('restart_required');
+    expect(output).not.toContain('HYPERVIBE · IN SYNC');
+  });
+
   it('does not call a plan ready when a scoped connection is required before apply', () => {
     const output = formatCommandResult('hv_plan', commandSuccess({
       environment: 'production',

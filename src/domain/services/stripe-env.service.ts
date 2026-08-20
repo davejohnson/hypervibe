@@ -1935,6 +1935,7 @@ export async function applyStripeHostingEnvSync(params: {
     };
   }
 
+  let removedData: Record<string, unknown> | undefined;
   if (plannedRemoveKeys.length > 0) {
     const removed = await removeHostingEnvVars({
       project: params.project,
@@ -1954,6 +1955,7 @@ export async function applyStripeHostingEnvSync(params: {
         },
       };
     }
+    removedData = removed.data as Record<string, unknown> | undefined;
   }
   const vars = Object.fromEntries(plannedKeys.map((key) => [key, resolved.values[key]]));
   const synced = plannedKeys.length > 0
@@ -1983,6 +1985,12 @@ export async function applyStripeHostingEnvSync(params: {
       },
     };
   }
+  const syncedData = synced.data as Record<string, unknown> | undefined;
+  const rolloutData = syncedData?.runtimeRolloutRequired === true
+    ? syncedData
+    : removedData?.runtimeRolloutRequired === true
+      ? removedData
+      : undefined;
 
   return {
     success: true,
@@ -1995,8 +2003,16 @@ export async function applyStripeHostingEnvSync(params: {
       keys: plannedKeys,
       removedKeys: plannedRemoveKeys,
       variableCount: plannedKeys.length,
-      ...((synced.data as Record<string, unknown> | undefined)?.deploymentDeferred === true
+      ...(syncedData?.deploymentDeferred === true || removedData?.deploymentDeferred === true
         ? { deploymentDeferred: true }
+        : {}),
+      ...(rolloutData
+        ? {
+            runtimeRolloutRequired: true,
+            ...(rolloutData.rolloutBaseline
+              ? { rolloutBaseline: rolloutData.rolloutBaseline }
+              : {}),
+          }
         : {}),
     },
   };
@@ -2170,6 +2186,17 @@ export async function applyStripeWebhookAction(params: {
         alreadyAbsent: deleted.alreadyAbsent,
         service: binding.service,
         envVar: binding.envVar,
+        ...((removed.data as Record<string, unknown> | undefined)?.deploymentDeferred === true
+          ? { deploymentDeferred: true }
+          : {}),
+        ...((removed.data as Record<string, unknown> | undefined)?.runtimeRolloutRequired === true
+          ? {
+              runtimeRolloutRequired: true,
+              ...((removed.data as Record<string, unknown>).rolloutBaseline
+                ? { rolloutBaseline: (removed.data as Record<string, unknown>).rolloutBaseline }
+                : {}),
+            }
+          : {}),
       },
     };
   }
@@ -2478,6 +2505,14 @@ export async function applyStripeWebhookAction(params: {
       envVar: currentSpec.envVar,
       ...((synced.data as Record<string, unknown> | undefined)?.deploymentDeferred === true
         ? { deploymentDeferred: true }
+        : {}),
+      ...((synced.data as Record<string, unknown> | undefined)?.runtimeRolloutRequired === true
+        ? {
+            runtimeRolloutRequired: true,
+            ...((synced.data as Record<string, unknown>).rolloutBaseline
+              ? { rolloutBaseline: (synced.data as Record<string, unknown>).rolloutBaseline }
+              : {}),
+          }
         : {}),
     },
   };

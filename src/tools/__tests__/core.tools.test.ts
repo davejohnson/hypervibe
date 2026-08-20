@@ -125,6 +125,11 @@ describe('bootstrap action receipt mapping', () => {
         summary: {
           deploymentMode: 'provision',
           appDeploymentPending: true,
+          deploymentDeferralRequested: true,
+          runtimeRolloutRequired: true,
+          rolloutBaselines: {
+            web: { state: 'present', deploymentId: 'deployment-before-config' },
+          },
           appDeployment: { status: 'pending_ci' },
           deploySource: { strategy: 'branch', trigger: 'ci', branch: 'main' },
         },
@@ -135,6 +140,11 @@ describe('bootstrap action receipt mapping', () => {
     expect(result.data).toMatchObject({
       deploymentMode: 'provision',
       appDeploymentPending: true,
+      deploymentDeferred: true,
+      runtimeRolloutRequired: true,
+      rolloutBaselines: {
+        web: { state: 'present', deploymentId: 'deployment-before-config' },
+      },
       appDeployment: { status: 'pending_ci' },
       deploySource: { strategy: 'branch', trigger: 'ci', branch: 'main' },
     });
@@ -2238,7 +2248,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('reports synced production GitHub Actions deploy workflows as manual promotion, not push-to-deploy', async () => {
+  it('reports restart_required when a synced CI service still runs its pre-configuration deployment', async () => {
     const t = await makeClient();
     await t.call('hv_spec', {
       spec: {
@@ -2289,6 +2299,15 @@ describe('hv_plan / hv_status / hv_apply', () => {
           },
         },
       },
+      runtimeRollouts: [{
+        service: 'web',
+        provider: 'railway',
+        serviceExternalId: 'svc-web',
+        baselineDeployment: { state: 'present', id: 'deployment-before-config' },
+        requiredAt: '2026-08-20T20:25:00.000Z',
+        applyRunId: 'apply-secret-sync',
+        actionIds: ['secret:ANTHROPIC_API_KEY'],
+      }],
     });
     mockObserved({
       provider: 'railway', observedAt: new Date().toISOString(),
@@ -2298,6 +2317,11 @@ describe('hv_plan / hv_status / hv_apply', () => {
         config: { startCommand: 'npm start', public: false },
         envVarKeys: [], envVarHashes: {},
         status: 'running',
+        maintenance: {
+          state: 'running',
+          deploymentId: 'deployment-before-config',
+          deploymentStatus: 'SUCCESS',
+        },
       }],
       databases: [], partial: false, warnings: [],
     });
@@ -2317,6 +2341,19 @@ describe('hv_plan / hv_status / hv_apply', () => {
         promoteFromEnvironment: 'staging',
       },
     });
+    expect(status.data.inSync).toBe(false);
+    expect(status.data.restartRequired).toBe(true);
+    expect(status.data.runtimeConfiguration).toMatchObject({
+      status: 'restart_required',
+      services: [{
+        service: 'web',
+        provider: 'railway',
+        actionIds: ['secret:ANTHROPIC_API_KEY'],
+      }],
+    });
+    expect(status.hint).toContain('.github/workflows/deploy-railway-production.yml');
+    expect(status.hint).toContain('hv_ci_trigger');
+    expect(status.next).toEqual(['hv_ci_trigger', 'hv_ci_status', 'hv_status']);
     await t.close();
   });
 

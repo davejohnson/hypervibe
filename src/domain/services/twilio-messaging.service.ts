@@ -564,6 +564,9 @@ async function applyRuntime(params: {
   const desiredKeys = desiredRuntimeKeys(params.spec);
   const previousKeys = asRecord(asRecord(bindings.runtime)?.perServiceKeys) ?? {};
   const failures: string[] = [];
+  let deploymentDeferred = false;
+  let runtimeRolloutRequired = false;
+  const rolloutBaselines: Record<string, unknown> = {};
   for (const serviceName of [...new Set([...Object.keys(previousKeys), ...targetServices])].sort()) {
     const service = serviceRepo.findByProjectAndName(params.project.id, serviceName);
     if (!service) {
@@ -584,6 +587,12 @@ async function applyRuntime(params: {
         failures.push(`${serviceName}: ${result.error ?? result.message}`);
         break;
       }
+      const resultData = asRecord(result.data);
+      deploymentDeferred ||= resultData?.deploymentDeferred === true;
+      runtimeRolloutRequired ||= resultData?.runtimeRolloutRequired === true;
+      if (resultData?.runtimeRolloutRequired === true && resultData.rolloutBaseline) {
+        rolloutBaselines[serviceName] = resultData.rolloutBaseline;
+      }
     }
     const staleKeys = stringArray(previousKeys, serviceName)
       .filter((key) => !shouldSync || !desiredKeys.includes(key));
@@ -592,6 +601,12 @@ async function applyRuntime(params: {
       if (!removed.success) {
         failures.push(`${serviceName}: ${removed.error ?? removed.message}`);
         break;
+      }
+      const removedData = asRecord(removed.data);
+      deploymentDeferred ||= removedData?.deploymentDeferred === true;
+      runtimeRolloutRequired ||= removedData?.runtimeRolloutRequired === true;
+      if (removedData?.runtimeRolloutRequired === true && removedData.rolloutBaseline) {
+        rolloutBaselines[serviceName] = removedData.rolloutBaseline;
       }
     }
   }
@@ -604,7 +619,17 @@ async function applyRuntime(params: {
     serviceSid,
     perServiceKeys: Object.fromEntries(targetServices.map((service) => [service, desiredKeys])),
   });
-  return { success: true, message: `Synced Twilio runtime configuration to ${targetServices.join(', ')}`, data: { services: targetServices, keys: desiredKeys } };
+  return {
+    success: true,
+    message: `Synced Twilio runtime configuration to ${targetServices.join(', ')}`,
+    data: {
+      services: targetServices,
+      keys: desiredKeys,
+      ...(deploymentDeferred ? { deploymentDeferred: true } : {}),
+      ...(runtimeRolloutRequired ? { runtimeRolloutRequired: true } : {}),
+      ...(Object.keys(rolloutBaselines).length > 0 ? { rolloutBaselines } : {}),
+    },
+  };
 }
 
 export function isTwilioMessagingAction(action: PlanAction): boolean {
