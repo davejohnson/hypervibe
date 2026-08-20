@@ -400,7 +400,11 @@ async function executeRepositoryPlanApply(
         action,
       });
     }
-    if (action.resource.name !== expectedRepository && authority.capability !== 'github.pages-dns.sync') {
+    if (
+      action.resource.name !== expectedRepository
+      && authority.capability !== 'github.pages-dns.sync'
+      && authority.capability !== 'github.openai-secret.sync'
+    ) {
       return blockedActionIdentity(
         action,
         `Reviewed repository is ${action.resource.name}; desired state currently targets ${expectedRepository ?? 'no repository'}.`
@@ -430,6 +434,18 @@ async function executeRepositoryPlanApply(
         }
         return applyGitHubPagesDns({
           spec: params.spec,
+          action,
+        });
+      case 'github.openai-secret.sync':
+        if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
+          return blockedActionIdentity(
+            action,
+            `The reviewed secret destination must be ${expectedRepository ?? 'a configured GitHub repository'}.`
+          );
+        }
+        return applyGitHubOpenAISecret({
+          project: projectForApply,
+          environmentName: params.envName,
           action,
         });
       default:

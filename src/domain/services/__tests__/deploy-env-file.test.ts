@@ -25,6 +25,7 @@ describe('deploy-env-file', () => {
       'GITHUB_TOKEN=github-provider-token',
       'SENTRY_AUTH_TOKEN=sentry-provider-token',
       'NPM_TOKEN=npm-provider-token',
+      'OPENAI_API_KEY=openai-provider-key',
       'VERCEL_TOKEN=vercel-provider-token',
       '',
     ].join('\n'));
@@ -40,7 +41,7 @@ describe('deploy-env-file', () => {
         SESSION_SECRET: 'session-runtime',
       },
       ignoredKeys: ['LOCAL_DEBUG_FLAG'],
-      skippedKeys: ['GITHUB_TOKEN', 'NPM_TOKEN', 'RAILWAY_API_TOKEN', 'SENTRY_AUTH_TOKEN', 'VERCEL_TOKEN'],
+      skippedKeys: ['GITHUB_TOKEN', 'NPM_TOKEN', 'OPENAI_API_KEY', 'RAILWAY_API_TOKEN', 'SENTRY_AUTH_TOKEN', 'VERCEL_TOKEN'],
       excludedKeys: [],
       localValueKeys: ['PRIVATE_DATABASE_URL', 'REDIS_URL', 'SEARCH_URL', 'WEBHOOK_URL'],
     });
