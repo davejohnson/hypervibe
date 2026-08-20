@@ -14,13 +14,6 @@
         "requirePr": false
       }
     },
-    "pages": {
-      "enabled": false,
-      "sourcePath": "apps/website",
-      "branch": "main",
-      "customDomain": "hypervibe.dev",
-      "dnsProvider": "cloudflare"
-    },
     "actions": {
       "provider-conformance": {
         "kind": "check",

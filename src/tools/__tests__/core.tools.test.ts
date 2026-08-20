@@ -774,6 +774,12 @@ describe('hv_spec', () => {
             },
           },
         },
+        github: {
+          pagesCertificateAttempt: { domain: 'team-shared-app.example.com' },
+          openAIActionsSecretName: 'OPENAI_API_KEY',
+          openAIActionsSecretHash: 'local-openai-secret-hash',
+          openAIActionsSecretSyncedAt: '2026-08-20T00:00:00.000Z',
+        },
       });
       await t.close();
       t = await makeClient();
@@ -791,6 +797,12 @@ describe('hv_spec', () => {
               syncedSecretHashes: { IMAGE_REGISTRY_TOKEN: 'local-secret-hash' },
             },
           },
+        },
+        github: {
+          pagesCertificateAttempt: { domain: 'team-shared-app.example.com' },
+          openAIActionsSecretName: 'OPENAI_API_KEY',
+          openAIActionsSecretHash: 'local-openai-secret-hash',
+          openAIActionsSecretSyncedAt: '2026-08-20T00:00:00.000Z',
         },
       });
 
