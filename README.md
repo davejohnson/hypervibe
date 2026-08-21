@@ -84,7 +84,7 @@ Published releases are public on the npm registry. Installation does not
 require GitHub access, a package token, or custom npm registry configuration.
 
 ```bash
-npm install -g @davejohnson/hypervibe@latest
+npm install -g @hypervibe/hypervibe@latest
 hypervibe --help
 ```
 
@@ -114,7 +114,7 @@ node dist/index.js --help
 ### 2. Install As Codex MCP
 
 ```bash
-codex mcp add hypervibe -- npx -y @davejohnson/hypervibe@latest
+codex mcp add hypervibe -- npx -y @hypervibe/hypervibe@latest
 codex mcp list
 ```
 
@@ -127,7 +127,7 @@ Add to `~/.claude/settings.json`:
   "mcpServers": {
     "hypervibe": {
       "command": "npx",
-      "args": ["-y", "@davejohnson/hypervibe@latest"]
+      "args": ["-y", "@hypervibe/hypervibe@latest"]
     }
   }
 }
@@ -1419,11 +1419,11 @@ Hypervibe has three kinds of state to keep current:
 - **Local Hypervibe state** in `~/.hypervibe`, especially the SQLite database schema and encrypted provider connections.
 - **Repo-backed project state** in `.hypervibe/spec.json` and `.hypervibe/bindings.json`, which should be committed with the app.
 
-The default install command uses `@davejohnson/hypervibe@latest`, so users should not need to know or remember a package-upgrade command. When Codex, Claude, or another MCP client restarts the Hypervibe server, `npx` resolves the latest published package and Hypervibe automatically runs any pending SQLite migrations at startup.
+The default install command uses `@hypervibe/hypervibe@latest`, so users should not need to know or remember a package-upgrade command. When Codex, Claude, or another MCP client restarts the Hypervibe server, `npx` resolves the latest published package and Hypervibe automatically runs any pending SQLite migrations at startup.
 
 Normal update flow:
 
-1. Restart the MCP client/server so `npx -y @davejohnson/hypervibe@latest` starts the newest published package.
+1. Restart the MCP client/server so `npx -y @hypervibe/hypervibe@latest` starts the newest published package.
 2. In each app repo, pull the latest `.hypervibe/spec.json` and `.hypervibe/bindings.json`, then run `hv_status` or `hv_plan`.
 3. Commit any intended changes Hypervibe makes to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, generated CI workflows, or other repo files.
 
@@ -1491,7 +1491,7 @@ hv_apply project="hypervibe" planId="<planId>"
 The bootstrap workflow exposes the token only to `npm publish` and uses npm
 11.19.0 with public provenance. Immediately after that first publish,
 configure an npm [trusted publisher](https://docs.npmjs.com/trusted-publishers/)
-for `@davejohnson/hypervibe` with these exact fields:
+for `@hypervibe/hypervibe` with these exact fields:
 
 - provider: GitHub Actions
 - organization or user: `davejohnson`
