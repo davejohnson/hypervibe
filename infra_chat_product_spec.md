@@ -1,4 +1,4 @@
-# Infra Chat Control Plane — Product Spec (Railway + Cloudflare + Stripe + SendGrid + Local-First)
+# Infra Chat Control Plane — Provider-Neutral, Local-First Product Spec
 **Project codename:** Infra Chat  
 **Primary use case:** Operate *Invoice Perfect* (api + web + cron; Sequelize migrations) via chat commands like “deploy staging” / “deploy production”, with automatic environment creation, canary, rollback, migrations, backfills, observability, alerting, and auditability—without GitOps.
 
@@ -7,7 +7,7 @@
 ## 1) Product vision
 A chat-driven **infrastructure control plane** that:
 - Owns the *desired state* of environments (local/staging/production) in its own database (not Git).
-- Reconciles that desired state onto real providers (initially Railway + Cloudflare).
+- Reconciles that desired state through capability-based hosting, data, DNS, and integration adapters.
 - Handles deploy/migrate/backfill/canary/rollback as **typed runs** with strong audit trails.
 - Makes local development first-class (compose + webhook tunneling + mocks).
 - Monitors canaries/logs/health and can **auto-rollback** and **notify** (SMS/text) when anomalies appear.
@@ -28,7 +28,7 @@ A chat-driven **infrastructure control plane** that:
 8. **Audit + compliance**: Every chat action becomes an immutable run with receipts and diffs.
 
 ### Non-goals (MVP)
-- Full multi-cloud / multi-platform support (start with Railway + Cloudflare).
+- Immediate parity across every provider; each capability still has to pass the same conformance contract before it is advertised.
 - Arbitrary “agent changes code in prod” (remediation is bounded and reversible).
 - Full GUI console (optional later; focus on chat + API).
 
@@ -36,7 +36,7 @@ A chat-driven **infrastructure control plane** that:
 
 ## 3) User stories (Invoice Perfect-focused)
 1. **Setup**
-   - “Set up local, staging, production for Invoice Perfect on Railway. Use Cloudflare for DNS and canary. Connect Stripe + SendGrid.”
+   - “Set up local, staging, and production for Invoice Perfect. Connect its hosting, database, storage, queue, DNS, billing, and email providers.”
 2. **Deploy**
    - “Deploy staging.”
    - “Deploy production with canary 10/50/100.”
@@ -61,14 +61,14 @@ A chat-driven **infrastructure control plane** that:
 ### 4.1 Entities
 **Project**
 - name (e.g., Invoice Perfect)
-- default platform target (railway)
+- selected registered hosting provider
 - service catalog (api/web/cron)
 - default policies (prod gates, canary strategy)
 
 **Environment**
 - name: `local`, `staging`, `production`, etc.
 - template / base_env reference
-- platform bindings (railway project/service ids, cloudflare zone ids)
+- provider bindings (hosting project/service ids, datastore ids and scope, DNS zone/record ids)
 - domain bindings
 - components (postgres, redis, storage, queues, cron)
 - provider connections required (stripe, sendgrid, etc.)
@@ -87,7 +87,7 @@ A chat-driven **infrastructure control plane** that:
 - binding outputs (componentref URLs) to env vars
 
 **Connection**
-- provider: railway/cloudflare/stripe/sendgrid
+- provider: a registered hosting, data, DNS, billing, email, or messaging provider
 - status: unconfigured → pending-auth → configured → verified
 - metadata (account id, zone id, etc.)
 - secrets (stored separately)
@@ -129,7 +129,8 @@ A chat-driven **infrastructure control plane** that:
    - Validates “can this action happen now?”
    - Enforces prod approvals, allowed refs, rate limits, budgets
 4. **Provider Adapters**
-   - Railway adapter
+   - Hosting adapters
+   - Database, cache, storage, and queue adapters
    - Cloudflare adapter (DNS + canary routing)
    - Stripe adapter (optional automation: webhooks)
    - SendGrid adapter (domain/sender setup + verification where possible)
@@ -140,7 +141,7 @@ A chat-driven **infrastructure control plane** that:
    - SMS/text (e.g., Twilio) and/or email/push
    - Escalation rules
 7. **Job Runner (Backfills/Migrations)**
-   - Runs migration and backfill steps as jobs via Railway one-off job or service command
+   - Runs migration and backfill steps through a provider-owned job or bounded operation contract
    - Tracks progress via ops tables / run telemetry
 
 ### 5.2 Control plane “two-phase” operation
@@ -151,19 +152,21 @@ A chat-driven **infrastructure control plane** that:
 
 ## 6) Provider integration specs
 
-### 6.1 Railway adapter (MVP)
+### 6.1 Hosting adapter contract (MVP)
 **Capabilities**
-- `railway.ensure_project(env)`
-- `railway.ensure_service(env, service)`
-- `railway.ensure_postgres(env)`
-- `railway.ensure_redis(env)` (optional)
-- `railway.set_env_vars(env, service, resolved_vars)`
-- `railway.deploy(env, service, ref)`
-- `railway.run_job(env, service, command, ref)` (migrate/backfill)
-- `railway.fetch_logs(env, service, since)`
-- `railway.release_list(env, service)`
-- `railway.rollback(env, service, release_id)`
-- `railway.status(env, service)`
+- `hosting.ensure_project(env)`
+- `hosting.ensure_service(env, service)`
+- `hosting.set_runtime_config(env, service, resolved_bindings)`
+- `hosting.deploy(env, service, ref)`
+- `hosting.run_job(env, service, command, ref)` (migrate/backfill)
+- `hosting.fetch_logs(env, service, since)`
+- `hosting.release_list(env, service)`
+- `hosting.rollback(env, service, release_id)`
+- `hosting.status(env, service)`
+
+Database, cache, storage, queue, and DNS lifecycle operations use their own
+capability contracts and explicit plan actions. A hosting action cannot create
+or repair one of those resources implicitly.
 
 **Notes**
 - No manual secret copying: env vars are reconciled by control plane.
@@ -180,7 +183,7 @@ A chat-driven **infrastructure control plane** that:
 
 **Canary strategy**
 - Preferred: Cloudflare traffic splitting between `api-stable` and `api-canary` origins.
-- Origins can be separate Railway services or separate Railway deployments behind distinct hostnames.
+- Origins can be separate hosting services or deployments behind distinct hostnames.
 - Weight steps: e.g., 10% → 50% → 100% with soak windows.
 
 ### 6.3 Stripe connection (MVP)
@@ -350,7 +353,8 @@ Only ask when unknown:
 - Domain names for staging/prod
 - Components toggles (Postgres required; others optional)
 - Connections:
-  - Railway account connect
+  - Hosting provider account connect
+  - Database, cache, storage, and queue provider connections as required
   - Cloudflare zone/domain connect
   - Stripe test/live keys
   - SendGrid key + sender domain
@@ -405,7 +409,8 @@ Adapters are invoked from the orchestrator, not directly by end-users.
 
 ### Phase 0 (2–3 days scope if focused)
 - Control plane DB schema + API for projects/envs/services
-- Railway connection + deploy (api/web/cron)
+- One hosting adapter conformance slice + deploy (api/web/cron)
+- Explicit database, storage, queue, and runtime-binding plan actions
 - Local bootstrap artifact generation (compose + env)
 - Basic runs + audit log
 
@@ -437,7 +442,8 @@ Adapters are invoked from the orchestrator, not directly by end-users.
 - Redis: optional (future queues/caching)
 
 **Providers**
-- Railway: deploy target
+- Hosting: selected registered provider
+- Data and messaging: selected database, cache, storage, and queue providers
 - Cloudflare: DNS + canary routing
 - Stripe: billing (test in staging/local)
 - SendGrid: outbound email

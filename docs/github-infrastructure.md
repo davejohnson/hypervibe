@@ -53,7 +53,7 @@ owned template keeps the required review contract consistent.
 ## Static sites with GitHub Pages
 
 Pages is project-level desired state. A repository that only publishes a
-static site does not need a fake Railway, GCP, or other hosting environment;
+static site does not need a fake application-hosting environment;
 use the reserved canonical environment `repository`:
 
 ```json
@@ -202,7 +202,7 @@ blocks until the contract is completed.
   "github": {
     "externalWorkflows": {
       "staging-deploy": {
-        "workflowName": "Deploy Railway (staging)",
+        "workflowName": "Deploy application (staging)",
         "failureArtifactPattern": "deploy-staging-failure-evidence",
         "failureArtifacts": ["hypervibe-deploy-failure.log"]
       }

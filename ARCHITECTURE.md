@@ -169,9 +169,9 @@ Environments store provider bindings in `platformBindings` using generic keys on
 
 ```json
 {
-  "provider": "railway",
-  "projectId": "...",
-  "environmentId": "...",
+  "provider": "<registered-hosting-provider>",
+  "projectId": "<provider-project-id>",
+  "environmentId": "<provider-environment-id>",
   "services": {
     "api": {
       "serviceId": "...",
@@ -195,7 +195,7 @@ Environment custom domains always require a successful provider-side attachment
 before Hypervibe writes DNS. Hosting providers declare `lifecycle.hosting` and
 their custom-domain support in registry metadata; generic orchestration must not
 infer support from a provider name or deployment category. There is no generic
-CNAME-to-service fallback. Railway, Cloud Run, DigitalOcean App Platform, and
+CNAME-to-service fallback. Cloud Run, DigitalOcean App Platform, Railway, and
 Vercel implement provider-owned attach, observation, and exact detach contracts.
 Each successful attachment persists the provider
 domain id, service and environment ids, Cloudflare zone id, and every managed
@@ -498,7 +498,7 @@ Delegated secrets are lifecycle-managed slots, not ordinary environment variable
 
 `.hypervibe/spec.json` and the sanitized `.hypervibe/bindings.json` make this state reconstructible after a local database or checkout is lost. Provider connections and encrypted in-flight plans remain local and must be recreated.
 
-In the no-service model, `principal` is declarative attribution, not authenticated authorization. Git review/branch protection and provider-scoped membership enforce who may change the spec and mutate infrastructure. A local principal or collaborator edit cannot grant a Railway/GCP/GitHub role, but a caller who already holds provider mutation credentials can still change provider state. Do not treat delegated metadata as a centralized ACL or automatically apply unreviewed changes with privileged credentials; authenticated principal enforcement would require a trusted service or signed attestation.
+In the no-service model, `principal` is declarative attribution, not authenticated authorization. Git review/branch protection and provider-scoped membership enforce who may change the spec and mutate infrastructure. A local principal or collaborator edit cannot grant a hosting, cloud, or code-host role, but a caller who already holds provider mutation credentials can still change provider state. Do not treat delegated metadata as a centralized ACL or automatically apply unreviewed changes with privileged credentials; authenticated principal enforcement would require a trusted service or signed attestation.
 
 ## Deploy Env Files
 
@@ -862,8 +862,8 @@ slice, so later drift blocks explicitly rather than being reported as a noop.
 moving existing local history into that new remote remains separate source
 coordination, not an implicit infrastructure side effect.
 
-GitLab CI renders the registered provider-neutral recipes for Railway, Vercel,
-DigitalOcean App Platform, Cloud Run, Azure Container Apps, and ECS Express.
+GitLab CI renders the registered provider-neutral recipes for Azure Container
+Apps, Cloud Run, DigitalOcean App Platform, ECS Express, Railway, and Vercel.
 CI may build and copy an exact-SHA image, but it mutates only pre-existing bound
 hosting resources and registries; it never bootstraps hosting infrastructure.
 Cloud Run, Azure Container Apps, and ECS Express deploy the registry-returned
@@ -1132,8 +1132,8 @@ or unknown observation blocks the next mutation. Migration copy actions carry
 fresh source and target maintenance fingerprints and re-observe both immediately
 before provisioning a candidate target.
 
-The workload port is implemented by Railway, GCP Cloud Run, Azure Container
-Apps, DigitalOcean App Platform, and Vercel. DigitalOcean archives and restores
+The workload port is implemented by Azure Container Apps, DigitalOcean App
+Platform, GCP Cloud Run, Railway, and Vercel. DigitalOcean archives and restores
 only the exact bound app, preserves the complete live App Spec on both writes,
 and verifies a terminal archived state with zero running instances before entry
 succeeds. Every component restoration snapshot is durable before that atomic
@@ -1146,8 +1146,8 @@ prove all background and direct-origin workloads are reversibly stopped.
 Generic planning must fail closed for unsupported providers; capability
 presence is never inferred from a provider name.
 
-Object-storage lifecycle is implemented for Railway, Amazon S3, Google Cloud
-Storage, and Azure Blob Storage. Each adapter owns provider-native private
+Object-storage lifecycle is implemented for Amazon S3, Azure Blob Storage,
+Google Cloud Storage, and Railway. Each adapter owns provider-native private
 resource creation, ownership metadata, live usage observation, runtime-secret
 wiring, streaming transfer, and confirmed teardown. Azure uses one dedicated
 storage account per declared bucket so its account key and deletion boundary do

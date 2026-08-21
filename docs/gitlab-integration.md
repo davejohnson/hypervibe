@@ -628,7 +628,7 @@ Variable deletion is not presented as revocation of a value already delivered
 to a runner; exposed or suspect credentials require provider-side rotation.
 
 Generated job ids are namespaced, such as
-`hypervibe:deploy:railway:production`, to avoid accidental collisions. After
+`hypervibe:deploy:<provider>:production`, to avoid accidental collisions. After
 merge, Hypervibe calls GitLab's [CI Lint
 API](https://docs.gitlab.com/api/lint/) at the exact default-branch commit.
 Managed GitLab jobs disable inheritance of root defaults and global YAML
@@ -1025,8 +1025,8 @@ provider. Multiple or unbound candidates block.
 
 GitLab jobs can push to the project registry with predefined short-lived job
 credentials. An external hosting provider cannot rely on that job token for
-durable pulls. When a provider such as Railway must pull a private GitLab
-image, the GitLab connection additionally requires a project deploy-token
+durable pulls. When the selected host must pull a private GitLab image, the
+GitLab connection additionally requires a project deploy-token
 username and token with `read_registry` only. GitLab documents this exact use
 in its [deploy token guide](https://docs.gitlab.com/user/project/deploy_tokens/).
 
@@ -1082,7 +1082,7 @@ secret can never shadow a commit identity, applied-spec gate, evidence path,
 registry endpoint, or renderer control variable.
 
 Provider storage keys are deterministic but project/environment-specific
-physical names, not public logical names such as `RAILWAY_TOKEN`. The
+physical names, not public logical names such as `HOSTING_PROVIDER_TOKEN`. The
 self-contained authorized job maps a physical key directly into the invoked
 owned process environment only for its declared consumer; it does not define a
 lower-precedence logical YAML variable that a group/project variable can
@@ -1212,7 +1212,7 @@ provider-side manual changes.
 | --- | --- | --- |
 | Exact project identity | Project API plus durable numeric project id | MVP |
 | Managed repository files | atomic commit on reviewed branch and merge request | MVP |
-| Managed deploy CI | neutral Railway, Vercel, DigitalOcean, Cloud Run, Azure Container Apps, and ECS Express recipes rendered by GitLab CI | MVP |
+| Managed deploy CI | neutral Azure Container Apps, Cloud Run, DigitalOcean, ECS Express, Railway, and Vercel recipes rendered by GitLab CI | MVP |
 | CI variables/secrets | scoped variables; raw values erased after internal fingerprinting | MVP |
 | Pipeline status, jobs, logs, artifacts | normalized GitLab APIs | MVP |
 | Manual deploy and exact-SHA release evidence | pipeline dispatch and job artifact | MVP |
@@ -1321,8 +1321,8 @@ The smallest useful end-to-end MVP is:
 3. Provider-neutral code-host and CI ports with GitHub and GitHub Actions
    migrated behind them without changing existing outcomes.
 4. The neutral CI program, a GitHub Actions renderer, and a GitLab CI renderer.
-5. Railway, Vercel, DigitalOcean, Cloud Run, Azure Container Apps, and ECS
-   Express expose provider-neutral deploy recipes; the GitLab renderer has no
+5. Azure Container Apps, Cloud Run, DigitalOcean, ECS Express, Railway, and
+   Vercel expose provider-neutral deploy recipes; the GitLab renderer has no
    hosting-provider switch and CI never creates missing hosting infrastructure.
 6. Reviewed GitLab merge request for managed deploy configuration, including
    root include ownership/blocking and exact-commit CI Lint verification.
@@ -1363,8 +1363,8 @@ This stage must produce no GitHub provider mutations for unchanged specs.
   capability sets, while allowing them to share the verified connection.
 - Add the versioned neutral deploy recipe and CI program.
 - Implement the GitHub Actions renderer/operator adapter.
-- Migrate Railway to the neutral recipe and prove its rendered GitHub behavior
-  retains the current release and secret contracts.
+- Migrate an existing hosting recipe to the neutral model and prove its
+  rendered GitHub behavior retains the current release and secret contracts.
 
 Other hosting providers may remain on the pinned legacy GitHub path only while
 they are migrated. New features cannot be added to that legacy path, and it is
@@ -1378,29 +1378,28 @@ removed after the last provider moves to neutral recipes.
   config linting, variables, pipelines, jobs, trace tails, artifacts, and
   dispatch.
 - Implement one GitLab CI renderer for the neutral CI program. It contains no
-  Railway, Cloud Run, Vercel, or other hosting-provider branches.
+  hosting-provider branches.
 - Add complete pagination, retry classification, redaction, and tri-state
   observation tests.
 - Add provider-owned inspection drivers; generic `hv_inspect` remains generic.
 
-### 4. Prove one vertical deploy path
+### 4. Prove one private-registry vertical deploy path
 
-- Compile the same neutral Railway recipe through both CI renderers.
+- Compile the same neutral recipe with durable private-registry pulls through
+  both CI renderers.
 - Generate reviewed GitLab config through the GitLab code-host adapter.
 - Verify root inclusion and merged job fingerprint.
 - Sync scoped variables only after merge verification.
 - Prove exact-SHA provider convergence, release artifact, status/log inspection,
   manual dispatch, rollback, noop, and teardown.
 
-The first vertical provider should be Railway because it exercises the hardest
-registry-pull credential boundary. Passing it makes the remaining recipe
-migrations less likely to hide a GitHub registry assumption.
+The vertical must exercise the durable registry-pull credential boundary so
+that both renderers prove they do not assume GitHub registry credentials.
 
 ### 5. Complete neutral deploy-recipe parity
 
-- Migrate Cloud Run, ECS Express, Azure Container Apps, DigitalOcean App
-  Platform, and Vercel once each from GitHub-specific workflow generation to a
-  neutral deploy recipe.
+- Migrate every remaining advertised hosting recipe from GitHub-specific
+  workflow generation to a neutral deploy recipe.
 - Compile every migrated recipe through both compatible CI renderers without
   adding hosting-provider cases to either renderer.
 - Keep each provider at `planned` or `ready-for-live` until its own mocked and
@@ -1472,8 +1471,9 @@ The implementation is incomplete without tests for:
   pre-mutation stale-run rejection;
 - fail-closed CI-provider cutover ordering, old-authority absence, separate
   action scope, and release-history isolation;
-- one neutral Railway recipe compiling through both CI adapters with equivalent
-  logical triggers, inputs, secrets, applied-spec gate, and evidence contract;
+- one neutral private-registry recipe compiling through both CI adapters with
+  equivalent logical triggers, inputs, secrets, applied-spec gate, and
+  evidence contract;
 - neutral recipe and generic-service scans rejecting GitHub/GitLab expressions,
   config paths, API fields, and provider-name dispatch;
 - Pages/static-hosting source, hosting-target, and optional executor bindings
@@ -1512,8 +1512,8 @@ following are true:
 - direct push or force push through any exact, wildcard, role, group, user, or
   deploy-key rule blocks privileged deployment;
 - each advertised neutral hosting recipe renders through GitLab CI without a
-  hosting-provider case in the CI adapter, and Railway retains its unchanged
-  GitHub Actions outcome;
+  hosting-provider case in the CI adapter and retains its existing GitHub
+  Actions outcome;
 - unknown observation never authorizes create, overwrite, dispatch, or delete;
 - every provider mutation is named by the current non-noop persisted action;
 - GitLab variable values and all credentials are absent from every output

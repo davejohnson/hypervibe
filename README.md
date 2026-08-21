@@ -9,20 +9,20 @@
 Hypervibe is a desired-state infrastructure orchestrator with two interfaces over one engine: a human/automation-friendly CLI and an [MCP server](https://modelcontextprotocol.io/) for Codex and Claude. Both use the same specs, reviewed plans, provider adapters, connections, receipts, and audit history.
 
 ```
-You: "Deploy my app to staging with a postgres database"
+You: "Create staging with hosting, Postgres, object storage, a queue, and api.staging.example.com"
 
-Claude: Creates GCP project, provisions Postgres, wires DATABASE_URL,
-        deploys your code, sets up DNS, returns the URL.
+Agent: Updates the desired state, plans every provider change and dependency,
+       applies the reviewed plan, and verifies the resulting services and resources.
 ```
 
 ## Features
 
-**Infrastructure Providers**
-- **Google Cloud** - Cloud Run hosting, Cloud SQL Postgres, and private Cloud Storage buckets
+**Providers and Integrations**
 - **AWS** - ECS hosting, RDS Postgres, ElastiCache, and private S3 buckets
 - **Azure** - Container Apps hosting, managed PostgreSQL/Redis, and private Blob Storage containers
-- **Railway** - Deploy apps, Postgres databases, Redis caches, private S3-compatible storage buckets, cron jobs, queues
 - **Fly.io** *(ready for live conformance)* - Apps/Machines hosting and Managed Postgres with operation-scoped private WireGuard access
+- **Google Cloud** - Cloud Run hosting, Cloud SQL Postgres, Pub/Sub queues, and private Cloud Storage buckets
+- **Railway** - App hosting, Postgres databases, Redis caches, private S3-compatible storage buckets, cron jobs, and postgres-backed queues
 - **Supabase** - Managed Postgres with direct or pooled connectivity
 - **Cloudflare** - DNS management, domain configuration
 - **Stripe** - Payment integration, webhooks, products
@@ -35,33 +35,22 @@ Claude: Creates GCP project, provisions Postgres, wires DATABASE_URL,
 - **Doppler** - Simple config management
 - **Stripe Projects** - Resolve one service from an already-pulled active local environment
 
-**Workloads & Queues**
+**Workloads & Connected Infrastructure**
 - Services declare `workloadKind: web | worker | cron`. Workers are always-on background consumers (on Cloud Run: internal-only ingress, minimum one instance; they must still listen on `PORT`).
 - `queues` in the spec declares named message queues: Cloud Run environments get real Pub/Sub topics + subscriptions (apps receive `QUEUE_TOPIC_*` / `QUEUE_SUBSCRIPTION_*`); Railway environments are postgres-backed (pg-boss model — requires a declared database; apps consume via `DATABASE_URL`). Every queue environment gets `QUEUE_BACKEND` and `QUEUE_NAMES`.
-- `storage` declares named private object buckets and an explicit `injectInto` service list. Supported providers are Railway (`railway`), Amazon S3 (`s3`), Google Cloud Storage (`gcs`), and Azure Blob Storage (`azureblob`), independent of the hosting provider. Railway/S3 wire the established `AWS_*` contract; GCS and Azure wire explicit provider-native variables plus `OBJECT_STORAGE_PROVIDER` and `OBJECT_STORAGE_BUCKET`. Credentials never appear in specs, bindings, plans, receipts, or logs. Bucket deletion is data-bearing and confirmation-gated.
+- `storage` declares named private object buckets and an explicit `injectInto` service list. Supported providers are Amazon S3 (`s3`), Azure Blob Storage (`azureblob`), Google Cloud Storage (`gcs`), and Railway (`railway`), independent of the hosting provider. S3/Railway wire the established `AWS_*` contract; Azure and GCS wire explicit provider-native variables plus `OBJECT_STORAGE_PROVIDER` and `OBJECT_STORAGE_BUCKET`. Credentials never appear in specs, bindings, plans, receipts, or logs. Bucket deletion is data-bearing and confirmation-gated.
 - Existing `ecs`, `cloudrun`, and `azure-container-apps` connections are reused automatically for their matching storage provider. Otherwise the standalone storage connection accepts the same cloud authentication fields. Region/location is desired state in the spec; Hypervibe creates provider resources and derives workload credentials, so operators do not obtain separate bucket HMAC keys, Azure account keys, or storage-specific settings.
 - Standalone S3/GCS/Azure Blob connections can also use the normal local cloud login with no credential value: AWS profiles/SSO through the default SDK chain, `gcloud auth application-default login`, or Azure's default credential chain (including `az login`). Explicit credential files remain supported for CI. Expiring local sessions are used for lifecycle and migration only and are never copied into deployed services.
-- `cache: { provider: "railway", engine: "redis" }` declares Redis independently from SQL/document databases. Hypervibe wires `REDIS_URL`; cache deletion is data-bearing and confirmation-gated.
-
-  ```json
-  "storage": {
-    "documents": {
-      "provider": "railway",
-      "type": "bucket",
-      "region": "sjc",
-      "injectInto": ["web", "worker", "cron"]
-    }
-  }
-  ```
-
-  `region` is the provider-native immutable location: Railway placement (`sjc`, `iad`, `ams`, or `sin`), an AWS region such as `us-west-2`, a GCS location such as `us-central1`, or an Azure location such as `westus2`. Railway's S3 credentials expose signing region `auto`, which Hypervibe passes through as `AWS_DEFAULT_REGION`.
+- `cache` declares Redis independently from SQL/document databases. Hypervibe wires the cache contract into its consumers; cache deletion is data-bearing and confirmation-gated.
+- Domains, DNS records, databases, caches, storage, queues, schedules, and service dependencies all remain explicit desired state. Hypervibe plans their dependency order, projects only the required runtime bindings into each service, and verifies each resource through its provider adapter.
+- Resource placement is provider-native desired state: for example, an AWS region such as `us-west-2`, an Azure location such as `westus2`, a GCS location such as `us-central1`, or a Railway placement such as `sjc`.
 
 **Developer Experience**
 - **CLI and MCP parity** - Every supported command is available through both interfaces
 - **Provider-neutral DevOps** - Canonical code-host and CI interfaces cover GitHub/GitHub Actions and a ready-for-live GitLab/GitLab CI implementation without coupling hosting recipes to either vendor
 - **Human and JSON output** - Readable terminal output by default, stable redacted envelopes with `--json`
 - **Natural language** - No YAML, no clicking through dashboards
-- **Auto-wiring** - DATABASE_URL connected automatically, DNS configuration
+- **Resource orchestration** - Plan databases, caches, storage, queues, domains/DNS, and integrations together, then project only the required secret-safe runtime bindings into each service
 - **Environment management** - Staging, production, PR previews
 - **Migration support** - Run Prisma, Drizzle, TypeORM migrations
 - **Local development** - Generate Docker Compose for local parity
@@ -137,24 +126,25 @@ Add to `~/.claude/settings.json`:
 Restart Claude Code, then:
 
 ```
-You: "Connect to Railway"
-Claude: Opens browser for Railway OAuth, saves credentials securely.
+You: "Show me which provider connections this staging spec requires"
+Claude: Lists the hosting, database, storage, queue, DNS, and integration connections needed by the plan.
 
-You: "Connect Cloudflare with API token xyz..."
-Claude: Validates and stores the connection.
+You: "Connect those providers using my local credential references"
+Claude: Validates each reference locally and stores the verified connections securely.
 ```
 
 ### 5. Deploy
 
 ```
 You: "Create a new project called my-app with staging and production environments"
-You: "Deploy to staging"
-You: "Add a Railway custom domain api.myapp.com"
-You: "Run database migrations"
+You: "Add the API, worker, Postgres, documents bucket, and events queue to staging"
+You: "Attach api.myapp.com and manage its DNS"
+You: "Plan and apply staging"
+You: "Verify the services and connected resources"
 ```
 
-Environment custom domains use the same spec/plan/apply loop for Railway,
-Cloud Run, DigitalOcean App Platform, and Vercel.
+Environment custom domains use the same spec/plan/apply loop for Cloud Run,
+DigitalOcean App Platform, Railway, and Vercel.
 Hypervibe attaches the hostname at the provider first, writes only returned
 Cloudflare records, persists exact provider/DNS ids, and confirmation-gates
 exact detach. Cloud Run stays DNS-only during its native certificate flow.
@@ -168,7 +158,7 @@ references when planning:
 
 ```
 You: "Connect to Vault at https://vault.mycompany.com"
-You: "Plan production with DATABASE_URL from vault://secret/myapp/db#url"
+You: "Plan production with APP_SIGNING_KEY from vault://secret/myapp/runtime#signing-key"
 Claude: Resolves the value locally, encrypts it into the reviewed plan, and injects it only during hv_apply.
 ```
 
@@ -216,8 +206,8 @@ hv_secrets project="my-app"                         # list sources; validate pro
 hv_secrets project="my-app" env="staging"           # masked hosting-variable names
 
 hv_inspect                                          # provider/capability discovery; no parameters
-hv_inspect provider="railway"                       # provider-account inspection
-hv_inspect provider="railway" project="my-app" env="staging"  # full live environment
+hv_inspect provider="cloudrun"                      # provider-account inspection
+hv_inspect provider="cloudrun" project="my-app" env="staging" region="us-central1"  # full live environment
 
 # Recover an abandoned host from a migration that predates retained bindings.
 hv_inspect provider="cloudrun" project="my-app" env="production" region="us-central1"
@@ -256,7 +246,7 @@ the spec:
     }
   },
   "database": {
-    "provider": "railway",
+    "provider": "rds",
     "engine": "postgres"
   }
 }
@@ -443,8 +433,8 @@ access is needed:
 When a collaborator lacks that connection, Hypervibe should offer two paths:
 connect credentials they already control, or prepare a value-free handoff
 naming the provider, scope, environment, and blocked task for the
-infrastructure owner. It should not assume that every coder belongs in the
-Railway, GCP, or other provider project. This stays local and repo-backed; it
+infrastructure owner. It should not assume that every coder belongs in each
+hosting, data, DNS, or integration provider account. This stays local and repo-backed; it
 does not require a new Hypervibe web service or shared drift database.
 
 ### Delegated secrets
@@ -490,13 +480,14 @@ For Anthropic, Alice creates a standard workspace-scoped API key at [Claude Plat
 ANTHROPIC_API_KEY=...
 ```
 
-If Alice will apply independently, for Railway she creates her own **Account
-API token** at [Railway account tokens](https://railway.com/account/tokens),
-selects **No workspace**, and uses only the access granted to her Railway
-account:
+If Alice will apply independently, she connects only the provider credentials
+she already controls. `hv_plan` reports the exact credential type, official
+setup URL, permissions, and resource scope for every required connection; she
+stores each value outside the repository and passes only a safe local
+reference:
 
 ```text
-hv_connections provider="railway" credentialsRef="dotenv:/Users/alice/.config/hypervibe/railway.env#HYPERVIBE_RAILWAY_TOKEN"
+hv_connections provider="<required-provider>" credentialsRef="dotenv:/Users/alice/.config/hypervibe/provider.env#PROVIDER_TOKEN"
 ```
 
 Then she creates and applies a plan without sending either token through chat:
@@ -657,9 +648,10 @@ before archiving it. Unmanaged Stripe objects are untouched.
 `hv_plan` reads Stripe and hosting state, but persists only provider identities,
 managed key names, and hashes—not credentials or webhook signing values.
 `hv_apply` resolves the encrypted Stripe connection again and writes runtime
-values through the hosting adapter. With CI-triggered branch
-deploys, the env update is staged without an independent Railway deploy; the
-approved exact-SHA workflow remains the next code release. Stripe-managed keys
+values through the hosting adapter. With CI-triggered branch deploys, the
+adapter preserves the approved exact-SHA workflow as the next code-release
+boundary instead of turning a configuration sync into an unrelated source
+release. Stripe-managed keys
 cannot also be supplied through `envVars`, `.env` includes, delegated secrets,
 one-off overrides, or `removeEnvVars`.
 
@@ -710,7 +702,7 @@ evidence records mobile and server repository/SHA fields separately:
 
 ```json
 {
-  "hosting": { "provider": "railway" },
+  "hosting": { "provider": "cloudrun" },
   "services": { "api": {} },
   "deploy": {
     "strategy": "branch",
@@ -799,7 +791,7 @@ Delete a retired key only through the environment's explicit tombstone list:
 
 `hv_plan` emits one `service:<name>:env-remove` action per affected service.
 The action shows key names but no values, and `hv_apply` skips it unless that
-exact action ID is passed in `confirmActions`. Railway and GCP Cloud Run both
+exact action ID is passed in `confirmActions`. GCP Cloud Run and Railway both
 support these explicit removals. Hypervibe-managed database, queue, storage,
 delegated-secret, and source-integration keys cannot be tombstoned; change or
 remove the owning resource instead.
@@ -843,8 +835,8 @@ targets. See [the full migration workflow](docs/data-migration.md).
 The copy is authorized only while both source and target declare
 `"maintenance": { "enabled": true }` and Hypervibe freshly verifies the full
 boundary: a Cloudflare-owned static 503 marker, every hosting workload stopped,
-and PostgreSQL defaulting new sessions to read-only. Railway, GCP Cloud Run,
-Azure Container Apps, DigitalOcean App Platform, and Vercel implement reversible
+and PostgreSQL defaulting new sessions to read-only. Azure Container Apps, GCP
+Cloud Run, DigitalOcean App Platform, Railway, and Vercel implement reversible
 workload maintenance. AWS ECS Express currently fails closed before the copy.
 DigitalOcean's exact-app archive/restore path and Vercel's exact-ID pause/unpause
 path are implemented and remain behind their opt-in live maintenance promotion
@@ -1426,13 +1418,13 @@ Normal update flow:
 2. In each app repo, pull the latest `.hypervibe/spec.json` and `.hypervibe/bindings.json`, then run `hv_status` or `hv_plan`.
 3. Commit any intended changes Hypervibe makes to `.hypervibe/spec.json`, `.hypervibe/bindings.json`, generated CI workflows, or other repo files.
 
-Provider credentials remain local and encrypted. Database component bindings (connection URLs, passwords) are also encrypted at rest. The encryption key lives in `~/.hypervibe/.secret-key` (0600); back it up — regenerating it makes previously encrypted data unrecoverable. Set `HYPERVIBE_SECRET_KEY` (64 hex chars) to supply the key externally (CI, containers). Teammates may still need to run `hv_connections` for their own Railway, GitHub, Cloudflare, SendGrid, AWS, Azure, or GCP access after installing Hypervibe, but ordinary Hypervibe package and SQLite schema upgrades should happen on restart.
+Provider credentials remain local and encrypted. Database component bindings (connection URLs, passwords) are also encrypted at rest. The encryption key lives in `~/.hypervibe/.secret-key` (0600); back it up — regenerating it makes previously encrypted data unrecoverable. Set `HYPERVIBE_SECRET_KEY` (64 hex chars) to supply the key externally (CI, containers). Teammates may still need to run `hv_connections` for their own AWS, Azure, Cloudflare, GCP, GitHub, Railway, or SendGrid access after installing Hypervibe, but ordinary Hypervibe package and SQLite schema upgrades should happen on restart.
 
 `workloadKind: "job"` was removed from the service spec — it never had run-to-completion deploy semantics. Specs using it fail validation; choose `worker` (always-on, internal-only on Cloud Run with a minimum of one instance — note Cloud Run workers must still listen on `PORT`) or `cron` (scheduled). Railway's observe cannot distinguish `web` from `worker`, so kind drift is not detected there.
 
-The provider catalog is intentionally focused. AWS ECS Express Mode, Azure Container Apps, DigitalOcean, Vercel, and Fly.io pass their registry and managed exact-image workflow contracts, but remain behind the provider-conformance live promotion gate and are not advertised as supported yet. Hosting connections contain authentication and account/project scope only; geography belongs in optional `environments.<name>.hosting.region` desired state and otherwise uses a provider default. AWS project actions ensure the shared default-VPC prerequisite and own ECR, IAM roles, and an ECS cluster; Azure project actions own the resource group, ACR, role assignments, and managed environment; DigitalOcean project actions reuse or create a free Starter registry. Fly creates one source-less App and stopped Machine per logical service, then managed CI changes only the exact bound Machine to an immutable image digest. Users do not pre-create or paste those infrastructure IDs into credentials. Heroku and Render remain deliberately out of scope. Supported database providers remain `supabase`, `cloudsql`, `railway`, and `rds`; Azure PostgreSQL, Neon, DigitalOcean, and Fly Managed Postgres are conformance targets at various pre-support stages. Fly Managed Postgres stays private: bounded local query, seed, and migration operations use an operation-scoped WireGuard peer and Hypervibe's packaged userspace connector, then remove the exact peer after the operation.
+The provider catalog is intentionally focused. AWS ECS Express Mode, Azure Container Apps, DigitalOcean, Vercel, and Fly.io pass their registry and managed exact-image workflow contracts, but remain behind the provider-conformance live promotion gate and are not advertised as supported yet. Hosting connections contain authentication and account/project scope only; geography belongs in optional `environments.<name>.hosting.region` desired state and otherwise uses a provider default. AWS project actions ensure the shared default-VPC prerequisite and own ECR, IAM roles, and an ECS cluster; Azure project actions own the resource group, ACR, role assignments, and managed environment; DigitalOcean project actions reuse or create a free Starter registry. Fly creates one source-less App and stopped Machine per logical service, then managed CI changes only the exact bound Machine to an immutable image digest. Users do not pre-create or paste those infrastructure IDs into credentials. Heroku and Render remain deliberately out of scope. Supported database providers remain `cloudsql`, `railway`, `rds`, and `supabase`; Azure PostgreSQL, Neon, DigitalOcean, and Fly Managed Postgres are conformance targets at various pre-support stages. Fly Managed Postgres stays private: bounded local query, seed, and migration operations use an operation-scoped WireGuard peer and Hypervibe's packaged userspace connector, then remove the exact peer after the operation.
 
-Redis is a separate cache lifecycle instead of a database component and wires `REDIS_URL`. Railway, DigitalOcean, Azure Managed Redis, and Amazon ElastiCache have adapter or conformance slices; GCP Memorystore's private-IP lifecycle is implemented, but its Cloud Run full-stack profile remains blocked on declarative VPC egress. PostgreSQL is the only database engine in desired state; MongoDB and MySQL are intentionally outside the core lifecycle.
+Redis is a separate cache lifecycle instead of a database component and wires `REDIS_URL`. Amazon ElastiCache, Azure Managed Redis, DigitalOcean, and Railway have adapter or conformance slices; GCP Memorystore's private-IP lifecycle is implemented, but its Cloud Run full-stack profile remains blocked on declarative VPC egress. PostgreSQL is the only database engine in desired state; MongoDB and MySQL are intentionally outside the core lifecycle.
 
 ## Adding New Providers
 

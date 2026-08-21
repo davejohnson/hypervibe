@@ -55,8 +55,8 @@ they are not hosting-provider lifecycle ids. GitHub/GitHub Actions retain the
 legacy compatibility route. GitLab/GitLab CI is currently `ready-for-live` for
 mocked project create/delete, reviewed whole-root configuration and teardown,
 environment-scoped variables, exact-SHA dispatch/evidence/rollback, and the
-portable Railway, Vercel, DigitalOcean, Cloud Run, Azure Container Apps, and ECS
-Express deploy recipes. GitLab.com 18.1+ uses its exact hosted-runner tag.
+portable Azure Container Apps, Cloud Run, DigitalOcean, ECS Express, Railway,
+and Vercel deploy recipes. GitLab.com 18.1+ uses its exact hosted-runner tag.
 Self-managed execution requires one exact locked project runner and manager,
 an uncontested tag, protected-ref-only execution, and an operator capability
 attestation; GitLab's project APIs do not prove executor or privileged-Docker
@@ -84,9 +84,9 @@ architecture and evidence boundary](gitlab-integration.md).
 
 `test/provider-conformance/domain-lifecycle.spec.json` is the isolated live
 fixture for environment domains. It declares one DNS-only subdomain under
-`domain-test.hypervibe.dev` for each hosting provider: Railway, Cloud Run,
-AWS ECS Express Mode, Azure Container Apps, DigitalOcean App Platform, Vercel,
-and Fly.io. Run each environment stage-by-stage through `hv_spec`, `hv_plan`,
+`domain-test.hypervibe.dev` for each hosting provider: AWS ECS Express Mode,
+Azure Container Apps, Cloud Run, DigitalOcean App Platform, Fly.io, Railway,
+and Vercel. Run each environment stage-by-stage through `hv_spec`, `hv_plan`,
 `hv_apply`, and `hv_status`; do not apply the entire seven-provider fixture as one
 opaque batch.
 
@@ -107,7 +107,7 @@ after direct certificate validation succeeds.
 
 ### Environment maintenance and data cutover
 
-Maintenance is an environment lifecycle capability, not a Railway special case.
+Maintenance is a provider-neutral environment lifecycle capability.
 The shared contract requires a bound Cloudflare static 503 edge, ordered
 cron/worker/web suspension, a PostgreSQL write fence, fresh tri-state
 observation after every boundary, exact restoration snapshots, and edge removal
@@ -115,7 +115,7 @@ only after normal workload/database state is verified. Migration copy authority
 requires active source and target maintenance observations and hashes both into
 the reviewed action; apply re-observes both before creating a fresh data target.
 
-Railway, Cloud Run, Azure Container Apps, DigitalOcean App Platform, and Vercel
+Azure Container Apps, Cloud Run, DigitalOcean App Platform, Railway, and Vercel
 expose the workload-maintenance port. DigitalOcean resolves the exact bound app
 and component, uses the documented app archive/restore setting, and requires a
 terminal deployment plus zero provider-reported running instances before entry
@@ -133,10 +133,9 @@ The DigitalOcean contract follows the provider's documented
 and verifies terminal shutdown through the Apps API
 [running-instances endpoint](https://docs.digitalocean.com/reference/api/reference/apps/#get-retrieve-app-instances).
 
-Redis/Valkey starts with Railway, Memorystore, DigitalOcean, ElastiCache,
-and Azure Managed Redis. Railway is the first implemented
-adapter slice. It is `ready-for-live`, not `supported`, until the opt-in live
-teardown contract passes.
+Redis/Valkey conformance covers Azure Managed Redis, DigitalOcean, ElastiCache,
+Memorystore, and Railway. The Railway adapter slice is `ready-for-live`, not
+`supported`, until the opt-in live teardown contract passes.
 
 Cloud SQL is the first database-resilience and restore-drill slice. Its mocked
 contract pins tri-state HA/backup/replica observation, action-scoped mutations,
