@@ -27,6 +27,7 @@ import { getGitHubAdapter } from './github-ops.service.js';
 export const GITHUB_PAGES_WORKFLOW_PATH = '.github/workflows/hypervibe-pages.yml';
 export const GITHUB_PAGES_ACTION_ID = 'repo:github-pages';
 export const GITHUB_PAGES_OPERATION = 'githubPagesConfigure';
+export const GITHUB_PAGES_BINDING_CLEANUP_OPERATION = 'githubPagesBindingCleanup';
 export const GITHUB_PAGES_DNS_OPERATION = 'githubPagesDnsSync';
 
 const GITHUB_PAGES_IPV4 = [
@@ -156,6 +157,19 @@ function recordCertificateAttempt(params: {
   environments.updatePlatformBindings(environment.id, {
     github: { ...github, pagesCertificateAttempt: attempt },
   });
+}
+
+function clearCertificateAttempt(params: {
+  project: Project;
+  environmentName: string;
+}): void {
+  const environments = new EnvironmentRepository();
+  const environment = environments.findByProjectAndName(params.project.id, params.environmentName);
+  if (!environment) return;
+  const github = asRecord(environment.platformBindings.github);
+  if (!github || !('pagesCertificateAttempt' in github)) return;
+  const { pagesCertificateAttempt: _attempt, ...nextGitHub } = github;
+  environments.updatePlatformBindings(environment.id, { github: nextGitHub });
 }
 
 function normalizeDomainHealth(domain: GitHubPagesDomainHealth | null | undefined): Record<string, unknown> | null {
@@ -439,7 +453,26 @@ export async function planGitHubPages(params: {
   environment?: Pick<Environment, 'platformBindings'> | null;
 }): Promise<{ actions: PlanAction[]; warnings: string[]; blocked: ConnectionBlock[] }> {
   const pages = params.spec.github?.pages;
-  if (!pages) return { actions: [], warnings: [], blocked: [] };
+  if (!pages) {
+    const observedAttempt = certificateAttempt(params.environment);
+    if (!observedAttempt) return { actions: [], warnings: [], blocked: [] };
+    return {
+      actions: [{
+        id: GITHUB_PAGES_ACTION_ID,
+        type: 'update',
+        resource: { kind: 'repo', name: params.repository, provider: 'github' },
+        verified: true,
+        reason: 'Remove obsolete local GitHub Pages certificate-recovery metadata',
+        metadata: {
+          operation: GITHUB_PAGES_BINDING_CLEANUP_OPERATION,
+          repository: params.repository,
+          observedCertificateAttempt: observedAttempt,
+        },
+      }],
+      warnings: [],
+      blocked: [],
+    };
+  }
   const parts = repoParts(params.repository);
   if (!parts) return { actions: [], warnings: [`Could not parse GitHub Pages repository ${params.repository}.`], blocked: [] };
 
@@ -573,6 +606,10 @@ export async function planGitHubPages(params: {
 
 export function isGitHubPagesAction(action: PlanAction): boolean {
   return action.metadata?.operation === GITHUB_PAGES_OPERATION;
+}
+
+export function isGitHubPagesBindingCleanupAction(action: PlanAction): boolean {
+  return action.metadata?.operation === GITHUB_PAGES_BINDING_CLEANUP_OPERATION;
 }
 
 export function isGitHubPagesDnsAction(action: PlanAction): boolean {
@@ -798,6 +835,34 @@ export async function applyGitHubPages(params: {
     success: true,
     message: `Configured GitHub Pages for ${repository}`,
     data: { repository, domain: desired.customDomain ?? null, url: verified.url ?? null },
+  };
+}
+
+export async function applyGitHubPagesBindingCleanup(params: {
+  spec: ProjectSpec;
+  action: PlanAction;
+  project: Project;
+  environmentName: string;
+}): Promise<{ success: boolean; status?: 'blocked'; message: string; error?: string; data?: Record<string, unknown> }> {
+  const repository = typeof params.action.metadata?.repository === 'string' ? params.action.metadata.repository : undefined;
+  if (
+    !repository
+    || !repoParts(repository)
+    || params.action.resource.name !== repository
+    || params.spec.github?.pages
+  ) {
+    return { success: false, status: 'blocked', message: 'GitHub Pages binding cleanup has stale identity', error: 'Re-run hv_plan.' };
+  }
+  const environment = new EnvironmentRepository().findByProjectAndName(params.project.id, params.environmentName);
+  const liveAttempt = certificateAttempt(environment);
+  if (!sameJson(liveAttempt, params.action.metadata?.observedCertificateAttempt ?? null)) {
+    return { success: false, status: 'blocked', message: 'GitHub Pages binding metadata changed after planning', error: 'Re-run hv_plan.' };
+  }
+  clearCertificateAttempt({ project: params.project, environmentName: params.environmentName });
+  return {
+    success: true,
+    message: `Removed obsolete GitHub Pages binding metadata for ${repository}`,
+    data: { repository },
   };
 }
 

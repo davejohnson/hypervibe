@@ -10,6 +10,7 @@ import {
 } from '../../domain/services/github-infrastructure.service.js';
 import {
   GITHUB_PAGES_ACTION_ID,
+  GITHUB_PAGES_BINDING_CLEANUP_OPERATION,
   GITHUB_PAGES_DNS_OPERATION,
   GITHUB_PAGES_OPERATION,
 } from '../../domain/services/github-pages.service.js';
@@ -460,6 +461,26 @@ const authorized: AuthorizedCase[] = [
       provider: 'cloudflare',
       operation: GITHUB_PAGES_DNS_OPERATION,
       metadata: { repository: 'owner/repo', enabled: true, desiredRecords: [] },
+    }),
+  },
+  {
+    label: 'GitHub Pages local binding cleanup',
+    capability: 'github.pages-binding.cleanup',
+    action: action({
+      id: GITHUB_PAGES_ACTION_ID,
+      type: 'update',
+      kind: 'repo',
+      name: 'owner/repo',
+      provider: 'github',
+      operation: GITHUB_PAGES_BINDING_CLEANUP_OPERATION,
+      metadata: {
+        repository: 'owner/repo',
+        observedCertificateAttempt: {
+          domain: 'example.com',
+          attemptedAt: '2026-08-08T00:00:00.000Z',
+          mode: 'reattach',
+        },
+      },
     }),
   },
   {

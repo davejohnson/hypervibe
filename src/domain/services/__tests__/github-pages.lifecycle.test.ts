@@ -145,6 +145,78 @@ describe('declarative GitHub Pages lifecycle', () => {
     expect(workflow).toContain('path: "apps/website"');
   });
 
+  it('plans and applies explicit cleanup for obsolete certificate metadata after Pages is removed', async () => {
+    const project = new ProjectRepository().create({
+      name: 'pages-binding-cleanup',
+      gitRemoteUrl: `https://github.com/${REPOSITORY}.git`,
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'repository',
+      platformBindings: {
+        github: {
+          pagesCertificateAttempt: {
+            domain: 'hypervibe.dev',
+            attemptedAt: '2026-08-08T00:00:00.000Z',
+            mode: 'reattach',
+          },
+          openAIActionsSecretHash: 'local-openai-hash',
+        },
+      },
+    });
+    const enabledSpec = spec(project.name);
+    const { pages: _pages, ...githubWithoutPages } = enabledSpec.github!;
+    const desiredSpec = projectSpecSchema.parse({ ...enabledSpec, github: githubWithoutPages });
+    const stored = new SpecStore().replace(project, desiredSpec);
+    const connection = new ConnectionRepository().create({
+      provider: 'github',
+      scope: REPOSITORY,
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'github-token' }),
+    });
+    new ConnectionRepository().updateStatus(connection.id, 'verified');
+    const files = new Map(compileManagedGitHubFiles(desiredSpec.github!).map((file) => [file.path, file.content]));
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, file) => files.get(file) ?? null);
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main', private: false });
+    vi.spyOn(GitHubAdapter.prototype, 'listLabels').mockResolvedValue([]);
+    const observe = vi.spyOn(GitHubAdapter.prototype, 'getPagesConfig');
+
+    const planned = await new PlanService().plan(project, 'repository');
+    expect(planned).not.toHaveProperty('error');
+    const plan = planned as Exclude<typeof planned, { error: string }>;
+    const cleanupAction = plan.actions.find((action) => action.id === GITHUB_PAGES_ACTION_ID)!;
+    expect(cleanupAction).toEqual(expect.objectContaining({
+      id: GITHUB_PAGES_ACTION_ID,
+      type: 'update',
+      metadata: expect.objectContaining({
+        observedCertificateAttempt: expect.objectContaining({ domain: 'hypervibe.dev' }),
+      }),
+    }));
+    expect(cleanupAction.requiresConfirm).toBeUndefined();
+    expect(observe).not.toHaveBeenCalled();
+
+    const outcome = await executePlanApply(createToolContext(), {
+      project,
+      spec: stored.spec,
+      specRevision: stored.revision,
+      planId: plan.planRunId,
+      confirmActions: [],
+    });
+
+    expect(outcome).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: true,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({ actionId: GITHUB_PAGES_ACTION_ID, status: 'succeeded' }),
+        ]),
+      },
+    });
+    expect(observe).not.toHaveBeenCalled();
+    expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.github).toEqual({
+      openAIActionsSecretHash: 'local-openai-hash',
+    });
+  });
+
   it('plans and applies Pages for a repository-only project without inventing a hosting environment', async () => {
     const project = new ProjectRepository().create({
       name: 'pages-project',
