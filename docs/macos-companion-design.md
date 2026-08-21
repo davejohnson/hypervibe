@@ -293,12 +293,12 @@ This is enough to render relationships such as:
 
 ```text
 staging
-├── api            Railway
-├── worker         Railway
+├── api            Cloud Run
+├── worker         Cloud Run
 ├── primary-db     Supabase
 │   ├── used by api
 │   └── used by worker
-└── documents      Railway
+└── documents      Amazon S3
     └── injected into api
 ```
 
@@ -416,8 +416,8 @@ Plans open in a detachable window.
 │  – database:redis · DATA-BEARING                    │
 │                                                     │
 │ Changes (execution order)                           │
-│  1 + storage:documents                   railway    │
-│  2 ~ service:api                         railway    │
+│  1 + storage:documents                   s3         │
+│  2 ~ service:api                         cloudrun   │
 │      healthcheckPath /health → /healthz             │
 │      depends on: storage:documents                  │
 ├─────────────────────────────────────────────────────┤

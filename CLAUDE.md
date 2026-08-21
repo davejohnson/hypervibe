@@ -72,8 +72,8 @@ Tools should return raw data and let Claude interpret it. Don't hardcode complex
 ```json
 {
   "environments": [
-    { "name": "prod-us-east", "railwayId": "..." },
-    { "name": "staging-v2", "railwayId": "..." }
+    { "name": "prod-us-east", "providerId": "..." },
+    { "name": "staging-v2", "providerId": "..." }
   ]
 }
 ```
@@ -112,7 +112,7 @@ Read `ARCHITECTURE.md` before changing lifecycle, provider, plan/apply, deploy, 
 - **Tools** (`src/tools/`): the pinned `hv_*` MCP tool surface (registered in `src/server.ts` via `ToolContext`); all responses use the `toolSuccess`/`toolError` envelope from `src/tools/respond.ts`
 - **Spec** (`src/domain/spec/`): the desired-state document (`ProjectSpec`, revisioned in the `project_specs` table via `SpecStore`)
 - **Plan** (`src/domain/plan/`): the reconciliation engine — observe live state, pure `diffEnvironment`, `ConvergeExecutor` with the planId handshake
-- **Adapters** (`src/adapters/`): External integrations (Railway, GCP, secrets, DB)
+- **Adapters** (`src/adapters/`): Provider, secret, database, and external-service integrations
 - **Domain services** (`src/domain/services/`): orchestrators (deploy, bootstrap, import, rollback, domain)
 - **Repositories** (`src/adapters/db/repositories/`): SQLite data access (JSON columns validated via `parseJsonColumn`)
 
@@ -130,7 +130,7 @@ Whenever a provider officially documents credential-template URLs, use them with
 
 The core workflow is terraform-style:
 1. `hv_spec` — write the desired state (single source of truth, revisioned)
-2. `hv_plan` — observe live infrastructure (Railway/Cloud Run support observe; others fall back to local state marked `verified: false`), diff, persist the plan as a run → `planId`
+2. `hv_plan` — observe live infrastructure through provider capabilities (unsupported observation falls back to local state marked `verified: false`), diff, persist the plan as a run → `planId`
 3. `hv_apply planId=...` — rejects stale plans (spec revision advanced, live state changed, plan expired/already applied); data-bearing destroys run only with exact action ids in `confirmActions`
 4. `hv_status` — read-only drift view
 
@@ -172,7 +172,7 @@ See `ARCHITECTURE.md` for the normative invariants and
 Environments store provider bindings in `platformBindings` using generic keys only (legacy `railwayProjectId`/`railwayEnvironmentId` were migrated away in sqlite migration 7):
 ```typescript
 {
-  provider: "railway",
+  provider: "<registered-hosting-provider>",
   projectId: "...",       // external project/app id on the provider
   environmentId: "...",   // external environment id (if supported)
   services: {
