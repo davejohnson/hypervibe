@@ -1,6 +1,6 @@
 # hypervibe
 
-> Desired-state infrastructure management from your terminal or an AI agent.
+> Desired-state infrastructure management from your terminal or agent.
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Node.js](https://img.shields.io/badge/Node.js-20+-green.svg)](https://nodejs.org/)
@@ -11,24 +11,23 @@ Hypervibe is a desired-state infrastructure orchestrator with two interfaces ove
 ```
 You: "Deploy my app to staging with a postgres database"
 
-Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
-        deploys your code, sets up health checks, returns the URL.
+Claude: Creates GCP project, provisions Postgres, wires DATABASE_URL,
+        deploys your code, sets up DNS, returns the URL.
 ```
 
 ## Features
 
 **Infrastructure Providers**
-- **Railway** - Deploy apps, Postgres databases, Redis caches, private S3-compatible storage buckets, cron jobs, queues
 - **Google Cloud** - Cloud Run hosting, Cloud SQL Postgres, and private Cloud Storage buckets
 - **AWS** - ECS hosting, RDS Postgres, ElastiCache, and private S3 buckets
 - **Azure** - Container Apps hosting, managed PostgreSQL/Redis, and private Blob Storage containers
+- **Railway** - Deploy apps, Postgres databases, Redis caches, private S3-compatible storage buckets, cron jobs, queues
 - **Fly.io** *(ready for live conformance)* - Apps/Machines hosting and Managed Postgres with operation-scoped private WireGuard access
 - **Supabase** - Managed Postgres with direct or pooled connectivity
 - **Cloudflare** - DNS management, domain configuration
 - **Stripe** - Payment integration, webhooks, products
 - **SendGrid** - Email authentication, domain verification
 - **Twilio** - Messaging Services, webhook callbacks, existing-number attachment
-- **reCAPTCHA convention** - Value-free site/secret key slots in every repo-backed project's `.env.example`
 
 **Secret Managers**
 - **HashiCorp Vault** - KV secrets with versioning
@@ -62,7 +61,7 @@ Claude: Creates Railway project, provisions Postgres, wires DATABASE_URL,
 - **Provider-neutral DevOps** - Canonical code-host and CI interfaces cover GitHub/GitHub Actions and a ready-for-live GitLab/GitLab CI implementation without coupling hosting recipes to either vendor
 - **Human and JSON output** - Readable terminal output by default, stable redacted envelopes with `--json`
 - **Natural language** - No YAML, no clicking through dashboards
-- **Auto-wiring** - DATABASE_URL connected automatically
+- **Auto-wiring** - DATABASE_URL connected automatically, DNS configuration
 - **Environment management** - Staging, production, PR previews
 - **Migration support** - Run Prisma, Drizzle, TypeORM migrations
 - **Local development** - Generate Docker Compose for local parity
