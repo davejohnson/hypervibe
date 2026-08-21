@@ -53,6 +53,16 @@ export interface ObservedService {
   envVarHashes: Record<string, string>;
   /** 'empty' = the service exists but has never deployed (no source/code). */
   status: 'running' | 'failed' | 'empty' | 'unknown';
+  /**
+   * Provider-native identity of the deployment or revision currently selected
+   * for this service. This is used to prove that runtime configuration changes
+   * have reached a later deployment without exposing configuration values.
+   */
+  deployment?: {
+    id: string;
+    status?: string;
+    createdAt?: string;
+  };
   /** Provider-confirmed execution state used by environment maintenance. */
   maintenance?: {
     state: 'running' | 'suspended' | 'unknown';

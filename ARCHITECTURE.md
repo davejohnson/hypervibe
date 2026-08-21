@@ -573,6 +573,27 @@ the later CI run and `hv_health` own that verification. New resources with no
 existing image may still require provider bootstrap before CI can target them,
 and receipts must report that honestly.
 
+`deploymentDeferred` means only that Hypervibe did not release new application
+code. It must not imply stale runtime configuration: Cloud Run, Fly.io, ECS
+Express, Azure Container Apps, and DigitalOcean can activate configuration with
+the current image, while providers such as Railway and Vercel can leave the
+currently selected deployment unchanged. An adapter sets
+`runtimeRolloutRequired` only when its successful mutation has left runtime
+configuration waiting for a later deployment. Generic orchestration must
+preserve this provider-owned evidence and must never derive it from the provider
+name or from `deploymentDeferred`.
+
+When a provider confirms `runtimeRolloutRequired`, apply persists the affected
+service and the exact deployment identity observed immediately after the
+configuration write as non-secret rollout evidence.
+`hv_status` must report `restart_required` and must not report the environment
+in sync while that same deployment is still active. A later provider-observed
+successful deployment with a different exact
+identity satisfies the rollout; an absent, failed, or unobservable deployment
+does not. For CI-triggered environments, the status guidance points back to the
+managed CI trigger/status path instead of bypassing that release authority with
+a provider redeploy.
+
 ### Environment Variable Coverage
 
 Desired state prevents new cross-environment configuration gaps before they

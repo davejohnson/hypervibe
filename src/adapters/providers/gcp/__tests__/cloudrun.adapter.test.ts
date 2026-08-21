@@ -387,6 +387,7 @@ describe('CloudRunAdapter maintenance', () => {
       }
       if (url.includes('run.googleapis.com') && method === 'PATCH') {
         patchBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        liveService.template = patchBody.template as typeof liveService.template;
         return Response.json({ name: 'operations/configure-service', done: true });
       }
       throw new Error(`Unexpected fetch: ${method} ${url}`);
@@ -423,7 +424,8 @@ describe('CloudRunAdapter maintenance', () => {
       { deferDeployment: true }
     );
     expect(preSync.data).toMatchObject({ deploymentDeferred: true });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(preSync.data?.runtimeRolloutRequired).toBeUndefined();
+    expect(patchBody).toBeTruthy();
 
     const result = await adapter.deploy(
       service,
@@ -437,6 +439,7 @@ describe('CloudRunAdapter maintenance', () => {
 
     expect(result.status).toBe('configured');
     expect(result.receipt.data).toMatchObject({ deploymentDeferred: true });
+    expect(result.receipt.data?.runtimeRolloutRequired).toBeUndefined();
     const template = patchBody?.template as { containers: Array<{ image: string; env: Array<{ name: string; value?: string }> }> };
     expect(template.containers[0].image).toBe(currentImage);
     expect(template.containers[0].env).toContainEqual({ name: 'NEW_API_TOKEN', value: 'secret-value' });
@@ -1056,29 +1059,33 @@ describe('CloudRunAdapter maintenance', () => {
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
 
+    let liveService: Record<string, any> = {
+      name: 'gcp-project-web',
+      uri: 'https://gcp-project-web.run.app',
+      terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
+      template: {
+        containers: [{
+          image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:main',
+          ports: [{ containerPort: 8080 }],
+          env: [
+            { name: 'DATABASE_URL', value: 'postgres://old' },
+            { name: 'SECRET_VALUE', valueSource: { secretKeyRef: { secret: 'secret', version: 'latest' } } },
+          ],
+          resources: { limits: { cpu: '1', memory: '512Mi' } },
+        }],
+      },
+    };
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
 
       if (url.includes('run.googleapis.com') && method === 'GET') {
-        return Response.json({
-          name: 'gcp-project-web',
-          uri: 'https://gcp-project-web.run.app',
-          template: {
-            containers: [{
-              image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:main',
-              ports: [{ containerPort: 8080 }],
-              env: [
-                { name: 'DATABASE_URL', value: 'postgres://old' },
-                { name: 'SECRET_VALUE', valueSource: { secretKeyRef: { secret: 'secret', version: 'latest' } } },
-              ],
-              resources: { limits: { cpu: '1', memory: '512Mi' } },
-            }],
-          },
-        });
+        return Response.json(liveService);
       }
       if (url.includes('run.googleapis.com') && method === 'PATCH') {
-        return Response.json({ name: 'gcp-project-web' });
+        const body = JSON.parse(String(init?.body));
+        liveService = { ...liveService, template: body.template };
+        return Response.json({ name: 'operations/env-update', done: true });
       }
 
       throw new Error(`Unexpected fetch: ${method} ${url}`);
@@ -1249,37 +1256,41 @@ describe('CloudRunAdapter maintenance', () => {
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
 
+    let liveService: Record<string, any> = {
+      name: 'gcp-project-web',
+      terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
+      template: {
+        containers: [{
+          image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:main',
+          env: [
+            { name: 'DATABASE_URL', value: 'postgres://old-cloudsql' },
+            { name: 'CLOUD_SQL_CONNECTION_NAME', value: 'gcp-project:us-central1:app' },
+            { name: 'INSTANCE_CONNECTION_NAME', value: 'gcp-project:us-central1:app' },
+            { name: 'NODE_ENV', value: 'production' },
+          ],
+          volumeMounts: [
+            { name: 'cloudsql', mountPath: '/cloudsql' },
+            { name: 'cache', mountPath: '/cache' },
+          ],
+          resources: { limits: { cpu: '1', memory: '512Mi' } },
+        }],
+        volumes: [
+          { name: 'cloudsql', cloudSqlInstance: { instances: ['gcp-project:us-central1:app'] } },
+          { name: 'cache', emptyDir: {} },
+        ],
+      },
+    };
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
 
       if (url.includes('run.googleapis.com') && method === 'GET') {
-        return Response.json({
-          name: 'gcp-project-web',
-          template: {
-            containers: [{
-              image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:main',
-              env: [
-                { name: 'DATABASE_URL', value: 'postgres://old-cloudsql' },
-                { name: 'CLOUD_SQL_CONNECTION_NAME', value: 'gcp-project:us-central1:app' },
-                { name: 'INSTANCE_CONNECTION_NAME', value: 'gcp-project:us-central1:app' },
-                { name: 'NODE_ENV', value: 'production' },
-              ],
-              volumeMounts: [
-                { name: 'cloudsql', mountPath: '/cloudsql' },
-                { name: 'cache', mountPath: '/cache' },
-              ],
-              resources: { limits: { cpu: '1', memory: '512Mi' } },
-            }],
-            volumes: [
-              { name: 'cloudsql', cloudSqlInstance: { instances: ['gcp-project:us-central1:app'] } },
-              { name: 'cache', emptyDir: {} },
-            ],
-          },
-        });
+        return Response.json(liveService);
       }
       if (url.includes('run.googleapis.com') && method === 'PATCH') {
-        return Response.json({ name: 'gcp-project-web' });
+        const body = JSON.parse(String(init?.body));
+        liveService = { ...liveService, template: body.template };
+        return Response.json({ name: 'operations/env-update', done: true });
       }
 
       throw new Error(`Unexpected fetch: ${method} ${url}`);
@@ -1349,13 +1360,22 @@ describe('CloudRunAdapter maintenance', () => {
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
 
+    let updatedTemplate: Record<string, unknown> | undefined;
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
 
       if (url.includes('run.googleapis.com') && method === 'GET') {
+        if (updatedTemplate) {
+          return Response.json({
+            name: 'gcp-project-web',
+            terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
+            template: updatedTemplate,
+          });
+        }
         return Response.json({
           name: 'gcp-project-web',
+          terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
           template: {
             containers: [{
               image: 'us-central1-docker.pkg.dev/gcp-project/infraprint/production-web:main',
@@ -1372,7 +1392,8 @@ describe('CloudRunAdapter maintenance', () => {
         });
       }
       if (url.includes('run.googleapis.com') && method === 'PATCH') {
-        return Response.json({ name: 'gcp-project-web' });
+        updatedTemplate = JSON.parse(String(init?.body)).template;
+        return Response.json({ name: 'operations/env-update', done: true });
       }
 
       throw new Error(`Unexpected fetch: ${method} ${url}`);

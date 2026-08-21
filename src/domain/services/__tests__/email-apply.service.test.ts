@@ -90,7 +90,14 @@ describe('declarative email apply', () => {
   });
 
   it('syncs sender defaults and inbound aliases only through the reviewed runtime action', async () => {
-    const setEnvVars = vi.fn().mockResolvedValue({ success: true, message: 'synced' });
+    const setEnvVars = vi.fn().mockResolvedValue({
+      success: true,
+      message: 'synced',
+      data: {
+        runtimeRolloutRequired: true,
+        rolloutBaseline: { state: 'present', deploymentId: 'deployment-before-email-sync' },
+      },
+    });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: {
@@ -135,6 +142,12 @@ describe('declarative email apply', () => {
       }
     );
     expect(JSON.stringify(result)).not.toContain('SG.secret-runtime-value');
+    expect(result.data).toMatchObject({
+      runtimeRolloutRequired: true,
+      rolloutBaselines: {
+        api: { state: 'present', deploymentId: 'deployment-before-email-sync' },
+      },
+    });
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
     expect(environment.platformBindings.email).toMatchObject({
       runtime: {

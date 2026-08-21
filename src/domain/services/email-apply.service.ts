@@ -212,6 +212,9 @@ async function applyRuntime(params: {
   const previousKeys = asRecord(runtimeBinding?.perServiceKeys);
   const perServiceKeys: Record<string, string[]> = {};
   const failures: string[] = [];
+  let deploymentDeferred = false;
+  let runtimeRolloutRequired = false;
+  const rolloutBaselines: Record<string, unknown> = {};
   for (const serviceName of expectedServices) {
     const service = serviceRepo.findByProjectAndName(params.project.id, serviceName);
     if (!service) {
@@ -231,6 +234,12 @@ async function applyRuntime(params: {
       failures.push(`${serviceName}: ${synced.error ?? synced.message}`);
       break;
     }
+    const syncedData = asRecord(synced.data);
+    deploymentDeferred ||= syncedData?.deploymentDeferred === true;
+    runtimeRolloutRequired ||= syncedData?.runtimeRolloutRequired === true;
+    if (syncedData?.runtimeRolloutRequired === true && syncedData.rolloutBaseline) {
+      rolloutBaselines[serviceName] = syncedData.rolloutBaseline;
+    }
 
     const obsoleteKeys = stringArray(previousKeys, serviceName)
       .filter((key) => !desiredKeys.includes(key));
@@ -244,6 +253,12 @@ async function applyRuntime(params: {
       if (!removed.success) {
         failures.push(`${serviceName}: ${removed.error ?? removed.message}`);
         break;
+      }
+      const removedData = asRecord(removed.data);
+      deploymentDeferred ||= removedData?.deploymentDeferred === true;
+      runtimeRolloutRequired ||= removedData?.runtimeRolloutRequired === true;
+      if (removedData?.runtimeRolloutRequired === true && removedData.rolloutBaseline) {
+        rolloutBaselines[serviceName] = removedData.rolloutBaseline;
       }
     }
     perServiceKeys[serviceName] = desiredKeys;
@@ -271,6 +286,9 @@ async function applyRuntime(params: {
     data: {
       services: expectedServices,
       keys: [...new Set(Object.values(perServiceKeys).flat())].sort(),
+      ...(deploymentDeferred ? { deploymentDeferred: true } : {}),
+      ...(runtimeRolloutRequired ? { runtimeRolloutRequired: true } : {}),
+      ...(Object.keys(rolloutBaselines).length > 0 ? { rolloutBaselines } : {}),
     },
   };
 }

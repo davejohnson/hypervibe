@@ -19,6 +19,7 @@ import {
   delegatedSecretsForEnvironment,
   planDelegatedSecrets,
 } from '../domain/services/delegated-secret.service.js';
+import { runtimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
 import { planManagedCiDeploy } from '../domain/services/managed-ci.service.js';
 import { resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
@@ -741,7 +742,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_status',
-    'Show desired vs observed infrastructure state for an environment: drift, unmanaged resources, blocked connections, managed database-variable attachment, and observed service endpoints. inSync means configuration convergence only; runtimeHealth remains unverified until hv_health or worker log/error evidence is checked. Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
+    'Show desired vs observed infrastructure state for an environment: drift, unmanaged resources, blocked connections, managed database-variable attachment, pending runtime rollouts, and observed service endpoints. inSync requires a provider-observed post-configuration deployment whenever the provider reports that activation is still pending; runtimeHealth remains unverified until hv_health or worker log/error evidence is checked. Uses repo-backed .hypervibe/spec.json/.hypervibe/bindings.json when present. Read-only; does not persist a plan.',
     { project: projectField, env: envField },
     wrapCommandHandler(async ({ project: projectRef, env }) => {
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
@@ -964,6 +965,24 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         observed.partial
         || Object.values(observed.completeness ?? {}).includes('unknown')
       );
+      const restartRequirements = runtimeRolloutRequirements({
+        environment,
+        provider: envSpec.hosting.provider,
+        observed,
+      });
+      const restartRequired = restartRequirements.length > 0;
+      const hasConfigurationDrift = maintenanceDrift.length > 0
+        || nativeDeploySourceDrift.length > 0
+        || drift.length > 0
+        || cacheDrift.length > 0
+        || databaseResilienceDrift.length > 0
+        || iosDrift.length > 0
+        || queueDrift.length > 0
+        || storageDrift.length > 0
+        || delegatedSecretDrift.length > 0
+        || stripeDrift.length > 0
+        || emailDrift.length > 0
+        || messagingDrift.length > 0;
       const blocked = planService.preflight(envSpec, envName, specResult.spec);
       for (const stripeBlock of stripeSync.blocked) {
         if (!blocked.some((entry) => entry.provider === 'stripe' && entry.scope === stripeBlock.scope)) {
@@ -1017,7 +1036,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               }),
             }
             : {}),
-          inSync: !observationIncomplete && maintenanceDrift.length === 0 && drift.length === 0 && cacheDrift.length === 0 && databaseResilienceDrift.length === 0 && nativeDeploySourceDrift.length === 0 && iosDrift.length === 0 && queueDrift.length === 0 && storageDrift.length === 0 && delegatedSecretDrift.length === 0 && stripeDrift.length === 0 && emailDrift.length === 0 && messagingDrift.length === 0,
+          inSync: !observationIncomplete && !hasConfigurationDrift && !restartRequired,
+          restartRequired,
+          runtimeConfiguration: {
+            status: restartRequired ? 'restart_required' : 'current',
+            ...(restartRequired ? { services: restartRequirements } : {}),
+          },
           runtimeHealth: runtimeHealthSummary(observed),
           ...(envSpec.maintenance || parseEnvironmentMaintenanceBinding(environment)
             ? {
@@ -1071,10 +1095,18 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
                 ? 'Run hv_plan and hv_apply to converge the selected managed CI provider; use hv_ci_status for runs after configuration is active.'
               : delegatedSecrets.inputRequired.length > 0
                 ? 'Use a safe local secretRef if the value is available here; otherwise prepare a value-free handoff naming the delegated key, environment, and principal. Do not paste raw secret values into chat.'
-              : maintenanceDrift.length > 0 || nativeDeploySourceDrift.length > 0 || drift.length > 0 || cacheDrift.length > 0 || databaseResilienceDrift.length > 0 || iosDrift.length > 0 || queueDrift.length > 0 || storageDrift.length > 0 || delegatedSecretDrift.length > 0 || stripeDrift.length > 0 || emailDrift.length > 0 || messagingDrift.length > 0
+              : hasConfigurationDrift
                 ? 'Run hv_plan to get an executable plan for this drift.'
+                : restartRequired
+                  ? deployStrategy === 'branch' && deployTrigger === 'ci'
+                    ? `Runtime configuration is attached, but ${restartRequirements.map((entry) => entry.service).join(', ')} still ${restartRequirements.length === 1 ? 'runs' : 'run'} a deployment from before the change. Trigger the managed CI deployment${stringField(ciWorkflow, 'path') ? ` (${stringField(ciWorkflow, 'path')})` : ''} with hv_ci_trigger, inspect it with hv_ci_status, then rerun hv_status. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.`
+                    : `Runtime configuration is attached, but ${restartRequirements.map((entry) => entry.service).join(', ')} still ${restartRequirements.length === 1 ? 'runs' : 'run'} a deployment from before the change. Complete a deployment through the configured release path, then rerun hv_status.`
                 : 'Configuration is in sync, but runtime health is unverified. Use hv_health for HTTP services and hv_logs source="service" errorsOnly=true for workers.',
-          next: blocked.length > 0 ? ['hv_connections'] : undefined,
+          next: blocked.length > 0
+            ? ['hv_connections']
+            : !hasConfigurationDrift && restartRequired && deployStrategy === 'branch' && deployTrigger === 'ci'
+              ? ['hv_ci_trigger', 'hv_ci_status', 'hv_status']
+              : undefined,
         }
       );
     })

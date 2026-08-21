@@ -170,7 +170,12 @@ describe('RailwayAdapter stale binding recovery', () => {
           },
         },
       })
-      .mockResolvedValueOnce({ variableCollectionUpsert: true });
+      .mockResolvedValueOnce({ variableCollectionUpsert: true })
+      .mockResolvedValueOnce({
+        serviceInstance: {
+          latestDeployment: { id: 'deployment-before-config', status: 'SUCCESS' },
+        },
+      });
 
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
@@ -187,8 +192,12 @@ describe('RailwayAdapter stale binding recovery', () => {
     );
 
     expect(receipt.success).toBe(true);
-    expect(receipt.data).toMatchObject({ deploymentDeferred: true });
-    const upsertCall = request.mock.calls.at(-1)!;
+    expect(receipt.data).toMatchObject({
+      deploymentDeferred: true,
+      runtimeRolloutRequired: true,
+      rolloutBaseline: { state: 'present', deploymentId: 'deployment-before-config' },
+    });
+    const upsertCall = request.mock.calls.find(([query]) => String(query).includes('variableCollectionUpsert'))!;
     expect(String(upsertCall[0])).toContain('skipDeploys');
     expect(upsertCall[1]).toMatchObject({ skipDeploys: true });
   });
@@ -216,6 +225,11 @@ describe('RailwayAdapter stale binding recovery', () => {
           },
         },
       })
+      .mockResolvedValueOnce({
+        serviceInstance: {
+          latestDeployment: { id: 'deployment-before-delete', status: 'SUCCESS' },
+        },
+      })
       .mockResolvedValueOnce({ variableDelete: true })
       .mockResolvedValueOnce({ variableDelete: true });
 
@@ -237,6 +251,11 @@ describe('RailwayAdapter stale binding recovery', () => {
         deletedKeys: ['LEGACY_FEATURE_FLAG', 'OLD_API_TOKEN'],
         variableCount: 2,
         redeployMayBeTriggered: true,
+        runtimeRolloutRequired: true,
+        rolloutBaseline: {
+          state: 'present',
+          deploymentId: 'deployment-before-delete',
+        },
       },
     });
     const deleteCalls = request.mock.calls.filter(([query]) => String(query).includes('variableDelete'));

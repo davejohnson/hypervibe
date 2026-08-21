@@ -340,6 +340,8 @@ export class DeployOrchestrator {
 
           const failures: string[] = [];
           const skippedStaleBindings: string[] = [];
+          let runtimeRolloutRequired = false;
+          const rolloutBaselines: Record<string, unknown> = {};
           for (const service of alreadyDeployed) {
             const serviceVars = { ...vars, ...(options.envVarsByService?.[service.name] ?? {}) };
             if (Object.keys(serviceVars).length === 0) continue;
@@ -357,6 +359,12 @@ export class DeployOrchestrator {
                 continue;
               }
               failures.push(`${service.name}: ${receipt.error ?? receipt.message}`);
+            } else if (receipt.data?.runtimeRolloutRequired === true) {
+              runtimeRolloutRequired = true;
+              const rolloutBaseline = receipt.data.rolloutBaseline;
+              if (rolloutBaseline && typeof rolloutBaseline === 'object' && !Array.isArray(rolloutBaseline)) {
+                rolloutBaselines[service.name] = rolloutBaseline;
+              }
             }
           }
 
@@ -367,6 +375,9 @@ export class DeployOrchestrator {
               serviceCount: alreadyDeployed.length,
               variableCount: Object.keys(vars).length,
               serviceVariableCount: Object.values(options.envVarsByService ?? {}).reduce((count, serviceVars) => count + Object.keys(serviceVars).length, 0),
+              ...(options.deferProviderDeployment ? { deploymentDeferred: true } : {}),
+              ...(runtimeRolloutRequired ? { runtimeRolloutRequired: true } : {}),
+              ...(Object.keys(rolloutBaselines).length > 0 ? { rolloutBaselines } : {}),
               ...(skippedStaleBindings.length > 0 ? { skippedStaleBindings } : {}),
             },
             error: failures.length > 0 ? failures.join('; ') : undefined,
@@ -475,7 +486,19 @@ export class DeployOrchestrator {
           return {
             step: step.name,
             status: result.receipt.success ? 'success' : 'failure',
-            result: { service: service.name, url: result.url, publicUrl: result.url, externalId: result.externalId },
+            result: {
+              service: service.name,
+              url: result.url,
+              publicUrl: result.url,
+              externalId: result.externalId,
+              ...(result.receipt.data?.deploymentDeferred === true ? { deploymentDeferred: true } : {}),
+              ...(result.receipt.data?.runtimeRolloutRequired === true
+                ? { runtimeRolloutRequired: true }
+                : {}),
+              ...(result.receipt.data?.rolloutBaseline
+                ? { rolloutBaseline: result.receipt.data.rolloutBaseline }
+                : {}),
+            },
             error: result.receipt.error,
             timestamp,
           };

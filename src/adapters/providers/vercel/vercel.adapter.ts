@@ -284,6 +284,10 @@ export class VercelAdapter implements IProviderAdapter {
             resourceType: 'web',
             createdService,
             deploymentDeferred: true,
+            runtimeRolloutRequired: true,
+            rolloutBaseline: latest
+              ? { state: 'present', deploymentId: latest.uid }
+              : { state: 'absent' },
             pendingDeployment: !latest,
             ...(url ? { url } : {}),
           },
@@ -315,7 +319,7 @@ export class VercelAdapter implements IProviderAdapter {
     environment: Environment,
     service: Service,
     vars: Record<string, string>,
-    options: DeploymentMutationOptions = {}
+    _options: DeploymentMutationOptions = {}
   ): Promise<Receipt> {
     const serviceId = parseHostingBindings(environment)
       .services?.[service.name]?.serviceId;
@@ -346,13 +350,18 @@ export class VercelAdapter implements IProviderAdapter {
       }
       this.assertProjectScope(project, scope);
       await this.syncProjectEnvironmentVariables(project, service, vars);
+      const latest = await this.latestDeployment(project.id);
       return {
         success: true,
         message: `Updated production Vercel environment variables for ${service.name}`,
         data: {
           serviceId,
           variableCount: Object.keys(this.runtimeEnvVars(vars)).length,
-          ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
+          deploymentDeferred: true,
+          runtimeRolloutRequired: true,
+          rolloutBaseline: latest
+            ? { state: 'present', deploymentId: latest.uid }
+            : { state: 'absent' },
         },
       };
     } catch (error) {
@@ -401,6 +410,7 @@ export class VercelAdapter implements IProviderAdapter {
         binding.projectId
       );
       const deletedKeys: string[] = [];
+      let baselineDeployment: VercelDeployment | undefined;
       for (const key of retired) {
         const matches = this.productionVariables(variables, key);
         this.assertSingleVariableIdentity(key, matches);
@@ -411,6 +421,9 @@ export class VercelAdapter implements IProviderAdapter {
           throw new Error(
             `Vercel environment variable ${key} has no durable ID; Hypervibe refused an ambiguous deletion.`
           );
+        }
+        if (deletedKeys.length === 0) {
+          baselineDeployment = await this.latestDeployment(project.id);
         }
         await this.client.deleteProjectEnvironmentVariable(
           binding.projectId,
@@ -439,7 +452,19 @@ export class VercelAdapter implements IProviderAdapter {
           return {
             success: true,
             message: `Deleted explicitly retired production Vercel environment variables for ${service.name}`,
-            data: { serviceId, deletedKeys },
+            data: {
+              serviceId,
+              deletedKeys,
+              ...(deletedKeys.length > 0
+                ? {
+                    deploymentDeferred: true,
+                    runtimeRolloutRequired: true,
+                    rolloutBaseline: baselineDeployment
+                      ? { state: 'present', deploymentId: baselineDeployment.uid }
+                      : { state: 'absent' },
+                  }
+                : {}),
+            },
           };
         }
         if (attempt < attempts) await this.delay(delayMs);
@@ -1056,6 +1081,15 @@ export class VercelAdapter implements IProviderAdapter {
         status: latest
           ? this.observedRuntimeStatus(latest)
           : 'empty',
+        ...(latest
+          ? {
+              deployment: {
+                id: latest.uid,
+                status: latest.readyState,
+                createdAt: new Date(latest.createdAt).toISOString(),
+              },
+            }
+          : {}),
       },
       unknownKeys: Array.from(new Set(unknownKeys)).sort(),
     };

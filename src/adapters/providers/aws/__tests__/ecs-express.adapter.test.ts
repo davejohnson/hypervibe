@@ -326,6 +326,7 @@ describe('EcsExpressAdapter lifecycle boundaries', () => {
       status: 'configured',
       receipt: { success: true, data: { createdService: true } },
     });
+    expect(deployed.receipt.data?.runtimeRolloutRequired).toBeUndefined();
     const serviceId = String(deployed.externalId);
     const mutationCount = calls.filter((name) => /^(Create|Update|Delete|Attach|Detach|Tag|Modify|Add|Remove)/.test(name)).length;
     await expect(adapter.observe(environment({

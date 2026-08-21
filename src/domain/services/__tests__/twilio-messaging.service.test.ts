@@ -297,7 +297,14 @@ describe('Twilio messaging apply', () => {
       country_code: 'US',
       capabilities: ['SMS'],
     });
-    const setEnvVars = vi.fn().mockResolvedValue({ success: true, message: 'synced' });
+    const setEnvVars = vi.fn().mockResolvedValue({
+      success: true,
+      message: 'synced',
+      data: {
+        runtimeRolloutRequired: true,
+        rolloutBaseline: { state: 'present', deploymentId: 'deployment-before-messaging-sync' },
+      },
+    });
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
       success: true,
       adapter: { name: 'railway', capabilities: { supportsDeferredDeploy: true }, setEnvVars } as never,
@@ -329,6 +336,12 @@ describe('Twilio messaging apply', () => {
     );
     expect(JSON.stringify(results)).not.toContain('runtime-api-key-secret');
     expect(JSON.stringify(results)).not.toContain('runtime-auth-token');
+    expect(results.at(-1)?.data).toMatchObject({
+      runtimeRolloutRequired: true,
+      rolloutBaselines: {
+        api: { state: 'present', deploymentId: 'deployment-before-messaging-sync' },
+      },
+    });
     const updated = new EnvironmentRepository().findByProjectAndName(storedProject.id, 'production')!;
     expect(updated.platformBindings.messaging).toMatchObject({
       twilio: {

@@ -597,6 +597,18 @@ describe('fingerprintObservedState', () => {
     expect(fingerprintObservedState(withSource)).not.toBe(fingerprintObservedState(withOtherBranch));
   });
 
+  it('changes when the active deployment identity changes', () => {
+    const before: ObservedState = {
+      ...base,
+      services: [{ ...base.services[0], deployment: { id: 'deployment-before', status: 'READY' } }],
+    };
+    const after: ObservedState = {
+      ...base,
+      services: [{ ...base.services[0], deployment: { id: 'deployment-after', status: 'READY' } }],
+    };
+    expect(fingerprintObservedState(before)).not.toBe(fingerprintObservedState(after));
+  });
+
   it('changes when provider domain verification changes', () => {
     const pending: ObservedState = {
       ...base,

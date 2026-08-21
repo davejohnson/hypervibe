@@ -366,6 +366,30 @@ export async function executeBootstrap(params: {
     adapter: hostingAdapter,
   });
 
+  const rolloutBaselines: Record<string, unknown> = {};
+  let runtimeRolloutRequired = false;
+  for (const receipt of deploy.run.receipts) {
+    const receiptResult = receipt.result;
+    if (!receiptResult || typeof receiptResult !== 'object') continue;
+    if (receiptResult.runtimeRolloutRequired === true) {
+      runtimeRolloutRequired = true;
+    }
+    const aggregate = receiptResult.rolloutBaselines;
+    if (aggregate && typeof aggregate === 'object' && !Array.isArray(aggregate)) {
+      Object.assign(rolloutBaselines, aggregate);
+    }
+    const serviceName = receiptResult.service;
+    const rolloutBaseline = receiptResult.rolloutBaseline;
+    if (
+      typeof serviceName === 'string'
+      && rolloutBaseline
+      && typeof rolloutBaseline === 'object'
+      && !Array.isArray(rolloutBaseline)
+    ) {
+      rolloutBaselines[serviceName] = rolloutBaseline;
+    }
+  }
+
   const summary: Record<string, unknown> = {
     project: project.name,
     environment: environment.name,
@@ -375,6 +399,8 @@ export async function executeBootstrap(params: {
     deploymentRunId: deploy.run.id,
     deploymentSuccess: deploy.success,
     deploymentDeferralRequested: deferProviderDeployment,
+    ...(runtimeRolloutRequired ? { runtimeRolloutRequired: true } : {}),
+    ...(Object.keys(rolloutBaselines).length > 0 ? { rolloutBaselines } : {}),
     urls: deploy.urls,
     serviceUrls: deploy.serviceUrls,
     primaryUrl: deploy.primaryUrl,

@@ -1081,18 +1081,6 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
       ? bindings.services?.[service.name]?.jobName ?? this.sanitizeName(`${prefix}-${service.name}`)
       : bindings.services?.[service.name]?.serviceId ?? this.sanitizeName(`${prefix}-${service.name}`);
 
-    if (options.deferDeployment) {
-      const runtimeVars = this.runtimeEnvVarsForService(service, vars);
-      return {
-        success: true,
-        message: `Deferred ${Object.keys(runtimeVars).length} environment variables to the exact-SHA service configuration pass`,
-        data: {
-          variableCount: Object.keys(runtimeVars).length,
-          deploymentDeferred: true,
-        },
-      };
-    }
-
     try {
       const token = await this.getAccessToken();
       const { projectId, region } = this.credentials;
@@ -1145,7 +1133,10 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
         return {
           success: true,
           message: `Set ${Object.keys(runtimeVars).length} environment variables`,
-          data: { variableCount: Object.keys(runtimeVars).length },
+          data: {
+            variableCount: Object.keys(runtimeVars).length,
+            ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
+          },
         };
       }
 
@@ -1228,10 +1219,32 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
         throw new Error(`Cloud Run API error: ${response.status} ${text}`);
       }
 
+      const operation = await response.json() as CloudRunOperation;
+      await this.waitForCloudRunOperation(token, operation, 'service env update');
+      const updatedService = await this.waitForCloudRunServiceReady(serviceName, token);
+      const updatedEnv = new Map(
+        (this.primaryContainer(updatedService)?.env ?? [])
+          .filter((entry): entry is { name: string; value?: string } => typeof entry.name === 'string')
+          .map((entry) => [entry.name, entry.value])
+      );
+      const unapplied = Object.entries(runtimeVars)
+        .filter(([key, value]) => updatedEnv.get(key) !== value)
+        .map(([key]) => key);
+      if (unapplied.length > 0) {
+        return {
+          success: false,
+          message: 'Cloud Run accepted the service update but runtime variables were not verified on the ready revision',
+          error: `Failed to verify: ${unapplied.join(', ')}`,
+        };
+      }
+
       return {
         success: true,
         message: `Set ${Object.keys(runtimeVars).length} environment variables`,
-        data: { variableCount: Object.keys(runtimeVars).length },
+        data: {
+          variableCount: Object.keys(runtimeVars).length,
+          ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
+        },
       };
     } catch (error) {
       return {

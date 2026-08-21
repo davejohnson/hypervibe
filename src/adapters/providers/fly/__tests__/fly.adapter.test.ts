@@ -262,6 +262,7 @@ describe('FlyAdapter', () => {
       createdService: true,
       pendingDeployment: true,
     });
+    expect(result.receipt.data?.runtimeRolloutRequired).toBeUndefined();
     expect(JSON.stringify(result.receipt)).not.toContain('secret-value');
     expect(machineConfig).not.toHaveProperty('env.APP_SECRET');
   });

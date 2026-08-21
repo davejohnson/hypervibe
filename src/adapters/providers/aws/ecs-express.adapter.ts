@@ -422,7 +422,11 @@ export class EcsExpressAdapter implements IProviderAdapter {
             scalingTarget: config.scalingTarget,
           })
         );
-        express = await this.waitForExpress(binding, config.primaryContainer.image);
+        express = await this.waitForExpress(
+          binding,
+          config.primaryContainer.image,
+          existing.currentDeployment
+        );
         if (output.service?.serviceArn !== binding) {
           throw new Error(`AWS update response did not preserve bound service ${binding}.`);
         }
@@ -530,7 +534,11 @@ export class EcsExpressAdapter implements IProviderAdapter {
         primaryContainer: { ...config.primaryContainer, environment: environmentValues },
         scalingTarget: config.scalingTarget,
       }));
-      await this.waitForExpress(serviceArn, config.primaryContainer.image);
+      await this.waitForExpress(
+        serviceArn,
+        config.primaryContainer.image,
+        express.currentDeployment
+      );
       return {
         success: true,
         message: `Deleted ${keys.length} retired environment variable${keys.length === 1 ? '' : 's'} from ECS Express`,
@@ -1154,7 +1162,11 @@ export class EcsExpressAdapter implements IProviderAdapter {
     return endpoint.startsWith('http') ? endpoint : `https://${endpoint}`;
   }
 
-  private async waitForExpress(serviceArn: string, image?: string): Promise<ECSExpressGatewayService> {
+  private async waitForExpress(
+    serviceArn: string,
+    image?: string,
+    previousDeployment?: string
+  ): Promise<ECSExpressGatewayService> {
     const attempts = this.attempts('HYPERVIBE_ECS_EXPRESS_WAIT_ATTEMPTS', 120);
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const service = await this.getExpressService(serviceArn);
@@ -1162,6 +1174,10 @@ export class EcsExpressAdapter implements IProviderAdapter {
       const config = this.currentConfiguration(service);
       if (service.status?.statusCode === 'ACTIVE'
         && (!image || config?.primaryContainer?.image === image)
+        && (!previousDeployment || (
+          Boolean(service.currentDeployment)
+          && service.currentDeployment !== previousDeployment
+        ))
         && this.expressUrl(service)) {
         return service;
       }

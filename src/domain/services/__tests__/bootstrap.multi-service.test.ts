@@ -740,7 +740,12 @@ describe('infra_apply multi-service convergence', () => {
         receipt: {
           success: true,
           message: 'service configured',
-          data: { environmentId: 'rail-env-1', deploymentDeferred: true },
+          data: {
+            environmentId: 'rail-env-1',
+            deploymentDeferred: true,
+            runtimeRolloutRequired: true,
+            rolloutBaseline: { state: 'present', deploymentId: 'deployment-before-config' },
+          },
         },
       };
     });
@@ -798,6 +803,10 @@ describe('infra_apply multi-service convergence', () => {
 
     expect(result.success).toBe(true);
     expect(result.summary.deploymentDeferralRequested).toBe(true);
+    expect(result.summary.runtimeRolloutRequired).toBe(true);
+    expect(result.summary.rolloutBaselines).toEqual({
+      web: { state: 'present', deploymentId: 'deployment-before-config' },
+    });
     expect(deploy).toHaveBeenCalledTimes(1);
     expect(getDeployStatus).not.toHaveBeenCalled();
     expect(result.summary.deploymentMode).toBe('provision');

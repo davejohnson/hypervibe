@@ -449,6 +449,15 @@ export class FlyAdapter implements IProviderAdapter {
       if (!observed) {
         throw new Error(`Fly.io Machine ${updated.id} was not observable after secret sync.`);
       }
+      if (
+        resolved.machine.instance_id
+        && (!observed.instance_id || observed.instance_id === resolved.machine.instance_id)
+      ) {
+        throw new Error(`Fly.io Machine ${updated.id} did not advance to a new instance version after secret sync.`);
+      }
+      if (resolved.machine.state === 'started' && observed.state !== 'started') {
+        throw new Error(`Fly.io Machine ${updated.id} is ${observed.state ?? 'unknown'} after secret sync.`);
+      }
       return {
         success: true,
         message: `Updated Fly.io app secrets for ${service.name}`,
@@ -504,8 +513,18 @@ export class FlyAdapter implements IProviderAdapter {
         minSecretsVersion: version,
         skipLaunch: resolved.machine.state !== 'started',
       });
-      if (!await this.client.getMachine(resolved.app.name, updated.id)) {
+      const observed = await this.client.getMachine(resolved.app.name, updated.id);
+      if (!observed) {
         throw new Error(`Fly.io Machine ${updated.id} was not observable after secret deletion.`);
+      }
+      if (
+        resolved.machine.instance_id
+        && (!observed.instance_id || observed.instance_id === resolved.machine.instance_id)
+      ) {
+        throw new Error(`Fly.io Machine ${updated.id} did not advance to a new instance version after secret deletion.`);
+      }
+      if (resolved.machine.state === 'started' && observed.state !== 'started') {
+        throw new Error(`Fly.io Machine ${updated.id} is ${observed.state ?? 'unknown'} after secret deletion.`);
       }
       const remaining = new Set(
         (await this.client.listSecrets(resolved.app.name))
