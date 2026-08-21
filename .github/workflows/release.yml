@@ -154,7 +154,7 @@ jobs:
         with:
           node-version: "22.17.1"
           registry-url: https://registry.npmjs.org
-          scope: "@davejohnson"
+          scope: "@hypervibe"
 
       - name: Set up Go for Fly.io private networking helper
         uses: actions/setup-go@v5

@@ -7,12 +7,14 @@ describe('public release configuration', () => {
     const packageMetadata = JSON.parse(
       readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
     ) as {
+      name?: string;
       publishConfig?: {
         access?: string;
         registry?: string;
       };
     };
 
+    expect(packageMetadata.name).toBe('@hypervibe/hypervibe');
     expect(packageMetadata.publishConfig).toEqual({
       access: 'public',
       registry: 'https://registry.npmjs.org',
@@ -30,6 +32,7 @@ describe('public release configuration', () => {
     );
 
     expect(workflow).toContain('registry-url: https://registry.npmjs.org');
+    expect(workflow).toContain('scope: "@hypervibe"');
     expect(workflow).toContain('id-token: write');
     expect(workflow).toContain('actions/checkout@v6');
     expect(workflow).toContain('actions/setup-node@v6');

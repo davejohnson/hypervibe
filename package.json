@@ -1,5 +1,5 @@
 {
-  "name": "@davejohnson/hypervibe",
+  "name": "@hypervibe/hypervibe",
   "version": "0.1.11",
   "description": "Desired-state infrastructure orchestration through CLI and MCP",
   "license": "Apache-2.0",
