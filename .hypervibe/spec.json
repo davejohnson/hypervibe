@@ -107,18 +107,6 @@
       "pushProtection": false
     }
   },
-  "secrets": {
-    "NPM_TOKEN": {
-      "ownership": "delegated",
-      "principal": "github:davejohnson",
-      "environments": [],
-      "githubActions": {
-        "repository": true,
-        "environments": []
-      },
-      "required": true,
-      "driftPolicy": "preserve"
-    }
-  },
+  "secrets": {},
   "environments": {}
 }

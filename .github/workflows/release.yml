@@ -139,8 +139,6 @@ jobs:
     name: Publish public npm package
     needs: [validate-package, build-macos]
     runs-on: ubuntu-latest
-    # Bootstrap authentication uses a short-lived NPM_TOKEN until the package
-    # exists and npm can trust this workflow through OIDC.
     permissions:
       contents: read
       id-token: write
@@ -170,8 +168,6 @@ jobs:
 
       - name: Publish public package with provenance
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   release:
     name: Publish GitHub Release
