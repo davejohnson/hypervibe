@@ -366,6 +366,7 @@ async function executeRepositoryPlanApply(
     confirmActions: string[];
     envName: string;
     actions: PlanAction[];
+    delegatedSecretValues?: Record<string, string>;
   }
 ): Promise<PlanApplyOutcome> {
   const projectForApply = syncProjectGitRemoteUrl(ctx, params.project, params.spec);
@@ -405,6 +406,7 @@ async function executeRepositoryPlanApply(
       action.resource.name !== expectedRepository
       && authority.capability !== 'github.pages-dns.sync'
       && authority.capability !== 'github.openai-secret.sync'
+      && authority.capability !== 'github.delegated-secret.sync'
     ) {
       return blockedActionIdentity(
         action,
@@ -455,6 +457,20 @@ async function executeRepositoryPlanApply(
           project: projectForApply,
           environmentName: params.envName,
           action,
+        });
+      case 'github.delegated-secret.sync':
+        if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
+          return blockedActionIdentity(
+            action,
+            `The reviewed secret destination must be ${expectedRepository ?? 'a configured GitHub repository'}.`
+          );
+        }
+        return applyGitHubDelegatedSecret({
+          project: projectForApply,
+          spec: params.spec,
+          environmentName: params.envName,
+          action,
+          value: params.delegatedSecretValues?.[action.resource.name],
         });
       default:
         return {
@@ -530,6 +546,11 @@ export async function executePlanApply(ctx: CommandContext, params: {
           confirmActions: params.confirmActions,
           envName,
           actions: loaded.document.actions,
+          delegatedSecretValues: loaded.document.overrides?.delegatedSecretVarsEncrypted
+            ? getSecretStore().decryptObject<Record<string, string>>(
+                loaded.document.overrides.delegatedSecretVarsEncrypted
+              )
+            : undefined,
         })
       : { kind: 'env_missing', envName };
   }
@@ -1015,6 +1036,13 @@ export async function executePlanApply(ctx: CommandContext, params: {
       return applyGitHubOpenAISecret({ project: applyProject, environmentName: envName, action });
     }
     if (capability === 'github.delegated-secret.sync') {
+      const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
+      if (stringField(asRecord(action.metadata), 'repository') !== expectedRepository) {
+        return blockedActionIdentity(
+          action,
+          `The reviewed secret destination must be ${expectedRepository ?? 'a configured GitHub repository'}.`
+        );
+      }
       return applyGitHubDelegatedSecret({
         project: applyProject,
         spec,

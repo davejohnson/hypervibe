@@ -20,10 +20,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22.17.1"
           cache: npm
@@ -66,10 +66,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22.17.1"
           cache: npm
@@ -139,16 +139,18 @@ jobs:
     name: Publish public npm package
     needs: [validate-package, build-macos]
     runs-on: ubuntu-latest
+    # Bootstrap authentication uses a short-lived NPM_TOKEN until the package
+    # exists and npm can trust this workflow through OIDC.
     permissions:
       contents: read
       id-token: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22.17.1"
           registry-url: https://registry.npmjs.org
@@ -162,6 +164,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.19.0
 
       - name: Publish public package with provenance
         run: npm publish --access public --provenance

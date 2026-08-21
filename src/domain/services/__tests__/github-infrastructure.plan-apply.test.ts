@@ -7,6 +7,7 @@ import { ConnectionRepository } from '../../../adapters/db/repositories/connecti
 import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
+import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
 import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import {
   GitHubAdapter,
@@ -116,6 +117,7 @@ describe('GitHub infrastructure plan/apply', () => {
   });
 
   afterEach(() => {
+    delete process.env.REPOSITORY_CI_TOKEN;
     vi.restoreAllMocks();
     vi.useRealTimers();
     SqliteAdapter.resetInstance();
@@ -358,6 +360,110 @@ describe('GitHub infrastructure plan/apply', () => {
       },
     });
     expect(setSecret).toHaveBeenCalledWith('owner', 'example', 'OPENAI_API_KEY', 'openai-test-key');
+  });
+
+  it('plans and applies a declared Actions secret through the repository-only lifecycle', async () => {
+    const secretValue = 'repository-plan-secret-value';
+    process.env.REPOSITORY_CI_TOKEN = secretValue;
+    const repositoryProject = new ProjectRepository().create({
+      name: 'repository-delegated-secret',
+      gitRemoteUrl: `https://github.com/${REPOSITORY}.git`,
+    });
+    const desiredSpec = projectSpecSchema.parse({
+      version: 1,
+      project: repositoryProject.name,
+      gitRemoteUrl: repositoryProject.gitRemoteUrl,
+      github: {
+        repository: REPOSITORY,
+        canonicalEnvironment: 'repository',
+        collaboration: {
+          issues: { enabled: false, templates: false },
+          pullRequests: { requirePr: false },
+        },
+      },
+      secrets: {
+        CI_TOKEN: {
+          principal: 'github:owner',
+          githubActions: { repository: true },
+        },
+      },
+      environments: {},
+    });
+    const stored = new SpecStore().replace(repositoryProject, desiredSpec);
+    const desiredFiles = new Map(
+      compileManagedGitHubFiles(desiredSpec.github!).map((file) => [file.path, file.content])
+    );
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent')
+      .mockImplementation(async (_owner, _repo, filePath) => desiredFiles.get(filePath) ?? null);
+    let repositorySecrets: string[] = [];
+    vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets')
+      .mockImplementation(async () => repositorySecrets);
+    const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret')
+      .mockImplementation(async (_owner, _repo, name) => {
+        repositorySecrets = [...new Set([...repositorySecrets, name])];
+      });
+    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({
+      default_branch: 'main',
+      private: false,
+    });
+    vi.spyOn(GitHubAdapter.prototype, 'listLabels').mockResolvedValue([]);
+
+    const planned = await new PlanService().plan(repositoryProject, 'repository', {
+      secretRefs: { CI_TOKEN: 'env:REPOSITORY_CI_TOKEN' },
+    });
+    expect(planned).not.toHaveProperty('error');
+    const plan = planned as Exclude<typeof planned, { error: string }>;
+    expect(plan.inputRequired).toEqual([]);
+    expect(plan.actions.find((action) => action.id === 'secret:github:repository:CI_TOKEN')).toMatchObject({
+      type: 'update',
+      resource: { kind: 'secret', name: 'CI_TOKEN', provider: 'github' },
+      metadata: {
+        operation: 'githubDelegatedSecretSync',
+        repository: REPOSITORY,
+        inputProvided: true,
+      },
+    });
+    const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+    expect(JSON.stringify(document)).not.toContain(secretValue);
+    expect(JSON.stringify(document)).not.toContain('REPOSITORY_CI_TOKEN');
+    const overrides = document.overrides as Record<string, unknown>;
+    expect(overrides.delegatedSecretKeys).toEqual(['CI_TOKEN']);
+    expect(getSecretStore().decryptObject(overrides.delegatedSecretVarsEncrypted as string)).toEqual({
+      CI_TOKEN: secretValue,
+    });
+
+    const outcome = await executePlanApply(createToolContext(), {
+      project: repositoryProject,
+      spec: stored.spec,
+      specRevision: stored.revision,
+      planId: plan.planRunId,
+      confirmActions: [],
+    });
+
+    expect(outcome).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: true,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({
+            actionId: 'secret:github:repository:CI_TOKEN',
+            status: 'succeeded',
+          }),
+        ]),
+      },
+    });
+    expect(setSecret).toHaveBeenCalledWith('owner', 'example', 'CI_TOKEN', secretValue);
+    expect(JSON.stringify(outcome)).not.toContain(secretValue);
+    const environment = new EnvironmentRepository()
+      .findByProjectAndName(repositoryProject.id, 'repository')!;
+    expect(environment.platformBindings.github).toMatchObject({
+      delegatedActionsBindings: [expect.objectContaining({
+        name: 'CI_TOKEN',
+        target: 'repository',
+        principal: 'github:owner',
+      })],
+    });
+    expect(JSON.stringify(environment.platformBindings)).not.toContain(secretValue);
   });
 
   it('plans and applies declared GitHub Actions secrets from encrypted plan input', async () => {

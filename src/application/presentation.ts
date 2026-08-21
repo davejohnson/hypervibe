@@ -427,11 +427,12 @@ function ciLogRows(logs: unknown[]): string[] {
       lines.push(`• ${String(value)}`);
       return;
     }
-    const phase = stringValue(entry.phase) ?? stringValue(entry.status) ?? 'unknown';
+    const phase = stringValue(entry.status) ?? stringValue(entry.phase) ?? 'unknown';
+    const outcome = stringValue(entry.conclusion) ?? stringValue(entry.phase) ?? phase;
     const name = stringValue(entry.name) ?? 'job';
     const jobId = compactId(entry.jobId);
-    const phaseText = isOutcomeOnlyStatus(phase) ? '' : ` · ${phase}`;
-    lines.push(`${statusSymbol(phase)} ${name}${phaseText}${jobId ? ` · job ${jobId}` : ''}`);
+    const phaseText = phase === outcome ? '' : ` · ${phase}`;
+    lines.push(`${statusSymbol(outcome)} ${outcome} · ${name}${phaseText}${jobId ? ` · job ${jobId}` : ''}`);
     if (typeof entry.error === 'string') {
       lines.push(`  ❌ ${entry.error}`);
       return;

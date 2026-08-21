@@ -114,7 +114,7 @@ describe('PlanService delegated secret inputs', () => {
   });
 
   it('persists an inspectable but non-executable plan when required input is absent', async () => {
-    const result = await new PlanService().plan(project, 'production');
+    const result = await new PlanService().plan(project, 'production', { includeEnvFile: false });
     expect(result).not.toHaveProperty('error');
     const plan = result as Exclude<typeof result, { error: string }>;
     expect(plan.inputRequired).toEqual([
@@ -146,6 +146,7 @@ describe('PlanService delegated secret inputs', () => {
   it('resolves a safe reference, encrypts the value, and includes it in env drift', async () => {
     process.env.FRIEND_ANTHROPIC_API_KEY = FRIEND_KEY;
     const result = await new PlanService().plan(project, 'production', {
+      includeEnvFile: false,
       secretRefs: { ANTHROPIC_API_KEY: 'env:FRIEND_ANTHROPIC_API_KEY' },
     });
     expect(result).not.toHaveProperty('error');
@@ -218,6 +219,7 @@ describe('PlanService delegated secret inputs', () => {
     } as never);
 
     const planned = await new PlanService().plan(project, 'production', {
+      includeEnvFile: false,
       secretRefs: { ANTHROPIC_API_KEY: 'env:FRIEND_ANTHROPIC_API_KEY' },
     });
     expect(planned).not.toHaveProperty('error');
@@ -256,6 +258,7 @@ describe('PlanService delegated secret inputs', () => {
 
   it('rejects attempts to supply a delegated value through ordinary envVars', async () => {
     const result = await new PlanService().plan(project, 'production', {
+      includeEnvFile: false,
       envVarOverrides: { ANTHROPIC_API_KEY: FRIEND_KEY },
     });
     expect(result).toMatchObject({ error: expect.stringContaining('Use secretRefs') });

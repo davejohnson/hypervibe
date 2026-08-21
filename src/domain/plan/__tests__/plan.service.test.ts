@@ -2849,7 +2849,7 @@ describe('PlanService.plan', () => {
 
       try {
         process.chdir(path.join(root, 'app'));
-        const result = await new PlanService().plan(project, 'staging');
+        const result = await new PlanService().plan(project, 'staging', { includeEnvFile: true });
         const plan = result as Exclude<typeof result, { error: string }>;
 
         expect(plan.warnings).toContainEqual(expect.stringContaining(`Created environment-specific deploy env file at ${stagingEnvFile}`));
@@ -2907,7 +2907,7 @@ describe('PlanService.plan', () => {
 
       try {
         process.chdir(path.join(root, 'app'));
-        const result = await new PlanService().plan(project, 'staging');
+        const result = await new PlanService().plan(project, 'staging', { includeEnvFile: true });
 
         expect(result).toEqual({
           error: expect.stringContaining('Refusing implicit deploy env-file access'),
@@ -2920,7 +2920,7 @@ describe('PlanService.plan', () => {
         project = new ProjectRepository().update(project.id, {
           gitRemoteUrl: '../hls-property-care.git',
         })!;
-        const unverifiable = await new PlanService().plan(project, 'staging');
+        const unverifiable = await new PlanService().plan(project, 'staging', { includeEnvFile: true });
         expect(unverifiable).toEqual({
           error: expect.stringContaining('selected project "plan-test" repository "unknown"'),
         });
@@ -2955,7 +2955,7 @@ describe('PlanService.plan', () => {
             },
           },
         });
-        const disabledByPolicy = await new PlanService().plan(project, 'staging');
+        const disabledByPolicy = await new PlanService().plan(project, 'staging', { includeEnvFile: true });
         expect(disabledByPolicy).not.toHaveProperty('error');
         expect(existsSync(environmentEnvFile)).toBe(false);
       } finally {

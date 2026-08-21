@@ -217,7 +217,8 @@ describe('command presentation', () => {
       logs: [{
         jobId: '96485414159',
         name: 'critical journey',
-        phase: 'failed',
+        status: 'completed',
+        conclusion: 'failure',
         text: 'Run npm test\nError: expected 200',
         lineCount: 200,
         returnedLines: 2,
@@ -227,8 +228,7 @@ describe('command presentation', () => {
 
     expect(output).toContain('✅  HYPERVIBE · CI STATUS');
     expect(output).toContain('📜  LOGS');
-    expect(output).toContain('❌ critical journey · job 96485414159');
-    expect(output).not.toContain('critical journey · failed');
+    expect(output).toContain('❌ failure · critical journey · completed · job 96485414159');
     expect(output).toContain('2 returned · 200 total · tail truncated');
     expect(output).toContain('  │ Run npm test');
     expect(output).toContain('  │ Error: expected 200');

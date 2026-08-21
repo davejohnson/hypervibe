@@ -752,10 +752,40 @@ export class PlanService {
       options?.serviceFilter?.length
       || Object.keys(options?.envVarOverrides ?? {}).length > 0
       || options?.envFile
-      || Object.keys(options?.secretRefs ?? {}).length > 0
     ) {
       return {
-        error: 'The repository project plan does not accept service, environment-variable, env-file, or secret inputs.',
+        error: 'The repository project plan does not accept service, environment-variable, or env-file inputs.',
+      };
+    }
+
+    const delegatedSecretSlots = new Map(
+      delegatedSecretInputsForEnvironment(specResult.spec, environmentName)
+    );
+    const requestedSecretRefs = options?.secretRefs && Object.keys(options.secretRefs).length > 0
+      ? options.secretRefs
+      : undefined;
+    const unknownSecretRefs = Object.keys(requestedSecretRefs ?? {})
+      .filter((key) => !delegatedSecretSlots.has(key));
+    if (unknownSecretRefs.length > 0) {
+      return {
+        error: `secretRefs contains keys that are not delegated secret slots for environment "${environmentName}": ${unknownSecretRefs.join(', ')}.`,
+      };
+    }
+    const delegatedSecretValues: Record<string, string> = {};
+    try {
+      for (const [key, ref] of Object.entries(requestedSecretRefs ?? {})) {
+        const value = await resolveSecretValueRef(ref, {
+          projectId: project.id,
+          environmentName,
+        });
+        if (!value) {
+          return { error: `secretRefs["${key}"] resolved to an empty value.` };
+        }
+        delegatedSecretValues[key] = value;
+      }
+    } catch (error) {
+      return {
+        error: `Failed to resolve delegated secret input: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
 
@@ -764,6 +794,7 @@ export class PlanService {
       project: projectForPlan,
       spec: specResult.spec,
       environmentName,
+      suppliedSecretValues: delegatedSecretValues,
     });
     const actions = github.actions;
     try {
@@ -787,6 +818,14 @@ export class PlanService {
       unmanaged: [],
       warnings: [...specWarnings, ...github.warnings],
       ...(github.inputRequired.length > 0 ? { inputRequired: github.inputRequired } : {}),
+      ...(Object.keys(delegatedSecretValues).length > 0
+        ? {
+            overrides: {
+              delegatedSecretKeys: Object.keys(delegatedSecretValues).sort(),
+              delegatedSecretVarsEncrypted: getSecretStore().encryptObject(delegatedSecretValues),
+            },
+          }
+        : {}),
     };
     const environment = this.envRepo.findByProjectAndName(project.id, environmentName)
       ?? this.envRepo.create({ projectId: project.id, name: environmentName });
@@ -1130,8 +1169,12 @@ export class PlanService {
     let envFile: ReturnType<typeof loadDeployEnvFile> = null;
     try {
       const envFilePolicy = environmentSpec.envFile;
+      const implicitEnvFileDisabled = !options?.envFile
+        && options?.includeEnvFile === undefined
+        && process.env.HYPERVIBE_DISABLE_IMPLICIT_DEPLOY_ENV_FILE === '1';
       const implicitEnvFilePath = !options?.envFile
         && options?.includeEnvFile !== false
+        && !implicitEnvFileDisabled
         && envFilePolicy?.mode !== 'off'
         ? defaultDeployEnvFilePath(undefined, environmentName)
         : null;
@@ -1151,7 +1194,9 @@ export class PlanService {
       ]));
       envFile = loadDeployEnvFile({
         envFile: options?.envFile,
-        includeEnvFile: options?.includeEnvFile === false ? false : envFilePolicy?.mode !== 'off',
+        includeEnvFile: options?.includeEnvFile === false || implicitEnvFileDisabled
+          ? false
+          : envFilePolicy?.mode !== 'off',
         mode: envFilePolicy?.mode,
         includeKeys: envFilePolicy?.include,
         excludeKeys: excludedEnvKeys,
