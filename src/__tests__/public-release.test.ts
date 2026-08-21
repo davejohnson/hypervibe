@@ -31,11 +31,31 @@ describe('public release configuration', () => {
 
     expect(workflow).toContain('registry-url: https://registry.npmjs.org');
     expect(workflow).toContain('id-token: write');
+    expect(workflow).toContain('actions/checkout@v6');
+    expect(workflow).toContain('actions/setup-node@v6');
+    expect(workflow).toContain('npm install --global npm@11.19.0');
     expect(workflow).toContain('npm publish --access public --provenance');
     expect(workflow).toContain('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}');
     expect(workflow).not.toContain('npm.pkg.github.com');
     expect(workflow).not.toContain('--access restricted');
     expect(releaseScript).toContain("const releaseWorkflow = 'release.yml';");
+  });
+
+  it('declares the temporary bootstrap token as a repository Actions secret', () => {
+    const spec = JSON.parse(
+      readFileSync(new URL('../../.hypervibe/spec.json', import.meta.url), 'utf8')
+    ) as {
+      secrets?: Record<string, unknown>;
+    };
+
+    expect(spec.secrets?.NPM_TOKEN).toEqual({
+      ownership: 'delegated',
+      principal: 'github:davejohnson',
+      environments: [],
+      githubActions: { repository: true, environments: [] },
+      required: true,
+      driftPolicy: 'preserve',
+    });
   });
 
   it('requires signed and notarized macOS release artifacts', () => {
