@@ -38,27 +38,37 @@ describe('public release configuration', () => {
     expect(workflow).toContain('actions/setup-node@v6');
     expect(workflow).toContain('npm install --global npm@11.19.0');
     expect(workflow).toContain('npm publish --access public --provenance');
-    expect(workflow).toContain('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}');
+    expect(workflow).not.toContain('NODE_AUTH_TOKEN');
+    expect(workflow).not.toContain('secrets.NPM_TOKEN');
     expect(workflow).not.toContain('npm.pkg.github.com');
     expect(workflow).not.toContain('--access restricted');
     expect(releaseScript).toContain("const releaseWorkflow = 'release.yml';");
   });
 
-  it('declares the temporary bootstrap token as a repository Actions secret', () => {
+  it('does not declare or bind a long-lived npm publishing token', () => {
     const spec = JSON.parse(
       readFileSync(new URL('../../.hypervibe/spec.json', import.meta.url), 'utf8')
     ) as {
       secrets?: Record<string, unknown>;
     };
+    const bindings = JSON.parse(
+      readFileSync(new URL('../../.hypervibe/bindings.json', import.meta.url), 'utf8')
+    ) as {
+      environments?: {
+        repository?: {
+          platformBindings?: {
+            github?: {
+              delegatedActionsBindings?: Array<{ name?: string }>;
+            };
+          };
+        };
+      };
+    };
 
-    expect(spec.secrets?.NPM_TOKEN).toEqual({
-      ownership: 'delegated',
-      principal: 'github:davejohnson',
-      environments: [],
-      githubActions: { repository: true, environments: [] },
-      required: true,
-      driftPolicy: 'preserve',
-    });
+    expect(spec.secrets?.NPM_TOKEN).toBeUndefined();
+    expect(
+      bindings.environments?.repository?.platformBindings?.github?.delegatedActionsBindings ?? []
+    ).not.toContainEqual(expect.objectContaining({ name: 'NPM_TOKEN' }));
   });
 
   it('requires signed and notarized macOS release artifacts', () => {

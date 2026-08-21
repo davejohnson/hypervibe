@@ -1477,20 +1477,10 @@ npm ci
 npm run release -- patch
 ```
 
-The first public publish needs a short-lived granular npm token because npm
-does not expose package settings until the package exists. Save it as
-`NPM_TOKEN` in the gitignored repository `.env`, declare the repository Actions
-destination in `.hypervibe/spec.json`, and sync it through a secret reference:
-
-```text
-hv_plan project="hypervibe" env="repository" secretRefs={"NPM_TOKEN":"dotenv:/absolute/path/to/hypervibe/.env#NPM_TOKEN"}
-hv_apply project="hypervibe" planId="<planId>"
-```
-
-The bootstrap workflow exposes the token only to `npm publish` and uses npm
-11.19.0 with public provenance. Immediately after that first publish,
-configure an npm [trusted publisher](https://docs.npmjs.com/trusted-publishers/)
-for `@hypervibe/hypervibe` with these exact fields:
+The public package uses npm
+[trusted publishing](https://docs.npmjs.com/trusted-publishers/) through GitHub
+Actions OIDC. Its trusted publisher for `@hypervibe/hypervibe` has these exact
+fields:
 
 - provider: GitHub Actions
 - organization or user: `davejohnson`
@@ -1499,10 +1489,9 @@ for `@hypervibe/hypervibe` with these exact fields:
 - environment name: none
 - allowed action: `npm publish`
 
-Then remove `NODE_AUTH_TOKEN` from the workflow, remove the delegated
-`NPM_TOKEN` declaration, reconcile its deletion through `hv_plan`/`hv_apply`,
-and revoke the npm token. Future releases use GitHub OIDC without a long-lived
-npm credential.
+The workflow uses npm 11.19.0 with public provenance and no long-lived npm
+credential. Changes to the trusted publisher must preserve the exact repository
+and workflow identity above.
 
 Use `minor`, `major`, or an exact stable version such as `0.2.0` instead of
 `patch`. The release command verifies that `main` exactly matches

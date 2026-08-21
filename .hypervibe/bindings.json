@@ -5,16 +5,7 @@
     "repository": {
       "platformBindings": {
         "github": {
-          "delegatedActionsBindings": [
-            {
-              "name": "NPM_TOKEN",
-              "target": "repository",
-              "principal": "github:davejohnson",
-              "valueHash": "d92b84897a62867a4215241c9b931a3c8f5f4c0df4651ba0c266fbd67aa50009",
-              "actionId": "secret:github:repository:NPM_TOKEN",
-              "syncedAt": "2026-08-21T03:14:52.552Z"
-            }
-          ]
+          "delegatedActionsBindings": []
         }
       }
     }
