@@ -13,6 +13,7 @@ import type {
 } from '../../../domain/ports/provider.port.js';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { Service } from '../../../domain/entities/service.entity.js';
+import { parseHostingBindings } from '../../../domain/ports/hosting.port.js';
 import { githubPackagePullCredentials } from '../github/package-pull.js';
 import type { Component, ComponentType } from '../../../domain/entities/component.entity.js';
 import { hashEnvValue } from '../../../domain/ports/observe.port.js';
@@ -58,6 +59,20 @@ type ResourceExistence =
 type DeletionVerification =
   | { deleted: true }
   | { deleted: false; error: string };
+
+type RailwayDeploymentStatus = {
+  status: string;
+  staticUrl?: string;
+};
+
+type RailwayDeploymentInstance = {
+  environmentId?: string;
+  latestDeployment?: RailwayDeploymentStatus;
+};
+
+type RailwayDeploymentInstanceSelection =
+  | { recognized: false }
+  | { recognized: true; instance: RailwayDeploymentInstance | null };
 
 function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -2359,48 +2374,63 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
   async getDeployStatus(
     environment: Environment,
     deploymentId: string
-  ): Promise<{ status: string; url?: string }> {
+  ): Promise<{ status: string; url?: string; reason?: string }> {
     if (!this.client) {
-      throw new Error('Not connected. Call connect() first.');
+      return {
+        status: 'unknown',
+        reason: 'Railway deployment observation requires a verified connection.',
+      };
     }
 
+    // First attempt: deployment ID lookup (legacy behavior).
     try {
-      // First attempt: deployment ID lookup (legacy behavior)
-      try {
-        const deploymentQuery = gql`
-          query GetDeployment($id: String!) {
-            deployment(id: $id) {
-              id
-              status
-              staticUrl
-            }
+      const deploymentQuery = gql`
+        query GetDeployment($id: String!) {
+          deployment(id: $id) {
+            id
+            status
+            staticUrl
           }
-        `;
-
-        const deploymentResult = await this.client.request<{
-          deployment: { id: string; status: string; staticUrl?: string };
-        }>(deploymentQuery, { id: deploymentId });
-
-        if (deploymentResult.deployment) {
-          return {
-            status: this.normalizeStatus(deploymentResult.deployment.status),
-            url: deploymentResult.deployment.staticUrl,
-          };
         }
-      } catch {
-        // Fall through to service-based status lookup.
-      }
+      `;
 
-      // Second attempt: treat deploymentId as a service ID (current deploy flow),
-      // supporting both connection and array response shapes.
-      const serviceQueries = [
-        gql`
+      const deploymentResult = await this.client.request<{
+        deployment: { id: string; status: string; staticUrl?: string } | null;
+      }>(deploymentQuery, { id: deploymentId });
+
+      if (deploymentResult.deployment) {
+        return {
+          status: this.normalizeStatus(deploymentResult.deployment.status),
+          url: deploymentResult.deployment.staticUrl,
+        };
+      }
+    } catch {
+      // A bound service ID is not a deployment ID, so use the environment-
+      // scoped service lookup below. Failures from that authoritative lookup
+      // are preserved in the returned observation reason.
+    }
+
+    const environmentId = parseHostingBindings(environment).environmentId;
+    if (!environmentId) {
+      return {
+        status: 'unknown',
+        reason: `Railway deployment observation for service ${deploymentId} requires a bound environmentId.`,
+      };
+    }
+
+    // Second attempt: treat deploymentId as a service ID (current deploy flow),
+    // supporting both connection and array response shapes.
+    const serviceQueries = [
+      {
+        name: 'serviceInstances connection query',
+        query: gql`
           query GetServiceStatusConnection($id: String!) {
             service(id: $id) {
               id
               serviceInstances {
                 edges {
                   node {
+                    environmentId
                     latestDeployment {
                       id
                       status
@@ -2412,11 +2442,15 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
             }
           }
         `,
-        gql`
+      },
+      {
+        name: 'serviceInstances direct query',
+        query: gql`
           query GetServiceStatusDirect($id: String!) {
             service(id: $id) {
               id
               serviceInstances {
+                environmentId
                 latestDeployment {
                   id
                   status
@@ -2426,57 +2460,76 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
             }
           }
         `,
-      ];
+      },
+    ];
+    const queryErrors: string[] = [];
 
-      for (const query of serviceQueries) {
-        try {
-          const serviceResult = await this.client.request<Record<string, unknown>>(query, { id: deploymentId });
-          const latestDeployment = this.extractLatestDeployment(serviceResult);
-          if (!latestDeployment) {
-            continue;
-          }
-          return {
-            status: this.normalizeStatus(latestDeployment.status),
-            url: latestDeployment.staticUrl,
-          };
-        } catch {
-          // Try next query shape.
+    for (const { name, query } of serviceQueries) {
+      try {
+        const serviceResult = await this.client.request<Record<string, unknown>>(query, { id: deploymentId });
+        const selection = this.extractServiceInstance(serviceResult, environmentId);
+        if (!selection.recognized) {
+          queryErrors.push(`${name}: Railway returned an unrecognized serviceInstances shape`);
+          continue;
         }
+        if (!selection.instance) {
+          return {
+            status: 'unknown',
+            reason: `Railway service ${deploymentId} has no instance in bound environment ${environmentId}.`,
+          };
+        }
+        const latestDeployment = selection.instance.latestDeployment;
+        if (!latestDeployment?.status) {
+          return {
+            status: 'unknown',
+            reason: `Railway service ${deploymentId} has no latest deployment in bound environment ${environmentId}.`,
+          };
+        }
+        return {
+          status: this.normalizeStatus(latestDeployment.status),
+          url: latestDeployment.staticUrl,
+        };
+      } catch (error) {
+        queryErrors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
       }
-
-      return { status: 'unknown' };
-    } catch {
-      return { status: 'unknown' };
     }
+
+    return {
+      status: 'unknown',
+      reason: `Railway deployment observation failed for service ${deploymentId} in environment ${environmentId}: ${queryErrors.join('; ')}`,
+    };
   }
 
-  private extractLatestDeployment(payload: Record<string, unknown>): { status: string; staticUrl?: string } | null {
+  private extractServiceInstance(
+    payload: Record<string, unknown>,
+    environmentId: string
+  ): RailwayDeploymentInstanceSelection {
     const service = payload.service as
       | {
           serviceInstances?:
-            | { edges?: Array<{ node?: { latestDeployment?: { status?: string; staticUrl?: string } } }> }
-            | Array<{ latestDeployment?: { status?: string; staticUrl?: string } }>;
+            | { edges?: Array<{ node?: RailwayDeploymentInstance }> }
+            | RailwayDeploymentInstance[];
         }
       | undefined;
     const instances = service?.serviceInstances;
-    if (!instances) return null;
+    if (!instances) return { recognized: false };
 
-    const edges = (instances as { edges?: Array<{ node?: { latestDeployment?: { status?: string; staticUrl?: string } } }> }).edges;
+    const edges = (instances as { edges?: Array<{ node?: RailwayDeploymentInstance }> }).edges;
     if (Array.isArray(edges)) {
-      const deployment = edges[0]?.node?.latestDeployment;
-      if (deployment?.status) {
-        return { status: deployment.status, staticUrl: deployment.staticUrl };
-      }
+      return {
+        recognized: true,
+        instance: edges.find((edge) => edge.node?.environmentId === environmentId)?.node ?? null,
+      };
     }
 
     if (Array.isArray(instances)) {
-      const deployment = instances[0]?.latestDeployment;
-      if (deployment?.status) {
-        return { status: deployment.status, staticUrl: deployment.staticUrl };
-      }
+      return {
+        recognized: true,
+        instance: instances.find((instance) => instance.environmentId === environmentId) ?? null,
+      };
     }
 
-    return null;
+    return { recognized: false };
   }
 
   private normalizeStatus(status: string): string {

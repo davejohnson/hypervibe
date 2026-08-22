@@ -85,6 +85,29 @@ describe('DigitalOceanAdapter', () => {
     vi.unstubAllEnvs();
   });
 
+  it('preserves provider errors in deployment-status observations', async () => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request) => jsonResponse(
+      { message: 'deployment observation denied' },
+      403
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    const result = await adapter.getDeployStatus(makeEnvironment({
+      provider: 'digitalocean',
+      projectId: 'do-app-production',
+      services: { web: { serviceId: 'do-app-production:services:web' } },
+    }), 'deployment-production');
+
+    expect(result).toMatchObject({
+      status: 'unknown',
+      reason: expect.stringMatching(/403.*deployment observation denied/i),
+    });
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).pathname).toBe(
+      '/v2/apps/do-app-production'
+    );
+  });
+
   it('inventories bounded PostgreSQL clusters with account scope', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));

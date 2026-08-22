@@ -210,7 +210,7 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
 
   commands.register(
     'hv_health',
-    'HTTP health-check a deployed service or an explicit URL. Project-backed checks also surface latest deployment failures across every bound environment when provider connections are available; unknown provider observations never count as healthy.',
+    'HTTP health-check a deployed service or an explicit URL. Project-backed checks also surface latest deployment failures for every current desired service across declared environments when provider connections are available; unknown provider observations never count as healthy.',
     {
       project: projectField,
       env: envField,
@@ -318,21 +318,30 @@ export function registerHvObservabilityTools(commands: CommandRegistrar, ctx: Co
         bodyPreviewBytes: 2048,
       });
 
-      const specEnvironmentNames = resolvedProject
-        ? Object.keys(new SpecStore().get(resolvedProject)?.spec.environments ?? {})
-        : [];
+      const projectSpec = resolvedProject
+        ? new SpecStore().get(resolvedProject)?.spec
+        : undefined;
+      const specEnvironmentNames = Object.keys(projectSpec?.environments ?? {});
       const deploymentHealth = resolvedProject
         ? await collectProjectDeploymentHealth({
           project: resolvedProject,
           environments: ctx.repos.environments
             .findByProjectId(resolvedProject.id)
             .filter((environment) => specEnvironmentNames.includes(environment.name)),
+          desiredServiceNamesByEnvironment: Object.fromEntries(
+            Object.entries(projectSpec?.environments ?? {}).map(([environmentName, environmentSpec]) => [
+              environmentName,
+              Object.keys(environmentSpec.services),
+            ])
+          ),
         })
         : undefined;
       const deploymentFailure = deploymentHealth?.failures[0];
       const unknownEnvironments = deploymentHealth?.environments
         .filter((environment) => environment.state === 'unknown')
-        .map((environment) => environment.environment) ?? [];
+        .map((environment) => environment.reason
+          ? `${environment.environment} (${environment.reason})`
+          : environment.environment) ?? [];
 
       return commandSuccess(
         {

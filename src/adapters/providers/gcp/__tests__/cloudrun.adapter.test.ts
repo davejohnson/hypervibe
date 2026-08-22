@@ -9,6 +9,49 @@ describe('CloudRunAdapter', () => {
     vi.restoreAllMocks();
 });
 
+  it('preserves provider errors in deployment-status observations', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      region: 'us-central1',
+      credentials: JSON.stringify({
+        type: 'service_account',
+        project_id: 'gcp-project',
+        private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    const fetchMock = vi.fn(async (_input: string | URL | Request) => Response.json(
+      { error: { message: 'permission denied' } },
+      { status: 403 }
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await adapter.getDeployStatus({
+      id: 'environment-local',
+      projectId: 'project-local',
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        environmentId: 'northamerica-northeast1',
+        services: { web: { serviceId: 'production-web' } },
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }, 'production-web');
+
+    expect(result).toMatchObject({
+      status: 'unknown',
+      reason: expect.stringMatching(/403.*permission denied/i),
+    });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
+      '/locations/northamerica-northeast1/'
+    );
+  });
+
   it('forensically lists a migrated environment without a retained binding or mutations', async () => {
     const adapter = new CloudRunAdapter();
     await adapter.connect({

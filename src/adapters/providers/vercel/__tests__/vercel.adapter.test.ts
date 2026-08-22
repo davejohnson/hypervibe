@@ -178,6 +178,26 @@ describe('VercelAdapter', () => {
     vi.unstubAllEnvs();
   });
 
+  it('preserves provider errors in deployment-status observations', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const identity = identityResponse(url);
+      if (identity) return identity;
+      if (url.pathname === `/v9/projects/${PROJECT_ID}`) {
+        return jsonResponse({ error: { code: 'deployment_observation_denied' } }, 403);
+      }
+      throw new Error(`unexpected request: ${url.pathname}`);
+    }));
+    const adapter = await connectedAdapter();
+
+    const result = await adapter.getDeployStatus(boundEnvironment(), SERVICE_BINDING);
+
+    expect(result).toMatchObject({
+      status: 'unknown',
+      reason: expect.stringMatching(/403.*deployment_observation_denied/i),
+    });
+  });
+
   it('forensically inventories deterministic abandoned projects without mutations', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));

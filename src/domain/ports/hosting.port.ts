@@ -222,7 +222,7 @@ export interface IHostingAdapter {
   getDeployStatus?(
     environment: Environment,
     deploymentId: string
-  ): Promise<{ status: string; url?: string }>;
+  ): Promise<{ status: string; url?: string; reason?: string }>;
 
   /**
    * Run a one-off command in a deployed service environment. Implementations

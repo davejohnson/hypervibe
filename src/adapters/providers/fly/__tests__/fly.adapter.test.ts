@@ -76,6 +76,36 @@ describe('FlyAdapter', () => {
     vi.unstubAllEnvs();
   });
 
+  it('preserves provider errors in deployment-status observations', async () => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request) => json(
+      { error: 'deployment observation denied' },
+      403
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connected();
+    const serviceBinding = formatFlyServiceBinding({
+      organizationSlug: 'hypervibe-test',
+      appId: 'fly-app-production',
+      appName: 'invoice-perfect-production-web',
+      machineId: 'machine-production-web',
+    });
+
+    const result = await adapter.getDeployStatus(environment({
+      provider: 'fly',
+      projectId: 'flyorg:hypervibe-test',
+      environmentId: FLY_ENVIRONMENT_ID,
+      services: { web: { serviceId: serviceBinding } },
+    }), serviceBinding);
+
+    expect(result).toMatchObject({
+      status: 'unknown',
+      reason: expect.stringMatching(/403.*deployment observation denied/i),
+    });
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).pathname).toBe(
+      '/v1/apps/invoice-perfect-production-web'
+    );
+  });
+
   it('keeps organization scope in credentials and placement in desired state', async () => {
     const adapter = new FlyAdapter();
     await expect(adapter.connect({ apiToken: 'token', region: 'yyz' }))
