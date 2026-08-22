@@ -202,6 +202,46 @@ describe('RdsAdapter lifecycle reconciliation', () => {
     return { adapter, rdsSend, ec2Send };
   }
 
+  it('inventories bounded RDS instances with account and region scope', async () => {
+    const { adapter } = await lifecycleAdapter({
+      rdsSend: async (command) => {
+        if (!(command instanceof DescribeDBInstancesCommand)) throw new Error('Unexpected RDS command');
+        return {
+          DBInstances: [
+            {
+              DBInstanceIdentifier: 'customer-primary',
+              DBInstanceArn: 'arn:aws:rds:us-west-2:123456789012:db:customer-primary',
+              Engine: 'postgres',
+              EngineVersion: '17.4',
+              DBInstanceStatus: 'available',
+              AvailabilityZone: 'us-west-2a',
+            },
+            {
+              DBInstanceIdentifier: 'analytics',
+              DBInstanceArn: 'arn:aws:rds:us-west-2:123456789012:db:analytics',
+              Engine: 'postgres',
+              DBInstanceStatus: 'stopped',
+            },
+          ],
+        };
+      },
+    });
+
+    const result = await adapter.inspectDatabaseResources({ resource: 'database', limit: 1 });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      resource: 'database',
+      databases: [{
+        id: 'customer-primary',
+        engine: 'postgres',
+        providerScope: { accountId: '123456789012', region: 'us-west-2' },
+      }],
+      truncated: true,
+      partial: false,
+    });
+  });
+
   it('provisions with the provider resource identity instead of the logical database name', async () => {
     let describeCount = 0;
     const instance = {

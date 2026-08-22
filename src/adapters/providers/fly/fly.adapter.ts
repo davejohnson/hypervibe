@@ -970,10 +970,12 @@ export class FlyAdapter implements IProviderAdapter {
     const databases = matched.slice(0, request.limit).map((cluster) => ({
       id: cluster.id,
       name: cluster.name,
+      engine: 'postgres',
       status: cluster.status ?? 'unknown',
       region: cluster.region ?? null,
       plan: cluster.plan ?? null,
       organizationSlug: this.credentials!.organizationSlug,
+      providerScope: { organizationSlug: this.credentials!.organizationSlug },
     }));
     const temporaryAccessPeers = peers
       .filter((peer) => peer.name.startsWith('hv-db-'))
@@ -996,8 +998,10 @@ export class FlyAdapter implements IProviderAdapter {
       },
       databases,
       temporaryAccessPeers,
-      partial: matched.length > request.limit
-        || peers.filter((peer) => peer.name.startsWith('hv-db-')).length > request.limit,
+      truncated: matched.length > request.limit,
+      temporaryAccessPeersTruncated:
+        peers.filter((peer) => peer.name.startsWith('hv-db-')).length > request.limit,
+      partial: false,
     };
   }
 
@@ -1537,6 +1541,11 @@ providerRegistry.register({
   },
   inspection: {
     resources: ['environment', 'database'],
+    defaultResource: 'environment',
+    selectors: {
+      environment: { mode: 'environment-forensics', required: ['project', 'env'], optional: ['scope', 'limit'], list: true },
+      database: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['organizationSlug'] },
+    },
     inspect: (adapter, request) => (
       adapter as FlyAdapter
     ).inspectEnvironmentResources(request),

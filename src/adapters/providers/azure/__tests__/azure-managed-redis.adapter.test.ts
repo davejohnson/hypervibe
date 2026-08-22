@@ -111,6 +111,30 @@ afterEach(() => {
 });
 
 describe('AzureManagedRedisAdapter', () => {
+  it('inventories bounded caches with their full Azure scope', async () => {
+    installAzureFetch((url, method) => {
+      expect(method).toBe('GET');
+      expect(url.pathname).toContain('/providers/Microsoft.Cache/redisEnterprise');
+      return jsonResponse({ value: [cluster()] });
+    });
+    const adapter = await connected();
+
+    await expect(adapter.inspectCacheResources({ resource: 'cache', limit: 1 }))
+      .resolves.toMatchObject({
+        observation: 'present',
+        resource: 'cache',
+        caches: [{
+          id: CLUSTER_ID,
+          name: CLUSTER_NAME,
+          providerScope: {
+            subscriptionId: SUBSCRIPTION_ID,
+            resourceGroup: RESOURCE_GROUP,
+          },
+        }],
+        partial: false,
+      });
+  });
+
   it('creates an encrypted Redis database and keeps access keys out of receipts', async () => {
     const requests: Array<{
       method: string;

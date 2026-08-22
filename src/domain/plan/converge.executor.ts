@@ -59,7 +59,7 @@ export const planRunDocumentSchema = z.object({
 
   const invalidAction = document.actions.find((action) =>
     action.type !== 'destroy'
-    || action.metadata?.operation !== 'previousHostingDestroy'
+    || !['previousHostingDestroy', 'retainedDatabaseDestroy'].includes(String(action.metadata?.operation ?? ''))
   );
   if (invalidAction) {
     ctx.addIssue({

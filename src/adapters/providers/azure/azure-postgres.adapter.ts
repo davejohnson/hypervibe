@@ -9,7 +9,10 @@ import type {
 } from '../../../domain/ports/database.port.js';
 import type { ObservedDatabase } from '../../../domain/ports/observe.port.js';
 import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from '../../../domain/ports/provider.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 import {
   AzurePostgresCredentialsSchema,
   type AzurePostgresCredentials,
@@ -350,8 +353,42 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
       provider: PROVIDER,
       engine: 'postgres',
       externalId: server.id,
+      providerScope: this.serverScope(server),
       name: server.name,
       status: this.normalizedStatus(server.properties?.state),
+    };
+  }
+
+  async inspectDatabaseResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.client || !this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const servers = request.id
+      ? [await this.client.getServer(request.id)].filter((server): server is AzurePostgresServer => Boolean(server))
+      : (await this.client.listServers()).filter((server) => (
+        !request.name || server.name.toLowerCase() === request.name.toLowerCase()
+      ));
+    const databases = servers.slice(0, request.limit).map((server) => ({
+      id: server.id,
+      name: server.name,
+      engine: 'postgres',
+      status: this.normalizedStatus(server.properties?.state),
+      region: server.location,
+      ...(server.properties?.version ? { databaseVersion: server.properties.version } : {}),
+      providerScope: this.serverScope(server),
+    }));
+    const ambiguous = Boolean(request.name && servers.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : servers.length > 0 ? 'present' : 'absent',
+      resource: 'database',
+      databases,
+      ...(servers.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: servers.length > request.limit,
+      partial: false,
     };
   }
 
@@ -484,6 +521,7 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
       bindings: {
         provider: PROVIDER,
         instanceId: server.id,
+        providerScope: this.serverScope(server),
         connectionString: connectionUrl,
         host: server.properties?.fullyQualifiedDomainName,
         port: 5432,
@@ -510,6 +548,7 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
       bindings: {
         provider: PROVIDER,
         instanceId: resourceId,
+        providerScope: this.resourceScope(resourceId, this.credentials?.location),
         database,
       },
       externalId: resourceId,
@@ -540,6 +579,20 @@ export class AzurePostgresAdapter implements IDatabaseAdapter {
     database: string
   ): string {
     return `postgresql://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:5432/${encodeURIComponent(database)}?sslmode=require`;
+  }
+
+  private serverScope(server: AzurePostgresServer): Record<string, string> {
+    return this.resourceScope(server.id, server.location);
+  }
+
+  private resourceScope(resourceId: string, location?: string): Record<string, string> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const identity = this.client.parseServerId(resourceId);
+    return {
+      subscriptionId: identity.subscriptionId,
+      resourceGroup: identity.resourceGroup,
+      ...(location ? { location } : {}),
+    };
   }
 
   private resourceName(value: string): string {
@@ -615,6 +668,22 @@ providerRegistry.register({
     lifecycle: {
       databaseEngines: ['postgres'],
     },
+  },
+  inspection: {
+    resources: ['database'],
+    defaultResource: 'database',
+    selectors: {
+      database: {
+        mode: 'provider-resource',
+        optional: ['project', 'scope', 'id', 'name', 'limit'],
+        mutuallyExclusive: [['id', 'name']],
+        list: true,
+        scopeKeys: ['subscriptionId', 'resourceGroup'],
+      },
+    },
+    inspect: (adapter, request) => (
+      adapter as AzurePostgresAdapter
+    ).inspectDatabaseResources(request),
   },
   factory: (credentials) => {
     const validated = AzurePostgresCredentialsSchema.parse(credentials);

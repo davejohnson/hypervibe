@@ -587,6 +587,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         action.metadata?.operation === 'dataMigrationDatabasePreviousDestroy'
         || action.metadata?.operation === 'dataMigrationStoragePreviousDestroy'
         || action.metadata?.operation === 'previousHostingDestroy'
+        || action.metadata?.operation === 'retainedDatabaseDestroy'
       )
     )
     .map((action) => action.resource.provider);
@@ -1302,6 +1303,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     if (capability === 'database.destroy') {
       return destroyDatabase(ctx, applyProject, envName, action);
+    }
+    if (capability === 'database.retained.destroy') {
+      return destroyRetainedDatabase(ctx, applyProject, envName, action);
     }
     if (capability === 'hosting.task-service.destroy') {
       return destroyTaskService(applyProject, action);
@@ -2342,6 +2346,132 @@ async function destroyDatabase(
   }
   ctx.repos.components.delete(component.id);
   return { success: true, message: `Destroyed ${action.resource.provider} ${action.resource.name} and removed local component` };
+}
+
+function sortedRecordJson(record: Record<string, unknown>): string {
+  return JSON.stringify(Object.fromEntries(Object.entries(record).sort(([left], [right]) => left.localeCompare(right))));
+}
+
+async function destroyRetainedDatabase(
+  ctx: CommandContext,
+  project: Project,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return { success: false, status: 'blocked', message: 'Retained database environment is missing', error: `No local environment "${envName}".` };
+  }
+  const retained = asRecord(environment.platformBindings.previousDatabase);
+  const metadata = asRecord(action.metadata);
+  const provider = stringField(retained, 'provider');
+  const externalId = stringField(retained, 'externalId');
+  const engine = stringField(retained, 'engine');
+  const providerScope = asRecord(retained?.providerScope);
+  const plannedScope = asRecord(metadata?.providerScope);
+  if (
+    provider !== action.resource.provider
+    || externalId !== stringField(metadata, 'externalId')
+    || engine !== action.resource.name
+    || !providerScope
+    || !plannedScope
+    || Object.keys(providerScope).length === 0
+    || Object.keys(plannedScope).length === 0
+    || Object.values(providerScope).some((value) => typeof value !== 'string' || !value)
+    || Object.values(plannedScope).some((value) => typeof value !== 'string' || !value)
+    || sortedRecordJson(providerScope) !== sortedRecordJson(plannedScope)
+  ) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'Retained database cleanup identity changed after planning',
+      error: 'Re-run hv_plan before deleting any data-bearing provider resource.',
+    };
+  }
+
+  const adapterResult = await adapterFactory.getDatabaseAdapter(provider, project);
+  if (!adapterResult.success || !adapterResult.adapter) {
+    return { success: false, status: 'blocked', message: 'Retained database adapter unavailable', error: adapterResult.error };
+  }
+  const component: Component = {
+    id: `retained:${externalId}`,
+    environmentId: environment.id,
+    type: engine,
+    externalId: externalId!,
+    bindings: {
+      provider,
+      instanceId: externalId,
+      providerScope,
+      ...providerScope,
+      retainedCleanup: true,
+    },
+    createdAt: environment.createdAt,
+    updatedAt: environment.updatedAt,
+  };
+  const clearBinding = (): void => {
+    const nextBindings = { ...environment.platformBindings };
+    delete nextBindings.previousDatabase;
+    ctx.repos.environments.update(environment.id, { platformBindings: nextBindings });
+  };
+
+  try {
+    const before = await adapterResult.adapter.observeDatabase(environment, component);
+    if (before) {
+      if (before.externalId !== externalId) {
+        return {
+          success: false,
+          status: 'blocked',
+          message: 'Retained database observation returned a different identity',
+          error: `Expected ${externalId}, observed ${before.externalId}. No deletion was attempted.`,
+        };
+      }
+      if (!before.providerScope) {
+        return {
+          success: false,
+          status: 'blocked',
+          message: 'Retained database observation omitted its provider scope',
+          error: 'Hypervibe cannot authorize deletion by an unscoped provider id. No deletion was attempted.',
+        };
+      }
+      if (sortedRecordJson(before.providerScope) !== sortedRecordJson(providerScope)) {
+        return {
+          success: false,
+          status: 'blocked',
+          message: 'Retained database provider scope changed',
+          error: 'The live provider scope no longer matches the reviewed binding. No deletion was attempted.',
+        };
+      }
+      const destroyed = await adapterResult.adapter.destroy(component);
+      if (!destroyed.success) {
+        return { success: false, message: destroyed.message, error: destroyed.error };
+      }
+      const after = await adapterResult.adapter.observeDatabase(environment, component);
+      if (after) {
+        return {
+          success: false,
+          status: 'blocked',
+          message: 'Provider acknowledged deletion but the retained database is still present',
+          error: `Database ${externalId} remains observable; its cleanup binding was preserved.`,
+        };
+      }
+    }
+    clearBinding();
+    return {
+      success: true,
+      message: before
+        ? `Deleted retained ${provider} database ${externalId} and cleared its cleanup binding`
+        : `Retained ${provider} database ${externalId} was already absent; cleared its cleanup binding`,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'Retained database cleanup could not prove terminal absence',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    await adapterResult.adapter.disconnect?.();
+  }
 }
 
 async function createDatabase(

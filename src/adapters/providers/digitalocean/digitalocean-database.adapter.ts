@@ -129,12 +129,14 @@ export class DigitalOceanDatabaseAdapter implements IDatabaseAdapter {
         databaseName
       );
       const parsed = this.parseConnectionUrl(connectionUrl);
+      const accountUuid = await this.client.getAccountUuid();
       const component = this.component(
         environment,
         online,
         databaseName,
         connectionUrl,
-        parsed
+        parsed,
+        accountUuid
       );
 
       return {
@@ -289,6 +291,10 @@ export class DigitalOceanDatabaseAdapter implements IDatabaseAdapter {
       provider: 'digitalocean',
       engine: 'postgres',
       externalId: cluster.id,
+      providerScope: {
+        accountUuid: await this.client.getAccountUuid(),
+        ...(cluster.region ? { region: cluster.region } : {}),
+      },
       name: cluster.name,
       status: this.normalizedStatus(cluster.status),
     };
@@ -340,7 +346,8 @@ export class DigitalOceanDatabaseAdapter implements IDatabaseAdapter {
       port: number;
       username: string;
       password: string;
-    }
+    },
+    accountUuid: string
   ): Component {
     return {
       id: '',
@@ -349,6 +356,10 @@ export class DigitalOceanDatabaseAdapter implements IDatabaseAdapter {
       bindings: {
         provider: 'digitalocean',
         instanceId: cluster.id,
+        providerScope: {
+          accountUuid,
+          ...(cluster.region ? { region: cluster.region } : {}),
+        },
         engine: cluster.engine,
         connectionString: connectionUrl,
         host: parsed.host,

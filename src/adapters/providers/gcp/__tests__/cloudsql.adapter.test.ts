@@ -90,6 +90,57 @@ describe('CloudSqlAdapter', () => {
     expect(result.error).toContain('backend unavailable');
   });
 
+  it('lists differently named Cloud SQL instances with scoped provider identities', async () => {
+    const adapter = await connectedAdapter();
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://sqladmin.googleapis.com/v1/projects/gcp-project/instances?maxResults=25' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({
+          items: [{
+            name: 'customer-facing-primary',
+            state: 'RUNNABLE',
+            databaseVersion: 'POSTGRES_15',
+            region: 'northamerica-northeast1',
+            connectionName: 'gcp-project:northamerica-northeast1:customer-facing-primary',
+          }],
+        });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.inspectDatabaseResources({ resource: 'database', limit: 25 });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      resource: 'database',
+      project: { id: 'gcp-project' },
+      databases: [{
+        id: 'customer-facing-primary',
+        engine: 'postgres',
+        status: 'running',
+        providerScope: { projectId: 'gcp-project', region: 'northamerica-northeast1' },
+      }],
+      truncated: false,
+      partial: false,
+    });
+  });
+
+  it('uses exact Cloud SQL identity lookup and preserves non-not-found errors', async () => {
+    const adapter = await connectedAdapter();
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('/instances/legacy-db')) {
+        return new Response('permission denied', { status: 403 });
+      }
+      throw new Error(`Unexpected fetch: GET ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(adapter.inspectDatabaseResources({ resource: 'database', id: 'legacy-db', limit: 1 }))
+      .rejects.toThrow('403 permission denied');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('creates a missing logical database on an existing Cloud SQL instance', async () => {
     const adapter = new CloudSqlAdapter();
     await adapter.connect({
@@ -277,6 +328,7 @@ describe('CloudSqlAdapter', () => {
       provider: 'cloudsql',
       engine: 'postgres',
       externalId: 'production-postgres',
+      providerScope: { projectId: 'gcp-project', region: 'us-central1' },
       name: 'production-postgres',
       status: 'running',
       resilience: {
@@ -649,5 +701,31 @@ describe('CloudSqlAdapter', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('503 backend unavailable');
+  });
+
+  it('refuses retained cleanup when the recorded GCP project scope differs from the connection', async () => {
+    const adapter = await connectedAdapter();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const component = {
+      id: 'retained:legacy-db',
+      environmentId: 'env-1',
+      type: 'postgres',
+      externalId: 'legacy-db',
+      bindings: {
+        provider: 'cloudsql',
+        providerScope: { projectId: 'different-project', region: 'us-central1' },
+        retainedCleanup: true,
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as Component;
+
+    const result = await adapter.destroy(component);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('different-project');
+    expect(result.error).toContain('gcp-project');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

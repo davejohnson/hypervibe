@@ -27,6 +27,35 @@ describe('SupabaseAdapter.provision', () => {
     vi.unstubAllEnvs();
   });
 
+  it('inventories bounded databases with organization and region scope', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/projects') && init?.method === 'GET') {
+        return jsonResponse([
+          { id: 'db-1', name: 'customer-primary', organization_id: 'org-1', region: 'ca-central-1', status: 'ACTIVE_HEALTHY' },
+          { id: 'db-2', name: 'analytics', organization_id: 'org-1', region: 'us-east-1', status: 'PAUSED' },
+          { id: 'other-org', name: 'hidden', organization_id: 'org-2', region: 'us-west-1', status: 'ACTIVE_HEALTHY' },
+        ]);
+      }
+      throw new Error(`unexpected request: ${init?.method} ${url}`);
+    }));
+    const adapter = new SupabaseAdapter();
+    await adapter.connect({ accessToken: 'token', organizationId: 'org-1' });
+
+    const result = await adapter.inspectDatabaseResources({ resource: 'database', limit: 1 });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      resource: 'database',
+      databases: [{
+        id: 'db-1',
+        engine: 'postgres',
+        providerScope: { organizationId: 'org-1', region: 'ca-central-1' },
+      }],
+      truncated: true,
+      partial: false,
+    });
+  });
+
   it('refuses to create a same-name project when one already exists', async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);

@@ -9,7 +9,10 @@ import type {
 } from '../../../domain/ports/database.port.js';
 import type { ObservedDatabase } from '../../../domain/ports/observe.port.js';
 import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 
 export const NeonCredentialsSchema = z.object({
   apiKey: z
@@ -462,8 +465,41 @@ export class NeonAdapter implements IDatabaseAdapter {
       provider: 'neon',
       engine: 'postgres',
       externalId: project.id,
+      providerScope: this.projectScope(project),
       name: project.name,
       status: 'ready',
+    };
+  }
+
+  async inspectDatabaseResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const projects = (request.id
+      ? [await this.getProject(request.id)].filter((project): project is NeonProject => Boolean(project))
+      : await this.listProjects()).filter((project) => (
+      (!this.credentials!.organizationId || project.org_id === this.credentials!.organizationId)
+      && (!request.name || project.name.toLowerCase() === request.name.toLowerCase())
+    ));
+    const databases = projects.slice(0, request.limit).map((project) => ({
+      id: project.id,
+      name: project.name,
+      engine: 'postgres',
+      status: 'ready',
+      ...(project.pg_version ? { databaseVersion: String(project.pg_version) } : {}),
+      ...(project.region_id ? { region: project.region_id } : {}),
+      providerScope: this.projectScope(project),
+    }));
+    const ambiguous = Boolean(request.name && projects.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : projects.length > 0 ? 'present' : 'absent',
+      resource: 'database',
+      databases,
+      ...(projects.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: projects.length > request.limit,
+      partial: false,
     };
   }
 
@@ -494,6 +530,7 @@ export class NeonAdapter implements IDatabaseAdapter {
       bindings: {
         provider: 'neon',
         instanceId: response.project.id,
+        providerScope: this.projectScope(response.project),
         database,
         ...(response.roles?.[0]?.name ? { roleName: response.roles[0].name } : {}),
         ...(response.branch?.id ? { branchId: response.branch.id } : {}),
@@ -535,6 +572,16 @@ export class NeonAdapter implements IDatabaseAdapter {
     } while (cursor);
 
     return projects;
+  }
+
+  private projectScope(project: NeonProject): Record<string, string> {
+    const organizationId = project.org_id ?? this.credentials?.organizationId;
+    const regionId = project.region_id ?? this.credentials?.regionId;
+    return {
+      projectId: project.id,
+      ...(organizationId ? { organizationId } : {}),
+      ...(regionId ? { regionId } : {}),
+    };
   }
 
   private assertCompleteProjectList(response: NeonListProjectsResponse): void {
@@ -769,6 +816,22 @@ providerRegistry.register({
     lifecycle: {
       databaseEngines: ['postgres'],
     },
+  },
+  inspection: {
+    resources: ['database'],
+    defaultResource: 'database',
+    selectors: {
+      database: {
+        mode: 'provider-resource',
+        optional: ['project', 'scope', 'id', 'name', 'limit'],
+        mutuallyExclusive: [['id', 'name']],
+        list: true,
+        scopeKeys: ['projectId'],
+      },
+    },
+    inspect: (adapter, request) => (
+      adapter as NeonAdapter
+    ).inspectDatabaseResources(request),
   },
   factory: (credentials) => {
     const validated = NeonCredentialsSchema.parse(credentials);

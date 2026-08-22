@@ -25,6 +25,7 @@ export interface ImportServiceSummary {
     cronSchedule?: string;
     numReplicas?: number;
     sleepApplication?: boolean;
+    sourceImage?: string;
   }>;
 }
 
@@ -86,7 +87,8 @@ export async function listRailwayImportCandidates(
 
 export async function inspectRailwayProject(
   adapter: RailwayAdapter,
-  railwayProjectId: string
+  railwayProjectId: string,
+  options: { includeEnvVarNames?: boolean } = {}
 ): Promise<RailwayProjectInspection | null> {
   const details = await adapter.getProjectDetails(railwayProjectId);
   if (!details) return null;
@@ -108,9 +110,16 @@ export async function inspectRailwayProject(
         cronSchedule: instance.cronSchedule,
         numReplicas: instance.numReplicas,
         sleepApplication: instance.sleepApplication,
+        ...(instance.source?.image ? { sourceImage: instance.source.image } : {}),
       };
     }
-    const datastoreEngine = classifyRailwayDatastoreEngine(serviceEdge.node.name);
+    const sourceImages = Object.values(instancesByEnv)
+      .map((instance) => instance.sourceImage)
+      .filter((image): image is string => Boolean(image));
+    const datastoreEngine = classifyRailwayDatastoreEngine([
+      serviceEdge.node.name,
+      ...sourceImages,
+    ].join(' '));
     return {
       name: serviceEdge.node.name,
       railwayId: serviceEdge.node.id,
@@ -138,7 +147,7 @@ export async function inspectRailwayProject(
   }));
 
   let envVarNames: string[] = [];
-  if (environments[0] && services[0]) {
+  if (options.includeEnvVarNames !== false && environments[0] && services[0]) {
     const variables = await adapter.getServiceVariables(
       details.id,
       services[0].railwayId,
@@ -165,8 +174,79 @@ export async function inspectRailwayResources(
   adapter: RailwayAdapter,
   request: ProviderInspectionRequest
 ): Promise<Record<string, unknown>> {
-  if (request.resource && !['project', 'environment'].includes(request.resource)) {
-    throw new Error(`Unsupported Railway inspection resource "${request.resource}". Use project or environment.`);
+  if (request.resource && !['project', 'environment', 'database', 'cache', 'storage'].includes(request.resource)) {
+    throw new Error(`Unsupported Railway inspection resource "${request.resource}". Use project, environment, database, cache, or storage.`);
+  }
+  if (
+    request.resource
+    && ['database', 'cache', 'storage'].includes(request.resource)
+    && !request.environment
+  ) {
+    const resource = request.resource as 'database' | 'cache' | 'storage';
+    const projects = await adapter.listProjects();
+    const resources: Array<Record<string, unknown>> = [];
+    for (const project of projects) {
+      const inspection = await inspectRailwayProject(adapter, project.id, { includeEnvVarNames: false });
+      if (!inspection) continue;
+      if (resource === 'storage') {
+        for (const bucket of inspection.storage) {
+          if (request.id && bucket.railwayId !== request.id) continue;
+          if (request.name && bucket.name.toLowerCase() !== request.name.toLowerCase()) continue;
+          resources.push({
+            id: bucket.railwayId,
+            name: bucket.name,
+            kind: 'object',
+            status: 'unknown',
+            environments: bucket.environments,
+            project: { id: project.id, name: project.name },
+            providerScope: { projectId: project.id },
+          });
+        }
+      } else {
+        const expectedEngine = resource === 'database' ? 'postgres' : 'redis';
+        for (const service of inspection.services) {
+          if (service.datastoreEngine !== expectedEngine) continue;
+          if (request.id && service.railwayId !== request.id) continue;
+          if (request.name && service.name.toLowerCase() !== request.name.toLowerCase()) continue;
+          resources.push({
+            id: service.railwayId,
+            name: service.name,
+            engine: expectedEngine,
+            status: 'unknown',
+            resourceKind: 'service',
+            project: { id: project.id, name: project.name },
+            providerScope: { projectId: project.id },
+          });
+        }
+        for (const component of inspection.components) {
+          if (component.type !== expectedEngine) continue;
+          if (request.id && component.railwayId !== request.id) continue;
+          if (request.name && component.name.toLowerCase() !== request.name.toLowerCase()) continue;
+          resources.push({
+            id: component.railwayId,
+            name: component.name,
+            engine: expectedEngine,
+            status: 'unknown',
+            resourceKind: 'legacy-plugin',
+            cleanupSupported: false,
+            project: { id: project.id, name: project.name },
+            providerScope: { projectId: project.id },
+          });
+        }
+      }
+    }
+    const ambiguous = Boolean(request.name && resources.length > 1);
+    const collection = resource === 'database' ? 'databases' : resource === 'cache' ? 'caches' : 'storage';
+    return {
+      observation: ambiguous ? 'ambiguous' : resources.length > 0 ? 'present' : 'absent',
+      resource,
+      [collection]: resources.slice(0, request.limit),
+      ...(resources.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: resources.length > request.limit,
+      partial: false,
+    };
   }
   const bindingProjectId = typeof request.binding?.projectId === 'string'
     ? request.binding.projectId

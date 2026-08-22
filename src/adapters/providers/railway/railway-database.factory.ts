@@ -18,6 +18,14 @@ interface RailwayHostingOps {
     receipt: { success: boolean; message: string; error?: string; data?: Record<string, unknown> };
   }>;
   listPlugins: (projectId: string) => Promise<Array<{ id: string; name: string; type: string }>>;
+  getProjectDetails?: (projectId: string) => Promise<{
+    services: { edges: Array<{ node: {
+      id: string;
+      name: string;
+      serviceInstances?: { edges?: Array<{ node?: { source?: { image?: string | null } | null } }> };
+    } }> };
+    plugins: { edges: Array<{ node: { id: string; name: string } }> };
+  } | null>;
   observe?: (environment: Environment) => Promise<ObservedState>;
   deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
   deleteService?: (serviceId: string) => Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }>;
@@ -65,6 +73,37 @@ export function createRailwayDatabaseAdapter(params: {
     component?: Component | null,
     options?: { resourceName?: string }
   ) => {
+    const componentScope = component?.bindings.providerScope;
+    const retainedProjectId = componentScope && typeof componentScope === 'object' && !Array.isArray(componentScope)
+      && typeof (componentScope as Record<string, unknown>).projectId === 'string'
+      ? (componentScope as Record<string, string>).projectId
+      : undefined;
+    if (component?.externalId && component.bindings.retainedCleanup === true && retainedProjectId) {
+      if (typeof railway.getProjectDetails !== 'function') {
+        throw new Error('Railway hosting adapter does not expose retained database observation.');
+      }
+      const details = await railway.getProjectDetails(retainedProjectId);
+      if (!details) return null;
+      const service = details.services.edges.find((edge) => edge.node.id === component.externalId)?.node;
+      const plugin = details.plugins.edges.find((edge) => edge.node.id === component.externalId)?.node;
+      const candidate = service ?? plugin;
+      if (!candidate) return null;
+      const identityHints = [
+        candidate.name,
+        ...(service?.serviceInstances?.edges ?? []).flatMap((edge) => edge.node?.source?.image ?? []),
+      ].join(' ').toLowerCase();
+      if (!identityHints.includes('postgres')) {
+        throw new Error(`Railway resource ${candidate.id} is not a PostgreSQL database.`);
+      }
+      return {
+        provider: 'railway',
+        engine: 'postgres',
+        externalId: candidate.id,
+        providerScope: { projectId: retainedProjectId },
+        name: candidate.name,
+        status: 'unknown',
+      };
+    }
     if (typeof railway.observe !== 'function') {
       throw new Error('Railway hosting adapter does not expose database observation.');
     }
@@ -239,6 +278,7 @@ export function createRailwayDatabaseAdapter(params: {
             ...(componentResult.component.bindings ?? {}),
             provider: 'railway',
             projectId: projectId ?? undefined,
+            providerScope: { projectId },
             connectionUrl,
             pluginName,
             resourceKind,

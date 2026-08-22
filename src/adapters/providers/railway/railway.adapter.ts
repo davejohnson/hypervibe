@@ -3042,6 +3042,7 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
                         cronSchedule
                         numReplicas
                         sleepApplication
+                        source { image }
                       }
                     }
                   }
@@ -4601,6 +4602,7 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
             provider: 'railway',
             engine: 'redis',
             externalId: node.id,
+            providerScope: { projectId },
             name: node.name,
             status: 'unknown',
           });
@@ -4609,6 +4611,7 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
             provider: 'railway',
             engine,
             externalId: node.id,
+            providerScope: { projectId },
             name: node.name,
             status: 'unknown',
           });
@@ -4761,6 +4764,7 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
           provider: 'railway',
           engine: 'redis',
           externalId: node.id,
+          providerScope: { projectId },
           name: node.name,
           status: 'unknown',
         });
@@ -4769,6 +4773,7 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
           provider: 'railway',
           engine: engine ?? 'unknown',
           externalId: node.id,
+          providerScope: { projectId },
           name: node.name,
           status: 'unknown',
         });
@@ -5053,6 +5058,7 @@ export interface RailwayServiceInstance {
   cronSchedule?: string;
   numReplicas?: number;
   sleepApplication?: boolean;
+  source?: { image?: string | null } | null;
 }
 
 export interface RailwayTcpProxy {
@@ -5210,7 +5216,15 @@ providerRegistry.register({
     return adapter;
   },
   inspection: {
-    resources: ['project', 'environment'],
+    resources: ['project', 'environment', 'database', 'cache', 'storage'],
+    defaultResource: 'project',
+    selectors: {
+      project: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true },
+      environment: { mode: 'environment-forensics', required: ['project', 'env'], optional: ['scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true },
+      database: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'] },
+      cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'] },
+      storage: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'] },
+    },
     inspect: (adapter, request) => inspectRailwayResources(adapter as RailwayAdapter, request),
   },
   adoption: { project: true },

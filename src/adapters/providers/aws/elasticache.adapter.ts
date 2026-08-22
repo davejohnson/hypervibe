@@ -25,7 +25,10 @@ import type {
 } from '../../../domain/ports/cache.port.js';
 import type { ObservedCache } from '../../../domain/ports/observe.port.js';
 import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 
 export const ElastiCacheCredentialsSchema = z.object({
   accessKeyId: z.string().min(1, 'AWS access key ID is required'),
@@ -412,8 +415,41 @@ export class ElastiCacheAdapter implements ICacheAdapter {
       provider: 'elasticache',
       engine: 'redis',
       externalId: cache.ARN,
+      providerScope: this.providerScope(cache),
       name: cache.ServerlessCacheName,
       status: this.normalizedStatus(cache.Status),
+    };
+  }
+
+  async inspectCacheResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    const caches = await this.listServerlessCaches();
+    const matched = caches
+      .filter((cache) => !request.id || cache.ARN === request.id)
+      .filter((cache) => !request.name
+        || cache.ServerlessCacheName?.toLowerCase() === request.name.toLowerCase());
+    const ambiguous = Boolean(request.name && matched.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : matched.length > 0 ? 'present' : 'absent',
+      resource: 'cache',
+      caches: matched.slice(0, request.limit).map((cache) => {
+        if (!cache.ARN || !cache.ServerlessCacheName) {
+          throw new Error('Amazon ElastiCache returned a serverless cache without its durable ARN and name.');
+        }
+        return {
+          id: cache.ARN,
+          name: cache.ServerlessCacheName,
+          engine: cache.Engine ?? 'valkey',
+          status: cache.Status ?? 'unknown',
+          providerScope: this.providerScope(cache),
+        };
+      }),
+      ...(matched.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: matched.length > request.limit,
+      partial: false,
     };
   }
 
@@ -751,6 +787,7 @@ export class ElastiCacheAdapter implements ICacheAdapter {
       bindings: {
         provider: 'elasticache',
         instanceId: cache.ARN!,
+        providerScope: this.providerScope(cache),
         cacheName: cache.ServerlessCacheName,
         connectionString: connectionUrl,
         connectionUrl,
@@ -779,6 +816,7 @@ export class ElastiCacheAdapter implements ICacheAdapter {
       bindings: {
         provider: 'elasticache',
         instanceId: cache.ARN,
+        ...(cache.ARN ? { providerScope: this.providerScope(cache) } : {}),
         cacheName: cache.ServerlessCacheName,
         securityGroupId,
         securityGroupManagedByHypervibe: Boolean(securityGroupId),
@@ -846,6 +884,18 @@ export class ElastiCacheAdapter implements ICacheAdapter {
     return `rediss://${host}:${port}`;
   }
 
+  private providerScope(cache: ServerlessCache): Record<string, string> {
+    const parts = cache.ARN?.split(':') ?? [];
+    const region = parts[3] || this.credentials?.region;
+    const accountId = parts[4];
+    if (!region || !accountId) {
+      throw new Error(
+        `Amazon ElastiCache cache ${cache.ServerlessCacheName ?? '(unnamed)'} returned an invalid durable ARN.`
+      );
+    }
+    return { accountId, region };
+  }
+
   private sanitizeName(value: string): string {
     return value
       .toLowerCase()
@@ -903,5 +953,15 @@ providerRegistry.register({
     const adapter = new ElastiCacheAdapter();
     void adapter.connect(credentials);
     return adapter;
+  },
+  inspection: {
+    resources: ['cache'],
+    defaultResource: 'cache',
+    selectors: {
+      cache: { mode: 'provider-resource', optional: ['id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['accountId', 'region'] },
+    },
+    inspect: (adapter, request) => (
+      adapter as ElastiCacheAdapter
+    ).inspectCacheResources(request),
   },
 });

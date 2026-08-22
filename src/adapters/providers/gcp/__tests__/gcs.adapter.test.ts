@@ -24,6 +24,31 @@ function json(body: unknown, status = 200): Response {
 }
 
 describe('GcsStorageAdapter', () => {
+  it('inventories bounded buckets with durable project scope', async () => {
+    const request = vi.fn(async () => json({ items: [
+      { name: 'customer-documents', location: 'US-CENTRAL1' },
+      { name: 'archive', location: 'US' },
+    ] }));
+    const adapter = new GcsStorageAdapter({
+      fetch: request as typeof fetch,
+      tokenProvider: async () => ({ token: 'token', email: 'service@example.com' }),
+    });
+    await adapter.connect({ projectId: 'cloud-project', credentials: serviceAccount });
+
+    await expect(adapter.inspectStorageResources({ resource: 'storage', limit: 1 }))
+      .resolves.toMatchObject({
+        observation: 'present',
+        resource: 'storage',
+        storage: [{
+          id: 'customer-documents',
+          name: 'customer-documents',
+          providerScope: { projectId: 'cloud-project' },
+        }],
+        truncated: true,
+        partial: false,
+      });
+  });
+
   it('uses Google Application Default Credentials and the configured gcloud project', async () => {
     const tokenProvider = vi.fn(async () => ({ token: 'token', email: 'gcloud-user' }));
     const adapter = new GcsStorageAdapter({

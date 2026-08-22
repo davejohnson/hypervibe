@@ -1280,16 +1280,23 @@ providerRegistry.register({
   },
   inspection: {
     resources: ['repository', 'ref', 'branch'],
+    defaultResource: 'repository',
+    selectors: {
+      repository: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project'] },
+      ref: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
+      branch: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
+    },
     inspect: async (rawAdapter, request) => {
       const adapter = rawAdapter as GitLabAdapter;
       if (!request.scope) throw new Error('GitLab inspection requires scope.');
       const repository = await adapter.observeRepository(request.scope);
-      if (request.resource === 'repository' || !request.resource) return { observation: repository.state, repository: repository.state === 'present' ? repository.value : undefined };
-      if (repository.state !== 'present') return { observation: repository.state, reason: repository.state === 'unknown' ? repository.reason : undefined };
+      const resource = request.resource ?? 'repository';
+      if (resource === 'repository') return { observation: repository.state, resource, repository: repository.state === 'present' ? repository.value : undefined };
+      if (repository.state !== 'present') return { observation: repository.state, resource, reason: repository.state === 'unknown' ? repository.reason : undefined };
       if (request.resource === 'ref' || request.resource === 'branch') {
         const branch = request.id ?? request.name ?? repository.value.defaultBranch;
         const observation = await adapter.observeBranch(repository.value, branch);
-        return { observation: observation.state, branch: observation.state === 'present' ? observation.value : undefined };
+        return { observation: observation.state, resource, branch: observation.state === 'present' ? observation.value : undefined };
       }
       throw new Error(`Unsupported GitLab inspection resource "${request.resource}".`);
     },

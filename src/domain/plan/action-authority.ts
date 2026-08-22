@@ -128,6 +128,7 @@ export type PlanMutationCapability =
   | 'database.replica.destroy'
   | 'database.seed'
   | 'database.destroy'
+  | 'database.retained.destroy'
   | 'database.migrate'
   | 'storage.migrate'
   | 'database.migration-target.destroy'
@@ -206,6 +207,16 @@ function metadataStringArray(action: PlanAction, key: string): string[] | undefi
     return undefined;
   }
   return value;
+}
+
+function metadataStringRecord(action: PlanAction, key: string): Record<string, string> | undefined {
+  const value = action.metadata?.[key];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value);
+  if (entries.length === 0 || entries.some(([, item]) => typeof item !== 'string' || item.length === 0)) {
+    return undefined;
+  }
+  return Object.fromEntries(entries) as Record<string, string>;
 }
 
 function metadataBoolean(action: PlanAction, key: string): boolean | undefined {
@@ -926,6 +937,16 @@ export function resolvePlanActionAuthority(
     }
     if (action.type === 'destroy' && !action.metadata?.operation) {
       return authority(action, 'database.destroy');
+    }
+    if (
+      action.type === 'destroy'
+      && action.metadata?.operation === 'retainedDatabaseDestroy'
+      && metadataString(action, 'externalId')
+      && metadataStringRecord(action, 'providerScope')
+      && action.dataBearing === true
+      && action.requiresConfirm === true
+    ) {
+      return authority(action, 'database.retained.destroy');
     }
     return null;
   }

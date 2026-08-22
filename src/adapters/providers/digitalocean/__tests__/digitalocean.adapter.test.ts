@@ -108,6 +108,55 @@ describe('DigitalOceanAdapter', () => {
     );
   });
 
+  it('inventories bounded PostgreSQL clusters with account scope', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v2/account') return jsonResponse({ account: { uuid: 'do-account-uuid' } });
+      if (url.pathname === '/v2/databases') {
+        return jsonResponse({
+          databases: [
+            { id: 'do-db-1', name: 'customer-primary', engine: 'pg', version: '17', region: 'sfo3', status: 'online' },
+            { id: 'do-db-2', name: 'analytics', engine: 'pg', version: '16', region: 'nyc3', status: 'online' },
+            { id: 'do-cache-1', name: 'cache', engine: 'valkey', region: 'sfo3', status: 'online' },
+          ],
+          links: { pages: {} },
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = await connectedAdapter();
+
+    const result = await adapter.inspectEnvironmentResources({ resource: 'database', limit: 1 });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      resource: 'database',
+      databases: [{
+        id: 'do-db-1',
+        engine: 'postgres',
+        providerScope: { accountUuid: 'do-account-uuid', region: 'sfo3' },
+      }],
+      truncated: true,
+      partial: false,
+    });
+    expect(mutationCalls(fetchMock)).toEqual([]);
+
+    const cacheResult = await adapter.inspectEnvironmentResources({ resource: 'cache', limit: 1 });
+    expect(cacheResult).toMatchObject({
+      observation: 'present',
+      resource: 'cache',
+      caches: [{
+        id: 'do-cache-1',
+        engine: 'valkey',
+        providerScope: { accountUuid: 'do-account-uuid', region: 'sfo3' },
+      }],
+      truncated: false,
+      partial: false,
+    });
+    expect(mutationCalls(fetchMock)).toEqual([]);
+  });
+
   it('forensically inventories a deterministic abandoned app without mutations', async () => {
     const environment = makeEnvironment();
     const app = {

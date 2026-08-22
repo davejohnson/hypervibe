@@ -23,7 +23,10 @@ import type {
   DatabaseReplicaProvisionResult,
   IDatabaseResilienceAdapter,
 } from '../../../domain/ports/database-resilience.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 import { buildDatabaseEnvVarsFromComponent } from '../../../domain/services/database-env.js';
 import { buildCloudSqlRestoreDrillWorkflow } from './cloudsql-restore-drill.workflow.js';
 
@@ -77,6 +80,11 @@ interface CloudSqlOperation {
   error?: {
     errors?: Array<{ code?: string; message?: string }>;
   };
+}
+
+interface CloudSqlInstanceList {
+  items?: CloudSqlInstance[];
+  nextPageToken?: string;
 }
 
 interface ServiceAccountCredentials {
@@ -295,6 +303,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
           provider: 'cloudsql',
           instanceId: instanceName,
           connectionName,
+          providerScope: { projectId, region: options?.region || region },
         },
         externalId: instanceName,
         createdAt: new Date(),
@@ -520,14 +529,17 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     }
 
     try {
+      this.assertComponentScope(component);
       const token = await this.getAccessToken();
       const { projectId } = this.credentials;
-      if (!await this.getInstance(component.externalId)) {
+      const current = await this.getInstance(component.externalId);
+      if (!current) {
         return {
           success: true,
           message: `Cloud SQL instance is already absent: ${component.externalId}`,
         };
       }
+      this.assertComponentScope(component, current);
 
       const response = await fetch(
         `https://sqladmin.googleapis.com/v1/projects/${projectId}/instances/${component.externalId}`,
@@ -628,6 +640,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
         provider: this.name,
         engine: 'postgres',
         externalId: instance.name || component.externalId,
+        providerScope: this.instanceProviderScope(instance),
         name: instance.name || component.externalId,
         status: this.normalizedInstanceStatus(instance.state),
         resilience: await this.observeResilience(instance, component),
@@ -646,6 +659,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
         provider: this.name,
         engine: type,
         externalId: instance.name || instanceName,
+        providerScope: this.instanceProviderScope(instance),
         name: instance.name || instanceName,
         status: this.normalizedInstanceStatus(instance.state),
         resilience: await this.observeResilience(instance, component),
@@ -653,6 +667,49 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     }
 
     return null;
+  }
+
+  async inspectDatabaseResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const selected = request.id ?? request.name;
+    if (selected) {
+      const instance = await this.getInstance(selected);
+      return {
+        observation: instance ? 'present' : 'absent',
+        resource: 'database',
+        project: { id: this.credentials.projectId },
+        databases: instance ? [this.inspectedDatabase(instance)] : [],
+        ...(instance ? {} : { [request.id ? 'id' : 'name']: selected }),
+        truncated: false,
+        partial: false,
+      };
+    }
+
+    const token = await this.getAccessToken();
+    const response = await fetch(
+      `https://sqladmin.googleapis.com/v1/projects/${encodeURIComponent(this.credentials.projectId)}/instances?maxResults=${request.limit}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Cloud SQL instance inventory failed: ${response.status} ${body}`);
+    }
+    const page = await response.json() as CloudSqlInstanceList;
+    const databases = (page.items ?? [])
+      .slice(0, request.limit)
+      .map((instance) => this.inspectedDatabase(instance));
+    return {
+      observation: databases.length > 0 ? 'present' : 'absent',
+      resource: 'database',
+      project: { id: this.credentials.projectId },
+      databases,
+      truncated: Boolean(page.nextPageToken) || (page.items?.length ?? 0) > request.limit,
+      partial: false,
+    };
   }
 
   async configureAvailability(
@@ -901,6 +958,48 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
       ?? (typeof bindings.instanceId === 'string' && bindings.instanceId.length > 0
         ? bindings.instanceId
         : undefined);
+  }
+
+  private instanceProviderScope(instance: CloudSqlInstance): Record<string, string> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    return {
+      projectId: this.credentials.projectId,
+      ...(instance.region ? { region: instance.region } : {}),
+    };
+  }
+
+  private inspectedDatabase(instance: CloudSqlInstance): Record<string, unknown> {
+    return {
+      id: instance.name,
+      name: instance.name,
+      engine: instance.databaseVersion.startsWith('POSTGRES')
+        ? 'postgres'
+        : instance.databaseVersion.toLowerCase(),
+      databaseVersion: instance.databaseVersion,
+      status: this.normalizedInstanceStatus(instance.state),
+      state: instance.state,
+      ...(instance.region ? { region: instance.region } : {}),
+      ...(instance.connectionName ? { connectionName: instance.connectionName } : {}),
+      ...(instance.masterInstanceName ? { primaryId: instance.masterInstanceName } : {}),
+      providerScope: this.instanceProviderScope(instance),
+    };
+  }
+
+  private assertComponentScope(component: Component, instance?: CloudSqlInstance): void {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const rawScope = component.bindings.providerScope;
+    const scope = rawScope && typeof rawScope === 'object' && !Array.isArray(rawScope)
+      ? rawScope as Record<string, unknown>
+      : undefined;
+    if (component.bindings.retainedCleanup === true && typeof scope?.projectId !== 'string') {
+      throw new Error(`Retained Cloud SQL cleanup target ${component.externalId ?? component.id} is missing its durable GCP project scope.`);
+    }
+    if (typeof scope?.projectId === 'string' && scope.projectId !== this.credentials.projectId) {
+      throw new Error(`Cloud SQL binding belongs to project ${scope.projectId}, not connected project ${this.credentials.projectId}.`);
+    }
+    if (instance && typeof scope?.region === 'string' && instance.region !== scope.region) {
+      throw new Error(`Cloud SQL instance ${instance.name} is in region ${instance.region ?? 'unknown'}, not retained region ${scope.region}.`);
+    }
   }
 
   private async observeResilience(
@@ -1273,6 +1372,22 @@ providerRegistry.register({
         buildWorkflow: buildCloudSqlRestoreDrillWorkflow,
       },
     },
+  },
+  inspection: {
+    resources: ['database'],
+    defaultResource: 'database',
+    selectors: {
+      database: {
+        mode: 'provider-resource',
+        optional: ['project', 'scope', 'id', 'name', 'limit'],
+        mutuallyExclusive: [['id', 'name']],
+        list: true,
+        scopeKeys: ['projectId'],
+      },
+    },
+    inspect: (adapter, request) => (
+      adapter as CloudSqlAdapter
+    ).inspectDatabaseResources(request),
   },
   factory: (credentials) => {
     const adapter = new CloudSqlAdapter();

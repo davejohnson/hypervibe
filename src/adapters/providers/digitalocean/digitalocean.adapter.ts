@@ -1304,6 +1304,12 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
     request: ProviderInspectionRequest
   ): Promise<Record<string, unknown>> {
     if (!this.client) throw new Error('Not connected. Call connect() first.');
+    if (request.resource === 'database' && !request.environment) {
+      return this.inspectDatabaseResources(request);
+    }
+    if (request.resource === 'cache' && !request.environment) {
+      return this.inspectCacheResources(request);
+    }
     const environment = environmentForInspection(request);
     const bindings = parseHostingBindings(environment);
     const apps = bindings.projectId
@@ -1342,6 +1348,78 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
       services: services.slice(0, request.limit),
       managedByHypervibe: app.spec.name === this.appName(environment),
       partial: services.length > request.limit,
+    };
+  }
+
+  private async inspectDatabaseResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const [accountUuid, clusters] = await Promise.all([
+      this.client.getAccountUuid(),
+      this.client.listDatabaseClusters(),
+    ]);
+    const matched = clusters
+      .filter((cluster) => ['pg', 'advanced_pg'].includes(cluster.engine))
+      .filter((cluster) => !request.id || cluster.id === request.id)
+      .filter((cluster) => !request.name || cluster.name.toLowerCase() === request.name.toLowerCase());
+    const ambiguous = Boolean(request.name && matched.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : matched.length > 0 ? 'present' : 'absent',
+      resource: 'database',
+      databases: matched.slice(0, request.limit).map((cluster) => ({
+        id: cluster.id,
+        name: cluster.name,
+        engine: 'postgres',
+        ...(cluster.version ? { databaseVersion: cluster.version } : {}),
+        status: cluster.status ?? 'unknown',
+        ...(cluster.region ? { region: cluster.region } : {}),
+        providerScope: {
+          accountUuid,
+          ...(cluster.region ? { region: cluster.region } : {}),
+        },
+      })),
+      ...(matched.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: matched.length > request.limit,
+      partial: false,
+    };
+  }
+
+  private async inspectCacheResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.client) throw new Error('Not connected. Call connect() first.');
+    const [accountUuid, clusters] = await Promise.all([
+      this.client.getAccountUuid(),
+      this.client.listDatabaseClusters(),
+    ]);
+    const matched = clusters
+      .filter((cluster) => ['valkey', 'redis'].includes(cluster.engine))
+      .filter((cluster) => !request.id || cluster.id === request.id)
+      .filter((cluster) => !request.name || cluster.name.toLowerCase() === request.name.toLowerCase());
+    const ambiguous = Boolean(request.name && matched.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : matched.length > 0 ? 'present' : 'absent',
+      resource: 'cache',
+      caches: matched.slice(0, request.limit).map((cluster) => ({
+        id: cluster.id,
+        name: cluster.name,
+        engine: cluster.engine,
+        ...(cluster.version ? { engineVersion: cluster.version } : {}),
+        status: cluster.status ?? 'unknown',
+        ...(cluster.region ? { region: cluster.region } : {}),
+        providerScope: {
+          accountUuid,
+          ...(cluster.region ? { region: cluster.region } : {}),
+        },
+      })),
+      ...(matched.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: matched.length > request.limit,
+      partial: false,
     };
   }
 
@@ -2108,7 +2186,13 @@ providerRegistry.register({
     return adapter;
   },
   inspection: {
-    resources: ['environment'],
+    resources: ['environment', 'database', 'cache'],
+    defaultResource: 'environment',
+    selectors: {
+      environment: { mode: 'environment-forensics', required: ['project', 'env'], optional: ['scope', 'region', 'limit'], list: true },
+      database: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['accountUuid'] },
+      cache: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['accountUuid'] },
+    },
     inspect: (adapter, request) => (
       adapter as DigitalOceanAdapter
     ).inspectEnvironmentResources(request),

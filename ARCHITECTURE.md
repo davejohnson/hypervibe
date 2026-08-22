@@ -299,13 +299,35 @@ inventory, rejects partial, ambiguous, or explicitly unowned results, and
 confirmation-gates recording the exact cleanup target. It never mutates the
 provider; deletion remains a separately reviewed `hv_plan`/`hv_apply` action.
 `hv_plan scope="retained-cleanup"` persists an isolated plan containing only
-those previous-host destroy actions. It observes the current host for the usual
-stale-plan fingerprint, preflights only the current and retained hosting
+those previous-host destroy actions. The same isolated scope may include one
+exact abandoned PostgreSQL identity recorded through
+`hv_import mode="retained-database-cleanup"` after provider-owned inventory.
+That binding carries the durable provider id and provider-native account/project
+and region/organization scope, never connection material. Planning and apply
+re-observe that exact scoped identity; deletion is data-bearing and
+confirmation-gated, and the binding is cleared only after provider-confirmed
+terminal absence. It observes the current host for the usual stale-plan
+fingerprint, preflights only the current and retained hosting or database
 providers, and neither loads deploy env files nor resolves unrelated
 integrations. `hv_apply` derives that isolation from the persisted plan scope,
 not caller input.
 This migration-recovery lifecycle is distinct from the future general
 environment desired-absent lifecycle.
+
+Provider inventory is provider-owned and mandatory. Registering hosting
+lifecycle support fails without bounded provider-owned environment forensics.
+Registering any
+database, cache, or storage lifecycle capability fails unless the same provider
+declares a provider-resource inspector with exact durable-id and exact-name
+selectors, a bounded `limit` selector, mutual exclusion between id and name,
+and non-empty provider-native scope keys. Every returned identity carries those
+non-secret scope values. This registry invariant prevents lifecycle support and
+forensic inventory from drifting apart as providers are added or extended.
+When an environment has no durable database binding, `hv_inspect` may return
+bounded account-level candidates but must label them as unattributed inventory;
+it must not collapse a successful inventory containing differently named
+instances into `null`, select one by convention, or silently adopt it. Exact
+adoption or retained cleanup is a separate explicit `hv_import` decision.
 
 When an attached Railway domain remains provider-unverified, the reviewed
 domain update first calls Railway's non-destructive `customDomainUpdate` for
@@ -428,7 +450,13 @@ project-only `hv_secrets` call lists sources just like `hv_connections`; masked
 hosting-variable reads require an explicit `env`. Only parameterless
 `hv_inspect({})` performs provider discovery. Every bounded inspection requires
 `provider`, and full environment observation additionally requires `project`
-and `env`.
+and `env`. Discovery returns every inspection mode's required, optional,
+one-of, and mutually-exclusive selectors plus whether that mode accepts the
+bounded `limit` selector. Provider-owned resource inspectors declare this
+contract beside their driver. A recoverable selector mismatch returns one safe
+machine-readable corrected call and permits exactly that retry; it does not
+instruct an agent to stop merely for removing a field the selected mode cannot
+consume.
 
 Secrets never cross output boundaries. Secret values may be accepted through `credentialsRef`, encrypted into plans, or stored as verified connections, but they must not be printed in tool output, committed specs, warnings, logs, receipts, or test snapshots.
 

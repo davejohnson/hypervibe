@@ -1594,6 +1594,10 @@ providerRegistry.register({
   },
   inspection: {
     resources: ['environment'],
+    defaultResource: 'environment',
+    selectors: {
+      environment: { mode: 'environment-forensics', required: ['project', 'env'], optional: ['scope', 'region', 'limit'], list: true },
+    },
     inspect: (adapter, request) => (
       adapter as EcsExpressAdapter
     ).inspectEnvironmentResources(request),

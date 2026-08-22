@@ -146,6 +146,8 @@ export interface ObservedCache {
   provider: string;
   engine: 'redis';
   externalId: string;
+  /** Opaque, non-secret provider scope that makes this resource id an instance identity. */
+  providerScope?: Record<string, string>;
   name?: string;
   status: string;
 }
