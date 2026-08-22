@@ -233,6 +233,7 @@ public struct EnvironmentSnapshot: Codable, Equatable, Identifiable, Sendable {
     public let name: String
     public let specRevision: Int
     public let resources: [ResourceSummary]
+    public let deployment: DeploymentConfiguration?
     public let observation: ObservationSummary?
     public let publicEndpointHealth: [PublicEndpointHealth]?
 
@@ -240,14 +241,21 @@ public struct EnvironmentSnapshot: Codable, Equatable, Identifiable, Sendable {
         name: String,
         specRevision: Int,
         resources: [ResourceSummary],
+        deployment: DeploymentConfiguration? = nil,
         observation: ObservationSummary?,
         publicEndpointHealth: [PublicEndpointHealth]? = nil
     ) {
         self.name = name
         self.specRevision = specRevision
         self.resources = resources
+        self.deployment = deployment
         self.observation = observation
         self.publicEndpointHealth = publicEndpointHealth
+    }
+
+    public var isProductionTarget: Bool {
+        name.localizedCaseInsensitiveContains("prod")
+            || deployment?.promoteFrom != nil
     }
 }
 
@@ -366,6 +374,7 @@ public struct ProjectSnapshot: Codable, Equatable, Sendable {
                     name: environment.name,
                     specRevision: environment.specRevision,
                     resources: environment.resources,
+                    deployment: environment.deployment,
                     observation: ObservationSummary(
                         health: .stale,
                         verified: observation.verified,

@@ -57,6 +57,12 @@ struct HypervibeResponseMapperTests {
         #expect(topology.projectName == "invoice-perfect")
         #expect(topology.specRevision == 14)
         #expect(environment.name == "staging")
+        #expect(
+            environment.deployment == DeploymentConfiguration(
+                strategy: "branch"
+            )
+        )
+        #expect(environment.deployment?.usesManagedCI == true)
         #expect(environment.resources.map(\.id) == [
             "service:api",
             "service:worker",

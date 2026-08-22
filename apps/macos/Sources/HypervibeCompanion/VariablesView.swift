@@ -178,7 +178,7 @@ struct VariablesView: View {
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .font(.callout)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(CompanionColor.warning)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
                     .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
@@ -189,7 +189,7 @@ struct VariablesView: View {
                 if let loadError {
                     Label(loadError, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(CompanionColor.warning)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10)
                         .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
@@ -288,7 +288,9 @@ struct VariablesView: View {
             } else {
                 Text(targetUnavailable ? "Unavailable" : "Missing")
                     .font(.callout.weight(.medium))
-                    .foregroundStyle(targetUnavailable ? .orange : .secondary)
+                    .foregroundStyle(
+                        targetUnavailable ? CompanionColor.warning : Color.secondary
+                    )
             }
         }
         .padding(.vertical, 5)

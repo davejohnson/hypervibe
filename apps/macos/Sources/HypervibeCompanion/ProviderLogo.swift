@@ -214,8 +214,8 @@ private extension ConnectionStatus {
 
     var color: Color {
         switch self {
-        case .verified: .green
-        case .pending: .orange
+        case .verified: CompanionColor.success
+        case .pending: CompanionColor.warning
         case .failed: .red
         case .unknown: .secondary
         }

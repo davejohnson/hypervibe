@@ -13,6 +13,11 @@ struct VariableWindowRoute: Codable, Hashable {
     let service: String?
 }
 
+struct ProductionDeploymentWindowRoute: Codable, Hashable {
+    let projectID: UUID
+    let environment: String
+}
+
 @main
 struct HypervibeCompanionApp: App {
     @NSApplicationDelegateAdaptor(CompanionApplicationDelegate.self)
@@ -106,6 +111,32 @@ struct HypervibeCompanionApp: App {
             }
         }
         .defaultSize(width: 680, height: 520)
+
+        WindowGroup(
+            "Deploy to Production",
+            id: "production-deployment",
+            for: ProductionDeploymentWindowRoute.self
+        ) { route in
+            if let route = route.wrappedValue,
+                let project = model.projects.first(where: { $0.id == route.projectID }),
+                let environment = model.snapshots[route.projectID]?.environments.first(where: {
+                    $0.name == route.environment
+                }) {
+                ProductionDeployView(
+                    model: model,
+                    project: project,
+                    environment: environment
+                )
+            } else {
+                ContentUnavailableView(
+                    "Production unavailable",
+                    systemImage: "paperplane",
+                    description: Text("Refresh the project from the Hypervibe menu bar app.")
+                )
+                .frame(width: 560, height: 420)
+            }
+        }
+        .defaultSize(width: 580, height: 460)
 
         Settings {
             CompanionSettingsView(

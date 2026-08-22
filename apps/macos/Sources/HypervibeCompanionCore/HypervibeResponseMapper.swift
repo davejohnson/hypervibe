@@ -8,6 +8,11 @@ enum HypervibeResponseMapper {
         let github: GitHubInfrastructureSummary?
     }
 
+    struct CIDefinitionCatalog: Equatable, Sendable {
+        let definitions: [CIDefinitionSummary]
+        let usesCanonicalBindings: Bool
+    }
+
     static func decodeTopology(_ data: Data) throws -> Topology {
         let envelope: ToolEnvelope<SpecToolData> = try decodeEnvelope(data)
         guard let payload = envelope.data else {
@@ -20,6 +25,15 @@ enum HypervibeResponseMapper {
                     name: name,
                     specRevision: payload.revision,
                     resources: resources(for: environment),
+                    deployment: environment.deploy.map {
+                        DeploymentConfiguration(
+                            strategy: $0.strategy,
+                            trigger: $0.trigger,
+                            branch: $0.branch,
+                            autoDeploy: $0.autoDeploy,
+                            promoteFrom: $0.promoteFrom
+                        )
+                    },
                     observation: nil
                 )
             }
@@ -176,6 +190,52 @@ enum HypervibeResponseMapper {
                 completedAt: parseDate(run.completedAt)
             )
         }
+    }
+
+    static func decodeCIDefinitionCatalog(_ data: Data) throws -> CIDefinitionCatalog {
+        let envelope: ToolEnvelope<CIStatusToolData> = try decodeEnvelope(data)
+        guard let payload = envelope.data else {
+            throw HypervibeClientError.malformedResponse("hv_ci_status returned no data.")
+        }
+        return CIDefinitionCatalog(
+            definitions: payload.definitions.map {
+                CIDefinitionSummary(
+                    id: $0.id,
+                    name: $0.name,
+                    path: $0.path,
+                    state: $0.state
+                )
+            },
+            usesCanonicalBindings: payload.ciProvider != nil
+        )
+    }
+
+    static func decodeDirectDeployment(_ data: Data) throws -> ProductionDeploymentResult {
+        let envelope: ToolEnvelope<DirectDeploymentToolData> = try decodeEnvelope(data)
+        guard let payload = envelope.data else {
+            throw HypervibeClientError.malformedResponse("hv_deploy returned no data.")
+        }
+        return ProductionDeploymentResult(
+            status: payload.status,
+            message: payload.message ?? "Production deployment \(payload.status).",
+            runID: payload.runId,
+            planID: payload.planId,
+            applyRunID: payload.applyRunId,
+            webURL: payload.primaryUrl.flatMap(URL.init(string:))
+        )
+    }
+
+    static func decodeCIDeployment(_ data: Data) throws -> ProductionDeploymentResult {
+        let envelope: ToolEnvelope<CIDeploymentToolData> = try decodeEnvelope(data)
+        guard let payload = envelope.data else {
+            throw HypervibeClientError.malformedResponse("hv_ci_trigger returned no data.")
+        }
+        return ProductionDeploymentResult(
+            status: payload.run?.phase ?? "pending",
+            message: "Production deployment was dispatched. Verify the CI run, then check production health.",
+            runID: payload.run?.id,
+            webURL: payload.run?.webUrl.flatMap(URL.init(string:))
+        )
     }
 
     static func decodeConnections(_ data: Data) throws -> [ConnectionSummary] {
@@ -648,6 +708,9 @@ private struct DesiredEnvironment: Decodable {
     struct Deploy: Decodable {
         let strategy: String
         let trigger: String?
+        let branch: String?
+        let autoDeploy: Bool?
+        let promoteFrom: String?
     }
 
     struct IOS: Decodable {
@@ -734,6 +797,81 @@ private struct RunsToolData: Decodable {
         let status: String
         let startedAt: String?
         let completedAt: String?
+    }
+}
+
+private struct CIStatusToolData: Decodable {
+    let ciProvider: String?
+    let definitions: [Definition]
+
+    private enum CodingKeys: String, CodingKey {
+        case ciProvider, definitions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ciProvider = try container.decodeIfPresent(String.self, forKey: .ciProvider)
+        definitions = try container.decodeIfPresent(
+            [Definition].self,
+            forKey: .definitions
+        ) ?? []
+    }
+
+    struct Definition: Decodable {
+        let id: String
+        let name: String
+        let path: String?
+        let state: String
+
+        private enum CodingKeys: String, CodingKey {
+            case id, name, path, state
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let stringID = try? container.decode(String.self, forKey: .id) {
+                id = stringID
+            } else {
+                id = String(try container.decode(Int.self, forKey: .id))
+            }
+            name = try container.decode(String.self, forKey: .name)
+            path = try container.decodeIfPresent(String.self, forKey: .path)
+            state = try container.decodeIfPresent(String.self, forKey: .state) ?? "unknown"
+        }
+    }
+}
+
+private struct DirectDeploymentToolData: Decodable {
+    let status: String
+    let message: String?
+    let planId: String?
+    let applyRunId: String?
+    let runId: String?
+    let primaryUrl: String?
+}
+
+private struct CIDeploymentToolData: Decodable {
+    let run: Run?
+
+    struct Run: Decodable {
+        let id: String
+        let phase: String?
+        let webUrl: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case id, phase, webUrl
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let stringID = try? container.decode(String.self, forKey: .id) {
+                id = stringID
+            } else {
+                id = String(try container.decode(Int.self, forKey: .id))
+            }
+            phase = try container.decodeIfPresent(String.self, forKey: .phase)
+            webUrl = try container.decodeIfPresent(String.self, forKey: .webUrl)
+        }
     }
 }
 
