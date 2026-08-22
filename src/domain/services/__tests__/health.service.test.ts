@@ -230,7 +230,14 @@ describe('health.service', () => {
       } as never,
     }));
 
-    const result = await collectProjectDeploymentHealth({ project, environments });
+    const result = await collectProjectDeploymentHealth({
+      project,
+      environments,
+      desiredServiceNamesByEnvironment: {
+        production: ['web', 'worker'],
+        staging: ['web'],
+      },
+    });
 
     expect(result.state).toBe('failed');
     expect(result.failures).toEqual([
@@ -244,6 +251,91 @@ describe('health.service', () => {
     }));
     expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('railway', project);
     expect(adapterFactory.getHostingAdapterByName).toHaveBeenCalledWith('vercel', project);
+  });
+
+  it('checks only services in current desired state when bindings contain a renamed service', async () => {
+    const project = new ProjectRepository().create({
+      name: 'stale-service-binding-health',
+      defaultPlatform: 'railway',
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        services: {
+          web: { serviceId: 'production-web' },
+          cron: { serviceId: 'production-cron' },
+          worker: { serviceId: 'production-worker' },
+          'events-worker': { serviceId: 'production-events-worker' },
+        },
+      },
+    });
+    const getDeployStatus = vi.fn(async (_environment: unknown, serviceId: string) => ({
+      status: serviceId === 'production-events-worker' ? 'unknown' : 'deployed',
+    }));
+    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
+      success: true,
+      adapter: { name: 'railway', getDeployStatus } as never,
+    });
+
+    const result = await collectProjectDeploymentHealth({
+      project,
+      environments: [environment],
+      desiredServiceNamesByEnvironment: {
+        production: ['web', 'cron', 'worker'],
+      },
+    });
+
+    expect(result.state).toBe('healthy');
+    expect(result.environments[0]?.services.map((service) => service.service)).toEqual([
+      'cron',
+      'web',
+      'worker',
+    ]);
+    expect(getDeployStatus).not.toHaveBeenCalledWith(environment, 'production-events-worker');
+  });
+
+  it('preserves the provider reason for an unknown deployment observation', async () => {
+    const project = new ProjectRepository().create({
+      name: 'failed-deployment-observation',
+      defaultPlatform: 'railway',
+    });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        services: { web: { serviceId: 'production-web' } },
+      },
+    });
+    vi.spyOn(adapterFactory, 'getHostingAdapterByName').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'railway',
+        getDeployStatus: async () => ({
+          status: 'unknown',
+          reason: 'Railway deployment observation failed: permission denied',
+        }),
+      } as never,
+    });
+
+    const result = await collectProjectDeploymentHealth({
+      project,
+      environments: [environment],
+      desiredServiceNamesByEnvironment: { production: ['web'] },
+    });
+
+    expect(result.environments[0]).toMatchObject({
+      state: 'unknown',
+      reason: 'web: Railway deployment observation failed: permission denied',
+      services: [{
+        service: 'web',
+        state: 'unknown',
+        status: 'unknown',
+        reason: 'Railway deployment observation failed: permission denied',
+      }],
+    });
   });
 
   it('preserves unknown deployment state when a provider cannot be observed', async () => {
@@ -267,6 +359,7 @@ describe('health.service', () => {
     const result = await collectProjectDeploymentHealth({
       project,
       environments: [environment],
+      desiredServiceNamesByEnvironment: { production: ['web'] },
     });
 
     expect(result).toMatchObject({
@@ -276,6 +369,7 @@ describe('health.service', () => {
         environment: 'production',
         provider: 'vercel',
         state: 'unknown',
+        reason: expect.stringContaining('permission denied'),
       }],
     });
   });

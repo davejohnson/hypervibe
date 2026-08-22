@@ -43,6 +43,7 @@ export type ProjectDeploymentHealth = {
       state: DeploymentHealthState;
       status: string;
       url?: string;
+      reason?: string;
     }>;
     reason?: string;
   }>;
@@ -89,44 +90,59 @@ export function classifyDeploymentStatus(status: string): DeploymentHealthState 
 export async function collectProjectDeploymentHealth(params: {
   project: Project;
   environments: Environment[];
+  desiredServiceNamesByEnvironment: Record<string, readonly string[]>;
 }): Promise<ProjectDeploymentHealth> {
   const environmentResults: ProjectDeploymentHealth['environments'] = [];
 
   for (const environment of [...params.environments].sort((a, b) => a.name.localeCompare(b.name))) {
     const bindings = parseHostingBindings(environment);
     const provider = bindings.provider ?? params.project.defaultPlatform ?? 'cloudrun';
-    const boundServices = Object.entries(bindings.services ?? {})
-      .filter(([, binding]) => Boolean(binding.serviceId))
-      .sort(([a], [b]) => a.localeCompare(b));
-    if (boundServices.length === 0) {
+    const desiredServiceNames = [...new Set(
+      params.desiredServiceNamesByEnvironment[environment.name] ?? []
+    )].sort((a, b) => a.localeCompare(b));
+    if (desiredServiceNames.length === 0) {
       environmentResults.push({
         environment: environment.name,
         provider,
         state: 'unknown',
         services: [],
-        reason: 'No bound services are available for deployment observation.',
+        reason: 'No current desired services are available for deployment observation.',
       });
       continue;
     }
 
     const resolved = await adapterFactory.getHostingAdapterByName(provider, params.project);
     if (!resolved.success || !resolved.adapter || typeof resolved.adapter.getDeployStatus !== 'function') {
+      const reason = resolved.success
+        ? `${provider} does not support deployment-status observation.`
+        : `No verified ${provider} hosting connection is available for deployment-status observation.${resolved.error ? ` ${resolved.error}` : ''}`;
       environmentResults.push({
         environment: environment.name,
         provider,
         state: 'unknown',
-        services: [],
-        reason: resolved.success
-          ? `${provider} does not support deployment-status observation.`
-          : `No verified ${provider} hosting connection is available for deployment-status observation.`,
+        services: desiredServiceNames.map((service) => ({
+          service,
+          state: 'unknown',
+          status: 'unknown',
+          reason,
+        })),
+        reason,
       });
       continue;
     }
 
     const services = [] as ProjectDeploymentHealth['environments'][number]['services'];
-    for (const [service, binding] of boundServices) {
-      const serviceId = binding.serviceId;
-      if (!serviceId) continue;
+    for (const service of desiredServiceNames) {
+      const serviceId = bindings.services?.[service]?.serviceId;
+      if (!serviceId) {
+        services.push({
+          service,
+          state: 'unknown',
+          status: 'unknown',
+          reason: `No provider binding is recorded for desired service "${service}".`,
+        });
+        continue;
+      }
       try {
         const observed = await resolved.adapter.getDeployStatus(environment, serviceId);
         const state = classifyDeploymentStatus(observed.status);
@@ -135,21 +151,39 @@ export async function collectProjectDeploymentHealth(params: {
           state,
           status: observed.status,
           ...(observed.url ? { url: observed.url } : {}),
+          ...(observed.reason
+            ? { reason: observed.reason }
+            : state === 'unknown'
+              ? { reason: `${provider} returned deployment status "${observed.status}".` }
+              : {}),
         });
-      } catch {
-        services.push({ service, state: 'unknown', status: 'unknown' });
+      } catch (error) {
+        services.push({
+          service,
+          state: 'unknown',
+          status: 'unknown',
+          reason: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 
+    const state = services.some((service) => service.state === 'failed')
+      ? 'failed'
+      : services.every((service) => service.state === 'healthy')
+        ? 'healthy'
+        : 'unknown';
+    const unknownReason = state === 'unknown'
+      ? services
+        .filter((service) => service.state === 'unknown')
+        .map((service) => `${service.service}: ${service.reason ?? `status ${service.status}`}`)
+        .join('; ')
+      : undefined;
     environmentResults.push({
       environment: environment.name,
       provider,
-      state: services.some((service) => service.state === 'failed')
-        ? 'failed'
-        : services.every((service) => service.state === 'healthy')
-          ? 'healthy'
-          : 'unknown',
+      state,
       services,
+      ...(unknownReason ? { reason: unknownReason } : {}),
     });
   }
 

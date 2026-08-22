@@ -677,27 +677,43 @@ export class DigitalOceanAdapter implements IProviderAdapter, IWorkloadMaintenan
   async getDeployStatus(
     environment: Environment,
     deploymentId: string
-  ): Promise<{ status: string; url?: string }> {
+  ): Promise<{ status: string; url?: string; reason?: string }> {
     if (!this.client) {
-      return { status: 'unknown' };
+      return {
+        status: 'unknown',
+        reason: 'DigitalOcean deployment observation requires a verified connection.',
+      };
     }
     const appId = parseHostingBindings(environment).projectId;
     if (!appId) {
-      return { status: 'unknown' };
+      return {
+        status: 'unknown',
+        reason: 'DigitalOcean deployment observation requires a bound App ID.',
+      };
     }
-    const app = await this.client.getApp(appId);
-    if (!app) {
-      return { status: 'absent' };
+    try {
+      const app = await this.client.getApp(appId);
+      if (!app) {
+        return { status: 'absent' };
+      }
+      const deployment = app.in_progress_deployment?.id === deploymentId
+        ? app.in_progress_deployment
+        : app.active_deployment?.id === deploymentId
+          ? app.active_deployment
+          : app.in_progress_deployment ?? app.active_deployment;
+      return {
+        status: deployment?.phase?.toLowerCase() ?? 'unknown',
+        ...(app.live_url ? { url: app.live_url } : {}),
+        ...(!deployment
+          ? { reason: `DigitalOcean App ${appId} has no active or in-progress deployment.` }
+          : {}),
+      };
+    } catch (error) {
+      return {
+        status: 'unknown',
+        reason: `DigitalOcean deployment observation failed for App ${appId}: ${this.formatError(error)}`,
+      };
     }
-    const deployment = app.in_progress_deployment?.id === deploymentId
-      ? app.in_progress_deployment
-      : app.active_deployment?.id === deploymentId
-        ? app.active_deployment
-        : app.in_progress_deployment ?? app.active_deployment;
-    return {
-      status: deployment?.phase?.toLowerCase() ?? 'unknown',
-      ...(app.live_url ? { url: app.live_url } : {}),
-    };
   }
 
   async observe(environment: Environment): Promise<ObservedState> {

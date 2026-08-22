@@ -690,8 +690,13 @@ export class FlyAdapter implements IProviderAdapter {
   async getDeployStatus(
     environment: Environment,
     serviceId: string
-  ): Promise<{ status: string; url?: string }> {
-    if (!this.client) return { status: 'unknown' };
+  ): Promise<{ status: string; url?: string; reason?: string }> {
+    if (!this.client) {
+      return {
+        status: 'unknown',
+        reason: 'Fly.io deployment observation requires a verified connection.',
+      };
+    }
     try {
       const scope = this.assertOrganizationBinding(
         parseHostingBindings(environment).projectId
@@ -703,10 +708,22 @@ export class FlyAdapter implements IProviderAdapter {
       this.assertAppIdentity(app, binding);
       const machines = await this.client.listMachines(app.name);
       if (!binding.machineId || machines.length !== 1) {
-        return { status: machines.length === 0 ? 'empty' : 'unknown' };
+        return {
+          status: machines.length === 0 ? 'empty' : 'unknown',
+          ...(!binding.machineId
+            ? { reason: `Fly.io service binding ${serviceId} has no durable Machine ID.` }
+            : machines.length > 1
+              ? { reason: `Fly.io App ${app.name} returned ${machines.length} Machines; expected exactly one.` }
+              : {}),
+        };
       }
       const machine = machines.find((candidate) => candidate.id === binding.machineId);
-      if (!machine) return { status: 'unknown' };
+      if (!machine) {
+        return {
+          status: 'unknown',
+          reason: `Fly.io App ${app.name} does not contain bound Machine ${binding.machineId}.`,
+        };
+      }
       const metadata = machine.config?.metadata;
       const ownership = this.ownershipIdentity(environment);
       if (
@@ -714,7 +731,10 @@ export class FlyAdapter implements IProviderAdapter {
         || metadata[META.projectId] !== ownership.projectName
         || metadata[META.environmentId] !== ownership.environmentId
       ) {
-        return { status: 'unknown' };
+        return {
+          status: 'unknown',
+          reason: `Fly.io Machine ${machine.id} ownership metadata does not match environment ${environment.name}.`,
+        };
       }
       const url = this.machineIsPublic(machine)
         ? `https://${app.name}.fly.dev`
@@ -723,8 +743,11 @@ export class FlyAdapter implements IProviderAdapter {
         status: this.machineStatus(machine),
         ...(url ? { url } : {}),
       };
-    } catch {
-      return { status: 'unknown' };
+    } catch (error) {
+      return {
+        status: 'unknown',
+        reason: `Fly.io deployment observation failed for ${serviceId}: ${this.formatError(error)}`,
+      };
     }
   }
 

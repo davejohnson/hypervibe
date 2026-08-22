@@ -1444,41 +1444,128 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
   async getDeployStatus(
     environment: Environment,
     deploymentId: string
-  ): Promise<{ status: string; url?: string }> {
+  ): Promise<{ status: string; url?: string; reason?: string }> {
     if (!this.credentials) {
-      return { status: 'unknown' };
+      return {
+        status: 'unknown',
+        reason: 'Cloud Run deployment observation requires a verified connection.',
+      };
     }
 
     try {
+      const bindings = parseHostingBindings(environment);
+      const boundRegion = bindings.environmentId;
+      if (boundRegion) {
+        this.configureTarget({ region: boundRegion });
+      }
       const token = await this.getAccessToken();
-      const schedulerJob = await this.getCloudSchedulerJob(deploymentId, token);
-      if (schedulerJob) {
+      const targetBinding = Object.values(bindings.services ?? {}).find((binding) => (
+        binding.serviceId === deploymentId
+        || binding.jobName === deploymentId
+        || binding.schedulerJobName === deploymentId
+      ));
+      const resourceType = targetBinding?.resourceType;
+      const workloadKind = targetBinding?.workloadKind;
+      const scheduledTarget = resourceType === 'scheduledJob' || workloadKind === 'cron';
+      const jobTarget = scheduledTarget || resourceType === 'taskJob';
+      const serviceTarget = resourceType === 'service'
+        || workloadKind === 'web'
+        || workloadKind === 'worker';
+
+      const schedulerStatus = (schedulerJob: CloudSchedulerJob, schedulerJobName: string) => {
         const state = (schedulerJob.state ?? '').toUpperCase();
         if (['ENABLED', 'PAUSED'].includes(state)) {
           return { status: 'deployed' };
         }
         if (state === 'UPDATE_FAILED') {
-          return { status: 'failed' };
+          return {
+            status: 'failed',
+            ...(schedulerJob.status?.message ? { reason: schedulerJob.status.message } : {}),
+          };
         }
-        return { status: state ? state.toLowerCase() : 'deploying' };
+        return {
+          status: state ? state.toLowerCase() : 'deploying',
+          reason: state
+            ? `Cloud Scheduler job ${schedulerJobName} is ${state.toLowerCase()}.`
+            : `Cloud Scheduler job ${schedulerJobName} did not report a state.`,
+        };
+      };
+
+      if (scheduledTarget) {
+        const schedulerJobName = targetBinding?.schedulerJobName ?? deploymentId;
+        const schedulerJob = await this.getCloudSchedulerJob(
+          schedulerJobName,
+          token,
+          { preserveErrors: true }
+        );
+        return schedulerJob
+          ? schedulerStatus(schedulerJob, schedulerJobName)
+          : {
+            status: 'unknown',
+            reason: `Cloud Scheduler job ${schedulerJobName} is absent in region ${this.credentials.region}.`,
+          };
       }
 
-      const service = await this.getService(deploymentId);
-      if (!service) {
-        const job = await this.getCloudRunJob(deploymentId, token);
+      if (jobTarget) {
+        const jobName = targetBinding?.jobName ?? deploymentId;
+        const job = await this.getCloudRunJob(
+          jobName,
+          token,
+          { preserveErrors: true }
+        );
         const readiness = this.cloudRunJobReadiness(job);
         if (readiness.ready) {
           return { status: 'deployed' };
         }
-        return { status: readiness.error ? 'failed' : 'unknown' };
+        if (readiness.error) {
+          return { status: 'failed', reason: readiness.error };
+        }
+        return {
+          status: 'unknown',
+          reason: `Cloud Run job ${jobName} is absent in region ${this.credentials.region}.`,
+        };
       }
 
-      const readiness = this.cloudRunServiceReadiness(service);
-      const status = readiness.ready ? 'deployed' : readiness.error ? 'failed' : 'deploying';
+      const service = await this.getService(deploymentId, { preserveErrors: true });
+      if (service) {
+        const readiness = this.cloudRunServiceReadiness(service);
+        const status = readiness.ready ? 'deployed' : readiness.error ? 'failed' : 'deploying';
 
-      return { status, url: service.uri };
-    } catch {
-      return { status: 'unknown' };
+        return {
+          status,
+          url: service.uri,
+          ...(readiness.error ? { reason: readiness.error } : {}),
+        };
+      }
+      if (serviceTarget) {
+        return {
+          status: 'unknown',
+          reason: `Cloud Run service ${deploymentId} is absent in region ${this.credentials.region}.`,
+        };
+      }
+
+      // Legacy bindings may not identify the resource type. Probe remaining
+      // Cloud Run shapes only after the service lookup confirms absence.
+      const job = await this.getCloudRunJob(deploymentId, token, { preserveErrors: true });
+      const jobReadiness = this.cloudRunJobReadiness(job);
+      if (jobReadiness.ready) return { status: 'deployed' };
+      if (jobReadiness.error) return { status: 'failed', reason: jobReadiness.error };
+      const schedulerJob = await this.getCloudSchedulerJob(
+        deploymentId,
+        token,
+        { preserveErrors: true }
+      );
+      if (schedulerJob) return schedulerStatus(schedulerJob, deploymentId);
+
+      return {
+        status: 'unknown',
+        reason: `Cloud Run found no service, job, or scheduler named ${deploymentId} in region ${this.credentials.region}.`,
+      };
+    } catch (error) {
+      return {
+        status: 'unknown',
+        reason: `Cloud Run deployment observation failed for ${deploymentId}: ${this.formatError(error)}`,
+      };
     }
   }
 
@@ -3521,7 +3608,10 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
       .replace(/=+$/, '');
   }
 
-  private async getService(serviceName: string): Promise<CloudRunService | null> {
+  private async getService(
+    serviceName: string,
+    options: { preserveErrors?: boolean } = {}
+  ): Promise<CloudRunService | null> {
     if (!this.credentials) {
       return null;
     }
@@ -3536,12 +3626,20 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
         }
       );
 
+      if (response.status === 404) {
+        return null;
+      }
       if (!response.ok) {
+        if (options.preserveErrors) {
+          const text = (await response.text()).slice(0, 500);
+          throw new Error(`Cloud Run API error: ${response.status}${text ? ` ${text}` : ''}`);
+        }
         return null;
       }
 
       return (await response.json()) as CloudRunService;
-    } catch {
+    } catch (error) {
+      if (options.preserveErrors) throw error;
       return null;
     }
   }
@@ -3681,7 +3779,11 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
     return { created: creatingJob };
   }
 
-  private async getCloudSchedulerJob(schedulerJobName: string, token: string): Promise<CloudSchedulerJob | null> {
+  private async getCloudSchedulerJob(
+    schedulerJobName: string,
+    token: string,
+    options: { preserveErrors?: boolean } = {}
+  ): Promise<CloudSchedulerJob | null> {
     if (!this.credentials) {
       return null;
     }
@@ -3694,7 +3796,14 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
       }
     );
 
+    if (response.status === 404) {
+      return null;
+    }
     if (!response.ok) {
+      if (options.preserveErrors) {
+        const text = (await response.text()).slice(0, 500);
+        throw new Error(`Cloud Scheduler API error: ${response.status}${text ? ` ${text}` : ''}`);
+      }
       return null;
     }
 
@@ -4035,7 +4144,11 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
     throw new Error(`Cloud Run job ${jobName} was not ready before timeout`);
   }
 
-  private async getCloudRunJob(jobName: string, token: string): Promise<CloudRunJob | null> {
+  private async getCloudRunJob(
+    jobName: string,
+    token: string,
+    options: { preserveErrors?: boolean } = {}
+  ): Promise<CloudRunJob | null> {
     if (!this.credentials) {
       return null;
     }
@@ -4048,7 +4161,14 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
       }
     );
 
+    if (response.status === 404) {
+      return null;
+    }
     if (!response.ok) {
+      if (options.preserveErrors) {
+        const text = (await response.text()).slice(0, 500);
+        throw new Error(`Cloud Run Jobs API error: ${response.status}${text ? ` ${text}` : ''}`);
+      }
       return null;
     }
 

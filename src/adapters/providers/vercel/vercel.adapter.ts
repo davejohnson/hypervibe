@@ -628,8 +628,13 @@ export class VercelAdapter implements IProviderAdapter {
   async getDeployStatus(
     environment: Environment,
     serviceId: string
-  ): Promise<{ status: string; url?: string }> {
-    if (!this.client) return { status: 'unknown' };
+  ): Promise<{ status: string; url?: string; reason?: string }> {
+    if (!this.client) {
+      return {
+        status: 'unknown',
+        reason: 'Vercel deployment observation requires a verified connection.',
+      };
+    }
     try {
       const scope = await this.assertScopeBinding(
         parseHostingBindings(environment).projectId
@@ -648,8 +653,11 @@ export class VercelAdapter implements IProviderAdapter {
         status: this.deployStatus(deployment),
         ...(url ? { url } : {}),
       };
-    } catch {
-      return { status: 'unknown' };
+    } catch (error) {
+      return {
+        status: 'unknown',
+        reason: `Vercel deployment observation failed for ${serviceId}: ${this.formatError(error)}`,
+      };
     }
   }
 
