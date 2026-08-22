@@ -11,7 +11,10 @@ import type {
   ProvisionableType,
 } from '../../../domain/ports/database.port.js';
 import type { ObservedDatabase } from '../../../domain/ports/observe.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 
 // Credentials schema for self-registration
 export const SupabaseCredentialsSchema = z.object({
@@ -178,6 +181,7 @@ export class SupabaseAdapter implements IDatabaseAdapter {
           database,
           provider: 'supabase',
           instanceId: project.id,
+          providerScope: this.projectScope(project),
           pooledUrl,
         },
         externalId: project.id,
@@ -385,8 +389,40 @@ export class SupabaseAdapter implements IDatabaseAdapter {
       provider: 'supabase',
       engine: 'postgres',
       externalId: project.id,
+      providerScope: this.projectScope(project),
       name: project.name,
       status: project.status.toLowerCase(),
+    };
+  }
+
+  async inspectDatabaseResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const projects = (request.id
+      ? [await this.getProject(request.id)].filter((project): project is SupabaseProject => Boolean(project))
+      : await this.listProjects()).filter((project) => (
+      (!this.credentials!.organizationId || project.organization_id === this.credentials!.organizationId)
+      && (!request.name || project.name === request.name)
+    ));
+    const databases = projects.slice(0, request.limit).map((project) => ({
+      id: project.id,
+      name: project.name,
+      engine: 'postgres',
+      status: project.status.toLowerCase(),
+      region: project.region,
+      providerScope: this.projectScope(project),
+    }));
+    const ambiguous = Boolean(request.name && projects.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : projects.length > 0 ? 'present' : 'absent',
+      resource: 'database',
+      databases,
+      ...(projects.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: projects.length > request.limit,
+      partial: false,
     };
   }
 
@@ -414,6 +450,13 @@ export class SupabaseAdapter implements IDatabaseAdapter {
       project.organization_id === organizationId
       && project.name.toLowerCase() === normalized
     );
+  }
+
+  private projectScope(project: SupabaseProject): Record<string, string> {
+    return {
+      organizationId: project.organization_id,
+      region: project.region,
+    };
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -525,6 +568,22 @@ providerRegistry.register({
     lifecycle: {
       databaseEngines: ['postgres'],
     },
+  },
+  inspection: {
+    resources: ['database'],
+    defaultResource: 'database',
+    selectors: {
+      database: {
+        mode: 'provider-resource',
+        optional: ['project', 'scope', 'id', 'name', 'limit'],
+        mutuallyExclusive: [['id', 'name']],
+        list: true,
+        scopeKeys: ['organizationId'],
+      },
+    },
+    inspect: (adapter, request) => (
+      adapter as SupabaseAdapter
+    ).inspectDatabaseResources(request),
   },
   factory: (credentials) => {
     const adapter = new SupabaseAdapter();

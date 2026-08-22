@@ -12,7 +12,10 @@ import type {
   StorageObjectClient,
   StorageObjectPayload,
 } from '../../../domain/ports/storage.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 
 const STORAGE_API = 'https://storage.googleapis.com';
 const ENVIRONMENT_LABEL = 'hypervibe_environment_id';
@@ -346,6 +349,53 @@ export class GcsStorageAdapter implements IStorageAdapter {
     return observed.sort((left, right) => left.name.localeCompare(right.name));
   }
 
+  async inspectStorageResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    const projectId = await this.connectedProjectId();
+    let buckets: GcsBucket[];
+    if (request.id) {
+      const bucket = await this.getBucket(request.id);
+      buckets = bucket ? [bucket] : [];
+    } else {
+      buckets = [];
+      let pageToken: string | undefined;
+      do {
+        const params = new URLSearchParams({ project: projectId });
+        if (pageToken) params.set('pageToken', pageToken);
+        const response = await this.authorized(`${STORAGE_API}/storage/v1/b?${params}`);
+        if (!response.ok) throw await responseError(response);
+        const body = await response.json() as { items?: GcsBucket[]; nextPageToken?: string };
+        buckets.push(...(body.items ?? []));
+        pageToken = body.nextPageToken;
+      } while (pageToken);
+    }
+    const matched = buckets
+      .filter((bucket) => typeof bucket.name === 'string')
+      .filter((bucket) => !request.name || bucket.name?.toLowerCase() === request.name.toLowerCase());
+    const ambiguous = Boolean(request.name && matched.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : matched.length > 0 ? 'present' : 'absent',
+      resource: 'storage',
+      storage: matched.slice(0, request.limit).map((bucket) => ({
+        id: bucket.name!,
+        name: bucket.name!,
+        kind: 'object',
+        status: 'ready',
+        ...(bucket.location ? { region: bucket.location.toLowerCase() } : {}),
+        ...(bucket.labels?.[STORAGE_NAME_LABEL]
+          ? { logicalName: bucket.labels[STORAGE_NAME_LABEL] }
+          : {}),
+        providerScope: { projectId },
+      })),
+      ...(matched.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: matched.length > request.limit,
+      partial: false,
+    };
+  }
+
   async ensureBucket(
     environment: Environment,
     context: StorageContext,
@@ -534,5 +584,15 @@ providerRegistry.register({
     const adapter = new GcsStorageAdapter();
     void adapter.connect(credentials);
     return adapter;
+  },
+  inspection: {
+    resources: ['storage'],
+    defaultResource: 'storage',
+    selectors: {
+      storage: { mode: 'provider-resource', optional: ['id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId'] },
+    },
+    inspect: (adapter, request) => (
+      adapter as GcsStorageAdapter
+    ).inspectStorageResources(request),
   },
 });

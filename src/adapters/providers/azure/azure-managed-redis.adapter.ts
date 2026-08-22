@@ -8,7 +8,10 @@ import type {
 } from '../../../domain/ports/cache.port.js';
 import type { ObservedCache } from '../../../domain/ports/observe.port.js';
 import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 import {
   AzureManagedRedisCredentialsSchema,
   type AzureManagedRedisCredentials,
@@ -139,6 +142,7 @@ export class AzureManagedRedisAdapter implements ICacheAdapter {
         bindings: {
           provider: PROVIDER,
           instanceId: ready.id,
+          providerScope: this.providerScope(ready),
           connectionString: connectionUrl,
           connectionUrl,
           host,
@@ -282,11 +286,47 @@ export class AzureManagedRedisAdapter implements ICacheAdapter {
       provider: PROVIDER,
       engine: 'redis',
       externalId: cluster.id,
+      providerScope: this.providerScope(cluster),
       name: cluster.name,
       status: this.normalizedStatus(
         cluster.properties?.resourceState
           ?? cluster.properties?.provisioningState
       ),
+    };
+  }
+
+  async inspectCacheResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const candidates = request.id
+      ? [await this.client.getCluster(request.id)].filter(
+        (cluster): cluster is AzureManagedRedisCluster => Boolean(cluster)
+      )
+      : await this.client.listClusters();
+    const matched = candidates.filter((cluster) => !request.name
+      || cluster.name.toLowerCase() === request.name.toLowerCase());
+    const ambiguous = Boolean(request.name && matched.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : matched.length > 0 ? 'present' : 'absent',
+      resource: 'cache',
+      caches: matched.slice(0, request.limit).map((cluster) => ({
+        id: cluster.id,
+        name: cluster.name,
+        engine: 'redis',
+        status: cluster.properties?.resourceState
+          ?? cluster.properties?.provisioningState
+          ?? 'unknown',
+        region: cluster.location,
+        providerScope: this.providerScope(cluster),
+      })),
+      ...(matched.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: matched.length > request.limit,
+      partial: false,
     };
   }
 
@@ -393,6 +433,7 @@ export class AzureManagedRedisAdapter implements ICacheAdapter {
       bindings: {
         provider: PROVIDER,
         instanceId: resourceId,
+        providerScope: this.providerScope(resourceId),
       },
       externalId: resourceId,
       createdAt: new Date(),
@@ -424,6 +465,21 @@ export class AzureManagedRedisAdapter implements ICacheAdapter {
       .slice(0, 60)
       .replace(/-$/g, '');
     return normalized || 'hypervibe-redis';
+  }
+
+  private providerScope(
+    cluster: AzureManagedRedisCluster | string
+  ): Record<string, string> {
+    if (!this.client) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const identity = this.client.parseClusterId(
+      typeof cluster === 'string' ? cluster : cluster.id
+    );
+    return {
+      subscriptionId: identity.subscriptionId,
+      resourceGroup: identity.resourceGroup,
+    };
   }
 
   private tags(environment: Environment): Record<string, string> {
@@ -496,5 +552,15 @@ providerRegistry.register({
     const adapter = new AzureManagedRedisAdapter();
     void adapter.connect(validated);
     return adapter;
+  },
+  inspection: {
+    resources: ['cache'],
+    defaultResource: 'cache',
+    selectors: {
+      cache: { mode: 'provider-resource', optional: ['id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['subscriptionId', 'resourceGroup'] },
+    },
+    inspect: (adapter, request) => (
+      adapter as AzureManagedRedisAdapter
+    ).inspectCacheResources(request),
   },
 });

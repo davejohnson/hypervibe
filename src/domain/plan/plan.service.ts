@@ -15,6 +15,7 @@ import {
 } from '../spec/spec.schema.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
+import type { Component } from '../entities/component.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import { parseHostingBindings } from '../ports/hosting.port.js';
@@ -874,36 +875,16 @@ export class PlanService {
     const boundHostingProvider = local.bindings?.provider;
     const previousHosting = local.bindings?.previousHosting;
     const previousProvider = previousHosting?.provider;
-    if (!previousProvider || previousProvider === environmentSpec.hosting.provider) {
+    const previousDatabase = local.bindings?.previousDatabase;
+    const previousDatabaseProvider = previousDatabase?.provider;
+    if ((!previousProvider || previousProvider === environmentSpec.hosting.provider) && !previousDatabaseProvider) {
       return {
-        error: `Environment "${environmentName}" has no abandoned hosting provider retained for cleanup.`,
+        error: `Environment "${environmentName}" has no abandoned hosting provider retained for cleanup and no retained database target.`,
       };
     }
-    if (boundHostingProvider && boundHostingProvider !== environmentSpec.hosting.provider) {
+    if (previousProvider && boundHostingProvider && boundHostingProvider !== environmentSpec.hosting.provider) {
       return {
         error: `The current hosting binding is ${boundHostingProvider}, but the spec selects ${environmentSpec.hosting.provider}. Reconcile that provider switch with a full plan before cleaning up ${previousProvider}.`,
-      };
-    }
-
-    const teardownBoundary = providerRegistry.getMetadata(previousProvider)
-      ?.lifecycle?.hosting?.teardownBoundary;
-    if (!teardownBoundary) {
-      return {
-        error: `Cannot plan cleanup for retained hosting provider ${previousProvider} because it does not declare a complete teardown boundary. Hypervibe will not guess which provider resource is safe to delete.`,
-      };
-    }
-    const retainedServices = Object.entries(previousHosting.services ?? {});
-    const incompleteServices = retainedServices
-      .filter(([, binding]) => !binding?.serviceId && !binding?.jobName)
-      .map(([name]) => name);
-    if (
-      (teardownBoundary === 'services' && retainedServices.length === 0)
-      || ((teardownBoundary === 'services' || teardownBoundary === 'project') && incompleteServices.length > 0)
-      || ((teardownBoundary === 'environment' || teardownBoundary === 'project') && !previousHosting.projectId)
-      || (teardownBoundary === 'environment' && !previousHosting.environmentId)
-    ) {
-      return {
-        error: `The retained ${previousProvider} binding is incomplete for its ${teardownBoundary} cleanup boundary. Re-import the exact provider identity before planning deletion${incompleteServices.length > 0 ? ` (services missing an id: ${incompleteServices.join(', ')})` : ''}.`,
       };
     }
 
@@ -913,19 +894,124 @@ export class PlanService {
       environmentSpec,
       { hostingOnly: true }
     );
-    const cleanup = diffRetainedHostingCleanup({
-      envName: environmentName,
-      currentProvider: environmentSpec.hosting.provider,
-      previousHosting,
-      teardownBoundary,
-    });
-    if (cleanup.actions.length === 0) {
-      return {
-        error: `The retained ${previousProvider} binding contains no complete ${teardownBoundary} cleanup target. Re-import the exact retained cleanup identity before planning deletion.`,
-      };
+    const actions: PlanAction[] = [];
+    const cleanupWarnings: string[] = [];
+    if (previousProvider && previousHosting && previousProvider !== environmentSpec.hosting.provider) {
+      const teardownBoundary = providerRegistry.getMetadata(previousProvider)
+        ?.lifecycle?.hosting?.teardownBoundary;
+      if (!teardownBoundary) {
+        return {
+          error: `Cannot plan cleanup for retained hosting provider ${previousProvider} because it does not declare a complete teardown boundary. Hypervibe will not guess which provider resource is safe to delete.`,
+        };
+      }
+      const retainedServices = Object.entries(previousHosting.services ?? {});
+      const incompleteServices = retainedServices
+        .filter(([, binding]) => !binding?.serviceId && !binding?.jobName)
+        .map(([name]) => name);
+      if (
+        (teardownBoundary === 'services' && retainedServices.length === 0)
+        || ((teardownBoundary === 'services' || teardownBoundary === 'project') && incompleteServices.length > 0)
+        || ((teardownBoundary === 'environment' || teardownBoundary === 'project') && !previousHosting.projectId)
+        || (teardownBoundary === 'environment' && !previousHosting.environmentId)
+      ) {
+        return {
+          error: `The retained ${previousProvider} binding is incomplete for its ${teardownBoundary} cleanup boundary. Re-import the exact provider identity before planning deletion${incompleteServices.length > 0 ? ` (services missing an id: ${incompleteServices.join(', ')})` : ''}.`,
+        };
+      }
+      const cleanup = diffRetainedHostingCleanup({
+        envName: environmentName,
+        currentProvider: environmentSpec.hosting.provider,
+        previousHosting,
+        teardownBoundary,
+      });
+      if (cleanup.actions.length === 0) {
+        return {
+          error: `The retained ${previousProvider} binding contains no complete ${teardownBoundary} cleanup target. Re-import the exact retained cleanup identity before planning deletion.`,
+        };
+      }
+      actions.push(...cleanup.actions);
+      cleanupWarnings.push(...cleanup.warnings);
+    }
+
+    let retainedDatabaseVerified = true;
+    if (previousDatabaseProvider) {
+      const externalId = previousDatabase?.externalId;
+      const engine = previousDatabase?.engine;
+      const providerScope = previousDatabase?.providerScope;
+      if (
+        !externalId
+        || engine !== 'postgres'
+        || !providerScope
+        || Object.keys(providerScope).length === 0
+        || Object.values(providerScope).some((value) => typeof value !== 'string' || !value)
+      ) {
+        return {
+          error: `The retained ${previousDatabaseProvider} database binding is incomplete. Re-import one exact database id and provider scope before planning deletion.`,
+        };
+      }
+      let blockedReason: string | undefined;
+      const adapterResult = await adapterFactory.getDatabaseAdapter(previousDatabaseProvider, projectForPlan);
+      if (!adapterResult.success || !adapterResult.adapter) {
+        retainedDatabaseVerified = false;
+        blockedReason = 'retained_database_connection_unavailable';
+        cleanupWarnings.push(`Retained database ${externalId} could not be re-observed: ${adapterResult.error ?? 'database adapter unavailable'}.`);
+      } else {
+        const retainedComponent: Component = {
+          id: `retained:${externalId}`,
+          environmentId: environment.id,
+          type: engine,
+          externalId,
+          bindings: {
+            provider: previousDatabaseProvider,
+            instanceId: externalId,
+            providerScope,
+            ...providerScope,
+            retainedCleanup: true,
+          },
+          createdAt: environment.createdAt,
+          updatedAt: environment.updatedAt,
+        };
+        try {
+          const retainedObserved = await adapterResult.adapter.observeDatabase(environment, retainedComponent);
+          if (retainedObserved && retainedObserved.externalId !== externalId) {
+            throw new Error(`provider returned ${retainedObserved.externalId} for retained id ${externalId}`);
+          }
+          if (retainedObserved && !retainedObserved.providerScope) {
+            throw new Error(`provider omitted the durable scope for retained id ${externalId}`);
+          }
+          if (retainedObserved?.providerScope) {
+            const expectedScope = JSON.stringify(Object.entries(providerScope).sort());
+            const observedScope = JSON.stringify(Object.entries(retainedObserved.providerScope).sort());
+            if (expectedScope !== observedScope) {
+              throw new Error(`provider scope changed from ${expectedScope} to ${observedScope}`);
+            }
+          }
+        } catch (error) {
+          retainedDatabaseVerified = false;
+          blockedReason = 'retained_database_observation_unknown';
+          cleanupWarnings.push(`Retained database ${externalId} observation is unknown: ${error instanceof Error ? error.message : String(error)}.`);
+        } finally {
+          await adapterResult.adapter.disconnect?.();
+        }
+      }
+      actions.push({
+        id: `database:${previousDatabaseProvider}:retained-destroy`,
+        type: 'destroy',
+        resource: { kind: 'database', name: engine, provider: previousDatabaseProvider },
+        verified: retainedDatabaseVerified,
+        reason: `Delete exact retained ${previousDatabaseProvider} database ${externalId} in its recorded provider scope`,
+        dataBearing: true,
+        requiresConfirm: true,
+        metadata: {
+          operation: 'retainedDatabaseDestroy',
+          externalId,
+          providerScope,
+          ...(blockedReason ? { blockedReason } : {}),
+        },
+      });
     }
     try {
-      orderActions(cleanup.actions);
+      orderActions(actions);
     } catch (error) {
       return {
         error: `Hypervibe generated an invalid retained-cleanup action graph. No plan was saved or provider mutation authorized. ${error instanceof Error ? error.message : String(error)}`,
@@ -939,7 +1025,7 @@ export class PlanService {
       ...specWarnings,
       ...observeWarnings,
       ...(observed?.warnings ?? []),
-      ...cleanup.warnings,
+      ...cleanupWarnings,
     ]));
     const document: PlanRunDocument = {
       kind: 'hv_plan',
@@ -947,7 +1033,7 @@ export class PlanService {
       environmentName,
       specRevision: specResult.revision,
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
-      actions: cleanup.actions,
+      actions,
       unmanaged: [],
       warnings,
     };
@@ -965,15 +1051,16 @@ export class PlanService {
       specRevision: specResult.revision,
       specSource: specResult.source ?? { kind: 'local' },
       environmentName,
-      verified: observed !== null && !observed.partial,
+      verified: observed !== null && !observed.partial && retainedDatabaseVerified,
       observed,
-      actions: cleanup.actions,
+      actions,
       unmanaged: [],
       warnings,
       inputRequired: [],
       blocked: this.providerPreflight([
         environmentSpec.hosting.provider,
-        previousProvider,
+        ...(previousProvider ? [previousProvider] : []),
+        ...(previousDatabaseProvider ? [previousDatabaseProvider] : []),
       ]),
     };
   }
@@ -998,7 +1085,7 @@ export class PlanService {
       ].filter((name): name is string => Boolean(name));
       if (incompatibleInputs.length > 0) {
         return {
-          error: `scope="retained-cleanup" does not accept deploy inputs: ${incompatibleInputs.join(', ')}. Remove them so the plan can authorize only retained previous-host teardown actions.`,
+          error: `scope="retained-cleanup" does not accept deploy inputs: ${incompatibleInputs.join(', ')}. Remove them so the plan can authorize only retained infrastructure teardown actions.`,
         };
       }
     }
@@ -2000,6 +2087,7 @@ export class PlanService {
           action.metadata?.operation === 'dataMigrationDatabasePreviousDestroy'
           || action.metadata?.operation === 'dataMigrationStoragePreviousDestroy'
           || action.metadata?.operation === 'previousHostingDestroy'
+          || action.metadata?.operation === 'retainedDatabaseDestroy'
         )
       )
       .map((action) => action.resource.provider);

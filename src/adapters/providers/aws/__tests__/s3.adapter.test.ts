@@ -30,6 +30,32 @@ function environment(): Environment {
 }
 
 describe('S3StorageAdapter', () => {
+  it('inventories bounded buckets with durable account scope', async () => {
+    const s3 = {
+      send: vi.fn(async (command: unknown) => {
+        expect(command).toBeInstanceOf(ListBucketsCommand);
+        return { Buckets: [{ Name: 'customer-documents', BucketRegion: 'us-west-2' }, { Name: 'archive' }] };
+      }),
+      destroy: vi.fn(),
+    };
+    const sts = { send: vi.fn(async () => ({ Account: '123456789012' })), destroy: vi.fn() };
+    const adapter = new S3StorageAdapter(() => ({ s3, sts }));
+    await adapter.connect(credentials);
+
+    await expect(adapter.inspectStorageResources({ resource: 'storage', limit: 1 }))
+      .resolves.toMatchObject({
+        observation: 'present',
+        resource: 'storage',
+        storage: [{
+          id: 'customer-documents',
+          name: 'customer-documents',
+          providerScope: { accountId: '123456789012' },
+        }],
+        truncated: true,
+        partial: false,
+      });
+  });
+
   it('uses the native AWS credential chain without requiring access keys in Hypervibe', async () => {
     const seen: unknown[] = [];
     const s3 = { send: vi.fn(), destroy: vi.fn() };

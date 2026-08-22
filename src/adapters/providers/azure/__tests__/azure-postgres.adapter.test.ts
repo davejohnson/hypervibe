@@ -96,6 +96,43 @@ afterEach(() => {
 });
 
 describe('AzurePostgresAdapter', () => {
+  it('inventories bounded servers with subscription and resource-group scope', async () => {
+    installAzureFetch((url, method) => {
+      if (method === 'GET' && url.pathname.endsWith('/flexibleServers')) {
+        return jsonResponse({
+          value: [
+            server(),
+            server({
+              id: SERVER_ID.replace(SERVER_NAME, 'analytics'),
+              name: 'analytics',
+              location: 'eastus',
+            }),
+          ],
+        });
+      }
+      throw new Error(`unexpected request: ${method} ${url.pathname}`);
+    });
+    const adapter = await connected();
+
+    const result = await adapter.inspectDatabaseResources({ resource: 'database', limit: 1 });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      resource: 'database',
+      databases: [{
+        id: SERVER_ID,
+        engine: 'postgres',
+        providerScope: {
+          subscriptionId: SUBSCRIPTION_ID,
+          resourceGroup: RESOURCE_GROUP,
+          location: 'canadacentral',
+        },
+      }],
+      truncated: true,
+      partial: false,
+    });
+  });
+
   it('creates a server and logical database while keeping receipts secret-safe', async () => {
     const requests: Array<{
       method: string;

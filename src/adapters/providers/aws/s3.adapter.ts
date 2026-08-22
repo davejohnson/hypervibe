@@ -26,7 +26,10 @@ import type {
   StorageCredentials,
   StorageEnsureResult,
 } from '../../../domain/ports/storage.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 import { createS3ObjectClient } from '../../../domain/services/object-storage-transfer.service.js';
 import {
   S3_STORAGE_RUNTIME_ENV_KEYS,
@@ -242,6 +245,46 @@ export class S3StorageAdapter implements IStorageAdapter {
       continuationToken = result.ContinuationToken;
     } while (continuationToken);
     return observed.sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  async inspectStorageResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    const identity = await this.stsClient().send(new GetCallerIdentityCommand({}));
+    if (typeof identity.Account !== 'string' || identity.Account.length === 0) {
+      throw new Error('AWS STS did not return an account identity.');
+    }
+    const buckets: Array<{ Name?: string; BucketRegion?: string }> = [];
+    let continuationToken: string | undefined;
+    do {
+      const result = await this.s3Client().send(new ListBucketsCommand({
+        ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
+      }));
+      buckets.push(...(result.Buckets ?? []));
+      continuationToken = result.ContinuationToken;
+    } while (continuationToken);
+    const matched = buckets
+      .filter((bucket) => typeof bucket.Name === 'string')
+      .filter((bucket) => !request.id || bucket.Name === request.id)
+      .filter((bucket) => !request.name || bucket.Name?.toLowerCase() === request.name.toLowerCase());
+    const ambiguous = Boolean(request.name && matched.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : matched.length > 0 ? 'present' : 'absent',
+      resource: 'storage',
+      storage: matched.slice(0, request.limit).map((bucket) => ({
+        id: bucket.Name!,
+        name: bucket.Name!,
+        kind: 'object',
+        status: 'ready',
+        ...(bucket.BucketRegion ? { region: bucket.BucketRegion } : {}),
+        providerScope: { accountId: identity.Account },
+      })),
+      ...(matched.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: matched.length > request.limit,
+      partial: false,
+    };
   }
 
   async ensureBucket(
@@ -501,5 +544,15 @@ providerRegistry.register({
     const adapter = new S3StorageAdapter();
     void adapter.connect(credentials);
     return adapter;
+  },
+  inspection: {
+    resources: ['storage'],
+    defaultResource: 'storage',
+    selectors: {
+      storage: { mode: 'provider-resource', optional: ['id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['accountId'] },
+    },
+    inspect: (adapter, request) => (
+      adapter as S3StorageAdapter
+    ).inspectStorageResources(request),
   },
 });

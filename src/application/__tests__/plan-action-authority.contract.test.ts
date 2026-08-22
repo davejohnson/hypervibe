@@ -784,6 +784,21 @@ const authorized: AuthorizedCase[] = [
     action: action({ id: 'database:railway:destroy', type: 'destroy', kind: 'database', name: 'postgres' }),
   },
   {
+    label: 'retained database destroy',
+    capability: 'database.retained.destroy',
+    action: action({
+      id: 'database:cloudsql:retained-destroy',
+      type: 'destroy',
+      kind: 'database',
+      name: 'postgres',
+      provider: 'cloudsql',
+      operation: 'retainedDatabaseDestroy',
+      metadata: { externalId: 'legacy-db', providerScope: { projectId: 'gcp-project', region: 'us-west1' } },
+      dataBearing: true,
+      requiresConfirm: true,
+    }),
+  },
+  {
     label: 'task service destroy',
     capability: 'hosting.task-service.destroy',
     action: action({ type: 'destroy', operation: 'taskServiceCleanup', metadata: { externalId: 'task-1' } }),
@@ -1050,6 +1065,18 @@ describe('plan action mutation-authority contract', () => {
   it('rejects a load-balancer operation under a different action id', () => {
     const candidate = authorized.find((entry) => entry.label === LOAD_BALANCER_OPERATIONS.ensure)!.action;
     expect(resolvePlanActionAuthority({ ...candidate, id: 'load-balancer:other.example.com' })).toBeNull();
+  });
+
+  it('rejects retained database deletion without a complete non-empty provider scope', () => {
+    const candidate = authorized.find((entry) => entry.label === 'retained database destroy')!.action;
+    expect(resolvePlanActionAuthority({
+      ...candidate,
+      metadata: { ...candidate.metadata, providerScope: {} },
+    })).toBeNull();
+    expect(resolvePlanActionAuthority({
+      ...candidate,
+      metadata: { ...candidate.metadata, providerScope: { projectId: '' } },
+    })).toBeNull();
   });
 
   it('grants no mutation authority to noop or unknown actions', () => {

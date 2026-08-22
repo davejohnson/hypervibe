@@ -1,6 +1,11 @@
 import type { CommandContext } from './context.js';
 import { HvError } from './results.js';
-import { providerRegistry, type ProviderInspectionRequest } from '../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+  type ProviderInspectionSelector,
+  type ProviderInspectionSelectorContract,
+} from '../domain/registry/provider.registry.js';
 import { connectionSetupOptions } from '../domain/services/connection-guidance.js';
 import { getProjectScopeHints } from '../domain/services/project-scope.js';
 import type { Component } from '../domain/entities/component.entity.js';
@@ -20,6 +25,7 @@ export interface InspectProviderInput {
 }
 
 const ENVIRONMENT_INSPECTION_RESOURCES = new Set(['environment', 'database', 'cache', 'storage']);
+const INSPECTION_SELECTORS = ['project', 'env', 'scope', 'id', 'name', 'region', 'limit'] as const;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -47,13 +53,100 @@ function advertisedResources(providerName: string): string[] {
   if (!registered) return [];
   const resources = new Set<string>(['connection']);
   for (const resource of registered.inspection?.resources ?? []) resources.add(resource);
-  if (!registered.inspection) {
-    if (registered.metadata.category === 'deployment') resources.add('environment');
-    if (providerRegistry.supports(providerName, 'database')) resources.add('database');
-    if (providerRegistry.supports(providerName, 'cache')) resources.add('cache');
-    if (providerRegistry.supports(providerName, 'storage')) resources.add('storage');
-  }
+  if (providerRegistry.supports(providerName, 'hosting')) resources.add('environment');
+  if (providerRegistry.supports(providerName, 'database')) resources.add('database');
+  if (providerRegistry.supports(providerName, 'cache')) resources.add('cache');
+  if (providerRegistry.supports(providerName, 'storage')) resources.add('storage');
   return [...resources];
+}
+
+function selectorMode(
+  resource: string,
+  contract: ProviderInspectionSelectorContract,
+  defaultResource?: string
+): Record<string, unknown> {
+  const isDefault = resource === defaultResource;
+  const unqualifiedDefault = isDefault
+    && (contract.required?.length ?? 0) === 0
+    && (contract.oneOf?.length ?? 0) === 0;
+  return {
+    mode: contract.mode,
+    resource,
+    default: unqualifiedDefault,
+    resourceOptionalWhenRequirementsMet: isDefault,
+    required: ['provider', ...(!isDefault ? ['resource'] : []), ...(contract.required ?? [])],
+    optional: [...(isDefault ? ['resource'] : []), ...(contract.optional ?? [])],
+    ...(contract.oneOf?.length ? { oneOf: contract.oneOf } : {}),
+    ...(contract.mutuallyExclusive?.length ? { mutuallyExclusive: contract.mutuallyExclusive } : {}),
+    ...(contract.scopeKeys?.length ? { providerScopeRequired: contract.scopeKeys } : {}),
+    list: contract.list === true,
+    acceptsLimit: contract.list === true,
+  };
+}
+
+function advertisedInspectionModes(providerName: string): Array<Record<string, unknown>> {
+  const registered = providerRegistry.get(providerName);
+  if (!registered) return [];
+  const inspection = registered.inspection;
+  const defaultResource = inspection?.defaultResource ?? inspection?.resources[0];
+  const defaultContract = defaultResource ? inspection?.selectors[defaultResource] : undefined;
+  const providerOnlyDefaultsToConnection = !defaultContract
+    || (defaultContract.required?.length ?? 0) > 0
+    || (defaultContract.oneOf?.length ?? 0) > 0;
+  const modes: Array<Record<string, unknown>> = [{
+    mode: 'connection',
+    resource: 'connection',
+    default: providerOnlyDefaultsToConnection,
+    resourceOptionalWhenRequirementsMet: true,
+    required: ['provider'],
+    optional: ['resource', 'project', 'scope'],
+    list: false,
+    acceptsLimit: false,
+  }];
+  if (inspection) {
+    for (const resource of inspection.resources) {
+      const contract = inspection.selectors[resource];
+      if (contract) modes.push(selectorMode(resource, contract, defaultResource));
+    }
+  }
+  if (providerRegistry.supports(providerName, 'hosting')) {
+    modes.push(selectorMode('environment', {
+      mode: 'environment',
+      required: ['project', 'env'],
+      optional: ['scope', 'region'],
+    }, 'environment'));
+  }
+  if (providerRegistry.supports(providerName, 'database')) {
+    modes.push(selectorMode('database', {
+      mode: 'environment',
+      required: ['project', 'env'],
+      optional: ['scope', 'name'],
+    }, registered.metadata.category === 'database' ? 'database' : undefined));
+  }
+  if (providerRegistry.supports(providerName, 'cache')) {
+    modes.push(selectorMode('cache', {
+      mode: 'environment',
+      required: ['project', 'env'],
+      optional: ['scope', 'name'],
+    }, registered.metadata.category === 'cache' ? 'cache' : undefined));
+  }
+  if (providerRegistry.supports(providerName, 'storage')) {
+    modes.push(selectorMode('storage', {
+      mode: 'environment',
+      required: ['project', 'env'],
+      optional: ['scope', 'id', 'name', 'limit'],
+      list: true,
+    }, registered.metadata.category === 'storage' ? 'storage' : undefined));
+  }
+  return modes;
+}
+
+function contractRequirementsSatisfied(
+  contract: ProviderInspectionSelectorContract,
+  input: InspectProviderInput
+): boolean {
+  return (contract.required ?? []).every((selector) => input[selector] !== undefined)
+    && (contract.oneOf ?? []).every((group) => group.some((selector) => input[selector] !== undefined));
 }
 
 function listProviders(ctx: CommandContext): Record<string, unknown> {
@@ -71,6 +164,7 @@ function listProviders(ctx: CommandContext): Record<string, unknown> {
         displayName: registered.metadata.displayName,
         category: registered.metadata.category,
         resources: advertisedResources(registered.metadata.name),
+        inspectionModes: advertisedInspectionModes(registered.metadata.name),
         connections: connections.map((connection) => ({
           scope: connection.scope,
           status: connectionStatus.get(`${connection.provider}\u0000${connection.scope ?? ''}`),
@@ -78,6 +172,152 @@ function listProviders(ctx: CommandContext): Record<string, unknown> {
       };
     }),
   };
+}
+
+function cleanInspectInput(input: InspectProviderInput): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+}
+
+function recoverableSelectorError(params: {
+  message: string;
+  input: InspectProviderInput;
+  corrected: InspectProviderInput;
+  details?: Record<string, unknown>;
+  hint: string;
+}): HvError {
+  return new HvError('VALIDATION', params.message, {
+    details: {
+      ...(params.details ?? {}),
+      suggestedCall: {
+        command: 'hv_inspect',
+        input: cleanInspectInput(params.corrected),
+      },
+    },
+    hint: params.hint,
+    next: ['hv_inspect'],
+    agentInstruction: {
+      action: 'continue',
+      message: 'Retry hv_inspect once with exactly the safe suggestedCall input. If that corrected call fails, stop and report the new result.',
+    },
+  });
+}
+
+function suppliedSelectors(input: InspectProviderInput): ProviderInspectionSelector[] {
+  return INSPECTION_SELECTORS.filter((selector) => input[selector] !== undefined);
+}
+
+function validateProviderSelectorContract(params: {
+  input: InspectProviderInput;
+  resource: string;
+  contract: ProviderInspectionSelectorContract;
+}): void {
+  const accepted = new Set<ProviderInspectionSelector>([
+    ...(params.contract.required ?? []),
+    ...(params.contract.optional ?? []),
+    ...(params.contract.oneOf?.flat() ?? []),
+  ]);
+  const supplied = suppliedSelectors(params.input);
+  const invalid = supplied.filter((selector) => !accepted.has(selector));
+  if (invalid.length > 0) {
+    const corrected = { ...params.input };
+    for (const selector of invalid) delete corrected[selector];
+    throw recoverableSelectorError({
+      message: `resource="${params.resource}" does not accept selector(s): ${invalid.join(', ')}.`,
+      input: params.input,
+      corrected,
+      details: { invalid, accepted: [...accepted] },
+      hint: `Use only the selectors advertised for ${params.resource}; the suggested call removes fields this mode cannot use.`,
+    });
+  }
+  const missing = (params.contract.required ?? []).filter((selector) => params.input[selector] === undefined);
+  const missingGroups = (params.contract.oneOf ?? []).filter((group) => (
+    !group.some((selector) => params.input[selector] !== undefined)
+  ));
+  if (missing.length > 0 || missingGroups.length > 0) {
+    throw new HvError('VALIDATION', `resource="${params.resource}" is missing required selectors.`, {
+      details: {
+        missing,
+        oneOf: missingGroups,
+        inspectionModes: advertisedInspectionModes(params.input.provider ?? ''),
+      },
+      hint: 'Call hv_inspect({}) to review the exact selector contract, then retry with the required provider scope or Hypervibe environment context.',
+      next: ['hv_inspect'],
+    });
+  }
+  for (const group of params.contract.mutuallyExclusive ?? []) {
+    const conflicts = group.filter((selector) => params.input[selector] !== undefined);
+    if (conflicts.length > 1) {
+      throw new HvError('VALIDATION', `resource="${params.resource}" received mutually exclusive selectors: ${conflicts.join(', ')}.`, {
+        details: { conflicts, inspectionModes: advertisedInspectionModes(params.input.provider ?? '') },
+        hint: 'Choose one exact selector. Hypervibe will not guess which provider identity was intended.',
+        next: ['hv_inspect'],
+      });
+    }
+  }
+}
+
+function validateStatefulInspectionResult(params: {
+  providerDisplayName: string;
+  resource: string;
+  contract: ProviderInspectionSelectorContract;
+  result: Record<string, unknown>;
+  limit: number;
+}): void {
+  if (!['database', 'cache', 'storage'].includes(params.resource)) return;
+  const collectionKey = params.resource === 'database'
+    ? 'databases'
+    : params.resource === 'cache'
+      ? 'caches'
+      : 'storage';
+  const collection = params.result[collectionKey];
+  const fail = (reason: string, details: Record<string, unknown> = {}): never => {
+    throw new HvError(
+      'PROVIDER_ERROR',
+      `${params.providerDisplayName} returned an invalid ${params.resource} inventory: ${reason}`,
+      {
+        details: { resource: params.resource, ...details },
+        hint: 'Treat this as a provider adapter contract failure. No provider state was changed.',
+      }
+    );
+  };
+  if (!Array.isArray(collection)) {
+    fail(`missing ${collectionKey} collection.`);
+  }
+  const resources = collection as unknown[];
+  if (resources.length > params.limit) {
+    fail(`returned ${resources.length} resources above limit ${params.limit}.`);
+  }
+  if (typeof params.result.truncated !== 'boolean' || typeof params.result.partial !== 'boolean') {
+    fail('list completeness flags must be explicit booleans.');
+  }
+  if (params.result.observation === 'present' && resources.length === 0) {
+    fail('observation was present but the collection was empty.');
+  }
+  if (params.result.observation === 'absent' && resources.length > 0) {
+    fail('observation was absent but the collection was non-empty.');
+  }
+  const scopeKeys = params.contract.scopeKeys ?? [];
+  for (const [index, value] of resources.entries()) {
+    const resource = asRecord(value);
+    const scope = asRecord(resource?.providerScope);
+    if (!resource || typeof resource.id !== 'string' || !resource.id.trim()) {
+      fail('a resource omitted its durable provider id.', { index });
+    }
+    const checked = resource as Record<string, unknown>;
+    if (typeof checked.name !== 'string' || !checked.name.trim()) {
+      fail('a resource omitted its exact provider name.', { index, id: checked.id });
+    }
+    const missingScopeKeys = scopeKeys.filter((key) => (
+      typeof scope?.[key] !== 'string' || !(scope[key] as string).trim()
+    ));
+    if (missingScopeKeys.length > 0) {
+      fail('a resource omitted required durable provider scope.', {
+        index,
+        id: checked.id,
+        missingScopeKeys,
+      });
+    }
+  }
 }
 
 function componentForProvider(
@@ -185,12 +425,18 @@ export async function inspectProvider(
     && providerRegistry.supports(providerName, 'hosting')
     && (!input.resource || input.resource === 'environment')
   );
-
-  if (input.region && !hostingEnvironmentInspection) {
-    throw new HvError('VALIDATION', 'region is only supported for a hosting environment inspection.', {
-      hint: 'Pass provider, project, and env for the hosting environment whose provider region should be inspected.',
-    });
-  }
+  const providerInspection = registered.inspection;
+  const defaultInspectionResource = providerInspection?.defaultResource ?? providerInspection?.resources[0];
+  const defaultInspectionContract = defaultInspectionResource
+    ? providerInspection?.selectors[defaultInspectionResource]
+    : undefined;
+  const inspectionResource = hostingForensics
+    ? 'environment'
+    : input.resource
+      ?? (!environment && defaultInspectionResource && defaultInspectionContract
+        && contractRequirementsSatisfied(defaultInspectionContract, input)
+        ? defaultInspectionResource
+        : undefined);
 
   if (input.resource === 'connection') {
     const invalid = [
@@ -201,9 +447,14 @@ export async function inspectProvider(
       input.limit !== undefined ? 'limit' : undefined,
     ].filter((field): field is string => Boolean(field));
     if (invalid.length > 0) {
-      throw new HvError('VALIDATION', 'Connection inspection does not accept resource selectors.', {
+      const corrected = { ...input };
+      for (const field of invalid) delete corrected[field as keyof InspectProviderInput];
+      throw recoverableSelectorError({
+        message: 'Connection inspection does not accept resource selectors.',
+        input,
+        corrected,
         details: { invalid },
-        hint: 'Use only provider, project, and scope when resource="connection".',
+        hint: 'Use only provider, project, scope, and resource="connection"; the suggested call removes unsupported selectors.',
       });
     }
   }
@@ -223,11 +474,45 @@ export async function inspectProvider(
         input.limit !== undefined && !hostingForensics ? 'limit' : undefined,
       ].filter((field): field is string => Boolean(field));
     if (invalid.length > 0) {
-      throw new HvError('VALIDATION', 'Live environment inspection received unsupported selectors.', {
+      const corrected = { ...input };
+      for (const field of invalid) delete corrected[field as keyof InspectProviderInput];
+      throw recoverableSelectorError({
+        message: 'Live environment inspection received unsupported selectors.',
+        input,
+        corrected,
         details: { invalid },
         hint: input.resource
           ? 'Use only selectors supported by the selected environment resource.'
           : 'Use provider, project, and env for a full environment observation, or add an explicit resource before filtering it.',
+      });
+    }
+  }
+
+  if (!environment && inspectionResource && inspectionResource !== 'connection' && providerInspection) {
+    const contract = providerInspection.selectors[inspectionResource];
+    if (!contract) {
+      throw new HvError('PROVIDER_ERROR', `${registered.metadata.displayName} did not declare selectors for inspection resource "${inspectionResource}".`, {
+        details: { inspectionModes: advertisedInspectionModes(providerName) },
+        hint: 'Treat this as an adapter contract failure; no provider state was changed.',
+      });
+    }
+    validateProviderSelectorContract({ input, resource: inspectionResource, contract });
+  }
+  if (!environment && !inspectionResource && (!input.resource || input.resource === 'connection')) {
+    const invalid = [
+      input.id !== undefined ? 'id' : undefined,
+      input.name !== undefined ? 'name' : undefined,
+      input.limit !== undefined ? 'limit' : undefined,
+    ].filter((field): field is string => Boolean(field));
+    if (invalid.length > 0) {
+      const corrected = { ...input };
+      for (const field of invalid) delete corrected[field as keyof InspectProviderInput];
+      throw recoverableSelectorError({
+        message: 'Connection inspection does not accept provider resource selectors.',
+        input,
+        corrected,
+        details: { invalid },
+        hint: 'The suggested call removes id, name, and limit because this provider exposes connection verification only.',
       });
     }
   }
@@ -252,7 +537,6 @@ export async function inspectProvider(
   const adapter = resolved.adapter as unknown as Record<string, unknown>;
   const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
   const currentHostingProvider = environment ? hostingProvider(environment) : undefined;
-  const inspectionResource = hostingForensics ? 'environment' : input.resource;
   const request: ProviderInspectionRequest = {
     scope: requestedScope,
     resource: inspectionResource,
@@ -275,7 +559,7 @@ export async function inspectProvider(
   };
 
   try {
-    if (input.region) {
+    if (input.region && hostingEnvironmentInspection) {
       const configureTarget = adapter.configureTarget;
       if (typeof configureTarget !== 'function') {
         throw new HvError('UNSUPPORTED', `${registered.metadata.displayName} does not support explicit regional inspection.`, {
@@ -285,10 +569,9 @@ export async function inspectProvider(
       await (configureTarget as (target: { region: string }) => void | Promise<void>)
         .call(resolved.adapter, { region: input.region });
     }
-    const providerInspection = registered.inspection;
     const useProviderInspection = input.resource !== 'connection'
       && Boolean(providerInspection)
-      && (!inspectionResource || providerInspection!.resources.includes(inspectionResource))
+      && Boolean(inspectionResource && providerInspection!.resources.includes(inspectionResource))
       && (!environment || hostingForensics);
     if (useProviderInspection && providerInspection) {
       const inspected = await providerInspection.inspect(resolved.adapter, request);
@@ -296,6 +579,15 @@ export async function inspectProvider(
         throw new HvError('PROVIDER_ERROR', `${registered.metadata.displayName} returned the wrong inspection resource.`, {
           details: { requested: inspectionResource, returned: inspected.resource ?? null },
           hint: 'Treat this as an adapter contract failure; no provider state was changed.',
+        });
+      }
+      if (inspectionResource) {
+        validateStatefulInspectionResult({
+          providerDisplayName: registered.metadata.displayName,
+          resource: inspectionResource,
+          contract: providerInspection.selectors[inspectionResource]!,
+          result: inspected,
+          limit: request.limit,
         });
       }
       if (inspected.observation === 'ambiguous') {
@@ -352,6 +644,53 @@ export async function inspectProvider(
 
       const component = componentForProvider(ctx, environment, providerName);
       const observeDatabase = adapter.observeDatabase;
+      const databaseInventoryContract = providerInspection?.selectors.database;
+      if (
+        (standardResource === 'database' || !standardResource)
+        && !component
+        && databaseInventoryContract?.mode === 'provider-resource'
+        && providerInspection?.resources.includes('database')
+      ) {
+        const inspected = await providerInspection.inspect(resolved.adapter, {
+          scope: request.scope,
+          resource: 'database',
+          id: request.id,
+          name: request.name,
+          limit: request.limit,
+          ...(request.project ? { project: request.project } : {}),
+        });
+        if (inspected.resource !== 'database') {
+          throw new HvError('PROVIDER_ERROR', `${registered.metadata.displayName} returned the wrong inspection resource.`, {
+            details: { requested: 'database', returned: inspected.resource ?? null },
+            hint: 'Treat this as an adapter contract failure; no provider state was changed.',
+          });
+        }
+        validateStatefulInspectionResult({
+          providerDisplayName: registered.metadata.displayName,
+          resource: 'database',
+          contract: databaseInventoryContract,
+          result: inspected,
+          limit: request.limit,
+        });
+        if (inspected.observation === 'ambiguous') {
+          throw new HvError('VALIDATION', `Multiple ${registered.metadata.displayName} databases matched "${input.name ?? 'the selector'}".`, {
+            details: inspected,
+            hint: 'Re-run hv_inspect without env and with the exact durable provider id. Hypervibe will not guess or adopt a candidate.',
+            next: ['hv_inspect'],
+          });
+        }
+        return {
+          provider: providerName,
+          category: registered.metadata.category,
+          mode: 'database',
+          project: project?.name,
+          environment: environment.name,
+          observed: null,
+          binding: 'missing',
+          inventory: inspected,
+          warning: 'These are provider-account candidates, not environment attribution. Use hv_import for explicit adoption or retained cleanup; Hypervibe did not select a database.',
+        };
+      }
       if ((standardResource === 'database' || !standardResource) && typeof observeDatabase === 'function') {
         const observed = await (observeDatabase as (
           environment: Environment,
@@ -425,9 +764,14 @@ export async function inspectProvider(
         input.limit !== undefined ? 'limit' : undefined,
       ].filter((field): field is string => Boolean(field));
       if (invalid.length > 0) {
-        throw new HvError('VALIDATION', 'Connection inspection does not accept provider resource selectors.', {
+        const corrected = { ...input };
+        for (const field of invalid) delete corrected[field as keyof InspectProviderInput];
+        throw recoverableSelectorError({
+          message: 'Connection inspection does not accept provider resource selectors.',
+          input,
+          corrected,
           details: { invalid },
-          hint: 'Remove id, name, and limit, or select an advertised provider resource.',
+          hint: 'The suggested call removes id, name, and limit because this provider exposes connection verification only.',
         });
       }
     }
@@ -453,6 +797,7 @@ export async function inspectProvider(
       mode: 'connection',
       verification,
       resources: advertisedResources(providerName),
+      inspectionModes: advertisedInspectionModes(providerName),
     };
   } catch (error) {
     if (error instanceof HvError) throw error;

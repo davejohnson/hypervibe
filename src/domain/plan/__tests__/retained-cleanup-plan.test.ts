@@ -182,6 +182,120 @@ describe('PlanService retained-cleanup scope', () => {
     expect(new RunRepository().findByProjectId(project.id)).toEqual([]);
   });
 
+  it('plans one exact confirmation-gated retained database destroy without unrelated actions', async () => {
+    arrangeEnvironment('railway');
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      previousDatabase: {
+        provider: 'cloudsql',
+        externalId: 'legacy-production-db',
+        engine: 'postgres',
+        name: 'legacy-production-db',
+        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+      },
+    });
+    const disconnect = vi.fn(async () => {});
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'cloudsql',
+        capabilities: {
+          supportedDatabases: ['postgres'],
+          supportsPooling: false,
+          supportsReadReplicas: false,
+          supportsPointInTimeRecovery: false,
+          serverlessOptimized: false,
+        },
+        connect: async () => {},
+        verify: async () => ({ success: true }),
+        disconnect,
+        provision: async () => { throw new Error('unused'); },
+        observeDatabase: async () => ({
+          provider: 'cloudsql',
+          engine: 'postgres',
+          externalId: 'legacy-production-db',
+          providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+          status: 'running',
+        }),
+        getConnectionUrl: async () => null,
+        destroy: async () => { throw new Error('unused'); },
+      },
+    });
+
+    const result = await new PlanService().plan(project, 'production', cleanupOptions);
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions).toEqual([expect.objectContaining({
+      id: 'database:cloudsql:retained-destroy',
+      type: 'destroy',
+      resource: { kind: 'database', name: 'postgres', provider: 'cloudsql' },
+      verified: true,
+      dataBearing: true,
+      requiresConfirm: true,
+      metadata: {
+        operation: 'retainedDatabaseDestroy',
+        externalId: 'legacy-production-db',
+        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+      },
+    })]);
+    expect(disconnect).toHaveBeenCalledOnce();
+    const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+    expect(document).toMatchObject({ scope: 'retained-cleanup', actions: plan.actions });
+  });
+
+  it('blocks retained database deletion when live observation omits durable provider scope', async () => {
+    arrangeEnvironment('railway');
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      previousDatabase: {
+        provider: 'cloudsql',
+        externalId: 'legacy-production-db',
+        engine: 'postgres',
+        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+      },
+    });
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'cloudsql',
+        capabilities: {
+          supportedDatabases: ['postgres'],
+          supportsPooling: false,
+          supportsReadReplicas: false,
+          supportsPointInTimeRecovery: false,
+          serverlessOptimized: false,
+        },
+        connect: async () => {},
+        verify: async () => ({ success: true }),
+        disconnect: async () => {},
+        provision: async () => { throw new Error('unused'); },
+        observeDatabase: async () => ({
+          provider: 'cloudsql',
+          engine: 'postgres',
+          externalId: 'legacy-production-db',
+          status: 'running',
+        }),
+        getConnectionUrl: async () => null,
+        destroy: async () => { throw new Error('unused'); },
+      },
+    });
+
+    const result = await new PlanService().plan(project, 'production', cleanupOptions);
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.verified).toBe(false);
+    expect(plan.actions).toEqual([expect.objectContaining({
+      id: 'database:cloudsql:retained-destroy',
+      verified: false,
+      metadata: expect.objectContaining({
+        blockedReason: 'retained_database_observation_unknown',
+      }),
+    })]);
+    expect(plan.warnings.join('\n')).toContain('omitted the durable scope');
+  });
+
   it.each([
     ['service', 'railway', { provider: 'cloudrun', projectId: 'old-gcp-project', services: { web: {} } }],
     ['environment', 'cloudrun', { provider: 'railway', projectId: 'old-railway-project', services: {} }],

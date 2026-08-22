@@ -120,6 +120,27 @@ describe('MemorystoreAdapter', () => {
     vi.unstubAllEnvs();
   });
 
+  it('inventories differently named caches across the connected project', async () => {
+    const adapter = await connected();
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe(`/v1/projects/${PROJECT_ID}/locations/-/instances`);
+      return response({ instances: [instance({ displayName: 'customer-sessions' })] });
+    }));
+
+    await expect(adapter.inspectCacheResources({ resource: 'cache', limit: 25 }))
+      .resolves.toMatchObject({
+        observation: 'present',
+        resource: 'cache',
+        caches: [{
+          id: RESOURCE_NAME,
+          name: 'customer-sessions',
+          providerScope: { projectId: PROJECT_ID, region: REGION },
+        }],
+        partial: false,
+      });
+  });
+
   it('creates private-IP Redis with AUTH and keeps the auth string out of receipts', async () => {
     vi.stubEnv('HYPERVIBE_MEMORYSTORE_READY_DELAY_MS', '0');
     vi.stubEnv('HYPERVIBE_MEMORYSTORE_READY_ATTEMPTS', '3');

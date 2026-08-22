@@ -275,6 +275,10 @@ providerRegistry.register({
   },
   inspection: {
     resources: ['messaging-service'],
+    defaultResource: 'messaging-service',
+    selectors: {
+      'messaging-service': { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true },
+    },
     inspect: (adapter, request) => inspectTwilio(adapter as TwilioAdapter, request),
   },
 });

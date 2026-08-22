@@ -103,6 +103,36 @@ describe('ElastiCacheAdapter', () => {
     vi.restoreAllMocks();
   });
 
+  it('inventories bounded serverless caches with account and region scope', async () => {
+    const { adapter } = await connected({
+      elasticacheSend: async (command) => {
+        expect(command).toBeInstanceOf(DescribeServerlessCachesCommand);
+        return {
+          ServerlessCaches: [
+            cache(),
+            cache({
+              ServerlessCacheName: 'analytics-cache',
+              ARN: 'arn:aws:elasticache:us-east-1:123456789012:serverlesscache:analytics-cache',
+            }),
+          ],
+        };
+      },
+    });
+
+    await expect(adapter.inspectCacheResources({ resource: 'cache', limit: 1 }))
+      .resolves.toMatchObject({
+        observation: 'present',
+        resource: 'cache',
+        caches: [{
+          id: CACHE_ARN,
+          name: CACHE_NAME,
+          providerScope: { accountId: '123456789012', region: 'us-west-2' },
+        }],
+        truncated: true,
+        partial: false,
+      });
+  });
+
   it('does not mutate when complete cache observation fails', async () => {
     const { adapter, elasticacheSend, ec2Send } = await connected({
       elasticacheSend: async (command) => {

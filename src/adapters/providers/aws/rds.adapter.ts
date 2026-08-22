@@ -28,7 +28,10 @@ import type {
 } from '../../../domain/ports/database.port.js';
 import type { Receipt, TemporaryDatabaseAccess, VerifyResult } from '../../../domain/ports/provider.port.js';
 import type { IObservableDatabase, ObservedDatabase } from '../../../domain/ports/observe.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 import { buildDatabaseEnvVarsFromComponent } from '../../../domain/services/database-env.js';
 
 export const RdsCredentialsSchema = z.object({
@@ -256,6 +259,7 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
           provider: 'rds',
           instanceId: identifier,
           instanceArn: instance.DBInstanceArn,
+          providerScope: this.instanceScope(instance),
           connectionString: connectionUrl,
           host: instance.Endpoint.Address,
           port: instance.Endpoint.Port,
@@ -477,8 +481,58 @@ export class RdsAdapter implements IDatabaseAdapter, IObservableDatabase {
       provider: 'rds',
       engine: 'postgres',
       externalId: instance.DBInstanceIdentifier ?? identifier,
+      providerScope: this.instanceScope(instance),
       name: instance.DBInstanceIdentifier ?? identifier,
       status: this.normalizedStatus(instance.DBInstanceStatus),
+    };
+  }
+
+  async inspectDatabaseResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.rds || !this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const selected = request.id ?? request.name;
+    let instances: DBInstance[];
+    let truncated = false;
+    if (selected) {
+      const instance = await this.describeInstance(selected);
+      instances = instance ? [instance] : [];
+    } else {
+      const response = await this.rds.send(new DescribeDBInstancesCommand({
+        MaxRecords: Math.max(20, Math.min(request.limit, 100)),
+      }));
+      instances = response.DBInstances ?? [];
+      truncated = Boolean(response.Marker) || instances.length > request.limit;
+    }
+    const databases = instances.slice(0, request.limit).map((instance) => ({
+      id: instance.DBInstanceIdentifier,
+      name: instance.DBInstanceIdentifier,
+      engine: instance.Engine === 'postgres' ? 'postgres' : instance.Engine ?? 'unknown',
+      ...(instance.EngineVersion ? { databaseVersion: instance.EngineVersion } : {}),
+      status: this.normalizedStatus(instance.DBInstanceStatus),
+      ...(instance.AvailabilityZone ? { availabilityZone: instance.AvailabilityZone } : {}),
+      providerScope: this.instanceScope(instance),
+    }));
+    return {
+      observation: instances.length > 0 ? 'present' : 'absent',
+      resource: 'database',
+      databases,
+      ...(instances.length === 0 && selected
+        ? { [request.id ? 'id' : 'name']: selected }
+        : {}),
+      truncated,
+      partial: false,
+    };
+  }
+
+  private instanceScope(instance: DBInstance): Record<string, string> {
+    const arn = instance.DBInstanceArn?.split(':');
+    const accountId = arn?.[4];
+    return {
+      ...(accountId ? { accountId } : {}),
+      ...(this.credentials?.region ? { region: this.credentials.region } : {}),
     };
   }
 
@@ -648,6 +702,22 @@ providerRegistry.register({
     lifecycle: {
       databaseEngines: ['postgres'],
     },
+  },
+  inspection: {
+    resources: ['database'],
+    defaultResource: 'database',
+    selectors: {
+      database: {
+        mode: 'provider-resource',
+        optional: ['project', 'scope', 'id', 'name', 'limit'],
+        mutuallyExclusive: [['id', 'name']],
+        list: true,
+        scopeKeys: ['accountId', 'region'],
+      },
+    },
+    inspect: (adapter, request) => (
+      adapter as RdsAdapter
+    ).inspectDatabaseResources(request),
   },
   factory: (credentials) => {
     const adapter = new RdsAdapter();
