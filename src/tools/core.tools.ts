@@ -601,11 +601,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="retained-cleanup" isolates confirm-gated destruction of the exact abandoned hosting identity retained after a provider migration; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Delegated values are accepted only through secretRefs and are encrypted into the stored plan, never returned. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId plus a compact review of non-noop actions; hv_apply requires that planId. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting and database identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Delegated values are accepted only through secretRefs and are encrypted into the stored plan, never returned. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
-      scope: z.enum(['full', 'retained-cleanup']).optional().describe('Default full. Use retained-cleanup to persist only the retained abandoned-host destroy actions after a provider migration.'),
+      scope: z.enum(['full', 'retained-cleanup']).optional().describe('Default full. Use retained-cleanup to persist only exact retained abandoned-host/database destroy actions.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. Defaults to .env.<env>, creating it from repo .env when missing and syncing newly added base keys when present. Selection follows spec envFile policy; values are encrypted in the stored plan and never returned.'),
@@ -627,7 +627,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             'VALIDATION',
             `scope="retained-cleanup" does not accept deploy inputs: ${incompatibleInputs.join(', ')}.`,
             {
-              hint: 'Remove deploy inputs so the plan can authorize only retained previous-host teardown actions.',
+              hint: 'Remove deploy inputs so the plan can authorize only retained infrastructure teardown actions.',
               next: ['hv_plan'],
             }
           );

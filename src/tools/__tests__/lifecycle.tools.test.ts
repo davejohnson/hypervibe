@@ -16,6 +16,8 @@ import { ComponentRepository } from '../../adapters/db/repositories/component.re
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { RailwayAdapter, type RailwayProjectDetails } from '../../adapters/providers/railway/railway.adapter.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
+import { CloudSqlAdapter } from '../../adapters/providers/gcp/cloudsql.adapter.js';
+import { MemorystoreAdapter } from '../../adapters/providers/gcp/memorystore.adapter.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { NeonAdapter } from '../../adapters/providers/neon/neon.adapter.js';
@@ -347,6 +349,21 @@ describe('hv_inspect / hv_import', () => {
       expect.objectContaining({ provider: 'cloudflare', resources: expect.arrayContaining(['zone', 'dns']) }),
       expect.objectContaining({ provider: 'railway', resources: expect.arrayContaining(['project', 'environment']) }),
       expect.objectContaining({ provider: 'fly', resources: expect.arrayContaining(['environment', 'database']) }),
+      expect.objectContaining({
+        provider: 'cloudsql',
+        resources: expect.arrayContaining(['connection', 'database']),
+        inspectionModes: expect.arrayContaining([
+          expect.objectContaining({ resource: 'connection', acceptsLimit: false }),
+          expect.objectContaining({ resource: 'database', mode: 'provider-resource', acceptsLimit: true }),
+        ]),
+      }),
+      expect.objectContaining({
+        provider: 'cloudrun',
+        inspectionModes: expect.arrayContaining([
+          expect.objectContaining({ resource: 'environment', mode: 'environment-forensics', acceptsLimit: true }),
+          expect.objectContaining({ resource: 'environment', mode: 'environment', acceptsLimit: false }),
+        ]),
+      }),
     ]));
     expect(providerRegistry.namesFor('storage').sort()).toEqual(['azureblob', 'gcs', 'railway', 's3']);
     for (const provider of providerRegistry.namesFor('hosting')) {
@@ -357,6 +374,260 @@ describe('hv_inspect / hv_import', () => {
         provider
       ).toMatch(/^(services|environment|project)$/);
     }
+    for (const resource of ['database', 'cache', 'storage'] as const) {
+      for (const provider of providerRegistry.namesFor(resource)) {
+        const contract = providerRegistry.get(provider)?.inspection?.selectors[resource];
+        expect(providerRegistry.get(provider)?.inspection?.resources, `${provider}/${resource}`)
+          .toContain(resource);
+        expect(contract, `${provider}/${resource}`).toMatchObject({
+          mode: 'provider-resource',
+          list: true,
+        });
+        expect(contract?.scopeKeys?.length, `${provider}/${resource}`).toBeGreaterThan(0);
+        expect(contract?.optional, `${provider}/${resource}`)
+          .toEqual(expect.arrayContaining(['id', 'name', 'limit']));
+      }
+    }
+    for (const registered of providerRegistry.all().filter((provider) => provider.inspection)) {
+      const inspection = registered.inspection!;
+      expect(Object.keys(inspection.selectors).sort(), registered.metadata.name)
+        .toEqual([...inspection.resources].sort());
+      expect(inspection.resources, registered.metadata.name)
+        .toContain(inspection.defaultResource ?? inspection.resources[0]);
+      for (const resource of inspection.resources) {
+        const selectors = inspection.selectors[resource]!;
+        const accepted = [
+          ...(selectors.required ?? []),
+          ...(selectors.optional ?? []),
+          ...(selectors.oneOf?.flat() ?? []),
+        ];
+        expect(accepted.includes('limit'), `${registered.metadata.name}/${resource}`)
+          .toBe(selectors.list === true);
+      }
+    }
+    await t.close();
+  });
+
+  it('hv_inspect uses Cloud SQL database inventory as its provider-only default and accepts its advertised limit', async () => {
+    const connections = new ConnectionRepository();
+    const connection = connections.create({
+      provider: 'cloudsql',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
+    });
+    connections.updateStatus(connection.id, 'verified');
+    vi.spyOn(CloudSqlAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(CloudSqlAdapter.prototype, 'disconnect').mockResolvedValue();
+    const inspect = vi.spyOn(CloudSqlAdapter.prototype, 'inspectDatabaseResources').mockResolvedValue({
+      observation: 'present',
+      resource: 'database',
+      project: { id: 'gcp-project' },
+      databases: [{
+        id: 'customer-facing-primary',
+        name: 'customer-facing-primary',
+        engine: 'postgres',
+        providerScope: { projectId: 'gcp-project', region: 'northamerica-northeast1' },
+      }],
+      truncated: false,
+      partial: false,
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', { provider: 'cloudsql', limit: 10 });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      mode: 'provider-resource',
+      resource: 'database',
+      databases: [{ id: 'customer-facing-primary' }],
+    });
+    expect(inspect).toHaveBeenCalledWith(expect.objectContaining({ resource: 'database', limit: 10 }));
+    await t.close();
+  });
+
+  it('hv_inspect rejects stateful inventory that violates its declared durable scope contract', async () => {
+    const connections = new ConnectionRepository();
+    const connection = connections.create({
+      provider: 'cloudsql',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
+    });
+    connections.updateStatus(connection.id, 'verified');
+    vi.spyOn(CloudSqlAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(CloudSqlAdapter.prototype, 'disconnect').mockResolvedValue();
+    vi.spyOn(CloudSqlAdapter.prototype, 'inspectDatabaseResources').mockResolvedValue({
+      observation: 'present',
+      resource: 'database',
+      databases: [{ id: 'db-1', name: 'db-1', engine: 'postgres', providerScope: {} }],
+      truncated: false,
+      partial: false,
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', { provider: 'cloudsql', resource: 'database' });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({
+      code: 'PROVIDER_ERROR',
+      details: { resource: 'database', missingScopeKeys: ['projectId'] },
+    });
+    await t.close();
+  });
+
+  it('hv_inspect accepts region when the provider-owned resource contract advertises it', async () => {
+    const connections = new ConnectionRepository();
+    const connection = connections.create({
+      provider: 'memorystore',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        projectId: 'gcp-project',
+        credentials: '{}',
+      }),
+    });
+    connections.updateStatus(connection.id, 'verified');
+    vi.spyOn(MemorystoreAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(MemorystoreAdapter.prototype, 'disconnect').mockResolvedValue();
+    const inspect = vi.spyOn(MemorystoreAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
+      observation: 'present',
+      resource: 'cache',
+      caches: [{
+        id: 'projects/gcp-project/locations/europe-west1/instances/sessions',
+        name: 'sessions',
+        engine: 'redis',
+        providerScope: { projectId: 'gcp-project', region: 'europe-west1' },
+      }],
+      truncated: false,
+      partial: false,
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', {
+      provider: 'memorystore',
+      resource: 'cache',
+      region: 'europe-west1',
+      limit: 5,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(inspect).toHaveBeenCalledWith(expect.objectContaining({
+      resource: 'cache',
+      region: 'europe-west1',
+      limit: 5,
+    }));
+    await t.close();
+  });
+
+  it('hv_inspect rejects limit when a provider-only call falls back to connection verification', async () => {
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', { provider: 'cloudrun', limit: 10 });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.details.suggestedCall).toEqual({
+      command: 'hv_inspect',
+      input: { provider: 'cloudrun' },
+    });
+    expect(result.agentInstruction).toMatchObject({ action: 'continue' });
+    await t.close();
+  });
+
+  it('hv_import confirmation-gates one exact scoped retained database cleanup identity', async () => {
+    const project = new ProjectRepository().create({ name: 'retained-database-app' });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway' },
+    });
+    const connections = new ConnectionRepository();
+    const connection = connections.create({
+      provider: 'cloudsql',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
+    });
+    connections.updateStatus(connection.id, 'verified');
+    vi.spyOn(CloudSqlAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(CloudSqlAdapter.prototype, 'disconnect').mockResolvedValue();
+    vi.spyOn(CloudSqlAdapter.prototype, 'inspectDatabaseResources').mockResolvedValue({
+      observation: 'present',
+      resource: 'database',
+      project: { id: 'gcp-project' },
+      databases: [{
+        id: 'legacy-production-db',
+        name: 'legacy-production-db',
+        engine: 'postgres',
+        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+      }],
+      truncated: false,
+      partial: false,
+    });
+    const t = await makeClient();
+    const input = {
+      provider: 'cloudsql',
+      mode: 'retained-database-cleanup',
+      project: project.name,
+      env: environment.name,
+      id: 'legacy-production-db',
+    };
+
+    const preview = await t.call('hv_import', input);
+    expect(preview.ok).toBe(false);
+    expect(preview.error.code).toBe('CONFIRM_REQUIRED');
+    expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousDatabase).toBeUndefined();
+
+    const retained = await t.call('hv_import', { ...input, confirm: true });
+    expect(retained.ok).toBe(true);
+    expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousDatabase).toEqual({
+      provider: 'cloudsql',
+      externalId: 'legacy-production-db',
+      engine: 'postgres',
+      name: 'legacy-production-db',
+      providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+    });
+    await t.close();
+  });
+
+  it('hv_inspect returns Cloud SQL inventory candidates instead of a false null for an unbound environment', async () => {
+    const project = new ProjectRepository().create({ name: 'cloudsql-inventory-app' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    const connections = new ConnectionRepository();
+    const connection = connections.create({
+      provider: 'cloudsql',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
+    });
+    connections.updateStatus(connection.id, 'verified');
+    vi.spyOn(CloudSqlAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(CloudSqlAdapter.prototype, 'disconnect').mockResolvedValue();
+    vi.spyOn(CloudSqlAdapter.prototype, 'inspectDatabaseResources').mockResolvedValue({
+      observation: 'present',
+      resource: 'database',
+      databases: [{
+        id: 'differently-named-primary',
+        name: 'differently-named-primary',
+        engine: 'postgres',
+        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+      }],
+      truncated: false,
+      partial: false,
+    });
+    const observe = vi.spyOn(CloudSqlAdapter.prototype, 'observeDatabase');
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', {
+      provider: 'cloudsql',
+      project: project.name,
+      env: 'production',
+      resource: 'database',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      mode: 'database',
+      observed: null,
+      binding: 'missing',
+      inventory: {
+        observation: 'present',
+        databases: [{ id: 'differently-named-primary' }],
+      },
+    });
+    expect(result.data.warning).toContain('not environment attribution');
+    expect(observe).not.toHaveBeenCalled();
     await t.close();
   });
 
@@ -610,18 +881,36 @@ describe('hv_inspect / hv_import', () => {
     expect(connectionWithEnv.error.code).toBe('VALIDATION');
     expect(connectionWithEnv.error.details.invalid).toEqual(['env']);
 
+    const connectionWithLimit = await t.call('hv_inspect', {
+      provider: 'openai',
+      limit: 5,
+    });
+    expect(connectionWithLimit.ok).toBe(false);
+    expect(connectionWithLimit.error.code).toBe('VALIDATION');
+    expect(connectionWithLimit.error.details.suggestedCall).toEqual({
+      command: 'hv_inspect',
+      input: { provider: 'openai' },
+    });
+    expect(connectionWithLimit.agentInstruction).toMatchObject({ action: 'continue' });
+
     const neonConnection = new ConnectionRepository().create({
       provider: 'neon',
       credentialsEncrypted: getSecretStore().encryptObject({ apiKey: 'neon-token' }),
     });
     new ConnectionRepository().updateStatus(neonConnection.id, 'verified');
     vi.spyOn(NeonAdapter.prototype, 'connect').mockResolvedValue();
-    const observeDatabase = vi.spyOn(NeonAdapter.prototype, 'observeDatabase').mockResolvedValue({
-      provider: 'neon',
-      engine: 'postgres',
-      externalId: 'neon-project-1',
-      name: 'selected-db',
-      status: 'ready',
+    const inspectDatabase = vi.spyOn(NeonAdapter.prototype, 'inspectDatabaseResources').mockResolvedValue({
+      observation: 'present',
+      resource: 'database',
+      databases: [{
+        id: 'neon-project-1',
+        engine: 'postgres',
+        name: 'selected-db',
+        status: 'ready',
+        providerScope: { projectId: 'neon-project-1', organizationId: 'org-1' },
+      }],
+      truncated: false,
+      partial: false,
     });
     const selectedDatabase = await t.call('hv_inspect', {
       provider: 'neon',
@@ -636,13 +925,14 @@ describe('hv_inspect / hv_import', () => {
       mode: 'database',
       project: project.name,
       environment: 'staging',
-      observed: { externalId: 'neon-project-1', name: 'selected-db' },
+      observed: null,
+      binding: 'missing',
+      inventory: { databases: [{ id: 'neon-project-1', name: 'selected-db' }] },
     });
-    expect(observeDatabase).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'staging' }),
-      null,
-      { resourceName: 'selected-db' }
-    );
+    expect(inspectDatabase).toHaveBeenCalledWith(expect.objectContaining({
+      resource: 'database',
+      name: 'selected-db',
+    }));
     await t.close();
   });
 

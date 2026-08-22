@@ -1667,6 +1667,13 @@ providerRegistry.register({
   },
   inspection: {
     resources: ['zone', 'dns', 'account', 'email-routing'],
+    defaultResource: 'zone',
+    selectors: {
+      zone: { mode: 'provider-resource', optional: ['project', 'scope', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true },
+      dns: { mode: 'provider-resource', required: ['scope'], optional: ['project', 'id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true },
+      account: { mode: 'provider-resource', optional: ['project', 'scope', 'limit'], list: true },
+      'email-routing': { mode: 'provider-resource', required: ['scope'], optional: ['project', 'limit'], list: true },
+    },
     inspect: (adapter, request) => inspectCloudflareResources(adapter as CloudflareAdapter, request),
   },
 });

@@ -123,6 +123,9 @@ describe('DigitalOceanDatabaseAdapter', () => {
     ) => {
       const url = new URL(String(input));
       const method = init?.method ?? 'GET';
+      if (url.pathname === '/v2/account' && method === 'GET') {
+        return jsonResponse({ account: { uuid: 'do-account-uuid' } });
+      }
       if (url.pathname === '/v2/databases' && method === 'GET') {
         return jsonResponse({ databases: [], links: {} });
       }
@@ -264,16 +267,24 @@ describe('DigitalOceanDatabaseAdapter', () => {
   });
 
   it('observes a bound cluster by durable ID and propagates non-404 failures', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({
-        database: {
-          id: 'do-postgres-1',
-          name: 'invoice-perfect-production-postgres',
-          engine: 'pg',
-          status: 'online',
-        },
-      }))
-      .mockResolvedValueOnce(jsonResponse({ message: 'unavailable' }, 503));
+    let clusterReads = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v2/account') {
+        return jsonResponse({ account: { uuid: 'do-account-uuid' } });
+      }
+      clusterReads += 1;
+      return clusterReads === 1
+        ? jsonResponse({
+            database: {
+              id: 'do-postgres-1',
+              name: 'invoice-perfect-production-postgres',
+              engine: 'pg',
+              status: 'online',
+            },
+          })
+        : jsonResponse({ message: 'unavailable' }, 503);
+    });
     vi.stubGlobal('fetch', fetchMock);
     const adapter = await connectedAdapter();
 
@@ -283,6 +294,7 @@ describe('DigitalOceanDatabaseAdapter', () => {
       provider: 'digitalocean',
       engine: 'postgres',
       externalId: 'do-postgres-1',
+      providerScope: { accountUuid: 'do-account-uuid' },
       status: 'running',
     });
     await expect(

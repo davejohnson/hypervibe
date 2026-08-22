@@ -30,9 +30,39 @@ export interface ProviderInspectionRequest {
   serviceNames?: string[];
 }
 
+export type ProviderInspectionSelector =
+  | 'project'
+  | 'env'
+  | 'scope'
+  | 'id'
+  | 'name'
+  | 'region'
+  | 'limit';
+
+export interface ProviderInspectionSelectorContract {
+  /** Whether this is an account/resource read or a Hypervibe environment read. */
+  mode: 'provider-resource' | 'environment-forensics' | 'environment';
+  /** Selectors which must all be present. `provider` and `resource` are implicit. */
+  required?: readonly ProviderInspectionSelector[];
+  /** Selectors accepted in addition to the required selectors. */
+  optional?: readonly ProviderInspectionSelector[];
+  /** At least one selector from every group must be present. */
+  oneOf?: readonly (readonly ProviderInspectionSelector[])[];
+  /** Selector groups which cannot be combined in one call. */
+  mutuallyExclusive?: readonly (readonly ProviderInspectionSelector[])[];
+  /** True when this resource can return a bounded collection and accepts `limit`. */
+  list?: boolean;
+  /** Durable non-secret scope keys every returned identity must carry. */
+  scopeKeys?: readonly string[];
+}
+
 export interface ProviderInspectionCapability {
   /** Bounded resource classes accepted by this provider inspector. */
   resources: readonly string[];
+  /** Resource selected when a provider-only call omits `resource`. Defaults to the first resource. */
+  defaultResource?: string;
+  /** Provider-owned selector contract exposed by parameterless hv_inspect discovery. */
+  selectors: Readonly<Record<string, ProviderInspectionSelectorContract>>;
   inspect(adapter: unknown, request: ProviderInspectionRequest): Promise<Record<string, unknown>>;
 }
 
@@ -170,7 +200,114 @@ export class ProviderRegistry {
     if (this.providers.has(provider.metadata.name)) {
       throw new Error(`Provider "${provider.metadata.name}" is already registered`);
     }
+    this.assertInspectionContract(provider);
     this.providers.set(provider.metadata.name, provider);
+  }
+
+  private assertInspectionContract(provider: RegisteredProvider): void {
+    const inspection = provider.inspection;
+    if (inspection) {
+      const resources = new Set(inspection.resources);
+      const selectorResources = Object.keys(inspection.selectors);
+      if (resources.size !== inspection.resources.length) {
+        throw new Error(`Provider "${provider.metadata.name}" inspection resources must be unique.`);
+      }
+      if (
+        selectorResources.length !== resources.size
+        || selectorResources.some((resource) => !resources.has(resource))
+      ) {
+        throw new Error(`Provider "${provider.metadata.name}" must declare exactly one selector contract for every inspection resource.`);
+      }
+      const defaultResource = inspection.defaultResource ?? inspection.resources[0];
+      if (!defaultResource || !resources.has(defaultResource)) {
+        throw new Error(`Provider "${provider.metadata.name}" inspection defaultResource must name a registered resource.`);
+      }
+      for (const resource of inspection.resources) {
+        const contract = inspection.selectors[resource]!;
+        const accepted = new Set([
+          ...(contract.required ?? []),
+          ...(contract.optional ?? []),
+          ...(contract.oneOf?.flat() ?? []),
+        ]);
+        if (accepted.has('limit') !== (contract.list === true)) {
+          throw new Error(`Provider "${provider.metadata.name}" inspection resource "${resource}" must accept limit exactly when list=true.`);
+        }
+        if ((contract.scopeKeys ?? []).some((key) => !key.trim())) {
+          throw new Error(`Provider "${provider.metadata.name}" inspection resource "${resource}" has an invalid provider scope key.`);
+        }
+        if (new Set(contract.scopeKeys ?? []).size !== (contract.scopeKeys?.length ?? 0)) {
+          throw new Error(`Provider "${provider.metadata.name}" inspection resource "${resource}" has duplicate provider scope keys.`);
+        }
+      }
+    }
+
+    if (provider.metadata.lifecycle?.hosting) {
+      const environment = inspection?.selectors.environment;
+      const accepted = new Set([
+        ...(environment?.required ?? []),
+        ...(environment?.optional ?? []),
+        ...(environment?.oneOf?.flat() ?? []),
+      ]);
+      if (
+        !inspection?.resources.includes('environment')
+        || environment?.mode !== 'environment-forensics'
+        || environment.list !== true
+        || !accepted.has('project')
+        || !accepted.has('env')
+        || !accepted.has('limit')
+      ) {
+        throw new Error(
+          `Provider "${provider.metadata.name}" declares hosting lifecycle support without bounded provider-owned environment inventory.`
+        );
+      }
+    }
+
+    const lifecycleInventories: Array<{
+      resource: 'database' | 'cache' | 'storage';
+      supported: boolean;
+    }> = [
+      {
+        resource: 'database',
+        supported: (provider.metadata.lifecycle?.databaseEngines?.length ?? 0) > 0
+          && (provider.metadata.category === 'database' || typeof provider.derivedAdapters?.database === 'function'),
+      },
+      {
+        resource: 'cache',
+        supported: (provider.metadata.lifecycle?.cacheEngines?.length ?? 0) > 0
+          && (provider.metadata.category === 'cache' || typeof provider.derivedAdapters?.cache === 'function'),
+      },
+      {
+        resource: 'storage',
+        supported: provider.metadata.category === 'storage'
+          || typeof provider.derivedAdapters?.storage === 'function',
+      },
+    ];
+    for (const { resource, supported } of lifecycleInventories) {
+      if (!supported) continue;
+      const contract = inspection?.selectors[resource];
+      const accepted = new Set([
+        ...(contract?.required ?? []),
+        ...(contract?.optional ?? []),
+        ...(contract?.oneOf?.flat() ?? []),
+      ]);
+      const idAndNameExclusive = contract?.mutuallyExclusive?.some((group) => (
+        group.includes('id') && group.includes('name')
+      ));
+      if (
+        !inspection?.resources.includes(resource)
+        || contract?.mode !== 'provider-resource'
+        || contract.list !== true
+        || !accepted.has('id')
+        || !accepted.has('name')
+        || !accepted.has('limit')
+        || !idAndNameExclusive
+        || (contract.scopeKeys?.length ?? 0) === 0
+      ) {
+        throw new Error(
+          `Provider "${provider.metadata.name}" declares ${resource} lifecycle support without a bounded, exact-id/name, durably scoped ${resource} inventory.`
+        );
+      }
+    }
   }
 
   /**

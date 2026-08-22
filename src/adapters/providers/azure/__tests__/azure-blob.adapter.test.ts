@@ -37,6 +37,7 @@ function controlPlane(overrides: Partial<AzureStorageControlPlane> = {}): AzureS
     verifySubscription: vi.fn(async () => {}),
     ensureScope: vi.fn(async () => ({ created: false })),
     listAccounts: vi.fn(async () => []),
+    listContainers: vi.fn(async () => []),
     getAccount: vi.fn(async () => null),
     createAccount: vi.fn(async (_name, _location, tags) => account({ tags })),
     getContainer: vi.fn(async () => null),
@@ -62,6 +63,38 @@ function dataPlane(overrides: Partial<AzureBlobDataPlane> = {}): AzureBlobDataPl
 }
 
 describe('AzureBlobStorageAdapter', () => {
+  it('inventories containers across the subscription with durable Azure scope', async () => {
+    const storageAccount = account();
+    const container = {
+      id: `${storageAccount.id}/blobServices/default/containers/customer-documents`,
+      name: 'customer-documents',
+    };
+    const control = controlPlane({
+      listAccounts: vi.fn(async () => [storageAccount]),
+      listContainers: vi.fn(async () => [container]),
+    });
+    const adapter = new AzureBlobStorageAdapter({
+      controlPlaneFactory: () => control,
+      dataPlaneFactory: () => dataPlane(),
+    });
+    await adapter.connect(credentials);
+
+    await expect(adapter.inspectStorageResources({ resource: 'storage', limit: 1 }))
+      .resolves.toMatchObject({
+        observation: 'present',
+        resource: 'storage',
+        storage: [{
+          id: container.id,
+          name: 'customer-documents',
+          providerScope: {
+            subscriptionId: credentials.subscriptionId,
+            resourceGroup: 'friend-app-production',
+          },
+        }],
+        partial: false,
+      });
+  });
+
   it('uses the Azure default credential chain without requiring a service-principal key', async () => {
     const control = controlPlane();
     const defaultCredentialProvider = vi.fn(async () => ({

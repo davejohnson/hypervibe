@@ -563,6 +563,9 @@ describe('FlyAdapter', () => {
         name: 'hv-db-stale-peer',
         organizationSlug: 'hypervibe-test',
       }],
+      truncated: false,
+      temporaryAccessPeersTruncated: false,
+      partial: false,
     });
     expect(JSON.stringify(inspected)).not.toContain('pubkey');
     expect(JSON.stringify(inspected)).not.toContain('public-key');

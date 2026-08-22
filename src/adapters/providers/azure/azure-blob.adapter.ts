@@ -16,7 +16,10 @@ import type {
   StorageObjectPayload,
   StorageObjectRecord,
 } from '../../../domain/ports/storage.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 import {
   AzureResourceManagerClient,
   resolveAzureDefaultSubscription,
@@ -70,6 +73,7 @@ export interface AzureStorageControlPlane {
   verifySubscription(): Promise<void>;
   ensureScope(location: string, tags: Record<string, string>): Promise<{ created: boolean }>;
   listAccounts(): Promise<AzureStorageAccount[]>;
+  listContainers(account: AzureStorageAccount): Promise<AzureBlobContainer[]>;
   getAccount(name: string): Promise<AzureStorageAccount | null>;
   createAccount(name: string, location: string, tags: Record<string, string>): Promise<AzureStorageAccount>;
   getContainer(account: AzureStorageAccount, container: string): Promise<AzureBlobContainer | null>;
@@ -122,9 +126,19 @@ class ArmStorageControlPlane implements AzureStorageControlPlane {
   }
 
   async listAccounts(): Promise<AzureStorageAccount[]> {
+    const resourceGroup = this.arm.credentials.resourceGroup;
     return this.arm.listAll<AzureStorageAccount>(
-      this.arm.resourceGroupProviderPath('Microsoft.Storage', 'storageAccounts'),
+      resourceGroup
+        ? this.arm.resourceGroupProviderPath('Microsoft.Storage', 'storageAccounts')
+        : `/subscriptions/${encodeURIComponent(this.arm.credentials.subscriptionId)}/providers/Microsoft.Storage/storageAccounts`,
       ACCOUNT_API_VERSION
+    );
+  }
+
+  async listContainers(account: AzureStorageAccount): Promise<AzureBlobContainer[]> {
+    return this.arm.listAll<AzureBlobContainer>(
+      `${account.id}/blobServices/default/containers`,
+      CONTAINER_API_VERSION
     );
   }
 
@@ -305,6 +319,22 @@ function containerName(name: string): string {
 }
 
 function parseExternalId(externalId: string, context: StorageContext): { account: string; container: string } {
+  const identity = parseStorageResourceIdentity(externalId);
+  if (
+    identity.subscriptionId.toLowerCase() !== context.subscriptionId?.toLowerCase()
+    || identity.resourceGroup.toLowerCase() !== context.resourceGroup?.toLowerCase()
+  ) {
+    throw new Error('Azure Blob container is outside the configured subscription/resource group.');
+  }
+  return { account: identity.account, container: identity.container };
+}
+
+function parseStorageResourceIdentity(externalId: string): {
+  subscriptionId: string;
+  resourceGroup: string;
+  account: string;
+  container: string;
+} {
   const segments = externalId.split('/').filter(Boolean).map(decodeURIComponent);
   if (
     segments.length !== 12
@@ -319,13 +349,12 @@ function parseExternalId(externalId: string, context: StorageContext): { account
   ) {
     throw new Error('Invalid Azure Blob container ARM resource ID.');
   }
-  if (
-    segments[1]?.toLowerCase() !== context.subscriptionId?.toLowerCase()
-    || segments[3]?.toLowerCase() !== context.resourceGroup?.toLowerCase()
-  ) {
-    throw new Error('Azure Blob container is outside the configured subscription/resource group.');
-  }
-  return { account: segments[7]!, container: segments[11]! };
+  return {
+    subscriptionId: segments[1]!,
+    resourceGroup: segments[3]!,
+    account: segments[7]!,
+    container: segments[11]!,
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -461,6 +490,52 @@ export class AzureBlobStorageAdapter implements IStorageAdapter {
       }
     }
     return observed.sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  async inspectStorageResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    const credentials = await this.connectedCredentials();
+    this.control = this.controlPlaneFactory(credentials);
+    const resources: Array<{
+      account: AzureStorageAccount;
+      container: AzureBlobContainer;
+    }> = [];
+    for (const account of await this.control.listAccounts()) {
+      for (const container of await this.control.listContainers(account)) {
+        if (request.id && container.id.toLowerCase() !== request.id.toLowerCase()) continue;
+        if (request.name && container.name.toLowerCase() !== request.name.toLowerCase()) continue;
+        resources.push({ account, container });
+      }
+    }
+    const ambiguous = Boolean(request.name && resources.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : resources.length > 0 ? 'present' : 'absent',
+      resource: 'storage',
+      storage: resources.slice(0, request.limit).map(({ account, container }) => {
+        const identity = parseStorageResourceIdentity(container.id);
+        return {
+          id: container.id,
+          name: container.name,
+          kind: 'object',
+          status: 'ready',
+          account: { id: account.id, name: account.name },
+          region: account.location,
+          ...(account.tags?.[STORAGE_NAME_TAG]
+            ? { logicalName: account.tags[STORAGE_NAME_TAG] }
+            : {}),
+          providerScope: {
+            subscriptionId: identity.subscriptionId,
+            resourceGroup: identity.resourceGroup,
+          },
+        };
+      }),
+      ...(resources.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: resources.length > request.limit,
+      partial: false,
+    };
   }
 
   async ensureBucket(
@@ -636,5 +711,15 @@ providerRegistry.register({
     const adapter = new AzureBlobStorageAdapter();
     void adapter.connect(credentials);
     return adapter;
+  },
+  inspection: {
+    resources: ['storage'],
+    defaultResource: 'storage',
+    selectors: {
+      storage: { mode: 'provider-resource', optional: ['id', 'name', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['subscriptionId', 'resourceGroup'] },
+    },
+    inspect: (adapter, request) => (
+      adapter as AzureBlobStorageAdapter
+    ).inspectStorageResources(request),
   },
 });

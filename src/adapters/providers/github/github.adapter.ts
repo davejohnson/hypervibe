@@ -1221,6 +1221,15 @@ providerRegistry.register({
   },
   inspection: {
     resources: ['repository', 'ref', 'branch', 'pages', 'pull-request', 'branch-protection'],
+    defaultResource: 'repository',
+    selectors: {
+      repository: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project'] },
+      ref: { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
+      branch: { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
+      pages: { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project'] },
+      'pull-request': { mode: 'provider-resource', oneOf: [['scope', 'project']], optional: ['scope', 'project', 'name', 'limit'], list: true },
+      'branch-protection': { mode: 'provider-resource', oneOf: [['scope', 'project'], ['id', 'name']], optional: ['scope', 'project', 'id', 'name'], mutuallyExclusive: [['id', 'name']] },
+    },
     inspect: (adapter, request) => inspectGitHubResources(adapter as GitHubAdapter, request),
   },
 });

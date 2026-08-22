@@ -6,7 +6,7 @@ import { suppliedOptionNames } from './command-options.js';
 
 export interface ImportProviderInput {
   provider: string;
-  mode?: 'adopt' | 'retained-cleanup';
+  mode?: 'adopt' | 'retained-cleanup' | 'retained-database-cleanup';
   project?: string;
   env?: string;
   region?: string;
@@ -18,6 +18,144 @@ export interface ImportProviderInput {
   databaseMappings?: Record<string, 'postgres'>;
   cacheMappings?: Record<string, 'redis'>;
   confirm?: boolean;
+}
+
+async function retainDatabaseCleanup(
+  ctx: CommandContext,
+  input: ImportProviderInput,
+  provider: string
+): Promise<CommandEnvelope> {
+  if (!input.project || !input.env || !input.id?.trim()) {
+    return commandError('VALIDATION', 'retained-database-cleanup requires project, env, and the exact database id returned by hv_inspect.', {
+      hint: `Run hv_inspect provider="${provider}" resource="database", then pass one exact returned id with the current Hypervibe project and environment.`,
+      next: ['hv_inspect', 'hv_import'],
+    });
+  }
+  const registration = providerRegistry.get(provider);
+  if (!providerRegistry.supports(provider, 'database') || !registration?.inspection?.resources.includes('database')) {
+    return commandError('UNSUPPORTED', `${registration?.metadata.displayName ?? provider} cannot inventory and retain an exact database cleanup target.`, {
+      hint: 'A provider-owned database inspection contract is required before Hypervibe can authorize cleanup.',
+      next: ['hv_inspect'],
+    });
+  }
+
+  const project = ctx.resolveProjectOrThrow({ project: input.project });
+  const environment = ctx.resolveEnvironmentOrThrow(project, input.env);
+  const currentBindings = record(environment.platformBindings) ?? {};
+  if (record(currentBindings.previousDatabase)) {
+    return commandError('VALIDATION', 'A retained database cleanup target already exists for this environment.', {
+      details: { previousDatabase: currentBindings.previousDatabase },
+      hint: 'Finish the existing retained cleanup plan before recording another data-bearing target.',
+      next: ['hv_plan'],
+    });
+  }
+
+  const externalId = input.id.trim();
+  const activeComponent = ctx.repos.components.findByEnvironmentId(environment.id).find((component) => (
+    component.type === 'postgres'
+    && component.bindings.provider === provider
+    && component.externalId === externalId
+  ));
+  if (activeComponent) {
+    return commandError('VALIDATION', `Database ${externalId} is the active locally bound ${provider} component for ${project.name}/${environment.name}.`, {
+      hint: 'Change desired state and use the ordinary hv_plan/hv_apply database destroy lifecycle; retained cleanup is only for an abandoned unbound identity.',
+      next: ['hv_plan'],
+    });
+  }
+
+  const forensic = await inspectProvider(ctx, {
+    provider,
+    project: project.name,
+    resource: 'database',
+    id: externalId,
+  });
+  const databases = Array.isArray(forensic.databases) ? forensic.databases : [];
+  const exact = databases
+    .map(record)
+    .filter((database): database is Record<string, unknown> => Boolean(database))
+    .filter((database) => stringValue(database.id) === externalId);
+  if (forensic.partial !== false) {
+    return commandError('PROVIDER_ERROR', `${registration.metadata.displayName} returned a partial database inventory; cleanup identity was not retained.`, {
+      details: forensic,
+      hint: 'Resolve the provider read failure and refresh hv_inspect before retaining a data-bearing deletion target.',
+      next: ['hv_inspect'],
+    });
+  }
+  if (forensic.observation !== 'present' || exact.length === 0) {
+    return commandError('NOT_FOUND', `${registration.metadata.displayName} did not confirm database ${externalId} is present.`, {
+      details: forensic,
+      hint: 'Refresh hv_inspect inventory. Hypervibe will not retain or delete an unverified identity.',
+      next: ['hv_inspect'],
+    });
+  }
+  if (exact.length !== 1) {
+    return commandError('VALIDATION', `${registration.metadata.displayName} did not return one unambiguous database for id ${externalId}.`, {
+      details: forensic,
+      hint: 'Use the exact durable provider id from a fresh inventory; Hypervibe will not choose between candidates.',
+      next: ['hv_inspect'],
+    });
+  }
+  if (exact[0].cleanupSupported === false) {
+    return commandError('UNSUPPORTED', `${registration.metadata.displayName} can inventory database ${externalId}, but its provider resource kind cannot be deleted through the lifecycle adapter.`, {
+      details: { database: exact[0] },
+      hint: 'Keep the resource visible in hv_inspect; do not retain it as a deletion target until the provider exposes a supported teardown operation.',
+      next: ['hv_inspect'],
+    });
+  }
+  const providerScope = record(exact[0].providerScope);
+  const requiredScopeKeys = registration.inspection.selectors.database?.scopeKeys ?? [];
+  if (
+    requiredScopeKeys.length === 0
+    || !providerScope
+    || Object.keys(providerScope).length === 0
+    || Object.values(providerScope).some((value) => typeof value !== 'string' || !value)
+    || requiredScopeKeys.some((key) => typeof providerScope[key] !== 'string' || !providerScope[key])
+  ) {
+    return commandError('PROVIDER_ERROR', `${registration.metadata.displayName} did not return the durable provider scope for database ${externalId}.`, {
+      details: { database: exact[0], requiredScopeKeys },
+      hint: 'The provider inspector must return a non-secret providerScope before this id can become a deletion target.',
+      next: ['hv_inspect'],
+    });
+  }
+  const engine = stringValue(exact[0].engine);
+  if (engine !== 'postgres') {
+    return commandError('UNSUPPORTED', `Retained cleanup supports PostgreSQL, but ${externalId} was reported as ${engine ?? 'an unknown engine'}.`);
+  }
+  const previousDatabase = {
+    provider,
+    externalId,
+    engine,
+    name: stringValue(exact[0].name) ?? externalId,
+    providerScope,
+  };
+
+  if (!input.confirm) {
+    return commandError('CONFIRM_REQUIRED', `This will retain ${provider} database ${externalId} as the exact data-bearing deletion target for ${project.name}/${environment.name}. No provider resource will be changed yet.`, {
+      details: { previousDatabase },
+      hint: 'Re-run hv_import with confirm=true, then use hv_plan scope="retained-cleanup" and explicitly confirm its database destroy action.',
+      next: ['hv_import'],
+    });
+  }
+
+  ctx.repos.environments.updatePlatformBindings(environment.id, { previousDatabase });
+  ctx.repos.audit.create({
+    action: 'database.previous.retained',
+    resourceType: 'environment',
+    resourceId: environment.id,
+    details: { project: project.name, environment: environment.name, provider, externalId, providerScope },
+  });
+  return commandSuccess({
+    retainedDatabaseCleanup: {
+      provider,
+      project: project.name,
+      environment: environment.name,
+      externalId,
+      providerScope,
+    },
+  }, {
+    hint: 'Run hv_plan with scope="retained-cleanup" and confirm only the exact retained database destroy action after reviewing the identity and scope.',
+    next: ['hv_plan'],
+  });
 }
 
 export type ProviderImportDriver = (
@@ -212,7 +350,17 @@ export async function importProvider(
       databaseMappings: input.databaseMappings,
       cacheMappings: input.cacheMappings,
     }
-    : { project: input.project, env: input.env, region: input.region });
+    : mode === 'retained-database-cleanup'
+      ? {
+        region: input.region,
+        name: input.name,
+        force: input.force,
+        environmentMappings: input.environmentMappings,
+        storageMappings: input.storageMappings,
+        databaseMappings: input.databaseMappings,
+        cacheMappings: input.cacheMappings,
+      }
+      : { project: input.project, env: input.env, region: input.region });
   if (incompatible.length > 0) {
     return commandError('VALIDATION', `mode="${mode}" received options for the other import mode: ${incompatible.join(', ')}.`, {
       hint: `Remove the listed options before retrying mode="${mode}".`,
@@ -221,6 +369,9 @@ export async function importProvider(
   }
   if (mode === 'retained-cleanup') {
     return retainHostingCleanup(ctx, input, provider);
+  }
+  if (mode === 'retained-database-cleanup') {
+    return retainDatabaseCleanup(ctx, input, provider);
   }
   const driver = importDrivers.get(provider);
   if (!registered.adoption?.project || !driver) {

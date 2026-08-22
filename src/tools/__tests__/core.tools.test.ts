@@ -3238,6 +3238,132 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
+  it('deletes an exact retained database only through isolated confirmed plan/apply and clears the binding after absence', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec', { spec: {
+      project: 'retained-database-apply-app',
+      environments: { production: {
+        hosting: { provider: 'railway' },
+        services: { web: { startCommand: 'npm start' } },
+      } },
+    } });
+    verifyRailwayConnection();
+    verifyConnection('cloudsql', { projectId: 'gcp-project', credentials: '{}' });
+    const project = new ProjectRepository().findByName('retained-database-apply-app')!;
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'railway-project',
+        environmentId: 'railway-environment',
+        services: { web: { serviceId: 'railway-web' } },
+        previousDatabase: {
+          provider: 'cloudsql',
+          externalId: 'legacy-production-db',
+          engine: 'postgres',
+          name: 'legacy-production-db',
+          providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+        },
+      },
+    });
+    new ServiceRepository().create({ projectId: project.id, name: 'web', buildConfig: {}, envVarSpec: {} });
+    const hostingObserved: ObservedState = {
+      provider: 'railway',
+      observedAt: new Date().toISOString(),
+      projectExists: true,
+      projectId: 'railway-project',
+      environmentId: 'railway-environment',
+      services: [{
+        name: 'web', externalId: 'railway-web', workloadKind: 'web', customDomains: [],
+        config: { startCommand: 'npm start' }, sourceState: 'disconnected',
+        envVarKeys: [], envVarHashes: {}, status: 'running',
+      }],
+      databases: [],
+      partial: false,
+      warnings: [],
+    };
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'railway',
+        capabilities: {
+          supportedBuilders: ['nixpacks'], supportedComponents: [], supportsAutoWiring: true,
+          supportsHealthChecks: true, supportsCronSchedule: true, supportsReleaseCommand: false,
+          supportsMultiEnvironment: true, managedTls: true, supportsObserve: true,
+        },
+        configureTarget: async () => {},
+        observe: async () => hostingObserved,
+      },
+    } as any);
+    let databasePresent = true;
+    const destroy = vi.fn(async (component: { externalId: string | null; bindings: Record<string, unknown> }) => {
+      expect(component.externalId).toBe('legacy-production-db');
+      expect(component.bindings).toMatchObject({
+        retainedCleanup: true,
+        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+      });
+      databasePresent = false;
+      return { success: true, message: 'deleted' };
+    });
+    vi.spyOn(adapterFactory, 'getDatabaseAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        name: 'cloudsql',
+        capabilities: {
+          supportedDatabases: ['postgres'], supportsPooling: false, supportsReadReplicas: false,
+          supportsPointInTimeRecovery: false, serverlessOptimized: false,
+        },
+        connect: async () => {}, verify: async () => ({ success: true }), disconnect: async () => {},
+        provision: async () => { throw new Error('unused'); }, getConnectionUrl: async () => null,
+        observeDatabase: async () => databasePresent ? ({
+          provider: 'cloudsql', engine: 'postgres', externalId: 'legacy-production-db', status: 'running',
+          providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+        }) : null,
+        destroy,
+      },
+    });
+
+    const plan = await t.call('hv_plan', {
+      project: project.name,
+      env: environment.name,
+      scope: 'retained-cleanup',
+    });
+    expect(plan.ok).toBe(true);
+    expect(plan.data.actions).toEqual([expect.objectContaining({
+      id: 'database:cloudsql:retained-destroy',
+      dataBearing: true,
+      requiresConfirm: true,
+    })]);
+
+    const unconfirmed = await t.call('hv_apply', { project: project.name, planId: plan.data.planId });
+    expect(unconfirmed.ok).toBe(true);
+    expect(unconfirmed.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'database:cloudsql:retained-destroy',
+      status: 'skipped_requires_confirm',
+    }));
+    expect(destroy).not.toHaveBeenCalled();
+
+    const confirmedPlan = await t.call('hv_plan', {
+      project: project.name,
+      env: environment.name,
+      scope: 'retained-cleanup',
+    });
+    const confirmed = await t.call('hv_apply', {
+      project: project.name,
+      planId: confirmedPlan.data.planId,
+      confirmActions: ['database:cloudsql:retained-destroy'],
+    });
+    expect(confirmed.ok).toBe(true);
+    expect(confirmed.data.receipts).toContainEqual(expect.objectContaining({
+      actionId: 'database:cloudsql:retained-destroy',
+      status: 'succeeded',
+    }));
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousDatabase).toBeUndefined();
+    await t.close();
+  });
+
   it('uses an exact environment boundary for abandoned shared-project hosting', async () => {
     const t = await makeClient();
     await t.call('hv_spec', { spec: {

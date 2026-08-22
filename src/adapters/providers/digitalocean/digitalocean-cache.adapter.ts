@@ -113,6 +113,7 @@ export class DigitalOceanCacheAdapter implements ICacheAdapter {
         size: options?.size ?? this.credentials.databaseSize,
       });
       const online = await this.client.waitForDatabaseOnline(created.id);
+      const accountUuid = await this.client.getAccountUuid();
       const connectionUrl = this.connectionUrl(online.connection);
       const component: Component = {
         id: '',
@@ -121,6 +122,10 @@ export class DigitalOceanCacheAdapter implements ICacheAdapter {
         bindings: {
           provider: 'digitalocean',
           instanceId: online.id,
+          providerScope: {
+            accountUuid,
+            ...(online.region ? { region: online.region } : {}),
+          },
           engine: online.engine,
           connectionString: connectionUrl,
           connectionUrl,
@@ -263,6 +268,10 @@ export class DigitalOceanCacheAdapter implements ICacheAdapter {
       provider: 'digitalocean',
       engine: 'redis',
       externalId: cluster.id,
+      providerScope: {
+        accountUuid: await this.client.getAccountUuid(),
+        ...(cluster.region ? { region: cluster.region } : {}),
+      },
       name: cluster.name,
       status: this.normalizedStatus(cluster.status),
     };

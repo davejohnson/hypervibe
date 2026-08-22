@@ -7,6 +7,30 @@ function provider(
   category: RegisteredProvider['metadata']['category'],
   derivedAdapters?: RegisteredProvider['derivedAdapters']
 ): RegisteredProvider {
+  const supportsDatabase = category === 'database' || Boolean(derivedAdapters?.database);
+  const supportsCache = category === 'cache' || Boolean(derivedAdapters?.cache);
+  const supportsStorage = category === 'storage' || Boolean(derivedAdapters?.storage);
+  const supportsHosting = category === 'deployment';
+  const resources = [
+    ...(supportsHosting ? ['environment' as const] : []),
+    ...(supportsDatabase ? ['database' as const] : []),
+    ...(supportsCache ? ['cache' as const] : []),
+    ...(supportsStorage ? ['storage' as const] : []),
+  ];
+  const selectors = Object.fromEntries(resources.map((resource) => [resource, resource === 'environment'
+    ? {
+        mode: 'environment-forensics' as const,
+        required: ['project', 'env'] as const,
+        optional: ['limit'] as const,
+        list: true,
+      }
+    : {
+        mode: 'provider-resource' as const,
+        optional: ['id', 'name', 'limit'] as const,
+        mutuallyExclusive: [['id', 'name']] as const,
+        list: true,
+        scopeKeys: ['accountId'],
+      }]));
   return {
     metadata: {
       name,
@@ -17,15 +41,23 @@ function provider(
         ...(category === 'deployment'
           ? { hosting: { customDomains: 'unsupported' as const, teardownBoundary: 'services' as const } }
           : {}),
-        ...(category === 'database' || derivedAdapters?.database
+        ...(supportsDatabase
           ? { databaseEngines: ['postgres'] }
           : {}),
-        ...(category === 'cache' || derivedAdapters?.cache
+        ...(supportsCache
           ? { cacheEngines: ['redis'] }
           : {}),
       },
     },
     factory: () => ({}),
+    ...(resources.length > 0 ? {
+      inspection: {
+        resources,
+        defaultResource: resources[0],
+        selectors,
+        inspect: async () => ({ observation: 'present', resource: resources[0] }),
+      },
+    } : {}),
     ...(derivedAdapters ? { derivedAdapters } : {}),
   };
 }
@@ -65,5 +97,50 @@ describe('ProviderRegistry lifecycle capabilities', () => {
 
     expect(registry.supports('repository', 'hosting')).toBe(false);
     expect(registry.namesFor('hosting')).toEqual([]);
+  });
+
+  it('rejects database lifecycle support without complete provider-owned inventory', () => {
+    const registry = new ProviderRegistry();
+    const incomplete = provider('incomplete-db', 'database');
+    delete incomplete.inspection;
+
+    expect(() => registry.register(incomplete)).toThrow(/database lifecycle support without/i);
+  });
+
+  it('rejects hosting lifecycle support without provider-owned environment inventory', () => {
+    const registry = new ProviderRegistry();
+    const incomplete = provider('incomplete-host', 'deployment');
+    delete incomplete.inspection;
+
+    expect(() => registry.register(incomplete)).toThrow(/hosting lifecycle support without/i);
+  });
+
+  it('rejects list contracts that do not accept limit', () => {
+    const registry = new ProviderRegistry();
+    const incomplete = provider('bad-limit-db', 'database');
+    incomplete.inspection!.selectors = {
+      database: {
+        ...incomplete.inspection!.selectors.database!,
+        optional: ['id', 'name'],
+      },
+    };
+
+    expect(() => registry.register(incomplete)).toThrow(/accept limit exactly when list=true/i);
+  });
+
+  it('rejects cache lifecycle support without complete provider-owned inventory', () => {
+    const registry = new ProviderRegistry();
+    const incomplete = provider('incomplete-cache', 'cache');
+    delete incomplete.inspection;
+
+    expect(() => registry.register(incomplete)).toThrow(/cache lifecycle support without/i);
+  });
+
+  it('rejects storage lifecycle support without complete provider-owned inventory', () => {
+    const registry = new ProviderRegistry();
+    const incomplete = provider('incomplete-storage', 'storage');
+    delete incomplete.inspection;
+
+    expect(() => registry.register(incomplete)).toThrow(/storage lifecycle support without/i);
   });
 });

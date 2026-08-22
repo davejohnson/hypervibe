@@ -71,6 +71,31 @@ describe('NeonAdapter', () => {
     vi.unstubAllEnvs();
   });
 
+  it('inventories bounded projects with durable organization scope', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      projects: [
+        { id: 'neon-1', name: 'customer-primary', org_id: 'org-hypervibe', region_id: 'aws-us-west-2', pg_version: 17 },
+        { id: 'neon-2', name: 'analytics', org_id: 'org-hypervibe', region_id: 'aws-us-east-1', pg_version: 16 },
+      ],
+      pagination: {},
+    })));
+    const adapter = await connectedAdapter();
+
+    const result = await adapter.inspectDatabaseResources({ resource: 'database', limit: 1 });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      resource: 'database',
+      databases: [{
+        id: 'neon-1',
+        engine: 'postgres',
+        providerScope: { projectId: 'neon-1', organizationId: 'org-hypervibe', regionId: 'aws-us-west-2' },
+      }],
+      truncated: true,
+      partial: false,
+    });
+  });
+
   it('validates credentials instead of accepting an unchecked cast', async () => {
     const adapter = new NeonAdapter();
 

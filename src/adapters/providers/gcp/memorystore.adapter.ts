@@ -10,7 +10,10 @@ import type {
 } from '../../../domain/ports/cache.port.js';
 import type { ObservedCache } from '../../../domain/ports/observe.port.js';
 import type { Receipt, VerifyResult } from '../../../domain/ports/provider.port.js';
-import { providerRegistry } from '../../../domain/registry/provider.registry.js';
+import {
+  providerRegistry,
+  type ProviderInspectionRequest,
+} from '../../../domain/registry/provider.registry.js';
 
 export const MemorystoreCredentialsSchema = z.object({
   projectId: z.string().min(1, 'GCP Project ID is required'),
@@ -386,8 +389,47 @@ export class MemorystoreAdapter implements ICacheAdapter {
       provider: 'memorystore',
       engine: 'redis',
       externalId: instance.name,
+      providerScope: this.providerScope(instance),
       name: instance.displayName ?? this.instanceId(instance.name),
       status: this.normalizedStatus(instance.state),
+    };
+  }
+
+  async inspectCacheResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const candidates = request.id
+      ? [await this.getInstance(request.id)].filter(
+        (instance): instance is MemorystoreInstance => Boolean(instance)
+      )
+      : await this.listInstances(request.region ?? '-');
+    const matched = candidates.filter((instance) => {
+      if (!request.name) return true;
+      const expected = request.name.toLowerCase();
+      return instance.name.toLowerCase() === expected
+        || this.instanceId(instance.name).toLowerCase() === expected
+        || instance.displayName?.toLowerCase() === expected;
+    });
+    const ambiguous = Boolean(request.name && matched.length > 1);
+    return {
+      observation: ambiguous ? 'ambiguous' : matched.length > 0 ? 'present' : 'absent',
+      resource: 'cache',
+      caches: matched.slice(0, request.limit).map((instance) => ({
+        id: instance.name,
+        name: instance.displayName ?? this.instanceId(instance.name),
+        engine: 'redis',
+        status: instance.state ?? 'unknown',
+        ...(instance.redisVersion ? { engineVersion: instance.redisVersion } : {}),
+        providerScope: this.providerScope(instance),
+      })),
+      ...(matched.length === 0 && (request.id || request.name)
+        ? { [request.id ? 'id' : 'name']: request.id ?? request.name }
+        : {}),
+      truncated: matched.length > request.limit,
+      partial: false,
     };
   }
 
@@ -577,6 +619,7 @@ export class MemorystoreAdapter implements ICacheAdapter {
       bindings: {
         provider: 'memorystore',
         instanceId: instance.name,
+        providerScope: this.providerScope(instance),
         connectionString: connectionUrl,
         connectionUrl,
         host: instance.host,
@@ -603,6 +646,7 @@ export class MemorystoreAdapter implements ICacheAdapter {
       bindings: {
         provider: 'memorystore',
         instanceId: instance.name,
+        providerScope: this.providerScope(instance),
         privateNetworkOnly: true,
       },
       createdAt: new Date(),
@@ -650,6 +694,20 @@ export class MemorystoreAdapter implements ICacheAdapter {
 
   private instanceId(resourceName: string): string {
     return resourceName.split('/').at(-1) ?? resourceName;
+  }
+
+  private providerScope(instance: MemorystoreInstance): Record<string, string> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const segments = instance.name.split('/');
+    const projectId = segments[0] === 'projects' && segments[1]
+      ? segments[1]
+      : this.credentials.projectId;
+    const region = segments[2] === 'locations' && segments[3]
+      ? segments[3]
+      : instance.currentLocationId ?? instance.locationId ?? this.credentials.region;
+    return { projectId, region };
   }
 
   private sanitizeId(value: string): string {
@@ -730,5 +788,15 @@ providerRegistry.register({
     const adapter = new MemorystoreAdapter();
     void adapter.connect(credentials);
     return adapter;
+  },
+  inspection: {
+    resources: ['cache'],
+    defaultResource: 'cache',
+    selectors: {
+      cache: { mode: 'provider-resource', optional: ['id', 'name', 'region', 'limit'], mutuallyExclusive: [['id', 'name']], list: true, scopeKeys: ['projectId', 'region'] },
+    },
+    inspect: (adapter, request) => (
+      adapter as MemorystoreAdapter
+    ).inspectCacheResources(request),
   },
 });
