@@ -169,7 +169,7 @@ struct ProjectSetupView: View {
                 }
             }
             .padding(12)
-            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+            .companionCardSurface(cornerRadius: 9)
 
             Text(setupHelp)
                 .font(.caption)
@@ -243,7 +243,7 @@ struct ProjectSetupView: View {
                     .textSelection(.enabled)
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+                    .companionCardSurface(cornerRadius: 9)
             }
 
             HStack {

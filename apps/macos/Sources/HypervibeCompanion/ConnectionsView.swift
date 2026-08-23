@@ -410,7 +410,7 @@ private struct AddConnectionView: View {
                                         Spacer()
                                     }
                                     .padding(10)
-                                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
+                                    .companionCardSurface(cornerRadius: 9)
                                 }
                                 .buttonStyle(.plain)
                                 .clickTargetCursor()
