@@ -101,8 +101,17 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
     const jobServiceNames = Object.entries(environment.services)
       .filter(([, service]) => service.workloadKind === 'cron')
       .map(([name]) => name);
-    const webService = Object.values(environment.services)
-      .find((service) => service.workloadKind === 'web');
+    const runtimeServices = Object.values(environment.services)
+      .filter((service) => service.workloadKind !== 'cron');
+    const explicitContainerCommands = runtimeServices
+      .map((service) => service.startCommand?.trim())
+      .filter((command): command is string => Boolean(command));
+    const containerCommands = [...new Set(explicitContainerCommands)];
+    const containerStartCommand = runtimeServices.length > 0
+      && explicitContainerCommands.length === runtimeServices.length
+      && containerCommands.length === 1
+      ? containerCommands[0]
+      : undefined;
     targetsByEnvironment.set(environmentName, {
       environmentName,
       kind,
@@ -122,7 +131,7 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
         || (serviceNames.length === 0 && bindings.providerServiceIds.length > 0),
       needsJobNames: jobServiceNames.length > 0
         || (serviceNames.length === 0 && bindings.providerJobNames.length > 0),
-      webStartCommand: webService?.startCommand,
+      containerStartCommand,
       runtime,
     });
 

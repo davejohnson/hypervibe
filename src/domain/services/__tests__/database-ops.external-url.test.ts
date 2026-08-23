@@ -149,13 +149,13 @@ describe('isExternallyUsableDatabaseUrl', () => {
 describe('buildRailwayProxyDatabaseUrl', () => {
   const proxy = { domain: 'db.proxy.rlwy.net', proxyPort: 33333 };
 
-  it('encodes the password and falls back to POSTGRES_DB then "railway" for the database', () => {
+  it('encodes the password and uses only an observed database name', () => {
     expect(buildRailwayProxyDatabaseUrl({ PGUSER: 'u', POSTGRES_PASSWORD: 'a b', PGDATABASE: 'db1' }, proxy))
       .toBe('postgresql://u:a%20b@db.proxy.rlwy.net:33333/db1');
     expect(buildRailwayProxyDatabaseUrl({ PGUSER: 'u', POSTGRES_PASSWORD: 'x', POSTGRES_DB: 'db2' }, proxy))
       .toBe('postgresql://u:x@db.proxy.rlwy.net:33333/db2');
     expect(buildRailwayProxyDatabaseUrl({ PGUSER: 'u', POSTGRES_PASSWORD: 'x' }, proxy))
-      .toBe('postgresql://u:x@db.proxy.rlwy.net:33333/railway');
+      .toBeNull();
   });
 
   it('returns null when credentials are missing', () => {
@@ -164,7 +164,7 @@ describe('buildRailwayProxyDatabaseUrl', () => {
   });
 
   it('trims trailing dots from the proxy domain', () => {
-    expect(buildRailwayProxyDatabaseUrl({ PGUSER: 'u', POSTGRES_PASSWORD: 'x' }, { domain: 'db.proxy.rlwy.net.', proxyPort: 33333 }))
-      .toBe('postgresql://u:x@db.proxy.rlwy.net:33333/railway');
+    expect(buildRailwayProxyDatabaseUrl({ PGUSER: 'u', POSTGRES_PASSWORD: 'x', PGDATABASE: 'app' }, { domain: 'db.proxy.rlwy.net.', proxyPort: 33333 }))
+      .toBe('postgresql://u:x@db.proxy.rlwy.net:33333/app');
   });
 });

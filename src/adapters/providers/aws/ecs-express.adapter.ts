@@ -83,6 +83,7 @@ import type {
   VerifyResult,
 } from '../../../domain/ports/provider.port.js';
 import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
+import { HYPERVIBE_MANAGED_NODE_VERSION } from '../../../domain/services/managed-runtime.js';
 import { environmentForInspection } from '../../../domain/registry/provider-inspection.js';
 import {
   buildEcsExpressGitHubActionsSteps,
@@ -90,7 +91,7 @@ import {
 } from './ecs-express-ci.workflow.js';
 import { buildEcsExpressPortableRecipe } from './ecs-express-ci.recipe.js';
 
-const BOOTSTRAP_IMAGE = 'public.ecr.aws/docker/library/node:20-alpine';
+const BOOTSTRAP_IMAGE = `public.ecr.aws/docker/library/node:${HYPERVIBE_MANAGED_NODE_VERSION}-alpine`;
 const BOOTSTRAP_COMMAND = [
   'node',
   '-e',

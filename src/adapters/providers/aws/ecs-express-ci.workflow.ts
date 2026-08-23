@@ -7,6 +7,7 @@ import {
   providerValueOrVariable,
   yamlSingleQuoted,
 } from '../../../domain/services/github-actions-workflow.js';
+import { HYPERVIBE_MANAGED_NPM_PACKAGES } from '../../../domain/services/managed-runtime.js';
 
 export const ECS_EXPRESS_CI_REQUIRED_SECRETS = [
   'AWS_ACCESS_KEY_ID',
@@ -88,7 +89,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
       - name: Install pinned ECS SDK
-        run: npm install --no-save --ignore-scripts @aws-sdk/client-ecs@3.1106.0
+        run: npm install --no-save --ignore-scripts ${HYPERVIBE_MANAGED_NPM_PACKAGES.awsEcs}
       - name: Release exact digest to bound ECS Express services
         uses: actions/github-script@v8
         env:

@@ -28,8 +28,18 @@ export const buildConfigColumnSchema = z
     cronSchedule: z.string().optional(),
     public: z.boolean().optional(),
     runtime: z.discriminatedUnion('kind', [
-      z.object({ kind: z.literal('node'), version: z.string() }),
-      z.object({ kind: z.literal('python'), version: z.string() }),
+      z.object({
+        kind: z.literal('node'),
+        version: z.string(),
+        installCommand: z.string().optional(),
+        buildCommand: z.string().optional(),
+      }),
+      z.object({
+        kind: z.literal('python'),
+        version: z.string(),
+        installCommand: z.string().optional(),
+        buildCommand: z.string().optional(),
+      }),
     ]).optional(),
   })
   .passthrough()

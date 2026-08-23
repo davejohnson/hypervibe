@@ -34,7 +34,7 @@ function githubSpec() {
         tests: {
           kind: 'check',
           category: 'test',
-          runtime: { kind: 'node', version: '22' },
+          runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
           commands: ['npm test'],
           failureArtifacts: ['test-results/**'],
           triggers: { pullRequest: true, schedule: { cron: '15 4 * * *', timezone: 'America/Vancouver' } },
@@ -116,7 +116,7 @@ describe('GitHub infrastructure compiler', () => {
     const spec = projectSpecSchema.parse({
       version: 1,
       project: 'runtime-checks',
-      runtime: { kind: 'node', version: '24' },
+      runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
       github: {
         actions: {
           inherited: {
@@ -213,7 +213,7 @@ describe('GitHub infrastructure compiler', () => {
     const spec = projectSpecSchema.parse({
       version: 1,
       project: 'infrastructure-validator',
-      runtime: { kind: 'node', version: '22' },
+      runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
       github: {
         actions: {
           infrastructure: {

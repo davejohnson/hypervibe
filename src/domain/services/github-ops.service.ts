@@ -6,7 +6,7 @@ import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js
 import type { GitHubCredentials } from '../../adapters/providers/github/github.adapter.js';
 import type { Project } from '../entities/project.entity.js';
 import { projectSpecSchema, type IosSpec } from '../spec/spec.schema.js';
-import type { ProjectRuntime } from '../spec/project-runtime.js';
+import { effectiveRuntimeInstallCommand, type ProjectRuntime } from '../spec/project-runtime.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { buildIosReleaseWorkflow } from './ios-release-workflow.service.js';
@@ -230,6 +230,7 @@ function buildMigrationStep(command: string, runtime: ProjectRuntime): string {
   // Migrations run app tooling (prisma, node scripts), so the runner needs
   // dependencies installed — the deploy steps that follow build a container
   // image and never run npm ci on the runner themselves.
+  const installCommand = effectiveRuntimeInstallCommand(runtime);
   const setup = runtime.kind === 'node'
     ? `      - uses: actions/setup-node@v6
         if: steps.deploy.outputs.operation != 'rollback'
@@ -239,7 +240,7 @@ function buildMigrationStep(command: string, runtime: ProjectRuntime): string {
           cache: 'npm'
       - name: Install dependencies for migrations
         if: steps.deploy.outputs.operation != 'rollback'
-        run: npm ci`
+        run: ${installCommand}`
     : `      - uses: actions/setup-python@v6
         if: steps.deploy.outputs.operation != 'rollback'
         with:
@@ -248,7 +249,7 @@ function buildMigrationStep(command: string, runtime: ProjectRuntime): string {
           cache: 'pip'
       - name: Install dependencies for migrations
         if: steps.deploy.outputs.operation != 'rollback'
-        run: python -m pip install -r requirements.txt`;
+        run: ${installCommand}`;
   return `${setup}
       - name: Run migrations
         if: steps.deploy.outputs.operation != 'rollback'
@@ -680,7 +681,7 @@ ${permissionsBlock.trimEnd()}
               throw new Error('Rollback evidence for ' + targetSha + ' did not come from a successful run of ' + workflowPath);
             }
             core.info('Verified rollback evidence from successful workflow run ' + run.data.id);
-${rollbackEvidenceSteps}      - uses: actions/checkout@v5
+${rollbackEvidenceSteps}      - uses: actions/checkout@v6
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:
           ref: \${{ steps.deploy.outputs.sha }}
 ${buildDeploymentContractStep(target.environmentName, sourcePreparationCondition)}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}      - name: Upload server release evidence

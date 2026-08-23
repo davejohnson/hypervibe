@@ -31,7 +31,8 @@ export function buildRailwayProxyDatabaseUrl(
   if (!user || !password) {
     return null;
   }
-  const database = vars.PGDATABASE || vars.POSTGRES_DB || 'railway';
+  const database = vars.PGDATABASE || vars.POSTGRES_DB;
+  if (!database) return null;
   const domain = proxy.domain.replace(/\.+$/, '');
   return `postgresql://${user}:${encodeURIComponent(password)}@${domain}:${proxy.proxyPort}/${database}`;
 }

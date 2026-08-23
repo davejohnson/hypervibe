@@ -67,17 +67,19 @@ export function compileDatabaseRestoreDrillFiles(params: {
     const boundProvider = stringField(bindings, 'provider');
     const sourceInstanceId = component?.externalId ?? stringField(bindings, 'instanceId');
     const sourceConnectionName = stringField(bindings, 'connectionName');
+    const sourceDatabaseName = stringField(bindings, 'database');
     if (
       !environment
       || !component
       || boundProvider !== database.provider
       || !sourceInstanceId
       || !sourceConnectionName
+      || !sourceDatabaseName
     ) {
       issues.push({
         code: 'database_restore_drill_binding_missing',
         environmentName,
-        message: `The ${environmentName} restore drill requires a durably bound ${database.provider} primary with a connection name.`,
+        message: `The ${environmentName} restore drill requires a durably bound ${database.provider} primary with exact connection and database identities.`,
       });
       continue;
     }
@@ -104,7 +106,7 @@ export function compileDatabaseRestoreDrillFiles(params: {
       region,
       sourceInstanceId,
       sourceConnectionName,
-      databaseName: stringField(bindings, 'database') ?? 'app',
+      databaseName: sourceDatabaseName,
       schedule: drill.schedule,
       credentialsSecretName: drill.credentialsSecret,
       verificationQuery: drill.verificationQuery,

@@ -155,7 +155,7 @@ describe('GitLab CI reviewed configuration lifecycle', () => {
 
   it('renders a syntactically valid hardened image-build wrapper', () => {
     const script = buildRailwayGitLabImageRuntime(
-      { kind: 'node', version: '22' },
+      { kind: 'node', version: '22', installCommand: 'npm ci' },
       'node server.mjs'
     );
     const checked = spawnSync('sh', ['-n'], { input: script, encoding: 'utf8' });

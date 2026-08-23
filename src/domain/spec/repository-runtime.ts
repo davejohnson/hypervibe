@@ -15,6 +15,8 @@ export interface RepositoryRuntimeAnalysis {
   status: 'detected' | 'ambiguous' | 'version-required' | 'dockerfile' | 'unknown';
   inspected: boolean;
   runtime?: ProjectRuntime;
+  /** Unambiguous repository-native service start command, suggested for agent review only. */
+  suggestedStartCommand?: string;
   dockerfile?: string;
   evidence: RepositoryRuntimeEvidence[];
   guidance: string;
@@ -127,6 +129,112 @@ function addPackageJson(evidence: RepositoryRuntimeEvidence[], root: string): vo
   });
 }
 
+interface RepositoryCommands {
+  installCommand?: string;
+  buildCommand?: string;
+  startCommand?: string;
+  guidance?: string;
+}
+
+function packageJsonRecord(root: string): Record<string, unknown> | null {
+  const content = readText(root, 'package.json');
+  if (!content) return null;
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function nodeCommands(root: string): RepositoryCommands {
+  const manifest = packageJsonRecord(root);
+  if (!manifest) {
+    return { guidance: 'package.json is missing or invalid, so Hypervibe cannot derive reviewed Node build commands.' };
+  }
+  const scripts = manifest.scripts && typeof manifest.scripts === 'object' && !Array.isArray(manifest.scripts)
+    ? manifest.scripts as Record<string, unknown>
+    : {};
+  const declaredPackageManager = typeof manifest.packageManager === 'string'
+    ? manifest.packageManager.trim()
+    : '';
+  const managerMatch = declaredPackageManager.match(
+    /^(npm|pnpm|yarn)@([1-9]\d*(?:\.\d+){2}(?:-[0-9A-Za-z.-]+)?)$/
+  );
+  const lockManagers = [
+    ...(['package-lock.json', 'npm-shrinkwrap.json'].some((file) => existsSync(path.join(root, file))) ? ['npm'] : []),
+    ...(existsSync(path.join(root, 'pnpm-lock.yaml')) ? ['pnpm'] : []),
+    ...(existsSync(path.join(root, 'yarn.lock')) ? ['yarn'] : []),
+  ];
+  const uniqueLockManagers = [...new Set(lockManagers)];
+  const manager = uniqueLockManagers.length === 1 ? uniqueLockManagers[0] : undefined;
+  if (!manager || uniqueLockManagers.length > 1) {
+    return {
+      guidance: uniqueLockManagers.length > 1
+        ? `Conflicting package-manager lockfiles were found (${uniqueLockManagers.join(', ')}); review and remove stale lockfiles or declare runtime.installCommand explicitly.`
+        : 'No supported package-manager lockfile was found; commit a lockfile or declare runtime.installCommand explicitly.',
+    };
+  }
+  if (!managerMatch) {
+    return {
+      guidance: `${manager} lockfile evidence requires an exact package.json#packageManager entry such as "${manager}@1.2.3" before Hypervibe will generate a build.`,
+    };
+  }
+  if (managerMatch && managerMatch[1] !== manager) {
+    return {
+      guidance: `package.json selects ${managerMatch[1]}, but the committed lockfile selects ${manager}; resolve the conflict before Hypervibe generates a build.`,
+    };
+  }
+  const packageManagerInstall = `npm install --global ${declaredPackageManager}`;
+  const yarnMajor = manager === 'yarn' ? Number(managerMatch[2].split('.')[0]) : undefined;
+  const commands = manager === 'npm'
+    ? { installCommand: `${packageManagerInstall} && npm ci`, run: 'npm run', start: 'npm start' }
+    : manager === 'pnpm'
+      ? { installCommand: `${packageManagerInstall} && pnpm install --frozen-lockfile`, run: 'pnpm run', start: 'pnpm start' }
+      : {
+        installCommand: `${packageManagerInstall} && yarn install ${yarnMajor === 1 ? '--frozen-lockfile' : '--immutable'}`,
+        run: 'yarn run',
+        start: 'yarn start',
+      };
+  return {
+    installCommand: commands.installCommand,
+    ...(typeof scripts.build === 'string' && scripts.build.trim()
+      ? { buildCommand: `${commands.run} build` }
+      : {}),
+    ...(typeof scripts.start === 'string' && scripts.start.trim()
+      ? { startCommand: commands.start }
+      : {}),
+  };
+}
+
+function pythonCommands(root: string): RepositoryCommands {
+  const specialized = [
+    ['uv.lock', 'uv'],
+    ['poetry.lock', 'Poetry'],
+    ['Pipfile.lock', 'Pipenv'],
+  ].find(([file]) => existsSync(path.join(root, file)));
+  if (specialized) {
+    return {
+      guidance: `${specialized[0]} selects ${specialized[1]}; declare runtime.installCommand explicitly or provide a repository Dockerfile so Hypervibe does not substitute pip.`,
+    };
+  }
+  if (existsSync(path.join(root, 'requirements.txt'))) {
+    return { installCommand: 'python -m pip install --no-cache-dir -r requirements.txt' };
+  }
+  if (existsSync(path.join(root, 'pyproject.toml'))) {
+    return { installCommand: 'python -m pip install --no-cache-dir .' };
+  }
+  return {
+    guidance: 'No supported locked Python dependency declaration was found; declare runtime.installCommand explicitly or provide a repository Dockerfile.',
+  };
+}
+
+function commandsForRuntime(root: string, runtime: ProjectRuntime): RepositoryCommands {
+  return runtime.kind === 'node' ? nodeCommands(root) : pythonCommands(root);
+}
+
 function addPyproject(evidence: RepositoryRuntimeEvidence[], root: string): void {
   const content = readText(root, 'pyproject.toml');
   if (!content) return;
@@ -172,6 +280,8 @@ export function analyzeRepositoryRuntime(root: string | null): RepositoryRuntime
   addPyproject(evidence, root);
   addManifest(evidence, root, 'requirements.txt', 'python');
   addManifest(evidence, root, 'Pipfile', 'python');
+  addManifest(evidence, root, 'uv.lock', 'python');
+  addManifest(evidence, root, 'poetry.lock', 'python');
   addManifest(evidence, root, 'go.mod', 'go');
   addManifest(evidence, root, 'Cargo.toml', 'rust');
   addManifest(evidence, root, 'Gemfile', 'ruby');
@@ -200,14 +310,28 @@ export function analyzeRepositoryRuntime(root: string | null): RepositoryRuntime
   const languages = new Set(evidence.map((entry) => entry.kind));
 
   if (runtimes.size === 1 && languages.size === 1) {
-    const runtime = [...runtimes.values()][0]!;
+    const detectedRuntime = [...runtimes.values()][0]!;
+    const commands = commandsForRuntime(root, detectedRuntime);
+    const runtime: ProjectRuntime = {
+      ...detectedRuntime,
+      ...(commands.installCommand ? { installCommand: commands.installCommand } : {}),
+      ...(commands.buildCommand ? { buildCommand: commands.buildCommand } : {}),
+    };
     return {
       status: 'detected',
       inspected: true,
       runtime,
+      ...(commands.startCommand ? { suggestedStartCommand: commands.startCommand } : {}),
       ...(dockerfile ? { dockerfile } : {}),
       evidence,
-      guidance: `Use ${runtime.kind}:${runtime.version} from ${sourceForRuntime(evidence, runtime)} and persist it in desired state.`,
+      guidance: [
+        `Use ${runtime.kind}:${runtime.version} from ${sourceForRuntime(evidence, runtime)} and persist it in desired state.`,
+        commands.installCommand
+          ? `The committed dependency evidence selects ${commands.installCommand}.`
+          : commands.guidance,
+        commands.buildCommand ? `The repository declares build command ${commands.buildCommand}.` : undefined,
+        commands.startCommand ? `Review ${commands.startCommand} for each service that needs an explicit start command.` : undefined,
+      ].filter(Boolean).join(' '),
     };
   }
   if (runtimes.size > 1 || languages.size > 1) {
@@ -267,6 +391,55 @@ export function reviewRepositoryRuntime(
     declaredRuntime?.kind === detectedRuntime.kind
     && declaredRuntime.version === detectedRuntime.version
   ) {
+    const suggestedRuntime: ProjectRuntime = {
+      ...declaredRuntime,
+      ...(!declaredRuntime.installCommand && detectedRuntime.installCommand
+        ? { installCommand: detectedRuntime.installCommand }
+        : {}),
+      ...(!declaredRuntime.buildCommand && detectedRuntime.buildCommand
+        ? { buildCommand: detectedRuntime.buildCommand }
+        : {}),
+    };
+    if (
+      suggestedRuntime.installCommand !== declaredRuntime.installCommand
+      || suggestedRuntime.buildCommand !== declaredRuntime.buildCommand
+    ) {
+      return {
+        status: 'review-required',
+        declaredRuntime,
+        detectedRuntime,
+        ...(source ? { source } : {}),
+        suggestedPatch: { runtime: suggestedRuntime },
+        message: 'Repository package-manager/build evidence supplies commands missing from desired state. Review and persist the suggested runtime patch before Hypervibe generates a build.',
+      };
+    }
+    if (!analysis.dockerfile && !declaredRuntime.installCommand) {
+      return {
+        status: 'review-required',
+        declaredRuntime,
+        detectedRuntime,
+        ...(source ? { source } : {}),
+        message: analysis.guidance,
+      };
+    }
+    const explicitCommandOverride = (
+      Boolean(declaredRuntime.installCommand)
+      && Boolean(detectedRuntime.installCommand)
+      && declaredRuntime.installCommand !== detectedRuntime.installCommand
+    ) || (
+      Boolean(declaredRuntime.buildCommand)
+      && Boolean(detectedRuntime.buildCommand)
+      && declaredRuntime.buildCommand !== detectedRuntime.buildCommand
+    );
+    if (explicitCommandOverride) {
+      return {
+        status: 'explicit',
+        declaredRuntime,
+        detectedRuntime,
+        ...(source ? { source } : {}),
+        message: `Desired runtime version matches ${source ?? 'repository evidence'}, with explicit install/build command overrides preserved.`,
+      };
+    }
     return {
       status: 'in-sync',
       declaredRuntime,

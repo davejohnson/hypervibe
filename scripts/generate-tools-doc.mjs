@@ -66,6 +66,6 @@ if (ungrouped.length > 0) {
   md += '\n';
 }
 
-fs.writeFileSync(outputPath, md, 'utf8');
+fs.writeFileSync(outputPath, `${md.trimEnd()}\n`, 'utf8');
 console.log(`Wrote ${outputPath} (${commands.length} commands)`);
 process.exit(0);

@@ -98,6 +98,7 @@ function mockObservingAdapter(observed: ObservedState, extra: Record<string, unk
 describe('PlanService.plan', () => {
   it('errors when the project has no spec', async () => {
     const bare = new ProjectRepository().create({ name: 'no-spec' });
+    expect(bare.defaultPlatform).toBe('unconfigured');
     const result = await new PlanService().plan(bare, 'staging');
     expect(result).toMatchObject({ error: expect.stringContaining('hv_spec') });
   });
@@ -1967,7 +1968,7 @@ describe('PlanService.plan', () => {
       environments: {
         production: {
           hosting: { provider: 'railway' },
-          services: { jobs: { workloadKind: 'cron', cronSchedule: '*/5 * * * *' } },
+          services: { jobs: { workloadKind: 'cron', cronSchedule: '*/5 * * * *', startCommand: 'npm run jobs' } },
           deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
         },
       },

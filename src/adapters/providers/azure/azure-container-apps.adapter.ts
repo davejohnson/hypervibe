@@ -25,6 +25,7 @@ import type {
   VerifyResult,
 } from '../../../domain/ports/provider.port.js';
 import { providerRegistry, type ProviderInspectionRequest } from '../../../domain/registry/provider.registry.js';
+import { HYPERVIBE_MANAGED_NODE_VERSION } from '../../../domain/services/managed-runtime.js';
 import { environmentForInspection } from '../../../domain/registry/provider-inspection.js';
 import {
   AZURE_CONTAINER_APPS_CI_REQUIRED_SECRETS,
@@ -40,7 +41,7 @@ const PROVIDER_API = '2021-04-01';
 const REGISTRY_API = '2025-11-01';
 const CONTAINER_APPS_API = '2026-01-01';
 const AUTHORIZATION_API = '2022-04-01';
-const BOOTSTRAP_IMAGE = 'mcr.microsoft.com/oss/nodejs/node:20-alpine';
+const BOOTSTRAP_IMAGE = `mcr.microsoft.com/oss/nodejs/node:${HYPERVIBE_MANAGED_NODE_VERSION}-alpine`;
 const BOOTSTRAP_SCRIPT = "require('http').createServer((_,res)=>{res.writeHead(200);res.end('hypervibe bootstrap')}).listen(8080)";
 const ACR_PUSH_ROLE = '8311e382-0749-4cb8-b61a-304f252e45ec';
 const ACR_PULL_ROLE = '7f951dda-4ed3-4680-a7ca-43fe172d538d';

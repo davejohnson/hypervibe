@@ -2,7 +2,11 @@ import { randomUUID } from 'crypto';
 import { getDb } from '../sqlite.adapter.js';
 import { parseJsonColumn } from '../json.codec.js';
 import { policiesColumnSchema } from '../column.schemas.js';
-import type { Project, CreateProjectInput } from '../../../domain/entities/project.entity.js';
+import {
+  UNCONFIGURED_HOSTING_PROVIDER,
+  type Project,
+  type CreateProjectInput,
+} from '../../../domain/entities/project.entity.js';
 
 export class ProjectRepository {
   create(input: CreateProjectInput): Project {
@@ -16,7 +20,7 @@ export class ProjectRepository {
     `).run(
       id,
       input.name,
-      input.defaultPlatform ?? 'cloudrun',
+      input.defaultPlatform?.trim() || UNCONFIGURED_HOSTING_PROVIDER,
       input.gitRemoteUrl ?? null,
       JSON.stringify(input.policies ?? {}),
       now,

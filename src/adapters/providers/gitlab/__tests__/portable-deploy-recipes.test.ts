@@ -74,7 +74,7 @@ describe('provider-neutral GitLab deploy recipes', () => {
   });
 
   it('keeps cloud service-account JSON encoded across the GitLab variable boundary', () => {
-    const recipe = buildCloudRunPortableRecipe(target({ providerProjectId: 'gcp-project', providerServiceIds: ['web-service'] }));
+    const recipe = buildCloudRunPortableRecipe(target({ providerProjectId: 'gcp-project', providerRegion: 'us-central1', providerServiceIds: ['web-service'] }));
     expect(recipe.values).toContainEqual(expect.objectContaining({
       name: 'GCP_SERVICE_ACCOUNT_JSON_B64',
       secret: true,
@@ -87,7 +87,7 @@ describe('provider-neutral GitLab deploy recipes', () => {
   });
 
   it('deploys digest-pinned images where the hosting API supports exact digests', () => {
-    const cloudRun = buildCloudRunPortableRecipe(target({ providerProjectId: 'gcp-project', providerServiceIds: ['web-service'] }));
+    const cloudRun = buildCloudRunPortableRecipe(target({ providerProjectId: 'gcp-project', providerRegion: 'us-central1', providerServiceIds: ['web-service'] }));
     const azure = buildAzureContainerAppsPortableRecipe(target({
       providerProjectId: '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/hv-prod',
       providerServiceIds: ['/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/hv-prod/providers/Microsoft.App/containerApps/web'],
@@ -96,6 +96,14 @@ describe('provider-neutral GitLab deploy recipes', () => {
       expect(recipe.runtime.content).toContain("'@' + digest");
       expect(recipe.runtime.content).toContain('sha256:[0-9a-f]{64}');
     }
+  });
+
+  it('refuses to guess a missing Cloud Run region from another binding', () => {
+    expect(() => buildCloudRunPortableRecipe(target({
+      providerProjectId: 'gcp-project',
+      providerEnvironmentId: 'not-a-region',
+      providerServiceIds: ['web-service'],
+    }))).toThrow('bindings for production are incomplete');
   });
 
   it('refuses to choose a DigitalOcean registry that is absent from hosting bindings', () => {

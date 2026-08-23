@@ -47,7 +47,7 @@ function spec() {
   return projectSpecSchema.parse({
     version: 1,
     project: 'example',
-    runtime: { kind: 'node', version: '22' },
+    runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
     github: {
       actions: {
         tests: { kind: 'check', category: 'test', runtime: { kind: 'node' }, commands: ['npm test'] },

@@ -2,7 +2,7 @@ import { EnvironmentRepository } from '../../adapters/db/repositories/environmen
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { serviceWorkloadKind } from '../entities/service.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
-import type { Project } from '../entities/project.entity.js';
+import { UNCONFIGURED_HOSTING_PROVIDER, type Project } from '../entities/project.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import { parseHostingBindings } from '../ports/hosting.port.js';
 import { adapterFactory } from './adapter.factory.js';
@@ -96,7 +96,7 @@ export async function collectProjectDeploymentHealth(params: {
 
   for (const environment of [...params.environments].sort((a, b) => a.name.localeCompare(b.name))) {
     const bindings = parseHostingBindings(environment);
-    const provider = bindings.provider ?? params.project.defaultPlatform ?? 'cloudrun';
+    const provider = bindings.provider ?? params.project.defaultPlatform;
     const desiredServiceNames = [...new Set(
       params.desiredServiceNamesByEnvironment[environment.name] ?? []
     )].sort((a, b) => a.localeCompare(b));
@@ -111,6 +111,16 @@ export async function collectProjectDeploymentHealth(params: {
       continue;
     }
 
+    if (!provider || provider === UNCONFIGURED_HOSTING_PROVIDER) {
+      environmentResults.push({
+        environment: environment.name,
+        provider: UNCONFIGURED_HOSTING_PROVIDER,
+        state: 'unknown',
+        services: [],
+        reason: 'No reviewed hosting provider is available for deployment observation.',
+      });
+      continue;
+    }
     const resolved = await adapterFactory.getHostingAdapterByName(provider, params.project);
     if (!resolved.success || !resolved.adapter || typeof resolved.adapter.getDeployStatus !== 'function') {
       const reason = resolved.success

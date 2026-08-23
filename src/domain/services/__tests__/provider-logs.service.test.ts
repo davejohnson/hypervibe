@@ -18,8 +18,8 @@ describe('provider-logs.service helpers', () => {
       expect(detectProviderName('vercel', undefined)).toBe('vercel');
     });
 
-    it('defaults to cloudrun when no provider is available', () => {
-      expect(detectProviderName(undefined, undefined)).toBe('cloudrun');
+    it('reports unconfigured when no provider is available', () => {
+      expect(detectProviderName(undefined, undefined)).toBe('unconfigured');
     });
   });
 

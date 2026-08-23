@@ -3,9 +3,9 @@ import type { z } from 'zod';
 /**
  * Parse a JSON TEXT column through a zod schema.
  *
- * Reads never throw: corrupt JSON or schema mismatches log a warning (stderr)
- * and fall back to the schema's default. Schemas passed here must carry a
- * `.default(...)` so a fallback value always exists.
+ * Empty legacy columns use the schema's declared empty value. Non-empty
+ * corrupt JSON and schema mismatches throw: treating unreadable bindings,
+ * plans, or receipts as empty state could authorize unsafe reconciliation.
  */
 export function parseJsonColumn<Schema extends z.ZodDefault<z.ZodTypeAny>>(
   schema: Schema,
@@ -20,14 +20,17 @@ export function parseJsonColumn<Schema extends z.ZodDefault<z.ZodTypeAny>>(
   try {
     parsed = JSON.parse(String(raw));
   } catch {
-    console.warn(`[hypervibe] Corrupt JSON in ${ctx}; falling back to default`);
-    return schema.parse(undefined);
+    throw new Error(
+      `Cannot read ${ctx}: persisted JSON is corrupt. Hypervibe refuses to treat unreadable state as empty.`
+    );
   }
 
   const result = schema.safeParse(parsed);
   if (!result.success) {
-    console.warn(`[hypervibe] Invalid shape in ${ctx}: ${result.error.issues[0]?.message ?? 'unknown'}; falling back to default`);
-    return schema.parse(undefined);
+    throw new Error(
+      `Cannot read ${ctx}: persisted JSON has an invalid shape (${result.error.issues[0]?.message ?? 'unknown'}). `
+      + 'Hypervibe refuses to treat unreadable state as empty.'
+    );
   }
   return result.data;
 }

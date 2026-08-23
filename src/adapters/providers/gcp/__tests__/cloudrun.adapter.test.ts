@@ -891,7 +891,7 @@ describe('CloudRunAdapter maintenance', () => {
       buildConfig: {
         builder: 'dockerfile',
         startCommand: 'npm start',
-        runtime: { kind: 'node', version: '24' },
+        runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
       },
       envVarSpec: {},
       createdAt: now,
@@ -923,7 +923,10 @@ describe('CloudRunAdapter maintenance', () => {
     );
     expect(buildCall).toBeTruthy();
     const buildBody = JSON.parse(String(buildCall?.[1]?.body));
-    expect(buildBody.steps[0].args[1]).toContain('FROM node:24-slim');
+    const buildScript = String(buildBody.steps[0].args[1]);
+    const dockerfileBase64 = buildScript.match(/printf '%s' '([A-Za-z0-9+/=]+)' \| base64 --decode/)?.[1];
+    expect(dockerfileBase64).toBeTruthy();
+    expect(Buffer.from(dockerfileBase64!, 'base64').toString('utf8')).toContain('FROM node:24-slim');
     expect(buildBody.source.gitSource).toEqual({
       url: 'https://x-access-token:ghp_private_repo_token@github.com/acme/demo.git',
       revision: 'main',

@@ -16,7 +16,7 @@ describe('ECS Express managed CI workflow', () => {
       providerServiceIds: [
         'arn:aws:ecs:us-west-2:123456789012:service/hv-app-production-a1b2c3d4e5/hv-web-a1b2c3d4e5',
       ],
-      webStartCommand: 'node server.mjs',
+      containerStartCommand: 'node server.mjs',
     });
 
     expect(result.requiredSecrets).toEqual(ECS_EXPRESS_CI_REQUIRED_SECRETS);

@@ -12,6 +12,15 @@ import {
 
 type PreviousHostingBinding = NonNullable<NonNullable<LocalSnapshot['bindings']>['previousHosting']>;
 
+function runtimeDescription(runtime: ProjectRuntimeSpec | undefined): string {
+  if (!runtime) return 'undeclared';
+  return [
+    `${runtime.kind}:${runtime.version}`,
+    runtime.installCommand ? `install=${JSON.stringify(runtime.installCommand)}` : 'install=undeclared',
+    runtime.buildCommand ? `build=${JSON.stringify(runtime.buildCommand)}` : 'build=none',
+  ].join(' ');
+}
+
 export function diffRetainedHostingCleanup(input: {
   envName: string;
   currentProvider: string;
@@ -312,8 +321,8 @@ export function diffEnvironment(input: {
       if (runtimeDrift) {
         diff.push({
           field: 'runtime',
-          from: localRuntime ? `${localRuntime.kind}:${localRuntime.version}` : 'undeclared',
-          to: `${input.projectRuntime!.kind}:${input.projectRuntime!.version}`,
+          from: runtimeDescription(localRuntime),
+          to: runtimeDescription(input.projectRuntime),
         });
       }
       const workloadKindObservable = providerBehavior.workloadKindObservation !== 'cron-only';
@@ -366,14 +375,14 @@ export function diffEnvironment(input: {
         resource,
         verified: false,
         reason: runtimeDrift
-          ? `Project runtime changes from ${localRuntime ? `${localRuntime.kind}:${localRuntime.version}` : 'undeclared'} to ${input.projectRuntime!.kind}:${input.projectRuntime!.version}`
+          ? `Project runtime changes from ${runtimeDescription(localRuntime)} to ${runtimeDescription(input.projectRuntime)}`
           : 'Bound in local state; provider does not support observation',
         ...(runtimeDrift
           ? {
             diff: [{
               field: 'runtime',
-              from: localRuntime ? `${localRuntime.kind}:${localRuntime.version}` : 'undeclared',
-              to: `${input.projectRuntime!.kind}:${input.projectRuntime!.version}`,
+              from: runtimeDescription(localRuntime),
+              to: runtimeDescription(input.projectRuntime),
             }],
           }
           : {}),

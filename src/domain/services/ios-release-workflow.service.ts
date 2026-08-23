@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
 import type { IosSpec } from '../spec/spec.schema.js';
 import { getManagedIosReleaseRuntimeBase64 } from './ios-release-template.service.js';
+import { HYPERVIBE_MANAGED_NODE_VERSION } from './managed-runtime.js';
 
 export const IOS_RELEASE_REQUIRED_SECRETS = [
   'APP_STORE_CONNECT_KEY_ID',
@@ -23,9 +24,6 @@ const matchSigningStepTemplateUrl = new URL(
   '../../../templates/ios/match-signing-step.yml',
   import.meta.url
 );
-
-/** Node only executes Hypervibe's isolated release helper, not project code. */
-const HYPERVIBE_MANAGED_NODE_VERSION = '24';
 
 function projectRuntimeSetup(target: BranchDeployTarget): string {
   const runtime = target.runtime;

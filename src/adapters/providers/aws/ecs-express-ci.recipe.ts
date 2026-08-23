@@ -1,4 +1,5 @@
 import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
+import { HYPERVIBE_MANAGED_NPM_PACKAGES } from '../../../domain/services/managed-runtime.js';
 
 export const ECS_EXPRESS_PORTABLE_RUNTIME_PATH = '.gitlab/hypervibe/ecs-express-deploy.cjs';
 
@@ -111,6 +112,10 @@ export function buildEcsExpressPortableRecipe(target: BranchDeployTarget): Porta
       { name: 'AWS_ECS_CLUSTER_ARN', source: { kind: 'literal', value: clusterArn }, secret: false },
       { name: 'AWS_ECS_EXPRESS_SERVICE_ARNS_JSON', source: { kind: 'literal', value: JSON.stringify(serviceArns) }, secret: false },
     ],
-    runtime: { path: ECS_EXPRESS_PORTABLE_RUNTIME_PATH, content: buildEcsExpressPortableRuntime(), npmPackages: ['@aws-sdk/client-ecr@3.1106.0', '@aws-sdk/client-ecs@3.1106.0'] },
+    runtime: {
+      path: ECS_EXPRESS_PORTABLE_RUNTIME_PATH,
+      content: buildEcsExpressPortableRuntime(),
+      npmPackages: [HYPERVIBE_MANAGED_NPM_PACKAGES.awsEcr, HYPERVIBE_MANAGED_NPM_PACKAGES.awsEcs],
+    },
   };
 }

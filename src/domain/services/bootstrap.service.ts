@@ -99,19 +99,16 @@ export async function executeBootstrap(params: {
   runtime?: ProjectRuntime;
 }): Promise<{ success: boolean; summary: Record<string, unknown> }> {
   const tx = new InfraTransaction();
-  let project = resolveProject({ projectName: params.projectName });
+  const project = resolveProject({ projectName: params.projectName });
   if (!project) {
-    project = projectRepo.create({ name: params.projectName, defaultPlatform: 'cloudrun' });
-    const createdProjectId = project.id;
-    tx.addStep({
-      id: `project:${createdProjectId}`,
-      label: 'project_create',
-      resource: { provider: 'hypervibe', type: 'project', id: createdProjectId, name: project.name },
-      compensate: async () => ({
-        success: projectRepo.delete(createdProjectId),
-        message: `Deleted local project ${createdProjectId}`,
-      }),
-    });
+    return {
+      success: false,
+      summary: {
+        blocked: true,
+        error: `Project ${params.projectName} has no reviewed desired state.`,
+        next: 'Initialize the project with hv_spec so its hosting provider is explicit before apply.',
+      },
+    };
   }
   const scopeHints = getProjectScopeHints(project);
 

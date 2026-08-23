@@ -9,6 +9,7 @@ import { AuditRepository } from '../adapters/db/repositories/audit.repository.js
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import type { Project } from '../domain/entities/project.entity.js';
+import { UNCONFIGURED_HOSTING_PROVIDER } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import { resolveProject } from '../domain/services/resolve-project.js';
 import { detectGitRemoteUrl, parseGitHubRepoFromRemote } from '../lib/git-remote.js';
@@ -60,7 +61,7 @@ export function createCommandContext(): CommandContext {
   };
 
   const firstHostingProvider = (spec: import('../domain/spec/spec.schema.js').ProjectSpec): string => {
-    return Object.values(spec.environments)[0]?.hosting.provider ?? 'cloudrun';
+    return Object.values(spec.environments)[0]?.hosting.provider ?? UNCONFIGURED_HOSTING_PROVIDER;
   };
 
   const hydrateRepoBindings = (project: Project): void => {

@@ -1,5 +1,5 @@
 import { adapterFactory } from './adapter.factory.js';
-import type { Project } from '../entities/project.entity.js';
+import { UNCONFIGURED_HOSTING_PROVIDER, type Project } from '../entities/project.entity.js';
 import { NotSupportedError } from '../errors/not-supported.error.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 
@@ -18,7 +18,7 @@ type EnvironmentLike = {
 export class ProviderLogsConnectionError extends Error {}
 
 export function detectProviderName(projectDefaultPlatform: string | undefined, bindingsProvider: string | undefined): string {
-  return (bindingsProvider || projectDefaultPlatform || 'cloudrun').toLowerCase();
+  return (bindingsProvider || projectDefaultPlatform || UNCONFIGURED_HOSTING_PROVIDER).toLowerCase();
 }
 
 export function isErrorLike(log: UnifiedLog): boolean {

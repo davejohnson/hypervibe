@@ -1,3 +1,5 @@
+export const UNCONFIGURED_HOSTING_PROVIDER = 'unconfigured';
+
 export interface Project {
   id: string;
   name: string;

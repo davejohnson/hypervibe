@@ -1,5 +1,5 @@
 import type { Environment } from '../entities/environment.entity.js';
-import type { Project } from '../entities/project.entity.js';
+import { UNCONFIGURED_HOSTING_PROVIDER, type Project } from '../entities/project.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import { parseHostingBindings, type IHostingAdapter } from '../ports/hosting.port.js';
 import type { Receipt } from '../ports/provider.port.js';
@@ -18,7 +18,11 @@ type EnvReadableHostingAdapter = IHostingAdapter & {
 export function hostingProviderForEnvironment(project: Project, environment: Environment): string {
   const bindings = parseHostingBindings(environment);
   if (bindings.provider) return bindings.provider.toLowerCase();
-  return project.defaultPlatform?.toLowerCase() || 'cloudrun';
+  const provider = project.defaultPlatform?.trim().toLowerCase();
+  if (provider && provider !== UNCONFIGURED_HOSTING_PROVIDER) return provider;
+  throw new Error(
+    `Environment ${environment.name} has no reviewed hosting provider binding. Run hv_spec and hv_plan before runtime synchronization.`
+  );
 }
 
 export function providerDisplayName(provider: string): string {

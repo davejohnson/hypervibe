@@ -250,6 +250,16 @@ function runtimeSteps(
   condition?: string
 ): string[] {
   const conditionLine = condition ? [`        if: ${condition}`] : [];
+  const installCommand = automation.runtime.installCommand?.trim()
+    || (projectRuntime?.kind === automation.runtime.kind
+      ? projectRuntime.installCommand?.trim()
+      : undefined);
+  if (!installCommand) {
+    throw new Error(
+      `A ${automation.runtime.kind} check has no reviewed installCommand. `
+      + 'Declare the check command explicitly or inherit it from a matching project runtime.'
+    );
+  }
   if (automation.runtime.kind === 'node') {
     const version = effectiveGitHubCheckRuntimeVersion('node', automation.runtime.version, projectRuntime);
     return [
@@ -263,7 +273,7 @@ function runtimeSteps(
       '      - name: Install dependencies',
       ...conditionLine,
       '        run: |',
-      ...indentBlock(automation.runtime.installCommand, 10),
+      ...indentBlock(installCommand, 10),
     ];
   }
   const version = effectiveGitHubCheckRuntimeVersion('python', automation.runtime.version, projectRuntime);
@@ -278,7 +288,7 @@ function runtimeSteps(
     '      - name: Install dependencies',
     ...conditionLine,
     '        run: |',
-    ...indentBlock(automation.runtime.installCommand, 10),
+    ...indentBlock(installCommand, 10),
   ];
 }
 
@@ -348,7 +358,7 @@ function buildCheckWorkflow(
     '    timeout-minutes: 30',
     '    steps:',
     ...(applicationScoped ? pullRequestChangeClassifier() : []),
-    '      - uses: actions/checkout@v5',
+    '      - uses: actions/checkout@v6',
     ...(expensiveCondition ? [`        if: ${expensiveCondition}`] : []),
     '        with:',
     '          persist-credentials: false',
@@ -554,7 +564,7 @@ function buildAutofixWorkflow(
     '      has_patch: ${{ steps.patch.outputs.has_patch }}',
     '      suite_id: ${{ needs.check_existing.outputs.suite_id }}',
     '    steps:',
-    '      - uses: actions/checkout@v5',
+    '      - uses: actions/checkout@v6',
     '        with:',
     '          ref: ${{ github.event.workflow_run.head_sha }}',
     '          fetch-depth: 0',
@@ -672,7 +682,7 @@ function buildAutofixWorkflow(
     '      actions: read',
     '      contents: read',
     '    steps:',
-    '      - uses: actions/checkout@v5',
+    '      - uses: actions/checkout@v6',
     '        with:',
     '          ref: ${{ github.event.workflow_run.head_sha }}',
     '          persist-credentials: false',
@@ -695,7 +705,7 @@ function buildAutofixWorkflow(
     '      contents: write',
     '      pull-requests: write',
     '    steps:',
-    '      - uses: actions/checkout@v5',
+    '      - uses: actions/checkout@v6',
     '        with:',
     '          ref: ${{ github.event.workflow_run.head_sha }}',
     '          fetch-depth: 0',
@@ -764,7 +774,7 @@ function buildReviewWorkflow(id: string, automation: Extract<GitHubAutomationSpe
     '    permissions:',
     '      contents: read',
     '    steps:',
-    '      - uses: actions/checkout@v5',
+    '      - uses: actions/checkout@v6',
     '        with:',
     '          ref: ${{ github.event.pull_request.head.sha }}',
     '          fetch-depth: 0',
@@ -842,7 +852,7 @@ function buildAuditWorkflow(id: string, automation: Extract<GitHubAutomationSpec
     '    permissions:',
     '      contents: read',
     '    steps:',
-    '      - uses: actions/checkout@v5',
+    '      - uses: actions/checkout@v6',
     '        with:',
     '          persist-credentials: false',
     '      - uses: openai/codex-action@v1',
@@ -1024,17 +1034,29 @@ export function unresolvedGitHubCheckRuntimeIssues(
   github: GitHubSpec,
   projectRuntime?: ProjectRuntimeSpec
 ): string[] {
-  return Object.entries(github.actions)
-    .filter(([, automation]) => (
-      automation.enabled
-      && automation.kind === 'check'
-      && automation.runtime.version === undefined
+  return Object.entries(github.actions).flatMap(([id, automation]) => {
+    if (!automation.enabled || automation.kind !== 'check') return [];
+    const issues: string[] = [];
+    if (
+      automation.runtime.version === undefined
       && projectRuntime?.kind !== automation.runtime.kind
-    ))
-    .map(([id, automation]) => (
-      `${automation.kind === 'check' ? automation.runtime.kind : 'project'} check "${id}" has no runtime version to inherit. `
-      + 'Run hv_spec to review repository runtime evidence, then declare spec.runtime or this check\'s runtime.version.'
-    ));
+    ) {
+      issues.push(
+        `${automation.runtime.kind} check "${id}" has no runtime version to inherit. `
+        + 'Run hv_spec to review repository runtime evidence, then declare spec.runtime or this check\'s runtime.version.'
+      );
+    }
+    if (
+      !automation.runtime.installCommand?.trim()
+      && (projectRuntime?.kind !== automation.runtime.kind || !projectRuntime.installCommand?.trim())
+    ) {
+      issues.push(
+        `${automation.runtime.kind} check "${id}" has no installCommand to inherit. `
+        + 'Review repository package-manager evidence with hv_spec, then declare runtime.installCommand on the project or check.'
+      );
+    }
+    return issues;
+  });
 }
 
 export function compileManagedGitHubFiles(

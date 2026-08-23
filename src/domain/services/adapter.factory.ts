@@ -1,7 +1,7 @@
 import { providerRegistry } from '../registry/provider.registry.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
-import type { Project } from '../entities/project.entity.js';
+import { UNCONFIGURED_HOSTING_PROVIDER, type Project } from '../entities/project.entity.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import type { IHostingAdapter } from '../ports/hosting.port.js';
 import type { IDatabaseAdapter } from '../ports/database.port.js';
@@ -33,7 +33,13 @@ export class AdapterFactory {
    * Looks up the verified connection and instantiates the adapter.
    */
   async getHostingAdapter(project: Project): Promise<AdapterResult<IHostingAdapter>> {
-    const platform = project.defaultPlatform || 'cloudrun';
+    const platform = project.defaultPlatform?.trim();
+    if (!platform || platform === UNCONFIGURED_HOSTING_PROVIDER) {
+      return {
+        success: false,
+        error: `Project ${project.name} has no reviewed hosting provider. Initialize desired state with hv_spec first.`,
+      };
+    }
     return this.getHostingAdapterByName(platform, project);
   }
 

@@ -14,6 +14,7 @@ import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain
 import { resolveReviewedBranchDeployTargets } from '../../../domain/services/managed-ci-targets.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { buildPortableContainerArchiveRuntime } from '../../../domain/services/portable-container-build.js';
+import { HYPERVIBE_MANAGED_NODE_SLIM_IMAGE } from '../../../domain/services/managed-runtime.js';
 import { normalizeGitRemoteIdentity } from '../../../lib/git-remote.js';
 import {
   CI_BINDING_REMOVE_OPERATION,
@@ -466,7 +467,7 @@ ${container ? '      - .hypervibe-image-uri\n      - .hypervibe-docker\n' : ''} 
 
 ${deployJob}:
   stage: deploy
-  image: node:22-slim
+  image: ${HYPERVIBE_MANAGED_NODE_SLIM_IMAGE}
 ${container ? `  services:
     - name: docker:27.5.1-dind
 ` : ''}  tags:
@@ -551,11 +552,6 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
   }
 
   const runtime = spec.runtime;
-  const defaultStartCommand = runtime?.kind === 'node'
-    ? 'npm start'
-    : runtime?.kind === 'python'
-      ? 'python -m app'
-      : undefined;
   const descriptors = targets.map((target) => {
     const provider = spec.environments[target.environmentName]!.hosting.provider;
     return {
@@ -563,7 +559,7 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
       provider,
       recipe: recipeFor(provider, target),
       buildRuntimePath: `.gitlab/hypervibe/build-${safeSlug(provider)}-${safeSlug(target.environmentName)}.sh`,
-      startCommand: target.webStartCommand ?? defaultStartCommand,
+      startCommand: target.containerStartCommand,
     };
   });
   const semanticProgram = JSON.stringify({

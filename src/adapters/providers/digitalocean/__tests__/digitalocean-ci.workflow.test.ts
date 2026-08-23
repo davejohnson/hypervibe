@@ -23,7 +23,7 @@ function target(
     ],
     needsServiceNames: true,
     needsJobNames: false,
-    webStartCommand: 'npm start',
+    containerStartCommand: 'npm start',
     ...overrides,
   };
 }

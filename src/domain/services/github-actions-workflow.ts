@@ -1,4 +1,5 @@
 import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
+import { generatedContainerDockerfile } from './generated-container.js';
 
 export function yamlSingleQuoted(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
@@ -30,50 +31,24 @@ export function providerListValueOrVariable(values: string[], variableName: stri
  */
 export function buildDockerfileStep(target: BranchDeployTarget, ifCondition?: string): string {
   const runtime = target.runtime;
-  const startCommand = target.webStartCommand?.trim()
-    || (runtime?.kind === 'node' ? 'npm start' : 'python app.py');
-  const cmdLine = `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`;
-  const commonTail = [
-    "'COPY . .'",
-    "'ENV PORT=8080'",
-    "'EXPOSE 8080'",
-    shellSingleQuoted(cmdLine),
-  ].join(' \\\n              ');
+  let dockerfileContent: string | undefined;
+  let generationError = 'No explicit project runtime was found. Run hv_spec to review repository evidence.';
+  if (runtime) {
+    try {
+      dockerfileContent = generatedContainerDockerfile(runtime, target.containerStartCommand);
+    } catch (error) {
+      generationError = error instanceof Error ? error.message : String(error);
+    }
+  }
   const manifestCondition = runtime?.kind === 'node'
     ? '[ -f package.json ]'
     : runtime?.kind === 'python'
       ? '[ -f requirements.txt ] || [ -f pyproject.toml ]'
       : 'false';
-  const generatedDockerfile = runtime?.kind === 'node'
-    ? `            if [ -f .npmrc ]; then
-              printf '%s\\n' \\
-                '# syntax=docker/dockerfile:1.7' \\
-                'FROM node:${runtime.version}-slim' \\
-                'WORKDIR /app' \\
-                'COPY package*.json .npmrc ./' \\
-                'RUN --mount=type=secret,id=npm_token sh -c "export NODE_AUTH_TOKEN=$(cat /run/secrets/npm_token); if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi"' \\
-                ${commonTail} \\
-                > Dockerfile.hypervibe
-            else
-              printf '%s\\n' \\
-                'FROM node:${runtime.version}-slim' \\
-                'WORKDIR /app' \\
-                'COPY package*.json ./' \\
-                'RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi' \\
-                ${commonTail} \\
-                > Dockerfile.hypervibe
-            fi`
-    : runtime?.kind === 'python'
-      ? `            printf '%s\\n' \\
-              'FROM python:${runtime.version}-slim' \\
-              'WORKDIR /app' \\
-              'COPY . .' \\
-              'RUN if [ -f requirements.txt ]; then python -m pip install --no-cache-dir -r requirements.txt; else python -m pip install --no-cache-dir .; fi' \\
-              'ENV PORT=8080' \\
-              'EXPOSE 8080' \\
-              ${shellSingleQuoted(cmdLine)} \\
-              > Dockerfile.hypervibe`
-      : '            : # A custom runtime must provide its own Dockerfile.';
+  const generatedDockerfile = dockerfileContent
+    ? `            printf '%s\\n' ${shellSingleQuoted(dockerfileContent)} > Dockerfile.hypervibe`
+    : `            echo ${shellSingleQuoted(generationError)} >&2
+            exit 1`;
   return `      - name: Resolve Dockerfile
         id: dockerfile
 ${ifCondition ? `        if: ${ifCondition}\n` : ''}        run: |
