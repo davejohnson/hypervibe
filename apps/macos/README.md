@@ -170,7 +170,10 @@ share one release number, while each process still reports its own identity.
 The artifact is written to `build/macos/`. The build downloads a pinned
 Node.js 22.17.1 archive from nodejs.org, verifies its SHA-256 checksum, installs
 production dependencies with that runtime, builds the Swift executables, and
-signs the complete bundle, including the native restart helper. Build Apple
+signs the complete bundle, including the native restart helper. Developer ID
+builds give the hardened bundled Node runtime only Apple's narrow JIT
+entitlement, then require the packaged launcher to complete an MCP handshake
+and expose the core tools before producing the DMG. Build Apple
 Silicon and Intel artifacts on matching Mac architectures; cross-architecture
 packaging is intentionally rejected.
 

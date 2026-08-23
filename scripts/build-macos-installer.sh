@@ -10,6 +10,7 @@ MCP_VERSION="$(node -p "require('$ROOT/package.json').version")"
 COMPANION_VERSION="${COMPANION_VERSION:-$MCP_VERSION}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+NODE_ENTITLEMENTS="$MACOS_ROOT/Distribution/BundledNode.entitlements"
 HOST_ARCH="$(uname -m)"
 ARCH="${ARCH:-$HOST_ARCH}"
 
@@ -101,10 +102,21 @@ iconutil --convert icns --output "$RESOURCES/AppIcon.icns" "$ICONSET"
 while IFS= read -r -d '' candidate; do
     if file "$candidate" | grep -q "Mach-O"; then
         if [ "$CODESIGN_IDENTITY" = "-" ]; then
-            codesign --force --sign - --timestamp=none "$candidate"
+            if [ "$candidate" = "$RESOURCES/runtime/node" ]; then
+                codesign --force --sign - --timestamp=none \
+                    --entitlements "$NODE_ENTITLEMENTS" "$candidate"
+            else
+                codesign --force --sign - --timestamp=none "$candidate"
+            fi
         else
-            codesign --force --options runtime --timestamp \
-                --sign "$CODESIGN_IDENTITY" "$candidate"
+            if [ "$candidate" = "$RESOURCES/runtime/node" ]; then
+                codesign --force --options runtime --timestamp \
+                    --entitlements "$NODE_ENTITLEMENTS" \
+                    --sign "$CODESIGN_IDENTITY" "$candidate"
+            else
+                codesign --force --options runtime --timestamp \
+                    --sign "$CODESIGN_IDENTITY" "$candidate"
+            fi
         fi
     fi
 done < <(find "$RESOURCES" -type f -print0)
@@ -124,6 +136,11 @@ else
     codesign --force --options runtime --timestamp \
         --sign "$CODESIGN_IDENTITY" "$APP"
 fi
+
+node "$ROOT/scripts/smoke-macos-mcp.mjs" \
+    "$CONTENTS/MacOS/hypervibe-mcp" \
+    "$ROOT" \
+    "$WORK_DIR/smoke-data"
 
 codesign --verify --deep --strict --verbose=2 "$APP"
 

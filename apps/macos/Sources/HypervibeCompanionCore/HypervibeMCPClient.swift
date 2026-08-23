@@ -11,6 +11,7 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
     case invalidExecutable
     case launchFailed
     case processExited(Int32)
+    case processTerminated(Int32)
     case incompatibleTools([String])
     case missingStructuredContent(String)
     case malformedResponse(String)
@@ -28,6 +29,8 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
             return "Hypervibe could not be launched."
         case .processExited(let status):
             return "Hypervibe exited before the refresh completed (status \(status))."
+        case .processTerminated(let signal):
+            return "Hypervibe crashed before the refresh completed (signal \(signal)). Update or reinstall Hypervibe, then try Refresh again."
         case .incompatibleTools(let missing):
             return "This Hypervibe executable is missing: \(missing.joined(separator: ", "))."
         case .missingStructuredContent(let tool):
@@ -497,6 +500,7 @@ public actor HypervibeMCPClient {
         }
 
         let process = Process()
+        let terminationObservation = ProcessTerminationObservation()
         process.executableURL = executableURL
         process.arguments = project.hypervibeArguments ?? []
         process.currentDirectoryURL = repositoryURL
@@ -514,6 +518,12 @@ public actor HypervibeMCPClient {
         process.standardInput = serverInput
         process.standardOutput = serverOutput
         process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { terminatedProcess in
+            terminationObservation.record(
+                status: terminatedProcess.terminationStatus,
+                wasSignaled: terminatedProcess.terminationReason == .uncaughtSignal
+            )
+        }
 
         do {
             try process.run()
@@ -559,13 +569,18 @@ public actor HypervibeMCPClient {
             await stop(client: client, process: process, input: serverInput, output: serverOutput)
             return result
         } catch {
-            let earlyExitStatus = process.isRunning
-                ? nil
-                : process.terminationStatus
+            let shouldReportProcessTermination =
+                !(error is HypervibeClientError) || error.isHypervibeTimeout
+            let earlyTermination = shouldReportProcessTermination
+                ? await observedTermination(terminationObservation)
+                : terminationObservation.value
             await stop(client: client, process: process, input: serverInput, output: serverOutput)
-            if let earlyExitStatus, earlyExitStatus != 0,
-                (!(error is HypervibeClientError) || error.isHypervibeTimeout) {
-                throw HypervibeClientError.processExited(earlyExitStatus)
+            if let earlyTermination, earlyTermination.status != 0,
+                shouldReportProcessTermination {
+                if earlyTermination.wasSignaled {
+                    throw HypervibeClientError.processTerminated(earlyTermination.status)
+                }
+                throw HypervibeClientError.processExited(earlyTermination.status)
             }
             throw error
         }
@@ -637,6 +652,36 @@ public actor HypervibeMCPClient {
                 }
             }
         }
+    }
+
+    private func observedTermination(
+        _ observation: ProcessTerminationObservation
+    ) async -> ChildTermination? {
+        if let value = observation.value { return value }
+        try? await Task.sleep(for: .milliseconds(100))
+        return observation.value
+    }
+}
+
+private struct ChildTermination: Sendable {
+    let status: Int32
+    let wasSignaled: Bool
+}
+
+private final class ProcessTerminationObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: ChildTermination?
+
+    var value: ChildTermination? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+
+    func record(status: Int32, wasSignaled: Bool) {
+        lock.lock()
+        storedValue = ChildTermination(status: status, wasSignaled: wasSignaled)
+        lock.unlock()
     }
 }
 
