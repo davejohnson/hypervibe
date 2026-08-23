@@ -47,6 +47,7 @@ function spec() {
   return projectSpecSchema.parse({
     version: 1,
     project: 'example',
+    runtime: { kind: 'node', version: '22' },
     github: {
       actions: {
         tests: { kind: 'check', category: 'test', runtime: { kind: 'node' }, commands: ['npm test'] },
@@ -70,6 +71,7 @@ function seedGitHub(): void {
 }
 
 function infrastructureAction(): PlanAction {
+  const desiredSpec = spec();
   return {
     id: GITHUB_INFRASTRUCTURE_ACTION_ID,
     type: 'update',
@@ -79,7 +81,7 @@ function infrastructureAction(): PlanAction {
     metadata: {
       operation: 'githubInfrastructurePullRequest',
       repository: REPOSITORY,
-      desiredFiles: compileManagedGitHubFiles(spec().github!),
+      desiredFiles: compileManagedGitHubFiles(desiredSpec.github!, desiredSpec.runtime),
     },
   };
 }
@@ -255,7 +257,11 @@ describe('GitHub infrastructure plan/apply', () => {
   });
 
   it('plans action-scoped OpenAI and native settings only after files are merged', async () => {
-    const desired = new Map(compileManagedGitHubFiles(spec().github!).map((file) => [file.path, file.content]));
+    const desiredSpec = spec();
+    const desired = new Map(compileManagedGitHubFiles(
+      desiredSpec.github!,
+      desiredSpec.runtime
+    ).map((file) => [file.path, file.content]));
     vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, filePath) => desired.get(filePath) ?? null);
     vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets').mockResolvedValue([]);
     vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({

@@ -66,10 +66,21 @@ execute Hypervibe itself.
   projected into local service build state during apply. Because hosting APIs
   generally cannot observe the base runtime directly, that drift is reported
   as unverified rather than falsely presented as provider-confirmed.
-- Specs that omit `runtime` preserve the historical Node 20 generated-build
-  behavior for compatibility. Hypervibe does not silently add the field or
-  upgrade existing projects; selecting a new runtime is an explicit spec
-  change reviewed through plan/apply.
+- On fresh-project discovery Hypervibe inspects repository-native evidence
+  (`.node-version`, `.nvmrc`, `.python-version`, `.tool-versions`, Volta, and
+  language manifests). A single concrete Node or Python selection is proposed
+  to the agent and persisted in the initial spec; conflicting, unversioned,
+  polyglot, and custom-language projects require an explicit decision or a
+  repository Dockerfile.
+- Specs that omit `runtime` never imply a Node or Python version. A
+  repository-owned Dockerfile can build without this field; generated builds,
+  migrations, and checks that need language tooling stop with runtime guidance
+  instead of silently selecting a compatibility default.
+- Repository evidence is rechecked by `hv_spec`. A changed native version is
+  returned as a suggested desired-state patch, not applied invisibly. Major or
+  language changes therefore remain plan/apply reviewed, while declared major
+  or minor selectors use the latest compatible patch in generated CI and
+  pulled runtime images.
 
 ## Code Map
 

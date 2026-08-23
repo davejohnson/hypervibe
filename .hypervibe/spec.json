@@ -2,6 +2,10 @@
   "version": 1,
   "project": "hypervibe",
   "gitRemoteUrl": "git@github.com:davejohnson/hypervibe.git",
+  "runtime": {
+    "kind": "node",
+    "version": "24"
+  },
   "github": {
     "enabled": true,
     "repository": "davejohnson/hypervibe",
@@ -42,7 +46,6 @@
         },
         "runtime": {
           "kind": "node",
-          "version": "20",
           "installCommand": "npm ci"
         },
         "changeScope": "all",

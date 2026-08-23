@@ -120,7 +120,10 @@ describe('github tools', () => {
     expect(migration.includeStep).toBe(true);
     expect(migration.command).toBe('npm run migrate');
 
-    const workflow = buildBranchDeployWorkflow('railway', targets[0], migration);
+    const workflow = buildBranchDeployWorkflow('railway', {
+      ...targets[0],
+      runtime: { kind: 'node', version: '24' },
+    }, migration);
     expect(workflow.template).toBe('deploy-railway-production');
     expect(workflow.branch).toBe('release');
     expect(workflow.autoDeployOnPush).toBe(false);
@@ -168,7 +171,7 @@ describe('github tools', () => {
     expect(workflow.content.indexOf('npm ci')).toBeLessThan(workflow.content.indexOf('run: npm run migrate'));
     expect(workflow.content.indexOf('Deployment safety gate: verify Hypervibe reconciliation'))
       .toBeLessThan(workflow.content.indexOf('npm ci'));
-    expect(workflow.content).toContain('actions/setup-node@v4');
+    expect(workflow.content).toContain('actions/setup-node@v6');
     expect(workflow.content).toContain('docker/build-push-action@v6');
     expect(workflow.content).toContain('if [ -f .npmrc ]; then');
     expect(workflow.content).toContain('COPY package*.json .npmrc ./');
@@ -216,6 +219,7 @@ describe('github tools', () => {
       providerEnvironmentId: 'rail-env',
       providerServiceIds: ['rail-web'],
       providerJobNames: [],
+      runtime: { kind: 'node' as const, version: '24' },
     };
     const content = buildBranchDeployWorkflow(
       'railway',
@@ -223,8 +227,8 @@ describe('github tools', () => {
       { includeStep: true, command: 'npm run migrate' }
     ).content;
     const checkoutStep = content.slice(
-      content.indexOf('      - uses: actions/checkout@v4'),
-      content.indexOf('\n      - ', content.indexOf('      - uses: actions/checkout@v4') + 1)
+      content.indexOf('      - uses: actions/checkout@v5'),
+      content.indexOf('\n      - ', content.indexOf('      - uses: actions/checkout@v5') + 1)
     );
     const buildAction = content.indexOf('uses: docker/build-push-action@v6');
     const buildStep = content.slice(
@@ -715,7 +719,7 @@ describe('github tools', () => {
     expect(workflow.content).not.toContain("CLOUDRUN_SERVICE_NAMES: 'gcp-project-web,gcp-project-daily-schedule'");
   });
 
-  it('never requires a repo Dockerfile: both providers generate one for Node apps', () => {
+  it('generates from an explicit runtime and never invents Node for custom apps', () => {
     const baseTarget = {
       environmentName: 'production',
       kind: 'production' as const,
@@ -726,15 +730,16 @@ describe('github tools', () => {
       providerEnvironmentId: 'env-1',
       providerServiceIds: ['srv-1'],
       webStartCommand: 'npm run serve',
+      runtime: { kind: 'node' as const, version: '24' },
     };
     for (const provider of ['railway', 'cloudrun'] as const) {
       const workflow = buildBranchDeployWorkflow(provider, baseTarget, { includeStep: false });
       expect(workflow.content).toContain('name: Resolve Dockerfile');
       expect(workflow.content).toContain('file: ${{ steps.dockerfile.outputs.path }}');
-      // Repo Dockerfile wins; otherwise a minimal Node image is generated
-      // with the web service start command as CMD.
+      // Repo Dockerfile wins; an explicitly declared runtime can generate a
+      // minimal image with the web service start command as CMD.
       expect(workflow.content).toContain('if [ -f Dockerfile ]; then');
-      expect(workflow.content).toContain('FROM node:20-slim');
+      expect(workflow.content).toContain('FROM node:24-slim');
       expect(workflow.content).toContain('if [ -f .npmrc ]; then');
       expect(workflow.content).toContain('RUN --mount=type=secret,id=npm_token');
       expect(workflow.content).toContain('npm_token=${{ secrets.NODE_AUTH_TOKEN }}');
@@ -744,6 +749,14 @@ describe('github tools', () => {
     }
     const defaulted = buildBranchDeployWorkflow('railway', { ...baseTarget, webStartCommand: undefined }, { includeStep: false });
     expect(defaulted.content).toContain('CMD ["sh", "-lc", "npm start"]');
+
+    const custom = buildBranchDeployWorkflow('railway', {
+      ...baseTarget,
+      runtime: undefined,
+    }, { includeStep: false });
+    expect(custom.content).not.toContain('FROM node:');
+    expect(custom.content).not.toContain('FROM python:');
+    expect(custom.content).toContain('custom languages require a Dockerfile');
   });
 
   it('generates builds and migration setup from the declared project runtime', () => {
@@ -840,7 +853,7 @@ describe('github tools', () => {
     expect(releaseWorkflow).toContain('group: hypervibe-deploy-development');
     expect(releaseWorkflow).toContain('  build:');
     expect(releaseWorkflow).toContain('  release:\n    needs: build');
-    expect(releaseWorkflow).toContain("node-version: '20'");
+    expect(releaseWorkflow).toContain("node-version: '24'");
     expect(releaseWorkflow).toContain('ruby/setup-ruby@v1');
     expect(releaseWorkflow).toContain("ruby-version: '3.3'");
     expect(releaseWorkflow).toContain('bundler-cache: true');

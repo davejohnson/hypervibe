@@ -25,11 +25,12 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "22.17.1"
+          node-version-file: ".node-version"
+          check-latest: true
           cache: npm
 
       - name: Set up Go for Fly.io private networking helper
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.27.0"
           cache-dependency-path: native/fly-wireguard-proxy/go.sum
@@ -71,11 +72,12 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "22.17.1"
+          node-version-file: ".node-version"
+          check-latest: true
           cache: npm
 
       - name: Set up Go for Fly.io private networking helper
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.27.0"
           cache-dependency-path: native/fly-wireguard-proxy/go.sum
@@ -116,7 +118,7 @@ jobs:
           )
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Hypervibe-${{ matrix.arch }}
           path: |
@@ -150,12 +152,13 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "22.17.1"
+          node-version-file: ".node-version"
+          check-latest: true
           registry-url: https://registry.npmjs.org
           scope: "@hypervibe"
 
       - name: Set up Go for Fly.io private networking helper
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.27.0"
           cache-dependency-path: native/fly-wireguard-proxy/go.sum
@@ -178,7 +181,7 @@ jobs:
 
     steps:
       - name: Download macOS installers
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: Hypervibe-*
           path: release-assets

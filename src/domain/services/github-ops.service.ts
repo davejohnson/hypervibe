@@ -6,11 +6,7 @@ import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js
 import type { GitHubCredentials } from '../../adapters/providers/github/github.adapter.js';
 import type { Project } from '../entities/project.entity.js';
 import { projectSpecSchema, type IosSpec } from '../spec/spec.schema.js';
-import {
-  effectiveProjectRuntime,
-  LEGACY_PROJECT_RUNTIME,
-  type ProjectRuntime,
-} from '../spec/project-runtime.js';
+import type { ProjectRuntime } from '../spec/project-runtime.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { buildIosReleaseWorkflow } from './ios-release-workflow.service.js';
@@ -235,18 +231,20 @@ function buildMigrationStep(command: string, runtime: ProjectRuntime): string {
   // dependencies installed — the deploy steps that follow build a container
   // image and never run npm ci on the runner themselves.
   const setup = runtime.kind === 'node'
-    ? `      - uses: actions/setup-node@v4
+    ? `      - uses: actions/setup-node@v6
         if: steps.deploy.outputs.operation != 'rollback'
         with:
           node-version: '${runtime.version}'
+          check-latest: true
           cache: 'npm'
       - name: Install dependencies for migrations
         if: steps.deploy.outputs.operation != 'rollback'
         run: npm ci`
-    : `      - uses: actions/setup-python@v5
+    : `      - uses: actions/setup-python@v6
         if: steps.deploy.outputs.operation != 'rollback'
         with:
           python-version: '${runtime.version}'
+          check-latest: true
           cache: 'pip'
       - name: Install dependencies for migrations
         if: steps.deploy.outputs.operation != 'rollback'
@@ -401,7 +399,7 @@ ${ifCondition ? `        if: ${ifCondition}\n` : ''}        uses: actions/github
 function buildImmutableRollbackEvidenceSteps(target: BranchDeployTarget): string {
   return `      - name: Download rollback release evidence
         if: steps.deploy.outputs.operation == 'rollback'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           artifact-ids: \${{ inputs.source_artifact_id }}
           run-id: \${{ inputs.source_workflow_run_id }}
@@ -544,7 +542,7 @@ function buildDeploymentFailureEvidenceJob(environmentName: string): string {
             );
             core.info('Captured sanitized evidence from failed deploy job ' + deployJob.id + '.');
       - name: Upload deployment failure evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: deploy-${environmentName}-failure-evidence
           path: hypervibe-deploy-failure.log
@@ -562,8 +560,14 @@ export function buildBranchDeployWorkflow(
   const safeEnvironment = target.environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
   const template = `deploy-${provider}-${safeEnvironment}`;
   const filename = `${template}.yml`;
-  const migrationStep = migration.includeStep && migration.command
-    ? buildMigrationStep(migration.command, target.runtime ?? LEGACY_PROJECT_RUNTIME)
+  if (migration.includeStep && migration.command && !target.runtime) {
+    throw new Error(
+      `Managed migration tooling for ${target.environmentName} requires an explicit project runtime. `
+      + 'Run hv_spec to review repository runtime evidence and persist the intended version.'
+    );
+  }
+  const migrationStep = migration.includeStep && migration.command && target.runtime
+    ? buildMigrationStep(migration.command, target.runtime)
     : '';
   const deployBlock = buildProviderDeploySteps(provider, target);
   const immutableRollback = Boolean(deployBlock.releaseImageUri);
@@ -676,11 +680,11 @@ ${permissionsBlock.trimEnd()}
               throw new Error('Rollback evidence for ' + targetSha + ' did not come from a successful run of ' + workflowPath);
             }
             core.info('Verified rollback evidence from successful workflow run ' + run.data.id);
-${rollbackEvidenceSteps}      - uses: actions/checkout@v4
+${rollbackEvidenceSteps}      - uses: actions/checkout@v5
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:
           ref: \${{ steps.deploy.outputs.sha }}
 ${buildDeploymentContractStep(target.environmentName, sourcePreparationCondition)}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}      - name: Upload server release evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: hypervibe-server-release-${safeEnvironment}-\${{ steps.deploy.outputs.sha }}
           path: hypervibe-server-release.json

@@ -34,7 +34,7 @@ function githubSpec() {
         tests: {
           kind: 'check',
           category: 'test',
-          runtime: { kind: 'node' },
+          runtime: { kind: 'node', version: '22' },
           commands: ['npm test'],
           failureArtifacts: ['test-results/**'],
           triggers: { pullRequest: true, schedule: { cron: '15 4 * * *', timezone: 'America/Vancouver' } },
@@ -137,6 +137,25 @@ describe('GitHub infrastructure compiler', () => {
       .toContain('node-version: "22"');
   });
 
+  it('refuses to compile a check when no explicit or inherited runtime exists', () => {
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: 'runtime-required',
+      github: {
+        actions: {
+          tests: {
+            kind: 'check', category: 'test', runtime: { kind: 'node' }, commands: ['npm test'],
+          },
+        },
+      },
+      environments: {},
+    });
+
+    expect(() => compileManagedGitHubFiles(spec.github!, spec.runtime)).toThrow(
+      'has no runtime version to inherit'
+    );
+  });
+
   it('skips expensive application steps only for narrow Hypervibe-only pull requests', async () => {
     const workflow = compileManagedGitHubFiles(githubSpec())
       .find((file) => file.path.endsWith('hypervibe-tests.yml'))!.content;
@@ -194,6 +213,7 @@ describe('GitHub infrastructure compiler', () => {
     const spec = projectSpecSchema.parse({
       version: 1,
       project: 'infrastructure-validator',
+      runtime: { kind: 'node', version: '22' },
       github: {
         actions: {
           infrastructure: {

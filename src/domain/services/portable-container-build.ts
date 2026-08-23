@@ -2,11 +2,34 @@ import type { ProjectRuntime } from '../spec/project-runtime.js';
 
 export const PORTABLE_CONTAINER_BUILD_PATH = '.gitlab/hypervibe/build-container-archive.sh';
 
-export function buildPortableContainerArchiveRuntime(runtime: ProjectRuntime, startCommand: string): string {
-  const base = runtime.kind === 'node' ? `node:${runtime.version}-slim` : `python:${runtime.version}-slim`;
-  const install = runtime.kind === 'node'
+export function buildPortableContainerArchiveRuntime(
+  runtime: ProjectRuntime | undefined,
+  startCommand: string | undefined
+): string {
+  const base = runtime?.kind === 'node'
+    ? `node:${runtime.version}-slim`
+    : runtime?.kind === 'python'
+      ? `python:${runtime.version}-slim`
+      : undefined;
+  const install = runtime?.kind === 'node'
     ? 'RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi'
-    : 'RUN if [ -f requirements.txt ]; then python -m pip install --no-cache-dir -r requirements.txt; else python -m pip install --no-cache-dir .; fi';
+    : runtime?.kind === 'python'
+      ? 'RUN if [ -f requirements.txt ]; then python -m pip install --no-cache-dir -r requirements.txt; else python -m pip install --no-cache-dir .; fi'
+      : undefined;
+  const generatedDockerfile = base && install && startCommand
+    ? `  generated_dockerfile="$(mktemp /tmp/hypervibe.Dockerfile.XXXXXX)"
+  cat > "$generated_dockerfile" <<'HYPERVIBE_DOCKERFILE'
+FROM ${base}
+WORKDIR /app
+COPY . .
+${install}
+ENV PORT=8080
+EXPOSE 8080
+CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]
+HYPERVIBE_DOCKERFILE
+  dockerfile="$generated_dockerfile"`
+    : `  echo "No repository Dockerfile and no explicit project runtime were found. Run hv_spec to review runtime evidence; custom languages require a Dockerfile." >&2
+  exit 1`;
   return `#!/bin/sh
 set -eu
 
@@ -29,17 +52,7 @@ fi
 generated_dockerfile=""
 dockerfile=Dockerfile
 if [ ! -f "$dockerfile" ]; then
-  generated_dockerfile="$(mktemp /tmp/hypervibe.Dockerfile.XXXXXX)"
-  cat > "$generated_dockerfile" <<'HYPERVIBE_DOCKERFILE'
-FROM ${base}
-WORKDIR /app
-COPY . .
-${install}
-ENV PORT=8080
-EXPOSE 8080
-CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]
-HYPERVIBE_DOCKERFILE
-  dockerfile="$generated_dockerfile"
+${generatedDockerfile}
 fi
 ignorefile="$(mktemp .dockerignore.hypervibe.XXXXXX)"
 if [ -f .dockerignore ]; then cat .dockerignore > "$ignorefile"; fi

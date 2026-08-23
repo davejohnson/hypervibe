@@ -1,7 +1,6 @@
 import { readFileSync } from 'fs';
 import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
 import type { IosSpec } from '../spec/spec.schema.js';
-import { effectiveProjectRuntime } from '../spec/project-runtime.js';
 import { getManagedIosReleaseRuntimeBase64 } from './ios-release-template.service.js';
 
 export const IOS_RELEASE_REQUIRED_SECRETS = [
@@ -26,20 +25,23 @@ const matchSigningStepTemplateUrl = new URL(
 );
 
 /** Node only executes Hypervibe's isolated release helper, not project code. */
-const HYPERVIBE_MANAGED_NODE_VERSION = '20';
+const HYPERVIBE_MANAGED_NODE_VERSION = '24';
 
 function projectRuntimeSetup(target: BranchDeployTarget): string {
-  const runtime = effectiveProjectRuntime(target.runtime);
+  const runtime = target.runtime;
+  if (!runtime) return '';
   return runtime.kind === 'node'
     ? [
-      '      - uses: actions/setup-node@v4',
+      '      - uses: actions/setup-node@v6',
       '        with:',
       `          node-version: '${runtime.version}'`,
+      '          check-latest: true',
     ].join('\n')
     : [
-      '      - uses: actions/setup-python@v5',
+      '      - uses: actions/setup-python@v6',
       '        with:',
       `          python-version: '${runtime.version}'`,
+      '          check-latest: true',
     ].join('\n');
 }
 
