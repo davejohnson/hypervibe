@@ -32,12 +32,12 @@ function projectRuntimeSetup(target: BranchDeployTarget): string {
   const runtime = effectiveProjectRuntime(target.runtime);
   return runtime.kind === 'node'
     ? [
-      '      - uses: actions/setup-node@v4',
+      '      - uses: actions/setup-node@v6',
       '        with:',
       `          node-version: '${runtime.version}'`,
     ].join('\n')
     : [
-      '      - uses: actions/setup-python@v5',
+      '      - uses: actions/setup-python@v6',
       '        with:',
       `          python-version: '${runtime.version}'`,
     ].join('\n');

@@ -235,7 +235,7 @@ function buildMigrationStep(command: string, runtime: ProjectRuntime): string {
   // dependencies installed — the deploy steps that follow build a container
   // image and never run npm ci on the runner themselves.
   const setup = runtime.kind === 'node'
-    ? `      - uses: actions/setup-node@v4
+    ? `      - uses: actions/setup-node@v6
         if: steps.deploy.outputs.operation != 'rollback'
         with:
           node-version: '${runtime.version}'
@@ -243,7 +243,7 @@ function buildMigrationStep(command: string, runtime: ProjectRuntime): string {
       - name: Install dependencies for migrations
         if: steps.deploy.outputs.operation != 'rollback'
         run: npm ci`
-    : `      - uses: actions/setup-python@v5
+    : `      - uses: actions/setup-python@v6
         if: steps.deploy.outputs.operation != 'rollback'
         with:
           python-version: '${runtime.version}'
@@ -401,7 +401,7 @@ ${ifCondition ? `        if: ${ifCondition}\n` : ''}        uses: actions/github
 function buildImmutableRollbackEvidenceSteps(target: BranchDeployTarget): string {
   return `      - name: Download rollback release evidence
         if: steps.deploy.outputs.operation == 'rollback'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           artifact-ids: \${{ inputs.source_artifact_id }}
           run-id: \${{ inputs.source_workflow_run_id }}
@@ -544,7 +544,7 @@ function buildDeploymentFailureEvidenceJob(environmentName: string): string {
             );
             core.info('Captured sanitized evidence from failed deploy job ' + deployJob.id + '.');
       - name: Upload deployment failure evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: deploy-${environmentName}-failure-evidence
           path: hypervibe-deploy-failure.log
@@ -676,11 +676,11 @@ ${permissionsBlock.trimEnd()}
               throw new Error('Rollback evidence for ' + targetSha + ' did not come from a successful run of ' + workflowPath);
             }
             core.info('Verified rollback evidence from successful workflow run ' + run.data.id);
-${rollbackEvidenceSteps}      - uses: actions/checkout@v4
+${rollbackEvidenceSteps}      - uses: actions/checkout@v5
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:
           ref: \${{ steps.deploy.outputs.sha }}
 ${buildDeploymentContractStep(target.environmentName, sourcePreparationCondition)}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}      - name: Upload server release evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: hypervibe-server-release-${safeEnvironment}-\${{ steps.deploy.outputs.sha }}
           path: hypervibe-server-release.json

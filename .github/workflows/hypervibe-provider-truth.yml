@@ -100,7 +100,7 @@ jobs:
             
             Additional reviewed audit rules:
             Audit every external provider registered in providerRegistry and every hosting, database, cache, storage, DNS, email, messaging, payments, source-control, AI, app-store, and secret-manager capability Hypervibe claims. Start from providerContracts and the complete provider registry; do not audit only the best-documented providers. For every claim, distinguish schema/registry presence, implemented adapter behavior, mocked safety and lifecycle coverage, current official provider documentation, and successful live-conformance evidence. Repository prose, implementation notes, metadata, and mocked tests are claims rather than independent proof. A ready-for-live or planned capability must not be described publicly as supported. A supported claim without concrete linked or committed live-conformance evidence from the last 90 days is a finding; never infer a live pass from test code. Verify provider API behavior only through current official documentation on the allowlisted hosts and include exact source URLs in evidence. If required official documentation cannot be reached, set complete=false and report the source gap. Compare the public website and docs with test/provider-conformance/provider-matrix.ts, providerRegistry metadata, adapter ports, focused tests, and live harness coverage. Report contradictions, missing lifecycle layers, stale evidence, undocumented limitations, and claims broader than the implemented or verified contract. Do not mutate resources, run opt-in live tests, use provider credentials, edit files, or promote statuses. Set complete=true only after examining every registered external provider and every declared capability.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: provider-truth-findings
           path: hypervibe-findings.json
@@ -112,7 +112,7 @@ jobs:
       actions: read
       issues: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: provider-truth-findings
       - name: Publish audit findings
