@@ -168,7 +168,7 @@ describe('github tools', () => {
     expect(workflow.content.indexOf('npm ci')).toBeLessThan(workflow.content.indexOf('run: npm run migrate'));
     expect(workflow.content.indexOf('Deployment safety gate: verify Hypervibe reconciliation'))
       .toBeLessThan(workflow.content.indexOf('npm ci'));
-    expect(workflow.content).toContain('actions/setup-node@v4');
+    expect(workflow.content).toContain('actions/setup-node@v6');
     expect(workflow.content).toContain('docker/build-push-action@v6');
     expect(workflow.content).toContain('if [ -f .npmrc ]; then');
     expect(workflow.content).toContain('COPY package*.json .npmrc ./');
@@ -223,8 +223,8 @@ describe('github tools', () => {
       { includeStep: true, command: 'npm run migrate' }
     ).content;
     const checkoutStep = content.slice(
-      content.indexOf('      - uses: actions/checkout@v4'),
-      content.indexOf('\n      - ', content.indexOf('      - uses: actions/checkout@v4') + 1)
+      content.indexOf('      - uses: actions/checkout@v5'),
+      content.indexOf('\n      - ', content.indexOf('      - uses: actions/checkout@v5') + 1)
     );
     const buildAction = content.indexOf('uses: docker/build-push-action@v6');
     const buildStep = content.slice(

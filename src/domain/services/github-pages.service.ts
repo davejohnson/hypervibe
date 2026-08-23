@@ -94,14 +94,14 @@ export function compileGitHubPagesWorkflow(pages: GitHubPagesSpec): string {
     '        with:',
     '          persist-credentials: false',
     '      - name: Configure Pages',
-    '        uses: actions/configure-pages@v5',
+    '        uses: actions/configure-pages@v6',
     '      - name: Upload static site',
-    '        uses: actions/upload-pages-artifact@v4',
+    '        uses: actions/upload-pages-artifact@v5',
     '        with:',
     `          path: ${yamlString(pages.sourcePath)}`,
     '      - name: Deploy Pages',
     '        id: deployment',
-    '        uses: actions/deploy-pages@v4',
+    '        uses: actions/deploy-pages@v5',
     '',
   ].join('\n');
 }
