@@ -15,6 +15,7 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
     case missingStructuredContent(String)
     case malformedResponse(String)
     case invalidDeployment(String)
+    case timedOut(String)
     case tool(code: String, message: String, hint: String?)
 
     public var errorDescription: String? {
@@ -35,6 +36,8 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
             return message
         case .invalidDeployment(let message):
             return message
+        case .timedOut(let operation):
+            return "Hypervibe timed out while \(operation). Check the configured runtime and try Refresh again."
         case .tool(_, let message, let hint):
             if let hint, !hint.isEmpty {
                 return "\(message)\n\n\(hint)"
@@ -46,11 +49,19 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
 
 public actor HypervibeMCPClient {
     private let encoder = JSONEncoder()
+    private let handshakeTimeout: Duration
+    private let toolTimeout: Duration
     public nonisolated let clientVersion: String
 
-    public init(clientVersion: String) {
+    public init(
+        clientVersion: String,
+        handshakeTimeout: Duration = .seconds(15),
+        toolTimeout: Duration = .seconds(90)
+    ) {
         let normalized = clientVersion.trimmingCharacters(in: .whitespacesAndNewlines)
         self.clientVersion = normalized.isEmpty ? "development" : normalized
+        self.handshakeTimeout = handshakeTimeout
+        self.toolTimeout = toolTimeout
     }
 
     public func probe(project: CompanionProject) async throws -> CompanionProjectReadiness {
@@ -526,8 +537,18 @@ public actor HypervibeMCPClient {
         )
 
         do {
-            _ = try await client.connect(transport: transport)
-            let (tools, _) = try await client.listTools()
+            _ = try await withTimeout(
+                after: handshakeTimeout,
+                operationDescription: "starting the project MCP runtime"
+            ) {
+                try await client.connect(transport: transport)
+            }
+            let (tools, _) = try await withTimeout(
+                after: handshakeTimeout,
+                operationDescription: "loading the project MCP tools"
+            ) {
+                try await client.listTools()
+            }
             let names = Set(tools.map(\.name))
             let missing = requiredTools.filter { !names.contains($0) }
             if !missing.isEmpty {
@@ -538,10 +559,13 @@ public actor HypervibeMCPClient {
             await stop(client: client, process: process, input: serverInput, output: serverOutput)
             return result
         } catch {
+            let earlyExitStatus = process.isRunning
+                ? nil
+                : process.terminationStatus
             await stop(client: client, process: process, input: serverInput, output: serverOutput)
-            if !process.isRunning, process.terminationStatus != 0,
-                !(error is HypervibeClientError) {
-                throw HypervibeClientError.processExited(process.terminationStatus)
+            if let earlyExitStatus, earlyExitStatus != 0,
+                (!(error is HypervibeClientError) || error.isHypervibeTimeout) {
+                throw HypervibeClientError.processExited(earlyExitStatus)
             }
             throw error
         }
@@ -555,8 +579,13 @@ public actor HypervibeMCPClient {
         let request = CallTool.request(
             .init(name: tool, arguments: arguments)
         )
-        let context = try await client.send(request)
-        let result = try await context.value
+        let result = try await withTimeout(
+            after: toolTimeout,
+            operationDescription: "waiting for \(tool)"
+        ) {
+            let context = try await client.send(request)
+            return try await context.value
+        }
         guard let structuredContent = result.structuredContent
             ?? result._meta?["hypervibeEnvelope"] else {
             throw HypervibeClientError.missingStructuredContent(tool)
@@ -570,12 +599,75 @@ public actor HypervibeMCPClient {
         input: Pipe,
         output: Pipe
     ) async {
-        await client.disconnect()
         try? input.fileHandleForWriting.close()
-        try? output.fileHandleForReading.close()
         if process.isRunning {
             process.terminate()
         }
+        try? output.fileHandleForReading.close()
+        await client.disconnect()
         process.waitUntilExit()
+    }
+
+    private func withTimeout<Value: Sendable>(
+        after timeout: Duration,
+        operationDescription: String,
+        operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        try await withCheckedThrowingContinuation { continuation in
+            let race = TimeoutRace(continuation)
+            let timeoutTask = Task {
+                do {
+                    try await Task.sleep(for: timeout)
+                } catch {
+                    return
+                }
+                _ = race.resolve(
+                    .failure(HypervibeClientError.timedOut(operationDescription))
+                )
+            }
+            Task {
+                let result: Result<Value, Error>
+                do {
+                    result = .success(try await operation())
+                } catch {
+                    result = .failure(error)
+                }
+                if race.resolve(result) {
+                    timeoutTask.cancel()
+                }
+            }
+        }
+    }
+}
+
+private final class TimeoutRace<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+
+    init(_ continuation: CheckedContinuation<Value, Error>) {
+        self.continuation = continuation
+    }
+
+    @discardableResult
+    func resolve(_ result: Result<Value, Error>) -> Bool {
+        lock.lock()
+        guard let continuation else {
+            lock.unlock()
+            return false
+        }
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(with: result)
+        return true
+    }
+}
+
+private extension Error {
+    var isHypervibeTimeout: Bool {
+        guard let error = self as? HypervibeClientError,
+            case .timedOut = error else {
+            return false
+        }
+        return true
     }
 }

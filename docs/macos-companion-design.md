@@ -251,6 +251,11 @@ On launch and after executable changes:
 5. Disable refresh actions if startup, the handshake, or status inspection
    reports an incompatibility.
 
+The initialize handshake, tool discovery, and every MCP tool call are bounded.
+An exited or nonresponsive runtime ends the refresh with targeted guidance,
+preserves the last successful snapshot as stale, and must never leave the UI in
+an indefinite observing state.
+
 ### Provider connection management
 
 Connections are explicitly project-scoped because each configured project can
