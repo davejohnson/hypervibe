@@ -95,6 +95,11 @@ describe('public release configuration', () => {
       expect(workflow).toContain(`secrets.${secret}`);
     }
     expect(workflow).toContain('./scripts/configure-macos-release-signing.sh');
+    expect(installer).toContain('REPOSITORY_NODE_VERSION="$(tr -d');
+    expect(installer).toContain("ACTIVE_NODE_VERSION=\"$(node -p 'process.versions.node')\"");
+    expect(installer).toContain('SHASUMS256.txt');
+    expect(installer).not.toMatch(/NODE_VERSION="\$\{NODE_VERSION:-\d/);
+    expect(installer).not.toContain('22.17.1');
     expect(installer).toContain('--entitlements "$NODE_ENTITLEMENTS"');
     expect(installer).toContain('scripts/smoke-macos-mcp.mjs');
     expect(nodeEntitlements).toMatch(
