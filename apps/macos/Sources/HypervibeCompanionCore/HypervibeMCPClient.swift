@@ -14,6 +14,7 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
     case incompatibleTools([String])
     case missingStructuredContent(String)
     case malformedResponse(String)
+    case invalidDeployment(String)
     case tool(code: String, message: String, hint: String?)
 
     public var errorDescription: String? {
@@ -31,6 +32,8 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
         case .missingStructuredContent(let tool):
             return "\(tool) returned no structured response."
         case .malformedResponse(let message):
+            return message
+        case .invalidDeployment(let message):
             return message
         case .tool(_, let message, let hint):
             if let hint, !hint.isEmpty {
@@ -270,6 +273,155 @@ public actor HypervibeMCPClient {
             }
             return HostingVariableInventory(catalogs: catalogs, failures: failures)
         }
+    }
+
+    public func prepareProductionDeployment(
+        project: CompanionProject,
+        environment: EnvironmentSnapshot
+    ) async throws -> ProductionDeploymentPreparation {
+        guard environment.isProductionTarget else {
+            throw HypervibeClientError.invalidDeployment(
+                "\(environment.name) is not declared as a production promotion target."
+            )
+        }
+        let branch = environment.deployment?.branch ?? "main"
+        guard environment.deployment?.usesManagedCI == true else {
+            return ProductionDeploymentPreparation(
+                mechanism: .direct,
+                environment: environment.name,
+                specRevision: environment.specRevision,
+                branch: branch
+            )
+        }
+
+        return try await withSession(
+            project: project,
+            requiredTools: ["hv_ci_status"]
+        ) { client in
+            let data = try await self.call(
+                client: client,
+                tool: "hv_ci_status",
+                arguments: [
+                    "project": .string(project.displayName),
+                    "include": .array([.string("definitions")]),
+                ]
+            )
+            let catalog = try HypervibeResponseMapper.decodeCIDefinitionCatalog(data)
+            return ProductionDeploymentPreparation(
+                mechanism: .managedCI,
+                environment: environment.name,
+                specRevision: environment.specRevision,
+                branch: branch,
+                definitions: catalog.definitions,
+                requiresExactRefSHA: catalog.usesCanonicalBindings
+            )
+        }
+    }
+
+    public func deployProduction(
+        project: CompanionProject,
+        environment: EnvironmentSnapshot,
+        preparation: ProductionDeploymentPreparation,
+        definitionID: String? = nil,
+        commitSHA: String? = nil
+    ) async throws -> ProductionDeploymentResult {
+        guard environment.isProductionTarget,
+            preparation.environment == environment.name,
+            preparation.specRevision == environment.specRevision else {
+            throw HypervibeClientError.invalidDeployment(
+                "Production deployment details are stale. Close this window and try again."
+            )
+        }
+
+        switch preparation.mechanism {
+        case .direct:
+            return try await withSession(project: project, requiredTools: ["hv_deploy"]) {
+                client in
+                let data = try await self.call(
+                    client: client,
+                    tool: "hv_deploy",
+                    arguments: Self.directDeploymentArguments(
+                        projectName: project.displayName,
+                        environment: environment.name
+                    )
+                )
+                return try HypervibeResponseMapper.decodeDirectDeployment(data)
+            }
+
+        case .managedCI:
+            guard let definitionID,
+                let definition = preparation.eligibleDefinitions.first(where: {
+                    $0.id == definitionID
+                }) else {
+                throw HypervibeClientError.invalidDeployment(
+                    "Choose the reviewed production CI definition before deploying."
+                )
+            }
+            let sha = commitSHA?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard sha.range(
+                of: "^[0-9a-fA-F]{40}$",
+                options: .regularExpression
+            ) != nil else {
+                throw HypervibeClientError.invalidDeployment(
+                    "Enter the full 40-character commit SHA that was verified in staging."
+                )
+            }
+
+            return try await withSession(
+                project: project,
+                requiredTools: ["hv_ci_trigger"]
+            ) { client in
+                let data = try await self.call(
+                    client: client,
+                    tool: "hv_ci_trigger",
+                    arguments: Self.ciDeploymentArguments(
+                        projectName: project.displayName,
+                        environment: environment.name,
+                        preparation: preparation,
+                        definition: definition,
+                        commitSHA: sha
+                    )
+                )
+                return try HypervibeResponseMapper.decodeCIDeployment(data)
+            }
+        }
+    }
+
+    static func directDeploymentArguments(
+        projectName: String,
+        environment: String
+    ) -> [String: Value] {
+        [
+            "project": .string(projectName),
+            "env": .string(environment),
+            "confirm": .bool(true),
+        ]
+    }
+
+    static func ciDeploymentArguments(
+        projectName: String,
+        environment: String,
+        preparation: ProductionDeploymentPreparation,
+        definition: CIDefinitionSummary,
+        commitSHA: String
+    ) -> [String: Value] {
+        var inputs: [String: Value] = [
+            "commit_sha": .string(commitSHA),
+        ]
+        if !definition.isExplicitlyScoped(to: environment) {
+            inputs["environment"] = .string(environment)
+        }
+        var arguments: [String: Value] = [
+            "project": .string(projectName),
+            "definition": .string(definition.id),
+            "ref": .string(preparation.branch),
+            "inputs": .object(inputs),
+        ]
+        if preparation.requiresExactRefSHA {
+            arguments["sha"] = .string(commitSHA)
+        }
+        return arguments
     }
 
     private func connectionMutation(

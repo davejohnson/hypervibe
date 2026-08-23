@@ -31,7 +31,7 @@ struct ProjectDashboardView: View {
                 if let refreshError {
                     Label(refreshError, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(CompanionColor.warning)
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
@@ -88,7 +88,11 @@ struct ProjectDashboardView: View {
                         ForEach(github.automations) { automation in
                             HStack {
                                 Image(systemName: automation.enabled ? "checkmark.circle.fill" : "pause.circle")
-                                    .foregroundStyle(automation.enabled ? .green : .secondary)
+                                    .foregroundStyle(
+                                        automation.enabled
+                                            ? CompanionColor.success
+                                            : Color.secondary
+                                    )
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(automation.id)
                                         .font(.callout.weight(.medium))
@@ -160,7 +164,7 @@ struct ProjectDashboardView: View {
         HStack {
             Text(message)
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(CompanionColor.warning)
             Spacer()
             Button("Connection Options…") { showConnections(provider: provider) }
                 .controlSize(.small)
@@ -267,7 +271,7 @@ struct ProjectDashboardView: View {
                                     "\(observation.driftCount) drifted",
                                     systemImage: "arrow.triangle.2.circlepath"
                                 )
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(CompanionColor.warning)
                                 .help(driftSummary(observation))
                             }
                             if observation.unmanagedCount > 0 {
@@ -287,6 +291,18 @@ struct ProjectDashboardView: View {
                                 .help("Manage runtime variables and secrets")
                                 .clickTargetCursor()
                             }
+                            if environment.isProductionTarget,
+                                environment.resources.contains(where: { $0.kind == .service }) {
+                                Button {
+                                    showProductionDeployment(environment: environment.name)
+                                } label: {
+                                    Label("Deploy…", systemImage: "paperplane.fill")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .help("Review and start a production deployment")
+                                .clickTargetCursor()
+                            }
                         }
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -303,14 +319,16 @@ struct ProjectDashboardView: View {
                                     : "heart.slash.fill"
                             )
                             .font(.caption)
-                            .foregroundStyle(failed.isEmpty ? .green : .red)
+                            .foregroundStyle(
+                                failed.isEmpty ? CompanionColor.success : Color.red
+                            )
                             .help(endpointHealthSummary(checks))
                         }
 
                         if !observation.blockedProviders.isEmpty {
                             Text("Blocked: \(observation.blockedProviders.joined(separator: ", "))")
                                 .font(.caption)
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(CompanionColor.warning)
                         }
                     }
 
@@ -389,6 +407,18 @@ struct ProjectDashboardView: View {
         menuPanel?.orderOut(nil)
     }
 
+    private func showProductionDeployment(environment: String) {
+        let menuPanel = NSApplication.shared.keyWindow
+        openWindow(
+            id: "production-deployment",
+            value: ProductionDeploymentWindowRoute(
+                projectID: project.id,
+                environment: environment
+            )
+        )
+        menuPanel?.orderOut(nil)
+    }
+
     private func environmentExpansion(_ environment: String) -> Binding<Bool> {
         let key = "\(project.id.uuidString):\(environment)"
         return Binding(
@@ -416,7 +446,7 @@ struct ProjectDashboardView: View {
                     if let drift {
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .font(.caption2)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(CompanionColor.warning)
                             .help("\(drift.actionType) pending on \(drift.provider)")
                     }
                     if service?.status == .failed {
@@ -551,8 +581,8 @@ private extension EnvironmentHealth {
 
     var color: Color {
         switch self {
-        case .inSync: .green
-        case .drifted: .orange
+        case .inSync: CompanionColor.success
+        case .drifted: CompanionColor.warning
         case .blocked, .failed: .red
         case .unverified, .stale, .unknown: .secondary
         }
@@ -606,9 +636,9 @@ private extension RecentRunStatus {
 
     var color: Color {
         switch self {
-        case .succeeded: .green
+        case .succeeded: CompanionColor.success
         case .running: .blue
-        case .pending: .orange
+        case .pending: CompanionColor.warning
         case .failed, .blocked: .red
         case .cancelled, .unknown: .secondary
         }

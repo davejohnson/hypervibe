@@ -282,6 +282,42 @@ final class CompanionAppModel: ObservableObject {
         )
     }
 
+    func prepareProductionDeployment(
+        projectID: UUID,
+        environmentName: String
+    ) async throws -> ProductionDeploymentPreparation {
+        let (project, environment) = try productionDeploymentContext(
+            projectID: projectID,
+            environmentName: environmentName
+        )
+        return try await mcpClient.prepareProductionDeployment(
+            project: project,
+            environment: environment
+        )
+    }
+
+    func deployProduction(
+        projectID: UUID,
+        environmentName: String,
+        preparation: ProductionDeploymentPreparation,
+        definitionID: String?,
+        commitSHA: String?
+    ) async throws -> ProductionDeploymentResult {
+        let (project, environment) = try productionDeploymentContext(
+            projectID: projectID,
+            environmentName: environmentName
+        )
+        let result = try await mcpClient.deployProduction(
+            project: project,
+            environment: environment,
+            preparation: preparation,
+            definitionID: definitionID,
+            commitSHA: commitSHA
+        )
+        await refresh(projectID: projectID)
+        return result
+    }
+
     func addProject(
         _ draft: ProjectDraft,
         connectHosts: Set<MCPHost> = []
@@ -581,6 +617,19 @@ final class CompanionAppModel: ObservableObject {
         }
         return project
     }
+
+    private func productionDeploymentContext(
+        projectID: UUID,
+        environmentName: String
+    ) throws -> (CompanionProject, EnvironmentSnapshot) {
+        guard let project = projects.first(where: { $0.id == projectID }),
+            let environment = snapshots[projectID]?.environments.first(where: {
+                $0.name == environmentName
+            }) else {
+            throw ProductionDeploymentContextError.unavailable
+        }
+        return (project, environment)
+    }
 }
 
 private enum ConnectionManagementError: LocalizedError {
@@ -588,6 +637,14 @@ private enum ConnectionManagementError: LocalizedError {
 
     var errorDescription: String? {
         "This project is no longer available in Hypervibe Companion."
+    }
+}
+
+private enum ProductionDeploymentContextError: LocalizedError {
+    case unavailable
+
+    var errorDescription: String? {
+        "Refresh the project before starting a production deployment."
     }
 }
 

@@ -1,7 +1,7 @@
 # Hypervibe macOS Companion
 
-**Status:** Rev 6, agent-first onboarding and credential-independent public health implemented
-**Shape:** A menu bar app in `apps/macos/`. Chat remains the control plane. The app provides ambient status, resource topology, notifications, and plan review.
+**Status:** Rev 7, explicit production deployment added to the implemented companion
+**Shape:** A menu bar app in `apps/macos/`. Chat remains the general control plane. The app provides ambient status, resource topology, notifications, plan review, and one narrow production-deploy action through existing Hypervibe commands.
 
 Rev 4 deliberately removes the companion read-model database. Hypervibe already has authoritative repo specs, local history, bindings, and live provider observation. The app should ask Hypervibe for those views through its existing local MCP process, retain only a small disposable cache, and never become another infrastructure state owner.
 
@@ -17,6 +17,7 @@ The companion answers:
   credentials?
 - Is the last live observation current, in sync, drifted, blocked, partial, or failed?
 - What recent plan or apply needs attention?
+- Can I review and start the already-declared production deployment from this Mac?
 - How do I make this project's Hypervibe MCP available to Claude or Codex
   without separately installing Node.js or editing configuration files?
 
@@ -26,7 +27,7 @@ It does not:
 - mutate provider resources directly;
 - read Hypervibe's SQLite schema;
 - store infrastructure bindings, specs, credentials, or secret material as authoritative state;
-- replace chat for lifecycle decisions;
+- replace chat for general lifecycle decisions or desired-state editing;
 - invent progress that Hypervibe has not reported.
 
 ## State ownership
@@ -72,8 +73,8 @@ The companion cache can always be deleted and rebuilt. Losing it must not change
 │ Existing Hypervibe MCP + Node runtime │
 │ bundled inside the app                │
 │ hv_spec / hv_status / hv_health       │
-│ hv_runs / hv_connections         │
-│ hv_connections (connection management)    │
+│ hv_runs / hv_connections / hv_deploy      │
+│ hv_ci_status / hv_ci_trigger              │
 └───────────────┬───────────────┬───────┘
                 │               │
                 ▼               ▼
@@ -434,7 +435,13 @@ Rules:
 - receipt counts report completed work only;
 - the app does not reproduce apply precondition logic.
 
-v0/v1 use a copy-to-chat handoff for apply. Native Apply is out of scope until there is evidence that the chat boundary is a usability problem. If it is ever added, server-side stale-plan and confirmation checks remain final.
+General plan application still uses a copy-to-chat handoff. The production
+deploy window is a narrow exception: direct deploys call plan-gated
+`hv_deploy`, while managed-CI promotion first reads provider-observed
+definitions with `hv_ci_status` and then calls `hv_ci_trigger` with the reviewed
+definition, source ref, and full commit SHA. The app requires its own explicit
+final confirmation, but Hypervibe's protected-environment, stale-plan,
+action-authority, CI-definition, and exact-SHA checks remain final.
 
 ## Failure model
 
@@ -457,6 +464,8 @@ v0/v1 use a copy-to-chat handoff for apply. Native Apply is out of scope until t
 - The Node archive is version-pinned and checksum-verified while packaging.
 - The app does not open `hypervibe.db` or `.secret-key`.
 - MCP responses are decoded into allowlisted app models; raw responses are not persisted.
+- Production deploy form state contains only environment, definition, ref,
+  commit SHA, and safe run/plan identities; it is never written to the snapshot cache.
 - Notifications and pasteboard content contain names, plan IDs, and confirmation IDs only.
 - Provider tokens and hosting-variable values exist only in explicit in-memory
   forms and one local MCP call; they are cleared and never cached or logged.
@@ -476,12 +485,14 @@ v0/v1 use a copy-to-chat handoff for apply. Native Apply is out of scope until t
 | **v0 — Distribution** | Bundled runtime/server, native launcher/updater, signed DMG, GitHub update checks, Claude/Codex registration | Packages the existing MCP unchanged |
 | **v1 — Ambient** | Scheduling, notifications, acknowledgements, power/network behavior | Uses existing read-only tools |
 | **Plan review** | Detachable review window and copy-to-chat handoff | Narrow `hv_runs get` sanitization/preview only |
+| **Production deploy** | Explicit confirmation; plan-gated direct deploy or reviewed exact-SHA CI dispatch | Existing `hv_deploy`, `hv_ci_status`, and `hv_ci_trigger` |
 | **Later, only if needed** | One derived snapshot operation or native Apply | Separate reviewed decision |
 
 The implemented v0 slice now includes Foundation, Status through manual
 refresh and recent runs, self-contained Distribution/onboarding, provider
-connection management, and explicit hosting-variable add/replace. Scheduling,
-notifications, plan review, and lifecycle mutations remain out of scope.
+connection management, explicit hosting-variable inventory, and the narrow
+production-deploy action. Scheduling, notifications, general plan review, and
+other lifecycle mutations remain out of scope.
 
 ## Acceptance criteria
 

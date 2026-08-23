@@ -227,7 +227,7 @@ struct ProjectSetupView: View {
         VStack(alignment: .leading, spacing: 18) {
             Label("Hypervibe is connected", systemImage: "checkmark.circle.fill")
                 .font(.title2.weight(.semibold))
-                .foregroundStyle(.green)
+                .foregroundStyle(CompanionColor.success)
 
             Text("Fully quit and reopen \(selectedHosts.map(\.displayName).sorted().joined(separator: " or ")), then continue in chat.")
                 .foregroundStyle(.secondary)

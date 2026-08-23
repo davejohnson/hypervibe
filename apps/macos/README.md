@@ -28,11 +28,21 @@ The current v0 slice contains:
 - project-scoped provider add, verify, and remove through the existing
   `hv_connections` MCP tool;
 - read-only masked runtime-variable inventory through `hv_secrets`;
+- an explicit production deploy review window that routes direct deployments
+  through plan-gated `hv_deploy` and managed-CI promotions through a reviewed
+  `hv_ci_status` / `hv_ci_trigger` definition and exact commit SHA;
 - an app-owned project registry and disposable, strictly typed snapshot cache.
 
 The person installing the app does not need Node.js, npm, or a separate
 Hypervibe installation. The app does not read Hypervibe's SQLite database,
 run a local HTTP server, or replace the Hypervibe MCP with a second server.
+
+Production deployment is the narrow lifecycle exception to the otherwise
+observational dashboard. The app never calls a provider directly: it requires
+an explicit final confirmation, passes protected direct deployments through
+`hv_deploy`, and requires a full 40-character SHA plus a provider-observed CI
+definition before calling `hv_ci_trigger`. Provider results remain pending
+until CI status and production health prove convergence.
 
 Connected-app summaries include only provider, scope, status, and verification
 time. They are held in memory for the current app session and are not written

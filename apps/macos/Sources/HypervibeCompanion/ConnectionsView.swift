@@ -122,7 +122,7 @@ struct ConnectionsView: View {
                 if let refreshError = model.connectionCatalogErrors[project.id] {
                     Label(refreshError, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(CompanionColor.warning)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10)
                         .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
@@ -135,7 +135,9 @@ struct ConnectionsView: View {
                         systemImage: notice.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
                     )
                     .font(.callout)
-                    .foregroundStyle(notice.isError ? .red : .green)
+                    .foregroundStyle(
+                        notice.isError ? Color.red : CompanionColor.success
+                    )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
                     .background(
@@ -289,8 +291,8 @@ struct ConnectionsView: View {
 
     private func connectionColor(_ status: ConnectionStatus) -> Color {
         switch status {
-        case .verified: .green
-        case .pending: .orange
+        case .verified: CompanionColor.success
+        case .pending: CompanionColor.warning
         case .failed: .red
         case .unknown: .secondary
         }
