@@ -284,7 +284,7 @@ struct CompanionSettingsView: View {
                     )
                 }
                 .padding(10)
-                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+                .companionCardSurface(cornerRadius: 9)
             }
 
             Text("After connecting, fully restart the desktop client. Hypervibe keeps a one-time backup beside each configuration file.")

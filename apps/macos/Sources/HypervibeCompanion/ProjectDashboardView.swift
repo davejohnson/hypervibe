@@ -156,7 +156,7 @@ struct ProjectDashboardView: View {
             }
         }
         .padding(12)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        .companionCardSurface(cornerRadius: 12)
         .padding(.horizontal, 12)
     }
 
@@ -236,7 +236,7 @@ struct ProjectDashboardView: View {
             }
         }
         .padding(12)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        .companionCardSurface(cornerRadius: 12)
         .padding(.horizontal, 12)
     }
 
@@ -345,7 +345,7 @@ struct ProjectDashboardView: View {
             }
         }
         .padding(12)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        .companionCardSurface(cornerRadius: 12)
         .padding(.horizontal, 12)
     }
 
@@ -520,7 +520,7 @@ struct ProjectDashboardView: View {
             }
         }
         .padding(12)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        .companionCardSurface(cornerRadius: 12)
         .padding(.horizontal, 12)
     }
 

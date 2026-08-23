@@ -429,6 +429,9 @@ Plans open in a detachable window.
 Rules:
 
 - color is never the only signal;
+- information cards use an opaque white surface with light semantic content,
+  rather than translucent system-gray fills whose contrast changes with the
+  menu bar material or system appearance;
 - destructive, data-bearing, blocked, confirm-gated, and input-required content is never collapsed;
 - environment-variable diffs show key names only;
 - `billable` means "may incur charges," not an estimated price;
