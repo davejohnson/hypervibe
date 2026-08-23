@@ -1,5 +1,4 @@
 import type { BranchDeployTarget } from '../ports/ci-deploy.port.js';
-import { effectiveProjectRuntime } from '../spec/project-runtime.js';
 
 export function yamlSingleQuoted(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
@@ -30,8 +29,9 @@ export function providerListValueOrVariable(values: string[], variableName: stri
  * generate a minimal image on the runner. A repo-owned Dockerfile always wins.
  */
 export function buildDockerfileStep(target: BranchDeployTarget, ifCondition?: string): string {
-  const startCommand = target.webStartCommand?.trim() || 'npm start';
-  const runtime = effectiveProjectRuntime(target.runtime);
+  const runtime = target.runtime;
+  const startCommand = target.webStartCommand?.trim()
+    || (runtime?.kind === 'node' ? 'npm start' : 'python app.py');
   const cmdLine = `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`;
   const commonTail = [
     "'COPY . .'",
@@ -39,10 +39,12 @@ export function buildDockerfileStep(target: BranchDeployTarget, ifCondition?: st
     "'EXPOSE 8080'",
     shellSingleQuoted(cmdLine),
   ].join(' \\\n              ');
-  const manifestCondition = runtime.kind === 'node'
+  const manifestCondition = runtime?.kind === 'node'
     ? '[ -f package.json ]'
-    : '[ -f requirements.txt ] || [ -f pyproject.toml ]';
-  const generatedDockerfile = runtime.kind === 'node'
+    : runtime?.kind === 'python'
+      ? '[ -f requirements.txt ] || [ -f pyproject.toml ]'
+      : 'false';
+  const generatedDockerfile = runtime?.kind === 'node'
     ? `            if [ -f .npmrc ]; then
               printf '%s\\n' \\
                 '# syntax=docker/dockerfile:1.7' \\
@@ -61,7 +63,8 @@ export function buildDockerfileStep(target: BranchDeployTarget, ifCondition?: st
                 ${commonTail} \\
                 > Dockerfile.hypervibe
             fi`
-    : `            printf '%s\\n' \\
+    : runtime?.kind === 'python'
+      ? `            printf '%s\\n' \\
               'FROM python:${runtime.version}-slim' \\
               'WORKDIR /app' \\
               'COPY . .' \\
@@ -69,7 +72,8 @@ export function buildDockerfileStep(target: BranchDeployTarget, ifCondition?: st
               'ENV PORT=8080' \\
               'EXPOSE 8080' \\
               ${shellSingleQuoted(cmdLine)} \\
-              > Dockerfile.hypervibe`;
+              > Dockerfile.hypervibe`
+      : '            : # A custom runtime must provide its own Dockerfile.';
   return `      - name: Resolve Dockerfile
         id: dockerfile
 ${ifCondition ? `        if: ${ifCondition}\n` : ''}        run: |
@@ -79,7 +83,7 @@ ${ifCondition ? `        if: ${ifCondition}\n` : ''}        run: |
 ${generatedDockerfile}
             echo "path=Dockerfile.hypervibe" >> "$GITHUB_OUTPUT"
           else
-            echo "No Dockerfile or manifest for the declared ${runtime.kind} runtime was found." >&2
+            echo "No repository Dockerfile or manifest for an explicit project runtime was found. Run hv_spec to review runtime evidence; custom languages require a Dockerfile." >&2
             exit 1
           fi
 `;

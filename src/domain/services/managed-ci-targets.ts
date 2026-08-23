@@ -4,7 +4,6 @@ import type {
   BranchDeployEnvironmentKind,
   BranchDeployTarget,
 } from '../ports/ci-deploy.port.js';
-import { effectiveProjectRuntime } from '../spec/project-runtime.js';
 import type { ProjectSpec } from '../spec/spec.schema.js';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -83,7 +82,7 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
   const skippedEnvironments: string[] = [];
   const desiredBranches: Record<string, string | undefined> = {};
   let migration: { includeStep: boolean; command?: string; note?: string } = { includeStep: false };
-  const runtime = effectiveProjectRuntime(spec.runtime);
+  const runtime = spec.runtime;
 
   for (const [environmentName, environment] of Object.entries(spec.environments)) {
     const kind = classifyManagedCiEnvironment(environmentName);

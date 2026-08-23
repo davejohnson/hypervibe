@@ -256,7 +256,9 @@ function runtimeSteps(
       '      - uses: actions/setup-node@v6',
       ...conditionLine,
       '        with:',
+      `          # ${automation.runtime.version ? 'Explicit check override' : 'Inherited project desired state'}; major/minor selectors track their latest compatible patch.`,
       `          node-version: ${yamlString(version)}`,
+      '          check-latest: true',
       '          cache: npm',
       '      - name: Install dependencies',
       ...conditionLine,
@@ -269,7 +271,9 @@ function runtimeSteps(
     '      - uses: actions/setup-python@v6',
     ...conditionLine,
     '        with:',
+    `          # ${automation.runtime.version ? 'Explicit check override' : 'Inherited project desired state'}; major/minor selectors track their latest compatible patch.`,
     `          python-version: ${yamlString(version)}`,
+    '          check-latest: true',
     '          cache: pip',
     '      - name: Install dependencies',
     ...conditionLine,
@@ -1016,11 +1020,32 @@ export function githubSpecNeedsOpenAI(github: GitHubSpec): boolean {
   );
 }
 
+export function unresolvedGitHubCheckRuntimeIssues(
+  github: GitHubSpec,
+  projectRuntime?: ProjectRuntimeSpec
+): string[] {
+  return Object.entries(github.actions)
+    .filter(([, automation]) => (
+      automation.enabled
+      && automation.kind === 'check'
+      && automation.runtime.version === undefined
+      && projectRuntime?.kind !== automation.runtime.kind
+    ))
+    .map(([id, automation]) => (
+      `${automation.kind === 'check' ? automation.runtime.kind : 'project'} check "${id}" has no runtime version to inherit. `
+      + 'Run hv_spec to review repository runtime evidence, then declare spec.runtime or this check\'s runtime.version.'
+    ));
+}
+
 export function compileManagedGitHubFiles(
   github: GitHubSpec,
   projectRuntime?: ProjectRuntimeSpec,
   databaseRestoreDrillFiles: DatabaseRestoreDrillFile[] = []
 ): ManagedGitHubFile[] {
+  const runtimeIssues = unresolvedGitHubCheckRuntimeIssues(github, projectRuntime);
+  if (runtimeIssues.length > 0) {
+    throw new Error(runtimeIssues.join(' '));
+  }
   const files: ManagedGitHubFile[] = [];
   if (github.collaboration.issues.enabled && github.collaboration.issues.templates) {
     files.push(managedFile(
@@ -1428,6 +1453,22 @@ export async function planGitHubInfrastructure(params: {
   if (!parts) return { actions: [], warnings: [`Could not parse GitHub repository ${repository}.`], blocked: [], inputRequired: [] };
 
   const artifactContractIssues = autofixArtifactContractIssues(params.spec.github);
+  const runtimeIssues = unresolvedGitHubCheckRuntimeIssues(params.spec.github, params.spec.runtime);
+  if (runtimeIssues.length > 0) {
+    return {
+      actions: [infrastructureAction({
+        repository,
+        files: [],
+        type: 'update',
+        verified: false,
+        drift: ['project runtime declaration'],
+        blockedReason: 'github_check_runtime_unresolved',
+      })],
+      warnings: runtimeIssues,
+      blocked: [],
+      inputRequired: [],
+    };
+  }
   const restoreDrills = compileDatabaseRestoreDrillFiles({ project: params.project, spec: params.spec });
   const files = compileManagedGitHubFiles(params.spec.github, params.spec.runtime, restoreDrills.files);
   const adapterResult = getGitHubAdapter(repository);

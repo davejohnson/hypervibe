@@ -12,7 +12,6 @@ import type { EnvironmentSpec, ProjectSpec } from '../../../domain/spec/spec.sch
 import { environmentDeploymentContractHashForApply } from '../../../domain/services/deployment-contract.service.js';
 import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
 import { resolveReviewedBranchDeployTargets } from '../../../domain/services/managed-ci-targets.js';
-import { effectiveProjectRuntime } from '../../../domain/spec/project-runtime.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { buildPortableContainerArchiveRuntime } from '../../../domain/services/portable-container-build.js';
 import { normalizeGitRemoteIdentity } from '../../../lib/git-remote.js';
@@ -551,8 +550,12 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
     throw new Error('GitLab CI environment names collide after safe job-id normalization');
   }
 
-  const runtime = effectiveProjectRuntime(spec.runtime);
-  const defaultStartCommand = runtime.kind === 'node' ? 'npm start' : 'python -m app';
+  const runtime = spec.runtime;
+  const defaultStartCommand = runtime?.kind === 'node'
+    ? 'npm start'
+    : runtime?.kind === 'python'
+      ? 'python -m app'
+      : undefined;
   const descriptors = targets.map((target) => {
     const provider = spec.environments[target.environmentName]!.hosting.provider;
     return {

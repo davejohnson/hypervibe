@@ -45,9 +45,14 @@ import {
   githubSpecNeedsOpenAI,
   planGitHubInfrastructure,
   shouldPlanGitHubInfrastructure,
+  unresolvedGitHubCheckRuntimeIssues,
 } from '../domain/services/github-infrastructure.service.js';
 import { detectGitRemoteUrl, parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { findRepoRoot } from '../domain/spec/repo-spec-file.js';
+import {
+  analyzeRepositoryRuntime,
+  reviewRepositoryRuntime,
+} from '../domain/spec/repository-runtime.js';
 import { planStripeEnvironmentSync } from '../domain/services/stripe-env.service.js';
 import { planEmail } from '../domain/services/email-plan.service.js';
 import { planTwilioMessaging } from '../domain/services/twilio-messaging.service.js';
@@ -278,6 +283,12 @@ function freshProjectCandidate(projectRef?: string): {
   };
 }
 
+function repositoryRootForProject(projectName: string): string | null {
+  return freshProjectCandidate(projectName)?.name === projectName
+    ? findRepoRoot()
+    : null;
+}
+
 function projectWithSpecGitRemoteUrl(project: Project, spec: ProjectSpec): Project {
   const gitRemoteUrl = spec.gitRemoteUrl?.trim();
   return gitRemoteUrl && gitRemoteUrl !== project.gitRemoteUrl
@@ -417,7 +428,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_spec',
-    'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. In a fresh git repository, that read returns a successful uninitialized contract; inspect the repository, then call hv_spec with spec input to create its project. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
+    'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. In a fresh git repository, that read returns a successful uninitialized contract with native runtime evidence; one unambiguous concrete Node or Python selection is persisted on initial write, while custom or ambiguous projects require an explicit runtime decision or repository Dockerfile. Later native-version drift is suggested for review, never applied silently. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
     {
       project: projectField,
       spec: z.record(z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
@@ -438,6 +449,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             ctx.resolveProjectOrThrow({ project: projectRef });
             throw new Error('Project resolution unexpectedly returned no result.');
           }
+          const repositoryRuntime = analyzeRepositoryRuntime(findRepoRoot());
           const example = `hv_spec project="${candidate.name}" spec={"project":"${candidate.name}","environments":{...}}`;
           return commandSuccess({
             initialized: false,
@@ -448,13 +460,17 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             revision: null,
             specSource: null,
             spec: null,
+            repositoryRuntime,
             bootstrap: {
               required: true,
               nextCommand: 'hv_spec',
               requiredSpecFields: ['project', 'environments'],
+              ...(repositoryRuntime.runtime
+                ? { suggestedRuntime: repositoryRuntime.runtime }
+                : {}),
             },
           }, {
-            hint: `This is a normal fresh-project state. Inspect the repository and choose its desired environments and providers, then initialize it with ${example}. Do not run hv_plan or hv_deploy before that write succeeds.`,
+            hint: `This is a normal fresh-project state. ${repositoryRuntime.guidance} Inspect the repository and choose its desired environments and providers, then initialize it with ${example}. Do not run hv_plan or hv_deploy before that write succeeds.`,
             next: ['hv_spec'],
             agentInstruction: {
               action: 'continue',
@@ -469,14 +485,30 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           });
         }
         const gitRemoteUrl = project.gitRemoteUrl ?? result.spec.gitRemoteUrl ?? null;
+        const repositoryRuntime = analyzeRepositoryRuntime(repositoryRootForProject(project.name));
+        const runtimeReview = reviewRepositoryRuntime(result.spec.runtime, repositoryRuntime);
+        const checkRuntimeIssues = result.spec.github
+          ? unresolvedGitHubCheckRuntimeIssues(result.spec.github, result.spec.runtime)
+          : [];
         const extras = result.adopted && result.source?.kind === 'repo'
-          ? { warnings: [`${result.source.path} changed outside hypervibe; recorded as revision ${result.revision}.`] }
-          : undefined;
+          ? { warnings: [
+            `${result.source.path} changed outside hypervibe; recorded as revision ${result.revision}.`,
+            ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
+            ...checkRuntimeIssues,
+          ] }
+          : runtimeReview.status === 'review-required' || checkRuntimeIssues.length > 0
+            ? { warnings: [
+              ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
+              ...checkRuntimeIssues,
+            ] }
+            : undefined;
         return commandSuccess({
           project: { id: project.id, name: project.name, gitRemoteUrl },
           revision: result.revision,
           specSource: result.source ?? { kind: 'local' },
           spec: result.spec,
+          repositoryRuntime,
+          runtimeReview,
           connections: requiredConnectionChecklist(ctx, result.spec),
         }, extras);
       }
@@ -521,13 +553,24 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         const projectName = project?.name ?? newProject!.name;
         const previousSpec = project ? specStore.get(project)?.spec ?? null : null;
         const baseSpec = previousSpec ?? { version: 1 as const, project: projectName, environments: {} };
-        const candidateInput = replace
+        const mergedInput = replace
           ? {
             version: 1,
             project: projectName,
             ...spec,
           }
           : deepMergeSpec(baseSpec, spec);
+        const repositoryRuntime = analyzeRepositoryRuntime(repositoryRootForProject(projectName));
+        const mergedRecord = asRecord(mergedInput);
+        const repositoryMatchesProject = !project
+          && freshProjectCandidate(projectName)?.name === projectName;
+        const candidateInput = !previousSpec
+          && repositoryMatchesProject
+          && mergedRecord
+          && !Object.prototype.hasOwnProperty.call(mergedRecord, 'runtime')
+          && repositoryRuntime.runtime
+          ? { ...mergedRecord, runtime: repositoryRuntime.runtime }
+          : mergedInput;
         const candidateSpec = projectSpecSchema.parse(canonicalizeLegacyGitHubSpec(candidateInput));
         coverageReport = environmentVariableCoverage(candidateSpec);
         const previousIssueIds = new Set(
@@ -570,9 +613,16 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       }
       project = syncProjectGitRemoteUrl(ctx, project, result.spec);
       const connections = requiredConnectionChecklist(ctx, result.spec);
+      const repositoryRuntime = analyzeRepositoryRuntime(repositoryRootForProject(project.name));
+      const runtimeReview = reviewRepositoryRuntime(result.spec.runtime, repositoryRuntime);
+      const checkRuntimeIssues = result.spec.github
+        ? unresolvedGitHubCheckRuntimeIssues(result.spec.github, result.spec.runtime)
+        : [];
       const nativeDeploys = providerNativeDeployChanges(result.spec, null);
       const warnings = [
         ...(nativeDeploys.length > 0 ? [nativeDeployConfirmationHint(nativeDeploys)] : []),
+        ...(runtimeReview.status === 'review-required' ? [runtimeReview.message] : []),
+        ...checkRuntimeIssues,
         ...(coverageReport.issues.length > 0
           ? [`The spec still has ${coverageReport.issues.length} pre-existing environment-variable coverage gap(s). Unrelated changes remain allowed, but new gaps are blocked.`]
           : []),
@@ -585,6 +635,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           specSource: result.source ?? { kind: 'local' },
           envTemplate: result.envTemplate ?? null,
           spec: result.spec,
+          repositoryRuntime,
+          runtimeReview,
           environmentVariableCoverage: coverageReport,
           connections,
         },

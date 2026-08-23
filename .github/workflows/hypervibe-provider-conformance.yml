@@ -20,7 +20,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          # Inherited project desired state; major/minor selectors track their latest compatible patch.
+          node-version: "24"
+          check-latest: true
           cache: npm
       - name: Install dependencies
         run: |

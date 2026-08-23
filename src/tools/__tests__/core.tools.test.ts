@@ -163,6 +163,8 @@ describe('hv_spec', () => {
       'origin',
       'git@github.com:davejohnson/fresh-agent-app.git',
     ], { cwd: repoDir });
+    writeFileSync(path.join(repoDir, '.node-version'), '24\n', 'utf8');
+    writeFileSync(path.join(repoDir, 'package.json'), JSON.stringify({ engines: { node: '>=20' } }), 'utf8');
 
     let t: Awaited<ReturnType<typeof makeClient>> | null = null;
     try {
@@ -185,10 +187,15 @@ describe('hv_spec', () => {
           },
           revision: null,
           spec: null,
+          repositoryRuntime: {
+            status: 'detected',
+            runtime: { kind: 'node', version: '24' },
+          },
           bootstrap: {
             required: true,
             nextCommand: 'hv_spec',
             requiredSpecFields: ['project', 'environments'],
+            suggestedRuntime: { kind: 'node', version: '24' },
           },
         },
         agentInstruction: { action: 'continue' },
@@ -248,6 +255,8 @@ describe('hv_spec', () => {
       });
       expect(initialized.ok).toBe(true);
       expect(initialized.data.revision).toBe(1);
+      expect(initialized.data.spec.runtime).toEqual({ kind: 'node', version: '24' });
+      expect(initialized.data.runtimeReview).toMatchObject({ status: 'in-sync' });
       expect(initialized.data.project).toMatchObject({
         name: 'fresh-agent-app',
         gitRemoteUrl: 'git@github.com:davejohnson/fresh-agent-app.git',
@@ -257,7 +266,10 @@ describe('hv_spec', () => {
       });
       expect(JSON.parse(
         readFileSync(path.join(repoDir, '.hypervibe', 'spec.json'), 'utf8')
-      )).toMatchObject({ project: 'fresh-agent-app' });
+      )).toMatchObject({
+        project: 'fresh-agent-app',
+        runtime: { kind: 'node', version: '24' },
+      });
 
       const plan = await t.call('hv_plan', {
         project: 'fresh-agent-app',

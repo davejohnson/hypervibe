@@ -6,11 +6,7 @@ import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js
 import type { GitHubCredentials } from '../../adapters/providers/github/github.adapter.js';
 import type { Project } from '../entities/project.entity.js';
 import { projectSpecSchema, type IosSpec } from '../spec/spec.schema.js';
-import {
-  effectiveProjectRuntime,
-  LEGACY_PROJECT_RUNTIME,
-  type ProjectRuntime,
-} from '../spec/project-runtime.js';
+import type { ProjectRuntime } from '../spec/project-runtime.js';
 import { providerRegistry } from '../registry/provider.registry.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 import { buildIosReleaseWorkflow } from './ios-release-workflow.service.js';
@@ -239,6 +235,7 @@ function buildMigrationStep(command: string, runtime: ProjectRuntime): string {
         if: steps.deploy.outputs.operation != 'rollback'
         with:
           node-version: '${runtime.version}'
+          check-latest: true
           cache: 'npm'
       - name: Install dependencies for migrations
         if: steps.deploy.outputs.operation != 'rollback'
@@ -247,6 +244,7 @@ function buildMigrationStep(command: string, runtime: ProjectRuntime): string {
         if: steps.deploy.outputs.operation != 'rollback'
         with:
           python-version: '${runtime.version}'
+          check-latest: true
           cache: 'pip'
       - name: Install dependencies for migrations
         if: steps.deploy.outputs.operation != 'rollback'
@@ -562,8 +560,14 @@ export function buildBranchDeployWorkflow(
   const safeEnvironment = target.environmentName.toLowerCase().replace(/[^a-z0-9-]+/g, '-');
   const template = `deploy-${provider}-${safeEnvironment}`;
   const filename = `${template}.yml`;
-  const migrationStep = migration.includeStep && migration.command
-    ? buildMigrationStep(migration.command, target.runtime ?? LEGACY_PROJECT_RUNTIME)
+  if (migration.includeStep && migration.command && !target.runtime) {
+    throw new Error(
+      `Managed migration tooling for ${target.environmentName} requires an explicit project runtime. `
+      + 'Run hv_spec to review repository runtime evidence and persist the intended version.'
+    );
+  }
+  const migrationStep = migration.includeStep && migration.command && target.runtime
+    ? buildMigrationStep(migration.command, target.runtime)
     : '';
   const deployBlock = buildProviderDeploySteps(provider, target);
   const immutableRollback = Boolean(deployBlock.releaseImageUri);

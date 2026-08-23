@@ -18,7 +18,6 @@ import { parseHostingBindings, type GetLogsOptions, type LogEntry } from '../../
 import * as pubsub from './pubsub.api.js';
 import { pubsubQueueResourceIds } from '../../../domain/services/queue-env.js';
 import { hashEnvValue, type ObservedService, type ObservedState } from '../../../domain/ports/observe.port.js';
-import { effectiveProjectRuntime } from '../../../domain/spec/project-runtime.js';
 import type {
   IWorkloadMaintenanceAdapter,
   MaintenanceWorkloadObservation,
@@ -3428,10 +3427,10 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
 
   private cloudBuildScript(service: Service, imageUri: string): string {
     const dockerfilePath = service.buildConfig.dockerfilePath?.trim() || 'Dockerfile';
-    const runtime = effectiveProjectRuntime(service.buildConfig.runtime);
+    const runtime = service.buildConfig.runtime;
     const startCommand = service.buildConfig.startCommand?.trim()
-      || (runtime.kind === 'node' ? 'npm start' : 'python app.py');
-    const generatedDockerfile = runtime.kind === 'node'
+      || (runtime?.kind === 'node' ? 'npm start' : 'python app.py');
+    const generatedDockerfile = runtime?.kind === 'node'
       ? [
         `FROM node:${runtime.version}-slim`,
         'WORKDIR /app',
@@ -3443,7 +3442,8 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
         `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`,
         '',
       ].join('\n')
-      : [
+      : runtime?.kind === 'python'
+        ? [
         `FROM python:${runtime.version}-slim`,
         'WORKDIR /app',
         'COPY . .',
@@ -3452,22 +3452,25 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
         'EXPOSE 8080',
         `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`,
         '',
-      ].join('\n');
-    const manifestCondition = runtime.kind === 'node'
+        ].join('\n')
+        : '';
+    const manifestCondition = runtime?.kind === 'node'
       ? '[ -f package.json ]'
-      : '[ -f requirements.txt ] || [ -f pyproject.toml ]';
+      : runtime?.kind === 'python'
+        ? '[ -f requirements.txt ] || [ -f pyproject.toml ]'
+        : 'false';
 
     return [
       'set -euo pipefail',
       `if [ -f ${JSON.stringify(dockerfilePath)} ]; then`,
-      `  docker build -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
+      `  docker build --pull -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
       `elif ${manifestCondition}; then`,
       "  cat > Dockerfile.infraprint <<'EOF'",
       generatedDockerfile,
       'EOF',
-      `  docker build -t ${JSON.stringify(imageUri)} -f Dockerfile.infraprint .`,
+      `  docker build --pull -t ${JSON.stringify(imageUri)} -f Dockerfile.infraprint .`,
       'else',
-      `  echo "No Dockerfile or manifest for the declared ${runtime.kind} runtime was found." >&2`,
+      '  echo "No repository Dockerfile or manifest for an explicit project runtime was found. Run hv_spec to review runtime evidence; custom languages require a Dockerfile." >&2',
       '  exit 1',
       'fi',
     ].join('\n');

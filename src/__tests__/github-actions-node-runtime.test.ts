@@ -30,6 +30,7 @@ describe('GitHub Actions JavaScript runtimes', () => {
     const files = [
       ...sourceFiles(join(repositoryRoot, '.github')),
       ...sourceFiles(join(repositoryRoot, 'src')),
+      ...sourceFiles(join(repositoryRoot, 'templates')),
     ];
 
     for (const file of files) {
