@@ -51,7 +51,7 @@ export function buildAzureContainerAppsGitHubActionsSteps(
     ],
     steps: `      - name: Resolve bound Azure target
         id: azure_target
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           AZURE_SUBSCRIPTION_ID: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_RESOURCE_GROUP_ID: ${projectValue}
@@ -96,7 +96,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
       - name: Release exact digest to bound Azure Container Apps
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           AZURE_TENANT_ID: \${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: \${{ secrets.AZURE_SUBSCRIPTION_ID }}

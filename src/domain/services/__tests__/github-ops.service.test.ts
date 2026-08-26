@@ -189,7 +189,7 @@ describe('github tools', () => {
     expect(workflow.content).toContain('username: process.env.IMAGE_REGISTRY_USERNAME');
     expect(workflow.content).toContain('password: process.env.IMAGE_REGISTRY_TOKEN');
     expect(workflow.content).toContain('DEPLOY_SHA: ${{ steps.deploy.outputs.sha }}');
-    expect(workflow.content).toContain('uses: actions/github-script@v8');
+    expect(workflow.content).toContain('uses: actions/github-script@v9');
     expect(workflow.content).toContain('Railway API \' + response.status + \' during \' + operation');
     expect(workflow.content).toContain('return status === 429 || (status >= 500 && status <= 599)');
     expect(workflow.content).toContain('async function railway(query, variables, options = {})');
@@ -227,8 +227,8 @@ describe('github tools', () => {
       { includeStep: true, command: 'npm run migrate' }
     ).content;
     const checkoutStep = content.slice(
-      content.indexOf('      - uses: actions/checkout@v6'),
-      content.indexOf('\n      - ', content.indexOf('      - uses: actions/checkout@v6') + 1)
+      content.indexOf('      - uses: actions/checkout@v7'),
+      content.indexOf('\n      - ', content.indexOf('      - uses: actions/checkout@v7') + 1)
     );
     const buildAction = content.indexOf('uses: docker/build-push-action@v6');
     const buildStep = content.slice(

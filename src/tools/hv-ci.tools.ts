@@ -249,10 +249,10 @@ function diagnoseGenericWorkflowLog(text: string): CiWorkflowDiagnostic[] {
     diagnostics.push({
       code: 'GITHUB_SCRIPT_NODE20_DEPRECATED',
       severity: 'warning',
-      summary: 'This deploy workflow still uses actions/github-script@v7, which runs on the deprecated Node 20 action runtime. Current Hypervibe workflows use actions/github-script@v8.',
+      summary: 'This deploy workflow still uses actions/github-script@v7, which runs on the deprecated Node 20 action runtime. Current Hypervibe workflows use actions/github-script@v9.',
       evidence: 'GitHub Actions reported Node 20 deprecation for actions/github-script@v7.',
       next: [
-        'Re-sync the declarative deploy workflow with hv_plan + hv_apply so it uses actions/github-script@v8.',
+        'Re-sync the declarative deploy workflow with hv_plan + hv_apply so it uses actions/github-script@v9.',
         'Re-run the workflow with hv_ci_trigger afterwards.',
       ],
     });

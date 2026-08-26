@@ -70,7 +70,7 @@ export function buildDigitalOceanGitHubActionsSteps(
     ],
     steps: `      - name: Resolve DigitalOcean image URI
         id: image
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           DIGITALOCEAN_TOKEN: \${{ secrets.DIGITALOCEAN_TOKEN }}
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
@@ -134,7 +134,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
       - name: Deploy exact-SHA image to existing DigitalOcean components
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           DIGITALOCEAN_TOKEN: \${{ secrets.DIGITALOCEAN_TOKEN }}
           DIGITALOCEAN_REGISTRY: \${{ steps.image.outputs.registry_name }}

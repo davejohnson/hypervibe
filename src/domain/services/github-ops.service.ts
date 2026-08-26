@@ -301,7 +301,7 @@ ${dispatch}`;
 
 function buildDeploymentContractStep(environmentName: string, ifCondition?: string): string {
   return `      - name: "Deployment safety gate: verify Hypervibe reconciliation"
-${ifCondition ? `        if: ${ifCondition}\n` : ''}        uses: actions/github-script@v8
+${ifCondition ? `        if: ${ifCondition}\n` : ''}        uses: actions/github-script@v9
         env:
           HYPERVIBE_ENVIRONMENT: ${JSON.stringify(environmentName)}
           HYPERVIBE_APPLIED_SPEC_HASH: \${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}
@@ -400,7 +400,7 @@ ${ifCondition ? `        if: ${ifCondition}\n` : ''}        uses: actions/github
 function buildImmutableRollbackEvidenceSteps(target: BranchDeployTarget): string {
   return `      - name: Download rollback release evidence
         if: steps.deploy.outputs.operation == 'rollback'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           artifact-ids: \${{ inputs.source_artifact_id }}
           run-id: \${{ inputs.source_workflow_run_id }}
@@ -410,7 +410,7 @@ function buildImmutableRollbackEvidenceSteps(target: BranchDeployTarget): string
       - name: Resolve immutable rollback image
         id: rollback_evidence
         if: steps.deploy.outputs.operation == 'rollback'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           HYPERVIBE_RELEASE_EVIDENCE_PATH: \${{ runner.temp }}/hypervibe-rollback-evidence/hypervibe-server-release.json
           HYPERVIBE_ENVIRONMENT: ${JSON.stringify(target.environmentName)}
@@ -458,7 +458,7 @@ function buildServerReleaseEvidenceStep(
 `;
   }
   return `      - name: Write server release evidence
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           HYPERVIBE_RELEASE_SHA: \${{ steps.deploy.outputs.sha }}
           HYPERVIBE_RELEASE_IMAGE_URI: ${releaseImageUri}
@@ -494,7 +494,7 @@ function buildDeploymentFailureEvidenceJob(environmentName: string): string {
       contents: read
     steps:
       - name: Capture sanitized deployment failure evidence
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           HYPERVIBE_RUN_ID: \${{ github.run_id }}
         with:
@@ -543,7 +543,7 @@ function buildDeploymentFailureEvidenceJob(environmentName: string): string {
             );
             core.info('Captured sanitized evidence from failed deploy job ' + deployJob.id + '.');
       - name: Upload deployment failure evidence
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: deploy-${environmentName}-failure-evidence
           path: hypervibe-deploy-failure.log
@@ -608,7 +608,7 @@ ${permissionsBlock.trimEnd()}
     steps:
       - name: Resolve deploy SHA
         id: deploy
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const inputSha = ((context.payload.inputs || {}).commit_sha || '').trim();
@@ -623,7 +623,7 @@ ${permissionsBlock.trimEnd()}
             core.info((operation === 'rollback' ? 'Restoring' : 'Deploying') + ' commit ' + sha);
       - name: Verify rollback release evidence
         if: steps.deploy.outputs.operation == 'rollback'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           HYPERVIBE_ENVIRONMENT: ${JSON.stringify(target.environmentName)}
           HYPERVIBE_ROLLBACK_SHA: \${{ steps.deploy.outputs.sha }}
@@ -681,11 +681,11 @@ ${permissionsBlock.trimEnd()}
               throw new Error('Rollback evidence for ' + targetSha + ' did not come from a successful run of ' + workflowPath);
             }
             core.info('Verified rollback evidence from successful workflow run ' + run.data.id);
-${rollbackEvidenceSteps}      - uses: actions/checkout@v6
+${rollbackEvidenceSteps}      - uses: actions/checkout@v7
 ${sourcePreparationCondition ? `        if: ${sourcePreparationCondition}\n` : ''}        with:
           ref: \${{ steps.deploy.outputs.sha }}
 ${buildDeploymentContractStep(target.environmentName, sourcePreparationCondition)}${migrationStep}${deployBlock.steps}${releaseEvidenceStep}      - name: Upload server release evidence
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: hypervibe-server-release-${safeEnvironment}-\${{ steps.deploy.outputs.sha }}
           path: hypervibe-server-release.json
