@@ -108,7 +108,14 @@ function errorMessage(error: unknown): string {
 
 async function responseError(response: Response): Promise<Error> {
   const text = await response.text();
-  return new Error(`Google Cloud Storage API ${response.status}: ${text.slice(0, 1_000)}`);
+  const detail = `Google Cloud Storage API ${response.status}: ${text.slice(0, 1_000)}`;
+  if (response.status === 403) {
+    return new Error(
+      `${detail}. When GCS reuses the Cloud Run connection, preview hv_connections provider="cloudrun" action="prepare" gcsAccess="inspect" for read-only inventory; `
+      + 'for GCS create, transfer, or teardown, preview it with gcsAccess="lifecycle". Both paths require explicit confirmation and one-time project IAM admin credentials. A standalone GCS connection must grant the equivalent role to its own identity.'
+    );
+  }
+  return new Error(detail);
 }
 
 function requestBody(payload: StorageObjectPayload): RequestInit['body'] {

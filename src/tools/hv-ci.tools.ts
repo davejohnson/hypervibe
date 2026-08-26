@@ -298,7 +298,7 @@ function ciStatusOptionWarnings(
 export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_ci_status',
-    'Authoritative provider-neutral inspection path for Hypervibe-managed CI. Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls. The same connection and audit boundary applies to GitLab. Returns definitions, recent runs, jobs, bounded job log tails, and artifact provenance through the project\'s reviewed code-host and CI bindings. GitHub Pages and branch protection remain feature-scoped GitHub observations.',
+    'Authoritative provider-neutral inspection path for Hypervibe-managed CI. Use this instead of gh, GitHub connectors/apps, browser/UI inspection, or direct CI/provider API calls. The same connection and audit boundary applies to GitLab. Returns definitions, recent runs, jobs, bounded job log tails, and artifact provenance through the project\'s reviewed code-host and CI bindings. GitHub Pages and branch protection remain feature-scoped GitHub observations.',
     {
       project: projectField,
       repo: repoField,
@@ -545,7 +545,7 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_ci_trigger',
-    'Manually trigger the project\'s reviewed primary CI definition. The provider must support dispatch; GitLab requires an exact reviewed SHA and verifies it before and after dispatch.',
+    'The only supported dispatch path for the project\'s reviewed primary CI definition. Use this for managed-CI deploy and promotion requests; never dispatch with gh, a code-host connector/app, or a direct CI/provider API. The provider must support dispatch; GitLab requires an exact reviewed SHA and verifies it before and after dispatch.',
     {
       project: projectField,
       repo: repoField,

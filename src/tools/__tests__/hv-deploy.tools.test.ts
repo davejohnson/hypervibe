@@ -218,6 +218,7 @@ describe('hv_deploy', () => {
     expect(result.error.message).toContain('does not build or push the image');
     expect(result.hint).toContain('hv_ci_trigger');
     expect(result.hint).toContain('deploy-railway-production.yml');
+    expect(result.hint).toContain('Never dispatch or monitor this workflow with gh');
     expect(adapterSpy).not.toHaveBeenCalled();
     await t.close();
   });

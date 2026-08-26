@@ -71,7 +71,10 @@ describe('server tool surface', () => {
     expect(names).toEqual(EXPECTED_TOOLS);
     expect(names).toHaveLength(19);
     expect(tools.find((tool) => tool.name === 'hv_ci_status')?.description).toContain(
-      'Use this before gh, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls.'
+      'Use this instead of gh, GitHub connectors/apps, browser/UI inspection, or direct CI/provider API calls.'
+    );
+    expect(tools.find((tool) => tool.name === 'hv_ci_trigger')?.description).toContain(
+      'The only supported dispatch path'
     );
     expect(names).not.toContain('hv_db_migrate');
     await client.close();
@@ -124,13 +127,16 @@ describe('server tool surface', () => {
   it('instructs agents to inspect managed deploys through Hypervibe', async () => {
     const { HYPERVIBE_SERVER_INSTRUCTIONS } = await import('../../server.js');
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'always inspect workflows, runs, jobs, and logs with hv_ci_status'
+      'For every deploy or promotion request'
     );
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'Do not use gh, a GitHub connector/app, the GitHub UI, or direct GitHub API calls to inspect deploys.'
+      'use hv_ci_status to select the reviewed definition, hv_ci_trigger to dispatch it, hv_ci_status to monitor it'
     );
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
-      'follow or report its connection/error guidance instead of bypassing Hypervibe'
+      'Never dispatch, monitor, or inspect a managed CI run with gh'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'follow or report its connection/error guidance and stop instead of bypassing Hypervibe'
     );
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
       'hv_connections({project?}) and hv_secrets({project?}) list by default'

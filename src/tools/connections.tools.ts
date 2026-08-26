@@ -288,6 +288,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       project: projectField.describe('Optional Hypervibe project name/id for validated context. With no provider, project-only still lists. Omit for an unscoped list. This never changes provider credential scope.'),
       gcpProjectId: z.string().optional().describe('action="prepare": GCP project ID (defaults to the Cloud Run connection projectId)'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
+      gcsAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add GCS access to the reused service account. "inspect" grants roles/storage.viewer; "lifecycle" grants roles/storage.admin.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
       adminCredentialsJsonRef: z.string().optional().describe('action="prepare": env:NAME or file:/absolute/path resolving to one-time admin service account JSON. Not stored.'),
       adminAccessToken: z.string().optional().describe('action="prepare": one-time OAuth admin access token. Not stored.'),
@@ -305,6 +306,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       project: projectRef,
       gcpProjectId,
       deployServiceAccountEmail,
+      gcsAccess,
       adminCredentialsJson,
       adminCredentialsJsonRef,
       adminAccessToken,
@@ -320,6 +322,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || scope !== undefined
           || gcpProjectId !== undefined
           || deployServiceAccountEmail !== undefined
+          || gcsAccess !== undefined
           || adminCredentialsJson !== undefined
           || adminCredentialsJsonRef !== undefined
           || adminAccessToken !== undefined
@@ -346,6 +349,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       const prepareFields = {
         gcpProjectId,
         deployServiceAccountEmail,
+        gcsAccess,
         adminCredentialsJson,
         adminCredentialsJsonRef,
         adminAccessToken,
@@ -375,6 +379,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
       if (requestedAction === 'prepare' && adminAccessToken && adminAccessTokenRef) {
         return commandError('VALIDATION', 'Pass either adminAccessToken or adminAccessTokenRef, not both.');
+      }
+      if (requestedAction === 'prepare' && gcsAccess && provider !== 'cloudrun') {
+        return commandError('VALIDATION', 'gcsAccess is supported only when preparing the shared cloudrun connection.');
       }
       const adminJsonSupplied = adminCredentialsJson !== undefined || adminCredentialsJsonRef !== undefined;
       const adminTokenSupplied = adminAccessToken !== undefined || adminAccessTokenRef !== undefined;
@@ -411,6 +418,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           provider,
           gcpProjectId,
           deployServiceAccountEmail,
+          gcsAccess,
           adminCredentialsJson: resolvedAdminCredentialsJson,
           adminAccessToken: resolvedAdminAccessToken,
           confirm,
