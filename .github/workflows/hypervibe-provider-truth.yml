@@ -414,7 +414,7 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: provider-truth-findings-*
           path: hypervibe-shard-findings
@@ -454,7 +454,7 @@ jobs:
       actions: read
       issues: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: provider-truth-findings
       - name: Publish audit findings
