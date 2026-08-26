@@ -66,7 +66,7 @@
     "@bitwarden/sdk-napi": "^1.0.0",
     "@google-cloud/cloud-sql-connector": "1.10.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^13.0.3",
     "google-auth-library": "^10.9.0",
     "graphql": "^16.9.0",
     "graphql-request": "^7.0.0",
@@ -78,7 +78,7 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.16.0",
     "@vitest/coverage-v8": "^4.0.18",
@@ -96,6 +96,6 @@
     "templates/"
   ],
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   }
 }
