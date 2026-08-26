@@ -9,6 +9,14 @@ import {
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 
+function minimumNodeMajor(requirement: string): number {
+  const match = /^>=\s*(\d+)(?:\.\d+\.\d+)?$/.exec(requirement);
+  if (!match) {
+    throw new Error(`Unsupported Node engine requirement: ${requirement}`);
+  }
+  return Number(match[1]);
+}
+
 function productionSources(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
@@ -41,6 +49,31 @@ describe('managed runtime contract', () => {
     };
     const releaseWorkflow = readFileSync(join(repositoryRoot, '.github/workflows/release.yml'), 'utf8');
     expect(releaseWorkflow).toContain(`npm install --global ${manifest.packageManager}`);
+  });
+
+  it('keeps the repository and application runtimes compatible with native SQLite', () => {
+    const repositoryVersion = readFileSync(join(repositoryRoot, '.node-version'), 'utf8').trim();
+    const manifest = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')) as {
+      engines: { node: string };
+    };
+    const lock = JSON.parse(readFileSync(join(repositoryRoot, 'package-lock.json'), 'utf8')) as {
+      packages: Record<
+        string,
+        { dependencies?: Record<string, string>; engines?: { node?: string } }
+      >;
+    };
+    const sqlite = lock.packages['node_modules/better-sqlite3'];
+    const sqliteRequirement = sqlite?.engines?.node;
+
+    expect(sqliteRequirement).toBeDefined();
+    expect(Number(repositoryVersion.split('.')[0])).toBeGreaterThanOrEqual(
+      minimumNodeMajor(manifest.engines.node),
+    );
+    expect(minimumNodeMajor(manifest.engines.node)).toBeGreaterThanOrEqual(
+      minimumNodeMajor(sqliteRequirement!),
+    );
+    expect(sqlite?.dependencies).toHaveProperty('node-addon-api');
+    expect(sqlite?.dependencies).not.toHaveProperty('prebuild-install');
   });
 
   it('does not reintroduce scattered legacy Node image pins or application command fallbacks', () => {
