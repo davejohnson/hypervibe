@@ -420,7 +420,7 @@ jobs:
           path: hypervibe-shard-findings
           merge-multiple: true
       - name: Combine complete shard reports
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           EXPECTED_AUDIT_SHARDS: "[\"hosting-core\",\"hosting-edge\",\"data-services\",\"integrations\"]"
         with:
@@ -458,7 +458,7 @@ jobs:
         with:
           name: provider-truth-findings
       - name: Publish audit findings
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           AUTOMATION_ID: "provider-truth"
         with:
