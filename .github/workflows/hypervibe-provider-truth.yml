@@ -104,7 +104,7 @@ jobs:
             This job is the hosting-core audit shard. Audit only this complete reviewed scope:
             Audit every hosting lifecycle and public support claim for Railway, Google Cloud Run, AWS ECS Express Mode, and Azure Container Apps. Cover project and service identity, deploy sources and managed CI recipes, runtime and environment wiring, maintenance, custom domains, teardown, mocked contracts, and recent live evidence. Include every registered capability owned by these hosting adapters, but do not audit data providers or integrations assigned to other shards.
             Set complete based on this shard alone. Do not expand into another shard scope.
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: provider-truth-findings-hosting-core
           path: hypervibe-findings-hosting-core.json
@@ -203,7 +203,7 @@ jobs:
             This job is the hosting-edge audit shard. Audit only this complete reviewed scope:
             Audit every hosting and edge lifecycle and public support claim for DigitalOcean App Platform, Vercel, Fly.io, Cloudflare DNS and load balancing, and GitHub Pages routing. Cover durable identity, deploy and runtime behavior, maintenance, certificates and domains, DNS ownership, teardown, mocked contracts, and recent live evidence. Do not audit code-host collaboration or integrations assigned to other shards.
             Set complete based on this shard alone. Do not expand into another shard scope.
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: provider-truth-findings-hosting-edge
           path: hypervibe-findings-hosting-edge.json
@@ -302,7 +302,7 @@ jobs:
             This job is the data-services audit shard. Audit only this complete reviewed scope:
             Audit every registered database, cache, storage, queue, resilience, restore-drill, and data-migration capability and public claim. Include Railway data services, Cloud SQL and Google Cloud Storage, RDS, S3 and ElastiCache, Azure Blob Storage, Supabase, Neon, Fly Managed Postgres, and every other providerRegistry entry in this resource scope. Cover private creation, scoped identity, observation, runtime wiring, data-plane behavior, retry-safe teardown, mocked contracts, and recent live evidence.
             Set complete based on this shard alone. Do not expand into another shard scope.
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: provider-truth-findings-data-services
           path: hypervibe-findings-data-services.json
@@ -401,7 +401,7 @@ jobs:
             This job is the integrations audit shard. Audit only this complete reviewed scope:
             Audit every registered email, messaging, payments, source-control and CI, AI, app-store, and secret-manager capability and public claim. Include SendGrid, Twilio, Stripe, GitHub and GitLab collaboration/CI excluding Pages routing, OpenAI, Apple, 1Password, Bitwarden, Doppler, Vault, and every other providerRegistry entry in this integration scope. Cover credential boundaries, provider behavior, lifecycle safety, mocked contracts, and recent live evidence.
             Set complete based on this shard alone. Do not expand into another shard scope.
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: provider-truth-findings-integrations
           path: hypervibe-findings-integrations.json
@@ -441,7 +441,7 @@ jobs:
               findings: reports.flatMap((report) => report.findings),
             };
             fs.writeFileSync("hypervibe-findings.json", JSON.stringify(combined, null, 2) + "\n");
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: provider-truth-findings
           path: hypervibe-findings.json
