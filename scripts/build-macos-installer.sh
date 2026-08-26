@@ -5,13 +5,31 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MACOS_ROOT="$ROOT/apps/macos"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/build/macos}"
-NODE_VERSION="${NODE_VERSION:-22.17.1}"
+REPOSITORY_NODE_VERSION="$(tr -d '[:space:]' < "$ROOT/.node-version")"
+ACTIVE_NODE_VERSION="$(node -p 'process.versions.node')"
+NODE_VERSION="${NODE_VERSION:-$ACTIVE_NODE_VERSION}"
 MCP_VERSION="$(node -p "require('$ROOT/package.json').version")"
 COMPANION_VERSION="${COMPANION_VERSION:-$MCP_VERSION}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+NODE_ENTITLEMENTS="$MACOS_ROOT/Distribution/BundledNode.entitlements"
 HOST_ARCH="$(uname -m)"
 ARCH="${ARCH:-$HOST_ARCH}"
+
+if [[ ! "$REPOSITORY_NODE_VERSION" =~ ^[1-9][0-9]*(\.[0-9]+){0,2}$ ]]; then
+    echo "The repository .node-version must contain a concrete major, minor, or patch release; got '$REPOSITORY_NODE_VERSION'." >&2
+    exit 2
+fi
+if [[ ! "$NODE_VERSION" =~ ^[1-9][0-9]*\.[0-9]+\.[0-9]+$ ]]; then
+    echo "The bundled Node runtime must resolve to an exact release; got '$NODE_VERSION'." >&2
+    exit 2
+fi
+if [ "$NODE_VERSION" != "$REPOSITORY_NODE_VERSION" ] \
+    && [[ "$NODE_VERSION" != "$REPOSITORY_NODE_VERSION".* ]]; then
+    echo "Active Node $NODE_VERSION does not satisfy repository runtime $REPOSITORY_NODE_VERSION from .node-version." >&2
+    echo "Select the repository runtime before packaging, or provide a matching exact NODE_VERSION." >&2
+    exit 2
+fi
 
 if [ "$ARCH" != "$HOST_ARCH" ]; then
     echo "Cross-architecture packaging is not supported yet. Build $ARCH on a $ARCH Mac." >&2
@@ -21,11 +39,9 @@ fi
 case "$ARCH" in
     arm64)
         NODE_ARCH="arm64"
-        NODE_SHA256="a983f4f2a7b71512b78d7935b9ccf6b72120a255810070afd635c4146bca7b31"
         ;;
     x86_64)
         NODE_ARCH="x64"
-        NODE_SHA256="b925103150fac0d23a44a45b2d88a01b73e5fff101e5dcfbae98d32c08d4bee3"
         ;;
     *)
         echo "Unsupported macOS architecture: $ARCH" >&2
@@ -38,7 +54,9 @@ APP="$WORK_DIR/Hypervibe.app"
 CONTENTS="$APP/Contents"
 RESOURCES="$CONTENTS/Resources"
 SERVER_STAGE="$WORK_DIR/server"
-NODE_ARCHIVE="$WORK_DIR/node-v$NODE_VERSION-darwin-$NODE_ARCH.tar.gz"
+NODE_ARCHIVE_NAME="node-v$NODE_VERSION-darwin-$NODE_ARCH.tar.gz"
+NODE_ARCHIVE="$WORK_DIR/$NODE_ARCHIVE_NAME"
+NODE_SHASUMS="$WORK_DIR/node-v$NODE_VERSION-SHASUMS256.txt"
 NODE_DIR="$WORK_DIR/node-v$NODE_VERSION-darwin-$NODE_ARCH"
 DMG_STAGE="$WORK_DIR/dmg"
 DMG="$OUTPUT_DIR/Hypervibe-$COMPANION_VERSION-$ARCH.dmg"
@@ -66,9 +84,17 @@ SWIFT_BIN_DIR="$(swift build --package-path "$MACOS_ROOT" -c release --show-bin-
 
 echo "Downloading Node.js v$NODE_VERSION for $NODE_ARCH"
 curl --fail --location --silent --show-error \
-    "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-darwin-$NODE_ARCH.tar.gz" \
+    "https://nodejs.org/dist/v$NODE_VERSION/SHASUMS256.txt" \
+    --output "$NODE_SHASUMS"
+NODE_SHA256="$(awk -v archive="$NODE_ARCHIVE_NAME" '$2 == archive { print $1 }' "$NODE_SHASUMS")"
+if [[ ! "$NODE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Node.js v$NODE_VERSION did not publish one SHA-256 digest for $NODE_ARCHIVE_NAME." >&2
+    exit 2
+fi
+curl --fail --location --silent --show-error \
+    "https://nodejs.org/dist/v$NODE_VERSION/$NODE_ARCHIVE_NAME" \
     --output "$NODE_ARCHIVE"
-echo "$NODE_SHA256  $NODE_ARCHIVE" | shasum -a 256 --check
+printf '%s  %s\n' "$NODE_SHA256" "$NODE_ARCHIVE" | shasum -a 256 --check
 tar -xzf "$NODE_ARCHIVE" -C "$WORK_DIR"
 
 echo "Installing production server dependencies with bundled Node.js"
@@ -101,10 +127,21 @@ iconutil --convert icns --output "$RESOURCES/AppIcon.icns" "$ICONSET"
 while IFS= read -r -d '' candidate; do
     if file "$candidate" | grep -q "Mach-O"; then
         if [ "$CODESIGN_IDENTITY" = "-" ]; then
-            codesign --force --sign - --timestamp=none "$candidate"
+            if [ "$candidate" = "$RESOURCES/runtime/node" ]; then
+                codesign --force --sign - --timestamp=none \
+                    --entitlements "$NODE_ENTITLEMENTS" "$candidate"
+            else
+                codesign --force --sign - --timestamp=none "$candidate"
+            fi
         else
-            codesign --force --options runtime --timestamp \
-                --sign "$CODESIGN_IDENTITY" "$candidate"
+            if [ "$candidate" = "$RESOURCES/runtime/node" ]; then
+                codesign --force --options runtime --timestamp \
+                    --entitlements "$NODE_ENTITLEMENTS" \
+                    --sign "$CODESIGN_IDENTITY" "$candidate"
+            else
+                codesign --force --options runtime --timestamp \
+                    --sign "$CODESIGN_IDENTITY" "$candidate"
+            fi
         fi
     fi
 done < <(find "$RESOURCES" -type f -print0)
@@ -124,6 +161,11 @@ else
     codesign --force --options runtime --timestamp \
         --sign "$CODESIGN_IDENTITY" "$APP"
 fi
+
+node "$ROOT/scripts/smoke-macos-mcp.mjs" \
+    "$CONTENTS/MacOS/hypervibe-mcp" \
+    "$ROOT" \
+    "$WORK_DIR/smoke-data"
 
 codesign --verify --deep --strict --verbose=2 "$APP"
 
