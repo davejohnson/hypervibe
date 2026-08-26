@@ -402,7 +402,7 @@ export function buildCloudSqlRestoreDrillWorkflow(
     '    env:',
     `      HYPERVIBE_DRILL_CONFIG_B64: ${yamlString(config)}`,
     '    steps:',
-    '      - uses: actions/checkout@v6',
+    '      - uses: actions/checkout@v7',
     '        with:',
     '          persist-credentials: false',
     '      - uses: actions/setup-node@v6',

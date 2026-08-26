@@ -40,7 +40,7 @@ jobs:
     steps:
       - name: Resolve release provenance
         id: provenance
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const automatic = context.eventName === 'workflow_run';
@@ -55,7 +55,7 @@ jobs:
             core.setOutput('requested_sha', requestedSha);
             core.setOutput('server_run_id', serverRunId);
       - name: Download verified server release evidence
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: hypervibe-server-release-@@SAFE_ENVIRONMENT@@-*
           path: ${{ runner.temp }}/hypervibe-server-evidence
@@ -71,7 +71,7 @@ jobs:
           HYPERVIBE_REQUIRED_SERVICES: @@REQUIRED_SERVICES_JSON@@
         run: |
           node -e 'const fs=require("fs"); const evidence=JSON.parse(fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")); const required=JSON.parse(process.env.HYPERVIBE_REQUIRED_SERVICES); if(evidence.version!==2||evidence.environment!==process.env.HYPERVIBE_ENVIRONMENT) throw new Error("server evidence environment mismatch"); if(evidence.server.repository!==process.env.GITHUB_REPOSITORY||!/^[0-9a-f]{40}$/i.test(evidence.server.sha)) throw new Error("server evidence repository/SHA mismatch"); if(process.env.HYPERVIBE_REQUESTED_SHA&&evidence.server.sha!==process.env.HYPERVIBE_REQUESTED_SHA) throw new Error("server evidence does not match requested SHA"); for(const service of required) if(!evidence.services.includes(service)) throw new Error("server evidence is missing service "+service); fs.appendFileSync(process.env.GITHUB_OUTPUT, "sha="+evidence.server.sha+"\n");'
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ steps.gate.outputs.sha }}
           persist-credentials: false
@@ -120,7 +120,7 @@ jobs:
               output.write("sha256=" + digest + "\n")
           PY
       - name: Upload validated iOS build
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: hypervibe-ios-build-@@SAFE_ENVIRONMENT@@-${{ steps.gate.outputs.sha }}
           path: ${{ steps.ipa.outputs.path }}
@@ -148,7 +148,7 @@ jobs:
           node-version: '@@MANAGED_NODE_VERSION@@'
           check-latest: true
       - name: Download validated iOS build
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: hypervibe-ios-build-@@SAFE_ENVIRONMENT@@-${{ needs.build.outputs.sha }}
           path: ${{ runner.temp }}/hypervibe-ios-build
@@ -186,7 +186,7 @@ jobs:
               output.write("path=" + str(ipa) + "\n")
           PY
       - name: Download verified server release evidence
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: hypervibe-server-release-@@SAFE_ENVIRONMENT@@-*
           path: ${{ runner.temp }}/hypervibe-server-evidence
@@ -213,7 +213,7 @@ jobs:
           HYPERVIBE_IOS_RELEASE_OUTPUT: ${{ github.workspace }}/hypervibe-ios-release.json
         run: node "$HYPERVIBE_MANAGED_RELEASE_RUNTIME"
       - name: Upload iOS release manifest
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: hypervibe-ios-release-@@SAFE_ENVIRONMENT@@-${{ needs.build.outputs.sha }}
           path: hypervibe-ios-release.json

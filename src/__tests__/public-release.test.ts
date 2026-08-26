@@ -34,7 +34,7 @@ describe('public release configuration', () => {
     expect(workflow).toContain('registry-url: https://registry.npmjs.org');
     expect(workflow).toContain('scope: "@hypervibe"');
     expect(workflow).toContain('id-token: write');
-    expect(workflow).toContain('actions/checkout@v6');
+    expect(workflow).toContain('actions/checkout@v7');
     expect(workflow).toContain('actions/setup-node@v6');
     expect(workflow).toContain('npm install --global npm@11.19.0');
     expect(workflow).toContain('npm publish --access public --provenance');

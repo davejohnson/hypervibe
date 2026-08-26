@@ -56,7 +56,7 @@ export function buildVercelGitHubActionsSteps(
     requiredSecrets: VERCEL_CI_REQUIRED_SECRETS,
     requiredVariables,
     steps: `      - name: Upload and deploy exact-SHA source to existing Vercel Projects
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           VERCEL_ACCESS_TOKEN: \${{ secrets.VERCEL_ACCESS_TOKEN }}
           VERCEL_SCOPE_BINDING: ${scopeValue}

@@ -110,7 +110,7 @@ export function buildRailwayGitHubActionsSteps(target: BranchDeployTarget): Bran
     steps: `      - name: Resolve image URI
         id: image
         if: steps.deploy.outputs.operation != 'rollback'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
@@ -139,7 +139,7 @@ ${buildDockerfileStep(target, "steps.deploy.outputs.operation != 'rollback'")}  
       - name: Resolve immutable Railway image
         id: release_image
         if: steps.deploy.outputs.operation != 'rollback'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           IMAGE_TAG: \${{ steps.image.outputs.uri }}
           IMAGE_DIGEST: \${{ steps.image_publish.outputs.digest }}
@@ -163,7 +163,7 @@ ${buildDockerfileStep(target, "steps.deploy.outputs.operation != 'rollback'")}  
         if: steps.deploy.outputs.operation != 'rollback'
         run: docker buildx imagetools inspect "\${{ steps.release_image.outputs.image_uri }}" >/dev/null
       - name: Deploy image to Railway
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           RAILWAY_API_TOKEN: \${{ secrets.RAILWAY_API_TOKEN }}
           RAILWAY_ENVIRONMENT_ID: ${railwayEnvironmentId}

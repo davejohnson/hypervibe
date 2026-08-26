@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-node@v6
@@ -26,7 +26,7 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: |
-          npm ci
+          npm install --global npm@11.19.0 && npm ci
       - name: Prepare failure evidence
         run: mkdir -p hypervibe-failure-evidence
       - name: "test 1"
@@ -38,7 +38,7 @@ jobs:
           ) 2>&1 | tee hypervibe-failure-evidence/1.log
       - name: Upload non-secret failure evidence
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: "provider-conformance-failure-evidence"
           if-no-files-found: error

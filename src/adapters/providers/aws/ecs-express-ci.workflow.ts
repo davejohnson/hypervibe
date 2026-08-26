@@ -47,7 +47,7 @@ export function buildEcsExpressGitHubActionsSteps(
     ],
     steps: `      - name: Resolve bound AWS target
         id: aws_target
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           AWS_ECS_CLUSTER_ARN: ${clusterArn}
         with:
@@ -91,7 +91,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
       - name: Install pinned ECS SDK
         run: npm install --no-save --ignore-scripts ${HYPERVIBE_MANAGED_NPM_PACKAGES.awsEcs}
       - name: Release exact digest to bound ECS Express services
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           AWS_ECS_CLUSTER_ARN: ${clusterArn}
           AWS_ECS_EXPRESS_SERVICE_ARNS_JSON: ${serviceArnsValue}

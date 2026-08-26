@@ -90,7 +90,7 @@ export function compileGitHubPagesWorkflow(pages: GitHubPagesSpec): string {
     '    runs-on: ubuntu-latest',
     '    steps:',
     '      - name: Checkout',
-    '        uses: actions/checkout@v6',
+    '        uses: actions/checkout@v7',
     '        with:',
     '          persist-credentials: false',
     '      - name: Configure Pages',

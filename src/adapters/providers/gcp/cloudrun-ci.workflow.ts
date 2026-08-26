@@ -40,7 +40,7 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
 `,
     steps: `      - name: Resolve Cloud Run image URI
         id: image
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
           GCP_REGION: ${region}
@@ -60,7 +60,7 @@ export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): Bra
             core.setOutput('uri', registry + '/' + process.env.GCP_PROJECT_ID + '/' + repository + '/' + imageName + ':' + process.env.DEPLOY_SHA);
       - name: Prepare GCP Artifact Registry
         id: gcp
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           GCP_SERVICE_ACCOUNT_JSON: \${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}
@@ -135,7 +135,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
       - name: Deploy image to Cloud Run
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           GCP_SERVICE_ACCOUNT_JSON: \${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
           GCP_PROJECT_ID: \${{ secrets.GCP_PROJECT_ID }}

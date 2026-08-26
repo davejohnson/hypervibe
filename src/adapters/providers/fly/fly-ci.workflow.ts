@@ -91,7 +91,7 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
       - name: Deploy immutable digest to existing Fly.io Machines
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           FLY_API_TOKEN: \${{ secrets.FLY_API_TOKEN }}
           FLY_ORGANIZATION_SLUG: ${organizationValue}
