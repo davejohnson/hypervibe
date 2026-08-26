@@ -385,6 +385,28 @@ const githubAuditDocumentationDomainsSchema = z.array(githubAuditDocumentationDo
     }
   });
 
+const githubAuditShardsSchema = z.array(z.object({
+  id: automationIdSchema,
+  /** The complete, non-overlapping audit scope assigned to this shard. */
+  instructions: githubAuditInstructionsSchema,
+}).strict())
+  .max(8)
+  .superRefine((shards, ctx) => {
+    if (shards.length === 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'code-audit shards must contain at least two scopes when configured',
+      });
+    }
+    const ids = shards.map((shard) => shard.id);
+    if (new Set(ids).size !== ids.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'code-audit shard ids must be unique',
+      });
+    }
+  });
+
 export const githubCheckAutomationSpecSchema = z.object({
   kind: z.literal('check'),
   enabled: z.boolean().default(true),
@@ -431,6 +453,8 @@ export const githubCodeAuditAutomationSpecSchema = z.object({
   agent: githubAiAgentSchema,
   /** Additional reviewed audit rules. Repository and fetched content remain untrusted evidence. */
   instructions: githubAuditInstructionsSchema.optional(),
+  /** Independent bounded scopes that run in parallel and combine only after every report exists. */
+  shards: githubAuditShardsSchema.default([]),
   /** Exact public documentation hosts available to the read-only Codex network profile. */
   documentationDomains: githubAuditDocumentationDomainsSchema.default([]),
   /** Stable issue-per-finding lifecycle; line numbers are deliberately excluded from fingerprints. */

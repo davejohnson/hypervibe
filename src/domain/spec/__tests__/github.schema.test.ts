@@ -112,6 +112,10 @@ describe('github desired state', () => {
           kind: 'code-audit',
           schedule: { cron: '0 6 * * *' },
           instructions: 'Compare provider claims with current official documentation.',
+          shards: [
+            { id: 'hosting', instructions: 'Audit hosting providers.' },
+            { id: 'data-services', instructions: 'Audit database and storage providers.' },
+          ],
           documentationDomains: ['docs.aws.amazon.com', 'learn.microsoft.com'],
         },
       },
@@ -119,6 +123,10 @@ describe('github desired state', () => {
 
     expect(spec.github?.actions.truth).toMatchObject({
       instructions: 'Compare provider claims with current official documentation.',
+      shards: [
+        { id: 'hosting', instructions: 'Audit hosting providers.' },
+        { id: 'data-services', instructions: 'Audit database and storage providers.' },
+      ],
       documentationDomains: ['docs.aws.amazon.com', 'learn.microsoft.com'],
     });
   });
@@ -127,6 +135,15 @@ describe('github desired state', () => {
     for (const audit of [
       { instructions: '${{ secrets.OPENAI_API_KEY }}' },
       { instructions: 'x'.repeat(12_001) },
+      { shards: [{ id: 'hosting', instructions: 'Audit hosting providers.' }] },
+      { shards: [
+        { id: 'hosting', instructions: 'Audit hosting providers.' },
+        { id: 'hosting', instructions: 'Audit hosting providers again.' },
+      ] },
+      { shards: [
+        { id: 'hosting', instructions: '${{ secrets.OPENAI_API_KEY }}' },
+        { id: 'data', instructions: 'Audit data providers.' },
+      ] },
       { documentationDomains: ['https://docs.aws.amazon.com'] },
       { documentationDomains: ['*.example.com'] },
       { documentationDomains: ['localhost'] },

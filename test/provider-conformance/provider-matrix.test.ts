@@ -33,6 +33,12 @@ describe('provider conformance matrix', () => {
     expect(actions['provider-truth']).toMatchObject({
       kind: 'code-audit',
       schedule: { cron: expect.any(String) },
+      shards: expect.arrayContaining([
+        expect.objectContaining({ id: 'hosting-core' }),
+        expect.objectContaining({ id: 'hosting-edge' }),
+        expect.objectContaining({ id: 'data-services' }),
+        expect.objectContaining({ id: 'integrations' }),
+      ]),
       documentationDomains: expect.arrayContaining([
         'docs.railway.com',
         'cloud.google.com',
@@ -51,6 +57,17 @@ describe('provider conformance matrix', () => {
     expect(instructions).toContain('providerRegistry');
     expect(instructions).toContain('ready-for-live');
     expect(instructions).toContain('live-conformance evidence');
+    const shardScopes = actions['provider-truth'].kind === 'code-audit'
+      ? actions['provider-truth'].shards.map((shard) => shard.instructions).join('\n')
+      : '';
+    for (const scope of [
+      'hosting lifecycle',
+      'database, cache, storage, queue',
+      'email, messaging, payments',
+      'secret-manager',
+    ]) {
+      expect(shardScopes).toContain(scope);
+    }
   });
 
   it('covers the requested hosting providers', () => {

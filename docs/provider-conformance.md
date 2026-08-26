@@ -47,6 +47,10 @@ audit does not replace a live contract: adapter code and mocked tests can move
 a provider only to `ready-for-live`, while `supported` still requires concrete,
 recent live evidence. Missing or stale proof is reported as a durable finding;
 the daily job never receives provider credentials or mutates infrastructure.
+The provider-truth scope is split into parallel, non-overlapping hosting,
+data-service, and integration shards. Findings are combined only when every
+expected shard report exists; a failed or incomplete shard preserves existing
+issues instead of treating missing evidence as a clean audit.
 
 ### Code-host and CI conformance
 
