@@ -68,7 +68,7 @@ function ciBranchDeployGuidance(project: Project, envName: string): {
 export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_deploy',
-    'Deploy services to an environment (staging, production, etc.). Plan-gated: builds a plan from the spec and applies it immediately; the planId and applyRunId are returned for the audit trail. Delegated secret slots accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally and encrypted into the plan. Ordinary envVars and env files cannot override delegated keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime". Requires a spec (hv_spec). Protected environments require confirm=true.',
+    'Deploy services to an environment (staging, production, etc.). Plan-gated direct/manual deploys build and immediately apply a plan; managed-CI environments must dispatch only through hv_ci_trigger after selecting the reviewed definition with hv_ci_status, never through gh or a direct CI/provider API. The planId and applyRunId are returned for the audit trail. Delegated secret slots accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally and encrypted into the plan. Ordinary envVars and env files cannot override delegated keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime". Requires a spec (hv_spec). Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
@@ -117,8 +117,8 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
           `Environment "${envName}" uses ${ciDeploy.providerName} managed branch deploys. hv_deploy does not build or push the image for this mode.`,
           {
             hint: ciDeploy.legacyGitHubWorkflow
-              ? `Run hv_plan/hv_apply to sync ${ciDeploy.legacyGitHubWorkflow}, then push to ${ciDeploy.branch}; for a manual run use hv_ci_trigger workflow="${ciDeploy.legacyGitHubWorkflow}" ref="${ciDeploy.branch}". Check progress with hv_ci_status, then hv_health.`
-              : `Run hv_plan/hv_apply to sync the reviewed CI configuration, then push to ${ciDeploy.branch}; for a manual run, list definitions with hv_ci_status and pass the selected id to hv_ci_trigger definition=<id> ref="${ciDeploy.branch}". Check progress with hv_ci_status, then hv_health.`,
+              ? `Run hv_plan/hv_apply to sync ${ciDeploy.legacyGitHubWorkflow}, then push to ${ciDeploy.branch}; for a manual run use hv_ci_trigger workflow="${ciDeploy.legacyGitHubWorkflow}" ref="${ciDeploy.branch}". Check progress only with hv_ci_status, then hv_health. Never dispatch or monitor this workflow with gh or a direct GitHub API.`
+              : `Run hv_plan/hv_apply to sync the reviewed CI configuration, then push to ${ciDeploy.branch}; for a manual run, list definitions with hv_ci_status and pass the selected id to hv_ci_trigger definition=<id> ref="${ciDeploy.branch}". Check progress only with hv_ci_status, then hv_health. Never dispatch or monitor this definition with a provider CLI or direct CI API.`,
             next: ['hv_plan', 'hv_apply', 'hv_ci_trigger', 'hv_ci_status'],
           }
         );

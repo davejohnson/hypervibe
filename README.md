@@ -39,7 +39,7 @@ Agent: Updates the desired state, plans every provider change and dependency,
 - Services declare `workloadKind: web | worker | cron`. Workers are always-on background consumers (on Cloud Run: internal-only ingress, minimum one instance; they must still listen on `PORT`).
 - `queues` in the spec declares named message queues: Cloud Run environments get real Pub/Sub topics + subscriptions (apps receive `QUEUE_TOPIC_*` / `QUEUE_SUBSCRIPTION_*`); Railway environments are postgres-backed (pg-boss model — requires a declared database; apps consume via `DATABASE_URL`). Every queue environment gets `QUEUE_BACKEND` and `QUEUE_NAMES`.
 - `storage` declares named private object buckets and an explicit `injectInto` service list. Supported providers are Amazon S3 (`s3`), Azure Blob Storage (`azureblob`), Google Cloud Storage (`gcs`), and Railway (`railway`), independent of the hosting provider. S3/Railway wire the established `AWS_*` contract; Azure and GCS wire explicit provider-native variables plus `OBJECT_STORAGE_PROVIDER` and `OBJECT_STORAGE_BUCKET`. Credentials never appear in specs, bindings, plans, receipts, or logs. Bucket deletion is data-bearing and confirmation-gated.
-- Existing `ecs`, `cloudrun`, and `azure-container-apps` connections are reused automatically for their matching storage provider. Otherwise the standalone storage connection accepts the same cloud authentication fields. Region/location is desired state in the spec; Hypervibe creates provider resources and derives workload credentials, so operators do not obtain separate bucket HMAC keys, Azure account keys, or storage-specific settings.
+- Existing `ecs`, `cloudrun`, and `azure-container-apps` connections are reused automatically for their matching storage provider. Reused GCP access is explicit and staged: `hv_connections provider="cloudrun" action="prepare" gcsAccess="inspect"` previews read-only inventory access, while `gcsAccess="lifecycle"` separately previews the broader create/transfer/teardown role. Otherwise the standalone storage connection accepts the same cloud authentication fields. Region/location is desired state in the spec; Hypervibe creates provider resources and derives workload credentials, so operators do not obtain separate bucket HMAC keys, Azure account keys, or storage-specific settings.
 - Standalone S3/GCS/Azure Blob connections can also use the normal local cloud login with no credential value: AWS profiles/SSO through the default SDK chain, `gcloud auth application-default login`, or Azure's default credential chain (including `az login`). Explicit credential files remain supported for CI. Expiring local sessions are used for lifecycle and migration only and are never copied into deployed services.
 - `cache` declares Redis independently from SQL/document databases. Hypervibe wires the cache contract into its consumers; cache deletion is data-bearing and confirmation-gated.
 - Domains, DNS records, databases, caches, storage, queues, schedules, and service dependencies all remain explicit desired state. Hypervibe plans their dependency order, projects only the required runtime bindings into each service, and verifies each resource through its provider adapter.
@@ -1360,7 +1360,11 @@ chat, re-plan from the local source of truth:
 hv_plan project="apreskeys.com" env="production" secretRefs={"IMAGE_REGISTRY_TOKEN":"dotenv:/Users/dave/projects/condoshare/.env#GHCR_TOKEN"}
 ```
 
-For any Hypervibe-managed GitHub Actions deploy, inspect the workflow and logs through Hypervibe itself. Agents should use `hv_ci_status` instead of `gh`, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls so the verified connection, diagnostics, and audit boundary stay coherent:
+For any Hypervibe-managed CI deploy, dispatch the reviewed definition with
+`hv_ci_trigger`, inspect its workflows/runs/jobs/logs with `hv_ci_status`, and
+finish with `hv_health`. Agents must not dispatch or monitor it with `gh`,
+code-host connectors/apps, browser/UI inspection, or direct CI/provider APIs;
+those paths bypass the verified connection, diagnostics, and audit boundary:
 
 ```text
 hv_ci_status project="apreskeys.com" repo="davejohnson/apreskeys.com" include=["logs"] runId=28272281787

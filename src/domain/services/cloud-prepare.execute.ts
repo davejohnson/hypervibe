@@ -4,8 +4,12 @@ import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import type { Project } from '../entities/project.entity.js';
 import { getProjectScopeHints } from './project-scope.js';
 import {
+  GCS_PREPARE_ADDONS,
   getCloudPrepareProfile,
-  withCloudPreparationRecord, QUEUE_PREPARE_ADDON } from './cloud-prepare.js';
+  withCloudPreparationRecord,
+  QUEUE_PREPARE_ADDON,
+  type GcsPrepareAccess,
+} from './cloud-prepare.js';
 
 const connectionRepo = new ConnectionRepository();
 const projectRepo = new ProjectRepository();
@@ -52,9 +56,19 @@ export async function runCloudPrepare(params: {
   deployServiceAccountEmail?: string;
   adminCredentialsJson?: string;
   adminAccessToken?: string;
+  gcsAccess?: GcsPrepareAccess;
   confirm?: boolean;
 }): Promise<Record<string, unknown> & { success: boolean }> {
-  const { project, provider, gcpProjectId, deployServiceAccountEmail, adminCredentialsJson, adminAccessToken, confirm = false } = params;
+  const {
+    project,
+    provider,
+    gcpProjectId,
+    deployServiceAccountEmail,
+    adminCredentialsJson,
+    adminAccessToken,
+    gcsAccess,
+    confirm = false,
+  } = params;
 
   const profile = getCloudPrepareProfile(provider);
   if (!profile) {
@@ -71,10 +85,20 @@ export async function runCloudPrepare(params: {
   }
 
   const member = `serviceAccount:${resolved.deployServiceAccountEmail}`;
-  // Prepare the union of the base profile and the queue addon so any new
-  // or re-run prepare also covers Pub/Sub queues.
-  const requiredApis = Array.from(new Set([...profile.requiredApis, ...QUEUE_PREPARE_ADDON.requiredApis]));
-  const requiredRoles = Array.from(new Set([...profile.requiredRoles, ...QUEUE_PREPARE_ADDON.requiredRoles]));
+  const gcsAddon = gcsAccess ? GCS_PREPARE_ADDONS[gcsAccess] : undefined;
+  // Preserve the existing base + queue preparation behavior. GCS is explicit:
+  // read-only inventory needs Storage Viewer, while lifecycle operations need
+  // the broader Storage Admin role and must be separately previewed.
+  const requiredApis = Array.from(new Set([
+    ...profile.requiredApis,
+    ...QUEUE_PREPARE_ADDON.requiredApis,
+    ...(gcsAddon?.requiredApis ?? []),
+  ]));
+  const requiredRoles = Array.from(new Set([
+    ...profile.requiredRoles,
+    ...QUEUE_PREPARE_ADDON.requiredRoles,
+    ...(gcsAddon?.requiredRoles ?? []),
+  ]));
   const plan = {
     projectName: project.name,
     provider: profile.provider,
@@ -84,6 +108,7 @@ export async function runCloudPrepare(params: {
     enableApis: requiredApis,
     grantRoles: requiredRoles,
     member,
+    ...(gcsAccess ? { gcsAccess } : {}),
   };
 
   if (!confirm) {
@@ -148,6 +173,7 @@ export async function runCloudPrepare(params: {
       nextSteps: [
         'hv_connections provider="cloudrun" action="verify"',
         'hv_connections provider="cloudsql" action="verify"',
+        ...(gcsAccess ? ['hv_inspect provider="gcs" resource="storage"'] : []),
         'hv_plan, then hv_apply',
       ],
     };

@@ -135,6 +135,7 @@ describe('hv_connections', () => {
       { provider: 'railway', action: 'verify', credentials: { apiToken: 'do-not-save' } },
       { provider: 'railway', action: 'remove', adminAccessTokenRef: 'env:ADMIN_TOKEN' },
       { provider: 'railway', action: 'add', gcpProjectId: 'wrong-mode' },
+      { provider: 'railway', action: 'add', gcsAccess: 'inspect' },
       { provider: 'railway', action: 'prepare', credentialsRef: 'env:RAILWAY_TOKEN' },
     ];
 
@@ -145,6 +146,19 @@ describe('hv_connections', () => {
       expect(result.error.message).toContain('options for another connection action');
     }
     expect(new ConnectionRepository().findAll()).toEqual([]);
+    await t.close();
+  });
+
+  it('allows staged GCS access only through Cloud Run preparation', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_connections', {
+      provider: 'railway',
+      action: 'prepare',
+      gcsAccess: 'inspect',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe('VALIDATION');
+    expect(result.error.message).toContain('only when preparing the shared cloudrun connection');
     await t.close();
   });
 

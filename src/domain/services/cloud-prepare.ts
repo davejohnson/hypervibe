@@ -109,6 +109,19 @@ export const QUEUE_PREPARE_ADDON = {
   requiredRoles: ['roles/pubsub.editor'],
 } as const;
 
+export const GCS_PREPARE_ADDONS = {
+  inspect: {
+    requiredApis: ['storage.googleapis.com'],
+    requiredRoles: ['roles/storage.viewer'],
+  },
+  lifecycle: {
+    requiredApis: ['storage.googleapis.com'],
+    requiredRoles: ['roles/storage.admin'],
+  },
+} as const;
+
+export type GcsPrepareAccess = keyof typeof GCS_PREPARE_ADDONS;
+
 export function isCloudPreparedForQueues(
   project: Pick<Project, 'policies'> | null | undefined,
   provider: string

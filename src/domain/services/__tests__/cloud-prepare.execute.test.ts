@@ -69,6 +69,27 @@ describe('runCloudPrepare', () => {
     expect(plan.enableApis).toContain('cloudscheduler.googleapis.com');
     expect(plan.grantRoles).toContain('roles/logging.viewAccessor');
     expect(plan.grantRoles).toContain('roles/cloudscheduler.admin');
+    expect(plan.enableApis).not.toContain('storage.googleapis.com');
+    expect(plan.grantRoles).not.toContain('roles/storage.viewer');
+    expect(plan.grantRoles).not.toContain('roles/storage.admin');
+  });
+
+  it('previews least-privilege GCS inspection separately from lifecycle access', async () => {
+    const project = seedProject();
+
+    const inspected = await runCloudPrepare({ project, provider: 'cloudrun', gcsAccess: 'inspect' });
+    const inspectPlan = inspected.plan as { enableApis: string[]; grantRoles: string[]; gcsAccess: string };
+    expect(inspectPlan).toMatchObject({ gcsAccess: 'inspect' });
+    expect(inspectPlan.enableApis).toContain('storage.googleapis.com');
+    expect(inspectPlan.grantRoles).toContain('roles/storage.viewer');
+    expect(inspectPlan.grantRoles).not.toContain('roles/storage.admin');
+
+    const lifecycle = await runCloudPrepare({ project, provider: 'cloudrun', gcsAccess: 'lifecycle' });
+    const lifecyclePlan = lifecycle.plan as { enableApis: string[]; grantRoles: string[]; gcsAccess: string };
+    expect(lifecyclePlan).toMatchObject({ gcsAccess: 'lifecycle' });
+    expect(lifecyclePlan.enableApis).toContain('storage.googleapis.com');
+    expect(lifecyclePlan.grantRoles).toContain('roles/storage.admin');
+    expect(lifecyclePlan.grantRoles).not.toContain('roles/storage.viewer');
   });
 
   it('enables required APIs, grants deploy service account roles, and records preparation with a one-time admin token', async () => {
@@ -100,6 +121,7 @@ describe('runCloudPrepare', () => {
     const payload = await runCloudPrepare({
       project,
       provider: 'cloudrun',
+      gcsAccess: 'inspect',
       adminAccessToken: 'admin-token',
       confirm: true,
     });
@@ -114,6 +136,7 @@ describe('runCloudPrepare', () => {
       'roles/logging.viewAccessor',
       'roles/cloudscheduler.admin',
       'roles/cloudsql.client',
+      'roles/storage.viewer',
     ]));
     expect(payload.existingRoles).toEqual(['roles/run.admin']);
     expect(payload).toMatchObject({ provider: 'cloudrun', version: 'gcp-cloudrun-v1' });
@@ -130,6 +153,10 @@ describe('runCloudPrepare', () => {
     });
     expect(bindings).toContainEqual({
       role: 'roles/cloudscheduler.admin',
+      members: ['serviceAccount:hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com'],
+    });
+    expect(bindings).toContainEqual({
+      role: 'roles/storage.viewer',
       members: ['serviceAccount:hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com'],
     });
 

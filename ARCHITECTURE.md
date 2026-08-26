@@ -1108,7 +1108,14 @@ site deletion and removal of only the exact Pages address records Hypervibe
 recognizes. Mail, verification, and unrelated DNS records are never part of
 the Pages mutation boundary.
 
-`hv_ci_status` is the authoritative observation path for Hypervibe-managed GitHub Actions deploys. Agents should use it to inspect workflows, runs, jobs, and bounded log tails, then use `hv_health` after a successful run. They must not bypass it with `gh`, GitHub connectors/apps, browser/UI inspection, or direct GitHub API calls; a blocked `hv_ci_status` result should surface its connection/error guidance and stop the stage.
+`hv_ci_trigger` is the only supported dispatch path and `hv_ci_status` is the
+authoritative observation path for Hypervibe-managed CI deploys. A request to
+deploy or promote an environment must use those tools for the reviewed
+definition, followed by `hv_health` after a successful run. Agents must not
+dispatch, monitor, or inspect managed runs with `gh`, code-host connectors/apps,
+browser/UI inspection, or direct CI/provider APIs; a blocked `hv_ci_trigger` or
+`hv_ci_status` result should surface its connection/error guidance and stop the
+stage.
 
 ## Database Resilience
 

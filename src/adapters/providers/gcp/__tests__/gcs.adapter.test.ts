@@ -153,6 +153,19 @@ describe('GcsStorageAdapter', () => {
     })]);
   });
 
+  it('turns inventory permission failures into explicit staged prepare guidance', async () => {
+    const adapter = new GcsStorageAdapter({
+      fetch: vi.fn(async () => json({ error: { message: 'storage.buckets.list denied' } }, 403)) as typeof fetch,
+      tokenProvider: async () => ({ token: 'token', email: 'service@example.com' }),
+    });
+    await adapter.connect({ projectId: 'cloud-project', credentials: serviceAccount });
+
+    await expect(adapter.inspectStorageResources({
+      resource: 'storage',
+      limit: 25,
+    })).rejects.toThrow('gcsAccess="inspect"');
+  });
+
   it('refuses to adopt an existing deterministic bucket without ownership labels', async () => {
     const request = vi.fn(async () => json({ name: 'existing', labels: {} }));
     const adapter = new GcsStorageAdapter({
