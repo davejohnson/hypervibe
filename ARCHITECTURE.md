@@ -1058,6 +1058,13 @@ Do not implement this policy with workflow-level `paths-ignore` or commit skip
 markers: skipped required workflows can remain pending and block merges, while
 selectively skipped job steps preserve the required check result.
 
+Broad code audits may declare two or more non-overlapping `shards`. Each shard
+runs as an independent read-only agent job with the same reviewed rules and a
+bounded scope. Hypervibe combines reports only after every expected artifact is
+present and structurally valid. Missing or failed shards block aggregation;
+partial reports preserve their findings but must keep the publishing job failed
+so stale issues are never closed from incomplete evidence.
+
 Every external workflow consumed by autofix declares a narrow evidence artifact
 name/pattern separately from its required paths. The generated consumer filters
 the source run by that pattern and treats absent or incomplete required evidence
