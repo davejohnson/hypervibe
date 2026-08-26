@@ -18,7 +18,7 @@ describe('Azure Container Apps managed CI workflow', () => {
       serviceNames: ['web'],
       providerProjectId: resourceGroupId,
       providerServiceIds: [appId],
-      webStartCommand: 'node server.mjs',
+      containerStartCommand: 'node server.mjs',
     });
 
     expect(result.requiredSecrets).toEqual(AZURE_CONTAINER_APPS_CI_REQUIRED_SECRETS);

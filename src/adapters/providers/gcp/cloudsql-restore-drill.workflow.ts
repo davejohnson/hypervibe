@@ -2,6 +2,10 @@ import type {
   DatabaseRestoreDrillTarget,
   DatabaseRestoreDrillWorkflow,
 } from '../../../domain/ports/database-restore-drill.port.js';
+import {
+  HYPERVIBE_MANAGED_NODE_VERSION,
+  HYPERVIBE_MANAGED_NPM_PACKAGES,
+} from '../../../domain/services/managed-runtime.js';
 
 export const CLOUDSQL_RESTORE_DRILL_SCRIPT_PATH = '.github/hypervibe/cloudsql-restore-drill.mjs';
 
@@ -398,12 +402,13 @@ export function buildCloudSqlRestoreDrillWorkflow(
     '    env:',
     `      HYPERVIBE_DRILL_CONFIG_B64: ${yamlString(config)}`,
     '    steps:',
-    '      - uses: actions/checkout@v5',
+    '      - uses: actions/checkout@v6',
     '        with:',
     '          persist-credentials: false',
-    '      - uses: actions/setup-node@v5',
+    '      - uses: actions/setup-node@v6',
     '        with:',
-    '          node-version: "24"',
+    `          node-version: "${HYPERVIBE_MANAGED_NODE_VERSION}"`,
+    '          check-latest: true',
     '      - name: Prepare isolated Cloud SQL restore-drill runtime',
     '        shell: bash',
     '        run: |',
@@ -413,7 +418,7 @@ export function buildCloudSqlRestoreDrillWorkflow(
     `          cp ${CLOUDSQL_RESTORE_DRILL_SCRIPT_PATH} "$drill_dir/restore-drill.mjs"`,
     '          cd "$drill_dir"',
     '          npm init --yes >/dev/null',
-    '          npm install --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact @google-cloud/cloud-sql-connector@1.10.0 pg@8.17.2',
+    `          npm install --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact ${HYPERVIBE_MANAGED_NPM_PACKAGES.cloudSqlConnector} ${HYPERVIBE_MANAGED_NPM_PACKAGES.postgres}`,
     '      - name: Run isolated Cloud SQL restore drill',
     '        env:',
     `          HYPERVIBE_DRILL_CREDENTIALS: ` + '${{ secrets.' + target.credentialsSecretName + ' }}',

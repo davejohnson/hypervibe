@@ -18,6 +18,7 @@ import { parseHostingBindings, type GetLogsOptions, type LogEntry } from '../../
 import * as pubsub from './pubsub.api.js';
 import { pubsubQueueResourceIds } from '../../../domain/services/queue-env.js';
 import { hashEnvValue, type ObservedService, type ObservedState } from '../../../domain/ports/observe.port.js';
+import { generatedContainerDockerfile } from '../../../domain/services/generated-container.js';
 import type {
   IWorkloadMaintenanceAdapter,
   MaintenanceWorkloadObservation,
@@ -812,7 +813,7 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
         'infraprint-service': this.labelValue(service.name),
         'infraprint-resource': 'scheduled-job',
       };
-      const command = service.buildConfig.startCommand?.trim() || 'npm start';
+      const command = this.requiredScheduledJobCommand(service);
       const cloudSqlConnectionNames = replaceManagedDatabaseVars
         ? this.cloudSqlConnectionNamesFromEnv(runtimeVars)
         : Array.from(new Set([
@@ -1111,7 +1112,7 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
         const replaceManagedDatabaseVars = this.isManagedDatabaseEnvSync(runtimeVars);
         const jobSpec = this.cloudRunJobSpec({
           imageUri: currentContainer.image,
-          command: service.buildConfig.startCommand?.trim() || 'npm start',
+          command: this.requiredScheduledJobCommand(service),
           env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars }),
           resources: currentContainer.resources,
           serviceAccount: currentJob?.template?.template?.serviceAccount
@@ -1312,7 +1313,7 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
 
         const jobSpec = this.cloudRunJobSpec({
           imageUri: currentContainer.image,
-          command: service.buildConfig.startCommand?.trim() || 'npm start',
+          command: this.requiredScheduledJobCommand(service),
           env: existingEnv.filter((entry) => typeof entry.name !== 'string' || !retired.has(entry.name)),
           resources: currentContainer.resources,
           serviceAccount: currentJob?.template?.template?.serviceAccount
@@ -2850,6 +2851,15 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
     return externalId.startsWith(`${prefix}-`) ? externalId.slice(prefix.length + 1) : externalId;
   }
 
+  private requiredScheduledJobCommand(service: Service): string {
+    const command = service.buildConfig.startCommand?.trim();
+    if (command) return command;
+    throw new Error(
+      `Scheduled job ${service.name} has no explicit startCommand. `
+      + 'Hypervibe will not substitute an application-language command.'
+    );
+  }
+
   private containerStartCommand(container: CloudRunContainer | undefined): string | undefined {
     if (!container) {
       return undefined;
@@ -3428,32 +3438,19 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
   private cloudBuildScript(service: Service, imageUri: string): string {
     const dockerfilePath = service.buildConfig.dockerfilePath?.trim() || 'Dockerfile';
     const runtime = service.buildConfig.runtime;
-    const startCommand = service.buildConfig.startCommand?.trim()
-      || (runtime?.kind === 'node' ? 'npm start' : 'python app.py');
-    const generatedDockerfile = runtime?.kind === 'node'
-      ? [
-        `FROM node:${runtime.version}-slim`,
-        'WORKDIR /app',
-        'COPY package*.json ./',
-        'RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi',
-        'COPY . .',
-        'ENV PORT=8080',
-        'EXPOSE 8080',
-        `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`,
-        '',
-      ].join('\n')
-      : runtime?.kind === 'python'
-        ? [
-        `FROM python:${runtime.version}-slim`,
-        'WORKDIR /app',
-        'COPY . .',
-        'RUN if [ -f requirements.txt ]; then python -m pip install --no-cache-dir -r requirements.txt; else python -m pip install --no-cache-dir .; fi',
-        'ENV PORT=8080',
-        'EXPOSE 8080',
-        `CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]`,
-        '',
-        ].join('\n')
-        : '';
+    let generatedDockerfile = '';
+    let generationError = 'No explicit project runtime was found. Run hv_spec to review repository evidence.';
+    if (runtime) {
+      try {
+        generatedDockerfile = generatedContainerDockerfile(runtime, service.buildConfig.startCommand);
+      } catch (error) {
+        generationError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const generatedDockerfileBase64 = Buffer.from(generatedDockerfile, 'utf8').toString('base64');
+    const writeGeneratedDockerfile = generatedDockerfile
+      ? `  printf '%s' '${generatedDockerfileBase64}' | base64 --decode > Dockerfile.infraprint`
+      : `  echo ${JSON.stringify(generationError)} >&2\n  exit 1`;
     const manifestCondition = runtime?.kind === 'node'
       ? '[ -f package.json ]'
       : runtime?.kind === 'python'
@@ -3465,9 +3462,7 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
       `if [ -f ${JSON.stringify(dockerfilePath)} ]; then`,
       `  docker build --pull -t ${JSON.stringify(imageUri)} -f ${JSON.stringify(dockerfilePath)} .`,
       `elif ${manifestCondition}; then`,
-      "  cat > Dockerfile.infraprint <<'EOF'",
-      generatedDockerfile,
-      'EOF',
+      writeGeneratedDockerfile,
       `  docker build --pull -t ${JSON.stringify(imageUri)} -f Dockerfile.infraprint .`,
       'else',
       '  echo "No repository Dockerfile or manifest for an explicit project runtime was found. Run hv_spec to review runtime evidence; custom languages require a Dockerfile." >&2',

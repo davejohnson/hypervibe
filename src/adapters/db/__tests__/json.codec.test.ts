@@ -16,6 +16,28 @@ describe('parseJsonColumn', () => {
     expect(result).toEqual({ startCommand: 'npm start', public: true });
   });
 
+  it('preserves the complete reviewed runtime build contract', () => {
+    expect(parseJsonColumn(
+      buildConfigColumnSchema,
+      JSON.stringify({
+        runtime: {
+          kind: 'node',
+          version: '24',
+          installCommand: 'npm install --global npm@11.19.0 && npm ci',
+          buildCommand: 'npm run build',
+        },
+      }),
+      'test'
+    )).toMatchObject({
+      runtime: {
+        kind: 'node',
+        version: '24',
+        installCommand: 'npm install --global npm@11.19.0 && npm ci',
+        buildCommand: 'npm run build',
+      },
+    });
+  });
+
   it('preserves unknown keys (passthrough)', () => {
     const result = parseJsonColumn(
       componentBindingsColumnSchema,
@@ -25,14 +47,17 @@ describe('parseJsonColumn', () => {
     expect(result).toEqual({ host: 'db.example.com', customKey: 'kept' });
   });
 
-  it('falls back to default on corrupt JSON', () => {
-    expect(parseJsonColumn(buildConfigColumnSchema, '{not json', 'test')).toEqual({});
-    expect(parseJsonColumn(runReceiptsColumnSchema, '{not json', 'test')).toEqual([]);
+  it('blocks on corrupt JSON instead of turning unknown state into an empty value', () => {
+    expect(() => parseJsonColumn(buildConfigColumnSchema, '{not json', 'test'))
+      .toThrow('refuses to treat unreadable state as empty');
+    expect(() => parseJsonColumn(runReceiptsColumnSchema, '{not json', 'test'))
+      .toThrow('refuses to treat unreadable state as empty');
   });
 
-  it('falls back to default on schema mismatch', () => {
+  it('blocks on schema mismatch', () => {
     // build_config must be an object, not an array
-    expect(parseJsonColumn(buildConfigColumnSchema, '[1,2,3]', 'test')).toEqual({});
+    expect(() => parseJsonColumn(buildConfigColumnSchema, '[1,2,3]', 'test'))
+      .toThrow('persisted JSON has an invalid shape');
   });
 
   it('falls back to default on null/empty input', () => {
@@ -42,7 +67,7 @@ describe('parseJsonColumn', () => {
   });
 
   it('rejects wrong field types inside known keys', () => {
-    // public must be boolean — whole row degrades to default rather than throwing
-    expect(parseJsonColumn(buildConfigColumnSchema, JSON.stringify({ public: 'yes' }), 'test')).toEqual({});
+    expect(() => parseJsonColumn(buildConfigColumnSchema, JSON.stringify({ public: 'yes' }), 'test'))
+      .toThrow('persisted JSON has an invalid shape');
   });
 });

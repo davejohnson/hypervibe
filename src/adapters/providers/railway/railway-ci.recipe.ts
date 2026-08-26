@@ -1,5 +1,6 @@
 import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
 import type { ProjectRuntime } from '../../../domain/spec/project-runtime.js';
+import { generatedContainerDockerfile } from '../../../domain/services/generated-container.js';
 
 export const RAILWAY_DEPLOY_RUNTIME_PATH = '.gitlab/hypervibe/railway-deploy.mjs';
 export const RAILWAY_BUILD_RUNTIME_PATH = '.gitlab/hypervibe/build-image.sh';
@@ -9,12 +10,7 @@ function shellSingleQuoted(value: string): string {
 }
 
 export function buildRailwayGitLabImageRuntime(runtime: ProjectRuntime, startCommand: string): string {
-  const base = runtime.kind === 'node'
-    ? `node:${runtime.version}-slim`
-    : `python:${runtime.version}-slim`;
-  const install = runtime.kind === 'node'
-    ? 'RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi'
-    : 'RUN if [ -f requirements.txt ]; then python -m pip install --no-cache-dir -r requirements.txt; else python -m pip install --no-cache-dir .; fi';
+  const dockerfile = generatedContainerDockerfile(runtime, startCommand);
   return `#!/bin/sh
 set -eu
 
@@ -47,13 +43,7 @@ dockerfile=Dockerfile
 if [ ! -f "$dockerfile" ]; then
   generated_dockerfile="$(mktemp /tmp/hypervibe.Dockerfile.XXXXXX)"
   cat > "$generated_dockerfile" <<'HYPERVIBE_DOCKERFILE'
-FROM ${base}
-WORKDIR /app
-COPY . .
-${install}
-ENV PORT=8080
-EXPOSE 8080
-CMD ["sh", "-lc", ${JSON.stringify(startCommand)}]
+${dockerfile}
 HYPERVIBE_DOCKERFILE
   dockerfile="$generated_dockerfile"
 fi

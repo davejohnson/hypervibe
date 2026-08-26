@@ -20,7 +20,8 @@ export interface BranchDeployTarget {
   providerJobNames?: string[];
   needsServiceNames?: boolean;
   needsJobNames?: boolean;
-  webStartCommand?: string;
+  /** One unambiguous reviewed CMD for generated images; absent when services disagree. */
+  containerStartCommand?: string;
   /** Effective project runtime for Hypervibe-generated build tooling. */
   runtime?: ProjectRuntime;
 }

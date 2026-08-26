@@ -56,6 +56,7 @@ function target(
     serviceNames: ['web'],
     providerProjectId: 'provider-project',
     providerEnvironmentId: 'provider-environment',
+    providerRegion: 'us-central1',
     providerServiceIds: ['provider-service'],
     providerJobNames: [],
   };

@@ -256,13 +256,14 @@ describe('hv_spec', () => {
       expect(initialized.ok).toBe(true);
       expect(initialized.data.revision).toBe(1);
       expect(initialized.data.spec.runtime).toEqual({ kind: 'node', version: '24' });
-      expect(initialized.data.runtimeReview).toMatchObject({ status: 'in-sync' });
+      expect(initialized.data.runtimeReview).toMatchObject({ status: 'review-required' });
       expect(initialized.data.project).toMatchObject({
         name: 'fresh-agent-app',
         gitRemoteUrl: 'git@github.com:davejohnson/fresh-agent-app.git',
       });
       expect(new ProjectRepository().findByName('fresh-agent-app')).toMatchObject({
         gitRemoteUrl: 'git@github.com:davejohnson/fresh-agent-app.git',
+        defaultPlatform: 'railway',
       });
       expect(JSON.parse(
         readFileSync(path.join(repoDir, '.hypervibe', 'spec.json'), 'utf8')

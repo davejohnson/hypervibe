@@ -79,7 +79,7 @@ export function desiredStateToSpec(project: Project): ProjectSpec | null {
     : undefined;
 
   const environment: EnvironmentSpec = {
-    hosting: { provider: project.defaultPlatform || 'railway' },
+    hosting: { provider: project.defaultPlatform },
     services,
     ...(desired.databaseProvider ? { database: { provider: desired.databaseProvider, engine: 'postgres' as const } } : {}),
     ...(desired.domain ? { domain: desired.domain } : {}),

@@ -3314,7 +3314,8 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
     const user = vars.PGUSER;
     const password = vars.POSTGRES_PASSWORD;
     if (!user || !password) return null;
-    const database = vars.PGDATABASE || vars.POSTGRES_DB || 'railway';
+    const database = vars.PGDATABASE || vars.POSTGRES_DB;
+    if (!database) return null;
     const domain = proxy.domain.replace(/\.+$/, '');
     return `postgresql://${user}:${encodeURIComponent(password)}@${domain}:${proxy.proxyPort}/${database}`;
   }

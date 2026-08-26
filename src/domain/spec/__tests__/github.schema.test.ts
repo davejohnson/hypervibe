@@ -76,8 +76,11 @@ describe('github desired state', () => {
       kind: 'check',
       enabled: true,
       changeScope: 'application',
-      runtime: { kind: 'node', installCommand: 'npm ci' },
+      runtime: { kind: 'node' },
     });
+    expect(spec.github?.actions.tests.kind === 'check'
+      ? spec.github.actions.tests.runtime.installCommand
+      : undefined).toBeUndefined();
     expect(spec.github?.actions['fix-tests']).toMatchObject({
       kind: 'autofix',
       agent: { provider: 'openai', model: 'gpt-5.6-sol', effort: 'high' },

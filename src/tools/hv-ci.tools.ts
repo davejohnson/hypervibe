@@ -220,11 +220,12 @@ function diagnoseGenericWorkflowLog(text: string): CiWorkflowDiagnostic[] {
     diagnostics.push({
       code: 'DOCKERFILE_MISSING',
       severity: 'error',
-      summary: 'The Docker build step found no Dockerfile in the repository. Current Hypervibe workflows generate one automatically for Node apps (package.json), so this workflow predates that support.',
+      summary: 'The Docker build step found neither a repository Dockerfile nor a complete reviewed runtime build contract.',
       evidence: 'failed to read dockerfile during the image build step.',
       next: [
-        'Re-sync the declarative deploy workflow with hv_plan + hv_apply so it picks up the auto-Dockerfile step.',
-        'A Dockerfile in the repo is only needed for non-Node apps (no package.json); if present it always takes precedence over the generated one.',
+        'Review repository runtime, package-manager, build-script, and start-script evidence with hv_spec, then persist any missing commands.',
+        'For a custom or polyglot build, add a repository Dockerfile; it remains authoritative over generated containers.',
+        'Re-sync the declarative deploy workflow with hv_plan + hv_apply after the desired build contract is complete.',
         'Re-run the workflow with hv_ci_trigger afterwards.',
       ],
     });

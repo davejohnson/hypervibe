@@ -34,10 +34,14 @@ export const projectRuntimeSpecSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('node'),
     version: nodeVersionSchema,
+    installCommand: z.string().min(1).optional(),
+    buildCommand: z.string().min(1).optional(),
   }).strict(),
   z.object({
     kind: z.literal('python'),
     version: pythonVersionSchema,
+    installCommand: z.string().min(1).optional(),
+    buildCommand: z.string().min(1).optional(),
   }).strict(),
 ]);
 
@@ -73,6 +77,13 @@ export const serviceSpecSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'cron services require cronSchedule',
       path: ['cronSchedule'],
+    });
+  }
+  if (service.workloadKind === 'cron' && !service.startCommand) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'cron services require an explicit startCommand; Hypervibe never guesses which application task to run',
+      path: ['startCommand'],
     });
   }
 });
@@ -281,12 +292,14 @@ const githubAutomationRuntimeSchema = z.discriminatedUnion('kind', [
     kind: z.literal('node'),
     /** Explicit check override; otherwise the project Node runtime is used. */
     version: z.string().min(1).optional(),
-    installCommand: z.string().min(1).default('npm ci'),
+    /** Explicit check install command; otherwise a matching project runtime installCommand is inherited. */
+    installCommand: z.string().min(1).optional(),
   }).strict(),
   z.object({
     kind: z.literal('python'),
     version: z.string().min(1).optional(),
-    installCommand: z.string().min(1).default('python -m pip install -r requirements.txt'),
+    /** Explicit check install command; otherwise a matching project runtime installCommand is inherited. */
+    installCommand: z.string().min(1).optional(),
   }).strict(),
 ]);
 

@@ -32,7 +32,7 @@ function desired(enabled: boolean) {
         services: {
           web: { workloadKind: 'web' },
           worker: { workloadKind: 'worker' },
-          cron: { workloadKind: 'cron', cronSchedule: '0 * * * *' },
+          cron: { workloadKind: 'cron', cronSchedule: '0 * * * *', startCommand: 'npm run cron' },
         },
         database: { provider: 'railway', engine: 'postgres' },
         maintenance: { enabled },

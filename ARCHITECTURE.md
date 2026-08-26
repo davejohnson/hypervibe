@@ -46,22 +46,45 @@ Desired infrastructure state is repo-backed when Hypervibe runs inside a git wor
 
 Do not treat cached local state as proof of convergence when live observation is available.
 
+Unreadable local state is not empty state. Non-empty corrupt or schema-invalid
+JSON in bindings, plans, receipts, service configuration, or policies blocks
+the operation; repositories must never replace it with `{}`/`[]` and continue
+reconciliation. Empty legacy columns may still decode to their declared empty
+shape.
+
+A local project with no environment/provider decision uses the non-provider
+sentinel `unconfigured`. Project creation, adapter lookup, health/log routing,
+and legacy bootstrap must never turn a missing choice into Cloud Run, Railway,
+or another real provider. The first reviewed environment spec establishes the
+project's hosting provider before plan/apply can mutate infrastructure.
+
 ## Project Runtime Desired State
 
 The top-level `runtime` field declares the project runtime used by
 Hypervibe-generated build and automation paths. It is a typed contract such as
-`{ "kind": "node", "version": "24" }` or
-`{ "kind": "python", "version": "3.13" }`; it is not the runtime used to
-execute Hypervibe itself.
+`{ "kind": "node", "version": "24", "installCommand": "npm install --global npm@11.19.0 && npm ci", "buildCommand": "npm run build" }`
+or `{ "kind": "python", "version": "3.13", "installCommand": "python -m pip install -r requirements.txt" }`;
+it is not the runtime used to execute Hypervibe itself.
 
 - A repository-owned Dockerfile remains authoritative and is never rewritten
   from `runtime`. When no Dockerfile exists, generated CI/provider builds use
-  the declared runtime image and the matching package manifest conventions.
+  the declared runtime image and only the commands persisted in desired state.
 - Migration setup, project build jobs, and managed checks with no explicit
-  same-kind version inherit the project runtime. A check-level version remains
-  an intentional override.
-- Hypervibe-owned isolated helpers, such as the App Store release runtime, keep
-  their own runtime contract and must not inherit project language settings.
+  same-kind version/install command inherit the reviewed project runtime. A
+  check-level version or install command remains an intentional override.
+- Generated containers never invent a package manager, dependency install,
+  build, or service start command. Fresh-project analysis may derive commands
+  from one consistent lockfile, an exact `packageManager` declaration,
+  and named package scripts. Those commands become desired state and are
+  reviewable. Missing or conflicting evidence blocks generated builds; a
+  repository Dockerfile remains the escape hatch for custom build systems.
+- Cron workloads always declare `startCommand`. Provider adapters must not
+  substitute an application command while creating or updating a scheduled job.
+- Hypervibe-owned isolated helpers, such as App Store releases, restore drills,
+  provider bootstrap images, and portable deploy gates, share one explicit
+  managed runtime contract and must not inherit project language settings. Its
+  version is regression-checked against Hypervibe's own `.node-version`; exact
+  helper dependencies are checked against the application lockfile.
 - Runtime changes are part of each environment's deployment contract and are
   projected into local service build state during apply. Because hosting APIs
   generally cannot observe the base runtime directly, that drift is reported

@@ -226,7 +226,7 @@ describe('diffEnvironment — config drift', () => {
     expect(result.actions.find((action) => action.id === 'service:web')).toMatchObject({
       type: 'update',
       verified: false,
-      diff: [{ field: 'runtime', from: 'undeclared', to: 'node:24' }],
+      diff: [{ field: 'runtime', from: 'undeclared', to: 'node:24 install=undeclared build=none' }],
     });
   });
 
@@ -668,7 +668,37 @@ describe('diffEnvironment — unverified fallback', () => {
     expect(result.actions.find((action) => action.id === 'service:web')).toMatchObject({
       type: 'update',
       verified: false,
-      diff: [{ field: 'runtime', from: 'node:20', to: 'python:3.13' }],
+      diff: [{
+        field: 'runtime',
+        from: 'node:20 install=undeclared build=none',
+        to: 'python:3.13 install=undeclared build=none',
+      }],
+    });
+  });
+
+  it('makes reviewed install and build command drift visible even when the language version is unchanged', () => {
+    const existing = localService('web');
+    existing.buildConfig.runtime = { kind: 'node', version: '24', installCommand: 'npm ci' };
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'staging',
+      observed: null,
+      local: local({ services: [existing] }),
+      projectRuntime: {
+        kind: 'node',
+        version: '24',
+        installCommand: 'pnpm install --frozen-lockfile',
+        buildCommand: 'pnpm run build',
+      },
+    });
+
+    expect(result.actions.find((action) => action.id === 'service:web')).toMatchObject({
+      type: 'update',
+      diff: [{
+        field: 'runtime',
+        from: 'node:24 install="npm ci" build=none',
+        to: 'node:24 install="pnpm install --frozen-lockfile" build="pnpm run build"',
+      }],
     });
   });
 });
@@ -1360,7 +1390,7 @@ describe('diffEnvironment — domain and workload', () => {
   });
 
   it('replaces a service whose cron-ness changed', () => {
-    const cronSpec = spec({ services: { web: { workloadKind: 'cron', cronSchedule: '0 3 * * *' } } });
+    const cronSpec = spec({ services: { web: { workloadKind: 'cron', cronSchedule: '0 3 * * *', startCommand: 'npm run cron' } } });
     const result = diffEnvironment({ spec: cronSpec, envName: 'production', observed: observed(), local: local() });
     const web = result.actions.find((a) => a.id === 'service:web')!;
     expect(web.type).toBe('replace');

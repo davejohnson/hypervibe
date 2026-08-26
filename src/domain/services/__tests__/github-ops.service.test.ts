@@ -122,7 +122,8 @@ describe('github tools', () => {
 
     const workflow = buildBranchDeployWorkflow('railway', {
       ...targets[0],
-      runtime: { kind: 'node', version: '24' },
+      containerStartCommand: 'npm start',
+      runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
     }, migration);
     expect(workflow.template).toBe('deploy-railway-production');
     expect(workflow.branch).toBe('release');
@@ -173,9 +174,8 @@ describe('github tools', () => {
       .toBeLessThan(workflow.content.indexOf('npm ci'));
     expect(workflow.content).toContain('actions/setup-node@v6');
     expect(workflow.content).toContain('docker/build-push-action@v6');
-    expect(workflow.content).toContain('if [ -f .npmrc ]; then');
-    expect(workflow.content).toContain('COPY package*.json .npmrc ./');
-    expect(workflow.content).toContain('RUN --mount=type=secret,id=npm_token');
+    expect(workflow.content).toContain('COPY . .');
+    expect(workflow.content).toContain('RUN --mount=type=secret,id=npm_token,required=false');
     expect(workflow.content).toContain('npm_token=${{ secrets.NODE_AUTH_TOKEN }}');
     expect(workflow.content).toContain('packages: write');
     expect(workflow.content).toContain('username: ${{ github.actor }}');
@@ -219,7 +219,7 @@ describe('github tools', () => {
       providerEnvironmentId: 'rail-env',
       providerServiceIds: ['rail-web'],
       providerJobNames: [],
-      runtime: { kind: 'node' as const, version: '24' },
+      runtime: { kind: 'node' as const, version: '24', installCommand: 'npm ci' },
     };
     const content = buildBranchDeployWorkflow(
       'railway',
@@ -227,8 +227,8 @@ describe('github tools', () => {
       { includeStep: true, command: 'npm run migrate' }
     ).content;
     const checkoutStep = content.slice(
-      content.indexOf('      - uses: actions/checkout@v5'),
-      content.indexOf('\n      - ', content.indexOf('      - uses: actions/checkout@v5') + 1)
+      content.indexOf('      - uses: actions/checkout@v6'),
+      content.indexOf('\n      - ', content.indexOf('      - uses: actions/checkout@v6') + 1)
     );
     const buildAction = content.indexOf('uses: docker/build-push-action@v6');
     const buildStep = content.slice(
@@ -662,6 +662,12 @@ describe('github tools', () => {
       railwayWorkflow.content,
     ].join('\n');
     expect(combinedContent).not.toMatch(/railway-github-action|vercel deploy|doctl apps|gcloud /);
+
+    expect(() => buildBranchDeployWorkflow('cloudrun', {
+      ...baseTarget,
+      providerEnvironmentId: 'not-a-region',
+      providerServiceIds: ['cloudrun-web'],
+    }, { includeStep: false })).toThrow('has no bound provider region');
   });
 
   it('separates Cloud Run service and scheduled job deploy targets', () => {
@@ -692,7 +698,7 @@ describe('github tools', () => {
           hosting: { provider: 'cloudrun', region: 'us-west1' },
           services: {
             web: { workloadKind: 'web' },
-            daily: { workloadKind: 'cron', cronSchedule: '0 8 * * *' },
+            daily: { workloadKind: 'cron', cronSchedule: '0 8 * * *', startCommand: 'npm run daily' },
           },
           deploy: { strategy: 'branch', branch: 'main' },
         },
@@ -728,9 +734,10 @@ describe('github tools', () => {
       serviceNames: ['web'],
       providerProjectId: undefined,
       providerEnvironmentId: 'env-1',
+      providerRegion: 'us-central1',
       providerServiceIds: ['srv-1'],
-      webStartCommand: 'npm run serve',
-      runtime: { kind: 'node' as const, version: '24' },
+      containerStartCommand: 'npm run serve',
+      runtime: { kind: 'node' as const, version: '24', installCommand: 'npm ci' },
     };
     for (const provider of ['railway', 'cloudrun'] as const) {
       const workflow = buildBranchDeployWorkflow(provider, baseTarget, { includeStep: false });
@@ -740,15 +747,16 @@ describe('github tools', () => {
       // minimal image with the web service start command as CMD.
       expect(workflow.content).toContain('if [ -f Dockerfile ]; then');
       expect(workflow.content).toContain('FROM node:24-slim');
-      expect(workflow.content).toContain('if [ -f .npmrc ]; then');
-      expect(workflow.content).toContain('RUN --mount=type=secret,id=npm_token');
+      expect(workflow.content).toContain('COPY . .');
+      expect(workflow.content).toContain('RUN --mount=type=secret,id=npm_token,required=false');
       expect(workflow.content).toContain('npm_token=${{ secrets.NODE_AUTH_TOKEN }}');
       expect(workflow.content).toContain('CMD ["sh", "-lc", "npm run serve"]');
       // The generated Dockerfile step precedes the image build.
       expect(workflow.content.indexOf('Resolve Dockerfile')).toBeLessThan(workflow.content.indexOf('docker/build-push-action@v6'));
     }
-    const defaulted = buildBranchDeployWorkflow('railway', { ...baseTarget, webStartCommand: undefined }, { includeStep: false });
-    expect(defaulted.content).toContain('CMD ["sh", "-lc", "npm start"]');
+    const defaulted = buildBranchDeployWorkflow('railway', { ...baseTarget, containerStartCommand: undefined }, { includeStep: false });
+    expect(defaulted.content).not.toContain('CMD ["sh", "-lc", "npm start"]');
+    expect(defaulted.content).toContain('requires an explicit service startCommand');
 
     const custom = buildBranchDeployWorkflow('railway', {
       ...baseTarget,
@@ -767,8 +775,8 @@ describe('github tools', () => {
       autoDeployOnPush: true,
       serviceNames: ['web'],
       providerServiceIds: ['service-1'],
-      webStartCommand: 'npm start',
-      runtime: { kind: 'node' as const, version: '24.1' },
+      containerStartCommand: 'npm start',
+      runtime: { kind: 'node' as const, version: '24.1', installCommand: 'npm ci' },
     };
     const nodeWorkflow = buildBranchDeployWorkflow(
       'railway',
@@ -782,8 +790,8 @@ describe('github tools', () => {
       'railway',
       {
         ...nodeTarget,
-        webStartCommand: 'python app.py',
-        runtime: { kind: 'python', version: '3.13' },
+        containerStartCommand: 'python app.py',
+        runtime: { kind: 'python', version: '3.13', installCommand: 'python -m pip install -r requirements.txt' },
       },
       { includeStep: true, command: 'python manage.py migrate' }
     );

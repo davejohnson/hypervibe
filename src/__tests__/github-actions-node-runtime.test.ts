@@ -6,10 +6,11 @@ import { describe, expect, it } from 'vitest';
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const deprecatedNode20Actions = [
-  /actions\/checkout@v[1-4]\b/,
+  /actions\/checkout@v[1-5]\b/,
   /actions\/setup-go@v[1-5]\b/,
-  /actions\/setup-node@v[1-4]\b/,
+  /actions\/setup-node@v[1-5]\b/,
   /actions\/setup-python@v[1-5]\b/,
+  /uses:\s*actions\/github-script@v[1-7]\b/,
   /actions\/upload-artifact@v[1-5]\b/,
   /actions\/download-artifact@v[1-6]\b/,
   /actions\/configure-pages@v[1-5]\b/,
@@ -26,7 +27,7 @@ function sourceFiles(directory: string): string[] {
 }
 
 describe('GitHub Actions JavaScript runtimes', () => {
-  it('keeps repository-owned and generated workflows off deprecated Node 20 action majors', () => {
+  it('keeps repository-owned and generated workflows on the current Node 24 action majors', () => {
     const files = [
       ...sourceFiles(join(repositoryRoot, '.github')),
       ...sourceFiles(join(repositoryRoot, 'src')),

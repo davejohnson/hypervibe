@@ -50,7 +50,7 @@ const component = {
   updatedAt: now,
 };
 
-function repos(componentValue: typeof component | null = component) {
+function repos(componentValue: unknown = component) {
   return {
     environmentRepo: {
       findByProjectAndName: () => environment,
@@ -83,6 +83,23 @@ describe('database restore-drill compiler', () => {
     expect(result.requiredSecrets).toEqual([]);
     expect(result.issues).toEqual([
       expect.objectContaining({ code: 'database_restore_drill_binding_missing', environmentName: 'production' }),
+    ]);
+  });
+
+  it('refuses to guess a database name for a data-bearing restore', () => {
+    const { database: _database, ...bindings } = component.bindings;
+    const result = compileDatabaseRestoreDrillFiles({
+      project,
+      spec,
+      ...repos({ ...component, bindings }),
+    });
+
+    expect(result.files).toEqual([]);
+    expect(result.issues).toEqual([
+      expect.objectContaining({
+        code: 'database_restore_drill_binding_missing',
+        message: expect.stringContaining('exact connection and database identities'),
+      }),
     ]);
   });
 });

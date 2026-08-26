@@ -90,6 +90,23 @@ describe('infra_apply multi-service convergence', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it('blocks legacy bootstrap before choosing a hosting provider for an unknown project', async () => {
+    const result = await executeBootstrap({
+      projectName: 'uninitialized-project',
+      environmentName: 'production',
+      services: ['web'],
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      summary: {
+        blocked: true,
+        error: expect.stringContaining('no reviewed desired state'),
+      },
+    });
+    expect(new ProjectRepository().findByName('uninitialized-project')).toBeNull();
+  });
+
   it('provisions one shared database and deploys all desired services in a single apply', async () => {
     const projectRepo = new ProjectRepository();
     const serviceRepo = new ServiceRepository();

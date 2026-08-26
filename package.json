@@ -1,6 +1,7 @@
 {
   "name": "@hypervibe/hypervibe",
   "version": "0.1.13",
+  "packageManager": "npm@11.19.0",
   "description": "Desired-state infrastructure orchestration through CLI and MCP",
   "license": "Apache-2.0",
   "repository": {

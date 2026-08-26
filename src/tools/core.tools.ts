@@ -428,7 +428,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_spec',
-    'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. In a fresh git repository, that read returns a successful uninitialized contract with native runtime evidence; one unambiguous concrete Node or Python selection is persisted on initial write, while custom or ambiguous projects require an explicit runtime decision or repository Dockerfile. Later native-version drift is suggested for review, never applied silently. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
+    'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. In a fresh git repository, that read returns a successful uninitialized contract with native runtime, lockfile/package-manager, build-script, and start-script evidence; one unambiguous concrete Node or Python selection plus reviewed install/build commands is persisted on initial write. Missing/conflicting commands, custom languages, and ambiguous projects require an explicit decision or repository Dockerfile. Later native drift is suggested for review, never applied silently. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
     {
       project: projectField,
       spec: z.record(z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
@@ -596,7 +596,11 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         }
         validateInstalledProviders(candidateSpec);
         if (!project) {
-          project = ctx.repos.projects.create(newProject!);
+          const initialHostingProvider = Object.values(candidateSpec.environments)[0]?.hosting.provider;
+          project = ctx.repos.projects.create({
+            ...newProject!,
+            ...(initialHostingProvider ? { defaultPlatform: initialHostingProvider } : {}),
+          });
         }
         result = specStore.replace(project, candidateSpec);
       } catch (error) {

@@ -119,9 +119,10 @@ await writeFile('.hypervibe-release.json', JSON.stringify({ version: 1, provider
 
 export function buildCloudRunPortableRecipe(target: BranchDeployTarget): PortableCiDeployRecipe {
   const projectId = target.providerProjectId?.trim();
+  const region = target.providerRegion?.trim();
   const services = [...new Set(target.providerServiceIds)].sort();
   const jobs = [...new Set(target.providerJobNames ?? [])].sort();
-  if (!projectId || (target.needsServiceNames && services.length === 0) || (target.needsJobNames && jobs.length === 0) || (services.length === 0 && jobs.length === 0)) {
+  if (!projectId || !region || (target.needsServiceNames && services.length === 0) || (target.needsJobNames && jobs.length === 0) || (services.length === 0 && jobs.length === 0)) {
     throw new Error(`Cloud Run bindings for ${target.environmentName} are incomplete; apply hosting first`);
   }
   return {
@@ -133,7 +134,7 @@ export function buildCloudRunPortableRecipe(target: BranchDeployTarget): Portabl
       { name: 'GCP_SERVICE_ACCOUNT_JSON_B64', source: { kind: 'connection', provider: 'cloudrun', credentialKey: 'credentials' }, secret: true, transform: 'base64' },
       { name: 'GCP_PROJECT_ID', source: { kind: 'connection', provider: 'cloudrun', credentialKey: 'projectId' }, secret: false },
       { name: 'GCP_BOUND_PROJECT_ID', source: { kind: 'literal', value: projectId }, secret: false },
-      { name: 'GCP_REGION', source: { kind: 'literal', value: target.providerRegion ?? target.providerEnvironmentId ?? 'us-central1' }, secret: false },
+      { name: 'GCP_REGION', source: { kind: 'literal', value: region }, secret: false },
       { name: 'GCP_ARTIFACT_REPOSITORY', source: { kind: 'literal', value: 'infraprint' }, secret: false },
       { name: 'CLOUDRUN_SERVICE_NAMES', source: { kind: 'literal', value: services.join(',') }, secret: false },
       { name: 'CLOUDRUN_JOB_NAMES', source: { kind: 'literal', value: jobs.join(',') }, secret: false },

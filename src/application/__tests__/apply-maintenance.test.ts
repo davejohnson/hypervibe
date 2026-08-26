@@ -63,6 +63,7 @@ describe('applyMaintenanceAction', () => {
             nightly: {
               workloadKind: 'cron',
               cronSchedule: '0 3 * * *',
+              startCommand: 'npm run nightly',
             },
             worker: { workloadKind: 'worker' },
             web: { workloadKind: 'web' },

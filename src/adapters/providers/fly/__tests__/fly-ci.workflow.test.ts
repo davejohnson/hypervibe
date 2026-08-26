@@ -23,7 +23,7 @@ function target(): BranchDeployTarget {
       machineId: 'machine-1',
     })],
     providerImageUris: [],
-    webStartCommand: 'node server.mjs',
+    containerStartCommand: 'node server.mjs',
     runtime: { kind: 'node', version: '24' },
   };
 }

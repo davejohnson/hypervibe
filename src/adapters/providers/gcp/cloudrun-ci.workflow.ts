@@ -8,7 +8,13 @@ import {
 export const CLOUDRUN_CI_REQUIRED_SECRETS = ['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID'];
 
 export function buildCloudRunGitHubActionsSteps(target: BranchDeployTarget): BranchDeployStepResult {
-  const region = JSON.stringify(target.providerRegion ?? target.providerEnvironmentId ?? 'us-central1');
+  const providerRegion = target.providerRegion?.trim();
+  if (!providerRegion) {
+    throw new Error(
+      `Cloud Run deploy target ${target.environmentName} has no bound provider region; apply hosting before compiling CI.`
+    );
+  }
+  const region = JSON.stringify(providerRegion);
   const jobNames = target.providerJobNames ?? [];
   const needsServiceNames = target.needsServiceNames ?? true;
   const needsJobNames = target.needsJobNames ?? false;
