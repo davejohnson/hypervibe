@@ -1,6 +1,7 @@
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { GoogleAuth } from 'google-auth-library';
 import type { Project } from '../entities/project.entity.js';
 import { getProjectScopeHints } from './project-scope.js';
 import {
@@ -56,7 +57,9 @@ export async function runCloudPrepare(params: {
   deployServiceAccountEmail?: string;
   adminCredentialsJson?: string;
   adminAccessToken?: string;
+  adminAuth?: 'default';
   gcsAccess?: GcsPrepareAccess;
+  defaultAdminAccessTokenProvider?: () => Promise<string>;
   confirm?: boolean;
 }): Promise<Record<string, unknown> & { success: boolean }> {
   const {
@@ -66,6 +69,7 @@ export async function runCloudPrepare(params: {
     deployServiceAccountEmail,
     adminCredentialsJson,
     adminAccessToken,
+    adminAuth,
     gcsAccess,
     confirm = false,
   } = params;
@@ -116,14 +120,14 @@ export async function runCloudPrepare(params: {
       success: true,
       mode: 'preview',
       plan,
-      message: 'Recommended: export admin tokens or save service-account JSON to a local file, then call again with confirm=true and adminCredentialsJsonRef or adminAccessTokenRef. If the user intentionally wants to enter credentials in chat, adminCredentialsJson/adminAccessToken are still accepted.',
+      message: 'Recommended: re-run with confirm=true and adminAuth="default" to use existing Google Application Default Credentials. Explicit adminCredentialsJsonRef or adminAccessTokenRef remain available when a separate one-time admin identity is intentional.',
     };
   }
 
-  if (!adminCredentialsJson && !adminAccessToken) {
+  if (!adminCredentialsJson && !adminAccessToken && adminAuth !== 'default') {
     return {
       success: false,
-      error: 'confirm=true requires adminCredentialsJsonRef/adminCredentialsJson or adminAccessTokenRef/adminAccessToken. The deploy service account cannot grant itself project IAM.',
+      error: 'confirm=true requires adminAuth="default", adminCredentialsJsonRef/adminCredentialsJson, or adminAccessTokenRef/adminAccessToken. The deploy service account cannot grant itself project IAM.',
       plan,
       requiredAdminPermissions: [
         'serviceusage.services.enable',
@@ -134,7 +138,10 @@ export async function runCloudPrepare(params: {
   }
 
   try {
-    const token = adminAccessToken ?? await getAccessTokenFromServiceAccount(parseAdminCredentials(adminCredentialsJson));
+    const token = adminAccessToken
+      ?? (adminAuth === 'default'
+        ? await (params.defaultAdminAccessTokenProvider ?? getDefaultAdminAccessToken)()
+        : await getAccessTokenFromServiceAccount(parseAdminCredentials(adminCredentialsJson)));
     const enabledApis = await enableRequiredApis({
       token,
       projectId: resolved.gcpProjectId,
@@ -189,6 +196,15 @@ export async function runCloudPrepare(params: {
       ],
     };
   }
+}
+
+async function getDefaultAdminAccessToken(): Promise<string> {
+  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+  const client = await auth.getClient();
+  const result = await client.getAccessToken();
+  const token = typeof result === 'string' ? result : result.token;
+  if (!token) throw new Error('Google Application Default Credentials did not return an access token.');
+  return token;
 }
 
 function resolveGcpBootstrapTarget(params: {

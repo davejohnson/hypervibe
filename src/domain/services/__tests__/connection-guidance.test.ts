@@ -288,6 +288,7 @@ describe('connection guidance', () => {
         'roles/storage.viewer',
         'gcsAccess="lifecycle"',
         'roles/storage.admin',
+        'adminAuth="default"',
         'domain-mapping API',
         'multi-value A/AAAA/CNAME',
       ],

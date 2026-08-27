@@ -535,6 +535,13 @@ details. Agents reproduce the links, offer to open the recommended page, tell
 the user exactly where to save the credential, and then call `hv_connections`
 themselves. Never hide those steps behind the phrase "credential flow."
 
+GCP cloud preparation uses a credential-free preview followed by explicit
+confirmation. It accepts `adminAuth: "default"` so an operator's existing
+Google Application Default Credentials can perform the one-time API/IAM work
+without manufacturing or exporting another credential. Explicit access-token
+and service-account references remain supported when a distinct automation
+identity is intentional; none of these admin credentials are stored.
+
 When adding or changing token guidance, include all of these details:
 
 - The exact credential kind, including distinctions that matter operationally, such as user token vs account token, classic PAT vs fine-grained PAT, service account JSON vs access token, or read token vs API-management token.

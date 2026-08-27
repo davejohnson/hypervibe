@@ -112,7 +112,7 @@ async function responseError(response: Response): Promise<Error> {
   if (response.status === 403) {
     return new Error(
       `${detail}. When GCS reuses the Cloud Run connection, preview hv_connections provider="cloudrun" action="prepare" gcsAccess="inspect" for read-only inventory; `
-      + 'for GCS create, transfer, or teardown, preview it with gcsAccess="lifecycle". Both paths require explicit confirmation and one-time project IAM admin credentials. A standalone GCS connection must grant the equivalent role to its own identity.'
+      + 'for GCS create, transfer, or teardown, preview it with gcsAccess="lifecycle". Both paths require explicit confirmation and may use existing Google Application Default Credentials through adminAuth="default". A standalone GCS connection must grant the equivalent role to its own identity.'
     );
   }
   return new Error(detail);

@@ -92,7 +92,7 @@ describe('runCloudPrepare', () => {
     expect(lifecyclePlan.grantRoles).not.toContain('roles/storage.viewer');
   });
 
-  it('enables required APIs, grants deploy service account roles, and records preparation with a one-time admin token', async () => {
+  it('uses existing Google default credentials to prepare the reviewed GCP access', async () => {
     const project = seedProject();
 
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -117,16 +117,19 @@ describe('runCloudPrepare', () => {
       throw new Error(`Unexpected fetch: ${method} ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
+    const defaultAdminAccessTokenProvider = vi.fn(async () => 'admin-token');
 
     const payload = await runCloudPrepare({
       project,
       provider: 'cloudrun',
       gcsAccess: 'inspect',
-      adminAccessToken: 'admin-token',
+      adminAuth: 'default',
+      defaultAdminAccessTokenProvider,
       confirm: true,
     });
 
     expect(payload.success).toBe(true);
+    expect(defaultAdminAccessTokenProvider).toHaveBeenCalledOnce();
     expect(payload.enabledApis).toEqual(expect.arrayContaining([
       { service: 'cloudscheduler.googleapis.com', status: 'enabled' },
       { service: 'cloudresourcemanager.googleapis.com', status: 'enabled' },
@@ -175,6 +178,6 @@ describe('runCloudPrepare', () => {
     const project = seedProject();
     const payload = await runCloudPrepare({ project, provider: 'cloudrun', confirm: true });
     expect(payload.success).toBe(false);
-    expect(String(payload.error)).toContain('adminCredentialsJson or adminAccessToken');
+    expect(String(payload.error)).toContain('adminAuth="default"');
   });
 });

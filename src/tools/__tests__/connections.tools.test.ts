@@ -136,6 +136,7 @@ describe('hv_connections', () => {
       { provider: 'railway', action: 'remove', adminAccessTokenRef: 'env:ADMIN_TOKEN' },
       { provider: 'railway', action: 'add', gcpProjectId: 'wrong-mode' },
       { provider: 'railway', action: 'add', gcsAccess: 'inspect' },
+      { provider: 'railway', action: 'add', adminAuth: 'default' },
       { provider: 'railway', action: 'prepare', credentialsRef: 'env:RAILWAY_TOKEN' },
     ];
 
@@ -182,7 +183,19 @@ describe('hv_connections', () => {
       {
         provider: 'railway',
         action: 'prepare',
+        confirm: true,
+        adminAuth: 'default',
         adminAccessTokenRef: 'env:ADMIN_TOKEN',
+      },
+      {
+        provider: 'railway',
+        action: 'prepare',
+        adminAccessTokenRef: 'env:ADMIN_TOKEN',
+      },
+      {
+        provider: 'railway',
+        action: 'prepare',
+        adminAuth: 'default',
       },
       {
         provider: 'railway',

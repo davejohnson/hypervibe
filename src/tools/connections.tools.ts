@@ -289,6 +289,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcpProjectId: z.string().optional().describe('action="prepare": GCP project ID (defaults to the Cloud Run connection projectId)'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
       gcsAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add GCS access to the reused service account. "inspect" grants roles/storage.viewer; "lifecycle" grants roles/storage.admin.'),
+      adminAuth: z.literal('default').optional().describe('action="prepare" with confirm=true: use existing Google Application Default Credentials for the one-time admin operation. Not stored.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
       adminCredentialsJsonRef: z.string().optional().describe('action="prepare": env:NAME or file:/absolute/path resolving to one-time admin service account JSON. Not stored.'),
       adminAccessToken: z.string().optional().describe('action="prepare": one-time OAuth admin access token. Not stored.'),
@@ -307,6 +308,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcpProjectId,
       deployServiceAccountEmail,
       gcsAccess,
+      adminAuth,
       adminCredentialsJson,
       adminCredentialsJsonRef,
       adminAccessToken,
@@ -323,6 +325,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || gcpProjectId !== undefined
           || deployServiceAccountEmail !== undefined
           || gcsAccess !== undefined
+          || adminAuth !== undefined
           || adminCredentialsJson !== undefined
           || adminCredentialsJsonRef !== undefined
           || adminAccessToken !== undefined
@@ -350,6 +353,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         gcpProjectId,
         deployServiceAccountEmail,
         gcsAccess,
+        adminAuth,
         adminCredentialsJson,
         adminCredentialsJsonRef,
         adminAccessToken,
@@ -385,17 +389,18 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
       const adminJsonSupplied = adminCredentialsJson !== undefined || adminCredentialsJsonRef !== undefined;
       const adminTokenSupplied = adminAccessToken !== undefined || adminAccessTokenRef !== undefined;
-      if (requestedAction === 'prepare' && adminJsonSupplied && adminTokenSupplied) {
-        return commandError('VALIDATION', 'Pass one admin authentication method for action="prepare": service-account JSON or an access token, not both.');
+      const adminDefaultSupplied = adminAuth === 'default';
+      if (requestedAction === 'prepare' && [adminJsonSupplied, adminTokenSupplied, adminDefaultSupplied].filter(Boolean).length > 1) {
+        return commandError('VALIDATION', 'Pass one admin authentication method for action="prepare": default Google credentials, service-account JSON, or an access token.');
       }
-      if (requestedAction === 'prepare' && !confirm && (adminJsonSupplied || adminTokenSupplied)) {
+      if (requestedAction === 'prepare' && !confirm && (adminJsonSupplied || adminTokenSupplied || adminDefaultSupplied)) {
         return commandError('VALIDATION', 'Admin credentials are accepted only with confirm=true for action="prepare".', {
-          hint: 'Run the credential-free preview first, then pass exactly one admin credential reference with confirm=true.',
+          hint: 'Run the credential-free preview first, then pass adminAuth="default" or exactly one admin credential reference with confirm=true.',
         });
       }
-      if (requestedAction === 'prepare' && confirm && !adminJsonSupplied && !adminTokenSupplied) {
-        return commandError('VALIDATION', 'confirm=true requires one admin credential reference for action="prepare".', {
-          hint: 'Pass adminCredentialsJsonRef or adminAccessTokenRef. Raw values remain available when intentionally chosen.',
+      if (requestedAction === 'prepare' && confirm && !adminJsonSupplied && !adminTokenSupplied && !adminDefaultSupplied) {
+        return commandError('VALIDATION', 'confirm=true requires one admin authentication method for action="prepare".', {
+          hint: 'Prefer adminAuth="default" to use existing Google Application Default Credentials. Explicit adminCredentialsJsonRef or adminAccessTokenRef remain available when intentional.',
         });
       }
       const project = projectRef
@@ -419,6 +424,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           gcpProjectId,
           deployServiceAccountEmail,
           gcsAccess,
+          adminAuth,
           adminCredentialsJson: resolvedAdminCredentialsJson,
           adminAccessToken: resolvedAdminAccessToken,
           confirm,
@@ -427,7 +433,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           return commandError('PROVIDER_ERROR', String(payload.error ?? 'Cloud preparation failed'), { details: payload });
         }
         return commandSuccess({ ...projectContext, ...payload }, payload.mode === 'preview'
-          ? { hint: 'Recommended: export admin tokens or save service-account JSON to a local file, then re-run with confirm=true plus adminCredentialsJsonRef or adminAccessTokenRef. If the user intentionally wants to enter credentials in chat, adminCredentialsJson/adminAccessToken are still accepted.' }
+          ? { hint: 'Recommended: re-run with confirm=true and adminAuth="default" to use existing Google Application Default Credentials. Explicit adminCredentialsJsonRef or adminAccessTokenRef remain available when intentional.' }
           : { next: ['hv_plan'] });
       }
 
