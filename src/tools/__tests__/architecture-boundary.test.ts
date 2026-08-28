@@ -47,6 +47,18 @@ const hostingProviderBranches = [
 ];
 
 describe('provider boundary architecture', () => {
+  it('keeps hosted committed-spec inspection pure and read-only', () => {
+    const source = readFileSync(
+      new URL('../../application/hosted/committed-spec-inspection.ts', import.meta.url),
+      'utf8'
+    );
+
+    expect(source).not.toContain('/adapters/');
+    expect(source).not.toContain('repo-spec-file');
+    expect(source).not.toContain('child_process');
+    expect(source).not.toMatch(/\b(?:readFile|writeFile|fetch)\b/);
+  });
+
   it('keeps command declarations transport-neutral', () => {
     for (const [label, url] of registeredCommandModules) {
       const source = readFileSync(url, 'utf8');
