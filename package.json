@@ -21,6 +21,16 @@
   ],
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./hosted": {
+      "types": "./dist/hosted.d.ts",
+      "import": "./dist/hosted.js"
+    }
+  },
   "bin": {
     "hypervibe": "dist/index.js",
     "hypervibe-mcp": "dist/mcp.js"

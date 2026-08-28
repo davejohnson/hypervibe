@@ -21,6 +21,21 @@ describe('public release configuration', () => {
     });
   });
 
+  it('publishes the side-effect-free hosted inspection boundary', () => {
+    const packageMetadata = JSON.parse(
+      readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
+    ) as {
+      exports?: Record<string, unknown>;
+    };
+
+    expect(packageMetadata.exports).toMatchObject({
+      './hosted': {
+        types: './dist/hosted.d.ts',
+        import: './dist/hosted.js',
+      },
+    });
+  });
+
   it('publishes tagged releases publicly with provenance', () => {
     const workflow = readFileSync(
       new URL('../../.github/workflows/release.yml', import.meta.url),
