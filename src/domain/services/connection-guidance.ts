@@ -440,7 +440,7 @@ const GUIDANCE: Record<string, ConnectionGuidance> = {
     ],
     credentialExample: 'hv_connections provider="cloudrun" credentialsRef="file:/absolute/path/cloudrun.json"',
     notes: [
-      'Run hv_connections action="prepare" when Hypervibe should enable APIs and grant these roles from one-time admin credentials. GCS access is never added silently; select gcsAccess="inspect" or gcsAccess="lifecycle" explicitly.',
+      'Run hv_connections action="prepare" when Hypervibe should enable APIs and grant these roles. After the credential-free preview, prefer confirm=true with adminAuth="default" to use existing Google Application Default Credentials; explicit one-time admin credential references remain available. GCS access is never added silently; select gcsAccess="inspect" or gcsAccess="lifecycle" explicitly.',
       'The connection JSON contains only projectId and credentials. Hypervibe uses us-central1 when environments.<name>.hosting.region is omitted; an agent may declare another supported region in the spec.',
       'Cloud Run native domain mappings are available only in Google-supported regions. Hypervibe blocks before DNS mutation in other regions; use a separately declared external HTTPS load balancer there.',
       'Cloud Run returns a multi-value A/AAAA/CNAME record set for the mapping. Hypervibe keeps those traffic records DNS-only while Google validates ownership and manages TLS.',

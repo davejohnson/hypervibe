@@ -163,7 +163,7 @@ describe('GcsStorageAdapter', () => {
     await expect(adapter.inspectStorageResources({
       resource: 'storage',
       limit: 25,
-    })).rejects.toThrow('gcsAccess="inspect"');
+    })).rejects.toThrow('adminAuth="default"');
   });
 
   it('refuses to adopt an existing deterministic bucket without ownership labels', async () => {
