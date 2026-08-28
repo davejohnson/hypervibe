@@ -33,6 +33,7 @@ describe('public release configuration', () => {
         types: './dist/hosted.d.ts',
         import: './dist/hosted.js',
       },
+      './*': './*',
     });
   });
 

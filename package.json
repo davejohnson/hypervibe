@@ -29,7 +29,8 @@
     "./hosted": {
       "types": "./dist/hosted.d.ts",
       "import": "./dist/hosted.js"
-    }
+    },
+    "./*": "./*"
   },
   "bin": {
     "hypervibe": "dist/index.js",
