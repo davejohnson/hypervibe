@@ -42,6 +42,8 @@ const EXPECTED_TOOLS = [
   'hv_appstore_status', 'hv_appstore_submit',
   // DevX
   'hv_runs',
+  // Hypervibe cloud
+  'hv_cloud_pair',
 ].sort();
 
 async function makeClient() {
@@ -64,12 +66,12 @@ describe('server tool surface', () => {
     await server.close();
   });
 
-  it('registers exactly the 19 pinned hv_* tools', async () => {
+  it('registers exactly the 20 pinned hv_* tools', async () => {
     const { client, server } = await makeClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_TOOLS);
-    expect(names).toHaveLength(19);
+    expect(names).toHaveLength(20);
     expect(tools.find((tool) => tool.name === 'hv_ci_status')?.description).toContain(
       'Use this instead of gh, GitHub connectors/apps, browser/UI inspection, or direct CI/provider API calls.'
     );
@@ -89,7 +91,7 @@ describe('server tool surface', () => {
 
     expect(ids).toEqual(EXPECTED_TOOLS);
     expect([...PRESENTED_COMMAND_IDS].sort()).toEqual(ids);
-    expect(new Set(cliPaths).size).toBe(19);
+    expect(new Set(cliPaths).size).toBe(20);
     expect(registry.get('hv_spec')?.cliPath).toEqual(['spec']);
     expect(registry.get('hv_connections')?.cliPath).toEqual(['connections']);
     expect(registry.get('hv_secrets')?.cliPath).toEqual(['secrets']);
@@ -110,6 +112,7 @@ describe('server tool surface', () => {
     expect(registry.get('hv_plan')?.inputShape.scope).toBeDefined();
     expect(registry.get('hv_plan')?.description).toContain('scope="retained-cleanup"');
     expect(registry.get('hv_db_query')?.cliPath).toEqual(['db', 'query']);
+    expect(registry.get('hv_cloud_pair')?.cliPath).toEqual(['cloud', 'pair']);
     expect(registry.get('hv_db_migrate')).toBeUndefined();
   });
 
@@ -155,6 +158,12 @@ describe('server tool surface', () => {
     );
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
       'offer to open it in the user\'s browser'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'call hv_cloud_pair with action=start'
+    );
+    expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
+      'Never ask for a GitHub token, repository id, or environment name'
     );
     expect(HYPERVIBE_SERVER_INSTRUCTIONS).toContain(
       'Never refer vaguely to a "Hypervibe credential flow"'
