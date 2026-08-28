@@ -17,6 +17,7 @@ import { registerHvSecretsTools } from '../tools/hv-secrets.tools.js';
 import { registerHvCiTools } from '../tools/hv-ci.tools.js';
 import { registerHvAppstoreTools } from '../tools/hv-appstore.tools.js';
 import { registerHvDevxTools } from '../tools/hv-devx.tools.js';
+import { registerHvCloudTools } from '../tools/hv-cloud.tools.js';
 
 export type CommandAccess = 'read' | 'write';
 
@@ -195,6 +196,7 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registerHvCiTools(registry, ctx);
   registerHvAppstoreTools(registry, ctx);
   registerHvDevxTools(registry, ctx);
+  registerHvCloudTools(registry, ctx);
 
   return registry;
 }

@@ -52,6 +52,7 @@ const COMMAND_PRESENTATION = {
   hv_status: { label: 'STATUS' },
   hv_apply: { label: 'APPLY' },
   hv_connections: { label: 'CONNECTIONS' },
+  hv_cloud_pair: { label: 'CLOUD PAIR' },
 } as const;
 
 export const PRESENTED_COMMAND_IDS = Object.freeze(Object.keys(COMMAND_PRESENTATION));

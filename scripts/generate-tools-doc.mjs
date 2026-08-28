@@ -30,6 +30,7 @@ commands.sort((a, b) => a.id.localeCompare(b.id));
 const groups = new Map([
   ['Core (spec → plan → apply)', /^hv_(spec$|plan$|apply$|status$|inspect$|import$|destroy$)/],
   ['Connections', /^hv_connections/],
+  ['Hypervibe cloud', /^hv_cloud_/],
   ['Deploy & observability', /^hv_(deploy|rollback|logs|health)$/],
   ['Database', /^hv_db_/],
   ['Secrets', /^hv_secrets$/],

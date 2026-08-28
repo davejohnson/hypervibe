@@ -89,6 +89,23 @@ Human-readable output is the default. Add `--json` for automation, or
 `--input <file|->` to supply the complete command input as JSON. Confirmation
 prompts are TTY-only; scripts must pass explicit confirmation flags.
 
+To connect this exact repository to Hypervibe's hosted reporting without a
+GitHub PAT:
+
+```bash
+cd /path/to/your/repository
+hypervibe cloud pair
+# Open the returned Hypervibe URL and approve the displayed repository.
+hypervibe cloud pair --action status
+```
+
+The same workflow is available to MCP clients as `hv_cloud_pair`: call it once
+with `action="start"`, offer to open `verificationUrl`, then call it with
+`action="status"` after the user approves. Hypervibe detects the GitHub origin,
+uses the repositories selected in the Hypervibe GitHub App, and stores the
+one-time device and environment credentials only in the encrypted local
+connection store. Do not paste a GitHub token or choose an environment.
+
 To run the current source checkout instead:
 
 ```bash
@@ -190,7 +207,10 @@ Hypervibe exposes the same focused operations as canonical `hv_*` MCP tools and 
 3. `hv_apply planId=...` — converge. Stale plans are rejected; destroying data-bearing resources requires explicit confirmation
 4. `hv_status` — see drift between desired and observed state at any time
 
-Around that core: connections (`hv_connections`), deploy/rollback, logs/errors/health, bounded database diagnostics, secrets, domains/DNS, email, payments, CI, App Store/TestFlight, and local dev tools.
+Around that core: hosted reporting pairing (`hv_cloud_pair`), provider
+connections (`hv_connections`), deploy/rollback, logs/errors/health, bounded
+database diagnostics, secrets, domains/DNS, email, payments, CI, App
+Store/TestFlight, and local dev tools.
 
 `hv_connections` and `hv_secrets` both accept `project="name-or-id"` to select and validate project context. Provider `scope` remains separate: it identifies the actual repository, domain, account, or environment covered by a credential.
 
