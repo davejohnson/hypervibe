@@ -554,9 +554,11 @@ package-manager runtime coupling can fail independently of Google credentials.
 Cloud Run authentication is compatible with GCS and Memorystore and is reused
 through provider registry metadata; operators must not create redundant Google
 service-account keys for those capabilities. GCS, Memorystore, and Pub/Sub
-preparation are explicit independent add-ons. Running one add-on must not grant
-another add-on's role, and successive preparations preserve other previously
-reviewed capability evidence. Explicit queue-role removal is a standalone,
+preparation are explicit independent capabilities. A capability preparation
+must reconcile only its selected APIs and roles; it must not repair base Cloud
+Run permissions or grant another capability's role. Base Cloud Run preparation
+remains a separate provider-only prepare call. Successive preparations preserve
+other previously reviewed capability evidence. Explicit queue-role removal is a standalone,
 removal-only operation; it affects only the connected deploy service-account
 member, including that member's conditional bindings, and never disables the
 Pub/Sub API, grants other access, or edits another principal.

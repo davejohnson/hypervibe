@@ -86,18 +86,14 @@ describe('runCloudPrepare', () => {
     const inspected = await runCloudPrepare({ project, provider: 'cloudrun', gcsAccess: 'inspect' });
     const inspectPlan = inspected.plan as { enableApis: string[]; grantRoles: string[]; gcsAccess: string };
     expect(inspectPlan).toMatchObject({ gcsAccess: 'inspect' });
-    expect(inspectPlan.enableApis).toContain('storage.googleapis.com');
-    expect(inspectPlan.grantRoles).toContain('roles/storage.viewer');
-    expect(inspectPlan.grantRoles).not.toContain('roles/storage.admin');
-    expect(inspectPlan.enableApis).not.toContain('pubsub.googleapis.com');
-    expect(inspectPlan.grantRoles).not.toContain('roles/pubsub.editor');
+    expect(inspectPlan.enableApis).toEqual(['storage.googleapis.com']);
+    expect(inspectPlan.grantRoles).toEqual(['roles/storage.viewer']);
 
     const lifecycle = await runCloudPrepare({ project, provider: 'cloudrun', gcsAccess: 'lifecycle' });
     const lifecyclePlan = lifecycle.plan as { enableApis: string[]; grantRoles: string[]; gcsAccess: string };
     expect(lifecyclePlan).toMatchObject({ gcsAccess: 'lifecycle' });
-    expect(lifecyclePlan.enableApis).toContain('storage.googleapis.com');
-    expect(lifecyclePlan.grantRoles).toContain('roles/storage.admin');
-    expect(lifecyclePlan.grantRoles).not.toContain('roles/storage.viewer');
+    expect(lifecyclePlan.enableApis).toEqual(['storage.googleapis.com']);
+    expect(lifecyclePlan.grantRoles).toEqual(['roles/storage.admin']);
   });
 
   it('keeps Memorystore and Pub/Sub preparation independently explicit', async () => {
@@ -114,12 +110,8 @@ describe('runCloudPrepare', () => {
       memorystoreAccess: string;
     };
     expect(inspectPlan).toMatchObject({ memorystoreAccess: 'inspect' });
-    expect(inspectPlan.enableApis).toContain('redis.googleapis.com');
-    expect(inspectPlan.grantRoles).toContain('roles/redis.viewer');
-    expect(inspectPlan.grantRoles).not.toContain('roles/redis.admin');
-    expect(inspectPlan.enableApis).not.toContain('pubsub.googleapis.com');
-    expect(inspectPlan.grantRoles).not.toContain('roles/pubsub.editor');
-    expect(inspectPlan.enableApis).not.toContain('storage.googleapis.com');
+    expect(inspectPlan.enableApis).toEqual(['redis.googleapis.com']);
+    expect(inspectPlan.grantRoles).toEqual(['roles/redis.viewer']);
 
     const queue = await runCloudPrepare({
       project,
@@ -132,10 +124,8 @@ describe('runCloudPrepare', () => {
       queueAccess: string;
     };
     expect(queuePlan).toMatchObject({ queueAccess: 'lifecycle' });
-    expect(queuePlan.enableApis).toContain('pubsub.googleapis.com');
-    expect(queuePlan.grantRoles).toContain('roles/pubsub.editor');
-    expect(queuePlan.enableApis).not.toContain('storage.googleapis.com');
-    expect(queuePlan.enableApis).not.toContain('redis.googleapis.com');
+    expect(queuePlan.enableApis).toEqual(['pubsub.googleapis.com']);
+    expect(queuePlan.grantRoles).toEqual(['roles/pubsub.editor']);
 
     const removal = await runCloudPrepare({
       project,
@@ -150,7 +140,7 @@ describe('runCloudPrepare', () => {
     });
   });
 
-  it('uses existing Google default credentials to prepare the reviewed GCP access', async () => {
+  it('uses existing Google default credentials to prepare only the reviewed staged access', async () => {
     const project = seedProject();
     let iamPolicy = {
       bindings: [{
@@ -190,19 +180,11 @@ describe('runCloudPrepare', () => {
 
     expect(payload.success).toBe(true);
     expect(defaultAdminAccessTokenProvider).toHaveBeenCalledOnce();
-    expect(payload.enabledApis).toEqual(expect.arrayContaining([
-      { service: 'cloudscheduler.googleapis.com', status: 'enabled' },
-      { service: 'cloudresourcemanager.googleapis.com', status: 'enabled' },
-    ]));
-    expect(payload.grantedRoles).toEqual(expect.arrayContaining([
-      'roles/logging.viewer',
-      'roles/logging.viewAccessor',
-      'roles/cloudscheduler.admin',
-      'roles/cloudsql.client',
-      'roles/storage.viewer',
-    ]));
-    expect(payload.grantedRoles).not.toContain('roles/pubsub.editor');
-    expect(payload.existingRoles).toEqual(['roles/run.admin']);
+    expect(payload.enabledApis).toEqual([
+      { service: 'storage.googleapis.com', status: 'enabled' },
+    ]);
+    expect(payload.grantedRoles).toEqual(['roles/storage.viewer']);
+    expect(payload.existingRoles).toEqual([]);
     expect(payload).toMatchObject({ provider: 'cloudrun', version: 'gcp-cloudrun-v1' });
 
     const setIamCall = fetchMock.mock.calls.find(([url, init]) =>
@@ -212,17 +194,13 @@ describe('runCloudPrepare', () => {
     const setIamBody = JSON.parse(String(setIamCall?.[1]?.body));
     const bindings = setIamBody.policy.bindings as Array<{ role: string; members: string[] }>;
     expect(bindings).toContainEqual({
-      role: 'roles/logging.viewAccessor',
-      members: ['serviceAccount:hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com'],
-    });
-    expect(bindings).toContainEqual({
-      role: 'roles/cloudscheduler.admin',
-      members: ['serviceAccount:hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com'],
-    });
-    expect(bindings).toContainEqual({
       role: 'roles/storage.viewer',
       members: ['serviceAccount:hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com'],
     });
+    expect(bindings.map(({ role }) => role)).toEqual([
+      'roles/run.admin',
+      'roles/storage.viewer',
+    ]);
 
     const updatedProject = new ProjectRepository().findById(project.id);
     expect(updatedProject?.policies.cloudPreparation).toMatchObject({

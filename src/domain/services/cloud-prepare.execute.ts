@@ -135,17 +135,18 @@ export async function runCloudPrepare(params: {
     : undefined;
   const queueAddon = queueAccess === 'lifecycle' ? QUEUE_PREPARE_ADDON : undefined;
   const removalOnly = queueAccess === 'remove';
+  const basePreparation = !gcsAccess && !memorystoreAccess && !queueAccess;
   // Every add-on is explicit and independently reviewable. A GCS or
   // Memorystore preparation must never broaden queue permissions, and vice
   // versa.
   const requiredApis = Array.from(new Set([
-    ...(removalOnly ? [] : profile.requiredApis),
+    ...(basePreparation ? profile.requiredApis : []),
     ...(queueAddon?.requiredApis ?? []),
     ...(gcsAddon?.requiredApis ?? []),
     ...(memorystoreAddon?.requiredApis ?? []),
   ]));
   const requiredRoles = Array.from(new Set([
-    ...(removalOnly ? [] : profile.requiredRoles),
+    ...(basePreparation ? profile.requiredRoles : []),
     ...(queueAddon?.requiredRoles ?? []),
     ...(gcsAddon?.requiredRoles ?? []),
     ...(memorystoreAddon?.requiredRoles ?? []),
@@ -298,7 +299,7 @@ export async function runCloudPrepare(params: {
         gcsAccess,
         memorystoreAccess,
         queueAccess,
-        requiresServiceEnablement: !removalOnly,
+        requiresServiceEnablement: requiredApis.length > 0,
       }),
     };
   }
