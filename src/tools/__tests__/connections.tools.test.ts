@@ -10,12 +10,14 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 // Importing adapters registers providers in the registry.
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import { GitHubAdapter } from '../../adapters/providers/github/github.adapter.js';
 import { CloudflareAdapter } from '../../adapters/providers/cloudflare/cloudflare.adapter.js';
 import { S3StorageAdapter } from '../../adapters/providers/aws/s3.adapter.js';
+import '../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../adapters/providers/secretmanagers/onepassword.adapter.js';
 import { StripeProjectsAdapter } from '../../adapters/providers/secretmanagers/stripe-projects.adapter.js';
 import { registerConnectionsTools } from '../connections.tools.js';
@@ -136,6 +138,8 @@ describe('hv_connections', () => {
       { provider: 'railway', action: 'remove', adminAccessTokenRef: 'env:ADMIN_TOKEN' },
       { provider: 'railway', action: 'add', gcpProjectId: 'wrong-mode' },
       { provider: 'railway', action: 'add', gcsAccess: 'inspect' },
+      { provider: 'railway', action: 'add', memorystoreAccess: 'inspect' },
+      { provider: 'railway', action: 'add', queueAccess: 'lifecycle' },
       { provider: 'railway', action: 'add', adminAuth: 'default' },
       { provider: 'railway', action: 'prepare', credentialsRef: 'env:RAILWAY_TOKEN' },
     ];
@@ -150,16 +154,31 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it('allows staged GCS access only through Cloud Run preparation', async () => {
+  it('allows staged GCP capabilities only through Cloud Run preparation', async () => {
     const t = await makeClient();
-    const result = await t.call('hv_connections', {
-      provider: 'railway',
+    for (const capability of [
+      { gcsAccess: 'inspect' },
+      { memorystoreAccess: 'inspect' },
+      { queueAccess: 'lifecycle' },
+    ]) {
+      const result = await t.call('hv_connections', {
+        provider: 'railway',
+        action: 'prepare',
+        ...capability,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.error.code).toBe('VALIDATION');
+      expect(result.error.message).toContain('only when preparing the shared cloudrun connection');
+    }
+    const mixedRemoval = await t.call('hv_connections', {
+      provider: 'cloudrun',
       action: 'prepare',
-      gcsAccess: 'inspect',
+      queueAccess: 'remove',
+      memorystoreAccess: 'inspect',
     });
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe('VALIDATION');
-    expect(result.error.message).toContain('only when preparing the shared cloudrun connection');
+    expect(mixedRemoval.ok).toBe(false);
+    expect(mixedRemoval.error.code).toBe('VALIDATION');
+    expect(mixedRemoval.error.message).toContain('exact removal-only operation');
     await t.close();
   });
 
@@ -301,6 +320,11 @@ describe('hv_connections', () => {
     const connection = new ConnectionRepository().findByProvider('railway')!;
     const decrypted = getSecretStore().decryptObject<{ apiToken: string }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('token-from-env-ref');
+    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toEqual({
+      provider: 'railway',
+      scope: null,
+      credentialsSource: 'env',
+    });
     await t.close();
   });
 

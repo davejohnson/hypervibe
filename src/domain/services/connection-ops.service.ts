@@ -31,7 +31,8 @@ export interface SaveConnectionOutcome {
 export async function saveConnection(
   provider: string,
   credentials: Record<string, unknown>,
-  scope?: string
+  scope?: string,
+  options: { credentialsSource?: string } = {}
 ): Promise<SaveConnectionOutcome> {
   scope = normalizeConnectionScope(scope) ?? undefined;
   const secretStore = getSecretStore();
@@ -67,7 +68,11 @@ export async function saveConnection(
     action: 'connection.created',
     resourceType: 'connection',
     resourceId: connection.id,
-    details: { provider, scope: scope || null },
+    details: {
+      provider,
+      scope: scope || null,
+      ...(options.credentialsSource ? { credentialsSource: options.credentialsSource } : {}),
+    },
   });
 
   return {

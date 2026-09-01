@@ -102,12 +102,15 @@ export function isCloudPrepared(
  * Extra APIs/roles queues need on GCP. Kept out of the base profile so
  * existing prepared projects are not forced to re-run prepare: deploys
  * keep working; only queue actions require the addon (with a clear
- * re-run-prepare hint). runCloudPrepare enables the union going forward.
+ * re-run-prepare hint). Queue access is added only when the caller explicitly
+ * selects queueAccess="lifecycle".
  */
 export const QUEUE_PREPARE_ADDON = {
   requiredApis: ['pubsub.googleapis.com'],
   requiredRoles: ['roles/pubsub.editor'],
 } as const;
+
+export type QueuePrepareAccess = 'lifecycle' | 'remove';
 
 export const GCS_PREPARE_ADDONS = {
   inspect: {
@@ -121,6 +124,19 @@ export const GCS_PREPARE_ADDONS = {
 } as const;
 
 export type GcsPrepareAccess = keyof typeof GCS_PREPARE_ADDONS;
+
+export const MEMORYSTORE_PREPARE_ADDONS = {
+  inspect: {
+    requiredApis: ['redis.googleapis.com'],
+    requiredRoles: ['roles/redis.viewer'],
+  },
+  lifecycle: {
+    requiredApis: ['redis.googleapis.com'],
+    requiredRoles: ['roles/redis.admin'],
+  },
+} as const;
+
+export type MemorystorePrepareAccess = keyof typeof MEMORYSTORE_PREPARE_ADDONS;
 
 export function isCloudPreparedForQueues(
   project: Pick<Project, 'policies'> | null | undefined,

@@ -99,6 +99,12 @@ describe('server tool surface', () => {
     expect(registry.get('hv_connections')?.inputShape.adminAuth.description).toContain(
       'Google Application Default Credentials'
     );
+    expect(registry.get('hv_connections')?.inputShape.memorystoreAccess.description).toContain(
+      'roles/redis.viewer'
+    );
+    expect(registry.get('hv_connections')?.inputShape.queueAccess.description).toContain(
+      'remove that exact role'
+    );
     expect(registry.get('hv_secrets')?.inputShape.project).toBeDefined();
     expect(registry.get('hv_spec')?.inputShape.project.description).toContain('typos can be corrected safely');
     expect(registry.get('hv_connections')?.description).toContain('{} lists every connection/provider');

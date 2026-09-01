@@ -780,6 +780,7 @@ providerRegistry.register({
     category: 'cache',
     credentialsSchema: MemorystoreCredentialsSchema,
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    connectionAliases: ['cloudrun'],
     lifecycle: {
       cacheEngines: ['redis'],
     },
