@@ -205,6 +205,7 @@ describe('runCloudPrepare', () => {
       gcloudCli: {
         requiredWhen: 'gcloud is not installed or not available on PATH',
         officialInstallUrl: 'https://cloud.google.com/sdk/docs/install',
+        recommendedInstallation: 'Use Google\'s official platform installer or archive from officialInstallUrl.',
       },
       commands: ['gcloud auth application-default login'],
       optionalQuotaProjectCommand: 'gcloud auth application-default set-quota-project hls-property-care',

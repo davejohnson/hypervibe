@@ -384,9 +384,7 @@ function cloudPrepareAdminCredentialSetup(params: {
     gcloudCli: {
       requiredWhen: 'gcloud is not installed or not available on PATH',
       officialInstallUrl: GCP_CLOUD_CLI_INSTALL_URL,
-      ...(process.platform === 'darwin'
-        ? { macosHomebrewCommand: 'brew install --cask gcloud-cli' }
-        : {}),
+      recommendedInstallation: 'Use Google\'s official platform installer or archive from officialInstallUrl.',
     },
     commands: ['gcloud auth application-default login'],
     optionalQuotaProjectCommand: `gcloud auth application-default set-quota-project ${params.gcpProjectId}`,

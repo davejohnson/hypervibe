@@ -548,7 +548,9 @@ category. When local ADC is absent, the result must distinguish it from the
 stored deploy service-account credential and return Google's official ADC URL,
 the exact `gcloud auth application-default` commands, project-scoped roles and
 permissions, the official Cloud CLI installation path when `gcloud` is absent,
-caveats, and the complete safe retry call.
+caveats, and the complete safe retry call. Do not recommend a third-party
+package-manager wrapper when Google provides a first-party installer or archive;
+package-manager runtime coupling can fail independently of Google credentials.
 
 When adding or changing token guidance, include all of these details:
 
