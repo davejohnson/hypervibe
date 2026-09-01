@@ -9,7 +9,7 @@ import { ProjectRepository } from '../../../adapters/db/repositories/project.rep
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { adapterFactory } from '../adapter.factory.js';
 
-describe('storage connection reuse', () => {
+describe('compatible cloud connection reuse', () => {
   beforeEach(() => {
     SqliteAdapter.resetInstance();
     SqliteAdapter.getInstance(path.join(mkdtempSync(path.join(tmpdir(), 'hypervibe-storage-connection-')), 'test.db')).migrate();
@@ -54,6 +54,30 @@ describe('storage connection reuse', () => {
     await expect(adapterFactory.getStorageAdapter('gcs', project)).resolves.toMatchObject({
       success: true,
       adapter: { name: 'gcs' },
+    });
+  });
+
+  it('builds the Memorystore adapter from an existing verified Cloud Run connection', async () => {
+    const serviceAccount = {
+      type: 'service_account',
+      project_id: 'cloud-project',
+      client_email: 'hypervibe@cloud-project.iam.gserviceaccount.com',
+      private_key: 'private-key',
+    };
+    const connectionRepo = new ConnectionRepository();
+    const connection = connectionRepo.create({
+      provider: 'cloudrun',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        projectId: 'cloud-project',
+        credentials: JSON.stringify(serviceAccount),
+      }),
+    });
+    connectionRepo.updateStatus(connection.id, 'verified');
+    const project = new ProjectRepository().create({ name: 'cache-auth-reuse-gcp' });
+
+    await expect(adapterFactory.getCacheAdapter('memorystore', project)).resolves.toMatchObject({
+      success: true,
+      adapter: { name: 'memorystore' },
     });
   });
 

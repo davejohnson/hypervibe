@@ -288,6 +288,10 @@ describe('connection guidance', () => {
         'roles/storage.viewer',
         'gcsAccess="lifecycle"',
         'roles/storage.admin',
+        'memorystoreAccess="inspect"',
+        'roles/redis.viewer',
+        'queueAccess="lifecycle"',
+        'roles/pubsub.editor',
         'adminAuth="default"',
         'domain-mapping API',
         'multi-value A/AAAA/CNAME',
@@ -305,6 +309,8 @@ describe('connection guidance', () => {
         'roles/serviceusage.serviceUsageConsumer',
         'redis.googleapis.com',
         'declarative VPC egress',
+        'cloudrun',
+        'memorystoreAccess="inspect"',
         'credentialsRef="file:/absolute/path/memorystore.json"',
       ],
       rds: [
@@ -498,6 +504,7 @@ describe('credentialFieldsFromSchema', () => {
     expect(providerRegistry.connectionProviders('s3')).toEqual(['s3', 'ecs']);
     expect(providerRegistry.connectionProviders('gcs')).toEqual(['gcs', 'cloudrun']);
     expect(providerRegistry.connectionProviders('azureblob')).toEqual(['azureblob', 'azure-container-apps']);
+    expect(providerRegistry.connectionProviders('memorystore')).toEqual(['memorystore', 'cloudrun']);
   });
 
   it('describes required, optional, secret, multiline, and choice fields', () => {

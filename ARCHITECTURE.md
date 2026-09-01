@@ -551,6 +551,15 @@ permissions, the official Cloud CLI installation path when `gcloud` is absent,
 caveats, and the complete safe retry call. Do not recommend a third-party
 package-manager wrapper when Google provides a first-party installer or archive;
 package-manager runtime coupling can fail independently of Google credentials.
+Cloud Run authentication is compatible with GCS and Memorystore and is reused
+through provider registry metadata; operators must not create redundant Google
+service-account keys for those capabilities. GCS, Memorystore, and Pub/Sub
+preparation are explicit independent add-ons. Running one add-on must not grant
+another add-on's role, and successive preparations preserve other previously
+reviewed capability evidence. Explicit queue-role removal is a standalone,
+removal-only operation; it affects only the connected deploy service-account
+member, including that member's conditional bindings, and never disables the
+Pub/Sub API, grants other access, or edits another principal.
 
 When adding or changing token guidance, include all of these details:
 

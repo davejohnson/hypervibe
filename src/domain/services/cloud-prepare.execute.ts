@@ -8,9 +8,13 @@ import { getProjectScopeHints } from './project-scope.js';
 import {
   GCS_PREPARE_ADDONS,
   getCloudPrepareProfile,
+  getCloudPreparation,
+  MEMORYSTORE_PREPARE_ADDONS,
   withCloudPreparationRecord,
   QUEUE_PREPARE_ADDON,
   type GcsPrepareAccess,
+  type MemorystorePrepareAccess,
+  type QueuePrepareAccess,
 } from './cloud-prepare.js';
 
 const connectionRepo = new ConnectionRepository();
@@ -59,6 +63,21 @@ interface IamPolicy {
   bindings?: IamBinding[];
 }
 
+interface CloudPreparePlan {
+  projectName: string;
+  provider: string;
+  version: string;
+  gcpProjectId: string;
+  deployServiceAccountEmail: string;
+  enableApis: string[];
+  grantRoles: string[];
+  revokeRoles: string[];
+  member: string;
+  gcsAccess?: GcsPrepareAccess;
+  memorystoreAccess?: MemorystorePrepareAccess;
+  queueAccess?: QueuePrepareAccess;
+}
+
 /**
  * One-time cloud account preparation. For Cloud Run this enables required
  * GCP APIs and grants the deploy service account required roles using
@@ -75,6 +94,8 @@ export async function runCloudPrepare(params: {
   adminAuth?: 'default';
   adminCredentialSource?: string;
   gcsAccess?: GcsPrepareAccess;
+  memorystoreAccess?: MemorystorePrepareAccess;
+  queueAccess?: QueuePrepareAccess;
   defaultAdminAccessTokenProvider?: () => Promise<string>;
   confirm?: boolean;
 }): Promise<Record<string, unknown> & { success: boolean }> {
@@ -88,6 +109,8 @@ export async function runCloudPrepare(params: {
     adminAuth,
     adminCredentialSource,
     gcsAccess,
+    memorystoreAccess,
+    queueAccess,
     confirm = false,
   } = params;
 
@@ -107,20 +130,33 @@ export async function runCloudPrepare(params: {
 
   const member = `serviceAccount:${resolved.deployServiceAccountEmail}`;
   const gcsAddon = gcsAccess ? GCS_PREPARE_ADDONS[gcsAccess] : undefined;
-  // Preserve the existing base + queue preparation behavior. GCS is explicit:
-  // read-only inventory needs Storage Viewer, while lifecycle operations need
-  // the broader Storage Admin role and must be separately previewed.
+  const memorystoreAddon = memorystoreAccess
+    ? MEMORYSTORE_PREPARE_ADDONS[memorystoreAccess]
+    : undefined;
+  const queueAddon = queueAccess === 'lifecycle' ? QUEUE_PREPARE_ADDON : undefined;
+  const removalOnly = queueAccess === 'remove';
+  // Every add-on is explicit and independently reviewable. A GCS or
+  // Memorystore preparation must never broaden queue permissions, and vice
+  // versa.
   const requiredApis = Array.from(new Set([
-    ...profile.requiredApis,
-    ...QUEUE_PREPARE_ADDON.requiredApis,
+    ...(removalOnly ? [] : profile.requiredApis),
+    ...(queueAddon?.requiredApis ?? []),
     ...(gcsAddon?.requiredApis ?? []),
+    ...(memorystoreAddon?.requiredApis ?? []),
   ]));
   const requiredRoles = Array.from(new Set([
-    ...profile.requiredRoles,
-    ...QUEUE_PREPARE_ADDON.requiredRoles,
+    ...(removalOnly ? [] : profile.requiredRoles),
+    ...(queueAddon?.requiredRoles ?? []),
     ...(gcsAddon?.requiredRoles ?? []),
+    ...(memorystoreAddon?.requiredRoles ?? []),
   ]));
-  const plan = {
+  const revokeRoles: string[] = queueAccess === 'remove'
+    ? [...QUEUE_PREPARE_ADDON.requiredRoles]
+    : [];
+  const requiredAdminPermissions = removalOnly
+    ? REQUIRED_ADMIN_PERMISSIONS.filter((permission) => permission !== 'serviceusage.services.enable')
+    : [...REQUIRED_ADMIN_PERMISSIONS];
+  const plan: CloudPreparePlan = {
     projectName: project.name,
     provider: profile.provider,
     version: profile.version,
@@ -128,8 +164,11 @@ export async function runCloudPrepare(params: {
     deployServiceAccountEmail: resolved.deployServiceAccountEmail,
     enableApis: requiredApis,
     grantRoles: requiredRoles,
+    revokeRoles,
     member,
     ...(gcsAccess ? { gcsAccess } : {}),
+    ...(memorystoreAccess ? { memorystoreAccess } : {}),
+    ...(queueAccess ? { queueAccess } : {}),
   };
 
   if (!confirm) {
@@ -147,7 +186,7 @@ export async function runCloudPrepare(params: {
       error: 'confirm=true requires adminAuth="default", adminCredentialsJsonRef/adminCredentialsJson, or adminAccessTokenRef/adminAccessToken. The deploy service account cannot grant itself project IAM.',
       plan,
       requiredAdminPermissions: [
-        ...REQUIRED_ADMIN_PERMISSIONS,
+        ...requiredAdminPermissions,
       ],
     };
   }
@@ -162,23 +201,38 @@ export async function runCloudPrepare(params: {
       projectId: resolved.gcpProjectId,
       services: requiredApis,
     });
-    const iamResult = await ensureProjectIamRoles({
+    const iamResult = await reconcileProjectIamRoles({
       token,
       projectId: resolved.gcpProjectId,
       member,
-      roles: requiredRoles,
+      grantRoles: requiredRoles,
+      revokeRoles,
     });
-    const updatedProject = projectRepo.update(project.id, {
-      policies: withCloudPreparationRecord(project.policies, profile.provider, {
-        provider: profile.provider,
-        version: profile.version,
-        preparedAt: new Date().toISOString(),
-        gcpProjectId: resolved.gcpProjectId,
-        deployServiceAccountEmail: resolved.deployServiceAccountEmail,
-        requiredApis,
-        requiredRoles,
-      }),
-    });
+    const previous = getCloudPreparation(project, profile.provider);
+    const preservesPrevious = previous?.version === profile.version
+      && previous.gcpProjectId === resolved.gcpProjectId
+      && previous.deployServiceAccountEmail === resolved.deployServiceAccountEmail;
+    const recordedApis = Array.from(new Set([
+      ...(preservesPrevious ? previous.requiredApis : []),
+      ...requiredApis,
+    ]));
+    const recordedRoles = Array.from(new Set([
+      ...(preservesPrevious ? previous.requiredRoles : []),
+      ...requiredRoles,
+    ])).filter((role) => !revokeRoles.includes(role));
+    const updatedProject = removalOnly && !preservesPrevious
+      ? project
+      : projectRepo.update(project.id, {
+        policies: withCloudPreparationRecord(project.policies, profile.provider, {
+          provider: profile.provider,
+          version: profile.version,
+          preparedAt: new Date().toISOString(),
+          gcpProjectId: resolved.gcpProjectId,
+          deployServiceAccountEmail: resolved.deployServiceAccountEmail,
+          requiredApis: recordedApis,
+          requiredRoles: recordedRoles,
+        }),
+      });
 
     auditRepo.create({
       action: 'cloud.prepare.succeeded',
@@ -192,7 +246,9 @@ export async function runCloudPrepare(params: {
 
     return {
       success: true,
-      message: 'Cloud prepared for Hypervibe deploys.',
+      message: removalOnly
+        ? 'Cloud access cleanup completed.'
+        : 'Cloud prepared for Hypervibe deploys.',
       project: project.name,
       provider: profile.provider,
       version: profile.version,
@@ -201,11 +257,16 @@ export async function runCloudPrepare(params: {
       enabledApis,
       grantedRoles: iamResult.updatedRoles,
       existingRoles: iamResult.existingRoles,
+      ...(revokeRoles.length > 0 ? {
+        revokedRoles: iamResult.removedRoles,
+        alreadyAbsentRoles: iamResult.absentRoles,
+      } : {}),
       preparation: updatedProject?.policies.cloudPreparation,
       nextSteps: [
         'hv_connections provider="cloudrun" action="verify"',
         'hv_connections provider="cloudsql" action="verify"',
         ...(gcsAccess ? ['hv_inspect provider="gcs" resource="storage"'] : []),
+        ...(memorystoreAccess ? ['hv_inspect provider="memorystore" resource="cache" region="<region>"'] : []),
         'hv_plan, then hv_apply',
       ],
     };
@@ -229,12 +290,15 @@ export async function runCloudPrepare(params: {
         deployServiceAccountEmail: resolved.deployServiceAccountEmail,
       }),
       plan,
-      requiredAdminPermissions: [...REQUIRED_ADMIN_PERMISSIONS],
+      requiredAdminPermissions,
       adminCredentialSetup: cloudPrepareAdminCredentialSetup({
         projectName: project.name,
         provider: profile.provider,
         gcpProjectId: resolved.gcpProjectId,
         gcsAccess,
+        memorystoreAccess,
+        queueAccess,
+        requiresServiceEnablement: !removalOnly,
       }),
     };
   }
@@ -333,7 +397,7 @@ function inferAdminCredentialSource(params: {
 }
 
 function cloudPrepareAuditDetails(params: {
-  plan: Record<string, unknown>;
+  plan: CloudPreparePlan;
   authenticationSource: string;
   failureCategory?: string;
 }): Record<string, unknown> {
@@ -343,6 +407,8 @@ function cloudPrepareAuditDetails(params: {
     gcpProjectId: params.plan.gcpProjectId,
     deployServiceAccountEmail: params.plan.deployServiceAccountEmail,
     ...(params.plan.gcsAccess ? { gcsAccess: params.plan.gcsAccess } : {}),
+    ...(params.plan.memorystoreAccess ? { memorystoreAccess: params.plan.memorystoreAccess } : {}),
+    ...(params.plan.queueAccess ? { queueAccess: params.plan.queueAccess } : {}),
     authenticationSource: params.authenticationSource,
     ...(params.failureCategory ? { failureCategory: params.failureCategory } : {}),
   };
@@ -353,12 +419,17 @@ function cloudPrepareAdminCredentialSetup(params: {
   provider: string;
   gcpProjectId: string;
   gcsAccess?: GcsPrepareAccess;
+  memorystoreAccess?: MemorystorePrepareAccess;
+  queueAccess?: QueuePrepareAccess;
+  requiresServiceEnablement: boolean;
 }): Record<string, unknown> {
   const retryCall = {
     project: params.projectName,
     provider: params.provider,
     action: 'prepare',
     ...(params.gcsAccess ? { gcsAccess: params.gcsAccess } : {}),
+    ...(params.memorystoreAccess ? { memorystoreAccess: params.memorystoreAccess } : {}),
+    ...(params.queueAccess ? { queueAccess: params.queueAccess } : {}),
     adminAuth: 'default',
     confirm: true,
   };
@@ -368,6 +439,8 @@ function cloudPrepareAdminCredentialSetup(params: {
     `provider="${params.provider}"`,
     'action="prepare"',
     ...(params.gcsAccess ? [`gcsAccess="${params.gcsAccess}"`] : []),
+    ...(params.memorystoreAccess ? [`memorystoreAccess="${params.memorystoreAccess}"`] : []),
+    ...(params.queueAccess ? [`queueAccess="${params.queueAccess}"`] : []),
     'adminAuth="default"',
     'confirm=true',
   ].join(' ');
@@ -389,8 +462,12 @@ function cloudPrepareAdminCredentialSetup(params: {
     commands: ['gcloud auth application-default login'],
     optionalQuotaProjectCommand: `gcloud auth application-default set-quota-project ${params.gcpProjectId}`,
     requiredOAuthScopes: [GCP_CLOUD_PLATFORM_SCOPE],
-    requiredPermissions: [...REQUIRED_ADMIN_PERMISSIONS],
-    requiredRoles: [...REQUIRED_ADMIN_ROLES],
+    requiredPermissions: params.requiresServiceEnablement
+      ? [...REQUIRED_ADMIN_PERMISSIONS]
+      : REQUIRED_ADMIN_PERMISSIONS.filter((permission) => permission !== 'serviceusage.services.enable'),
+    requiredRoles: params.requiresServiceEnablement
+      ? [...REQUIRED_ADMIN_ROLES]
+      : REQUIRED_ADMIN_ROLES.filter((role) => role !== 'roles/serviceusage.serviceUsageAdmin'),
     resourceScope: `projects/${params.gcpProjectId}`,
     caveats: [
       'Application Default Credentials are separate from the account selected by gcloud auth login.',
@@ -470,12 +547,18 @@ async function enableRequiredApis(params: {
   return results;
 }
 
-async function ensureProjectIamRoles(params: {
+async function reconcileProjectIamRoles(params: {
   token: string;
   projectId: string;
   member: string;
-  roles: string[];
-}): Promise<{ updatedRoles: string[]; existingRoles: string[] }> {
+  grantRoles: string[];
+  revokeRoles: string[];
+}): Promise<{
+  updatedRoles: string[];
+  existingRoles: string[];
+  removedRoles: string[];
+  absentRoles: string[];
+}> {
   const policy = await getProjectIamPolicy(params.token, params.projectId);
   const bindings = (policy.bindings ?? []).map((binding) => ({
     ...binding,
@@ -483,8 +566,10 @@ async function ensureProjectIamRoles(params: {
   }));
   const updatedRoles: string[] = [];
   const existingRoles: string[] = [];
+  const removedRoles: string[] = [];
+  const absentRoles: string[] = [];
 
-  for (const role of params.roles) {
+  for (const role of params.grantRoles) {
     const existing = bindings.find((binding) => binding.role === role && !binding.condition);
     if (existing?.members?.includes(params.member)) {
       existingRoles.push(role);
@@ -498,11 +583,57 @@ async function ensureProjectIamRoles(params: {
     updatedRoles.push(role);
   }
 
-  if (updatedRoles.length > 0) {
-    await setProjectIamPolicy(params.token, params.projectId, { ...policy, bindings });
+  for (const role of params.revokeRoles) {
+    const matchingBindings = bindings.filter((binding) =>
+      binding.role === role && binding.members?.includes(params.member)
+    );
+    if (matchingBindings.length === 0) {
+      absentRoles.push(role);
+      continue;
+    }
+    for (const binding of matchingBindings) {
+      binding.members = binding.members?.filter((member) => member !== params.member);
+    }
+    removedRoles.push(role);
   }
 
-  return { updatedRoles, existingRoles };
+  if (updatedRoles.length > 0 || removedRoles.length > 0) {
+    await setProjectIamPolicy(params.token, params.projectId, {
+      ...policy,
+      bindings: bindings.filter((binding) => (binding.members?.length ?? 0) > 0),
+    });
+    await verifyProjectIamRoles(params);
+  }
+
+  return { updatedRoles, existingRoles, removedRoles, absentRoles };
+}
+
+async function verifyProjectIamRoles(params: {
+  token: string;
+  projectId: string;
+  member: string;
+  grantRoles: string[];
+  revokeRoles: string[];
+}): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const policy = await getProjectIamPolicy(params.token, params.projectId);
+    const bindings = policy.bindings ?? [];
+    const missingGrants = params.grantRoles.filter((role) => !bindings.some((binding) =>
+      binding.role === role
+      && !binding.condition
+      && binding.members?.includes(params.member)
+    ));
+    const remainingRevocations = params.revokeRoles.filter((role) => bindings.some((binding) =>
+      binding.role === role && binding.members?.includes(params.member)
+    ));
+    if (missingGrants.length === 0 && remainingRevocations.length === 0) {
+      return;
+    }
+    if (attempt < 4) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  throw new Error('GCP project IAM policy update was acknowledged but the reviewed role changes did not converge.');
 }
 
 async function getProjectIamPolicy(token: string, projectId: string): Promise<IamPolicy> {

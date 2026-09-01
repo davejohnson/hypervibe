@@ -169,7 +169,7 @@ export async function planQueues(params: {
   // Pub/Sub backend.
   if (!isCloudPreparedForQueues(params.project, provider)) {
     warnings.push(
-      'Pub/Sub queues need cloud preparation: re-run hv_connections provider="cloudrun" action="prepare" confirm=true (adds pubsub.googleapis.com and roles/pubsub.editor). Queue actions will fail until then.'
+      'Pub/Sub queues need cloud preparation: preview hv_connections provider="cloudrun" action="prepare" queueAccess="lifecycle", then explicitly confirm that same preparation (adds pubsub.googleapis.com and roles/pubsub.editor). Queue actions will fail until then.'
     );
   }
 

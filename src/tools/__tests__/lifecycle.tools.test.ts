@@ -514,6 +514,48 @@ describe('hv_inspect / hv_import', () => {
     await t.close();
   });
 
+  it('hv_inspect reuses a verified Cloud Run connection for Memorystore inventory', async () => {
+    const connections = new ConnectionRepository();
+    const connection = connections.create({
+      provider: 'cloudrun',
+      credentialsEncrypted: getSecretStore().encryptObject({
+        projectId: 'gcp-project',
+        credentials: JSON.stringify({
+          type: 'service_account',
+          project_id: 'gcp-project',
+          client_email: 'hypervibe@gcp-project.iam.gserviceaccount.com',
+          private_key: 'private-key',
+        }),
+      }),
+    });
+    connections.updateStatus(connection.id, 'verified');
+    vi.spyOn(MemorystoreAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(MemorystoreAdapter.prototype, 'disconnect').mockResolvedValue();
+    const inspect = vi.spyOn(MemorystoreAdapter.prototype, 'inspectCacheResources').mockResolvedValue({
+      observation: 'absent',
+      resource: 'cache',
+      caches: [],
+      truncated: false,
+      partial: false,
+    });
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', {
+      provider: 'memorystore',
+      resource: 'cache',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({
+      provider: 'memorystore',
+      observation: 'absent',
+      resource: 'cache',
+      caches: [],
+    });
+    expect(inspect).toHaveBeenCalledWith(expect.objectContaining({ resource: 'cache' }));
+    await t.close();
+  });
+
   it('hv_inspect rejects limit when a provider-only call falls back to connection verification', async () => {
     const t = await makeClient();
 

@@ -289,6 +289,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcpProjectId: z.string().optional().describe('action="prepare": GCP project ID (defaults to the Cloud Run connection projectId)'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
       gcsAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add GCS access to the reused service account. "inspect" grants roles/storage.viewer; "lifecycle" grants roles/storage.admin.'),
+      memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
+      queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
       adminAuth: z.literal('default').optional().describe('action="prepare" with confirm=true: use existing Google Application Default Credentials for the one-time admin operation. Not stored.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
       adminCredentialsJsonRef: z.string().optional().describe('action="prepare": env:NAME or file:/absolute/path resolving to one-time admin service account JSON. Not stored.'),
@@ -308,6 +310,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcpProjectId,
       deployServiceAccountEmail,
       gcsAccess,
+      memorystoreAccess,
+      queueAccess,
       adminAuth,
       adminCredentialsJson,
       adminCredentialsJsonRef,
@@ -325,6 +329,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || gcpProjectId !== undefined
           || deployServiceAccountEmail !== undefined
           || gcsAccess !== undefined
+          || memorystoreAccess !== undefined
+          || queueAccess !== undefined
           || adminAuth !== undefined
           || adminCredentialsJson !== undefined
           || adminCredentialsJsonRef !== undefined
@@ -353,6 +359,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         gcpProjectId,
         deployServiceAccountEmail,
         gcsAccess,
+        memorystoreAccess,
+        queueAccess,
         adminAuth,
         adminCredentialsJson,
         adminCredentialsJsonRef,
@@ -386,6 +394,18 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
       if (requestedAction === 'prepare' && gcsAccess && provider !== 'cloudrun') {
         return commandError('VALIDATION', 'gcsAccess is supported only when preparing the shared cloudrun connection.');
+      }
+      if (requestedAction === 'prepare' && memorystoreAccess && provider !== 'cloudrun') {
+        return commandError('VALIDATION', 'memorystoreAccess is supported only when preparing the shared cloudrun connection.');
+      }
+      if (requestedAction === 'prepare' && queueAccess && provider !== 'cloudrun') {
+        return commandError('VALIDATION', 'queueAccess is supported only when preparing the shared cloudrun connection.');
+      }
+      if (requestedAction === 'prepare' && queueAccess === 'remove' && (gcsAccess || memorystoreAccess)) {
+        return commandError(
+          'VALIDATION',
+          'queueAccess="remove" is an exact removal-only operation and cannot be combined with GCS or Memorystore grants.'
+        );
       }
       const adminJsonSupplied = adminCredentialsJson !== undefined || adminCredentialsJsonRef !== undefined;
       const adminTokenSupplied = adminAccessToken !== undefined || adminAccessTokenRef !== undefined;
@@ -424,6 +444,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           gcpProjectId,
           deployServiceAccountEmail,
           gcsAccess,
+          memorystoreAccess,
+          queueAccess,
           adminAuth,
           adminCredentialsJson: resolvedAdminCredentialsJson,
           adminAccessToken: resolvedAdminAccessToken,
