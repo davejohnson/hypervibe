@@ -141,6 +141,128 @@ describe('CloudSqlAdapter', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('inventories project-level retained backups with exact scoped identities', async () => {
+    const adapter = await connectedAdapter();
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://sqladmin.googleapis.com/v1/projects/gcp-project/backups?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({
+          backups: [{
+            name: 'projects/gcp-project/backups/backup-123',
+            sourceInstance: 'projects/gcp-project/instances/legacy-db',
+            type: 'FINAL',
+            state: 'SUCCESSFUL',
+            instanceDeletionTime: '2026-08-17T12:00:00Z',
+            maxChargeableBytes: '4294967296',
+          }],
+        });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.inspectBackupResources({ resource: 'backup', limit: 25 });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      resource: 'backup',
+      backups: [{
+        id: 'projects/gcp-project/backups/backup-123',
+        name: 'backup-123',
+        type: 'FINAL',
+        providerScope: { projectId: 'gcp-project' },
+        cleanupSupported: true,
+      }],
+      truncated: false,
+      partial: false,
+    });
+  });
+
+  it('refuses retained cleanup for a backup whose source instance is still live', async () => {
+    const adapter = await connectedAdapter();
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/v1/projects/gcp-project/backups/backup-live') && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({
+          name: 'projects/gcp-project/backups/backup-live',
+          sourceInstance: 'projects/gcp-project/instances/live-db',
+          type: 'ON_DEMAND',
+          state: 'SUCCESSFUL',
+        });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const receipt = await adapter.destroyRetainedBackup({
+      resource: 'backup',
+      id: 'projects/gcp-project/backups/backup-live',
+      providerScope: { projectId: 'gcp-project' },
+    });
+
+    expect(receipt.success).toBe(false);
+    expect(receipt.error).toMatch(/live instance/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes an exact retained backup and verifies terminal absence', async () => {
+    const adapter = await connectedAdapter();
+    let deleted = false;
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/v1/projects/gcp-project/backups/backup-old') && method === 'GET') {
+        return deleted
+          ? new Response('missing', { status: 404 })
+          : Response.json({
+              name: 'projects/gcp-project/backups/backup-old',
+              instanceDeletionTime: '2026-08-17T12:00:00Z',
+              type: 'FINAL',
+            });
+      }
+      if (url.endsWith('/v1/projects/gcp-project/backups/backup-old') && method === 'DELETE') {
+        deleted = true;
+        return Response.json({ name: 'backup-delete-op', status: 'DONE' });
+      }
+      if (url.endsWith('/operations/backup-delete-op') && method === 'GET') {
+        return Response.json({ name: 'backup-delete-op', status: 'DONE' });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const receipt = await adapter.destroyRetainedBackup({
+      resource: 'backup',
+      id: 'projects/gcp-project/backups/backup-old',
+      providerScope: { projectId: 'gcp-project' },
+    });
+
+    expect(receipt.success).toBe(true);
+    expect(deleted).toBe(true);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(true);
+  });
+
+  it('treats an already-absent retained backup as success without a delete mutation', async () => {
+    const adapter = await connectedAdapter();
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/v1/projects/gcp-project/backups/backup-gone') && (init?.method ?? 'GET') === 'GET') {
+        return new Response('missing', { status: 404 });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const receipt = await adapter.destroyRetainedBackup({
+      resource: 'backup',
+      id: 'projects/gcp-project/backups/backup-gone',
+      providerScope: { projectId: 'gcp-project' },
+    });
+
+    expect(receipt.success).toBe(true);
+    expect(receipt.message).toMatch(/already absent/i);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
+  });
+
   it('creates a missing logical database on an existing Cloud SQL instance', async () => {
     const adapter = new CloudSqlAdapter();
     await adapter.connect({

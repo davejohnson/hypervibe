@@ -129,6 +129,7 @@ export type PlanMutationCapability =
   | 'database.seed'
   | 'database.destroy'
   | 'database.retained.destroy'
+  | 'provider-resource.retained.destroy'
   | 'database.migrate'
   | 'storage.migrate'
   | 'database.migration-target.destroy'
@@ -313,6 +314,20 @@ export function resolvePlanActionAuthority(
   if (action.type === 'noop') return null;
   if (!action.id.trim() || !action.resource.name.trim() || !action.resource.provider.trim()) {
     return null;
+  }
+
+  if (
+    exactResource(action, 'retained-resource')
+    && action.type === 'destroy'
+    && action.metadata?.operation === 'retainedResourceDestroy'
+    && metadataString(action, 'resource') === action.resource.name
+    && metadataString(action, 'externalId')
+    && metadataString(action, 'name')
+    && metadataStringRecord(action, 'providerScope')
+    && action.dataBearing === true
+    && action.requiresConfirm === true
+  ) {
+    return authority(action, 'provider-resource.retained.destroy');
   }
 
   if (

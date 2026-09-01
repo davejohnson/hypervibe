@@ -164,6 +164,7 @@ function listProviders(ctx: CommandContext): Record<string, unknown> {
         displayName: registered.metadata.displayName,
         category: registered.metadata.category,
         resources: advertisedResources(registered.metadata.name),
+        retainedCleanupResources: [...(registered.retainedCleanup?.resources ?? [])],
         inspectionModes: advertisedInspectionModes(registered.metadata.name),
         connections: connections.map((connection) => ({
           scope: connection.scope,
@@ -263,12 +264,15 @@ function validateStatefulInspectionResult(params: {
   result: Record<string, unknown>;
   limit: number;
 }): void {
-  if (!['database', 'cache', 'storage'].includes(params.resource)) return;
-  const collectionKey = params.resource === 'database'
-    ? 'databases'
-    : params.resource === 'cache'
-      ? 'caches'
-      : 'storage';
+  const collectionKey = params.contract.collectionKey
+    ?? (params.resource === 'database'
+      ? 'databases'
+      : params.resource === 'cache'
+        ? 'caches'
+        : params.resource === 'storage'
+          ? 'storage'
+          : undefined);
+  if (!collectionKey) return;
   const collection = params.result[collectionKey];
   const fail = (reason: string, details: Record<string, unknown> = {}): never => {
     throw new HvError(
@@ -289,6 +293,12 @@ function validateStatefulInspectionResult(params: {
   }
   if (typeof params.result.truncated !== 'boolean' || typeof params.result.partial !== 'boolean') {
     fail('list completeness flags must be explicit booleans.');
+  }
+  if (!['present', 'absent', 'unknown', 'ambiguous'].includes(String(params.result.observation))) {
+    fail('observation must be present, absent, unknown, or ambiguous.');
+  }
+  if (params.result.observation === 'unknown' && params.result.partial !== true) {
+    fail('unknown observation must be marked partial.');
   }
   if (params.result.observation === 'present' && resources.length === 0) {
     fail('observation was present but the collection was empty.');

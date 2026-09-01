@@ -5,6 +5,7 @@ import path from 'path';
 import { SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
+import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import '../../../adapters/providers/aws/ecs-express.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
@@ -242,6 +243,103 @@ describe('PlanService retained-cleanup scope', () => {
     expect(disconnect).toHaveBeenCalledOnce();
     const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
     expect(document).toMatchObject({ scope: 'retained-cleanup', actions: plan.actions });
+  });
+
+  it('plans one exact confirmation-gated provider resource destroy without unrelated actions', async () => {
+    arrangeEnvironment('railway');
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      previousResource: {
+        provider: 'cloudsql',
+        resource: 'backup',
+        externalId: 'projects/gcp-project/backups/backup-123',
+        name: 'backup-123',
+        providerScope: { projectId: 'gcp-project' },
+      },
+    });
+    const currentObserved = await adapterFactory.getProviderAdapter('railway', project);
+    const disconnect = vi.fn(async () => {});
+    vi.mocked(adapterFactory.getProviderAdapter).mockImplementation(async (provider) => provider === 'cloudsql'
+      ? {
+          success: true,
+          adapter: {
+            disconnect,
+            inspectBackupResources: async () => ({
+              observation: 'present',
+              resource: 'backup',
+              backups: [{
+                id: 'projects/gcp-project/backups/backup-123',
+                name: 'backup-123',
+                providerScope: { projectId: 'gcp-project' },
+              }],
+              partial: false,
+              truncated: false,
+            }),
+          },
+        } as never
+      : currentObserved);
+
+    const result = await new PlanService().plan(project, 'production', cleanupOptions);
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions).toEqual([expect.objectContaining({
+      id: 'retained-resource:cloudsql:backup:destroy',
+      type: 'destroy',
+      resource: { kind: 'retained-resource', name: 'backup', provider: 'cloudsql' },
+      verified: true,
+      dataBearing: true,
+      requiresConfirm: true,
+      metadata: {
+        operation: 'retainedResourceDestroy',
+        resource: 'backup',
+        externalId: 'projects/gcp-project/backups/backup-123',
+        name: 'backup-123',
+        providerScope: { projectId: 'gcp-project' },
+      },
+    })]);
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('blocks retained provider-resource deletion when exact observation is partial', async () => {
+    arrangeEnvironment('railway');
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      previousResource: {
+        provider: 'cloudsql',
+        resource: 'backup',
+        externalId: 'projects/gcp-project/backups/backup-123',
+        name: 'backup-123',
+        providerScope: { projectId: 'gcp-project' },
+      },
+    });
+    const currentObserved = await adapterFactory.getProviderAdapter('railway', project);
+    vi.mocked(adapterFactory.getProviderAdapter).mockImplementation(async (provider) => provider === 'cloudsql'
+      ? {
+          success: true,
+          adapter: {
+            disconnect: async () => {},
+            inspectBackupResources: async () => ({
+              observation: 'unknown',
+              resource: 'backup',
+              backups: [],
+              partial: true,
+              truncated: false,
+            }),
+          },
+        } as never
+      : currentObserved);
+
+    const result = await new PlanService().plan(project, 'production', cleanupOptions);
+
+    expect(result).not.toHaveProperty('error');
+    const plan = result as Exclude<typeof result, { error: string }>;
+    expect(plan.actions).toEqual([expect.objectContaining({
+      id: 'retained-resource:cloudsql:backup:destroy',
+      verified: false,
+      metadata: expect.objectContaining({ blockedReason: 'retained_resource_observation_unknown' }),
+    })]);
+    expect(plan.warnings.join('\n')).toMatch(/incomplete or unknown observation/i);
   });
 
   it('blocks retained database deletion when live observation omits durable provider scope', async () => {

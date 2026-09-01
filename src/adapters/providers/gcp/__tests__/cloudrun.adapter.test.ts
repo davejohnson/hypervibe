@@ -9,6 +9,215 @@ describe('CloudRunAdapter', () => {
     vi.restoreAllMocks();
 });
 
+  it('inventories Artifact Registry repositories in the explicitly selected region', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      credentials: JSON.stringify({
+        type: 'service_account', project_id: 'gcp-project', private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations/us-west1/repositories?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ repositories: [{
+          name: 'projects/gcp-project/locations/us-west1/repositories/infraprint',
+          format: 'DOCKER',
+          sizeBytes: '12884901888',
+        }] });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.inspectArtifactResources({ resource: 'artifact', region: 'us-west1', limit: 25 });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      resource: 'artifact',
+      region: 'us-west1',
+      artifacts: [{
+        id: 'projects/gcp-project/locations/us-west1/repositories/infraprint',
+        name: 'infraprint',
+        format: 'DOCKER',
+        sizeBytes: '12884901888',
+        providerScope: { projectId: 'gcp-project', location: 'us-west1' },
+      }],
+      partial: false,
+    });
+  });
+
+  it('discovers Artifact Registry repositories across all project locations by default', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      credentials: JSON.stringify({
+        type: 'service_account', project_id: 'gcp-project', private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations?pageSize=100' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ locations: [
+          { name: 'projects/gcp-project/locations/us-central1' },
+          { name: 'projects/gcp-project/locations/europe-west1' },
+        ] });
+      }
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations/us-central1/repositories?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ repositories: [] });
+      }
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations/europe-west1/repositories?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ repositories: [{
+          name: 'projects/gcp-project/locations/europe-west1/repositories/legacy-images',
+          format: 'DOCKER',
+        }] });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.inspectArtifactResources({ resource: 'artifact', limit: 25 });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      region: 'all',
+      artifacts: [{
+        id: 'projects/gcp-project/locations/europe-west1/repositories/legacy-images',
+        providerScope: { projectId: 'gcp-project', location: 'europe-west1' },
+      }],
+      partial: false,
+    });
+  });
+
+  it('does not report Artifact Registry absence when one project location cannot be observed', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      credentials: JSON.stringify({
+        type: 'service_account', project_id: 'gcp-project', private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations?pageSize=100' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ locations: [
+          { name: 'projects/gcp-project/locations/us-central1' },
+          { name: 'projects/gcp-project/locations/europe-west1' },
+        ] });
+      }
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations/us-central1/repositories?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ repositories: [] });
+      }
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations/europe-west1/repositories?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
+        return new Response('permission denied', { status: 403 });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.inspectArtifactResources({ resource: 'artifact', limit: 25 });
+
+    expect(result).toMatchObject({
+      observation: 'unknown',
+      artifacts: [],
+      partial: true,
+      warnings: [expect.stringContaining('europe-west1: 403 permission denied')],
+    });
+  });
+
+  it('fails project-wide Artifact Registry inventory when locations cannot be enumerated', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      credentials: JSON.stringify({
+        type: 'service_account', project_id: 'gcp-project', private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('forbidden', { status: 403 })));
+
+    await expect(adapter.inspectArtifactResources({ resource: 'artifact', limit: 25 }))
+      .rejects.toThrow('Artifact Registry location inventory failed: 403 forbidden');
+  });
+
+  it('derives Artifact Registry location from an exact durable id', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      credentials: JSON.stringify({
+        type: 'service_account', project_id: 'gcp-project', private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    const id = 'projects/gcp-project/locations/europe-west1/repositories/legacy-images';
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === `https://artifactregistry.googleapis.com/v1/${id}` && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ name: id, format: 'DOCKER' });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.inspectArtifactResources({ resource: 'artifact', id, limit: 1 });
+
+    expect(result).toMatchObject({
+      observation: 'present',
+      artifacts: [{ id, providerScope: { projectId: 'gcp-project', location: 'europe-west1' } }],
+      partial: false,
+    });
+  });
+
+  it('deletes one exact Artifact Registry repository and verifies terminal absence', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      credentials: JSON.stringify({
+        type: 'service_account', project_id: 'gcp-project', private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    let deleted = false;
+    const id = 'projects/gcp-project/locations/us-central1/repositories/infraprint';
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url === `https://artifactregistry.googleapis.com/v1/${id}` && method === 'GET') {
+        return deleted ? new Response('missing', { status: 404 }) : Response.json({ name: id, format: 'DOCKER' });
+      }
+      if (url === `https://artifactregistry.googleapis.com/v1/${id}` && method === 'DELETE') {
+        deleted = true;
+        return Response.json({
+          name: 'projects/gcp-project/locations/us-central1/operations/delete-repo',
+          done: true,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const receipt = await adapter.destroyRetainedArtifactRepository({
+      resource: 'artifact',
+      id,
+      providerScope: { projectId: 'gcp-project', location: 'us-central1' },
+    });
+
+    expect(receipt.success).toBe(true);
+    expect(deleted).toBe(true);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(true);
+  });
+
   it('preserves provider errors in deployment-status observations', async () => {
     const adapter = new CloudRunAdapter();
     await adapter.connect({

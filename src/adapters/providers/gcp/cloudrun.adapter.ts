@@ -274,6 +274,30 @@ interface CloudRunOperation {
   };
 }
 
+interface ArtifactRepository {
+  name: string;
+  format?: string;
+  description?: string;
+  createTime?: string;
+  updateTime?: string;
+  sizeBytes?: string;
+  mode?: string;
+}
+
+interface ArtifactRepositoryList {
+  repositories?: ArtifactRepository[];
+  nextPageToken?: string;
+}
+
+interface ArtifactLocation {
+  name?: string;
+}
+
+interface ArtifactLocationList {
+  locations?: ArtifactLocation[];
+  nextPageToken?: string;
+}
+
 interface IamBinding {
   role?: string;
   members?: string[];
@@ -2245,6 +2269,185 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
     };
   }
 
+  async inspectArtifactResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    if (request.region) this.configureTarget({ region: request.region });
+    const selectedId = request.id?.trim();
+    if (selectedId) {
+      const identity = this.artifactRepositoryIdentity(selectedId);
+      if (!identity) {
+        throw new Error(`Artifact Registry repository id must match projects/${this.credentials.projectId}/locations/{location}/repositories/{repository}.`);
+      }
+      this.configureTarget({ region: identity.location });
+      const repository = await this.getArtifactRepository(selectedId);
+      return {
+        observation: repository ? 'present' : 'absent',
+        resource: 'artifact',
+        project: { id: this.credentials.projectId },
+        artifacts: repository ? [this.inspectedArtifactRepository(repository)] : [],
+        ...(repository ? {} : { id: selectedId }),
+        truncated: false,
+        partial: false,
+      };
+    }
+
+    const token = await this.getAccessToken();
+    const { projectId } = this.credentials;
+    const locations = request.region
+      ? [request.region]
+      : await this.listArtifactRegistryLocations(token);
+    const candidates: ArtifactRepository[] = [];
+    const warnings: string[] = [];
+    let truncated = false;
+
+    for (let locationIndex = 0; locationIndex < locations.length; locationIndex++) {
+      const location = locations[locationIndex]!;
+      const locationCandidates: ArtifactRepository[] = [];
+      let locationTruncated = false;
+      try {
+        let pageToken: string | undefined;
+        const seenPageTokens = new Set<string>();
+        for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+          const query = new URLSearchParams({ pageSize: String(Math.min(request.limit, 100)) });
+          if (pageToken) query.set('pageToken', pageToken);
+          const parent = `projects/${projectId}/locations/${location}`;
+          const response = await fetch(
+            `https://artifactregistry.googleapis.com/v1/${parent}/repositories?${query.toString()}`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (!response.ok) {
+            const body = (await response.text()).slice(0, 500);
+            throw new Error(`${response.status}${body ? ` ${body}` : ''}`);
+          }
+          const page = await response.json() as ArtifactRepositoryList;
+          for (const repository of page.repositories ?? []) {
+            const identity = this.artifactRepositoryIdentity(repository.name);
+            if (!identity || identity.location !== location) {
+              throw new Error(`returned an invalid repository identity: ${repository.name}`);
+            }
+            if (!request.name || repository.name === request.name || identity.repository === request.name) {
+              locationCandidates.push(repository);
+            }
+          }
+
+          if (!request.name && candidates.length + locationCandidates.length > request.limit) {
+            locationTruncated = true;
+            break;
+          }
+          if (request.name && candidates.length + locationCandidates.length > 1) {
+            locationTruncated = Boolean(page.nextPageToken) || locationIndex < locations.length - 1;
+            break;
+          }
+
+          pageToken = page.nextPageToken;
+          if (!pageToken) break;
+          if (seenPageTokens.has(pageToken)) {
+            throw new Error('returned a repeated page token');
+          }
+          seenPageTokens.add(pageToken);
+          if (pageNumber === 99) {
+            throw new Error('exceeded the bounded repository inventory page limit');
+          }
+        }
+        candidates.push(...locationCandidates);
+        truncated = truncated || locationTruncated;
+      } catch (error) {
+        if (request.region) {
+          throw new Error(`Artifact Registry repository inventory failed in ${location}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        warnings.push(`Artifact Registry repository inventory failed in ${location}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      if (truncated || (request.name && candidates.length > 1)) break;
+    }
+
+    const artifacts = candidates.slice(0, request.limit).map((repository) => this.inspectedArtifactRepository(repository));
+    const incompleteNameSearch = Boolean(request.name && warnings.length > 0);
+    return {
+      observation: request.name && candidates.length > 1
+        ? 'ambiguous'
+        : incompleteNameSearch
+        ? 'unknown'
+        : artifacts.length > 0
+        ? 'present'
+        : warnings.length > 0
+        ? 'unknown'
+        : 'absent',
+      resource: 'artifact',
+      project: { id: projectId },
+      region: request.region ?? 'all',
+      artifacts,
+      ...(request.name ? { name: request.name } : {}),
+      truncated: truncated || candidates.length > request.limit,
+      partial: warnings.length > 0,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
+  }
+
+  async destroyRetainedArtifactRepository(target: {
+    resource: string;
+    id: string;
+    providerScope: Record<string, string>;
+  }): Promise<Receipt> {
+    if (!this.credentials) return { success: false, message: 'Not connected' };
+    const location = target.providerScope.location;
+    if (location) this.configureTarget({ region: location });
+    if (
+      target.resource !== 'artifact'
+      || target.providerScope.projectId !== this.credentials.projectId
+      || target.providerScope.location !== this.credentials.region
+      || !this.isArtifactRepositoryName(target.id)
+    ) {
+      return {
+        success: false,
+        message: 'Artifact Registry deletion target is invalid',
+        error: 'The exact repository id, project, or location does not match the connected provider scope.',
+      };
+    }
+    try {
+      const before = await this.getArtifactRepository(target.id);
+      if (!before) return { success: true, message: `Artifact Registry repository is already absent: ${target.id}` };
+      if (before.name !== target.id) {
+        return { success: false, message: 'Artifact Registry returned a different repository identity', error: 'No deletion was attempted.' };
+      }
+      const token = await this.getAccessToken();
+      const response = await fetch(`https://artifactregistry.googleapis.com/v1/${target.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.status === 404) return { success: true, message: `Artifact Registry repository is already absent: ${target.id}` };
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Artifact Registry repository delete failed: ${response.status} ${body}`);
+      }
+      const operation = await response.json() as CloudRunOperation;
+      await this.waitForArtifactRegistryOperation(token, operation, 'repository delete');
+      const attempts = Math.max(1, Number(process.env.HYPERVIBE_ARTIFACT_DELETE_ATTEMPTS ?? 60));
+      const delayMs = Math.max(0, Number(process.env.HYPERVIBE_ARTIFACT_DELETE_DELAY_MS ?? 1000));
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (!await this.getArtifactRepository(target.id)) {
+          return { success: true, message: `Deleted Artifact Registry repository: ${target.id}` };
+        }
+        if (attempt < attempts - 1 && delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+      return {
+        success: false,
+        message: 'Artifact Registry accepted repository deletion but it remains present',
+        error: `${target.id} remained observable after ${attempts} checks.`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to delete Artifact Registry repository',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   async observeMaintenanceWorkload(
     environment: Environment,
     serviceId: string,
@@ -2977,6 +3180,129 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
     if (!value) return undefined;
     const parts = value.split('/').filter(Boolean);
     return parts[parts.length - 1];
+  }
+
+  private isArtifactRepositoryName(name: string): boolean {
+    const identity = this.artifactRepositoryIdentity(name);
+    return Boolean(identity && this.credentials && identity.location === this.credentials.region);
+  }
+
+  private artifactRepositoryIdentity(name: string): { location: string; repository: string } | null {
+    if (!this.credentials) return null;
+    const match = /^projects\/([^/]+)\/locations\/([^/]+)\/repositories\/([^/]+)$/.exec(name);
+    if (!match || match[1] !== this.credentials.projectId) return null;
+    return { location: match[2]!, repository: match[3]! };
+  }
+
+  private async listArtifactRegistryLocations(token: string): Promise<string[]> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const { projectId } = this.credentials;
+    const locations: string[] = [];
+    const seenLocations = new Set<string>();
+    const seenPageTokens = new Set<string>();
+    let pageToken: string | undefined;
+
+    for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+      const query = new URLSearchParams({ pageSize: '100' });
+      if (pageToken) query.set('pageToken', pageToken);
+      const response = await fetch(
+        `https://artifactregistry.googleapis.com/v1/projects/${projectId}/locations?${query.toString()}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!response.ok) {
+        const body = (await response.text()).slice(0, 500);
+        throw new Error(`Artifact Registry location inventory failed: ${response.status}${body ? ` ${body}` : ''}`);
+      }
+      const page = await response.json() as ArtifactLocationList;
+      for (const location of page.locations ?? []) {
+        const match = /^projects\/([^/]+)\/locations\/([^/]+)$/.exec(location.name ?? '');
+        if (!match || match[1] !== projectId) {
+          throw new Error(`Artifact Registry returned an invalid location identity: ${location.name ?? '(missing)'}`);
+        }
+        const locationId = match[2]!;
+        if (!seenLocations.has(locationId)) {
+          seenLocations.add(locationId);
+          locations.push(locationId);
+        }
+      }
+
+      pageToken = page.nextPageToken;
+      if (!pageToken) return locations;
+      if (seenPageTokens.has(pageToken)) {
+        throw new Error('Artifact Registry location inventory returned a repeated page token');
+      }
+      seenPageTokens.add(pageToken);
+      if (pageNumber === 99) {
+        throw new Error('Artifact Registry location inventory exceeded the bounded page limit');
+      }
+    }
+
+    throw new Error('Artifact Registry location inventory did not converge');
+  }
+
+  private async getArtifactRepository(name: string): Promise<ArtifactRepository | null> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    if (!this.isArtifactRepositoryName(name)) {
+      throw new Error(`Artifact Registry repository id must match projects/${this.credentials.projectId}/locations/${this.credentials.region}/repositories/{repository}.`);
+    }
+    const token = await this.getAccessToken();
+    const response = await fetch(`https://artifactregistry.googleapis.com/v1/${name}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Artifact Registry repository lookup failed: ${response.status} ${body}`);
+    }
+    return await response.json() as ArtifactRepository;
+  }
+
+  private inspectedArtifactRepository(repository: ArtifactRepository): Record<string, unknown> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const identity = this.artifactRepositoryIdentity(repository.name);
+    if (!identity) throw new Error(`Artifact Registry returned an invalid repository identity: ${repository.name}`);
+    return {
+      id: repository.name,
+      name: this.lastPathSegment(repository.name) ?? repository.name,
+      providerScope: {
+        projectId: this.credentials.projectId,
+        location: identity.location,
+      },
+      format: repository.format ?? null,
+      mode: repository.mode ?? null,
+      description: repository.description ?? null,
+      createTime: repository.createTime ?? null,
+      updateTime: repository.updateTime ?? null,
+      sizeBytes: repository.sizeBytes ?? null,
+      cleanupSupported: true,
+    };
+  }
+
+  private async waitForArtifactRegistryOperation(
+    token: string,
+    operation: CloudRunOperation,
+    description: string
+  ): Promise<void> {
+    if (!operation.name || !operation.name.includes('/operations/')) return;
+    let current = operation;
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      if (current.done) {
+        if (current.error) {
+          throw new Error(`Artifact Registry ${description} failed: ${current.error.status ?? current.error.code ?? 'unknown'} ${current.error.message ?? ''}`.trim());
+        }
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const response = await fetch(`https://artifactregistry.googleapis.com/v1/${current.name}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Artifact Registry ${description} operation lookup failed: ${response.status} ${body}`);
+      }
+      current = await response.json() as CloudRunOperation;
+    }
+    throw new Error(`Artifact Registry ${description} did not finish before timeout`);
   }
 
   private escapeLoggingValue(value: string): string {
@@ -4442,13 +4768,25 @@ providerRegistry.register({
     return adapter;
   },
   inspection: {
-    resources: ['environment'],
+    resources: ['environment', 'artifact'],
     defaultResource: 'environment',
     selectors: {
       environment: { mode: 'environment-forensics', required: ['project', 'env'], optional: ['scope', 'region', 'limit'], list: true },
+      artifact: {
+        mode: 'provider-resource',
+        optional: ['project', 'scope', 'id', 'name', 'region', 'limit'],
+        mutuallyExclusive: [['id', 'name']],
+        list: true,
+        scopeKeys: ['projectId', 'location'],
+        collectionKey: 'artifacts',
+      },
     },
-    inspect: (adapter, request) => (
-      adapter as CloudRunAdapter
-    ).inspectEnvironmentResources(request),
+    inspect: (adapter, request) => request.resource === 'artifact'
+      ? (adapter as CloudRunAdapter).inspectArtifactResources(request)
+      : (adapter as CloudRunAdapter).inspectEnvironmentResources(request),
+  },
+  retainedCleanup: {
+    resources: ['artifact'],
+    destroy: (adapter, target) => (adapter as CloudRunAdapter).destroyRetainedArtifactRepository(target),
   },
 });

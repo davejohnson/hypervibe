@@ -3,6 +3,7 @@ import type { ProviderCiDeployMetadata } from '../ports/ci-deploy.port.js';
 import type { ProviderDatabaseRestoreDrillMetadata } from '../ports/database-restore-drill.port.js';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
+import type { Receipt } from '../ports/provider.port.js';
 
 export type ProviderCategory = 'deployment' | 'dns' | 'email' | 'messaging' | 'payment' | 'database' | 'cache' | 'storage' | 'appstore' | 'ai';
 export type ProviderLifecycleCapability = 'hosting' | 'database' | 'cache' | 'storage';
@@ -54,6 +55,8 @@ export interface ProviderInspectionSelectorContract {
   list?: boolean;
   /** Durable non-secret scope keys every returned identity must carry. */
   scopeKeys?: readonly string[];
+  /** Result field containing the bounded resource collection. */
+  collectionKey?: string;
 }
 
 export interface ProviderInspectionCapability {
@@ -64,6 +67,19 @@ export interface ProviderInspectionCapability {
   /** Provider-owned selector contract exposed by parameterless hv_inspect discovery. */
   selectors: Readonly<Record<string, ProviderInspectionSelectorContract>>;
   inspect(adapter: unknown, request: ProviderInspectionRequest): Promise<Record<string, unknown>>;
+}
+
+export interface ProviderRetainedResourceTarget {
+  resource: string;
+  id: string;
+  name: string;
+  providerScope: Record<string, string>;
+}
+
+export interface ProviderRetainedCleanupCapability {
+  /** Extra provider-owned resource classes eligible for exact, confirmation-gated cleanup. */
+  resources: readonly string[];
+  destroy(adapter: unknown, target: ProviderRetainedResourceTarget): Promise<Receipt>;
 }
 
 export interface ProviderMetadata {
@@ -174,6 +190,8 @@ export interface RegisteredProvider {
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
   inspection?: ProviderInspectionCapability;
+  /** Provider-owned deletion driver for explicitly retained non-lifecycle resources. */
+  retainedCleanup?: ProviderRetainedCleanupCapability;
   /** Existing infrastructure can be adopted only when a provider declares and tests this capability. */
   adoption?: {
     project: true;
@@ -237,6 +255,40 @@ export class ProviderRegistry {
         }
         if (new Set(contract.scopeKeys ?? []).size !== (contract.scopeKeys?.length ?? 0)) {
           throw new Error(`Provider "${provider.metadata.name}" inspection resource "${resource}" has duplicate provider scope keys.`);
+        }
+      }
+    }
+
+    const retainedCleanup = provider.retainedCleanup;
+    if (retainedCleanup) {
+      const resources = new Set(retainedCleanup.resources);
+      if (resources.size !== retainedCleanup.resources.length || resources.size === 0) {
+        throw new Error(`Provider "${provider.metadata.name}" retained cleanup resources must be non-empty and unique.`);
+      }
+      for (const resource of retainedCleanup.resources) {
+        const contract = inspection?.selectors[resource];
+        const accepted = new Set([
+          ...(contract?.required ?? []),
+          ...(contract?.optional ?? []),
+          ...(contract?.oneOf?.flat() ?? []),
+        ]);
+        const idAndNameExclusive = contract?.mutuallyExclusive?.some((group) => (
+          group.includes('id') && group.includes('name')
+        ));
+        if (
+          !inspection?.resources.includes(resource)
+          || contract?.mode !== 'provider-resource'
+          || contract.list !== true
+          || !accepted.has('id')
+          || !accepted.has('name')
+          || !accepted.has('limit')
+          || !idAndNameExclusive
+          || (contract.scopeKeys?.length ?? 0) === 0
+          || !contract.collectionKey?.trim()
+        ) {
+          throw new Error(
+            `Provider "${provider.metadata.name}" declares retained cleanup for "${resource}" without bounded exact-id/name inspection, durable scope, and a collection key.`
+          );
         }
       }
     }
