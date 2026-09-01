@@ -427,6 +427,17 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           adminAuth,
           adminCredentialsJson: resolvedAdminCredentialsJson,
           adminAccessToken: resolvedAdminAccessToken,
+          adminCredentialSource: adminAuth === 'default'
+            ? 'application-default'
+            : adminCredentialsJsonRef
+              ? `service-account-${refKind(adminCredentialsJsonRef)}`
+              : adminCredentialsJson
+                ? 'service-account-inline'
+                : adminAccessTokenRef
+                  ? `access-token-${refKind(adminAccessTokenRef)}`
+                  : adminAccessToken
+                    ? 'access-token-inline'
+                    : undefined,
           confirm,
         });
         if (!payload.success) {
@@ -473,7 +484,12 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           });
         }
 
-        const saved = await saveConnection(provider, credentialsToSave, scope);
+        const credentialsSource = credentialsRef
+          ? refKind(credentialsRef)
+          : !credentials && nativeCliAuth
+            ? 'native-cli'
+            : 'inline';
+        const saved = await saveConnection(provider, credentialsToSave, scope, { credentialsSource });
         if (!saved.success) {
           return commandError('VALIDATION', saved.error!, {
             details: setupDetails(provider, scope, project?.name),
@@ -496,8 +512,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           scope: scope || 'global',
           status: 'verified',
           message: verified.message,
-          ...(credentialsRef ? { credentialsSource: refKind(credentialsRef) } : {}),
-          ...(!credentials && !credentialsRef && nativeCliAuth ? { credentialsSource: 'native-cli' } : {}),
+          credentialsSource,
           ...verified.data,
           ...(saved.dependenciesInstalled ? { dependenciesInstalled: saved.dependenciesInstalled } : {}),
           ...(saved.dependencyErrors ? { dependencyErrors: saved.dependencyErrors } : {}),

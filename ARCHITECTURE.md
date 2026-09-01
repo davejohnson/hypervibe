@@ -540,7 +540,15 @@ confirmation. It accepts `adminAuth: "default"` so an operator's existing
 Google Application Default Credentials can perform the one-time API/IAM work
 without manufacturing or exporting another credential. Explicit access-token
 and service-account references remain supported when a distinct automation
-identity is intentional; none of these admin credentials are stored.
+identity is intentional; none of these admin credentials are stored. Connection
+creation audit events retain only the non-secret credential source kind, and
+cloud preparation audit events retain only the authentication source kind,
+target project/service account, requested capability, and safe outcome
+category. When local ADC is absent, the result must distinguish it from the
+stored deploy service-account credential and return Google's official ADC URL,
+the exact `gcloud auth application-default` commands, project-scoped roles and
+permissions, the official Cloud CLI installation path when `gcloud` is absent,
+caveats, and the complete safe retry call.
 
 When adding or changing token guidance, include all of these details:
 

@@ -30,6 +30,8 @@ export type AuditAction =
   | 'connection.created'
   | 'connection.verified'
   | 'connection.failed'
+  | 'cloud.prepare.succeeded'
+  | 'cloud.prepare.failed'
   | 'deploy.started'
   | 'deploy.succeeded'
   | 'deploy.failed'

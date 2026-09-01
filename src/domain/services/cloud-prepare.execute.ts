@@ -1,5 +1,6 @@
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GoogleAuth } from 'google-auth-library';
 import type { Project } from '../entities/project.entity.js';
@@ -14,6 +15,20 @@ import {
 
 const connectionRepo = new ConnectionRepository();
 const projectRepo = new ProjectRepository();
+const auditRepo = new AuditRepository();
+
+const GCP_ADC_SETUP_URL = 'https://cloud.google.com/docs/authentication/set-up-adc-local-dev-environment';
+const GCP_CLOUD_CLI_INSTALL_URL = 'https://cloud.google.com/sdk/docs/install';
+const GCP_CLOUD_PLATFORM_SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
+const REQUIRED_ADMIN_PERMISSIONS = [
+  'serviceusage.services.enable',
+  'resourcemanager.projects.getIamPolicy',
+  'resourcemanager.projects.setIamPolicy',
+] as const;
+const REQUIRED_ADMIN_ROLES = [
+  'roles/serviceusage.serviceUsageAdmin',
+  'roles/resourcemanager.projectIamAdmin',
+] as const;
 
 interface ServiceAccountCredentials {
   type?: string;
@@ -58,6 +73,7 @@ export async function runCloudPrepare(params: {
   adminCredentialsJson?: string;
   adminAccessToken?: string;
   adminAuth?: 'default';
+  adminCredentialSource?: string;
   gcsAccess?: GcsPrepareAccess;
   defaultAdminAccessTokenProvider?: () => Promise<string>;
   confirm?: boolean;
@@ -70,6 +86,7 @@ export async function runCloudPrepare(params: {
     adminCredentialsJson,
     adminAccessToken,
     adminAuth,
+    adminCredentialSource,
     gcsAccess,
     confirm = false,
   } = params;
@@ -130,9 +147,7 @@ export async function runCloudPrepare(params: {
       error: 'confirm=true requires adminAuth="default", adminCredentialsJsonRef/adminCredentialsJson, or adminAccessTokenRef/adminAccessToken. The deploy service account cannot grant itself project IAM.',
       plan,
       requiredAdminPermissions: [
-        'serviceusage.services.enable',
-        'resourcemanager.projects.getIamPolicy',
-        'resourcemanager.projects.setIamPolicy',
+        ...REQUIRED_ADMIN_PERMISSIONS,
       ],
     };
   }
@@ -165,6 +180,16 @@ export async function runCloudPrepare(params: {
       }),
     });
 
+    auditRepo.create({
+      action: 'cloud.prepare.succeeded',
+      resourceType: 'project',
+      resourceId: project.id,
+      details: cloudPrepareAuditDetails({
+        plan,
+        authenticationSource: adminCredentialSource ?? inferAdminCredentialSource(params),
+      }),
+    });
+
     return {
       success: true,
       message: 'Cloud prepared for Hypervibe deploys.',
@@ -185,15 +210,32 @@ export async function runCloudPrepare(params: {
       ],
     };
   } catch (error) {
+    const failureCategory = classifyPrepareError(error, adminAuth);
+    auditRepo.create({
+      action: 'cloud.prepare.failed',
+      resourceType: 'project',
+      resourceId: project.id,
+      details: cloudPrepareAuditDetails({
+        plan,
+        authenticationSource: adminCredentialSource ?? inferAdminCredentialSource(params),
+        failureCategory,
+      }),
+    });
     return {
       success: false,
-      error: describePrepareError(error),
+      error: describePrepareError(error, {
+        adminAuth,
+        gcpProjectId: resolved.gcpProjectId,
+        deployServiceAccountEmail: resolved.deployServiceAccountEmail,
+      }),
       plan,
-      requiredAdminPermissions: [
-        'serviceusage.services.enable',
-        'resourcemanager.projects.getIamPolicy',
-        'resourcemanager.projects.setIamPolicy',
-      ],
+      requiredAdminPermissions: [...REQUIRED_ADMIN_PERMISSIONS],
+      adminCredentialSetup: cloudPrepareAdminCredentialSetup({
+        projectName: project.name,
+        provider: profile.provider,
+        gcpProjectId: resolved.gcpProjectId,
+        gcsAccess,
+      }),
     };
   }
 }
@@ -240,15 +282,127 @@ function resolveGcpBootstrapTarget(params: {
   };
 }
 
-function describePrepareError(error: unknown): string {
+function describePrepareError(error: unknown, context: {
+  adminAuth?: 'default';
+  gcpProjectId: string;
+  deployServiceAccountEmail: string;
+}): string {
   const message = error instanceof Error ? error.message : String(error);
-  if (/setIamPolicy|set iam policy|resourcemanager\.projects\.setIamPolicy|permission/i.test(message)) {
-    return `${message}. Use different admin credentials with permission to update project IAM.`;
+  if (context.adminAuth === 'default' && isMissingDefaultCredentialsError(message)) {
+    return `Google Application Default Credentials are not configured for Hypervibe. The stored deploy connection authenticates as ${context.deployServiceAccountEmail}, but that service account cannot grant itself new project IAM roles. Run "gcloud auth application-default login" with a Google user that can administer project ${context.gcpProjectId}, then retry the same confirmed hv_connections preparation call.`;
   }
-  if (/serviceusage|services\.enable|enable .*api|permission/i.test(message)) {
+  if (/serviceusage|services\.enable|enable .*api/i.test(message)) {
     return `${message}. Use different admin credentials with permission to enable GCP services/APIs.`;
   }
+  if (/setIamPolicy|set iam policy|resourcemanager\.projects\.(?:getIamPolicy|setIamPolicy)|project IAM policy/i.test(message)) {
+    return `${message}. Use different admin credentials with permission to update project IAM.`;
+  }
+  if (/permission/i.test(message)) {
+    return `${message}. Use an admin identity with the project-scoped permissions listed in adminCredentialSetup.`;
+  }
   return message;
+}
+
+function isMissingDefaultCredentialsError(message: string): boolean {
+  return /could not load (?:the )?default credentials|default credentials.*(?:not found|unavailable)|application default credentials did not return an access token/i.test(message);
+}
+
+function classifyPrepareError(error: unknown, adminAuth?: 'default'): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (adminAuth === 'default' && isMissingDefaultCredentialsError(message)) {
+    return 'missing_application_default_credentials';
+  }
+  if (/setIamPolicy|set iam policy|resourcemanager\.projects\.(?:getIamPolicy|setIamPolicy)|project IAM policy/i.test(message)) {
+    return 'project_iam_failed';
+  }
+  if (/serviceusage|services\.enable|enable .*api/i.test(message)) {
+    return 'service_enablement_failed';
+  }
+  return 'provider_error';
+}
+
+function inferAdminCredentialSource(params: {
+  adminCredentialsJson?: string;
+  adminAccessToken?: string;
+  adminAuth?: 'default';
+}): string {
+  if (params.adminAuth === 'default') return 'application-default';
+  if (params.adminCredentialsJson) return 'service-account';
+  if (params.adminAccessToken) return 'access-token';
+  return 'none';
+}
+
+function cloudPrepareAuditDetails(params: {
+  plan: Record<string, unknown>;
+  authenticationSource: string;
+  failureCategory?: string;
+}): Record<string, unknown> {
+  return {
+    provider: params.plan.provider,
+    version: params.plan.version,
+    gcpProjectId: params.plan.gcpProjectId,
+    deployServiceAccountEmail: params.plan.deployServiceAccountEmail,
+    ...(params.plan.gcsAccess ? { gcsAccess: params.plan.gcsAccess } : {}),
+    authenticationSource: params.authenticationSource,
+    ...(params.failureCategory ? { failureCategory: params.failureCategory } : {}),
+  };
+}
+
+function cloudPrepareAdminCredentialSetup(params: {
+  projectName: string;
+  provider: string;
+  gcpProjectId: string;
+  gcsAccess?: GcsPrepareAccess;
+}): Record<string, unknown> {
+  const retryCall = {
+    project: params.projectName,
+    provider: params.provider,
+    action: 'prepare',
+    ...(params.gcsAccess ? { gcsAccess: params.gcsAccess } : {}),
+    adminAuth: 'default',
+    confirm: true,
+  };
+  const credentialExample = [
+    'hv_connections',
+    `project="${params.projectName}"`,
+    `provider="${params.provider}"`,
+    'action="prepare"',
+    ...(params.gcsAccess ? [`gcsAccess="${params.gcsAccess}"`] : []),
+    'adminAuth="default"',
+    'confirm=true',
+  ].join(' ');
+  return {
+    credentialType: 'Google user Application Default Credentials (ADC)',
+    recommendedSetupUrl: GCP_ADC_SETUP_URL,
+    setupUrls: [{
+      label: 'Set up ADC for a local development environment',
+      url: GCP_ADC_SETUP_URL,
+    }, {
+      label: 'Install the Google Cloud CLI',
+      url: GCP_CLOUD_CLI_INSTALL_URL,
+    }],
+    gcloudCli: {
+      requiredWhen: 'gcloud is not installed or not available on PATH',
+      officialInstallUrl: GCP_CLOUD_CLI_INSTALL_URL,
+      ...(process.platform === 'darwin'
+        ? { macosHomebrewCommand: 'brew install --cask gcloud-cli' }
+        : {}),
+    },
+    commands: ['gcloud auth application-default login'],
+    optionalQuotaProjectCommand: `gcloud auth application-default set-quota-project ${params.gcpProjectId}`,
+    requiredOAuthScopes: [GCP_CLOUD_PLATFORM_SCOPE],
+    requiredPermissions: [...REQUIRED_ADMIN_PERMISSIONS],
+    requiredRoles: [...REQUIRED_ADMIN_ROLES],
+    resourceScope: `projects/${params.gcpProjectId}`,
+    caveats: [
+      'Application Default Credentials are separate from the account selected by gcloud auth login.',
+      'Set the ADC quota project only if Google reports a missing or incorrect quota project.',
+      'The local ADC file contains a refresh token; keep it private and revoke it with gcloud auth application-default revoke when it is no longer needed.',
+      'Hypervibe uses this identity only for the confirmed preparation call and does not copy it into deployed workloads or store its token.',
+    ],
+    credentialExample,
+    retryCall,
+  };
 }
 
 function parseOptionalServiceAccountJson(value?: string): ServiceAccountCredentials | undefined {

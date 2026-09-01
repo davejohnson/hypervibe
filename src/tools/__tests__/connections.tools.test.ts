@@ -10,6 +10,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 // Importing adapters registers providers in the registry.
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
@@ -301,6 +302,11 @@ describe('hv_connections', () => {
     const connection = new ConnectionRepository().findByProvider('railway')!;
     const decrypted = getSecretStore().decryptObject<{ apiToken: string }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('token-from-env-ref');
+    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toEqual({
+      provider: 'railway',
+      scope: null,
+      credentialsSource: 'env',
+    });
     await t.close();
   });
 

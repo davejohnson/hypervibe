@@ -5,6 +5,7 @@ import path from 'path';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { AuditRepository } from '../../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import { runCloudPrepare } from '../cloud-prepare.execute.js';
 
@@ -172,6 +173,69 @@ describe('runCloudPrepare', () => {
         deployServiceAccountEmail: 'hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com',
       },
     });
+    expect(new AuditRepository().findByAction('cloud.prepare.succeeded')[0]?.details).toMatchObject({
+      provider: 'cloudrun',
+      gcpProjectId: 'hls-property-care',
+      deployServiceAccountEmail: 'hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com',
+      gcsAccess: 'inspect',
+      authenticationSource: 'application-default',
+    });
+  });
+
+  it('returns exact ADC recovery guidance and audits only safe failure provenance', async () => {
+    const project = seedProject();
+    const payload = await runCloudPrepare({
+      project,
+      provider: 'cloudrun',
+      gcsAccess: 'inspect',
+      adminAuth: 'default',
+      adminCredentialSource: 'application-default',
+      defaultAdminAccessTokenProvider: async () => {
+        throw new Error('Could not load the default credentials.');
+      },
+      confirm: true,
+    });
+
+    expect(payload.success).toBe(false);
+    expect(String(payload.error)).toContain('stored deploy connection authenticates as hypervibe-hls-deploy@');
+    expect(String(payload.error)).toContain('gcloud auth application-default login');
+    expect(payload.adminCredentialSetup).toMatchObject({
+      credentialType: 'Google user Application Default Credentials (ADC)',
+      recommendedSetupUrl: 'https://cloud.google.com/docs/authentication/set-up-adc-local-dev-environment',
+      gcloudCli: {
+        requiredWhen: 'gcloud is not installed or not available on PATH',
+        officialInstallUrl: 'https://cloud.google.com/sdk/docs/install',
+      },
+      commands: ['gcloud auth application-default login'],
+      optionalQuotaProjectCommand: 'gcloud auth application-default set-quota-project hls-property-care',
+      requiredRoles: [
+        'roles/serviceusage.serviceUsageAdmin',
+        'roles/resourcemanager.projectIamAdmin',
+      ],
+      resourceScope: 'projects/hls-property-care',
+      retryCall: {
+        project: 'hls-property-care',
+        provider: 'cloudrun',
+        action: 'prepare',
+        gcsAccess: 'inspect',
+        adminAuth: 'default',
+        confirm: true,
+      },
+    });
+    expect(String((payload.adminCredentialSetup as Record<string, unknown>).credentialExample))
+      .toContain('adminAuth="default"');
+
+    const audit = new AuditRepository().findByAction('cloud.prepare.failed')[0];
+    expect(audit?.details).toEqual({
+      provider: 'cloudrun',
+      version: 'gcp-cloudrun-v1',
+      gcpProjectId: 'hls-property-care',
+      deployServiceAccountEmail: 'hypervibe-hls-deploy@hls-property-care.iam.gserviceaccount.com',
+      gcsAccess: 'inspect',
+      authenticationSource: 'application-default',
+      failureCategory: 'missing_application_default_credentials',
+    });
+    expect(JSON.stringify(audit)).not.toContain('Could not load the default credentials');
   });
 
   it('requires admin credentials when confirming', async () => {
