@@ -3,7 +3,7 @@ import type { Component } from '../entities/component.entity.js';
 
 export type PlanActionType = 'create' | 'update' | 'replace' | 'destroy' | 'noop';
 
-export type PlanResourceKind = 'project' | 'environment' | 'service' | 'database' | 'cache' | 'storage' | 'load-balancer' | 'domain' | 'email' | 'messaging' | 'ci' | 'repo' | 'ios' | 'queue' | 'secret' | 'payment' | 'maintenance';
+export type PlanResourceKind = 'project' | 'environment' | 'service' | 'database' | 'cache' | 'storage' | 'retained-resource' | 'load-balancer' | 'domain' | 'email' | 'messaging' | 'ci' | 'repo' | 'ios' | 'queue' | 'secret' | 'payment' | 'maintenance';
 
 export interface PlanFieldDiff {
   /** Field name; env vars appear as "env:KEY" with no values. */
@@ -71,6 +71,14 @@ export interface LocalSnapshot {
       provider?: string;
       externalId?: string;
       engine?: string;
+      name?: string;
+      providerScope?: Record<string, string>;
+    };
+    /** Exact extra provider identity retained only for isolated, confirmation-gated cleanup. */
+    previousResource?: {
+      provider?: string;
+      resource?: string;
+      externalId?: string;
       name?: string;
       providerScope?: Record<string, string>;
     };

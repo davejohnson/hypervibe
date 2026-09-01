@@ -16,7 +16,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
   id: z.string().min(1),
   type: z.enum(['create', 'update', 'replace', 'destroy', 'noop']),
   resource: z.object({
-    kind: z.enum(['project', 'environment', 'service', 'database', 'cache', 'storage', 'load-balancer', 'domain', 'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
+    kind: z.enum(['project', 'environment', 'service', 'database', 'cache', 'storage', 'retained-resource', 'load-balancer', 'domain', 'email', 'messaging', 'ci', 'repo', 'ios', 'queue', 'secret', 'payment', 'maintenance']),
     name: z.string().min(1),
     provider: z.string().min(1),
   }),
@@ -59,7 +59,7 @@ export const planRunDocumentSchema = z.object({
 
   const invalidAction = document.actions.find((action) =>
     action.type !== 'destroy'
-    || !['previousHostingDestroy', 'retainedDatabaseDestroy'].includes(String(action.metadata?.operation ?? ''))
+    || !['previousHostingDestroy', 'retainedDatabaseDestroy', 'retainedResourceDestroy'].includes(String(action.metadata?.operation ?? ''))
   );
   if (invalidAction) {
     ctx.addIssue({

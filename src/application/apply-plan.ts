@@ -588,6 +588,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
         || action.metadata?.operation === 'dataMigrationStoragePreviousDestroy'
         || action.metadata?.operation === 'previousHostingDestroy'
         || action.metadata?.operation === 'retainedDatabaseDestroy'
+        || action.metadata?.operation === 'retainedResourceDestroy'
       )
     )
     .map((action) => action.resource.provider);
@@ -1306,6 +1307,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     if (capability === 'database.retained.destroy') {
       return destroyRetainedDatabase(ctx, applyProject, envName, action);
+    }
+    if (capability === 'provider-resource.retained.destroy') {
+      return destroyRetainedResource(ctx, applyProject, envName, action);
     }
     if (capability === 'hosting.task-service.destroy') {
       return destroyTaskService(applyProject, action);
@@ -2467,6 +2471,151 @@ async function destroyRetainedDatabase(
       success: false,
       status: 'blocked',
       message: 'Retained database cleanup could not prove terminal absence',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    await adapterResult.adapter.disconnect?.();
+  }
+}
+
+async function destroyRetainedResource(
+  ctx: CommandContext,
+  project: Project,
+  envName: string,
+  action: PlanAction
+): Promise<ActionResult> {
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, envName);
+  if (!environment) {
+    return { success: false, status: 'blocked', message: 'Retained resource environment is missing', error: `No local environment "${envName}".` };
+  }
+  const retained = asRecord(environment.platformBindings.previousResource);
+  const metadata = asRecord(action.metadata);
+  const provider = stringField(retained, 'provider');
+  const resource = stringField(retained, 'resource');
+  const externalId = stringField(retained, 'externalId');
+  const name = stringField(retained, 'name');
+  const providerScope = asRecord(retained?.providerScope);
+  const plannedScope = asRecord(metadata?.providerScope);
+  if (
+    provider !== action.resource.provider
+    || resource !== action.resource.name
+    || resource !== stringField(metadata, 'resource')
+    || externalId !== stringField(metadata, 'externalId')
+    || name !== stringField(metadata, 'name')
+    || !providerScope
+    || !plannedScope
+    || Object.values(providerScope).some((value) => typeof value !== 'string' || !value)
+    || Object.values(plannedScope).some((value) => typeof value !== 'string' || !value)
+    || sortedRecordJson(providerScope) !== sortedRecordJson(plannedScope)
+  ) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'Retained provider-resource cleanup identity changed after planning',
+      error: 'Re-run hv_plan before deleting any data-bearing provider resource.',
+    };
+  }
+
+  const registration = provider ? providerRegistry.get(provider) : undefined;
+  const contract = resource ? registration?.inspection?.selectors[resource] : undefined;
+  if (!resource || !externalId || !name || !registration?.retainedCleanup?.resources.includes(resource) || !contract?.collectionKey) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'Retained provider-resource cleanup is no longer supported',
+      error: 'The provider registration no longer exposes matching inspection and deletion capabilities. No deletion was attempted.',
+    };
+  }
+  const collectionKey = contract.collectionKey;
+  const adapterResult = await adapterFactory.getProviderAdapter(provider!, project);
+  if (!adapterResult.success || !adapterResult.adapter) {
+    return { success: false, status: 'blocked', message: 'Retained provider adapter unavailable', error: adapterResult.error };
+  }
+
+  const inspectExact = async (): Promise<Record<string, unknown> | null> => {
+    const inspected = await registration.inspection!.inspect(adapterResult.adapter, {
+      resource,
+      id: externalId,
+      region: stringField(providerScope, 'region') ?? stringField(providerScope, 'location'),
+      limit: 1,
+      project: { id: project.id, name: project.name },
+    });
+    const items = Array.isArray(inspected[collectionKey])
+      ? inspected[collectionKey] as unknown[]
+      : [];
+    if (
+      inspected.resource !== resource
+      || inspected.partial !== false
+      || inspected.truncated !== false
+      || !['present', 'absent'].includes(String(inspected.observation))
+    ) {
+      throw new Error('Provider returned an incomplete or unknown retained-resource observation.');
+    }
+    if (inspected.observation === 'absent') {
+      if (items.length > 0) throw new Error('Provider reported absence with a non-empty resource collection.');
+      return null;
+    }
+    const exact = items.filter((item) => (
+      item && typeof item === 'object' && !Array.isArray(item)
+      && (item as Record<string, unknown>).id === externalId
+    ));
+    if (exact.length !== 1) throw new Error(`Provider did not return exactly one retained id ${externalId}.`);
+    const item = exact[0] as Record<string, unknown>;
+    const liveScope = asRecord(item.providerScope);
+    if (!liveScope || sortedRecordJson(liveScope) !== sortedRecordJson(providerScope)) {
+      throw new Error('The live provider scope no longer matches the reviewed binding.');
+    }
+    return item;
+  };
+  const clearBinding = (): void => {
+    const nextBindings = { ...environment.platformBindings };
+    delete nextBindings.previousResource;
+    ctx.repos.environments.update(environment.id, { platformBindings: nextBindings });
+  };
+
+  try {
+    const before = await inspectExact();
+    if (before) {
+      const destroyed = await registration.retainedCleanup.destroy(adapterResult.adapter, {
+        resource,
+        id: externalId,
+        name,
+        providerScope: providerScope as Record<string, string>,
+      });
+      if (!destroyed.success) {
+        return { success: false, message: destroyed.message, error: destroyed.error, data: destroyed.data };
+      }
+      const attempts = Math.max(1, Number(process.env.HYPERVIBE_RETAINED_DELETE_ATTEMPTS ?? 10));
+      const delayMs = Math.max(0, Number(process.env.HYPERVIBE_RETAINED_DELETE_DELAY_MS ?? 1000));
+      let after: Record<string, unknown> | null = before;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        after = await inspectExact();
+        if (!after) break;
+        if (attempt < attempts - 1 && delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+      if (after) {
+        return {
+          success: false,
+          status: 'blocked',
+          message: 'Provider acknowledged deletion but the retained resource is still present',
+          error: `${resource} ${externalId} remains observable; its cleanup binding was preserved.`,
+        };
+      }
+    }
+    clearBinding();
+    return {
+      success: true,
+      message: before
+        ? `Deleted retained ${provider} ${resource} ${externalId} and cleared its cleanup binding`
+        : `Retained ${provider} ${resource} ${externalId} was already absent; cleared its cleanup binding`,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'Retained provider-resource cleanup could not prove terminal absence',
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {

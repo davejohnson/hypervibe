@@ -87,6 +87,26 @@ interface CloudSqlInstanceList {
   nextPageToken?: string;
 }
 
+interface CloudSqlBackup {
+  name: string;
+  description?: string;
+  sourceInstance?: string;
+  type?: string;
+  backupKind?: string;
+  state?: string;
+  databaseVersion?: string;
+  location?: string;
+  instanceDeletionTime?: string;
+  expiryTime?: string;
+  ttlDays?: string | number;
+  maxChargeableBytes?: string;
+}
+
+interface CloudSqlBackupList {
+  backups?: CloudSqlBackup[];
+  nextPageToken?: string;
+}
+
 interface ServiceAccountCredentials {
   type: string;
   project_id: string;
@@ -712,6 +732,120 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     };
   }
 
+  async inspectBackupResources(
+    request: ProviderInspectionRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const selectedId = request.id?.trim();
+    if (selectedId) {
+      const backup = await this.getBackup(selectedId);
+      return {
+        observation: backup ? 'present' : 'absent',
+        resource: 'backup',
+        project: { id: this.credentials.projectId },
+        backups: backup ? [this.inspectedBackup(backup)] : [],
+        ...(backup ? {} : { id: selectedId }),
+        truncated: false,
+        partial: false,
+      };
+    }
+
+    const token = await this.getAccessToken();
+    const response = await fetch(
+      `https://sqladmin.googleapis.com/v1/projects/${encodeURIComponent(this.credentials.projectId)}/backups?pageSize=${request.limit}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Cloud SQL backup inventory failed: ${response.status} ${body}`);
+    }
+    const page = await response.json() as CloudSqlBackupList;
+    const candidates = (page.backups ?? []).filter((backup) => (
+      !request.name || backup.name === request.name || this.lastPathSegment(backup.name) === request.name
+    ));
+    const backups = candidates.slice(0, request.limit).map((backup) => this.inspectedBackup(backup));
+    const incompleteNameSearch = Boolean(request.name && page.nextPageToken);
+    return {
+      observation: incompleteNameSearch
+        ? 'unknown'
+        : request.name && backups.length > 1
+        ? 'ambiguous'
+        : backups.length > 0 ? 'present' : 'absent',
+      resource: 'backup',
+      project: { id: this.credentials.projectId },
+      backups,
+      ...(request.name ? { name: request.name } : {}),
+      truncated: Boolean(page.nextPageToken) || candidates.length > request.limit,
+      partial: incompleteNameSearch,
+    };
+  }
+
+  async destroyRetainedBackup(target: {
+    resource: string;
+    id: string;
+    providerScope: Record<string, string>;
+  }): Promise<Receipt> {
+    if (!this.credentials) return { success: false, message: 'Not connected' };
+    if (
+      target.resource !== 'backup'
+      || target.providerScope.projectId !== this.credentials.projectId
+      || !this.isBackupResourceName(target.id)
+    ) {
+      return {
+        success: false,
+        message: 'Cloud SQL backup deletion target is invalid',
+        error: 'The exact backup id or project scope does not match the connected project.',
+      };
+    }
+    try {
+      const before = await this.getBackup(target.id);
+      if (!before) return { success: true, message: `Cloud SQL backup is already absent: ${target.id}` };
+      if (before.name !== target.id) {
+        return { success: false, message: 'Cloud SQL returned a different backup identity', error: 'No deletion was attempted.' };
+      }
+      if (!before.instanceDeletionTime) {
+        return {
+          success: false,
+          message: 'Cloud SQL backup belongs to a live instance',
+          error: 'Retained-resource cleanup will not delete a backup for a live instance; the source instance deletion time must be present.',
+        };
+      }
+      const token = await this.getAccessToken();
+      const response = await fetch(`https://sqladmin.googleapis.com/v1/${target.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.status === 404) return { success: true, message: `Cloud SQL backup is already absent: ${target.id}` };
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Cloud SQL backup delete failed: ${response.status} ${body}`);
+      }
+      const operation = await response.json() as CloudSqlOperation;
+      if (operation.name) await this.waitForOperation(token, operation.name, 'backup delete');
+      const attempts = Math.max(1, Number(process.env.HYPERVIBE_CLOUDSQL_DELETE_ATTEMPTS ?? 60));
+      const delayMs = Math.max(0, Number(process.env.HYPERVIBE_CLOUDSQL_DELETE_DELAY_MS ?? 1000));
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (!await this.getBackup(target.id)) {
+          return { success: true, message: `Deleted Cloud SQL retained backup: ${target.id}` };
+        }
+        if (attempt < attempts - 1 && delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+      return {
+        success: false,
+        message: 'Cloud SQL accepted backup deletion but it remains present',
+        error: `${target.id} remained observable after ${attempts} checks.`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Failed to delete Cloud SQL retained backup',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   async configureAvailability(
     _environment: Environment,
     component: Component,
@@ -1228,6 +1362,53 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     return (await response.json()) as CloudSqlInstance;
   }
 
+  private isBackupResourceName(name: string): boolean {
+    if (!this.credentials) return false;
+    const prefix = `projects/${this.credentials.projectId}/backups/`;
+    return name.startsWith(prefix) && name.length > prefix.length && !name.slice(prefix.length).includes('/');
+  }
+
+  private async getBackup(name: string): Promise<CloudSqlBackup | null> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    if (!this.isBackupResourceName(name)) {
+      throw new Error(`Cloud SQL backup id must be scoped as projects/${this.credentials.projectId}/backups/{backup}.`);
+    }
+    const token = await this.getAccessToken();
+    const response = await fetch(`https://sqladmin.googleapis.com/v1/${name}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Cloud SQL backup lookup failed: ${response.status} ${body}`);
+    }
+    return await response.json() as CloudSqlBackup;
+  }
+
+  private inspectedBackup(backup: CloudSqlBackup): Record<string, unknown> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    return {
+      id: backup.name,
+      name: this.lastPathSegment(backup.name),
+      providerScope: { projectId: this.credentials.projectId },
+      sourceInstance: backup.sourceInstance ?? null,
+      type: backup.type ?? null,
+      backupKind: backup.backupKind ?? null,
+      state: backup.state ?? null,
+      databaseVersion: backup.databaseVersion ?? null,
+      location: backup.location ?? null,
+      instanceDeletionTime: backup.instanceDeletionTime ?? null,
+      expiryTime: backup.expiryTime ?? null,
+      ttlDays: backup.ttlDays ?? null,
+      maxChargeableBytes: backup.maxChargeableBytes ?? null,
+      cleanupSupported: Boolean(backup.instanceDeletionTime),
+    };
+  }
+
+  private lastPathSegment(value: string): string {
+    return value.split('/').filter(Boolean).at(-1) ?? value;
+  }
+
   private normalizedInstanceStatus(state?: string): string {
     const statusMap: Record<string, string> = {
       RUNNABLE: 'running',
@@ -1374,7 +1555,7 @@ providerRegistry.register({
     },
   },
   inspection: {
-    resources: ['database'],
+    resources: ['database', 'backup'],
     defaultResource: 'database',
     selectors: {
       database: {
@@ -1384,10 +1565,22 @@ providerRegistry.register({
         list: true,
         scopeKeys: ['projectId'],
       },
+      backup: {
+        mode: 'provider-resource',
+        optional: ['project', 'scope', 'id', 'name', 'limit'],
+        mutuallyExclusive: [['id', 'name']],
+        list: true,
+        scopeKeys: ['projectId'],
+        collectionKey: 'backups',
+      },
     },
-    inspect: (adapter, request) => (
-      adapter as CloudSqlAdapter
-    ).inspectDatabaseResources(request),
+    inspect: (adapter, request) => request.resource === 'backup'
+      ? (adapter as CloudSqlAdapter).inspectBackupResources(request)
+      : (adapter as CloudSqlAdapter).inspectDatabaseResources(request),
+  },
+  retainedCleanup: {
+    resources: ['backup'],
+    destroy: (adapter, target) => (adapter as CloudSqlAdapter).destroyRetainedBackup(target),
   },
   factory: (credentials) => {
     const adapter = new CloudSqlAdapter();

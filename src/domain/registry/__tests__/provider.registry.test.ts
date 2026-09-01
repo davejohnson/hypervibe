@@ -143,4 +143,53 @@ describe('ProviderRegistry lifecycle capabilities', () => {
 
     expect(() => registry.register(incomplete)).toThrow(/storage lifecycle support without/i);
   });
+
+  it('accepts retained cleanup only with bounded exact scoped inventory', () => {
+    const registry = new ProviderRegistry();
+    const cleanup = provider('cleanup', 'ai');
+    cleanup.inspection = {
+      resources: ['backup'],
+      selectors: {
+        backup: {
+          mode: 'provider-resource',
+          optional: ['id', 'name', 'limit'],
+          mutuallyExclusive: [['id', 'name']],
+          list: true,
+          scopeKeys: ['projectId'],
+          collectionKey: 'backups',
+        },
+      },
+      inspect: async () => ({ resource: 'backup', observation: 'absent', backups: [], partial: false, truncated: false }),
+    };
+    cleanup.retainedCleanup = {
+      resources: ['backup'],
+      destroy: async () => ({ success: true, message: 'deleted' }),
+    };
+
+    expect(() => registry.register(cleanup)).not.toThrow();
+  });
+
+  it('rejects retained cleanup without an explicit inspection collection key', () => {
+    const registry = new ProviderRegistry();
+    const cleanup = provider('unsafe-cleanup', 'ai');
+    cleanup.inspection = {
+      resources: ['backup'],
+      selectors: {
+        backup: {
+          mode: 'provider-resource',
+          optional: ['id', 'name', 'limit'],
+          mutuallyExclusive: [['id', 'name']],
+          list: true,
+          scopeKeys: ['projectId'],
+        },
+      },
+      inspect: async () => ({ resource: 'backup' }),
+    };
+    cleanup.retainedCleanup = {
+      resources: ['backup'],
+      destroy: async () => ({ success: true, message: 'deleted' }),
+    };
+
+    expect(() => registry.register(cleanup)).toThrow(/collection key/i);
+  });
 });

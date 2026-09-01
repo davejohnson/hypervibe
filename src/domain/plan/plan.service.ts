@@ -877,9 +877,11 @@ export class PlanService {
     const previousProvider = previousHosting?.provider;
     const previousDatabase = local.bindings?.previousDatabase;
     const previousDatabaseProvider = previousDatabase?.provider;
-    if ((!previousProvider || previousProvider === environmentSpec.hosting.provider) && !previousDatabaseProvider) {
+    const previousResource = local.bindings?.previousResource;
+    const previousResourceProvider = previousResource?.provider;
+    if ((!previousProvider || previousProvider === environmentSpec.hosting.provider) && !previousDatabaseProvider && !previousResourceProvider) {
       return {
-        error: `Environment "${environmentName}" has no abandoned hosting provider retained for cleanup and no retained database target.`,
+        error: `Environment "${environmentName}" has no abandoned hosting provider retained for cleanup and no retained database or provider-resource target.`,
       };
     }
     if (previousProvider && boundHostingProvider && boundHostingProvider !== environmentSpec.hosting.provider) {
@@ -1010,6 +1012,102 @@ export class PlanService {
         },
       });
     }
+    let retainedResourceVerified = true;
+    if (previousResourceProvider) {
+      const resource = previousResource?.resource;
+      const externalId = previousResource?.externalId;
+      const name = previousResource?.name;
+      const providerScope = previousResource?.providerScope;
+      const registration = providerRegistry.get(previousResourceProvider);
+      const contract = resource ? registration?.inspection?.selectors[resource] : undefined;
+      if (
+        !resource
+        || !externalId
+        || !name
+        || !providerScope
+        || Object.keys(providerScope).length === 0
+        || Object.values(providerScope).some((value) => typeof value !== 'string' || !value)
+        || !registration?.retainedCleanup?.resources.includes(resource)
+        || !contract?.collectionKey
+      ) {
+        return {
+          error: `The retained ${previousResourceProvider} provider-resource binding is incomplete or no longer supported. Re-import one exact resource id and provider scope before planning deletion.`,
+        };
+      }
+      let blockedReason: string | undefined;
+      const adapterResult = await adapterFactory.getProviderAdapter(previousResourceProvider, projectForPlan);
+      if (!adapterResult.success || !adapterResult.adapter) {
+        retainedResourceVerified = false;
+        blockedReason = 'retained_resource_connection_unavailable';
+        cleanupWarnings.push(`Retained ${resource} ${externalId} could not be re-observed: ${adapterResult.error ?? 'provider adapter unavailable'}.`);
+      } else {
+        try {
+          const inspected = await registration.inspection!.inspect(adapterResult.adapter, {
+            resource,
+            id: externalId,
+            region: providerScope.region ?? providerScope.location,
+            limit: 1,
+            project: { id: project.id, name: project.name },
+          });
+          const items = Array.isArray(inspected[contract.collectionKey])
+            ? inspected[contract.collectionKey] as unknown[]
+            : [];
+          const exact = items.filter((item) => {
+            const candidate = item && typeof item === 'object' && !Array.isArray(item)
+              ? item as Record<string, unknown>
+              : undefined;
+            return candidate?.id === externalId;
+          });
+          if (
+            inspected.resource !== resource
+            || inspected.partial !== false
+            || inspected.truncated !== false
+            || !['present', 'absent'].includes(String(inspected.observation))
+          ) {
+            throw new Error('provider returned an incomplete or unknown observation');
+          }
+          if (inspected.observation === 'present') {
+            if (exact.length !== 1) throw new Error(`provider did not return exactly one retained id ${externalId}`);
+            const liveScope = exact[0] && typeof exact[0] === 'object' && !Array.isArray(exact[0])
+              ? (exact[0] as Record<string, unknown>).providerScope
+              : undefined;
+            if (!liveScope || typeof liveScope !== 'object' || Array.isArray(liveScope)) {
+              throw new Error(`provider omitted durable scope for retained id ${externalId}`);
+            }
+            const expectedScope = JSON.stringify(Object.entries(providerScope).sort());
+            const observedScope = JSON.stringify(Object.entries(liveScope as Record<string, unknown>).sort());
+            if (expectedScope !== observedScope) {
+              throw new Error(`provider scope changed from ${expectedScope} to ${observedScope}`);
+            }
+          } else if (items.length > 0) {
+            throw new Error('provider reported absence with a non-empty resource collection');
+          }
+        } catch (error) {
+          retainedResourceVerified = false;
+          blockedReason = 'retained_resource_observation_unknown';
+          cleanupWarnings.push(`Retained ${resource} ${externalId} observation is unknown: ${error instanceof Error ? error.message : String(error)}.`);
+        } finally {
+          await adapterResult.adapter.disconnect?.();
+        }
+      }
+      actions.push({
+        id: `retained-resource:${previousResourceProvider}:${resource}:destroy`,
+        type: 'destroy',
+        resource: { kind: 'retained-resource', name: resource, provider: previousResourceProvider },
+        verified: retainedResourceVerified,
+        reason: `Delete exact retained ${previousResourceProvider} ${resource} ${externalId} in its recorded provider scope`,
+        dataBearing: true,
+        requiresConfirm: true,
+        metadata: {
+          operation: 'retainedResourceDestroy',
+          resource,
+          externalId,
+          name,
+          providerScope,
+          ...(blockedReason ? { blockedReason } : {}),
+        },
+      });
+    }
     try {
       orderActions(actions);
     } catch (error) {
@@ -1051,7 +1149,7 @@ export class PlanService {
       specRevision: specResult.revision,
       specSource: specResult.source ?? { kind: 'local' },
       environmentName,
-      verified: observed !== null && !observed.partial && retainedDatabaseVerified,
+      verified: observed !== null && !observed.partial && retainedDatabaseVerified && retainedResourceVerified,
       observed,
       actions,
       unmanaged: [],
@@ -1061,6 +1159,7 @@ export class PlanService {
         environmentSpec.hosting.provider,
         ...(previousProvider ? [previousProvider] : []),
         ...(previousDatabaseProvider ? [previousDatabaseProvider] : []),
+        ...(previousResourceProvider ? [previousResourceProvider] : []),
       ]),
     };
   }
@@ -2088,6 +2187,7 @@ export class PlanService {
           || action.metadata?.operation === 'dataMigrationStoragePreviousDestroy'
           || action.metadata?.operation === 'previousHostingDestroy'
           || action.metadata?.operation === 'retainedDatabaseDestroy'
+          || action.metadata?.operation === 'retainedResourceDestroy'
         )
       )
       .map((action) => action.resource.provider);

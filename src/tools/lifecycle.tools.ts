@@ -33,15 +33,16 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
 
   commands.register(
     'hv_import',
-    'Import provider identity into Hypervibe. mode="adopt" adopts an existing provider project through a provider-declared driver. mode="retained-cleanup" retains an abandoned hosting boundary, while mode="retained-database-cleanup" retains one exact inventoried database so isolated plan/apply can delete it safely. Never creates provider infrastructure.',
+    'Import provider identity into Hypervibe. mode="adopt" adopts an existing provider project through a provider-declared driver. Cleanup modes retain an exact inventoried hosting boundary, database, or provider-declared resource so isolated plan/apply can delete only that identity. Never creates provider infrastructure.',
     {
       provider: z.string().trim().min(1).describe('Registered source provider. Providers without a tested adoption driver return UNSUPPORTED.'),
-      mode: z.enum(['adopt', 'retained-cleanup', 'retained-database-cleanup']).optional().describe('Default adopt. Cleanup modes retain an exact abandoned hosting or database identity for a later confirmation-gated plan/apply.'),
-      project: projectField.optional().describe('Current Hypervibe project; required for either retained cleanup mode.'),
-      env: envField.optional().describe('Current Hypervibe environment; required for either retained cleanup mode.'),
-      region: z.string().trim().min(1).optional().describe('Explicit old-provider region for retained-cleanup discovery.'),
+      mode: z.enum(['adopt', 'retained-cleanup', 'retained-database-cleanup', 'retained-resource-cleanup']).optional().describe('Default adopt. Cleanup modes retain an exact abandoned hosting, database, or provider-declared resource identity for later confirmation-gated plan/apply.'),
+      resource: z.string().trim().min(1).optional().describe('Exact provider-declared resource class for retained-resource-cleanup, as advertised by hv_inspect discovery.'),
+      project: projectField.optional().describe('Current Hypervibe project; required for every retained cleanup mode.'),
+      env: envField.optional().describe('Current Hypervibe environment; required for every retained cleanup mode.'),
+      region: z.string().trim().min(1).optional().describe('Explicit provider region when the selected cleanup inspection contract requires it.'),
       name: z.string().optional().describe('Existing provider project name to adopt. Use hv_inspect first if you only need to read provider state.'),
-      id: z.string().optional().describe('Exact durable provider project id for adopt, or exact database id returned by hv_inspect for retained-database-cleanup.'),
+      id: z.string().optional().describe('Exact durable provider id for adoption or cleanup, copied from hv_inspect.'),
       force: z.boolean().optional().describe('Set true to override the safety check when a Hypervibe project with the same name already exists.'),
       environmentMappings: z
         .record(z.string(), z.string().trim().min(1))

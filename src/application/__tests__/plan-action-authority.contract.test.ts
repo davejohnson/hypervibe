@@ -799,6 +799,26 @@ const authorized: AuthorizedCase[] = [
     }),
   },
   {
+    label: 'retained provider resource destroy',
+    capability: 'provider-resource.retained.destroy',
+    action: action({
+      id: 'retained-resource:cloudsql:backup:destroy',
+      type: 'destroy',
+      kind: 'retained-resource',
+      name: 'backup',
+      provider: 'cloudsql',
+      operation: 'retainedResourceDestroy',
+      metadata: {
+        resource: 'backup',
+        externalId: 'projects/gcp-project/backups/backup-123',
+        name: 'backup-123',
+        providerScope: { projectId: 'gcp-project' },
+      },
+      dataBearing: true,
+      requiresConfirm: true,
+    }),
+  },
+  {
     label: 'task service destroy',
     capability: 'hosting.task-service.destroy',
     action: action({ type: 'destroy', operation: 'taskServiceCleanup', metadata: { externalId: 'task-1' } }),

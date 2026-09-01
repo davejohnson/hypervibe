@@ -625,6 +625,60 @@ describe('hv_inspect / hv_import', () => {
     await t.close();
   });
 
+  it('hv_import confirmation-gates one exact provider-declared retained resource', async () => {
+    const project = new ProjectRepository().create({ name: 'retained-backup-app' });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: { provider: 'railway' },
+    });
+    const connections = new ConnectionRepository();
+    const connection = connections.create({
+      provider: 'cloudsql',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'gcp-project', credentials: '{}' }),
+    });
+    connections.updateStatus(connection.id, 'verified');
+    vi.spyOn(CloudSqlAdapter.prototype, 'connect').mockResolvedValue();
+    vi.spyOn(CloudSqlAdapter.prototype, 'disconnect').mockResolvedValue();
+    vi.spyOn(CloudSqlAdapter.prototype, 'inspectBackupResources').mockResolvedValue({
+      observation: 'present',
+      resource: 'backup',
+      backups: [{
+        id: 'projects/gcp-project/backups/backup-123',
+        name: 'backup-123',
+        providerScope: { projectId: 'gcp-project' },
+        cleanupSupported: true,
+      }],
+      truncated: false,
+      partial: false,
+    });
+    const t = await makeClient();
+    const input = {
+      provider: 'cloudsql',
+      mode: 'retained-resource-cleanup',
+      resource: 'backup',
+      project: project.name,
+      env: environment.name,
+      id: 'projects/gcp-project/backups/backup-123',
+    };
+
+    const preview = await t.call('hv_import', input);
+    expect(preview.ok).toBe(false);
+    expect(preview.error.code).toBe('CONFIRM_REQUIRED');
+    expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousResource).toBeUndefined();
+
+    const retained = await t.call('hv_import', { ...input, confirm: true });
+    expect(retained.ok).toBe(true);
+    expect(new EnvironmentRepository().findById(environment.id)!.platformBindings.previousResource).toEqual({
+      provider: 'cloudsql',
+      resource: 'backup',
+      externalId: 'projects/gcp-project/backups/backup-123',
+      name: 'backup-123',
+      providerScope: { projectId: 'gcp-project' },
+    });
+    await t.close();
+  });
+
   it('hv_inspect returns Cloud SQL inventory candidates instead of a false null for an unbound environment', async () => {
     const project = new ProjectRepository().create({ name: 'cloudsql-inventory-app' });
     new EnvironmentRepository().create({ projectId: project.id, name: 'production' });

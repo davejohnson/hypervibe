@@ -227,7 +227,7 @@ hv_secrets project="my-app"                         # list sources; validate pro
 hv_secrets project="my-app" env="staging"           # masked hosting-variable names
 
 hv_inspect                                          # provider/capability discovery; no parameters
-hv_inspect provider="cloudrun"                      # connection verification (its resource reads require project + env)
+hv_inspect provider="cloudrun"                      # connection verification; discovery advertises each resource selector contract
 hv_inspect provider="cloudrun" project="my-app" env="staging" region="us-central1"  # full live environment
 hv_inspect provider="cloudsql" resource="database" limit=25  # bounded Cloud SQL instance inventory
 
@@ -235,7 +235,13 @@ hv_inspect provider="cloudsql" resource="database" limit=25  # bounded Cloud SQL
 hv_inspect provider="cloudrun" project="my-app" env="production" region="us-central1"
 hv_import provider="cloudrun" mode="retained-cleanup" project="my-app" env="production" region="us-central1" confirm=true
 hv_import provider="cloudsql" mode="retained-database-cleanup" project="my-app" env="production" id="exact-instance-id" confirm=true
-hv_plan project="my-app" env="production"           # review exact confirm-gated cleanup actions
+
+# Discover and safely remove billable remnants left after their owning runtime was deleted.
+hv_inspect provider="cloudsql" project="my-app" resource="backup" limit=25
+hv_import provider="cloudsql" mode="retained-resource-cleanup" resource="backup" project="my-app" env="production" id="projects/gcp-project/backups/exact-backup-id" confirm=true
+hv_inspect provider="cloudrun" project="my-app" resource="artifact" limit=25  # all Artifact Registry locations
+hv_import provider="cloudrun" mode="retained-resource-cleanup" resource="artifact" project="my-app" env="production" id="projects/gcp-project/locations/us-central1/repositories/exact-repository" confirm=true
+hv_plan project="my-app" env="production" scope="retained-cleanup"  # review exact confirm-gated cleanup actions
 ```
 
 For `hv_inspect`, any bounded selector requires `provider`; `project` plus `env` never replaces it. Parameterless discovery reports every resource mode's selector contract and whether it accepts `limit`. Every database, cache, and storage lifecycle provider is required at registration time to expose bounded exact-id/name inventory with durable provider scope. Selecting a non-current hosting provider runs read-only provider-scoped environment forensics and never passes the current provider's binding to that adapter. The retained cleanup import modes only record complete inspected identities locally; they do not delete anything until a later isolated plan is explicitly confirmed. For hosting-variable mode, `hv_secrets` requires an explicit `env` and does not infer staging from `project` alone.

@@ -6,7 +6,8 @@ import { suppliedOptionNames } from './command-options.js';
 
 export interface ImportProviderInput {
   provider: string;
-  mode?: 'adopt' | 'retained-cleanup' | 'retained-database-cleanup';
+  mode?: 'adopt' | 'retained-cleanup' | 'retained-database-cleanup' | 'retained-resource-cleanup';
+  resource?: string;
   project?: string;
   env?: string;
   region?: string;
@@ -18,6 +19,130 @@ export interface ImportProviderInput {
   databaseMappings?: Record<string, 'postgres'>;
   cacheMappings?: Record<string, 'redis'>;
   confirm?: boolean;
+}
+
+async function retainResourceCleanup(
+  ctx: CommandContext,
+  input: ImportProviderInput,
+  provider: string
+): Promise<CommandEnvelope> {
+  const resource = input.resource?.trim();
+  const externalId = input.id?.trim();
+  if (!input.project || !input.env || !resource || !externalId) {
+    return commandError('VALIDATION', 'retained-resource-cleanup requires project, env, resource, and the exact id returned by hv_inspect.', {
+      hint: `Run hv_inspect provider="${provider}" to discover cleanup-capable resources, inspect one resource class, then pass one exact returned id.`,
+      next: ['hv_inspect', 'hv_import'],
+    });
+  }
+  const registration = providerRegistry.get(provider);
+  const contract = registration?.inspection?.selectors[resource];
+  if (!registration?.retainedCleanup?.resources.includes(resource) || !contract?.collectionKey) {
+    return commandError('UNSUPPORTED', `${registration?.metadata.displayName ?? provider} does not declare retained cleanup for resource "${resource}".`, {
+      details: { resources: registration?.retainedCleanup?.resources ?? [] },
+      hint: 'Use a cleanup-capable resource advertised by provider discovery.',
+      next: ['hv_inspect'],
+    });
+  }
+
+  const project = ctx.resolveProjectOrThrow({ project: input.project });
+  const environment = ctx.resolveEnvironmentOrThrow(project, input.env);
+  const currentBindings = record(environment.platformBindings) ?? {};
+  if (record(currentBindings.previousResource)) {
+    return commandError('VALIDATION', 'A retained provider-resource cleanup target already exists for this environment.', {
+      details: { previousResource: currentBindings.previousResource },
+      hint: 'Finish the existing retained cleanup plan before recording another data-bearing target.',
+      next: ['hv_plan'],
+    });
+  }
+
+  const forensic = await inspectProvider(ctx, {
+    provider,
+    project: project.name,
+    resource,
+    id: externalId,
+    region: input.region,
+  });
+  const items = Array.isArray(forensic[contract.collectionKey]) ? forensic[contract.collectionKey] as unknown[] : [];
+  const exact = items
+    .map(record)
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .filter((item) => stringValue(item.id) === externalId);
+  if (forensic.partial !== false) {
+    return commandError('PROVIDER_ERROR', `${registration.metadata.displayName} returned a partial ${resource} inventory; cleanup identity was not retained.`, {
+      details: forensic,
+      hint: 'Resolve the provider read failure and refresh hv_inspect before retaining a data-bearing deletion target.',
+      next: ['hv_inspect'],
+    });
+  }
+  if (forensic.observation !== 'present' || exact.length === 0) {
+    return commandError('NOT_FOUND', `${registration.metadata.displayName} did not confirm ${resource} ${externalId} is present.`, {
+      details: forensic,
+      hint: 'Refresh hv_inspect inventory. Hypervibe will not retain or delete an unverified identity.',
+      next: ['hv_inspect'],
+    });
+  }
+  if (exact.length !== 1) {
+    return commandError('VALIDATION', `${registration.metadata.displayName} did not return one unambiguous ${resource} for id ${externalId}.`, {
+      details: forensic,
+      hint: 'Use the exact durable provider id from a fresh inventory; Hypervibe will not choose between candidates.',
+      next: ['hv_inspect'],
+    });
+  }
+  if (exact[0].cleanupSupported === false) {
+    return commandError('UNSUPPORTED', `${registration.metadata.displayName} can inventory ${resource} ${externalId}, but reported that it cannot safely delete it.`, {
+      details: { resource: exact[0] },
+      next: ['hv_inspect'],
+    });
+  }
+  const providerScope = record(exact[0].providerScope);
+  const requiredScopeKeys = contract.scopeKeys ?? [];
+  if (
+    requiredScopeKeys.length === 0
+    || !providerScope
+    || Object.values(providerScope).some((value) => typeof value !== 'string' || !value)
+    || requiredScopeKeys.some((key) => typeof providerScope[key] !== 'string' || !providerScope[key])
+  ) {
+    return commandError('PROVIDER_ERROR', `${registration.metadata.displayName} did not return the durable provider scope for ${resource} ${externalId}.`, {
+      details: { resource: exact[0], requiredScopeKeys },
+      next: ['hv_inspect'],
+    });
+  }
+  const previousResource = {
+    provider,
+    resource,
+    externalId,
+    name: stringValue(exact[0].name) ?? externalId,
+    providerScope,
+  };
+
+  if (!input.confirm) {
+    return commandError('CONFIRM_REQUIRED', `This will retain ${provider} ${resource} ${externalId} as the exact data-bearing deletion target for ${project.name}/${environment.name}. No provider resource will be changed yet.`, {
+      details: { previousResource },
+      hint: 'Re-run hv_import with confirm=true, then use hv_plan scope="retained-cleanup" and explicitly confirm its destroy action.',
+      next: ['hv_import'],
+    });
+  }
+
+  ctx.repos.environments.updatePlatformBindings(environment.id, { previousResource });
+  ctx.repos.audit.create({
+    action: 'provider-resource.previous.retained',
+    resourceType: 'environment',
+    resourceId: environment.id,
+    details: { project: project.name, environment: environment.name, provider, resource, externalId, providerScope },
+  });
+  return commandSuccess({
+    retainedResourceCleanup: {
+      provider,
+      resource,
+      project: project.name,
+      environment: environment.name,
+      externalId,
+      providerScope,
+    },
+  }, {
+    hint: 'Run hv_plan with scope="retained-cleanup" and confirm only the exact retained resource destroy action after reviewing the identity and scope.',
+    next: ['hv_plan'],
+  });
 }
 
 async function retainDatabaseCleanup(
@@ -342,6 +467,7 @@ export async function importProvider(
   const mode = input.mode ?? 'adopt';
   const incompatible = suppliedOptionNames(mode === 'retained-cleanup'
     ? {
+      resource: input.resource,
       name: input.name,
       id: input.id,
       force: input.force,
@@ -352,6 +478,7 @@ export async function importProvider(
     }
     : mode === 'retained-database-cleanup'
       ? {
+        resource: input.resource,
         region: input.region,
         name: input.name,
         force: input.force,
@@ -360,7 +487,16 @@ export async function importProvider(
         databaseMappings: input.databaseMappings,
         cacheMappings: input.cacheMappings,
       }
-      : { project: input.project, env: input.env, region: input.region });
+      : mode === 'retained-resource-cleanup'
+        ? {
+          name: input.name,
+          force: input.force,
+          environmentMappings: input.environmentMappings,
+          storageMappings: input.storageMappings,
+          databaseMappings: input.databaseMappings,
+          cacheMappings: input.cacheMappings,
+        }
+        : { project: input.project, env: input.env, region: input.region, resource: input.resource });
   if (incompatible.length > 0) {
     return commandError('VALIDATION', `mode="${mode}" received options for the other import mode: ${incompatible.join(', ')}.`, {
       hint: `Remove the listed options before retrying mode="${mode}".`,
@@ -372,6 +508,9 @@ export async function importProvider(
   }
   if (mode === 'retained-database-cleanup') {
     return retainDatabaseCleanup(ctx, input, provider);
+  }
+  if (mode === 'retained-resource-cleanup') {
+    return retainResourceCleanup(ctx, input, provider);
   }
   const driver = importDrivers.get(provider);
   if (!registered.adoption?.project || !driver) {
