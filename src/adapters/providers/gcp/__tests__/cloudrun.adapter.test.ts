@@ -62,7 +62,16 @@ describe('CloudRunAdapter', () => {
     (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
-      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations/-/repositories?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations?pageSize=100' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ locations: [
+          { name: 'projects/gcp-project/locations/us-central1' },
+          { name: 'projects/gcp-project/locations/europe-west1' },
+        ] });
+      }
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations/us-central1/repositories?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ repositories: [] });
+      }
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations/europe-west1/repositories?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
         return Response.json({ repositories: [{
           name: 'projects/gcp-project/locations/europe-west1/repositories/legacy-images',
           format: 'DOCKER',
@@ -82,6 +91,61 @@ describe('CloudRunAdapter', () => {
       }],
       partial: false,
     });
+  });
+
+  it('does not report Artifact Registry absence when one project location cannot be observed', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      credentials: JSON.stringify({
+        type: 'service_account', project_id: 'gcp-project', private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations?pageSize=100' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ locations: [
+          { name: 'projects/gcp-project/locations/us-central1' },
+          { name: 'projects/gcp-project/locations/europe-west1' },
+        ] });
+      }
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations/us-central1/repositories?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
+        return Response.json({ repositories: [] });
+      }
+      if (url === 'https://artifactregistry.googleapis.com/v1/projects/gcp-project/locations/europe-west1/repositories?pageSize=25' && (init?.method ?? 'GET') === 'GET') {
+        return new Response('permission denied', { status: 403 });
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${url}`);
+    }));
+
+    const result = await adapter.inspectArtifactResources({ resource: 'artifact', limit: 25 });
+
+    expect(result).toMatchObject({
+      observation: 'unknown',
+      artifacts: [],
+      partial: true,
+      warnings: [expect.stringContaining('europe-west1: 403 permission denied')],
+    });
+  });
+
+  it('fails project-wide Artifact Registry inventory when locations cannot be enumerated', async () => {
+    const adapter = new CloudRunAdapter();
+    await adapter.connect({
+      projectId: 'gcp-project',
+      credentials: JSON.stringify({
+        type: 'service_account', project_id: 'gcp-project', private_key: 'dummy',
+        client_email: 'deploy@gcp-project.iam.gserviceaccount.com',
+      }),
+    });
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).accessToken = 'token';
+    (adapter as unknown as { accessToken: string; tokenExpiry: Date }).tokenExpiry = new Date(Date.now() + 60_000);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('forbidden', { status: 403 })));
+
+    await expect(adapter.inspectArtifactResources({ resource: 'artifact', limit: 25 }))
+      .rejects.toThrow('Artifact Registry location inventory failed: 403 forbidden');
   });
 
   it('derives Artifact Registry location from an exact durable id', async () => {

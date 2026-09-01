@@ -289,6 +289,15 @@ interface ArtifactRepositoryList {
   nextPageToken?: string;
 }
 
+interface ArtifactLocation {
+  name?: string;
+}
+
+interface ArtifactLocationList {
+  locations?: ArtifactLocation[];
+  nextPageToken?: string;
+}
+
 interface IamBinding {
   role?: string;
   members?: string[];
@@ -2286,35 +2295,94 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
 
     const token = await this.getAccessToken();
     const { projectId } = this.credentials;
-    const selectedLocation = request.region ?? '-';
-    const parent = `projects/${projectId}/locations/${selectedLocation}`;
-    const response = await fetch(
-      `https://artifactregistry.googleapis.com/v1/${parent}/repositories?pageSize=${request.limit}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Artifact Registry repository inventory failed: ${response.status} ${body}`);
+    const locations = request.region
+      ? [request.region]
+      : await this.listArtifactRegistryLocations(token);
+    const candidates: ArtifactRepository[] = [];
+    const warnings: string[] = [];
+    let truncated = false;
+
+    for (let locationIndex = 0; locationIndex < locations.length; locationIndex++) {
+      const location = locations[locationIndex]!;
+      const locationCandidates: ArtifactRepository[] = [];
+      let locationTruncated = false;
+      try {
+        let pageToken: string | undefined;
+        const seenPageTokens = new Set<string>();
+        for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+          const query = new URLSearchParams({ pageSize: String(Math.min(request.limit, 100)) });
+          if (pageToken) query.set('pageToken', pageToken);
+          const parent = `projects/${projectId}/locations/${location}`;
+          const response = await fetch(
+            `https://artifactregistry.googleapis.com/v1/${parent}/repositories?${query.toString()}`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (!response.ok) {
+            const body = (await response.text()).slice(0, 500);
+            throw new Error(`${response.status}${body ? ` ${body}` : ''}`);
+          }
+          const page = await response.json() as ArtifactRepositoryList;
+          for (const repository of page.repositories ?? []) {
+            const identity = this.artifactRepositoryIdentity(repository.name);
+            if (!identity || identity.location !== location) {
+              throw new Error(`returned an invalid repository identity: ${repository.name}`);
+            }
+            if (!request.name || repository.name === request.name || identity.repository === request.name) {
+              locationCandidates.push(repository);
+            }
+          }
+
+          if (!request.name && candidates.length + locationCandidates.length > request.limit) {
+            locationTruncated = true;
+            break;
+          }
+          if (request.name && candidates.length + locationCandidates.length > 1) {
+            locationTruncated = Boolean(page.nextPageToken) || locationIndex < locations.length - 1;
+            break;
+          }
+
+          pageToken = page.nextPageToken;
+          if (!pageToken) break;
+          if (seenPageTokens.has(pageToken)) {
+            throw new Error('returned a repeated page token');
+          }
+          seenPageTokens.add(pageToken);
+          if (pageNumber === 99) {
+            throw new Error('exceeded the bounded repository inventory page limit');
+          }
+        }
+        candidates.push(...locationCandidates);
+        truncated = truncated || locationTruncated;
+      } catch (error) {
+        if (request.region) {
+          throw new Error(`Artifact Registry repository inventory failed in ${location}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        warnings.push(`Artifact Registry repository inventory failed in ${location}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      if (truncated || (request.name && candidates.length > 1)) break;
     }
-    const page = await response.json() as ArtifactRepositoryList;
-    const candidates = (page.repositories ?? []).filter((repository) => (
-      !request.name || repository.name === request.name || this.lastPathSegment(repository.name) === request.name
-    ));
+
     const artifacts = candidates.slice(0, request.limit).map((repository) => this.inspectedArtifactRepository(repository));
-    const incompleteNameSearch = Boolean(request.name && page.nextPageToken);
+    const incompleteNameSearch = Boolean(request.name && warnings.length > 0);
     return {
-      observation: incompleteNameSearch
-        ? 'unknown'
-        : request.name && artifacts.length > 1
+      observation: request.name && candidates.length > 1
         ? 'ambiguous'
-        : artifacts.length > 0 ? 'present' : 'absent',
+        : incompleteNameSearch
+        ? 'unknown'
+        : artifacts.length > 0
+        ? 'present'
+        : warnings.length > 0
+        ? 'unknown'
+        : 'absent',
       resource: 'artifact',
       project: { id: projectId },
       region: request.region ?? 'all',
       artifacts,
       ...(request.name ? { name: request.name } : {}),
-      truncated: Boolean(page.nextPageToken) || candidates.length > request.limit,
-      partial: incompleteNameSearch,
+      truncated: truncated || candidates.length > request.limit,
+      partial: warnings.length > 0,
+      ...(warnings.length > 0 ? { warnings } : {}),
     };
   }
 
@@ -3124,6 +3192,52 @@ export class CloudRunAdapter implements IProviderAdapter, IWorkloadMaintenanceAd
     const match = /^projects\/([^/]+)\/locations\/([^/]+)\/repositories\/([^/]+)$/.exec(name);
     if (!match || match[1] !== this.credentials.projectId) return null;
     return { location: match[2]!, repository: match[3]! };
+  }
+
+  private async listArtifactRegistryLocations(token: string): Promise<string[]> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const { projectId } = this.credentials;
+    const locations: string[] = [];
+    const seenLocations = new Set<string>();
+    const seenPageTokens = new Set<string>();
+    let pageToken: string | undefined;
+
+    for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+      const query = new URLSearchParams({ pageSize: '100' });
+      if (pageToken) query.set('pageToken', pageToken);
+      const response = await fetch(
+        `https://artifactregistry.googleapis.com/v1/projects/${projectId}/locations?${query.toString()}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!response.ok) {
+        const body = (await response.text()).slice(0, 500);
+        throw new Error(`Artifact Registry location inventory failed: ${response.status}${body ? ` ${body}` : ''}`);
+      }
+      const page = await response.json() as ArtifactLocationList;
+      for (const location of page.locations ?? []) {
+        const match = /^projects\/([^/]+)\/locations\/([^/]+)$/.exec(location.name ?? '');
+        if (!match || match[1] !== projectId) {
+          throw new Error(`Artifact Registry returned an invalid location identity: ${location.name ?? '(missing)'}`);
+        }
+        const locationId = match[2]!;
+        if (!seenLocations.has(locationId)) {
+          seenLocations.add(locationId);
+          locations.push(locationId);
+        }
+      }
+
+      pageToken = page.nextPageToken;
+      if (!pageToken) return locations;
+      if (seenPageTokens.has(pageToken)) {
+        throw new Error('Artifact Registry location inventory returned a repeated page token');
+      }
+      seenPageTokens.add(pageToken);
+      if (pageNumber === 99) {
+        throw new Error('Artifact Registry location inventory exceeded the bounded page limit');
+      }
+    }
+
+    throw new Error('Artifact Registry location inventory did not converge');
   }
 
   private async getArtifactRepository(name: string): Promise<ArtifactRepository | null> {
