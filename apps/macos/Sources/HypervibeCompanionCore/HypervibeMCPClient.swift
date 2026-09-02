@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import MCP
 #if canImport(System)
 import System
@@ -48,6 +49,14 @@ public enum HypervibeClientError: LocalizedError, Equatable, Sendable {
             return message
         }
     }
+}
+
+func makeMCPServerInputPipe() throws -> Pipe {
+    let pipe = Pipe()
+    guard fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
+        throw HypervibeClientError.launchFailed
+    }
+    return pipe
 }
 
 public actor HypervibeMCPClient {
@@ -513,7 +522,7 @@ public actor HypervibeMCPClient {
         }
         process.environment = environment
 
-        let serverInput = Pipe()
+        let serverInput = try makeMCPServerInputPipe()
         let serverOutput = Pipe()
         process.standardInput = serverInput
         process.standardOutput = serverOutput
