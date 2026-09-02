@@ -17,6 +17,17 @@ struct HypervibeMCPClientIdentityTests {
     }
 
     @Test
+    func serverInputPipeTurnsAClosedReaderIntoAnErrorInsteadOfSIGPIPE() throws {
+        let pipe = try makeMCPServerInputPipe()
+        defer {
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
+        }
+
+        #expect(fcntl(pipe.fileHandleForWriting.fileDescriptor, F_GETNOSIGPIPE) == 1)
+    }
+
+    @Test
     func nonresponsiveRuntimeReturnsATargetedTimeout() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
