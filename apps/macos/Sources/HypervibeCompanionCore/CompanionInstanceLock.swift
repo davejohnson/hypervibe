@@ -70,7 +70,9 @@ public final class CompanionInstanceLock {
 
     public func release() {
         guard descriptor >= 0 else { return }
-        Darwin.close(descriptor)
+        let unlockFile: (Int32, Int32) -> Int32 = flock
+        _ = unlockFile(descriptor, LOCK_UN)
+        _ = Darwin.close(descriptor)
         descriptor = -1
     }
 
