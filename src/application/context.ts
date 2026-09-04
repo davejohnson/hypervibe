@@ -16,6 +16,7 @@ import { detectGitRemoteUrl, parseGitHubRepoFromRemote } from '../lib/git-remote
 import { findRepoRoot, readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
 import { mergeRepoPlatformBindings, readRepoBindingsFile } from '../domain/spec/repo-bindings-file.js';
 import { HvError } from './results.js';
+import { currentWorkspaceDirectories, selectWorkspaceDirectory } from '../lib/workspace-context.js';
 
 export interface Repos {
   projects: ProjectRepository;
@@ -38,7 +39,7 @@ export interface CommandContext {
   secretStore: ReturnType<typeof getSecretStore>;
   adapterFactory: typeof adapterFactory;
 
-  /** Resolve by name/id, git remote of cwd, or single-project fallback. */
+  /** Resolve by name/id, repository identity of the active interface workspace, or CLI single-project fallback. */
   resolveProject(opts?: { project?: string }): Project | null;
 
   /** Like resolveProject but throws HvError(NOT_FOUND | AMBIGUOUS_PROJECT). */
@@ -64,10 +65,12 @@ export function createCommandContext(): CommandContext {
     return Object.values(spec.environments)[0]?.hosting.provider ?? UNCONFIGURED_HOSTING_PROVIDER;
   };
 
-  const hydrateRepoBindings = (project: Project): void => {
+  const workspaceDirectories = (): readonly string[] => currentWorkspaceDirectories() ?? [process.cwd()];
+
+  const hydrateRepoBindings = (project: Project, startDir?: string): void => {
     let bindings;
     try {
-      bindings = readRepoBindingsFile(project.name);
+      bindings = readRepoBindingsFile(project.name, startDir);
     } catch {
       return;
     }
@@ -88,10 +91,10 @@ export function createCommandContext(): CommandContext {
     }
   };
 
-  const resolveRepoBackedProject = (ref?: string): Project | null => {
+  const resolveRepoBackedProject = (ref?: string, startDir?: string): Project | null => {
     let repoSpec;
     try {
-      repoSpec = readRepoSpecFile();
+      repoSpec = readRepoSpecFile(startDir);
     } catch {
       return null;
     }
@@ -99,12 +102,12 @@ export function createCommandContext(): CommandContext {
     if (ref && ref !== repoSpec.spec.project) return null;
 
     const existing = repos.projects.findByName(repoSpec.spec.project);
-    const gitRemoteUrl = repoSpec.spec.gitRemoteUrl ?? detectGitRemoteUrl() ?? undefined;
+    const gitRemoteUrl = repoSpec.spec.gitRemoteUrl ?? detectGitRemoteUrl(startDir) ?? undefined;
     if (existing) {
       const project = gitRemoteUrl && existing.gitRemoteUrl !== gitRemoteUrl
         ? repos.projects.update(existing.id, { gitRemoteUrl }) ?? existing
         : existing;
-      hydrateRepoBindings(project);
+      hydrateRepoBindings(project, startDir);
       return project;
     }
 
@@ -113,38 +116,72 @@ export function createCommandContext(): CommandContext {
       defaultPlatform: firstHostingProvider(repoSpec.spec),
       ...(gitRemoteUrl ? { gitRemoteUrl } : {}),
     });
-    hydrateRepoBindings(project);
+    hydrateRepoBindings(project, startDir);
     return project;
   };
 
-  const hydrateAndReturn = (project: Project | null): Project | null => {
+  const hydrateAndReturn = (project: Project | null, startDir?: string): Project | null => {
     if (project) {
-      hydrateRepoBindings(project);
+      if (startDir) selectWorkspaceDirectory(startDir);
+      hydrateRepoBindings(project, startDir);
     }
     return project;
+  };
+
+  const workspaceMatchesProject = (project: Project, startDir: string): boolean => {
+    try {
+      if (readRepoSpecFile(startDir)?.spec.project === project.name) return true;
+    } catch {
+      return false;
+    }
+    const remoteUrl = detectGitRemoteUrl(startDir);
+    return Boolean(remoteUrl && repos.projects.findByGitRemoteUrl(remoteUrl)?.id === project.id);
   };
 
   const resolve = (opts?: { project?: string }): Project | null => {
     const ref = opts?.project?.trim();
     if (!ref) {
-      const remoteUrl = detectGitRemoteUrl();
-      if (remoteUrl) {
-        const remoteProject = repos.projects.findByGitRemoteUrl(remoteUrl);
-        if (remoteProject) {
-          return hydrateAndReturn(remoteProject);
+      const resolved = new Map<string, { project: Project; startDir: string }>();
+      let repositoryIdentityFound = false;
+      for (const startDir of workspaceDirectories()) {
+        const remoteUrl = detectGitRemoteUrl(startDir);
+        if (remoteUrl) {
+          repositoryIdentityFound = true;
+          const remoteProject = repos.projects.findByGitRemoteUrl(remoteUrl);
+          if (remoteProject) {
+            resolved.set(remoteProject.id, { project: remoteProject, startDir });
+            continue;
+          }
         }
-        const repoBacked = resolveRepoBackedProject();
-        if (repoBacked) return repoBacked;
-        // A repository identity is stronger than the legacy single-project
-        // fallback. Never bind a new checkout to an unrelated lone project.
+        const repoBacked = resolveRepoBackedProject(undefined, startDir);
+        if (repoBacked) {
+          repositoryIdentityFound = true;
+          resolved.set(repoBacked.id, { project: repoBacked, startDir });
+        }
+      }
+      if (resolved.size === 1) {
+        const selection = [...resolved.values()][0]!;
+        return hydrateAndReturn(selection.project, selection.startDir);
+      }
+      if (resolved.size > 1 || repositoryIdentityFound || currentWorkspaceDirectories() !== undefined) {
+        // Client workspace roots and repository identities are stronger than
+        // the legacy single-project fallback. Never select unrelated state.
         return null;
       }
-      const repoBacked = resolveRepoBackedProject();
-      if (repoBacked) return repoBacked;
       return hydrateAndReturn(resolveProject({}));
     }
     // Accept either a project id or name in one field.
-    return hydrateAndReturn(repos.projects.findById(ref) ?? repos.projects.findByName(ref)) ?? resolveRepoBackedProject(ref);
+    const stored = repos.projects.findById(ref) ?? repos.projects.findByName(ref);
+    if (stored) {
+      const matchingDirectory = workspaceDirectories()
+        .find((startDir) => workspaceMatchesProject(stored, startDir));
+      return hydrateAndReturn(stored, matchingDirectory);
+    }
+    for (const startDir of workspaceDirectories()) {
+      const repoBacked = resolveRepoBackedProject(ref, startDir);
+      if (repoBacked) return repoBacked;
+    }
+    return null;
   };
 
   return {
@@ -160,9 +197,10 @@ export function createCommandContext(): CommandContext {
 
       const requestedProject = opts?.project?.trim();
       if (requestedProject) {
-        const remoteUrl = detectGitRemoteUrl();
+        const startDir = workspaceDirectories()[0];
+        const remoteUrl = startDir ? detectGitRemoteUrl(startDir) : null;
         const repositoryProject = parseGitHubRepoFromRemote(remoteUrl ?? undefined)?.split('/').at(-1)
-          ?? findRepoRoot()?.split(/[\\/]/).filter(Boolean).at(-1)
+          ?? (startDir ? findRepoRoot(startDir)?.split(/[\\/]/).filter(Boolean).at(-1) : undefined)
           ?? null;
         const registered = repos.projects.findAll()
           .sort((a, b) => a.name.localeCompare(b.name));
@@ -190,7 +228,8 @@ export function createCommandContext(): CommandContext {
         });
       }
 
-      const remoteUrl = detectGitRemoteUrl();
+      const startDir = workspaceDirectories()[0];
+      const remoteUrl = startDir ? detectGitRemoteUrl(startDir) : null;
       if (remoteUrl) {
         throw new HvError('NOT_FOUND', `No Hypervibe project is initialized for git remote "${remoteUrl}".`, {
           hint: 'Call hv_spec from this repository. A fresh-repository read returns the initialization contract, then hv_spec with spec input creates the project.',

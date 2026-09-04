@@ -7,6 +7,8 @@ import type {
 } from '../../application/commands.js';
 import type { CommandEnvelope } from '../../application/results.js';
 import { formatCommandResult } from '../../application/presentation.js';
+import { fileURLToPath } from 'node:url';
+import { runWithWorkspaceDirectories } from '../../lib/workspace-context.js';
 
 export interface McpToolResponse {
   content: Array<{ type: 'text'; text: string }>;
@@ -35,10 +37,30 @@ function registerDefinition(
     definition.id,
     definition.description,
     definition.inputShape,
-    async (args) => toMcpToolResponse(
-      await registry.execute(definition.id, args),
-      definition.id
-    )
+    async (args) => {
+      const capabilities = server.server.getClientCapabilities();
+      let workspaceDirectories: string[] | undefined;
+      if (capabilities?.roots) {
+        try {
+          const { roots } = await server.server.listRoots();
+          workspaceDirectories = roots.flatMap((root) => {
+            try {
+              const url = new URL(root.uri);
+              return url.protocol === 'file:' ? [fileURLToPath(url)] : [];
+            } catch {
+              return [];
+            }
+          });
+        } catch {
+          workspaceDirectories = [];
+        }
+      }
+      const execute = () => registry.execute(definition.id, args);
+      const envelope = workspaceDirectories === undefined
+        ? await execute()
+        : await runWithWorkspaceDirectories(workspaceDirectories, execute);
+      return toMcpToolResponse(envelope, definition.id);
+    }
   );
 }
 

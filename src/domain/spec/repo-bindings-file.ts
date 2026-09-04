@@ -4,6 +4,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
 import { findRepoRoot, repoSpecEnabled } from './repo-spec-file.js';
 import { withStorageInstanceScopes } from '../services/storage-instance-identity.js';
+import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
 
 // Bindings are the inverse of the spec's source-of-truth contract: the DB
 // column `environments.platform_bindings` is authoritative (it holds data the
@@ -126,7 +127,7 @@ function normalizeDocument(raw: unknown, projectName: string): RepoBindingsFile 
   };
 }
 
-export function readRepoBindingsFile(projectName?: string, startDir = process.cwd()): { path: string; document: RepoBindingsFile } | null {
+export function readRepoBindingsFile(projectName?: string, startDir = primaryWorkspaceDirectory()): { path: string; document: RepoBindingsFile } | null {
   if (!repoSpecEnabled()) {
     return null;
   }
@@ -148,7 +149,7 @@ export function readRepoBindingsFile(projectName?: string, startDir = process.cw
   return { path: file, document };
 }
 
-export function writeRepoBindingsForEnvironment(project: Project, environment: Environment, startDir = process.cwd()): string | null {
+export function writeRepoBindingsForEnvironment(project: Project, environment: Environment, startDir = primaryWorkspaceDirectory()): string | null {
   if (!repoSpecEnabled()) {
     return null;
   }

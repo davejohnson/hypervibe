@@ -10,6 +10,7 @@ import {
 } from '../../../domain/ports/secretmanager.port.js';
 import { secretManagerRegistry } from '../../../domain/registry/secretmanager.registry.js';
 import { parseEnvFile } from '../../../utils/env-parser.js';
+import { primaryWorkspaceDirectory } from '../../../lib/workspace-context.js';
 
 const CLI_TIMEOUT_MS = 30_000;
 const CLI_MAX_BUFFER_BYTES = 1024 * 1024;
@@ -184,7 +185,7 @@ export class StripeProjectsAdapter implements ISecretManagerAdapter {
   private connected = false;
 
   constructor(options: StripeProjectsAdapterOptions = {}) {
-    this.cwd = path.resolve(options.cwd ?? process.cwd());
+    this.cwd = path.resolve(options.cwd ?? primaryWorkspaceDirectory());
     this.runner = options.runner ?? defaultCliRunner();
   }
 

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import path from 'path';
 import { projectSpecSchema, type ProjectSpec } from './spec.schema.js';
+import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
 
 export interface RepoSpecFile {
   root: string;
@@ -31,7 +32,7 @@ export function repoSpecEnabled(): boolean {
   return disabled !== '1' && disabled !== 'true' && disabled !== 'yes';
 }
 
-export function findRepoRoot(startDir = process.cwd()): string | null {
+export function findRepoRoot(startDir = primaryWorkspaceDirectory()): string | null {
   let current = path.resolve(startDir);
   while (true) {
     const gitPath = path.join(current, '.git');
@@ -93,7 +94,7 @@ export function ensureRepoEnvTemplate(root: string): RepoEnvTemplateWrite {
   return { path: templatePath, addedKeys };
 }
 
-export function readRepoSpecFile(startDir = process.cwd()): RepoSpecFile | null {
+export function readRepoSpecFile(startDir = primaryWorkspaceDirectory()): RepoSpecFile | null {
   if (!repoSpecEnabled()) {
     return null;
   }
@@ -126,7 +127,7 @@ export function readRepoSpecFile(startDir = process.cwd()): RepoSpecFile | null 
   return { root, path: specPath, document, spec: parsed.data };
 }
 
-export function writeRepoSpecFile(spec: ProjectSpec, startDir = process.cwd()): RepoSpecWrite | null {
+export function writeRepoSpecFile(spec: ProjectSpec, startDir = primaryWorkspaceDirectory()): RepoSpecWrite | null {
   if (!repoSpecEnabled()) {
     return null;
   }

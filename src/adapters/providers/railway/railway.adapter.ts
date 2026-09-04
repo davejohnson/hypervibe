@@ -4238,14 +4238,10 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
       }
     `;
 
-    try {
-      const result = await this.client.request<{
-        deploymentLogs: RailwayLogEntry[];
-      }>(query, { deploymentId, limit });
-      return result.deploymentLogs ?? [];
-    } catch {
-      return [];
-    }
+    const result = await this.client.request<{
+      deploymentLogs: RailwayLogEntry[];
+    }>(query, { deploymentId, limit });
+    return result.deploymentLogs ?? [];
   }
 
   async getBuildLogs(deploymentId: string): Promise<string> {
@@ -4263,12 +4259,8 @@ export class RailwayAdapter implements IProviderAdapter, IWorkloadMaintenanceAda
       }
     `;
 
-    try {
-      const result = await this.client.request<{ buildLogs: RailwayLogEntry[] }>(query, { deploymentId });
-      return this.formatRailwayLogEntries(result.buildLogs ?? []);
-    } catch {
-      return '';
-    }
+    const result = await this.client.request<{ buildLogs: RailwayLogEntry[] }>(query, { deploymentId });
+    return this.formatRailwayLogEntries(result.buildLogs ?? []);
   }
 
   private formatRailwayLogEntries(logs: RailwayLogEntry[]): string {
