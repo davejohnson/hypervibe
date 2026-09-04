@@ -79,6 +79,60 @@ describe('hv_logs', () => {
     await t.close();
   });
 
+  it('returns a provider error with the failed operation and network cause', async () => {
+    const project = new ProjectRepository().create({
+      name: 'provider-error-app',
+      defaultPlatform: 'railway',
+    });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'project-1',
+        environmentId: 'environment-1',
+        services: { worker: { serviceId: 'service-1' } },
+      },
+    });
+    const cause = Object.assign(new Error('getaddrinfo ENOTFOUND backboard.railway.app'), {
+      code: 'ENOTFOUND',
+    });
+    const fetchError = Object.assign(new TypeError('fetch failed'), { cause });
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: {
+        getDeployments: vi.fn(async () => { throw fetchError; }),
+        getDeploymentLogs: vi.fn(),
+      } as never,
+    });
+
+    const t = await makeClient();
+    const result = await t.call('hv_logs', {
+      project: project.name,
+      env: 'staging',
+      service: 'worker',
+      source: 'service',
+      errorsOnly: true,
+      limit: 50,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: 'PROVIDER_ERROR',
+        details: {
+          provider: 'railway',
+          operation: 'latest deployment lookup',
+          message: 'fetch failed',
+          cause: 'getaddrinfo ENOTFOUND backboard.railway.app',
+          causeCode: 'ENOTFOUND',
+        },
+      },
+    });
+    expect(result.error.message).toContain('railway latest deployment lookup failed');
+    await t.close();
+  });
+
   it('returns environment-scoped Stripe setup before reading webhook status', async () => {
     const project = new ProjectRepository().create({ name: 'stripe-setup-app' });
     new EnvironmentRepository().create({

@@ -1,11 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseToolEnvelope } from './tool-result.js';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { HYPERVIBE_VERSION } from '../../version.js';
 import { createCommandContext } from '../../application/context.js';
 import { createCommandRegistry } from '../../application/commands.js';
@@ -20,6 +23,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   SqliteAdapter.resetInstance();
   rmSync(tempDir, { recursive: true, force: true });
 });
@@ -46,10 +50,18 @@ const EXPECTED_TOOLS = [
   'hv_cloud_pair',
 ].sort();
 
-async function makeClient() {
+async function makeClient(workspaceRoot?: string) {
   const { createServer } = await import('../../server.js');
   const server = createServer();
-  const client = new Client({ name: 'server-contract-client', version: '1.0.0' });
+  const client = new Client(
+    { name: 'server-contract-client', version: '1.0.0' },
+    workspaceRoot ? { capabilities: { roots: {} } } : undefined
+  );
+  if (workspaceRoot) {
+    client.setRequestHandler(ListRootsRequestSchema, async () => ({
+      roots: [{ uri: pathToFileURL(workspaceRoot).href, name: path.basename(workspaceRoot) }],
+    }));
+  }
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   return { client, server };
@@ -132,6 +144,72 @@ describe('server tool surface', () => {
     }));
 
     expect(overMcp).toEqual(direct);
+    await client.close();
+    await server.close();
+  });
+
+  it('resolves omitted projects from the MCP client workspace root, not the server launch directory', async () => {
+    vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', '0');
+    new ProjectRepository().create({ name: 'hypervibe-domain-conformance' });
+    const workspaceRoot = path.join(tempDir, 'invoice-perfect');
+    mkdirSync(path.join(workspaceRoot, '.git'), { recursive: true });
+    mkdirSync(path.join(workspaceRoot, '.hypervibe'), { recursive: true });
+    writeFileSync(path.join(workspaceRoot, '.hypervibe', 'spec.json'), `${JSON.stringify({
+      version: 1,
+      project: 'invoiceperfect.com',
+      runtime: { kind: 'node', version: '24' },
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          services: {
+            worker: { workloadKind: 'worker', startCommand: 'npm run worker' },
+          },
+        },
+      },
+    }, null, 2)}\n`);
+    writeFileSync(path.join(workspaceRoot, '.hypervibe', 'bindings.json'), `${JSON.stringify({
+      version: 1,
+      project: 'invoiceperfect.com',
+      environments: {
+        staging: {
+          platformBindings: {
+            provider: 'railway',
+            projectId: 'railway-project',
+            environmentId: 'railway-staging',
+            services: { worker: { serviceId: 'railway-worker' } },
+          },
+        },
+      },
+    }, null, 2)}\n`);
+
+    const { client, server } = await makeClient(workspaceRoot);
+    expect(server.server.getClientCapabilities()?.roots).toEqual({});
+    await expect(server.server.listRoots()).resolves.toMatchObject({
+      roots: [{ uri: pathToFileURL(workspaceRoot).href }],
+    });
+    const result = parseToolEnvelope(await client.callTool({ name: 'hv_spec', arguments: {} }));
+
+    expect(result.ok).toBe(true);
+    expect((result.data as { project?: { name?: string } }).project?.name).toBe('invoiceperfect.com');
+
+    const logsResult = parseToolEnvelope(await client.callTool({
+      name: 'hv_logs',
+      arguments: {
+        env: 'staging',
+        service: 'worker',
+        source: 'service',
+        errorsOnly: true,
+        limit: 50,
+      },
+    }));
+    expect(logsResult.ok).toBe(false);
+    expect(logsResult.error).toMatchObject({ code: 'MISSING_CONNECTION' });
+    expect(logsResult.error?.details).toMatchObject({
+      connectionSetup: expect.objectContaining({
+        provider: 'railway',
+        project: 'invoiceperfect.com',
+      }),
+    });
     await client.close();
     await server.close();
   });

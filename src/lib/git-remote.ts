@@ -3,9 +3,10 @@ import { execSync } from 'child_process';
 /**
  * Detect the git remote URL of the current working directory.
  */
-export function detectGitRemoteUrl(): string | null {
+export function detectGitRemoteUrl(startDir = process.cwd()): string | null {
   try {
     return execSync('git remote get-url origin', {
+      cwd: startDir,
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],

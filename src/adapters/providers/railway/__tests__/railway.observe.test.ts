@@ -512,6 +512,22 @@ describe('RailwayAdapter observe', () => {
     expect(logs).toContain('2026-06-16T21:00:01Z info Check image credentials');
   });
 
+  it('preserves Railway service-log read failures', async () => {
+    const request = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.getDeploymentLogs('dep-1', 50)).rejects.toThrow('fetch failed');
+  });
+
+  it('preserves Railway build-log read failures', async () => {
+    const request = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.getBuildLogs('dep-1')).rejects.toThrow('fetch failed');
+  });
+
   it('returns projectExists false when the project query fails', async () => {
     const request = vi.fn().mockRejectedValueOnce(new Error('Project not found'));
 

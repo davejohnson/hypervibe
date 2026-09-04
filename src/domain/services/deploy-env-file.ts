@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { parseEnvFile } from '../../utils/env-parser.js';
 import { findRepoRoot } from '../spec/repo-spec-file.js';
+import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
 
 export interface DeployEnvFileResult {
   path: string;
@@ -264,11 +265,11 @@ export function valueLooksLocal(value: string): boolean {
   return false;
 }
 
-export function defaultDeployEnvFilePath(startDir = process.cwd(), envName?: string): string | null {
+export function defaultDeployEnvFilePath(startDir = primaryWorkspaceDirectory(), envName?: string): string | null {
   return resolveDefaultDeployEnvFile(startDir, envName).path;
 }
 
-function resolveDefaultDeployEnvFile(startDir = process.cwd(), envName?: string, options: { syncEnvSpecific?: boolean; excludedKeys?: string[] } = {}): {
+function resolveDefaultDeployEnvFile(startDir = primaryWorkspaceDirectory(), envName?: string, options: { syncEnvSpecific?: boolean; excludedKeys?: string[] } = {}): {
   path: string | null;
   baseEnvPath?: string;
   createdEnvSpecificPath?: string;
@@ -331,7 +332,7 @@ export function loadDeployEnvFile(options: {
   const mode = options.mode ?? 'runtime';
   if (options.includeEnvFile === false || mode === 'off') return null;
   const resolvedDefault = options.envFile
-    ? { path: path.resolve(options.startDir ?? process.cwd(), options.envFile) }
+    ? { path: path.resolve(options.startDir ?? primaryWorkspaceDirectory(), options.envFile) }
     : resolveDefaultDeployEnvFile(options.startDir, options.envName, {
       syncEnvSpecific: options.syncEnvSpecific !== false,
       excludedKeys: options.excludeKeys,

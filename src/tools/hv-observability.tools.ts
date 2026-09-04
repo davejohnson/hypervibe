@@ -10,6 +10,7 @@ import {
   logsDeploymentsUnsupportedMessage,
   logsBuildUnsupportedMessage,
   ProviderLogsConnectionError,
+  ProviderLogsReadError,
 } from '../domain/services/provider-logs.service.js';
 import { fetchStripeWebhookStatuses } from '../domain/services/stripe-ops.service.js';
 import { stripeEnvironmentName } from '../domain/services/stripe-env.service.js';
@@ -62,12 +63,24 @@ async function readProviderLogs<T>(
   try {
     return await read();
   } catch (error) {
-    if (!(error instanceof ProviderLogsConnectionError)) throw error;
-    const scopeHints = getProjectScopeHints(project);
-    const scope = scopeHints.find((hint) => !hint.includes('://') && !hint.includes('github.com/'));
-    throw new HvError('MISSING_CONNECTION', error.message, {
-      ...connectionSetupOptions(provider, { project: project.name, scope }),
-    });
+    if (error instanceof ProviderLogsConnectionError) {
+      const scopeHints = getProjectScopeHints(project);
+      const scope = scopeHints.find((hint) => !hint.includes('://') && !hint.includes('github.com/'));
+      throw new HvError('MISSING_CONNECTION', error.message, {
+        ...connectionSetupOptions(provider, { project: project.name, scope }),
+      });
+    }
+    if (error instanceof ProviderLogsReadError) {
+      throw new HvError('PROVIDER_ERROR', error.message, {
+        details: {
+          provider: error.provider,
+          operation: error.operation,
+          ...error.details,
+        },
+        hint: 'Retry the same bounded hv_logs request once. If it fails again, use the returned provider operation and network/HTTP details to repair connectivity or permissions; do not bypass Hypervibe.',
+      });
+    }
+    throw error;
   }
 }
 
