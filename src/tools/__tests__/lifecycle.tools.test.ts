@@ -706,6 +706,79 @@ describe('hv_inspect / hv_import', () => {
     await t.close();
   });
 
+  it.each([
+    ['database', 'databases', 'postgres', 'db-1'],
+    ['cache', 'caches', 'redis', 'cache-1'],
+  ] as const)('hv_inspect uses full environment observation for Railway %s inspection', async (
+    resource,
+    collection,
+    engine,
+    externalId
+  ) => {
+    const project = new ProjectRepository().create({ name: `railway-${resource}-inspection` });
+    const environment = new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rp-1',
+        environmentId: 'env-prod',
+      },
+    });
+    new ComponentRepository().create({
+      environmentId: environment.id,
+      type: engine,
+      externalId,
+      bindings: { provider: 'railway', projectId: 'rp-1' },
+    });
+    const observedResource = {
+      provider: 'railway',
+      engine,
+      externalId,
+      providerScope: { projectId: 'rp-1', environmentId: 'env-prod' },
+      status: 'running',
+    };
+    const observe = vi.fn(async (): Promise<ObservedState> => ({
+      provider: 'railway',
+      observedAt: '2026-09-09T00:00:00.000Z',
+      projectExists: true,
+      projectId: 'rp-1',
+      environmentId: 'env-prod',
+      services: [],
+      databases: resource === 'database' ? [observedResource] : [],
+      caches: resource === 'cache' ? [observedResource] : [],
+      completeness: { databases: 'complete', caches: 'complete' },
+      partial: false,
+      warnings: [],
+    } as ObservedState));
+    vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({
+      success: true,
+      adapter: { name: 'railway', observe, disconnect: async () => {} },
+    } as never);
+    const t = await makeClient();
+
+    const result = await t.call('hv_inspect', {
+      provider: 'railway',
+      project: project.name,
+      env: environment.name,
+      resource,
+    });
+
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect(result.data).toMatchObject({
+      provider: 'railway',
+      mode: resource,
+      project: project.name,
+      environment: environment.name,
+      observed: {
+        [collection]: [expect.objectContaining({ externalId })],
+        completeness: 'complete',
+      },
+    });
+    expect(observe).toHaveBeenCalledWith(environment);
+    await t.close();
+  });
+
   it('hv_import confirmation-gates one exact scoped retained database cleanup identity', async () => {
     const project = new ProjectRepository().create({ name: 'retained-database-app' });
     const environment = new EnvironmentRepository().create({

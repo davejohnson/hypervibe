@@ -12,6 +12,58 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/**
+ * Compare a live provider scope with durable local identity metadata while
+ * remaining compatible with bindings written before providerScope existed.
+ *
+ * Legacy component bindings sometimes stored provider scope fields at the
+ * top level and relied on the environment's exact hosting scope for the rest.
+ * Explicit component scope always wins, and every live scope field must still
+ * be proven. A different environment can therefore never complete a match.
+ */
+export function providerIdentityScopeMatches(params: {
+  componentBindings?: Record<string, unknown>;
+  environmentBindings?: Record<string, unknown>;
+  provider?: string;
+  liveScope?: Record<string, string>;
+}): boolean {
+  const explicitScope = asRecord(params.componentBindings?.providerScope);
+  const explicitEntries = Object.entries(explicitScope ?? {});
+  const liveEntries = Object.entries(params.liveScope ?? {});
+
+  if (liveEntries.length === 0) {
+    return explicitEntries.length === 0;
+  }
+
+  const environmentScope = params.provider
+    && params.environmentBindings?.provider === params.provider
+    ? params.environmentBindings
+    : undefined;
+  const ownValue = (record: Record<string, unknown> | null | undefined, key: string): {
+    found: boolean;
+    value?: unknown;
+  } => record && Object.prototype.hasOwnProperty.call(record, key)
+    ? { found: true, value: record[key] }
+    : { found: false };
+  const localValue = (key: string): unknown => {
+    const explicit = ownValue(explicitScope, key);
+    if (explicit.found) return explicit.value;
+    const flattened = ownValue(params.componentBindings, key);
+    if (flattened.found) return flattened.value;
+    return ownValue(environmentScope, key).value;
+  };
+
+  return liveEntries.every(([key, value]) => (
+    typeof value === 'string'
+    && value.length > 0
+    && localValue(key) === value
+  )) && explicitEntries.every(([key, value]) => (
+    typeof value === 'string'
+    && value.length > 0
+    && params.liveScope?.[key] === value
+  ));
+}
+
 function canonicalSanitizedValue(value: unknown): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
