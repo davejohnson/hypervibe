@@ -2453,15 +2453,11 @@ export class RailwayAdapter implements
         error: `service instance absence is unknown (${serviceId} in ${environmentId}): ${existing.error}`,
       };
     }
-    if (!options.allowMutation) {
-      return {
-        success: false,
-        error: `Railway service ${serviceId} remains present, and another local binding forbids provider mutation.`,
-      };
-    }
-
     const inventory = await this.serviceInstanceInventory(serviceId, projectId);
     if (inventory.state === 'absent') {
+      if (!options.allowMutation) {
+        return { success: true, alreadyAbsent: true };
+      }
       return {
         success: false,
         error: `Railway returned conflicting service and service-instance evidence for ${serviceId}; deletion is blocked.`,
@@ -2477,6 +2473,12 @@ export class RailwayAdapter implements
       return {
         success: false,
         error: `Railway returned conflicting service-instance evidence for ${serviceId} in ${environmentId}; deletion is blocked.`,
+      };
+    }
+    if (!options.allowMutation) {
+      return {
+        success: false,
+        error: `Railway service ${serviceId} remains present, but this apply did not authorize provider mutation.`,
       };
     }
     const siblingEnvironmentIds = inventory.environmentIds.filter((id) => id !== environmentId);

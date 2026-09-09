@@ -349,11 +349,17 @@ the mutation. A present target may be deleted only when no other current or
 retained local binding refers to the id and a complete paginated provider
 inventory proves that no sibling environment instance exists. The mutation is
 scoped with `serviceDelete(id, environmentId)`. An exact already-absent result
-removes only the selected local binding; unknown or conflicting evidence keeps
-all local state for a safe retry. Before any retained hosting boundary is
-destroyed, apply scans every local Hypervibe project and environment for an
-exact or ambiguously scoped reference to that provider boundary; any other
-reference blocks cleanup, including a database or cache provider identity
+removes only the selected local binding. When mutation is already disabled and
+the exact Railway `service(id)` parent lookup is provider-confirmed absent, a
+lingering exact `serviceInstance(serviceId, environmentId)` response is treated
+as a provider tombstone and likewise removes only the selected local binding
+without another provider mutation. Unknown parent evidence, a complete parent
+inventory that omits the target environment, or the same absent-parent conflict
+while mutation is authorized keeps all local state for a safe retry. Before any
+retained hosting boundary is destroyed, apply scans every local Hypervibe
+project and environment for an exact or ambiguously scoped reference to that
+provider boundary; any other reference blocks cleanup, including a database or
+cache provider identity
 nested in a component's retained previous binding. Retained hosting cleanup is
 not planned without its required project/environment scope. If rollout rollback
 cannot remove a newly created service, snapshot restoration persists an

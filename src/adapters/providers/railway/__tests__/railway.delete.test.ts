@@ -317,15 +317,77 @@ describe('RailwayAdapter delete verification', () => {
   });
 
   it('does not mutate Railway when the exact target remains present but local sharing forbids mutation', async () => {
-    const request = vi.fn().mockResolvedValueOnce(serviceInstance());
+    const request = vi.fn()
+      .mockResolvedValueOnce(serviceInstance())
+      .mockResolvedValueOnce(serviceInventory(['env-staging']));
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
 
     const result = await adapter.deleteService('svc-1', serviceScope(), { allowMutation: false });
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('forbids provider mutation');
-    expect(request).toHaveBeenCalledTimes(1);
+    expect(result.error).toContain('did not authorize provider mutation');
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
+  });
+
+  it('treats a stale service-instance tombstone as absent when the exact parent service is gone', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(serviceInstance())
+      .mockResolvedValueOnce({ service: null });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.deleteService('svc-1', serviceScope(), { allowMutation: false })).resolves.toEqual({
+      success: true,
+      alreadyAbsent: true,
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(String(request.mock.calls[1]?.[0])).toContain('service(id: $serviceId)');
+    expect(request.mock.calls.some(([query]) => String(query).includes('mutation DeleteEnvironmentService'))).toBe(false);
+  });
+
+  it('treats a strict parent-service not-found response as a stale service-instance tombstone', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(serviceInstance())
+      .mockRejectedValueOnce(graphqlNotFound('service', 'Service not found'));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    await expect(adapter.deleteService('svc-1', serviceScope(), { allowMutation: false })).resolves.toEqual({
+      success: true,
+      alreadyAbsent: true,
+    });
+    expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
+  });
+
+  it('preserves the binding when the exact parent service check is unknown', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(serviceInstance())
+      .mockRejectedValueOnce(new Error('Railway parent lookup unavailable'));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.deleteService('svc-1', serviceScope(), { allowMutation: false });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('service instance inventory is unknown');
+    expect(result.error).toContain('Railway parent lookup unavailable');
+    expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
+  });
+
+  it('preserves the binding when the parent inventory omits the exact target environment', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(serviceInstance())
+      .mockResolvedValueOnce(serviceInventory([]));
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: ReturnType<typeof vi.fn> } }).client = { request };
+
+    const result = await adapter.deleteService('svc-1', serviceScope(), { allowMutation: false });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('conflicting service-instance evidence');
     expect(request.mock.calls.some(([query]) => String(query).includes('serviceDelete'))).toBe(false);
   });
 
