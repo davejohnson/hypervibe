@@ -47,6 +47,16 @@ function validSpec(): Record<string, unknown> {
         provider: 'github-actions',
       },
     },
+    secrets: {
+      INTEGRATION_CREDENTIAL_KEY_BASE64URL: {
+        ownership: 'hypervibe',
+        generator: 'random-base64url-32-v1',
+        generation: 1,
+        replacementPolicy: 'immutable',
+        conflictsWith: ['INTEGRATION_CREDENTIAL_KEYRING_BASE64'],
+        environments: ['production'],
+      },
+    },
     environments: {
       staging: {
         hosting: { provider: 'railway' },

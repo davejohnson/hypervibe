@@ -1624,9 +1624,17 @@ export class PlanService {
     }
     const managedSecretSlots = new Map(managedSecretsForEnvironment(specResult.spec, environmentName));
     const delegatedSecretSlots = new Map(delegatedSecretInputsForEnvironment(specResult.spec, environmentName));
+    const immutableConflictKeys = Array.from(new Set(
+      [...managedSecretSlots.values()].flatMap((slot) =>
+        slot.ownership === 'hypervibe' && slot.replacementPolicy === 'immutable'
+          ? slot.conflictsWith ?? []
+          : []
+      )
+    )).sort();
     const reservedSecretKeys = new Set([
       ...managedSecretSlots.keys(),
       ...delegatedSecretSlots.keys(),
+      ...immutableConflictKeys,
     ]);
     const requestedSecretRefs = options?.secretRefs && Object.keys(options.secretRefs).length > 0
       ? options.secretRefs
@@ -1928,13 +1936,12 @@ export class PlanService {
       ? buildCacheEnvVarsFromComponent(localCache).envVars
       : undefined;
     const managedQueueEnvVars = await resolveQueueEnvVars(projectForPlan, environmentSpec, environment);
-    const managedEnvKeys = new Set([
+    const infrastructureManagedEnvKeys = new Set([
       ...Object.keys(managedDatabaseEnvVars ?? {}),
       ...Object.values(environmentSpec.services)
         .flatMap((service) => Object.keys(service.databaseEnvAliases ?? {})),
       ...Object.keys(managedCacheEnvVars ?? {}),
       ...Object.keys(managedQueueEnvVars ?? {}),
-      ...reservedSecretKeys,
       ...stripeManagedEnvKeys(environmentSpec),
       ...(environmentSpec.email.enabled ? EMAIL_MANAGED_ENV_KEYS : []),
       ...(environmentSpec.messaging ? MESSAGING_MANAGED_ENV_KEYS : []),
@@ -1956,6 +1963,17 @@ export class PlanService {
       ...(projectForPlan.gitRemoteUrl
         ? ['HYPERVIBE_SOURCE_REPO_URL', 'HYPERVIBE_SOURCE_REVISION', 'HYPERVIBE_GITHUB_TOKEN']
         : []),
+    ]);
+    const immutableManagedKeyCollisions = immutableConflictKeys
+      .filter((key) => infrastructureManagedEnvKeys.has(key));
+    if (immutableManagedKeyCollisions.length > 0) {
+      return {
+        error: `Immutable generated-secret conflict keys cannot also be managed runtime variables: ${immutableManagedKeyCollisions.join(', ')}. Remove the collision or use an explicit credential rewrap workflow.`,
+      };
+    }
+    const managedEnvKeys = new Set([
+      ...infrastructureManagedEnvKeys,
+      ...reservedSecretKeys,
     ]);
     const retiredManagedKeys = (environmentSpec.removeEnvVars ?? [])
       .filter((key) => managedEnvKeys.has(key));

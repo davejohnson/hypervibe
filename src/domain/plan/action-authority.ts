@@ -226,6 +226,20 @@ function metadataStringArray(action: PlanAction, key: string): string[] | undefi
   return value;
 }
 
+function metadataCanonicalEnvVarNames(action: PlanAction, key: string): string[] | undefined {
+  const names = metadataStringArray(action, key);
+  const sorted = names ? [...names].sort() : [];
+  if (
+    names === undefined
+    || names.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+    || new Set(names).size !== names.length
+    || names.some((name, index) => name !== sorted[index])
+  ) {
+    return undefined;
+  }
+  return names;
+}
+
 function metadataStringRecord(action: PlanAction, key: string): Record<string, string> | undefined {
   const value = action.metadata?.[key];
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
@@ -293,8 +307,26 @@ function managedSecretAuthorityMetadataIsValid(action: PlanAction): boolean {
 
   const generator = metadataString(action, 'generator');
   const generation = metadataPositiveInteger(action, 'generation');
+  const replacementPolicyValue = action.metadata?.replacementPolicy;
+  if (
+    replacementPolicyValue !== undefined
+    && replacementPolicyValue !== 'confirm'
+    && replacementPolicyValue !== 'immutable'
+  ) {
+    return false;
+  }
+  const replacementPolicy = replacementPolicyValue ?? 'confirm';
+  const conflictsValue = action.metadata?.conflictsWith;
+  const conflictsWith = conflictsValue === undefined
+    ? []
+    : metadataCanonicalEnvVarNames(action, 'conflictsWith');
   return generator === 'random-base64url-32-v1'
     && generation !== undefined
+    && conflictsWith !== undefined
+    && !conflictsWith.includes(action.resource.name)
+    && (replacementPolicy === 'immutable' || conflictsWith.length === 0)
+    && (replacementPolicy !== 'immutable' || conflictsValue !== undefined)
+    && (replacementPolicy !== 'immutable' || action.requiresConfirm !== true)
     && metadataSha256(action, 'expectedValueHash') !== undefined
     && metadataBoolean(action, 'inputProvided') === false
     && metadataBoolean(action, 'valuePrepared') === true

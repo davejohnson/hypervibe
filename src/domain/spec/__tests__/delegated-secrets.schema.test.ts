@@ -71,6 +71,117 @@ describe('project secret spec', () => {
 
   });
 
+  it('accepts immutable generated secrets with canonical conflicting environment-variable names', () => {
+    const parsed = projectSpecSchema.parse(hypervibeSecretSpec({
+      ownership: 'hypervibe',
+      generator: 'random-base64url-32-v1',
+      generation: 1,
+      replacementPolicy: 'immutable',
+      conflictsWith: ['LEGACY_Z_KEY', 'LEGACY_A_KEY'],
+      environments: ['production'],
+    }));
+
+    expect(parsed.secrets.SESSION_SECRET).toEqual({
+      ownership: 'hypervibe',
+      generator: 'random-base64url-32-v1',
+      generation: 1,
+      replacementPolicy: 'immutable',
+      conflictsWith: ['LEGACY_A_KEY', 'LEGACY_Z_KEY'],
+      environments: ['production'],
+    });
+  });
+
+  it.each([
+    ['invalid conflict name', ['NOT-AN-ENV-KEY']],
+    ['duplicate conflict name', ['LEGACY_KEY', 'LEGACY_KEY']],
+    ['self conflict', ['SESSION_SECRET']],
+  ])('rejects immutable generated secrets with an %s', (_label, conflictsWith) => {
+    const result = projectSpecSchema.safeParse(hypervibeSecretSpec({
+      ownership: 'hypervibe',
+      generator: 'random-base64url-32-v1',
+      replacementPolicy: 'immutable',
+      conflictsWith,
+      environments: ['production'],
+    }));
+
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects conflictsWith without the immutable replacement policy', () => {
+    const result = projectSpecSchema.safeParse(hypervibeSecretSpec({
+      ownership: 'hypervibe',
+      generator: 'random-base64url-32-v1',
+      conflictsWith: ['LEGACY_KEY'],
+      environments: ['production'],
+    }));
+
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an immutable conflict that is also desired in a target environment', () => {
+    const result = projectSpecSchema.safeParse({
+      ...hypervibeSecretSpec({
+        ownership: 'hypervibe',
+        generator: 'random-base64url-32-v1',
+        replacementPolicy: 'immutable',
+        conflictsWith: ['LEGACY_KEY'],
+        environments: ['production'],
+      }),
+      environments: {
+        production: {
+          hosting: { provider: 'railway' },
+          services: { web: {} },
+          envVars: { LEGACY_KEY: 'still-managed' },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: expect.stringContaining('conflicts with desired runtime key "LEGACY_KEY"'),
+      }));
+    }
+  });
+
+  it.each([
+    ['retired', { removeEnvVars: ['LEGACY_KEY'] }],
+    ['managed as a database alias', {
+      database: { provider: 'railway' },
+      services: {
+        web: { databaseEnvAliases: { LEGACY_KEY: 'DATABASE_URL' } },
+      },
+    }],
+  ])('rejects an immutable conflict key that is also %s', (_label, environmentPatch) => {
+    const candidate = hypervibeSecretSpec({
+      ownership: 'hypervibe',
+      generator: 'random-base64url-32-v1',
+      replacementPolicy: 'immutable',
+      conflictsWith: ['LEGACY_KEY'],
+      environments: ['production'],
+    });
+    const production = candidate.environments.production;
+    const result = projectSpecSchema.safeParse({
+      ...candidate,
+      environments: {
+        production: {
+          ...production,
+          ...environmentPatch,
+          services: 'services' in environmentPatch
+            ? environmentPatch.services
+            : production.services,
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: expect.stringContaining('immutable Hypervibe-owned secret'),
+      }));
+    }
+  });
+
   it('keeps Hypervibe-owned slots runtime-only and rejects delegated fields', () => {
     for (const forbidden of [
       { principal: 'github:alice' },
