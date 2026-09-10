@@ -27,6 +27,8 @@ export type DelegatedSecretBinding = RuntimeSecretBindingBase & (
       source: 'hypervibe-generated';
       generator: HypervibeSecretSpec['generator'];
       generation: number;
+      replacementPolicy?: 'immutable';
+      conflictsWith?: string[];
     }
 );
 
@@ -50,6 +52,39 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function stringField(record: Record<string, unknown> | null, key: string): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function canonicalEnvVarNames(value: unknown): string[] | null {
+  if (
+    !Array.isArray(value)
+    || value.some((entry) => typeof entry !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(entry))
+  ) {
+    return null;
+  }
+  const names = value as string[];
+  const sorted = [...names].sort();
+  if (new Set(names).size !== names.length || names.some((name, index) => name !== sorted[index])) {
+    return null;
+  }
+  return names;
+}
+
+function generatedSecretReplacementPolicy(slot: HypervibeSecretSpec): 'confirm' | 'immutable' {
+  return slot.replacementPolicy ?? 'confirm';
+}
+
+function generatedSecretConflicts(slot: HypervibeSecretSpec): string[] {
+  return slot.conflictsWith ?? [];
+}
+
+function runtimeSecretBindingCount(
+  environment: Pick<Environment, 'platformBindings'> | null | undefined,
+  key: string
+): number {
+  const raw = environment?.platformBindings.delegatedEnvBindings;
+  return Array.isArray(raw)
+    ? raw.filter((value) => stringField(asRecord(value), 'name') === key).length
+    : 0;
 }
 
 export function delegatedSecretActionId(key: string): string {
@@ -137,6 +172,17 @@ export function parseDelegatedSecretBindings(
       ) {
         return [];
       }
+      const replacementPolicy = record?.replacementPolicy;
+      const conflictsWith = record?.conflictsWith;
+      if (replacementPolicy !== undefined && replacementPolicy !== 'immutable') {
+        return [];
+      }
+      if (
+        (replacementPolicy === 'immutable' && canonicalEnvVarNames(conflictsWith) === null)
+        || (replacementPolicy === undefined && conflictsWith !== undefined)
+      ) {
+        return [];
+      }
       return [{
         name,
         principal,
@@ -144,6 +190,9 @@ export function parseDelegatedSecretBindings(
         source,
         generator,
         generation,
+        ...(replacementPolicy === 'immutable'
+          ? { replacementPolicy, conflictsWith: canonicalEnvVarNames(conflictsWith) ?? [] }
+          : {}),
         syncedAt,
         applyRunId,
         actionId,
@@ -251,7 +300,49 @@ function generatedBindingMatchesSlot(
   return binding?.source === 'hypervibe-generated'
     && binding.principal === 'hypervibe'
     && binding.generator === slot.generator
-    && binding.generation === slot.generation;
+    && binding.generation === slot.generation
+    && (binding.replacementPolicy ?? 'confirm') === generatedSecretReplacementPolicy(slot)
+    && JSON.stringify(binding.conflictsWith ?? []) === JSON.stringify(generatedSecretConflicts(slot));
+}
+
+export function generatedSecretBindingEvidence(params: {
+  environment: Pick<Environment, 'platformBindings'> | null | undefined;
+  key: string;
+  slot: HypervibeSecretSpec;
+  expectedValueHash: string;
+}): {
+  hasPriorBinding: boolean;
+  identityMatches: boolean;
+  matches: boolean;
+} {
+  const parsed = parseDelegatedSecretBindings(params.environment)
+    .filter((candidate) => candidate.name === params.key);
+  const binding = parsed.length === 1 ? parsed[0] : undefined;
+  const bindingCount = runtimeSecretBindingCount(params.environment, params.key);
+  const identityMatches = bindingCount === 1
+    && parsed.length === 1
+    && generatedBindingMatchesSlot(binding, params.slot);
+  return {
+    hasPriorBinding: bindingCount > 0,
+    identityMatches,
+    matches: identityMatches && binding?.valueHash === params.expectedValueHash,
+  };
+}
+
+export function immutableSecretConflict(params: {
+  environment: Pick<Environment, 'platformBindings'> | null | undefined;
+  observed: ObservedState | null;
+  serviceNames: string[];
+  conflictsWith: string[];
+}): { key: string; bindingPresent: boolean; live: LiveSecretHashes } | undefined {
+  for (const key of params.conflictsWith) {
+    const bindingPresent = runtimeSecretBindingCount(params.environment, key) > 0;
+    const live = liveHashesForSecret(params.observed, params.serviceNames, key);
+    if (bindingPresent || live.state !== 'missing') {
+      return { key, bindingPresent, live };
+    }
+  }
+  return undefined;
 }
 
 function generatedSecretAction(params: {
@@ -280,6 +371,12 @@ function generatedSecretAction(params: {
       principal: 'hypervibe',
       generator: params.slot.generator,
       generation: params.slot.generation,
+      ...(params.slot.replacementPolicy === 'immutable'
+        ? {
+          replacementPolicy: params.slot.replacementPolicy,
+          conflictsWith: generatedSecretConflicts(params.slot),
+        }
+        : {}),
       expectedValueHash: params.expectedValueHash,
       inputProvided: false,
       valuePrepared: true,
@@ -342,8 +439,32 @@ export function planDelegatedSecrets(params: {
       }
 
       const expectedValueHash = hashEnvValue(generatedValue);
-      const bindingIdentityMatches = generatedBindingMatchesSlot(binding, slot);
-      const bindingMatches = bindingIdentityMatches && binding?.valueHash === expectedValueHash;
+      const replacementPolicy = generatedSecretReplacementPolicy(slot);
+      const bindingEvidence = generatedSecretBindingEvidence({
+        environment: params.environment,
+        key,
+        slot,
+        expectedValueHash,
+      });
+      const bindingIdentityMatches = bindingEvidence.identityMatches;
+      const bindingMatches = bindingEvidence.matches;
+      if (replacementPolicy === 'immutable' && bindingEvidence.hasPriorBinding && !bindingMatches) {
+        const reason = `Hypervibe cannot change immutable ${key} because its prior binding does not match the exact immutable contract`;
+        blockers.push({ key, reason });
+        actions.push(generatedSecretAction({
+          key,
+          slot,
+          hostingProvider: params.hostingProvider,
+          serviceNames,
+          type: 'update',
+          verified: !live.hasUnknownDestination,
+          reason,
+          expectedValueHash,
+          blockedReason: 'hypervibe_immutable_secret_binding_mismatch',
+        }));
+        warnings.push(`${reason}. No confirmation can replace an immutable value.`);
+        continue;
+      }
       if (bindingIdentityMatches && !bindingMatches) {
         const reason = `Hypervibe cannot reproduce its accepted ${key} value with the current local encryption key`;
         blockers.push({ key, reason });
@@ -360,6 +481,60 @@ export function planDelegatedSecrets(params: {
         }));
         warnings.push(`${reason}. Restore the original Hypervibe secret key; do not replace the live value implicitly.`);
         continue;
+      }
+
+      if (replacementPolicy === 'immutable' && live.hasUnknownDestination) {
+        const reason = `Hypervibe cannot verify every live ${key} target required by its immutable policy`;
+        blockers.push({ key, reason });
+        actions.push(generatedSecretAction({
+          key,
+          slot,
+          hostingProvider: params.hostingProvider,
+          serviceNames,
+          type: 'update',
+          verified: false,
+          reason,
+          expectedValueHash,
+          blockedReason: 'hypervibe_immutable_secret_observation_unknown',
+        }));
+        warnings.push(`${reason}. No confirmation can override unknown state.`);
+        continue;
+      }
+
+      if (replacementPolicy === 'immutable') {
+        const conflict = immutableSecretConflict({
+          environment: params.environment,
+          observed: params.observed,
+          serviceNames,
+          conflictsWith: generatedSecretConflicts(slot),
+        });
+        if (conflict) {
+          const bindingPresent = conflict.bindingPresent;
+          const unknown = conflict.live.hasUnknownDestination;
+          const reason = bindingPresent
+            ? `Conflicting key ${conflict.key} has prior binding evidence for immutable ${key}`
+            : unknown
+            ? `Hypervibe cannot verify that conflicting key ${conflict.key} is absent from every target for immutable ${key}`
+            : `Conflicting key ${conflict.key} is present on one or more targets for immutable ${key}`;
+          blockers.push({ key, reason });
+          actions.push(generatedSecretAction({
+            key,
+            slot,
+            hostingProvider: params.hostingProvider,
+            serviceNames,
+            type: 'update',
+            verified: !unknown,
+            reason,
+            expectedValueHash,
+            blockedReason: bindingPresent
+              ? 'hypervibe_immutable_secret_conflict_binding'
+              : unknown
+              ? 'hypervibe_immutable_secret_conflict_unknown'
+              : 'hypervibe_immutable_secret_conflict_present',
+          }));
+          warnings.push(`${reason}. No confirmation can override this conflict.`);
+          continue;
+        }
       }
 
       if (live.hasUnknownDestination) {
@@ -434,6 +609,23 @@ export function planDelegatedSecrets(params: {
         || (live.state === 'inconsistent' && !partialGeneratedValue);
 
       const requiresConfirm = changingAcceptedGeneration || conflictingLiveValue;
+      if (replacementPolicy === 'immutable' && requiresConfirm) {
+        const reason = `Hypervibe cannot replace immutable ${key} because its live value does not match the derived value`;
+        blockers.push({ key, reason });
+        actions.push(generatedSecretAction({
+          key,
+          slot,
+          hostingProvider: params.hostingProvider,
+          serviceNames,
+          type: 'update',
+          verified: true,
+          reason,
+          expectedValueHash,
+          blockedReason: 'hypervibe_immutable_secret_replacement_forbidden',
+        }));
+        warnings.push(`${reason}. No confirmation can replace an immutable value.`);
+        continue;
+      }
       desiredEnvVars[key] = generatedValue;
       actions.push(generatedSecretAction({
         key,
@@ -615,6 +807,12 @@ export function recordDelegatedSecretBindings(params: {
       source: 'hypervibe-generated',
       generator: slot.generator,
       generation: slot.generation,
+      ...(slot.replacementPolicy === 'immutable'
+        ? {
+          replacementPolicy: slot.replacementPolicy,
+          conflictsWith: generatedSecretConflicts(slot),
+        }
+        : {}),
       syncedAt,
       applyRunId: params.applyRunId,
       actionId,

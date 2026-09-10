@@ -669,6 +669,23 @@ provider and binding evidence. A replacement needs both its persisted
 write, so stripping confirmation metadata cannot turn a rotation into an
 automatic install.
 
+A Hypervibe-owned slot may opt into `replacementPolicy: "immutable"` when its
+value cannot safely rotate in place. Its first write requires the exact target
+key and every declared `conflictsWith` key to be provider-confirmed absent with
+no conflicting prior binding. A matching value may remain a noop, and a
+verified partial write may be repaired only with the identical derived value.
+Changed generator/generation/policy/conflicts, mismatching binding metadata,
+conflicting live values, masked or unknown observation, and any present or
+unobservable conflicting key block without a confirmation override. Plans pin
+the normalized policy, conflict names, and value fingerprint; apply compares
+them with the current spec, freshly observed live evidence, encrypted value,
+and non-secret binding before authorizing a write. A write is not accepted or
+bound until bounded post-write observation proves the exact value on every
+target and proves every conflict still absent. Immutable conflict names are
+excluded from deploy env inputs, cannot simultaneously be desired runtime
+keys, and cannot be retired through `removeEnvVars`; replacing a legacy
+encryption key requires an explicit credential rewrap workflow.
+
 ### Delegated secrets
 
 Delegated secrets are lifecycle-managed slots, not ordinary environment variables and not provider connections:

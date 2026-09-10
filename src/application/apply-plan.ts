@@ -25,8 +25,9 @@ import { applyQueueAction } from '../domain/services/queue-plan.service.js';
 import { resolveQueueEnvVars } from '../domain/services/queue-env.js';
 import { applyStorageAction, resolveStorageServiceEnvVars } from '../domain/services/storage-plan.service.js';
 import {
+  generatedSecretBindingEvidence,
+  immutableSecretConflict,
   liveHashesForSecret,
-  parseDelegatedSecretBindings,
   recordDelegatedSecretBinding,
   type DelegatedSecretInputRequirement,
 } from '../domain/services/delegated-secret.service.js';
@@ -1377,6 +1378,11 @@ export async function executePlanApply(ctx: CommandContext, params: {
 
       const hypervibeOwned = declaredSecret.ownership === 'hypervibe';
       let bindingOnly = false;
+      let bindingEnvironment = latestEnvironment;
+      let immutableContract: {
+        expectedValueHash: string;
+        conflictsWith: string[];
+      } | undefined;
       if (declaredSecret.ownership === 'delegated') {
         if (
           stringField(metadata, 'principal') !== declaredSecret.principal
@@ -1390,25 +1396,50 @@ export async function executePlanApply(ctx: CommandContext, params: {
       } else {
         const generation = metadata?.generation;
         const expectedValueHash = hashEnvValue(value);
+        const declaredReplacementPolicy = declaredSecret.replacementPolicy ?? 'confirm';
+        const declaredConflictsWith = declaredSecret.conflictsWith ?? [];
+        const plannedReplacementPolicy = stringField(metadata, 'replacementPolicy') ?? 'confirm';
+        const plannedConflictsWith = metadata?.conflictsWith === undefined
+          ? []
+          : stringArrayField(metadata, 'conflictsWith');
         if (
           stringField(metadata, 'principal') !== 'hypervibe'
           || stringField(metadata, 'generator') !== declaredSecret.generator
           || generation !== declaredSecret.generation
+          || plannedReplacementPolicy !== declaredReplacementPolicy
+          || JSON.stringify(plannedConflictsWith) !== JSON.stringify(declaredConflictsWith)
           || stringField(metadata, 'expectedValueHash') !== expectedValueHash
         ) {
           return blockedActionIdentity(
             action,
-            `The reviewed Hypervibe generator, generation, or value fingerprint for ${key} no longer matches.`
+            `The reviewed Hypervibe generator, generation, replacement policy, conflicts, or value fingerprint for ${key} no longer matches.`
           );
         }
+        if (declaredReplacementPolicy === 'immutable') {
+          immutableContract = {
+            expectedValueHash,
+            conflictsWith: declaredConflictsWith,
+          };
+        }
 
-        const binding = parseDelegatedSecretBindings(latestEnvironment)
-          .find((candidate) => candidate.name === key);
-        const bindingIdentityMatches = binding?.source === 'hypervibe-generated'
-          && binding.principal === 'hypervibe'
-          && binding.generator === declaredSecret.generator
-          && binding.generation === declaredSecret.generation;
-        const bindingMatches = bindingIdentityMatches && binding.valueHash === expectedValueHash;
+        const bindingEvidence = generatedSecretBindingEvidence({
+          environment: latestEnvironment,
+          key,
+          slot: declaredSecret,
+          expectedValueHash,
+        });
+        const bindingIdentityMatches = bindingEvidence.identityMatches;
+        const bindingMatches = bindingEvidence.matches;
+        if (
+          declaredReplacementPolicy === 'immutable'
+          && bindingEvidence.hasPriorBinding
+          && !bindingMatches
+        ) {
+          return blockedActionIdentity(
+            action,
+            `The prior binding for immutable ${key} no longer matches its reviewed generator, generation, policy, conflicts, and value fingerprint. No confirmation can replace it.`
+          );
+        }
         if (bindingIdentityMatches && !bindingMatches) {
           return blockedActionIdentity(
             action,
@@ -1416,12 +1447,40 @@ export async function executePlanApply(ctx: CommandContext, params: {
           );
         }
 
-        const liveState = liveHashesForSecret(observed, destinationServices, key);
+        let actionObserved = observed;
+        if (declaredReplacementPolicy === 'immutable') {
+          actionObserved = (await planService.observeEnvironment(
+            applyProject,
+            latestEnvironment,
+            envSpec,
+            { hostingOnly: true }
+          )).observed;
+        }
+        const liveState = liveHashesForSecret(actionObserved, destinationServices, key);
         if (liveState.hasUnknownDestination) {
           return blockedActionIdentity(
             action,
             `The current live value for ${key} is not observable, so this action cannot install or replace it.`
           );
+        }
+
+        if (declaredReplacementPolicy === 'immutable') {
+          const conflict = immutableSecretConflict({
+            environment: latestEnvironment,
+            observed: actionObserved,
+            serviceNames: destinationServices,
+            conflictsWith: declaredConflictsWith,
+          });
+          if (conflict) {
+            return blockedActionIdentity(
+              action,
+              conflict.bindingPresent
+                ? `Conflicting key ${conflict.key} has prior binding evidence for immutable ${key}. No confirmation can override this conflict.`
+                : conflict.live.hasUnknownDestination
+                ? `Conflicting key ${conflict.key} is not verifiably absent from every target for immutable ${key}. No confirmation can override unknown state.`
+                : `Conflicting key ${conflict.key} is present on a target for immutable ${key}. No confirmation can override this conflict.`
+            );
+          }
         }
 
         bindingOnly = liveState.state === 'consistent'
@@ -1435,11 +1494,17 @@ export async function executePlanApply(ctx: CommandContext, params: {
           );
         }
 
-        const changingAcceptedGeneration = Boolean(binding && !bindingMatches);
+        const changingAcceptedGeneration = bindingEvidence.hasPriorBinding && !bindingMatches;
         const hasConflictingLiveValue = liveState.hashes
           .some((liveHash) => liveHash !== expectedValueHash);
         const replacingLiveValue = !bindingOnly
           && (changingAcceptedGeneration || hasConflictingLiveValue);
+        if (declaredReplacementPolicy === 'immutable' && replacingLiveValue) {
+          return blockedActionIdentity(
+            action,
+            `The live or accepted value for immutable ${key} differs from the reviewed derived value. No confirmation can replace it.`
+          );
+        }
         if (!hasExactPlanActionConfirmationAuthority(
           action,
           replacingLiveValue,
@@ -1540,9 +1605,87 @@ export async function executePlanApply(ctx: CommandContext, params: {
         };
       }
 
+      if (immutableContract) {
+        let verified = false;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const verificationEnvironment = ctx.repos.environments
+            .findByProjectAndName(project.id, envName);
+          if (!verificationEnvironment) {
+            return blockedActionIdentity(
+              action,
+              `Environment ${envName} disappeared before immutable ${key} could be verified.`
+            );
+          }
+          bindingEnvironment = verificationEnvironment;
+          let verificationObserved: ObservedState | null;
+          try {
+            verificationObserved = (await planService.observeEnvironment(
+              applyProject,
+              verificationEnvironment,
+              envSpec,
+              { hostingOnly: true }
+            )).observed;
+          } catch {
+            verificationObserved = null;
+          }
+          const conflict = immutableSecretConflict({
+            environment: verificationEnvironment,
+            observed: verificationObserved,
+            serviceNames: destinationServices,
+            conflictsWith: immutableContract.conflictsWith,
+          });
+          if (conflict) {
+            return {
+              success: false,
+              status: 'blocked',
+              message: `Synced ${key}, but its immutable conflict boundary did not converge`,
+              error: conflict.bindingPresent
+                ? `Conflicting key ${conflict.key} has prior binding evidence.`
+                : conflict.live.hasUnknownDestination
+                  ? `Conflicting key ${conflict.key} is not verifiably absent from every target.`
+                  : `Conflicting key ${conflict.key} is present on one or more targets.`,
+              data: { ...counts, bindingRecorded: false, failureStage: 'verification' },
+            };
+          }
+          const verifiedLive = liveHashesForSecret(
+            verificationObserved,
+            destinationServices,
+            key
+          );
+          if (
+            verifiedLive.state === 'consistent'
+            && verifiedLive.hash === immutableContract.expectedValueHash
+          ) {
+            verified = true;
+            break;
+          }
+          if (verifiedLive.hashes.some((hash) => hash !== immutableContract.expectedValueHash)) {
+            return {
+              success: false,
+              status: 'blocked',
+              message: `Synced ${key}, but its immutable value did not converge`,
+              error: `A live ${key} value differs from the reviewed fingerprint.`,
+              data: { ...counts, bindingRecorded: false, failureStage: 'verification' },
+            };
+          }
+          if (attempt < 2) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }
+        if (!verified) {
+          return {
+            success: false,
+            status: 'pending',
+            message: `Provider acknowledged ${key}, but its immutable value is not yet visible on every target`,
+            error: `Re-run hv_plan after ${key} becomes observable; no binding was recorded.`,
+            data: { ...counts, bindingRecorded: false, failureStage: 'verification' },
+          };
+        }
+      }
+
       try {
         recordDelegatedSecretBinding({
-          environment: latestEnvironment,
+          environment: bindingEnvironment,
           spec,
           environmentName: envName,
           key,

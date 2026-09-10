@@ -1275,12 +1275,46 @@ describe('plan action mutation-authority contract', () => {
     { inputProvided: true },
     { valuePrepared: false },
     { services: ['web', 'web'] },
+    { replacementPolicy: 'replace' },
+    { conflictsWith: ['LEGACY_KEY'] },
   ])('rejects incomplete generated-secret authority metadata %#', (metadataPatch) => {
     const candidate = authorized.find((entry) => entry.label === 'Hypervibe-generated secret sync')!.action;
     expect(resolvePlanActionAuthority({
       ...candidate,
       metadata: { ...candidate.metadata, ...metadataPatch },
     })).toBeNull();
+  });
+
+  it('accepts only canonical, non-confirmable immutable generated-secret authority', () => {
+    const candidate = authorized.find((entry) => entry.label === 'Hypervibe-generated secret sync')!.action;
+    const immutable = {
+      ...candidate,
+      metadata: {
+        ...candidate.metadata,
+        replacementPolicy: 'immutable',
+        conflictsWith: ['LEGACY_A_KEY', 'LEGACY_Z_KEY'],
+      },
+    };
+
+    expect(resolvePlanActionAuthority(immutable)).toMatchObject({
+      capability: 'hosting.delegated-secret.sync',
+    });
+    expect(resolvePlanActionAuthority({
+      ...immutable,
+      requiresConfirm: true,
+    })).toBeNull();
+    for (const conflictsWith of [
+      undefined,
+      ['LEGACY_Z_KEY', 'LEGACY_A_KEY'],
+      ['LEGACY_A_KEY', 'LEGACY_A_KEY'],
+      ['NOT-AN-ENV-KEY'],
+      ['SESSION_SECRET'],
+    ]) {
+      expect(resolvePlanActionAuthority({
+        ...immutable,
+        metadata: { ...immutable.metadata, conflictsWith },
+      })).toBeNull();
+    }
   });
 
   it('rejects retained database deletion without a complete non-empty provider scope', () => {

@@ -53,7 +53,8 @@ function observed(): ObservedState {
 }
 
 function replaceWithHypervibeManagedSecrets(
-  project: ReturnType<ProjectRepository['create']>
+  project: ReturnType<ProjectRepository['create']>,
+  secretOverrides: Record<string, unknown> = {}
 ): void {
   new SpecStore().replace(project, {
     version: 1,
@@ -63,6 +64,7 @@ function replaceWithHypervibeManagedSecrets(
         ownership: 'hypervibe',
         generator: 'random-base64url-32-v1',
         environments: ['production'],
+        ...secretOverrides,
       },
     },
     environments: {
@@ -369,6 +371,51 @@ describe('PlanService delegated secret inputs', () => {
     expect(overrides.envFileKeys).toEqual(['PUBLIC_LABEL']);
     expect(overrides.delegatedSecretKeys).toEqual(['SESSION_SECRET']);
     expect(JSON.stringify(document).includes('caller-selected-value')).toBe(false);
+  });
+
+  it('reserves immutable conflict keys from ordinary overrides and deploy env files', async () => {
+    replaceWithHypervibeManagedSecrets(project, {
+      replacementPolicy: 'immutable',
+      conflictsWith: ['LEGACY_SESSION_SECRET'],
+    });
+
+    const overrideResult = await new PlanService().plan(project, 'production', {
+      includeEnvFile: false,
+      envVarOverrides: { LEGACY_SESSION_SECRET: 'legacy-value' },
+    });
+    expect(overrideResult).toMatchObject({
+      error: expect.stringContaining('Managed secret keys cannot be passed through envVars: LEGACY_SESSION_SECRET'),
+    });
+
+    const envFile = path.join(tempDir, '.env.production');
+    fs.writeFileSync(envFile, 'PUBLIC_LABEL=friend\nLEGACY_SESSION_SECRET=legacy-value\n', 'utf8');
+    const fileResult = await new PlanService().plan(project, 'production', { envFile });
+    expect(fileResult).not.toHaveProperty('error');
+    const plan = fileResult as Exclude<typeof fileResult, { error: string }>;
+    const document = new RunRepository().findById(plan.planRunId)!.plan as Record<string, unknown>;
+    const overrides = document.overrides as Record<string, unknown>;
+    expect(overrides.envFileKeys).toEqual(['PUBLIC_LABEL']);
+    expect(JSON.stringify(document)).not.toContain('legacy-value');
+  });
+
+  it('rejects immutable conflicts owned by another runtime subsystem', async () => {
+    replaceWithHypervibeManagedSecrets(project, {
+      replacementPolicy: 'immutable',
+      conflictsWith: ['DATABASE_URL'],
+    });
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    const runsBefore = new RunRepository().findByEnvironmentId(environment.id).length;
+
+    const result = await new PlanService().plan(project, 'production', {
+      includeEnvFile: false,
+    });
+
+    expect(result).toMatchObject({
+      error: expect.stringContaining(
+        'Immutable generated-secret conflict keys cannot also be managed runtime variables: DATABASE_URL'
+      ),
+    });
+    expect(new RunRepository().findByEnvironmentId(environment.id)).toHaveLength(runsBefore);
   });
 
   it('returns a planning error without saving a run when generated-secret safety is unknown', async () => {

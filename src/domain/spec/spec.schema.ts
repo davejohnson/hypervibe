@@ -778,6 +778,17 @@ export const delegatedSecretSpecSchema = z.object({
   }
 });
 
+const generatedSecretConflictsSchema = z.array(environmentVariableNameSchema)
+  .superRefine((keys, ctx) => {
+    if (new Set(keys).size !== keys.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'generated secret conflicts cannot contain duplicates',
+      });
+    }
+  })
+  .transform((keys) => [...keys].sort());
+
 export const hypervibeRandomSecretSpecSchema = z.object({
   /** Hypervibe generates and owns this value; users never supply it. */
   ownership: z.literal('hypervibe'),
@@ -785,12 +796,24 @@ export const hypervibeRandomSecretSpecSchema = z.object({
   generator: z.literal('random-base64url-32-v1'),
   /** Incrementing this value requests a reviewed rotation. */
   generation: z.number().int().positive().default(1),
+  /** Prevent replacement after the first verified install. */
+  replacementPolicy: z.literal('immutable').optional(),
+  /** Exact legacy or alternate runtime keys that must be verified absent. */
+  conflictsWith: generatedSecretConflictsSchema.optional(),
   /** Runtime environments in which this secret must be injected. */
   environments: z.array(z.string().min(1)).min(
     1,
     'Hypervibe-owned secrets require at least one runtime environment'
   ),
-}).strict();
+}).strict().superRefine((secret, ctx) => {
+  if (secret.conflictsWith !== undefined && secret.replacementPolicy !== 'immutable') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'generated secret conflictsWith requires replacementPolicy="immutable"',
+      path: ['conflictsWith'],
+    });
+  }
+});
 
 export const hypervibeSecretSpecSchema = hypervibeRandomSecretSpecSchema;
 
@@ -2165,6 +2188,13 @@ export const projectSpecSchema = z.object({
       ? 'delegated secret'
       : 'Hypervibe-owned secret';
     const seen = new Set<string>();
+    if (secret.ownership === 'hypervibe' && secret.conflictsWith?.includes(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Hypervibe-owned secret "${key}" cannot conflict with itself`,
+        path: ['secrets', key, 'conflictsWith'],
+      });
+    }
     for (const environmentName of secret.environments) {
       if (seen.has(environmentName)) {
         ctx.addIssue({
@@ -2191,6 +2221,31 @@ export const projectSpecSchema = z.object({
           message: `${secretKind} "${key}" requires at least one service in environment "${environmentName}"`,
           path: ['secrets', key, 'environments'],
         });
+      }
+      if (secret.ownership === 'hypervibe' && secret.replacementPolicy === 'immutable') {
+        for (const conflictKey of secret.conflictsWith ?? []) {
+          const conflictingSecret = spec.secrets[conflictKey];
+          if (environment.removeEnvVars?.includes(conflictKey)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `immutable Hypervibe-owned secret "${key}" cannot retire conflicting key "${conflictKey}" without an explicit credential rewrap workflow`,
+              path: ['secrets', key, 'conflictsWith'],
+            });
+          }
+          const conflictIsDesired = conflictKey in environment.envVars
+            || environment.envFile?.include.includes(conflictKey)
+            || Object.values(environment.services).some(
+              (service) => conflictKey in (service.databaseEnvAliases ?? {})
+            )
+            || Boolean(conflictingSecret?.environments.includes(environmentName));
+          if (conflictIsDesired) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `immutable Hypervibe-owned secret "${key}" conflicts with desired runtime key "${conflictKey}" in "${environmentName}"`,
+              path: ['secrets', key, 'conflictsWith'],
+            });
+          }
+        }
       }
       if (key in environment.envVars) {
         ctx.addIssue({
