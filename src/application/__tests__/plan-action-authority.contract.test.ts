@@ -631,6 +631,18 @@ const authorized: AuthorizedCase[] = [
               },
             }
           : {}),
+        ...(operation === STORAGE_OPERATIONS.finalizeCreateRecovery
+          ? {
+              externalId: 'bucket-1',
+              region: 'sjc',
+              instanceScope: { projectId: 'railway-project', environmentId: 'railway-environment' },
+              storageCreateRecovery: {
+                provider: 'railway', operation: 'create', resourceName: 'documents',
+                providerScope: { projectId: 'railway-project', environmentId: 'railway-environment' },
+                state: 'identified', externalId: 'bucket-1', returnedName: 'documents',
+              },
+            }
+          : {}),
         ...(
           operation === STORAGE_OPERATIONS.wire || operation === STORAGE_OPERATIONS.unwire
             ? { serviceName: 'web', serviceId: 'service-1' }
@@ -1500,6 +1512,19 @@ describe('plan action mutation-authority contract', () => {
     )!.action;
     expect(resolvePlanActionAuthority({ ...candidate, requiresConfirm: undefined })).toBeNull();
   });
+
+  it.each(['externalId', 'region', 'instanceScope', 'storageCreateRecovery'])(
+    'rejects delayed storage-create finalization without %s',
+    (field) => {
+      const candidate = authorized.find(
+        (entry) => entry.label === STORAGE_OPERATIONS.finalizeCreateRecovery
+      )!.action;
+      expect(resolvePlanActionAuthority({
+        ...candidate,
+        metadata: { ...candidate.metadata, [field]: undefined },
+      })).toBeNull();
+    }
+  );
 
   it('authorizes exact desired cache reconciliation and rejects unpinned config', () => {
     const create = authorized.find((entry) => entry.label === CACHE_OPERATIONS.ensure)!.action;

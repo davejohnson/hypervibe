@@ -32,6 +32,13 @@ const recovery = {
   state: 'unresolved' as const,
 };
 
+const identifiedRecovery = {
+  ...recovery,
+  state: 'identified' as const,
+  externalId: 'bucket-1',
+  returnedName: 'uploads',
+};
+
 function directEnvironment(platformBindings: Record<string, unknown>): Environment {
   return {
     id: 'env-local', projectId: 'project-local', name: 'staging',
@@ -69,6 +76,24 @@ function recoveryClearAction(): PlanAction {
   };
 }
 
+function recoveryFinalizeAction(): PlanAction {
+  return {
+    id: 'storage:uploads',
+    type: 'update',
+    resource: { kind: 'storage', name: 'uploads', provider: 'railway' },
+    verified: true,
+    reason: 'Finalize the exact delayed storage create',
+    metadata: {
+      operation: STORAGE_OPERATIONS.finalizeCreateRecovery,
+      storageName: 'uploads',
+      externalId: 'bucket-1',
+      region: 'sjc',
+      instanceScope: { projectId: 'rp', environmentId: 're' },
+      storageCreateRecovery: identifiedRecovery,
+    },
+  };
+}
+
 describe('storage create-recovery planning', () => {
   it('turns a retained exact marker into a non-billable blocker', () => {
     const result = planStorage({
@@ -91,6 +116,122 @@ describe('storage create-recovery planning', () => {
       }),
     ]);
     expect(result.actions[0]?.billable).toBeUndefined();
+  });
+
+  it('plans non-mutating finalization when complete observation proves the exact delayed create', () => {
+    const result = planStorage({
+      environmentSpec,
+      environment: directEnvironment({
+        provider: 'railway', projectId: 'rp', environmentId: 're',
+        services: { api: { serviceId: 'service-api' } },
+        storageCreateRecovery: { uploads: identifiedRecovery },
+      }),
+      observed: {
+        provider: 'railway', observedAt: new Date().toISOString(), projectExists: true,
+        projectId: 'rp', environmentId: 're', databases: [], partial: false, warnings: [],
+        services: [{
+          name: 'api', externalId: 'service-api', workloadKind: 'web', customDomains: [],
+          envVarKeys: [], envVarHashes: {}, status: 'running', config: {},
+        }],
+        storage: [{
+          provider: 'railway', kind: 'object', externalId: 'bucket-1',
+          instanceScope: { projectId: 'rp', environmentId: 're' },
+          name: 'uploads', region: 'sjc', status: 'ready',
+        }],
+        completeness: { storage: 'complete', storageByProvider: { railway: 'complete' } },
+      },
+    });
+
+    expect(result.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'storage:uploads',
+        type: 'update',
+        verified: true,
+        metadata: expect.objectContaining({
+          operation: STORAGE_OPERATIONS.finalizeCreateRecovery,
+          externalId: 'bucket-1',
+          instanceScope: { projectId: 'rp', environmentId: 're' },
+          storageCreateRecovery: identifiedRecovery,
+        }),
+      }),
+      expect.objectContaining({
+        id: 'storage:uploads:wiring:api',
+        dependsOn: ['storage:uploads', 'service:api'],
+      }),
+    ]));
+    expect(result.actions.find((item) => item.id === 'storage:uploads'))
+      .not.toHaveProperty('billable');
+    expect(result.actions.some((item) => item.metadata?.blockedReason)).toBe(false);
+    expect(result.unmanaged).toEqual([]);
+  });
+
+  it.each([
+    ['different id', { externalId: 'bucket-2' }],
+    ['different region', { region: 'iad' }],
+    ['different scope', { instanceScope: { projectId: 'rp', environmentId: 'other' } }],
+    ['not ready', { status: 'creating' }],
+  ])('keeps identified recovery blocked when live storage has a %s', (_label, livePatch) => {
+    const result = planStorage({
+      environmentSpec,
+      environment: directEnvironment({
+        provider: 'railway', projectId: 'rp', environmentId: 're',
+        storageCreateRecovery: { uploads: identifiedRecovery },
+      }),
+      observed: {
+        provider: 'railway', observedAt: new Date().toISOString(), projectExists: true,
+        projectId: 'rp', environmentId: 're', databases: [], services: [], partial: false, warnings: [],
+        storage: [{
+          provider: 'railway', kind: 'object', externalId: 'bucket-1',
+          instanceScope: { projectId: 'rp', environmentId: 're' },
+          name: 'uploads', region: 'sjc', status: 'ready',
+          ...livePatch,
+        }],
+        completeness: { storage: 'complete', storageByProvider: { railway: 'complete' } },
+      },
+    });
+
+    expect(result.actions).toEqual([
+      expect.objectContaining({
+        id: 'storage:uploads',
+        type: 'update',
+        metadata: expect.objectContaining({ blockedReason: 'storage_create_recovery_required' }),
+      }),
+    ]);
+  });
+
+  it('keeps identified recovery blocked when another same-name bucket makes identity ambiguous', () => {
+    const result = planStorage({
+      environmentSpec,
+      environment: directEnvironment({
+        provider: 'railway', projectId: 'rp', environmentId: 're',
+        storageCreateRecovery: { uploads: identifiedRecovery },
+      }),
+      observed: {
+        provider: 'railway', observedAt: new Date().toISOString(), projectExists: true,
+        projectId: 'rp', environmentId: 're', databases: [], services: [], partial: false, warnings: [],
+        storage: [
+          {
+            provider: 'railway', kind: 'object', externalId: 'bucket-1',
+            instanceScope: { projectId: 'rp', environmentId: 're' },
+            name: 'uploads', region: 'sjc', status: 'ready',
+          },
+          {
+            provider: 'railway', kind: 'object', externalId: 'bucket-2',
+            instanceScope: { projectId: 'rp', environmentId: 're' },
+            name: 'uploads', region: 'sjc', status: 'ready',
+          },
+        ],
+        completeness: { storage: 'complete', storageByProvider: { railway: 'complete' } },
+      },
+    });
+
+    expect(result.actions).toEqual([
+      expect.objectContaining({
+        id: 'storage:uploads',
+        type: 'update',
+        metadata: expect.objectContaining({ blockedReason: 'storage_create_recovery_required' }),
+      }),
+    ]);
   });
 
   it('plans a confirmed recovery clear before a new create when complete observation proves absence', () => {
@@ -284,6 +425,108 @@ describe('storage create-recovery apply boundary', () => {
     expect(result).toMatchObject({ success: false, status: 'blocked' });
     expect(result.error).toContain('explicitly adopt');
     expect(persisted?.platformBindings.storageCreateRecovery).toEqual({ uploads: recovery });
+  });
+
+  it('finalizes an identified create only after exact fresh observation, without another create', async () => {
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      storageCreateRecovery: { uploads: identifiedRecovery },
+    });
+    const observe = vi.fn().mockResolvedValue([{
+      provider: 'railway', kind: 'object', externalId: 'bucket-1',
+      instanceScope: { projectId: 'rp', environmentId: 're' },
+      name: 'uploads', region: 'sjc', status: 'ready',
+    }]);
+    const ensureBucket = vi.fn();
+    vi.spyOn(adapterFactory, 'getStorageAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeStorageAdapter(ensureBucket, observe),
+    } as never);
+
+    const result = await applyStorageAction({
+      project, envName: 'staging', environmentSpec, action: recoveryFinalizeAction(),
+    });
+    const persisted = new EnvironmentRepository().findById(environment.id);
+
+    expect(result).toMatchObject({
+      success: true,
+      data: { externalId: 'bucket-1', region: 'sjc', recovered: true },
+    });
+    expect(observe).toHaveBeenCalledWith(
+      expect.objectContaining({ id: environment.id }),
+      { projectId: 'rp', environmentId: 're' }
+    );
+    expect(ensureBucket).not.toHaveBeenCalled();
+    expect(persisted?.platformBindings).toMatchObject({
+      storage: {
+        uploads: {
+          provider: 'railway', externalId: 'bucket-1', region: 'sjc',
+          instanceScope: { projectId: 'rp', environmentId: 're' },
+        },
+      },
+      storageProviders: {
+        railway: { projectId: 'rp', environmentId: 're' },
+      },
+    });
+    expect(persisted?.platformBindings.storageCreateRecovery).toBeUndefined();
+  });
+
+  it('preserves identified recovery when fresh finalization evidence does not match', async () => {
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      storageCreateRecovery: { uploads: identifiedRecovery },
+    });
+    const observe = vi.fn().mockResolvedValue([{
+      provider: 'railway', kind: 'object', externalId: 'bucket-1',
+      instanceScope: { projectId: 'rp', environmentId: 're' },
+      name: 'uploads', region: 'iad', status: 'ready',
+    }]);
+    vi.spyOn(adapterFactory, 'getStorageAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeStorageAdapter(vi.fn(), observe),
+    } as never);
+
+    const result = await applyStorageAction({
+      project, envName: 'staging', environmentSpec, action: recoveryFinalizeAction(),
+    });
+    const persisted = new EnvironmentRepository().findById(environment.id);
+
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(persisted?.platformBindings.storageCreateRecovery)
+      .toEqual({ uploads: identifiedRecovery });
+    expect(persisted?.platformBindings.storage).toBeUndefined();
+  });
+
+  it('preserves identified recovery when fresh finalization evidence is ambiguous', async () => {
+    new EnvironmentRepository().updatePlatformBindings(environment.id, {
+      storageCreateRecovery: { uploads: identifiedRecovery },
+    });
+    const observe = vi.fn().mockResolvedValue([
+      {
+        provider: 'railway', kind: 'object', externalId: 'bucket-1',
+        instanceScope: { projectId: 'rp', environmentId: 're' },
+        name: 'uploads', region: 'sjc', status: 'ready',
+      },
+      {
+        provider: 'railway', kind: 'object', externalId: 'bucket-2',
+        instanceScope: { projectId: 'rp', environmentId: 're' },
+        name: 'uploads', region: 'sjc', status: 'ready',
+      },
+    ]);
+    const ensureBucket = vi.fn();
+    vi.spyOn(adapterFactory, 'getStorageAdapter').mockResolvedValue({
+      success: true,
+      adapter: fakeStorageAdapter(ensureBucket, observe),
+    } as never);
+
+    const result = await applyStorageAction({
+      project, envName: 'staging', environmentSpec, action: recoveryFinalizeAction(),
+    });
+    const persisted = new EnvironmentRepository().findById(environment.id);
+
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+    expect(ensureBucket).not.toHaveBeenCalled();
+    expect(persisted?.platformBindings.storageCreateRecovery)
+      .toEqual({ uploads: identifiedRecovery });
+    expect(persisted?.platformBindings.storage).toBeUndefined();
   });
 
   it('durably retains a no-id failed create and prevents a second mutation', async () => {
