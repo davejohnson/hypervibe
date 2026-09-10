@@ -139,8 +139,8 @@ export function delegatedGitHubSecretsForEnvironment(
 export function parseDelegatedSecretBindings(
   environment: Pick<Environment, 'platformBindings'> | null | undefined
 ): DelegatedSecretBinding[] {
-  // Avoid "secret" in the binding key: repo-bindings-file intentionally strips
-  // any key that looks secret-bearing, while this array contains metadata only.
+  // Accepted-value hashes are secret verifiers and remain in authoritative
+  // local state; repo-bindings-file omits this entire collection.
   const raw = environment?.platformBindings.delegatedEnvBindings;
   if (!Array.isArray(raw)) return [];
 

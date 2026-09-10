@@ -34,7 +34,7 @@ Read-only provider forensics belong in `hv_inspect`. Adoption of already-existin
 Desired infrastructure state is repo-backed when Hypervibe runs inside a git worktree:
 
 - `.hypervibe/spec.json` is the committed source of truth for infrastructure shape.
-- `.hypervibe/bindings.json` stores non-secret provider identity bindings needed for team members to observe the same live resources.
+- `.hypervibe/bindings.json` stores non-secret provider identity bindings needed for team members to observe the same live resources. Managed-secret acceptance metadata stays local because even a value hash is an offline verifier for a low-entropy delegated value.
 - Scoped storage identity is the composite of the provider resource id and its
   provider-native context. Keep `externalId` provider-native and present the
   opaque, non-secret `instanceScope` beside it. Railway uses project and
@@ -686,8 +686,8 @@ plan override. The value is excluded from `secretRefs`, ordinary `envVars`,
 deploy-env loading, `.env`, `.env.example`, previews, status, logs, receipts,
 and repository bindings. One value is sent to every declared service. A
 successful action records only its SHA-256 hash and generator/generation
-provenance, and binding persistence is part of action success rather than a
-post-apply best effort.
+provenance in local SQLite, and binding persistence is part of action success
+rather than a post-apply best effort.
 
 Provider-confirmed absence is an automatic initial install. Replacing an
 existing random secret requires exact action confirmation. Unknown or masked
@@ -725,10 +725,10 @@ Delegated secrets are lifecycle-managed slots, not ordinary environment variable
 - `hv_plan secretRefs={...}` is the only write input. References are resolved locally, values are encrypted into that specific plan, and the plan action/preview contains only key names and non-secret metadata.
 - Declared keys are excluded from deploy env files and rejected from ordinary `envVars` overrides. An owner's local `.env` must never silently become the desired value for a delegated slot.
 - Missing, unaccepted, drifted, or newly reassigned required slots produce `inputRequired`. The plan remains inspectable but `hv_apply` must reject it before connection checks or provider mutations.
-- A successful provider receipt records value-free binding metadata (`delegatedEnvBindings` for hosting and `delegatedActionsBindings` for GitHub): key name, destination, principal, SHA-256 value hash, timestamp, and action id. The value itself is never stored in repo bindings or receipts.
+- A successful provider receipt records binding metadata (`delegatedEnvBindings` for hosting and `delegatedActionsBindings` for GitHub) in authoritative local SQLite: key name, destination, principal, SHA-256 value hash, timestamp, and action id. The value itself is never stored in bindings or receipts. The complete binding collections are omitted from `.hypervibe/bindings.json`; a hash must not become a repository-visible offline verifier for a low-entropy delegated value.
 - Live observation compares provider hashes against the accepted hash. Matching values are preserved without needing the secret locally. Drift is reported and preserved until a new explicit plan input is supplied.
 
-`.hypervibe/spec.json` and the sanitized `.hypervibe/bindings.json` make this state reconstructible after a local database or checkout is lost. Provider connections and encrypted in-flight plans remain local and must be recreated.
+`.hypervibe/spec.json` and the sanitized `.hypervibe/bindings.json` make desired state and non-secret provider identities reconstructible after a local database or checkout is lost. Accepted managed-secret fingerprints, provider connections, and encrypted in-flight plans remain local and must be recreated. A fresh machine therefore needs explicit delegated secret input before it can accept or replace a managed slot; it must never trust a verifier recovered from the repository.
 
 In the no-service model, `principal` is declarative attribution, not authenticated authorization. Git review/branch protection and provider-scoped membership enforce who may change the spec and mutate infrastructure. A local principal or collaborator edit cannot grant a hosting, cloud, or code-host role, but a caller who already holds provider mutation credentials can still change provider state. Do not treat delegated metadata as a centralized ACL or automatically apply unreviewed changes with privileged credentials; authenticated principal enforcement would require a trusted service or signed attestation.
 
