@@ -289,7 +289,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       credentialsMap: z.record(z.string()).optional().describe('action="add": for dotenv or structured secret-manager references, maps provider credential keys to source fields, e.g. {"apiToken":"CLOUDFLARE_API_TOKEN","accountId":"CLOUDFLARE_ACCOUNT_ID"}.'),
       scope: z.string().optional().describe('Optional scope for fine-grained tokens (e.g., "owner/repo" for GitHub, "example.com" for Cloudflare). Use "org/*" for wildcard matching. Leave empty for global except action="bootstrap", which derives an exact repository scope from the selected project when omitted and never creates global GCP access.'),
       project: projectField.describe('Hypervibe project name/id for validated context. Required explicitly for action="bootstrap". With no provider, project-only still lists. Omit for an unscoped list. This never changes provider credential scope.'),
-      gcpProjectId: z.string().optional().describe('action="bootstrap" or action="prepare": exact GCP project ID. Required for bootstrap; prepare defaults to the Cloud Run connection projectId.'),
+      gcpProjectId: z.string().optional().describe('Exact GCP project ID. Bootstrap preview reuses verified repository-scoped access or derives a stable name when omitted; confirmation requires the exact ID returned by that preview. Prepare defaults to the Cloud Run connection projectId.'),
       billingAccountName: z.string().optional().describe('action="bootstrap" with confirm=true: exact open billing account name returned by the preview, such as billingAccounts/AAAAAA-BBBBBB-CCCCCC.'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
       gcsAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add GCS access to the reused service account. "inspect" grants roles/storage.viewer; "lifecycle" grants roles/storage.admin.'),
@@ -448,8 +448,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       if (requestedAction === 'bootstrap' && provider !== 'cloudrun') {
         return commandError('VALIDATION', 'action="bootstrap" is supported only with provider="cloudrun". It creates both Cloud Run and Cloud SQL connections.');
       }
-      if (requestedAction === 'bootstrap' && !gcpProjectId?.trim()) {
-        return commandError('VALIDATION', 'gcpProjectId is required for action="bootstrap".');
+      if (requestedAction === 'bootstrap' && confirm && !gcpProjectId?.trim()) {
+        return commandError('VALIDATION', 'Confirmed bootstrap requires the exact gcpProjectId returned by the preview.');
       }
       if (requestedAction === 'bootstrap' && !projectRef?.trim()) {
         return commandError('VALIDATION', 'project is required for action="bootstrap" so Hypervibe never stores GCP access against an inferred project.');
@@ -480,7 +480,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const targetProject = project!;
         const payload = await runGcpBootstrap({
           project: targetProject,
-          gcpProjectId: gcpProjectId!,
+          gcpProjectId,
           scope,
           billingAccountName,
           confirm,

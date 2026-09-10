@@ -187,7 +187,6 @@ describe('hv_connections', () => {
       provider: 'cloudrun',
       action: 'bootstrap',
       project: project.name,
-      gcpProjectId: 'vibe-project',
       adminAuth: 'default',
     });
 
@@ -202,7 +201,7 @@ describe('hv_connections', () => {
     expect(result.agentInstruction).toMatchObject({ action: 'ask_user' });
     expect(runGcpBootstrap).toHaveBeenCalledWith({
       project,
-      gcpProjectId: 'vibe-project',
+      gcpProjectId: undefined,
       scope: undefined,
       billingAccountName: undefined,
       confirm: undefined,
@@ -250,6 +249,7 @@ describe('hv_connections', () => {
     const cases = [
       { provider: 'railway', action: 'bootstrap', gcpProjectId: 'vibe-project' },
       { provider: 'cloudrun', action: 'bootstrap' },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', confirm: true, billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' },
       { provider: 'cloudrun', action: 'bootstrap', project: 'app', gcpProjectId: 'vibe-project' },
       { provider: 'cloudrun', action: 'bootstrap', gcpProjectId: 'vibe-project', adminAuth: 'default' },
       {

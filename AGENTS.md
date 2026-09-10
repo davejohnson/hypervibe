@@ -4,6 +4,17 @@ Read `ARCHITECTURE.md` before changing lifecycle, provider, plan/apply, deploy, 
 
 Hypervibe is an infrastructure creation, migration, and destruction orchestrator. It is not a loose collection of imperative provider functions.
 
+Hypervibe is built for nontechnical vibe coders who want to bring their projects to life on the web. Optimize the product and agent experience for the easiest, fastest sensible path from an existing repository to a working deployment. Hypervibe should do the infrastructure work and explain the outcome in plain language.
+
+Onboarding and deployment defaults:
+
+- Make routine decisions instead of asking users to design infrastructure. Infer the application name and runtime from the repository, reuse verified connections when their resource scope belongs to the selected project, and choose supported, economical defaults. Do not ask users to approve ordinary names, suffixes, or other reversible implementation details.
+- For a new web project without an existing environment policy, prepare production and staging together. Derive names from the application, for example production `xyz` and staging `xyz-staging`, and state the proposed setup directly. Preserve existing environment names and explicit user choices. Keep staging data, secrets, and resource identities isolated from production; do not add databases, caches, or other paid services the application does not need.
+- Prefer HTTPS, private datastores, least-privilege workload identities, generated application secrets, managed CI deploys, and economical staging capacity wherever implemented. Explain any unsupported or blocked part honestly instead of presenting an intended default as completed infrastructure.
+- Hide provider setup complexity behind the desired-state lifecycle where possible. Automatically discover unambiguous authorized account and billing scope, derive valid resource names, and plan required project creation, API enablement, identity setup, and runtime wiring through declared provider capabilities. A Hypervibe environment is not a GCP project; do not confuse their names or assume that a connection to another application's cloud project authorizes using it.
+- Ask only for missing access, genuinely ambiguous ownership or billing choices, external-party secrets, or consequential approvals required by the lifecycle contract. Present a concrete plan with the chosen defaults and cost implications before asking for those approvals. Naming defaults never authorize spending, billing attachment, adoption, or destructive changes.
+- When a missing capability forces a user to perform routine provider setup manually, treat it as an onboarding product gap to fix in the shared application/provider path. Do not normalize repeated dashboard chores, credential copying, or provider-specific questionnaires as the deployment experience.
+
 Core rules for coding agents:
 
 - Add the least code needed for the requested behavior. Prefer deleting or extending existing paths over introducing new layers, helpers, configuration, compatibility branches, or abstractions for hypothetical future needs.
@@ -63,3 +74,5 @@ Core rules for coding agents:
 - On macOS, configure every parent write descriptor used for child-process IPC with `F_SETNOSIGPIPE` before handing it to an async transport. An immediately exiting child must surface an ordinary write/process error instead of terminating the host; keep immediate-exit and crash coverage in the release-gated companion tests.
 - Release macOS advisory instance locks explicitly with `flock(LOCK_UN)` before closing their descriptor. Keep release-and-immediate-reacquisition coverage in the release-gated companion tests; descriptor close alone is not a sufficiently deterministic handoff across runner architectures.
 - After creating a pull request, always provide its URL and explicitly offer to open it in the user's browser. Open it only after the user accepts.
+
+- Distinguish failed execution from work that was never attempted. When confirmation is missing or an earlier action fails or blocks progress, report subsequent unattempted actions as skipped or aborted and name the prerequisite or confirmation that stopped them. Reserve failed for actions actually attempted that failed; preserve confirmation-required, pending, or blocked for the action awaiting that condition. Apply this distinction consistently to receipts, structured results, summaries, and human output.

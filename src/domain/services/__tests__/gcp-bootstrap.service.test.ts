@@ -159,6 +159,63 @@ describe('runGcpBootstrap', () => {
     });
   }
 
+  it('derives a stable valid preview name without mutating provider state', async () => {
+    const client = makeClient({ getProject: vi.fn(async () => null) });
+    const dependencies = makeDependencies(client);
+    const project = seedProject();
+    const first = await runGcpBootstrap({ project }, dependencies);
+    const second = await runGcpBootstrap({ project }, dependencies);
+    expect(first.success).toBe(true);
+    expect((first.target as { projectId: string }).projectId).toMatch(/^hv-hypervibe-cli-[a-f0-9]{8}$/);
+    expect(second.target).toEqual(first.target);
+    expect(client.createProject).not.toHaveBeenCalled();
+    expect(client.updateProjectBillingInfo).not.toHaveBeenCalled();
+    expect(client.createServiceAccountKey).not.toHaveBeenCalled();
+    expect(dependencies.prepareCloud).not.toHaveBeenCalled();
+  });
+
+  it('requires the exact preview ID on confirmation before accessing Google', async () => {
+    const dependencies = makeDependencies(makeClient());
+    const result = await runGcpBootstrap({ project: seedProject(), confirm: true }, dependencies);
+    expect(result.success).toBe(false);
+    expect(dependencies.getDefaultAdminAccessToken).not.toHaveBeenCalled();
+  });
+
+  it.each(['matching', 'conflicting', 'global'] as const)(
+    'resolves only matching verified repository connections: %s', async (scenario) => {
+      new ConnectionRepository().upsertVerifiedBatch([
+        { provider: 'cloudrun', scope: scenario === 'global' ? null : SCOPE,
+          credentialsEncrypted: getSecretStore().encryptObject({ projectId: GCP_PROJECT_ID, credentials: serviceAccountJson() }) },
+        ...(scenario === 'conflicting' ? [{ provider: 'cloudsql' as const, scope: SCOPE,
+          credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'another-project' }) }] : []),
+      ]);
+      const client = makeClient({ getProject: vi.fn(async () => null) });
+      const dependencies = makeDependencies(client);
+      const result = await runGcpBootstrap({ project: seedProject() }, dependencies);
+      if (scenario === 'conflicting') {
+        expect(result.success).toBe(false);
+        expect(dependencies.getDefaultAdminAccessToken).not.toHaveBeenCalled();
+      } else {
+        expect(result.success).toBe(true);
+        expect((result.target as { projectId: string }).projectId).toEqual(scenario === 'matching' ? GCP_PROJECT_ID : expect.stringMatching(/^hv-hypervibe-cli-/));
+      }
+      expect(client.createProject).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(['unverified', 'unreadable'] as const)('blocks %s scoped access before Google access', async (state) => {
+    const repository = new ConnectionRepository();
+    const connection = repository.create({
+      provider: 'cloudrun', scope: SCOPE,
+      credentialsEncrypted: state === 'unreadable' ? 'invalid-encrypted-value' : getSecretStore().encryptObject({ projectId: GCP_PROJECT_ID }),
+    });
+    if (state === 'unreadable') repository.updateStatus(connection.id, 'verified');
+    const dependencies = makeDependencies(makeClient());
+    const result = await runGcpBootstrap({ project: seedProject() }, dependencies);
+    expect(result.success).toBe(false);
+    expect(dependencies.getDefaultAdminAccessToken).not.toHaveBeenCalled();
+  });
+
   it('uses ADC for an exact read-only preview and exposes no credential material', async () => {
     const client = makeClient();
     const dependencies = makeDependencies(client);
