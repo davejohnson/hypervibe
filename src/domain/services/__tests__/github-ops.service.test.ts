@@ -902,7 +902,7 @@ describe('github tools', () => {
       needsJobNames: true,
       providerRegion: 'us-west1',
       runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
-      containerStartCommand: undefined,
+      containerStartCommand: 'npm run web',
       runtimeResources: [
         {
           logicalName: 'daily',
@@ -930,7 +930,7 @@ describe('github tools', () => {
         },
       ],
     });
-    expect(cloudRunContainerBuildStartCommand(targets[0])).toContain('Hypervibe applies the runtime command');
+    expect(cloudRunContainerBuildStartCommand(targets[0])).toBe('npm run web');
 
     const workflow = buildBranchDeployWorkflow('cloudrun', targets[0], { includeStep: false });
     expect(workflow.requiredVariables).toEqual([]);
@@ -944,7 +944,7 @@ describe('github tools', () => {
     expect(workflow.content).toContain('CLOUDRUN_RUNTIME_RESOURCES_B64:');
     expect(workflow.content).toContain('cloudRunContainerWithRuntime');
     expect(workflow.content.match(/Resolve Dockerfile[\s\S]{0,1200}/)?.[0]).toContain(
-      'Hypervibe applies the runtime command during Cloud Run release.'
+      'CMD ["sh", "-lc", "npm run web"]'
     );
     expect(workflow.content).toContain('await runCloudRunReleaseCommands({');
     expect(workflow.content.indexOf('await runCloudRunReleaseCommands({')).toBeLessThan(
