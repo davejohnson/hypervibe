@@ -2455,9 +2455,6 @@ export class RailwayAdapter implements
     }
     const inventory = await this.serviceInstanceInventory(serviceId, projectId);
     if (inventory.state === 'absent') {
-      if (!options.allowMutation) {
-        return { success: true, alreadyAbsent: true };
-      }
       return {
         success: false,
         error: `Railway returned conflicting service and service-instance evidence for ${serviceId}; deletion is blocked.`,
@@ -2632,6 +2629,7 @@ export class RailwayAdapter implements
             id
             serviceId
             environmentId
+            deletedAt
             source {
               image
             }
@@ -2655,6 +2653,18 @@ export class RailwayAdapter implements
           state: 'unknown',
           error: `Railway returned a partial service-instance identity for ${serviceId} in ${environmentId}.`,
         };
+      }
+      const deletedAt = result.serviceInstance.deletedAt;
+      if (deletedAt !== null) {
+        if (typeof deletedAt !== 'string'
+          || deletedAt.trim().length === 0
+          || Number.isNaN(Date.parse(deletedAt))) {
+          return {
+            state: 'unknown',
+            error: `Railway returned a missing or malformed service-instance deletion marker for ${serviceId} in ${environmentId}.`,
+          };
+        }
+        return { state: 'absent' };
       }
       const source = result.serviceInstance.source;
       if (source !== undefined && source !== null && !isRecord(source)) {
