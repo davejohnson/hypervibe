@@ -189,17 +189,16 @@ export function managedCiEnvironmentBindings(
       ?? (boundKind === 'web' || boundKind === 'worker' || boundKind === 'cron'
         ? boundKind
         : isScheduledJob ? 'cron' : 'web');
-    const providerResourceId = workloadKind === 'cron' && jobName ? jobName : serviceId;
+    // Workload scheduling does not determine the provider resource type (for example Railway cron services).
+    const providerResourceId = isScheduledJob ? jobName ?? serviceId : serviceId;
     const boundKindIsKnown = boundKind === 'web' || boundKind === 'worker' || boundKind === 'cron';
-    const bindingMatchesDesiredKind = !configuredKind || (
-      (!boundKindIsKnown || boundKind === configuredKind)
-      && (configuredKind === 'cron') === isScheduledJob
-    );
+    const bindingMatchesDesiredKind = (!configuredKind || !boundKindIsKnown || boundKind === configuredKind)
+      && (!isScheduledJob || workloadKind === 'cron');
     if (providerResourceId && bindingMatchesDesiredKind) {
       releaseResources.push({
         logicalName: serviceName,
         workloadKind,
-        providerResourceType: workloadKind === 'cron' ? 'job' : 'service',
+        providerResourceType: isScheduledJob ? 'job' : 'service',
         providerResourceId,
       });
     }
