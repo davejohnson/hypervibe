@@ -15,6 +15,9 @@ beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), 'hypervibe-environment-repo-state-'));
   mkdirSync(path.join(root, '.git'));
   mkdirSync(path.join(root, '.hypervibe'));
+  writeFileSync(path.join(root, '.hypervibe', 'spec.json'), JSON.stringify({
+    version: 1, project: 'safe-app', environments: {},
+  }));
   SqliteAdapter.getInstance(path.join(root, 'test.db')).migrate();
   oldCwd = process.cwd();
   oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;

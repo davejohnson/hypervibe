@@ -88,6 +88,20 @@ describe('apply-run reservation persistence', () => {
     )).toThrow(/UNIQUE constraint failed: index 'idx_runs_succeeded_apply_plan'/i);
   });
 
+  it('rejects newer local state before running any missing migration', () => {
+    const db = getDb();
+    db.exec('DELETE FROM schema_migrations WHERE version = 11');
+    db.prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)')
+      .run(999, 'future-schema');
+    const before = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all();
+
+    expect(() => SqliteAdapter.getInstance().migrate()).toThrow(
+      /state uses schema 999.*supports schema 11.*Update Hypervibe/
+    );
+    expect(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()).toEqual(before);
+    expect(new EnvironmentRepository().findById(environmentId)?.projectId).toBe(projectId);
+  });
+
   it('installs the migration over malformed legacy run JSON without weakening the indexes', () => {
     const db = getDb();
     const now = new Date().toISOString();

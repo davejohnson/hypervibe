@@ -159,8 +159,10 @@ The target invariant is:
       converge successfully without leaking stale state.
 - [x] Confirmation contract: every billable or data-bearing action is skipped
       unless its exact action id is confirmed.
-- [ ] Provider parity matrix: run the database lifecycle contract against
+- [x] Provider parity matrix: run the database lifecycle contract against
       Railway, Supabase, Cloud SQL, and RDS adapters.
+      The shared contract also covers Fly; full import round trips remain the
+      separate unchecked contract above.
 
 ## Exit Criteria
 

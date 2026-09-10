@@ -391,6 +391,7 @@ async function setupRailway(
             id: 'rail-db-instance',
             serviceId: EXTERNAL_IDS[0],
             environmentId: 'rail-env',
+            deletedAt: null,
           },
         };
       }

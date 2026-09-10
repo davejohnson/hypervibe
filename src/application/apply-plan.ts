@@ -1039,7 +1039,6 @@ export async function executePlanApply(ctx: CommandContext, params: {
       });
       deployBootstrap = await executeBootstrap({
         ...bootstrapParams,
-        domain: undefined,
         ensureHostingProject: false,
       });
     }

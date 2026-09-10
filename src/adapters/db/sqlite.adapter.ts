@@ -448,6 +448,15 @@ export class SqliteAdapter {
           .map((row: unknown) => (row as { version: number }).version)
       );
 
+      const supportedVersion = Math.max(...migrations.map((migration) => migration.version));
+      const newestAppliedVersion = Math.max(0, ...appliedVersions);
+      if (newestAppliedVersion > supportedVersion) {
+        throw new Error(
+          `Local state uses schema ${newestAppliedVersion}, but this Hypervibe runtime supports schema ${supportedVersion}. `
+          + 'Update Hypervibe before opening this state; do not delete the database or migration history.'
+        );
+      }
+
       const appliedNow: Migration[] = [];
       for (const migration of migrations) {
         if (!appliedVersions.has(migration.version)) {
