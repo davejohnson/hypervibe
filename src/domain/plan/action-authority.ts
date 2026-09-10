@@ -404,6 +404,8 @@ function operationTypeIsValid(action: PlanAction): boolean {
     case STORAGE_OPERATIONS.ensure:
       return (action.type === 'update' && Boolean(metadataString(action, 'blockedReason')))
         || (action.type === 'create' && action.billable === true);
+    case STORAGE_OPERATIONS.finalizeCreateRecovery:
+      return action.type === 'update' && action.verified === true;
     case STORAGE_OPERATIONS.wire:
     case STORAGE_OPERATIONS.unwire:
       return action.type === 'update';
@@ -934,6 +936,15 @@ export function resolvePlanActionAuthority(
     && action.resource.name === metadataString(action, 'storageName')
     && (
       action.metadata?.operation === STORAGE_OPERATIONS.ensure
+      || (
+        action.metadata?.operation === STORAGE_OPERATIONS.finalizeCreateRecovery
+        && action.type === 'update'
+        && action.verified === true
+        && Boolean(metadataString(action, 'externalId'))
+        && Boolean(metadataString(action, 'region'))
+        && Boolean(metadataStringRecord(action, 'instanceScope'))
+        && Boolean(action.metadata?.storageCreateRecovery)
+      )
       || (
         action.metadata?.operation === STORAGE_OPERATIONS.clearCreateRecovery
         && action.type === 'update'
