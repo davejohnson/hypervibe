@@ -101,4 +101,59 @@ describe('ConnectionRepository scope safety', () => {
     expect(repository.deleteByProviderAndScope('github', 'global')).toBe(true);
     expect(repository.findAllByProvider('github')).toEqual([]);
   });
+
+  it('atomically replaces an exact verified provider batch', () => {
+    const cloudRun = create('cloudrun', 'owner/repo');
+    const cloudSql = create('cloudsql', 'owner/repo');
+
+    const stored = repository.upsertVerifiedBatch([
+      {
+        provider: 'cloudrun',
+        scope: 'owner/repo',
+        credentialsEncrypted: 'new-cloudrun-encrypted',
+      },
+      {
+        provider: 'cloudsql',
+        scope: 'owner/repo',
+        credentialsEncrypted: 'new-cloudsql-encrypted',
+      },
+    ]);
+
+    expect(stored.map((connection) => connection.id)).toEqual([cloudRun.id, cloudSql.id]);
+    expect(stored.map((connection) => connection.credentialsEncrypted)).toEqual([
+      'new-cloudrun-encrypted',
+      'new-cloudsql-encrypted',
+    ]);
+    expect(stored.every((connection) => connection.status === 'verified')).toBe(true);
+    expect(stored.every((connection) => connection.lastVerifiedAt instanceof Date)).toBe(true);
+  });
+
+  it('rolls back every replacement when one verified batch write fails', () => {
+    const cloudRun = create('cloudrun', 'owner/repo');
+    const db = SqliteAdapter.getInstance().getDb();
+    db.exec(`
+      CREATE TRIGGER fail_cloudsql_connection
+      BEFORE INSERT ON connections
+      WHEN NEW.provider = 'cloudsql'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected cloudsql persistence failure');
+      END;
+    `);
+
+    expect(() => repository.upsertVerifiedBatch([
+      {
+        provider: 'cloudrun',
+        scope: 'owner/repo',
+        credentialsEncrypted: 'replacement-cloudrun-encrypted',
+      },
+      {
+        provider: 'cloudsql',
+        scope: 'owner/repo',
+        credentialsEncrypted: 'new-cloudsql-encrypted',
+      },
+    ])).toThrow('injected cloudsql persistence failure');
+
+    expect(repository.findByProviderAndScope('cloudrun', 'owner/repo')).toEqual(cloudRun);
+    expect(repository.findByProviderAndScope('cloudsql', 'owner/repo')).toBeNull();
+  });
 });

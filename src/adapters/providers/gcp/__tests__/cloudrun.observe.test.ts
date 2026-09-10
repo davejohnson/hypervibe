@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CloudRunAdapter } from '../cloudrun.adapter.js';
 import { hashEnvValue } from '../../../../domain/ports/observe.port.js';
 import type { Environment } from '../../../../domain/entities/environment.entity.js';
+import { CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION } from '../cloudrun-release-command.js';
 
 async function connectedAdapter(): Promise<CloudRunAdapter> {
   const adapter = new CloudRunAdapter();
@@ -44,6 +45,10 @@ const webService = {
   reconciling: false,
   uri: 'https://gcp-project-web.run.app',
   labels: { 'infraprint-environment': 'production', 'infraprint-service': 'web' },
+  annotations: {
+    'example.com/owner': 'platform-team',
+    [CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION]: hashEnvValue('npm run db:migrate'),
+  },
   terminalCondition: { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
   template: {
     vpcAccess: {
@@ -215,6 +220,7 @@ describe('CloudRunAdapter.observe', () => {
       customDomains: [],
       config: {
         healthCheckPath: '/healthz',
+        releaseCommandHash: hashEnvValue('npm run db:migrate'),
         public: true,
         cacheNetwork: {
           network: 'projects/gcp-project/global/networks/default',

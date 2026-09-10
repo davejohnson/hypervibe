@@ -101,7 +101,9 @@ describe('DeployOrchestrator local rollback', () => {
     const project = projectRepo.create({ name: 'rollback-project', defaultPlatform: provider });
     const originalBindings = {
       provider,
-      projectId: 'old-project',
+      projectId: provider === 'unregistered-hosting' || environmentId === undefined
+        ? projectId
+        : 'old-project',
       environmentId: 'old-environment',
       services: {
         web: {
@@ -268,6 +270,9 @@ describe('DeployOrchestrator local rollback', () => {
           data: {
             projectId: 'gcp-project',
             environmentId: 'us-central1',
+            providerBindings: {
+              providerScope: { projectId: 'real-gcp-project', region: 'us-central1' },
+            },
           },
         };
       },
@@ -311,6 +316,13 @@ describe('DeployOrchestrator local rollback', () => {
       provider: 'cloudrun',
       projectId: 'gcp-project',
       environmentId: 'us-central1',
+      providerScope: { projectId: 'real-gcp-project', region: 'us-central1' },
+      previousHosting: {
+        provider: 'railway',
+        projectId: 'rail-old-project',
+        environmentId: 'rail-old-env',
+        services: {},
+      },
       services: {
         web: {
           serviceId: 'cloudrun-web',
@@ -318,6 +330,190 @@ describe('DeployOrchestrator local rollback', () => {
           workloadKind: 'web',
         },
       },
+    });
+  });
+
+  it.each([
+    {
+      reason: 'provider changes',
+      currentProvider: 'railway',
+      currentScope: { projectId: 'real-project', region: 'us-central1' },
+      nextScope: { projectId: 'real-project', region: 'us-central1' },
+    },
+    {
+      reason: 'canonical provider scope changes',
+      currentProvider: 'cloudrun',
+      currentScope: { projectId: 'real-project', region: 'us-east1' },
+      nextScope: { projectId: 'real-project', region: 'us-central1' },
+    },
+    {
+      reason: 'canonical provider project changes',
+      currentProvider: 'cloudrun',
+      currentScope: { projectId: 'old-project', region: 'us-central1' },
+      nextScope: { projectId: 'new-project', region: 'us-central1' },
+    },
+    {
+      reason: 'provider omits the previously bound scope',
+      currentProvider: 'cloudrun',
+      currentScope: { projectId: 'real-project', region: 'us-central1' },
+      nextScope: undefined,
+    },
+  ])('clears stale service and environment identities when the $reason even if projectId is unchanged', async ({
+    currentProvider,
+    currentScope,
+    nextScope,
+  }) => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const serviceRepo = new ServiceRepository();
+    const project = projectRepo.create({ name: 'same-logical-project', defaultPlatform: 'cloudrun' });
+    const environment = envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: currentProvider,
+        projectId: 'shared-logical-project',
+        environmentId: 'stale-environment',
+        providerScope: currentScope,
+        services: { web: { serviceId: 'stale-service' } },
+      },
+    });
+    const service = serviceRepo.create({
+      projectId: project.id,
+      name: 'web',
+      buildConfig: { builder: 'dockerfile' },
+    });
+    const deploy = vi.fn(async (_service, refreshedEnvironment: typeof environment) => {
+      expect(refreshedEnvironment.platformBindings).toMatchObject({
+        provider: 'cloudrun',
+        projectId: 'shared-logical-project',
+        ...(nextScope ? { providerScope: nextScope } : {}),
+        services: {},
+        previousHosting: {
+          provider: currentProvider,
+          projectId: 'shared-logical-project',
+          environmentId: 'stale-environment',
+          providerScope: currentScope,
+          services: { web: { serviceId: 'stale-service' } },
+        },
+      });
+      expect(refreshedEnvironment.platformBindings).not.toHaveProperty('environmentId');
+      if (!nextScope) expect(refreshedEnvironment.platformBindings).not.toHaveProperty('providerScope');
+      return {
+        serviceId: service.id,
+        externalId: 'current-service',
+        url: 'https://current.example.run.app',
+        status: 'deployed' as const,
+        receipt: { success: true, message: 'deployed' },
+      };
+    });
+    const adapter: IHostingAdapter = {
+      name: 'cloudrun',
+      capabilities: {
+        supportedBuilders: ['dockerfile'], supportsAutoWiring: false, supportsHealthChecks: true,
+        supportsCronSchedule: true, supportsReleaseCommand: true, supportsMultiEnvironment: false,
+        managedTls: true, supportsAutoScaling: true, supportsObserve: false,
+      },
+      async connect() {},
+      async verify() { return { success: true }; },
+      async ensureProject() {
+        return {
+          success: true,
+          message: 'using project',
+          data: {
+            projectId: 'shared-logical-project',
+            ...(nextScope ? { providerBindings: { providerScope: nextScope } } : {}),
+          },
+        };
+      },
+      deploy,
+      async setEnvVars() { return { success: true, message: 'ok' }; },
+      async getDeployStatus() { return { status: 'deployed', url: 'https://current.example.run.app' }; },
+    };
+
+    const result = await new DeployOrchestrator().execute({ project, environment, services: [service], adapter });
+
+    expect(result.success).toBe(true);
+    expect(deploy).toHaveBeenCalledOnce();
+    expect(envRepo.findById(environment.id)?.platformBindings).toEqual({
+      provider: 'cloudrun',
+      projectId: 'shared-logical-project',
+      ...(nextScope ? { providerScope: nextScope } : {}),
+      services: {
+        web: {
+          serviceId: 'current-service',
+          url: 'https://current.example.run.app',
+          workloadKind: 'web',
+        },
+      },
+      previousHosting: {
+        provider: currentProvider,
+        projectId: 'shared-logical-project',
+        environmentId: 'stale-environment',
+        providerScope: currentScope,
+        services: { web: { serviceId: 'stale-service' } },
+      },
+    });
+  });
+
+  it('rehomes exact service-create recovery during a direct deploy scope transition', async () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const serviceRepo = new ServiceRepository();
+    const oldScope = { projectId: 'gcp-project', region: 'us-east1' };
+    const recovery = {
+      provider: 'cloudrun', operation: 'create' as const, resourceName: 'worker', providerScope: oldScope,
+      state: 'identified' as const, serviceId: 'old-worker', returnedName: 'worker',
+    };
+    const project = projectRepo.create({ name: 'direct-recovery-transition', defaultPlatform: 'cloudrun' });
+    const environment = envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'cloudrun', projectId: 'logical-production', environmentId: 'us-east1',
+        providerScope: oldScope, services: {}, serviceCreateRecovery: { worker: recovery },
+      },
+    });
+    const service = serviceRepo.create({ projectId: project.id, name: 'web', buildConfig: { builder: 'dockerfile' } });
+    const adapter: IHostingAdapter = {
+      name: 'cloudrun',
+      capabilities: {
+        supportedBuilders: ['dockerfile'], supportsAutoWiring: false, supportsHealthChecks: true,
+        supportsCronSchedule: true, supportsReleaseCommand: true, supportsMultiEnvironment: false,
+        managedTls: true, supportsAutoScaling: true, supportsObserve: false,
+      },
+      async connect() {}, async verify() { return { success: true }; },
+      async ensureProject() {
+        return {
+          success: true, message: 'using project',
+          data: {
+            projectId: 'logical-production', environmentId: 'us-west1',
+            providerBindings: { providerScope: { projectId: 'gcp-project', region: 'us-west1' } },
+          },
+        };
+      },
+      async deploy() {
+        return {
+          serviceId: service.id, externalId: 'new-web', url: 'https://new.example.run.app', status: 'deployed',
+          receipt: { success: true, message: 'deployed' },
+        };
+      },
+      async setEnvVars() { return { success: true, message: 'ok' }; },
+      async getDeployStatus() { return { status: 'deployed', url: 'https://new.example.run.app' }; },
+    };
+
+    const result = await new DeployOrchestrator().execute({ project, environment, services: [service], adapter });
+
+    expect(result.success).toBe(true);
+    const updated = envRepo.findById(environment.id)?.platformBindings;
+    expect(updated).not.toHaveProperty('serviceCreateRecovery');
+    expect(updated).toMatchObject({
+      previousHosting: {
+        providerScope: oldScope,
+        serviceCreateRecovery: { worker: recovery },
+        services: { worker: { serviceId: 'old-worker', createRecovery: recovery } },
+      },
+      services: { web: { serviceId: 'new-web' } },
     });
   });
 

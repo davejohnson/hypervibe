@@ -245,9 +245,22 @@ export const deploySpecSchema = z.object({
   branch: z.string().min(1).optional(),
   /** CI branch deploys default to true for staging and false for production. */
   autoDeploy: z.boolean().optional(),
-  /** Production promotion source label, usually staging. Used for workflow guidance. */
+  /** Environment whose verified exact-SHA release is required before this manual deployment. */
   promoteFrom: z.string().min(1).optional(),
 }).strict();
+
+export function effectiveBranchCiAutoDeploy(
+  environmentName: string,
+  configured: boolean | undefined
+): boolean {
+  if (configured !== undefined) return configured;
+  const normalized = environmentName.trim().toLowerCase();
+  return !(
+    normalized === 'production'
+    || normalized === 'prod'
+    || normalized.includes('prod')
+  );
+}
 
 export const collaborationLabelSpecSchema = z.object({
   name: z.string().min(1),
@@ -2019,6 +2032,95 @@ export const projectSpecSchema = z.object({
   ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 }).strict().superRefine((spec, ctx) => {
+  const promotionIssuePath = (environmentName: string): Array<string | number> => (
+    ['environments', environmentName, 'deploy', 'promoteFrom']
+  );
+  const usesManagedBranchCi = (environmentName: string) => {
+    const deploy = spec.environments[environmentName]?.deploy;
+    return deploy?.strategy === 'branch' && (deploy.trigger ?? 'ci') === 'ci';
+  };
+
+  for (const [targetName, target] of Object.entries(spec.environments)) {
+    const sourceName = target.deploy?.promoteFrom;
+    if (!sourceName) continue;
+    if (sourceName === targetName) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'deploy.promoteFrom must name a different environment',
+        path: promotionIssuePath(targetName),
+      });
+      continue;
+    }
+    const source = spec.environments[sourceName];
+    if (!source) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `deploy.promoteFrom targets unknown environment "${sourceName}"`,
+        path: promotionIssuePath(targetName),
+      });
+      continue;
+    }
+    if (!usesManagedBranchCi(targetName)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'an environment with deploy.promoteFrom must use deploy.strategy="branch" and deploy.trigger="ci"',
+        path: promotionIssuePath(targetName),
+      });
+    }
+    if (!usesManagedBranchCi(sourceName)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `deploy.promoteFrom source "${sourceName}" must use deploy.strategy="branch" and deploy.trigger="ci"`,
+        path: promotionIssuePath(targetName),
+      });
+    }
+    if (effectiveBranchCiAutoDeploy(targetName, target.deploy?.autoDeploy)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'an environment with deploy.promoteFrom must have effective autoDeploy=false',
+        path: promotionIssuePath(targetName),
+      });
+    }
+  }
+
+  const promotionVisitState = new Map<string, 'visiting' | 'done'>();
+  const promotionStack: string[] = [];
+  const promotionCycleMembers = new Set<string>();
+  const visitPromotion = (environmentName: string): void => {
+    if (promotionVisitState.get(environmentName) === 'done') return;
+    if (promotionVisitState.get(environmentName) === 'visiting') return;
+    promotionVisitState.set(environmentName, 'visiting');
+    promotionStack.push(environmentName);
+    const sourceName = spec.environments[environmentName]?.deploy?.promoteFrom;
+    if (
+      sourceName
+      && sourceName !== environmentName
+      && spec.environments[sourceName]
+    ) {
+      if (promotionVisitState.get(sourceName) === 'visiting') {
+        const cycleStart = promotionStack.indexOf(sourceName);
+        const cycle = [...promotionStack.slice(cycleStart), sourceName];
+        const message = `deploy.promoteFrom cannot form a cycle: ${cycle.join(' -> ')}`;
+        for (const cycleEnvironment of cycle.slice(0, -1)) {
+          if (promotionCycleMembers.has(cycleEnvironment)) continue;
+          promotionCycleMembers.add(cycleEnvironment);
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message,
+            path: promotionIssuePath(cycleEnvironment),
+          });
+        }
+      } else {
+        visitPromotion(sourceName);
+      }
+    }
+    promotionStack.pop();
+    promotionVisitState.set(environmentName, 'done');
+  };
+  for (const environmentName of Object.keys(spec.environments)) {
+    visitPromotion(environmentName);
+  }
+
   for (const [targetName, target] of Object.entries(spec.environments)) {
     const migration = target.dataMigration;
     if (!migration) continue;
@@ -2176,11 +2278,14 @@ export const projectSpecSchema = z.object({
       ? [key]
       : []
   );
-  if (githubSecretKeys.length > 0 && (!spec.github || spec.github.enabled === false)) {
+  const canonicalGitHubActions = spec.devops?.code.provider === 'github'
+    && spec.devops.ci?.provider === 'github-actions';
+  const legacyGitHubActions = Boolean(spec.github && spec.github.enabled !== false);
+  if (githubSecretKeys.length > 0 && !canonicalGitHubActions && !legacyGitHubActions) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: `GitHub Actions secret destinations require enabled top-level github desired state (${githubSecretKeys.join(', ')})`,
-      path: ['github'],
+      message: `GitHub Actions secret destinations require devops.code.provider="github" with devops.ci.provider="github-actions", or enabled legacy top-level github desired state (${githubSecretKeys.join(', ')})`,
+      path: spec.devops ? ['devops', 'ci'] : ['github'],
     });
   }
   for (const [key, secret] of Object.entries(spec.secrets)) {

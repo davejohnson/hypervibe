@@ -95,6 +95,23 @@ describe('connection local env inputs', () => {
     ]);
   });
 
+  it('ignores an action-scoped connection block when its exact action is already a no-op', () => {
+    const result = splitActionScopedConnectionBlocks([{
+      provider: 'github',
+      policy: 'action-scoped-if-independent-actions',
+      actionIds: ['secret:github:repository:CI_TOKEN'],
+      reason: 'GitHub is not connected',
+    }], [{
+      id: 'secret:github:repository:CI_TOKEN',
+      type: 'noop',
+      resource: { kind: 'secret', name: 'CI_TOKEN', provider: 'github' },
+      verified: false,
+      reason: 'Preserve accepted GitHub Actions secret because observation is unknown',
+    }]);
+
+    expect(result).toEqual({ hardBlocked: [], actionScopedBlocked: [] });
+  });
+
   it('builds an executable value-free Cloudflare Registrar replacement command', () => {
     const [setup] = connectionRecoveryDetails([{
       provider: 'cloudflare',

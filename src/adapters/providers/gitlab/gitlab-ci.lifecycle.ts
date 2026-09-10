@@ -11,7 +11,10 @@ import type { CiApplyResult, CiLifecyclePort, CiLifecycleResult } from '../../..
 import type { EnvironmentSpec, ProjectSpec } from '../../../domain/spec/spec.schema.js';
 import { environmentDeploymentContractHashForApply } from '../../../domain/services/deployment-contract.service.js';
 import type { BranchDeployTarget, PortableCiDeployRecipe } from '../../../domain/ports/ci-deploy.port.js';
-import { resolveReviewedBranchDeployTargets } from '../../../domain/services/managed-ci-targets.js';
+import {
+  missingManagedCiReleaseBindings,
+  resolveReviewedBranchDeployTargets,
+} from '../../../domain/services/managed-ci-targets.js';
 import { providerRegistry } from '../../../domain/registry/provider.registry.js';
 import { buildPortableContainerArchiveRuntime } from '../../../domain/services/portable-container-build.js';
 import { HYPERVIBE_MANAGED_NODE_SLIM_IMAGE } from '../../../domain/services/managed-runtime.js';
@@ -32,6 +35,8 @@ import {
 const ROOT_MARKER = '# hypervibe-managed: gitlab-ci/v1';
 const MANIFEST_PATH = '.gitlab/hypervibe/manifest.yml';
 export const GITLAB_DEPLOYMENT_GATE_PATH = '.gitlab/hypervibe/verify-deployment-order.mjs';
+export const GITLAB_PROMOTION_GATE_PATH = '.gitlab/hypervibe/verify-promotion-evidence.mjs';
+export const GITLAB_RELEASE_EVIDENCE_PATH = '.gitlab/hypervibe/finalize-release-evidence.mjs';
 const PROGRAM_VERSION = 1;
 const GITLAB_SAAS_RUNNER_TAG = 'saas-linux-small-amd64';
 
@@ -124,6 +129,50 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+type ReleaseEvidenceContract = {
+  services: string[];
+  providerIdentity: Record<string, unknown>;
+  providerResources: string[];
+  deploymentContractFingerprint: string;
+  requiresImmutableImage: boolean;
+};
+
+function providerIdentityForTarget(target: BranchDeployTarget): Record<string, unknown> {
+  const providerScope = target.providerScope
+    ? Object.fromEntries(Object.entries(target.providerScope).sort(([left], [right]) => left.localeCompare(right)))
+    : undefined;
+  return {
+    ...(target.providerProjectId ? { projectId: target.providerProjectId } : {}),
+    ...(target.providerEnvironmentId ? { environmentId: target.providerEnvironmentId } : {}),
+    ...(providerScope && Object.keys(providerScope).length > 0 ? { scope: providerScope } : {}),
+    ...(target.providerRegion ? { region: target.providerRegion } : {}),
+  };
+}
+
+function releaseEvidenceContract(
+  target: BranchDeployTarget,
+  recipe: PortableCiDeployRecipe
+): ReleaseEvidenceContract {
+  const services = [...target.serviceNames].sort();
+  const providerResources = [...(recipe.releaseEvidence?.providerResources ?? [])].sort();
+  const deploymentContractFingerprint = target.programFingerprint ?? '';
+  if (
+    services.length === 0
+    || new Set(services).size !== services.length
+    || new Set(providerResources).size !== providerResources.length
+    || !/^[0-9a-f]{64}$/.test(deploymentContractFingerprint)
+  ) {
+    throw new Error(`Portable CI release evidence for ${target.environmentName} is incomplete`);
+  }
+  return {
+    services,
+    providerIdentity: providerIdentityForTarget(target),
+    providerResources,
+    deploymentContractFingerprint,
+    requiresImmutableImage: recipe.releaseEvidence?.requiresImmutableImage === true,
+  };
 }
 
 function gitLabCiBinding(projectId: string, environmentName: string): Record<string, unknown> | null {
@@ -284,14 +333,18 @@ function activeRootPath(project: GitLabProject): string {
 
 function canonicalEnvironment(spec: ProjectSpec, targets: BranchDeployTarget[]): string | null {
   const requested = spec.devops?.canonicalEnvironment;
-  if (requested && requested !== 'repository') return requested;
+  if (
+    requested
+    && requested !== 'repository'
+    && targets.some((target) => target.environmentName === requested)
+  ) return requested;
   return targets.find((target) => target.kind === 'production')?.environmentName
     ?? targets[0]?.environmentName
     ?? null;
 }
 
 function configurationBindingForSpec(project: Project, spec: ProjectSpec): Record<string, unknown> | null {
-  const canonical = canonicalEnvironment(spec, managedTargets(project, spec));
+  const canonical = canonicalEnvironment(spec, renderableManagedTargets(project, spec));
   const canonicalBinding = canonical ? gitLabCiBinding(project.id, canonical) : null;
   if (canonicalBinding) return canonicalBinding;
   for (const environment of new EnvironmentRepository().findByProjectId(project.id)) {
@@ -304,7 +357,7 @@ function configurationBindingForSpec(project: Project, spec: ProjectSpec): Recor
 }
 
 function configurationOwnerEnvironment(project: Project, spec: ProjectSpec): string | null {
-  const canonical = canonicalEnvironment(spec, managedTargets(project, spec));
+  const canonical = canonicalEnvironment(spec, renderableManagedTargets(project, spec));
   if (canonical && gitLabCiBinding(project.id, canonical)) return canonical;
   for (const environment of new EnvironmentRepository().findByProjectId(project.id)) {
     const binding = gitLabCiBinding(project.id, environment.name);
@@ -324,11 +377,21 @@ function managedTargets(project: Project, spec: ProjectSpec): BranchDeployTarget
   });
 }
 
-function renderRules(target: BranchDeployTarget): string {
+function renderableManagedTargets(project: Project, spec: ProjectSpec): BranchDeployTarget[] {
+  return managedTargets(project, spec)
+    .filter((target) => missingManagedCiReleaseBindings(target).length === 0);
+}
+
+function autoPushRule(spec: ProjectSpec, target: BranchDeployTarget): string {
+  const appliedSpecVariable = gitLabVariableKeys(spec, target.environmentName).appliedSpecHash;
+  return `$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == ${gitLabExpressionString(target.branch)} && $${appliedSpecVariable} != ""`;
+}
+
+function renderRules(spec: ProjectSpec, target: BranchDeployTarget): string {
   const rules: string[] = [];
   const rollbackTagPrefix = `hypervibe-rollback-${safeSlug(target.environmentName)}-`;
   if (target.autoDeployOnPush) {
-    rules.push(`    - if: ${yamlString(`$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == ${gitLabExpressionString(target.branch)}`)}`);
+    rules.push(`    - if: ${yamlString(autoPushRule(spec, target))}`);
   }
   rules.push(`    - if: ${yamlString(`($CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "web") && $CI_COMMIT_BRANCH == ${gitLabExpressionString(target.branch)} && "$[[ inputs.environment ]]" == ${gitLabExpressionString(target.environmentName)} && "$[[ inputs.rollback ]]" == "false"`)}`);
   rules.push(`    - if: ${yamlString(`$CI_PIPELINE_SOURCE == "api" && $CI_COMMIT_TAG =~ /^${rollbackTagPrefix}[a-z0-9-]+$/ && "$[[ inputs.environment ]]" == ${gitLabExpressionString(target.environmentName)} && "$[[ inputs.rollback ]]" == "true"`)}`);
@@ -389,18 +452,298 @@ if (process.env.HYPERVIBE_ROLLBACK === 'true') {
 `;
 }
 
+export function buildGitLabReleaseEvidenceRuntime(): string {
+  return `import { readFile, writeFile } from 'node:fs/promises';
+
+const required = ['CI_PROJECT_ID', 'CI_PIPELINE_ID', 'CI_JOB_ID', 'CI_COMMIT_SHA', 'HYPERVIBE_RELEASE_PROVIDER', 'HYPERVIBE_REPOSITORY', 'HYPERVIBE_ENVIRONMENT', 'HYPERVIBE_PROGRAM_FINGERPRINT', 'HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT', 'HYPERVIBE_RELEASE_SERVICES', 'HYPERVIBE_RELEASE_PROVIDER_IDENTITY', 'HYPERVIBE_RELEASE_PROVIDER_RESOURCES', 'HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE'];
+for (const key of required) if (!process.env[key]) throw new Error(key + ' is required to finalize release evidence');
+for (const key of ['CI_PROJECT_ID', 'CI_PIPELINE_ID', 'CI_JOB_ID']) if (!/^[1-9]\\d*$/.test(process.env[key])) throw new Error(key + ' must be a positive GitLab id');
+if (!/^[0-9a-f]{40}$/i.test(process.env.CI_COMMIT_SHA)) throw new Error('CI_COMMIT_SHA must be a full Git SHA');
+for (const key of ['HYPERVIBE_PROGRAM_FINGERPRINT', 'HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT']) if (!/^[0-9a-f]{64}$/.test(process.env[key])) throw new Error(key + ' must be a SHA-256 fingerprint');
+if (!['false', 'true'].includes(process.env.HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE)) throw new Error('HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE is invalid');
+function stringArray(name) {
+  let value;
+  try { value = JSON.parse(process.env[name]); } catch { throw new Error(name + ' must be JSON'); }
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string' || !entry)) throw new Error(name + ' must contain non-empty strings');
+  if (new Set(value).size !== value.length) throw new Error(name + ' contains duplicate identities');
+  return [...value].sort();
+}
+function object(name) {
+  let value;
+  try { value = JSON.parse(process.env[name]); } catch { throw new Error(name + ' must be JSON'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(name + ' must be an object');
+  return value;
+}
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+}
+const same = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+const services = stringArray('HYPERVIBE_RELEASE_SERVICES');
+const providerResources = stringArray('HYPERVIBE_RELEASE_PROVIDER_RESOURCES');
+const providerIdentity = object('HYPERVIBE_RELEASE_PROVIDER_IDENTITY');
+const sha = (await readFile('.hypervibe-deploy-sha', 'utf8')).trim().toLowerCase();
+if (!/^[0-9a-f]{40}$/.test(sha) || sha !== process.env.CI_COMMIT_SHA.toLowerCase()) throw new Error('Release SHA does not match the exact GitLab commit');
+let evidence;
+try { evidence = JSON.parse(await readFile('.hypervibe-release.json', 'utf8')); } catch { throw new Error('Provider release evidence is missing or invalid JSON'); }
+if (
+  ![1, 2].includes(evidence?.version)
+  || evidence.provider !== process.env.HYPERVIBE_RELEASE_PROVIDER
+  || evidence.repository !== process.env.HYPERVIBE_REPOSITORY
+  || evidence.environment !== process.env.HYPERVIBE_ENVIRONMENT
+  || String(evidence.sha || '').toLowerCase() !== sha
+  || evidence.programFingerprint !== process.env.HYPERVIBE_PROGRAM_FINGERPRINT
+  || !Array.isArray(evidence.deployments)
+  || evidence.deployments.length === 0
+) throw new Error('Provider release evidence does not match the exact managed release');
+if (evidence.services !== undefined && (!Array.isArray(evidence.services) || !same([...evidence.services].sort(), services))) throw new Error('Provider release evidence has a different service set');
+if (evidence.providerIdentity !== undefined && !same(evidence.providerIdentity, providerIdentity)) throw new Error('Provider release evidence has a different provider identity');
+if (providerResources.length > 0 && !Array.isArray(evidence.providerResources)) throw new Error('Provider release evidence is missing exact provider resources');
+if (evidence.providerResources !== undefined && (!Array.isArray(evidence.providerResources) || !same([...evidence.providerResources].sort(), providerResources))) throw new Error('Provider release evidence has different provider resources');
+if (evidence.deploymentContractFingerprint !== undefined && evidence.deploymentContractFingerprint !== process.env.HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT) throw new Error('Provider release evidence has a different deployment contract');
+const imageUri = String(evidence.imageUri || '').trim().toLowerCase();
+if (process.env.HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE === 'true' && !/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(imageUri)) throw new Error('Provider release evidence has no immutable image digest');
+await writeFile('.hypervibe-release.json', JSON.stringify({
+  ...evidence,
+  version: 2,
+  sha,
+  services,
+  providerIdentity,
+  providerResources,
+  deploymentContractFingerprint: process.env.HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT,
+  ...(imageUri ? { imageUri } : {}),
+  ci: { projectId: process.env.CI_PROJECT_ID, pipelineId: process.env.CI_PIPELINE_ID, jobId: process.env.CI_JOB_ID },
+  verifiedAt: new Date().toISOString(),
+}) + '\\n', { mode: 0o600 });
+`;
+}
+
+export function buildGitLabPromotionGateRuntime(): string {
+  return `const required = ['CI_API_V4_URL', 'CI_PROJECT_ID', 'CI_JOB_TOKEN', 'HYPERVIBE_REPOSITORY', 'HYPERVIBE_PROMOTE_FROM_ENVIRONMENT', 'HYPERVIBE_PROMOTE_FROM_PROVIDER', 'HYPERVIBE_PROMOTE_FROM_JOB', 'HYPERVIBE_PROMOTION_SHA', 'HYPERVIBE_PROGRAM_FINGERPRINT', 'HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT', 'HYPERVIBE_PROMOTION_SERVICES', 'HYPERVIBE_PROMOTION_PROVIDER_IDENTITY', 'HYPERVIBE_PROMOTION_PROVIDER_RESOURCES', 'HYPERVIBE_PROMOTION_REQUIRES_IMMUTABLE_IMAGE'];
+for (const key of required) if (!process.env[key]) throw new Error(key + ' is required for the promotion gate');
+if (!/^[1-9]\\d*$/.test(process.env.CI_PROJECT_ID)) throw new Error('CI_PROJECT_ID must be a positive GitLab id');
+const targetSha = process.env.HYPERVIBE_PROMOTION_SHA.toLowerCase();
+if (!/^[0-9a-f]{40}$/.test(targetSha)) throw new Error('HYPERVIBE_PROMOTION_SHA must be a full Git SHA');
+if (!/^[0-9a-f]{64}$/.test(process.env.HYPERVIBE_PROGRAM_FINGERPRINT)) throw new Error('HYPERVIBE_PROGRAM_FINGERPRINT must be a SHA-256 fingerprint');
+if (!/^[0-9a-f]{64}$/.test(process.env.HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT)) throw new Error('HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT must be a SHA-256 fingerprint');
+if (!['false', 'true'].includes(process.env.HYPERVIBE_PROMOTION_REQUIRES_IMMUTABLE_IMAGE)) throw new Error('HYPERVIBE_PROMOTION_REQUIRES_IMMUTABLE_IMAGE is invalid');
+function stringArray(name) {
+  let value;
+  try { value = JSON.parse(process.env[name]); } catch { throw new Error(name + ' must be JSON'); }
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string' || !entry) || new Set(value).size !== value.length) throw new Error(name + ' must contain unique non-empty strings');
+  return [...value].sort();
+}
+function object(name) {
+  let value;
+  try { value = JSON.parse(process.env[name]); } catch { throw new Error(name + ' must be JSON'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(name + ' must be an object');
+  return value;
+}
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+}
+const same = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+const expectedServices = stringArray('HYPERVIBE_PROMOTION_SERVICES');
+const expectedProviderIdentity = object('HYPERVIBE_PROMOTION_PROVIDER_IDENTITY');
+const expectedProviderResources = stringArray('HYPERVIBE_PROMOTION_PROVIDER_RESOURCES');
+const requiresImmutableImage = process.env.HYPERVIBE_PROMOTION_REQUIRES_IMMUTABLE_IMAGE === 'true';
+const sourceEnvironment = process.env.HYPERVIBE_PROMOTE_FROM_ENVIRONMENT;
+const sourceProvider = process.env.HYPERVIBE_PROMOTE_FROM_PROVIDER;
+const sourceJob = process.env.HYPERVIBE_PROMOTE_FROM_JOB;
+const headers = { Accept: 'application/json', 'JOB-TOKEN': process.env.CI_JOB_TOKEN };
+const endpoint = new URL(process.env.CI_API_V4_URL.replace(/\\/+$/, '') + '/projects/' + encodeURIComponent(process.env.CI_PROJECT_ID) + '/deployments');
+endpoint.searchParams.set('environment', sourceEnvironment);
+endpoint.searchParams.set('status', 'success');
+endpoint.searchParams.set('order_by', 'id');
+endpoint.searchParams.set('sort', 'desc');
+endpoint.searchParams.set('per_page', '100');
+const deployments = [];
+let page = 1;
+let exhausted = false;
+for (let requestIndex = 0; requestIndex < 20; requestIndex++) {
+  endpoint.searchParams.set('page', String(page));
+  const response = await fetch(new URL(endpoint), { headers });
+  if (!response.ok) throw new Error('GitLab promotion deployment observation failed with HTTP ' + response.status);
+  const value = await response.json();
+  if (!Array.isArray(value)) throw new Error('GitLab promotion deployment observation was not a list');
+  deployments.push(...value);
+  const nextPage = (response.headers.get('x-next-page') || '').trim();
+  if (nextPage) {
+    if (!/^[1-9]\\d*$/.test(nextPage) || Number(nextPage) <= page) {
+      throw new Error('GitLab promotion deployment pagination returned an invalid next page');
+    }
+    page = Number(nextPage);
+    continue;
+  }
+  if (value.length < 100) {
+    exhausted = true;
+    break;
+  }
+  page += 1;
+}
+const candidates = deployments.filter((deployment) => (
+  deployment?.status === 'success'
+  && deployment?.environment?.name === sourceEnvironment
+  && String(deployment?.sha || '').toLowerCase() === targetSha
+  && deployment?.deployable?.name === sourceJob
+  && deployment?.deployable?.status === 'success'
+  && String(deployment?.deployable?.pipeline?.sha || '').toLowerCase() === targetSha
+  && deployment?.deployable?.pipeline?.status === 'success'
+  && /^[1-9]\\d*$/.test(String(deployment?.deployable?.id || ''))
+  && /^[1-9]\\d*$/.test(String(deployment?.deployable?.pipeline?.id || ''))
+));
+if (candidates.length === 0) {
+  if (!exhausted) {
+    throw new Error('GitLab promotion deployment observation exceeded the 2000-record safety limit');
+  }
+  throw new Error('No successful ' + sourceEnvironment + ' deployment of ' + targetSha + ' was found for exact managed job ' + sourceJob);
+}
+let verified = false;
+for (const deployment of candidates) {
+  const jobId = String(deployment.deployable.id);
+  const artifactUrl = process.env.CI_API_V4_URL.replace(/\\/+$/, '')
+    + '/projects/' + encodeURIComponent(process.env.CI_PROJECT_ID)
+    + '/jobs/' + encodeURIComponent(jobId)
+    + '/artifacts/.hypervibe-release.json';
+  const artifactResponse = await fetch(artifactUrl, { headers });
+  if (artifactResponse.status === 404) continue;
+  if (!artifactResponse.ok) {
+    throw new Error('GitLab promotion release-artifact observation failed with HTTP ' + artifactResponse.status);
+  }
+  let evidence;
+  try {
+    evidence = await artifactResponse.json();
+  } catch {
+    continue;
+  }
+  const pipelineId = String(deployment.deployable.pipeline.id);
+  const actualServices = Array.isArray(evidence?.services) ? [...evidence.services].sort() : null;
+  const actualProviderResources = Array.isArray(evidence?.providerResources) ? [...evidence.providerResources].sort() : null;
+  const imageUri = String(evidence?.imageUri || '').trim().toLowerCase();
+  const deploymentResources = Array.isArray(evidence?.deployments) && expectedProviderResources.length > 0
+    ? evidence.deployments.map((entry) => entry?.kind + ':' + entry?.name).sort()
+    : [];
+  const immutableDeploymentsMatch = !requiresImmutableImage || (
+    Array.isArray(evidence?.deployments)
+    && evidence.deployments.every((entry) => entry?.imageUri === imageUri && entry?.imageDigest === imageUri.split('@')[1])
+  );
+  if (
+    evidence?.version === 2
+    && evidence?.provider === sourceProvider
+    && evidence?.repository === process.env.HYPERVIBE_REPOSITORY
+    && evidence?.environment === sourceEnvironment
+    && String(evidence?.sha || '').toLowerCase() === targetSha
+    && evidence?.programFingerprint === process.env.HYPERVIBE_PROGRAM_FINGERPRINT
+    && evidence?.deploymentContractFingerprint === process.env.HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT
+    && actualServices !== null
+    && same(actualServices, expectedServices)
+    && evidence?.providerIdentity
+    && same(evidence.providerIdentity, expectedProviderIdentity)
+    && actualProviderResources !== null
+    && same(actualProviderResources, expectedProviderResources)
+    && String(evidence?.ci?.projectId || '') === process.env.CI_PROJECT_ID
+    && String(evidence?.ci?.pipelineId || '') === pipelineId
+    && String(evidence?.ci?.jobId || '') === jobId
+    && Array.isArray(evidence?.deployments)
+    && evidence.deployments.length > 0
+    && (expectedProviderResources.length === 0 || same(deploymentResources, expectedProviderResources))
+    && (!requiresImmutableImage || /^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(imageUri))
+    && immutableDeploymentsMatch
+  ) {
+    console.log('Verified ' + sourceEnvironment + ' release evidence for ' + targetSha + ' from job ' + jobId);
+    verified = true;
+    break;
+  }
+}
+if (!verified) {
+  if (!exhausted) {
+    throw new Error('GitLab promotion deployment observation exceeded the 2000-record safety limit before complete release-evidence validation');
+  }
+  throw new Error('No unexpired Hypervibe ' + sourceEnvironment + ' release artifact for ' + targetSha + ' was found');
+}
+`;
+}
+
+function renderPromotionGateJob(
+  spec: ProjectSpec,
+  target: BranchDeployTarget,
+  hostingProvider: string,
+  selectedRunnerTag: string,
+  programFingerprint: string,
+  sourceTarget?: BranchDeployTarget,
+  sourceRecipe?: PortableCiDeployRecipe
+): string {
+  if (!target.promoteFromEnvironment) return '';
+  if (
+    !target.promoteFromProvider
+    || !sourceTarget
+    || !sourceRecipe
+    || sourceTarget.environmentName !== target.promoteFromEnvironment
+    || sourceRecipe.provider !== target.promoteFromProvider
+  ) {
+    throw new Error(`GitLab promotion target ${target.environmentName} has no exact reviewed source target`);
+  }
+  const sourceEvidence = releaseEvidenceContract(sourceTarget, sourceRecipe);
+  const promotedServices = [...(target.promoteFromServiceNames ?? [])].sort();
+  if (
+    JSON.stringify(promotedServices) !== JSON.stringify(sourceEvidence.services)
+    || target.promoteFromProgramFingerprint !== sourceEvidence.deploymentContractFingerprint
+  ) throw new Error(`GitLab promotion target ${target.environmentName} has stale source release expectations`);
+  const slug = safeSlug(target.environmentName);
+  const sourceSlug = safeSlug(target.promoteFromEnvironment);
+  const sourceProviderSlug = safeSlug(target.promoteFromProvider);
+  const promotionJob = `hypervibe:promote:${hostingProvider}:${slug}`;
+  const sourceJob = `hypervibe:deploy:${sourceProviderSlug}:${sourceSlug}`;
+  return `${promotionJob}:
+  stage: promotion
+  image: ${HYPERVIBE_MANAGED_NODE_SLIM_IMAGE}
+  tags:
+    - ${selectedRunnerTag}
+  inherit:
+    default: false
+    variables: false
+  interruptible: true
+  timeout: 5m
+  rules:
+    - if: ${yamlString(`($CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "web") && $CI_COMMIT_BRANCH == ${gitLabExpressionString(target.branch)} && "$[[ inputs.environment ]]" == ${gitLabExpressionString(target.environmentName)} && "$[[ inputs.rollback ]]" == "false"`)}
+    - when: never
+  before_script: []
+  script:
+    - |
+      set -eu
+      export HYPERVIBE_REPOSITORY=${gitLabShellLiteral(spec.devops!.code.scope)}
+      export HYPERVIBE_PROMOTE_FROM_ENVIRONMENT=${gitLabShellLiteral(target.promoteFromEnvironment)}
+      export HYPERVIBE_PROMOTE_FROM_PROVIDER=${gitLabShellLiteral(target.promoteFromProvider)}
+      export HYPERVIBE_PROMOTE_FROM_JOB=${gitLabShellLiteral(sourceJob)}
+      export HYPERVIBE_PROMOTION_SHA="$[[ inputs.commit_sha ]]"
+      export HYPERVIBE_PROGRAM_FINGERPRINT=${gitLabShellLiteral(programFingerprint)}
+      export HYPERVIBE_PROMOTION_DEPLOYMENT_CONTRACT_FINGERPRINT=${gitLabShellLiteral(sourceEvidence.deploymentContractFingerprint)}
+      export HYPERVIBE_PROMOTION_SERVICES=${gitLabShellLiteral(JSON.stringify(sourceEvidence.services))}
+      export HYPERVIBE_PROMOTION_PROVIDER_IDENTITY=${gitLabShellLiteral(JSON.stringify(sourceEvidence.providerIdentity))}
+      export HYPERVIBE_PROMOTION_PROVIDER_RESOURCES=${gitLabShellLiteral(JSON.stringify(sourceEvidence.providerResources))}
+      export HYPERVIBE_PROMOTION_REQUIRES_IMMUTABLE_IMAGE=${gitLabShellLiteral(String(sourceEvidence.requiresImmutableImage))}
+      node ${GITLAB_PROMOTION_GATE_PATH}
+  after_script: []
+
+`;
+}
 function renderEnvironmentJobs(
   spec: ProjectSpec,
   target: BranchDeployTarget,
   hostingProvider: string,
   recipe: PortableCiDeployRecipe,
   buildRuntimePath: string,
-  programFingerprint: string
+  programFingerprint: string,
+  sourceTarget?: BranchDeployTarget,
+  sourceRecipe?: PortableCiDeployRecipe
 ): string {
   const slug = safeSlug(target.environmentName);
   const appliedHash = environmentDeploymentContractHashForApply(spec, target.environmentName);
   const keys = gitLabVariableKeys(spec, target.environmentName, recipe.values.map((value) => value.name));
-  const rules = renderRules(target);
+  const rules = renderRules(spec, target);
   const selectedRunnerTag = runnerTag(spec);
   const buildJob = `hypervibe:build:${hostingProvider}:${slug}`;
   const deployJob = `hypervibe:deploy:${hostingProvider}:${slug}`;
@@ -411,6 +754,16 @@ function renderEnvironmentJobs(
   const dependencyInstall = recipe.runtime.npmPackages?.length
     ? `      npm install --prefix .hypervibe-runtime --ignore-scripts --no-save ${recipe.runtime.npmPackages.map(gitLabShellLiteral).join(' ')}\n      export NODE_PATH="$PWD/.hypervibe-runtime/node_modules"\n`
     : '';
+  const releaseEvidence = releaseEvidenceContract(target, recipe);
+  const promotionGateJob = renderPromotionGateJob(
+    spec,
+    target,
+    hostingProvider,
+    selectedRunnerTag,
+    programFingerprint,
+    sourceTarget,
+    sourceRecipe
+  );
   return `spec:
   inputs:
     environment:
@@ -431,7 +784,7 @@ function renderEnvironmentJobs(
       type: string
       default: ''
 ---
-${buildJob}:
+${promotionGateJob}${buildJob}:
   stage: build
   image: docker:27.5.1-git
 ${container ? `  services:
@@ -453,7 +806,16 @@ ${rules}
       set -eu
       test "$${keys.appliedSpecHash}" = ${gitLabShellLiteral(appliedHash)}
 ${container
-    ? `      sh ${buildRuntimePath} "$[[ inputs.commit_sha ]]"`
+    ? recipe.releaseEvidence?.requiresImmutableImage
+      ? `      if test "$[[ inputs.rollback ]]" = "true"; then
+        test -n "$[[ inputs.source_artifact_id ]]"
+        test -n "$[[ inputs.source_pipeline_id ]]"
+        test "$CI_COMMIT_SHA" = "$[[ inputs.commit_sha ]]"
+        printf '%s\\n' "$[[ inputs.commit_sha ]]" > .hypervibe-deploy-sha
+      else
+        sh ${buildRuntimePath} "$[[ inputs.commit_sha ]]"
+      fi`
+      : `      sh ${buildRuntimePath} "$[[ inputs.commit_sha ]]"`
     : `      deploy_sha="$(git rev-parse HEAD)"
       case "$deploy_sha" in *[!0-9a-fA-F]*|'') exit 1 ;; esac
       test "\${#deploy_sha}" -eq 40
@@ -499,9 +861,16 @@ ${rules}
       export HYPERVIBE_SOURCE_ARTIFACT_ID="$[[ inputs.source_artifact_id ]]"
       export HYPERVIBE_SOURCE_PIPELINE_ID="$[[ inputs.source_pipeline_id ]]"
       export HYPERVIBE_EXPECTED_LATEST_RUN_ID="$[[ inputs.expected_latest_run_id ]]"
+      export HYPERVIBE_RELEASE_PROVIDER=${gitLabShellLiteral(hostingProvider)}
+      export HYPERVIBE_DEPLOYMENT_CONTRACT_FINGERPRINT=${gitLabShellLiteral(releaseEvidence.deploymentContractFingerprint)}
+      export HYPERVIBE_RELEASE_SERVICES=${gitLabShellLiteral(JSON.stringify(releaseEvidence.services))}
+      export HYPERVIBE_RELEASE_PROVIDER_IDENTITY=${gitLabShellLiteral(JSON.stringify(releaseEvidence.providerIdentity))}
+      export HYPERVIBE_RELEASE_PROVIDER_RESOURCES=${gitLabShellLiteral(JSON.stringify(releaseEvidence.providerResources))}
+      export HYPERVIBE_RELEASE_REQUIRES_IMMUTABLE_IMAGE=${gitLabShellLiteral(String(releaseEvidence.requiresImmutableImage))}
       node ${GITLAB_DEPLOYMENT_GATE_PATH}
 ${valueExports}
 ${dependencyInstall}      node ${recipe.runtime.path}
+      node ${GITLAB_RELEASE_EVIDENCE_PATH}
   after_script: []
   artifacts:
     when: always
@@ -516,7 +885,7 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
   programHash: string;
   jobNames: string[];
 } {
-  const targets = managedTargets(project, spec);
+  const targets = renderableManagedTargets(project, spec);
   if (targets.length === 0) {
     return {
       files: [],
@@ -542,7 +911,8 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
     throw new Error('GitLab CI MVP does not yet render declarative database seed releases');
   }
   if (Object.values(spec.environments).some((environment) => (
-    Object.values(environment.services).some((service) => service.workloadKind === 'cron')
+    environment.hosting.provider !== 'cloudrun'
+    && Object.values(environment.services).some((service) => service.workloadKind === 'cron')
   ))) {
     throw new Error('GitLab CI does not yet deploy declared cron jobs');
   }
@@ -554,12 +924,13 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
   const runtime = spec.runtime;
   const descriptors = targets.map((target) => {
     const provider = spec.environments[target.environmentName]!.hosting.provider;
+    const recipe = recipeFor(provider, target);
     return {
       target,
       provider,
-      recipe: recipeFor(provider, target),
+      recipe,
       buildRuntimePath: `.gitlab/hypervibe/build-${safeSlug(provider)}-${safeSlug(target.environmentName)}.sh`,
-      startCommand: target.containerStartCommand,
+      startCommand: recipe.containerBuildStartCommand ?? target.containerStartCommand,
     };
   });
   const semanticProgram = JSON.stringify({
@@ -568,12 +939,17 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
     repository: spec.devops?.code,
     runtime,
     deploymentGateHash: sha256(buildGitLabDeploymentGateRuntime()),
+    releaseEvidenceHash: sha256(buildGitLabReleaseEvidenceRuntime()),
+    promotionGateHash: targets.some((target) => target.promoteFromEnvironment)
+      ? sha256(buildGitLabPromotionGateRuntime())
+      : null,
     targets: descriptors.map(({ target, provider, recipe, startCommand }) => ({
       environment: target.environmentName,
       provider,
       branch: target.branch,
       autoDeployOnPush: target.autoDeployOnPush,
       promoteFromEnvironment: target.promoteFromEnvironment,
+      promoteFromProvider: target.promoteFromProvider,
       appliedSpecHash: environmentDeploymentContractHashForApply(spec, target.environmentName),
       startCommand,
       recipe: {
@@ -583,18 +959,37 @@ function renderManagedFiles(project: Project, spec: ProjectSpec, rootPath: strin
         values: recipe.values,
         runtimePath: recipe.runtime.path,
         runtimeHash: sha256(recipe.runtime.content),
+        releaseEvidence: recipe.releaseEvidence ?? null,
       },
     })),
   });
   const programHash = sha256(semanticProgram);
   const jobNames = descriptors.flatMap(({ target, provider }) => {
     const slug = safeSlug(target.environmentName);
-    return [`hypervibe:build:${provider}:${slug}`, `hypervibe:deploy:${provider}:${slug}`];
+    return [
+      ...(target.promoteFromEnvironment ? [`hypervibe:promote:${provider}:${slug}`] : []),
+      `hypervibe:build:${provider}:${slug}`,
+      `hypervibe:deploy:${provider}:${slug}`,
+    ];
   });
-  const deployFiles = descriptors.map(({ target, provider, recipe, buildRuntimePath }) => ({
-    path: `.gitlab/hypervibe/deploy-${safeSlug(provider)}-${safeSlug(target.environmentName)}.yml`,
-    content: renderEnvironmentJobs(spec, target, provider, recipe, buildRuntimePath, programHash),
-  }));
+  const deployFiles = descriptors.map(({ target, provider, recipe, buildRuntimePath }) => {
+    const source = target.promoteFromEnvironment
+      ? descriptors.find((candidate) => candidate.target.environmentName === target.promoteFromEnvironment)
+      : undefined;
+    return {
+      path: `.gitlab/hypervibe/deploy-${safeSlug(provider)}-${safeSlug(target.environmentName)}.yml`,
+      content: renderEnvironmentJobs(
+        spec,
+        target,
+        provider,
+        recipe,
+        buildRuntimePath,
+        programHash,
+        source?.target,
+        source?.recipe
+      ),
+    };
+  });
   const manifest = `# hypervibe-managed: gitlab-ci-manifest/v1
 spec:
   inputs:
@@ -628,6 +1023,7 @@ ${deployFiles.map((file) => `  - local: '/${file.path}'
 `;
   const environments = targets.map((target) => target.environmentName);
   const defaultEnvironment = canonicalEnvironment(spec, targets) ?? environments[0];
+  const hasPromotion = targets.some((target) => target.promoteFromEnvironment);
   const root = `${ROOT_MARKER}
 spec:
   inputs:
@@ -655,11 +1051,11 @@ ${environments.map((environment) => `        - ${yamlString(environment)}`).join
 ---
 workflow:
   rules:
-${targets.filter((target) => target.autoDeployOnPush).map((target) => `    - if: ${yamlString(`$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == ${gitLabExpressionString(target.branch)}`)}`).join('\n')}
+${targets.filter((target) => target.autoDeployOnPush).map((target) => `    - if: ${yamlString(autoPushRule(spec, target))}`).join('\n')}
     - if: '$CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "web"'
     - when: never
 stages:
-  - build
+${hasPromotion ? '  - promotion\n' : ''}  - build
   - deploy
 include:
   - local: '/${MANIFEST_PATH}'
@@ -673,6 +1069,10 @@ include:
 `;
   const runtimeFiles = new Map<string, string>([
     [GITLAB_DEPLOYMENT_GATE_PATH, buildGitLabDeploymentGateRuntime()],
+    [GITLAB_RELEASE_EVIDENCE_PATH, buildGitLabReleaseEvidenceRuntime()],
+    ...(hasPromotion
+      ? [[GITLAB_PROMOTION_GATE_PATH, buildGitLabPromotionGateRuntime()] as const]
+      : []),
   ]);
   for (const { target, recipe, buildRuntimePath, startCommand } of descriptors) {
     if (recipe.kind === 'container') {
@@ -1179,6 +1579,17 @@ async function activeManagedJobProblem(
   }
 }
 
+export function findGitLabPortableProviderConnection(
+  provider: string,
+  repositoryScope: string
+) {
+  const repository = new ConnectionRepository();
+  const exact = repository.findByProviderAndScope(provider, repositoryScope);
+  if (exact?.status === 'verified') return exact;
+  const global = repository.findByProvider(provider);
+  return global?.status === 'verified' ? global : null;
+}
+
 function portableVariables(
   _context: GitLabContext,
   spec: ProjectSpec,
@@ -1205,9 +1616,9 @@ function portableVariables(
       const connectionProvider = definition.source.provider;
       let credentials = credentialCache.get(connectionProvider);
       if (!credentials) {
-        const connection = new ConnectionRepository().findBestVerifiedMatch(
+        const connection = findGitLabPortableProviderConnection(
           connectionProvider,
-          connectionProvider === 'gitlab' ? spec.devops?.code.scope : undefined
+          spec.devops!.code.scope
         );
         if (!connection) {
           return { error: `No verified ${connectionProvider} connection is available for GitLab CI variable sync` };
@@ -1479,9 +1890,31 @@ async function planDeploy(params: {
   const context = await loadContext(params.spec);
   if ('error' in context) return { warnings: [], error: context.error };
   const rootPath = activeRootPath(context.project);
+  const targets = managedTargets(params.project, params.spec);
+  const target = targets.find((candidate) => candidate.environmentName === params.environmentName);
+  const missingReleaseBindings = target ? missingManagedCiReleaseBindings(target) : [];
+  if (
+    params.bindingsWillChange
+    && target
+    && missingReleaseBindings.length > 0
+    && !missingReleaseBindings.includes('invalid-or-duplicate-binding')
+  ) {
+    return {
+      warnings: [
+        `Managed GitLab CI for ${params.environmentName} is deferred until the planned hosting bindings exist. `
+        + 'Apply this plan, then re-run hv_plan so Hypervibe can compile the program against the exact provider scope and resource identities.',
+      ],
+      deferred: true,
+    };
+  }
+  if (missingReleaseBindings.includes('invalid-or-duplicate-binding')) {
+    return {
+      warnings: [],
+      error: `Managed GitLab CI for ${params.environmentName} cannot be compiled because its current provider bindings are malformed, duplicated, or outside the exact desired service set.`,
+    };
+  }
   const rendered = renderManagedFilesSafely(params.project, params.spec, rootPath);
   if ('error' in rendered) return { warnings: [], error: rendered.error };
-  const targets = managedTargets(params.project, params.spec);
   if (targets.length > 0) {
     const runnerProblem = await verifyRunnerPolicy(context, params.spec);
     if (runnerProblem) return { warnings: [], error: runnerProblem };
@@ -1562,6 +1995,7 @@ async function planDeploy(params: {
   if (params.bindingsWillChange) {
     return {
       warnings: [`Hosting bindings will change for ${params.environmentName}; re-plan after hosting converges before syncing exact GitLab variables.`],
+      deferred: true,
     };
   }
   if (!wantsManagedDeploy) {
@@ -2187,7 +2621,7 @@ async function applyConfiguration(params: {
   persistConfigurationProposal({
     project: params.project,
     environmentName: rendered.files.length > 0
-      ? canonicalEnvironment(params.spec, managedTargets(params.project, params.spec)) ?? params.environmentName
+      ? canonicalEnvironment(params.spec, renderableManagedTargets(params.project, params.spec)) ?? params.environmentName
       : params.environmentName,
     context,
     files: rendered.files,
@@ -2224,6 +2658,7 @@ export async function observeGitLabManagedProgram(params: {
   programHash: string;
   deployJobName: string;
   hostingProvider: string;
+  releaseEvidence: ReleaseEvidenceContract;
 } | { error: string }> {
   const context = await loadContext(params.spec);
   if ('error' in context) return context;
@@ -2240,6 +2675,12 @@ export async function observeGitLabManagedProgram(params: {
   const policyProblem = await verifyDeployPolicy(context, params.spec, target);
   if (policyProblem) return { error: policyProblem };
   const hostingProvider = params.spec.environments[params.environmentName]!.hosting.provider;
+  let evidence: ReleaseEvidenceContract;
+  try {
+    evidence = releaseEvidenceContract(target, recipeFor(hostingProvider, target));
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
   return {
     adapter: context.adapter,
     repository: context.repository,
@@ -2249,6 +2690,7 @@ export async function observeGitLabManagedProgram(params: {
     programHash: rendered.programHash,
     deployJobName: `hypervibe:deploy:${hostingProvider}:${safeSlug(params.environmentName)}`,
     hostingProvider,
+    releaseEvidence: evidence,
   };
 }
 

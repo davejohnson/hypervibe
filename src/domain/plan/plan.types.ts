@@ -66,7 +66,9 @@ export interface LocalSnapshot {
       provider?: string;
       projectId?: string;
       environmentId?: string;
+      providerScope?: Record<string, string>;
       services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
+      serviceCreateRecovery?: Record<string, unknown>;
     };
     /** Exact abandoned datastore identity retained only for isolated, confirmation-gated cleanup. */
     previousDatabase?: {

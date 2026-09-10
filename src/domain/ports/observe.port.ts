@@ -36,6 +36,8 @@ export interface ObservedService {
   config: {
     startCommand?: string;
     releaseCommand?: string;
+    /** Provider-observed sha256 marker for release commands that must not be exposed in metadata. */
+    releaseCommandHash?: string;
     healthCheckPath?: string;
     cronSchedule?: string;
     public?: boolean;

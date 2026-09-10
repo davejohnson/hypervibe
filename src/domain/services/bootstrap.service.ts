@@ -77,6 +77,7 @@ export async function executeBootstrap(params: {
   serviceConfig?: DesiredState['serviceConfig'];
   envVars?: DesiredState['envVars'];
   deploy?: DesiredState['deploy'];
+  expectedSourceCommitSha?: string;
   verifyHttpHealth?: boolean;
   queueEnvVars?: Record<string, string>;
   envVarsByService?: Record<string, Record<string, string>>;
@@ -315,6 +316,7 @@ export async function executeBootstrap(params: {
     ...(params.envVarsByService ? { envVarsByService: params.envVarsByService } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
     ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),
+    ...(params.expectedSourceCommitSha ? { expectedSourceCommitSha: params.expectedSourceCommitSha } : {}),
     ensureProject: params.ensureHostingProject !== false,
     adapter: hostingAdapter,
   });

@@ -11,6 +11,8 @@ export interface BootstrapParams {
   serviceConfig?: DesiredState['serviceConfig'];
   envVars?: DesiredState['envVars'];
   deploy?: DesiredState['deploy'];
+  /** Exact immutable commit frozen into the reviewed deployment plan. */
+  expectedSourceCommitSha?: string;
   /** Poll web services' healthCheckPath over HTTP after deploy (hv_deploy). */
   verifyHttpHealth?: boolean;
   /** Managed queue env vars resolved by the caller (see queue-env.ts). */

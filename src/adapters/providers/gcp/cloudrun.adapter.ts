@@ -42,12 +42,31 @@ import type {
   DeploySourceCredentialProjection,
   IDeploySourceCredentialAdapter,
 } from '../../../domain/ports/deploy-source.port.js';
+import {
+  CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION,
+  CLOUD_RUN_SOURCE_COMMIT_ANNOTATION,
+  cloudRunMigrationJobName,
+  cloudRunReleaseJobConfigurationMismatch,
+  cloudRunReleaseCommandHash,
+} from './cloudrun-release-command.js';
 
 // Credentials schema for self-registration
 const CloudRunAuthenticationSchema = z.object({
   projectId: z.string().min(1, 'GCP Project ID is required'),
   credentials: z.string().min(1, 'Service account JSON is required'),
-}).strict();
+  runtimeServiceAccountEmail: z.string().trim().email('Runtime service account email must be valid').optional(),
+}).strict().superRefine((value, context) => {
+  if (
+    value.runtimeServiceAccountEmail
+    && !value.runtimeServiceAccountEmail.toLowerCase().endsWith(`@${value.projectId.toLowerCase()}.iam.gserviceaccount.com`)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['runtimeServiceAccountEmail'],
+      message: `Runtime service account must belong to connected GCP project ${value.projectId}`,
+    });
+  }
+});
 
 export const CloudRunCredentialsSchema = z.preprocess((input) => {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
@@ -102,6 +121,7 @@ interface CloudRunService {
   observedGeneration?: number | string;
   reconciling?: boolean;
   labels?: Record<string, string>;
+  annotations?: Record<string, string>;
   uri?: string;
   ingress?: string;
   scaling?: {
@@ -133,6 +153,8 @@ interface CloudRunService {
 
 interface CloudRunJob {
   name?: string;
+  uid?: string;
+  etag?: string;
   generation?: string;
   observedGeneration?: string;
   reconciling?: boolean;
@@ -150,6 +172,20 @@ interface CloudRunJob {
   terminalCondition?: CloudRunCondition;
   conditions?: CloudRunCondition[];
 }
+
+interface DeferredWorkloadEvidence {
+  expectedExisting: boolean;
+  observedExisting: boolean;
+  imageUri?: string;
+  runtimeServiceAccountEmail?: string;
+}
+
+interface DeferredWorkloadProblem {
+  phase: 'adoption_required' | 'binding_missing' | 'image_evidence' | 'runtime_identity_evidence' | 'stale_provider_state';
+  error: string;
+}
+
+class CloudRunReleaseJobAdoptionRequiredError extends Error {}
 
 interface CloudRunVpcAccess {
   networkInterfaces?: Array<{
@@ -269,7 +305,18 @@ interface CloudBuildResult {
   imageUri?: string;
   buildId?: string;
   logsUrl?: string;
+  resolvedCommitSha?: string;
   error?: string;
+}
+
+interface DirectCloudRunServiceExpectation {
+  resourceName: string;
+  imageUri: string;
+  runtimeServiceAccountEmail: string;
+  releaseCommandHash?: string;
+  sourceCommitSha?: string;
+  startCommand: string | null;
+  healthCheckPath: string | null;
 }
 
 interface CloudBuildStatus {
@@ -289,6 +336,17 @@ interface CloudBuildStatus {
     exitCode?: number;
     args?: string[];
   }>;
+  sourceProvenance?: {
+    resolvedRepoSource?: {
+      commitSha?: string;
+    };
+  };
+  results?: {
+    images?: Array<{
+      name?: string;
+      digest?: string;
+    }>;
+  };
 }
 
 interface CloudBuildOperation {
@@ -314,6 +372,7 @@ interface CloudRunOperation {
     status?: string;
     message?: string;
   };
+  response?: CloudRunExecution;
 }
 
 interface ArtifactRepository {
@@ -393,7 +452,7 @@ export class CloudRunAdapter implements
     supportsAutoWiring: false, // Manual connection needed
     supportsHealthChecks: true,
     supportsCronSchedule: true, // Cloud Scheduler
-    supportsReleaseCommand: false,
+    supportsReleaseCommand: true,
     supportsMultiEnvironment: false, // Separate services per env
     managedTls: true,
     supportsObserve: true,
@@ -557,6 +616,12 @@ export class CloudRunAdapter implements
       gcpProjectId: this.credentials.projectId,
       region: this.credentials.region,
       environmentId: this.credentials.region,
+      providerBindings: {
+        providerScope: {
+          projectId: this.credentials.projectId,
+          region: this.credentials.region,
+        },
+      },
     };
     const loggingRepair = await this.repairLoggingAccess();
     data.loggingIamRepair = {
@@ -607,9 +672,16 @@ export class CloudRunAdapter implements
       throw new Error('Not connected. Call connect() first.');
     }
 
+    const workloadKind = serviceWorkloadKind(service);
     const deferredTarget = options.deferDeployment
       ? await this.currentImageForDeferredDeployment(service, environment)
       : undefined;
+    const deferredProblem = deferredTarget
+      ? this.deferredWorkloadProblem(deferredTarget, workloadKind === 'cron' ? 'scheduled job' : 'service')
+      : undefined;
+    if (deferredProblem) {
+      return this.deferredDeployFailure(service, deferredProblem);
+    }
     if (deferredTarget?.expectedExisting && !deferredTarget.imageUri) {
       return {
         serviceId: service.id,
@@ -626,11 +698,52 @@ export class CloudRunAdapter implements
       };
     }
     const deferredImageUri = deferredTarget?.imageUri;
-    const deploymentDeferred = Boolean(deferredImageUri);
-    const explicitImageUri = deferredImageUri ?? this.imageUriForService(service, envVars);
-    const buildResult = explicitImageUri
+    const bootstrapDeployment = Boolean(
+      options.deferDeployment
+      && deferredTarget
+      && !deferredTarget.expectedExisting
+      && !deferredTarget.imageUri
+    );
+    const deploymentDeferred = Boolean(deferredImageUri || bootstrapDeployment);
+    const expectedBootstrapSourceCommitSha = options.expectedSourceCommitSha?.trim().toLowerCase();
+    if (bootstrapDeployment && !/^[0-9a-f]{40}$/.test(expectedBootstrapSourceCommitSha ?? '')) {
+      return {
+        serviceId: service.id,
+        status: 'failed',
+        receipt: {
+          success: false,
+          message: `Cloud Run could not authorize the first CI-managed release for service ${service.name}`,
+          error: 'A full 40-character expectedSourceCommitSha is required before building a brand-new deferred Cloud Run service.',
+          data: {
+            provider: this.name,
+            phase: 'bootstrap_source_authority',
+          },
+        },
+      };
+    }
+    if (bootstrapDeployment && workloadKind === 'cron') {
+      return {
+        serviceId: service.id,
+        status: 'failed',
+        receipt: {
+          success: false,
+          message: `Cloud Run cannot safely prepare the first CI-managed scheduled job ${service.name}`,
+          error: 'The first deferred scheduled workload for managed CI needs an exact candidate job image before Hypervibe can safely enable its scheduler. Deploy a web or worker service first; scheduled-job bootstrap remains fail-closed.',
+          data: {
+            provider: this.name,
+            phase: 'bootstrap_scheduled_job',
+          },
+        },
+      };
+    }
+    const explicitImageUri = bootstrapDeployment
       ? undefined
-      : await this.buildImageForService(service, environment, envVars);
+      : deferredImageUri ?? this.imageUriForService(service, envVars);
+    const buildResult = bootstrapDeployment
+      ? await this.buildHoldingImageForService(service, environment, envVars)
+      : explicitImageUri
+        ? undefined
+        : await this.buildImageForService(service, environment, envVars);
     const imageUri = explicitImageUri ?? buildResult?.imageUri;
     if (!imageUri) {
       return {
@@ -648,18 +761,37 @@ export class CloudRunAdapter implements
         },
       };
     }
-
+    if ((bootstrapDeployment || !deploymentDeferred) && !this.isImmutableContainerImage(imageUri)) {
+      return {
+        serviceId: service.id,
+        status: 'failed',
+        receipt: {
+          success: false,
+          message: `Cloud Run could not prove an immutable image for service ${service.name}`,
+          error: 'Direct Cloud Run deployment requires an exact image digest in repo@sha256 form. Refusing to deploy a mutable tag.',
+          data: {
+            provider: this.name,
+            phase: 'image_evidence',
+          },
+        },
+      };
+    }
     const bindings = environment.platformBindings as {
       projectId?: string;
-      services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
+      services?: Record<string, {
+        serviceId?: string;
+        jobName?: string;
+        schedulerJobName?: string;
+        releaseJobName?: string;
+        resourceType?: string;
+      }>;
     };
 
-    const prefix = bindings.projectId || 'hypervibe';
-    const workloadKind = serviceWorkloadKind(service);
     const isCron = workloadKind === 'cron';
+    const serviceBinding = bindings.services?.[service.name];
     const serviceName = isCron
-      ? bindings.services?.[service.name]?.jobName ?? this.sanitizeName(`${prefix}-${service.name}`)
-      : bindings.services?.[service.name]?.serviceId ?? this.sanitizeName(`${prefix}-${service.name}`);
+      ? this.workloadResourceName(environment, service.name, serviceBinding?.jobName)
+      : this.workloadResourceName(environment, service.name, serviceBinding?.serviceId);
 
     if (isCron) {
       return this.deployScheduledJob({
@@ -668,12 +800,17 @@ export class CloudRunAdapter implements
         envVars,
         imageUri,
         buildResult,
-        prefix,
         jobName: serviceName,
+        schedulerJobName: this.schedulerResourceName(serviceName, serviceBinding?.schedulerJobName),
         deploymentDeferred,
+        deferredExpectedImageUri: deferredImageUri,
       });
     }
 
+    let createdUnboundReleaseJobName: string | undefined;
+    let createdUnboundReleaseJobUid: string | undefined;
+    let createdUnboundReleaseJobEtag: string | undefined;
+    let releaseJobMutationToken: string | undefined;
     try {
       const token = await this.getAccessToken();
       const { projectId, region } = this.credentials;
@@ -681,6 +818,17 @@ export class CloudRunAdapter implements
       // Only a provider-confirmed 404 means the service does not exist.
       // Permission, transport, and server failures must not authorize a create.
       const cloudRunService = await this.getService(serviceName);
+      if (options.deferDeployment) {
+        const freshDeferredProblem = this.deferredWorkloadProblem({
+          expectedExisting: Boolean(serviceBinding?.serviceId),
+          observedExisting: Boolean(cloudRunService),
+          imageUri: this.primaryContainer(cloudRunService)?.image,
+          runtimeServiceAccountEmail: this.serviceRuntimeIdentity(cloudRunService),
+        }, 'service', deferredImageUri);
+        if (freshDeferredProblem) {
+          return this.deferredDeployFailure(service, freshDeferredProblem);
+        }
+      }
       const vpcAccess = await this.resolveVpcAccess(
         environment,
         this.serviceVpcAccess(cloudRunService),
@@ -713,17 +861,43 @@ export class CloudRunAdapter implements
           ? this.removeCloudSqlVolumes(this.serviceVolumes(cloudRunService))
           : this.serviceVolumes(cloudRunService);
 
+      const isWorker = workloadKind === 'worker';
+      const desiredStartCommand = service.buildConfig.startCommand?.trim() || null;
+      const desiredHealthCheckPath = service.buildConfig.healthCheckPath?.trim() || null;
+      const preserveLiveRuntime = deploymentDeferred && !bootstrapDeployment;
+
       // Build container spec
       const containerSpec = {
         image: imageUri,
         ports: [{ containerPort: parseInt(envVars['PORT'] || '8080', 10) }],
         env,
+        ...(preserveLiveRuntime && existingContainer?.command !== undefined
+          ? { command: existingContainer.command }
+          : {}),
+        ...(preserveLiveRuntime && existingContainer?.args !== undefined
+          ? { args: existingContainer.args }
+          : {}),
+        ...(!deploymentDeferred && desiredStartCommand
+          ? { command: ['/bin/sh'], args: ['-lc', desiredStartCommand] }
+          : {}),
+        ...(preserveLiveRuntime && existingContainer?.startupProbe !== undefined
+          ? { startupProbe: existingContainer.startupProbe }
+          : {}),
+        ...(preserveLiveRuntime && existingContainer?.livenessProbe !== undefined
+          ? { livenessProbe: existingContainer.livenessProbe }
+          : {}),
+        ...(!deploymentDeferred && desiredHealthCheckPath
+          ? { startupProbe: { httpGet: { path: desiredHealthCheckPath } } }
+          : {}),
         ...(volumeMounts && volumeMounts.length > 0 ? { volumeMounts } : {}),
         resources: {
           limits: {
             cpu: envVars['CPU'] || '1',
             memory: envVars['MEMORY'] || '512Mi',
           },
+          // Cloud Run v2 requires this to be explicit when resources are set.
+          // Workers need instance-based CPU so they can process without requests.
+          cpuIdle: !isWorker,
         },
       };
 
@@ -735,9 +909,41 @@ export class CloudRunAdapter implements
       // Cloud Run Admin API v2 Service shape. Workers get internal-only
       // ingress and min one instance: with no inbound traffic they would
       // otherwise scale to zero and never process work.
-      const isWorker = workloadKind === 'worker';
+      const releaseCommand = service.buildConfig.releaseCommand?.trim();
+      const releaseCommandHash = releaseCommand
+        ? cloudRunReleaseCommandHash(releaseCommand)
+        : undefined;
+      const annotations = { ...(cloudRunService?.annotations ?? {}) };
+      if (
+        releaseCommandHash
+        && annotations[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION] !== releaseCommandHash
+      ) {
+        delete annotations[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION];
+      }
+      if (!deploymentDeferred) {
+        if (buildResult?.resolvedCommitSha) {
+          annotations[CLOUD_RUN_SOURCE_COMMIT_ANNOTATION] = buildResult.resolvedCommitSha;
+        } else {
+          delete annotations[CLOUD_RUN_SOURCE_COMMIT_ANNOTATION];
+        }
+        if (!releaseCommandHash) {
+          delete annotations[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION];
+        }
+      }
+      const liveServiceAccount = cloudRunService?.template?.serviceAccount
+        ?? cloudRunService?.template?.serviceAccountName
+        ?? cloudRunService?.spec?.template?.spec?.serviceAccountName;
+      const serviceAccount = cloudRunService
+        ? liveServiceAccount
+        : this.requiredRuntimeServiceAccountEmail('service');
+      if (!deploymentDeferred && cloudRunService && !serviceAccount) {
+        throw new Error(
+          `Cloud Run service ${serviceName} did not expose its runtime service account; refusing to mutate code without exact runtime identity evidence.`
+        );
+      }
       const serviceSpec = {
         labels,
+        annotations,
         ingress: isWorker ? 'INGRESS_TRAFFIC_INTERNAL_ONLY' : 'INGRESS_TRAFFIC_ALL',
         template: {
           labels,
@@ -746,20 +952,73 @@ export class CloudRunAdapter implements
           ...(templateVolumes && (templateVolumes.length > 0 || replaceManagedDatabaseVars)
             ? { volumes: templateVolumes }
             : {}),
-          ...(this.serviceAccountCreds?.client_email
-            ? { serviceAccount: this.serviceAccountCreds.client_email }
+          ...(serviceAccount
+            ? { serviceAccount }
             : {}),
           ...(vpcAccess.apiValue !== undefined ? { vpcAccess: vpcAccess.apiValue } : {}),
         },
       };
 
+      let releaseExecution: CloudRunExecution | undefined;
+      let releaseJobName: string | undefined;
+      if (releaseCommand) {
+        const boundReleaseJobName = serviceBinding?.releaseJobName?.trim();
+        const jobName = boundReleaseJobName || this.migrationJobName(serviceName);
+        if (!/^[a-z][a-z0-9-]{0,62}$/.test(jobName)) {
+          throw new Error(`Cloud Run release job binding for ${serviceName} is invalid.`);
+        }
+        releaseJobName = jobName;
+        const jobSpec = this.cloudRunJobSpec({
+          imageUri,
+          command: releaseCommand,
+          env,
+          resources: containerSpec.resources,
+          serviceAccount,
+          existingVolumes: this.serviceVolumes(cloudRunService),
+          existingVolumeMounts: existingContainer?.volumeMounts,
+          cloudSqlConnectionNames: cloudSqlNames,
+          replaceManagedDatabaseVars,
+          ...(vpcAccess.apiValue !== undefined ? { vpcAccess: vpcAccess.apiValue } : {}),
+        });
+        const { created, job } = await this.upsertCloudRunJob({
+          token,
+          jobName,
+          jobSpec,
+          description: 'release job',
+          bindingAuthority: boundReleaseJobName ? 'bound' : 'unbound',
+        });
+        if (created && !boundReleaseJobName) {
+          createdUnboundReleaseJobName = jobName;
+          createdUnboundReleaseJobUid = job.uid;
+          createdUnboundReleaseJobEtag = job.etag;
+          releaseJobMutationToken = token;
+        }
+        this.assertReleaseJobConfiguration(job, jobName, jobSpec);
+        this.assertVpcAccess(job, vpcAccess, `Cloud Run job ${jobName}`);
+        if (!deploymentDeferred) {
+          const run = await this.executeCloudRunJob(jobName, token);
+          if (!run.execution) {
+            throw new Error(`Cloud Run release command execution for ${jobName} did not finish before timeout`);
+          }
+          releaseExecution = run.execution;
+          const status = this.executionStatus(run.execution);
+          if (status !== 'completed') {
+            throw new Error(
+              `Cloud Run release command execution ${this.lastPathSegment(run.execution.name) ?? run.operation.name ?? jobName} ended with status ${status}`
+            );
+          }
+          annotations[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION] = releaseCommandHash!;
+        }
+      }
+
       const baseUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/services`;
+      const serviceResourceName = `projects/${projectId}/locations/${region}/services/${serviceName}`;
       const creatingService = !cloudRunService;
-      let serviceOperation: CloudRunOperation | undefined;
+      let serviceOperation: CloudRunOperation;
 
       if (cloudRunService) {
         // Update existing service
-        const response = await fetch(`${baseUrl}/${serviceName}?updateMask=labels,ingress,template`, {
+        const response = await fetch(`${baseUrl}/${serviceName}?updateMask=labels,annotations,ingress,template`, {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -793,30 +1052,50 @@ export class CloudRunAdapter implements
         serviceOperation = await response.json() as CloudRunOperation;
       }
 
-      if (serviceOperation) {
-        await this.waitForCloudRunOperation(token, serviceOperation, `service ${creatingService ? 'create' : 'update'}`);
-      }
+      await this.waitForCloudRunOperation(
+        token,
+        serviceOperation,
+        `service ${creatingService ? 'create' : 'update'}`,
+        serviceResourceName
+      );
 
+      // Get service URL
+      const serviceInfo = await this.waitForCloudRunServiceReady(
+        serviceName,
+        token,
+        (!deploymentDeferred || bootstrapDeployment)
+          ? {
+              resourceName: serviceResourceName,
+              imageUri,
+              runtimeServiceAccountEmail: serviceAccount!,
+              startCommand: bootstrapDeployment ? null : desiredStartCommand,
+              healthCheckPath: bootstrapDeployment ? null : desiredHealthCheckPath,
+              ...(!deploymentDeferred && releaseCommandHash ? { releaseCommandHash } : {}),
+              ...(!bootstrapDeployment && buildResult?.resolvedCommitSha
+                ? { sourceCommitSha: buildResult.resolvedCommitSha }
+                : {}),
+            }
+          : undefined
+      );
+      this.assertVpcAccess(serviceInfo, vpcAccess, `Cloud Run service ${serviceName}`);
+      const url = serviceInfo?.uri;
       const publicAccess = this.shouldAllowUnauthenticated(service);
       const publicInvokerBindingUpdated = publicAccess
         ? await this.ensurePublicInvoker(serviceName, token)
         : false;
 
-      // Get service URL
-      const serviceInfo = await this.waitForCloudRunServiceReady(serviceName, token);
-      this.assertVpcAccess(serviceInfo, vpcAccess, `Cloud Run service ${serviceName}`);
-      const url = serviceInfo?.uri;
-
       return {
         serviceId: service.id,
         externalId: serviceName,
         url,
-        status: deploymentDeferred ? 'configured' : 'deployed',
+        status: options.deferDeployment ? 'configured' : 'deployed',
         receipt: {
           success: true,
-          message: deploymentDeferred
-            ? `Prepared ${serviceName} for exact-SHA CI deployment using its current image`
-            : `Deployed ${serviceName} to Cloud Run`,
+          message: bootstrapDeployment
+            ? `Prepared ${serviceName} with a digest-pinned holding image; managed CI owns the first application release`
+            : deploymentDeferred
+              ? `Prepared ${serviceName} for exact-SHA CI deployment using its current image`
+              : `Deployed ${serviceName} to Cloud Run`,
           data: {
             serviceName,
             url,
@@ -826,12 +1105,33 @@ export class CloudRunAdapter implements
             publicAccessConfigured: publicAccess,
             publicInvokerBindingUpdated,
             environmentId: region,
-            ...(deploymentDeferred ? { deploymentDeferred: true } : {}),
+            ...(releaseJobName ? { releaseJobName } : {}),
+            ...(bootstrapDeployment
+              ? {
+                  bootstrapDeployment: {
+                    expectedSourceCommitSha: expectedBootstrapSourceCommitSha,
+                    imageUri,
+                    holdingImage: true,
+                    releaseCommandDeferred: Boolean(releaseCommand),
+                  },
+                }
+              : {}),
+            ...(releaseExecution
+              ? {
+                  releaseCommand: {
+                    executionName: releaseExecution.name,
+                    status: this.executionStatus(releaseExecution),
+                  },
+                }
+              : {}),
+            ...(options.deferDeployment ? { deploymentDeferred: true } : {}),
             ...(buildResult
               ? {
                   build: {
                     id: buildResult.buildId,
                     logsUrl: buildResult.logsUrl,
+                    resolvedCommitSha: buildResult.resolvedCommitSha,
+                    imageUri: buildResult.imageUri,
                   },
                 }
               : {}),
@@ -839,13 +1139,51 @@ export class CloudRunAdapter implements
         },
       };
     } catch (error) {
+      let releaseJobCleanupWarning: string | undefined;
+      if (createdUnboundReleaseJobName && releaseJobMutationToken) {
+        try {
+          releaseJobCleanupWarning = await this.deleteCloudRunJobIfExists(
+            createdUnboundReleaseJobName,
+            releaseJobMutationToken,
+            {
+              uid: createdUnboundReleaseJobUid,
+              etag: createdUnboundReleaseJobEtag,
+            }
+          );
+        } catch (cleanupError) {
+          releaseJobCleanupWarning = `Could not clean up newly-created Cloud Run release job ${createdUnboundReleaseJobName}: ${this.formatError(cleanupError)}`;
+        }
+      }
+      if (error instanceof CloudRunReleaseJobAdoptionRequiredError) {
+        return {
+          serviceId: service.id,
+          status: 'failed',
+          receipt: {
+            success: false,
+            message: `Cloud Run release job configuration is blocked for ${service.name}`,
+            error: error.message,
+            data: { provider: this.name, phase: 'adoption_required' },
+          },
+        };
+      }
       return {
         serviceId: service.id,
         status: 'failed',
         receipt: {
           success: false,
           message: `Deployment failed for ${service.name}`,
-          error: this.formatError(error),
+          error: [this.formatError(error), releaseJobCleanupWarning]
+            .filter((value): value is string => Boolean(value))
+            .join('; '),
+          ...(releaseJobCleanupWarning
+            ? {
+                data: {
+                  provider: this.name,
+                  phase: 'release_job_cleanup_required',
+                  releaseJobName: createdUnboundReleaseJobName,
+                },
+              }
+            : {}),
         },
       };
     }
@@ -857,9 +1195,10 @@ export class CloudRunAdapter implements
     envVars: Record<string, string>;
     imageUri: string;
     buildResult?: CloudBuildResult;
-    prefix: string;
     jobName: string;
+    schedulerJobName: string;
     deploymentDeferred?: boolean;
+    deferredExpectedImageUri?: string;
   }): Promise<DeployResult> {
     const {
       service,
@@ -868,7 +1207,9 @@ export class CloudRunAdapter implements
       imageUri,
       buildResult,
       jobName,
+      schedulerJobName,
       deploymentDeferred,
+      deferredExpectedImageUri,
     } = params;
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -893,6 +1234,17 @@ export class CloudRunAdapter implements
       // Merge with the live job container env so redeploys don't wipe vars
       // injected outside this call (e.g. DATABASE_URL at provision time).
       const currentJob = await this.getCloudRunJob(jobName, token);
+      if (deploymentDeferred) {
+        const freshDeferredProblem = this.deferredWorkloadProblem({
+          expectedExisting: true,
+          observedExisting: Boolean(currentJob),
+          imageUri: this.primaryJobContainer(currentJob)?.image,
+          runtimeServiceAccountEmail: this.jobRuntimeIdentity(currentJob),
+        }, 'scheduled job', deferredExpectedImageUri);
+        if (freshDeferredProblem) {
+          return this.deferredDeployFailure(service, freshDeferredProblem);
+        }
+      }
       const vpcAccess = await this.resolveVpcAccess(
         environment,
         currentJob?.template?.template?.vpcAccess,
@@ -923,7 +1275,8 @@ export class CloudRunAdapter implements
             memory: envVars['MEMORY'] || '512Mi',
           },
         },
-        serviceAccount: this.serviceAccountCreds?.client_email,
+        serviceAccount: currentJob?.template?.template?.serviceAccount
+          ?? currentJob?.template?.template?.serviceAccountName,
         labels,
         existingVolumes: currentJob?.template?.template?.volumes,
         existingVolumeMounts: currentJobContainer?.volumeMounts,
@@ -938,19 +1291,22 @@ export class CloudRunAdapter implements
         jobSpec,
         description: 'scheduled job',
       });
+      this.assertReleaseJobConfiguration(readyJob, jobName, jobSpec);
       this.assertVpcAccess(
         readyJob,
         vpcAccess,
         `Cloud Run job ${jobName}`
       );
 
-      const schedulerJobName = this.sanitizeName(`${jobName}-schedule`);
       const { created: createdScheduler } = await this.upsertCloudSchedulerJob({
         token,
         schedulerJobName,
         jobName,
         schedule: service.buildConfig.cronSchedule.trim(),
         timeZone: envVars['HYPERVIBE_CRON_TIME_ZONE']?.trim() || 'Etc/UTC',
+        runtimeServiceAccountEmail: readyJob.template?.template?.serviceAccount
+          ?? readyJob.template?.template?.serviceAccountName
+          ?? this.requiredRuntimeServiceAccountEmail('scheduled job'),
       });
 
       const cleanupWarning = await this.deleteCloudRunServiceIfExists(jobName, token);
@@ -980,6 +1336,8 @@ export class CloudRunAdapter implements
                   build: {
                     id: buildResult.buildId,
                     logsUrl: buildResult.logsUrl,
+                    resolvedCommitSha: buildResult.resolvedCommitSha,
+                    imageUri: buildResult.imageUri,
                   },
                 }
               : {}),
@@ -1006,7 +1364,9 @@ export class CloudRunAdapter implements
 
     try {
       const token = await this.getAccessToken();
-      const schedulerJobName = serviceId.endsWith('-schedule') ? serviceId : `${serviceId}-schedule`;
+      const schedulerJobName = serviceId.endsWith('-schedule')
+        ? serviceId
+        : this.schedulerResourceName(serviceId);
       const jobName = serviceId.endsWith('-schedule') ? serviceId.replace(/-schedule$/, '') : serviceId;
       const warnings = [
         await this.deleteCloudSchedulerJobIfExists(schedulerJobName, token),
@@ -1173,12 +1533,11 @@ export class CloudRunAdapter implements
       services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
     };
 
-    const prefix = bindings.projectId || 'hypervibe';
     const workloadKind = serviceWorkloadKind(service);
     const isCron = workloadKind === 'cron';
     const serviceName = isCron
-      ? bindings.services?.[service.name]?.jobName ?? this.sanitizeName(`${prefix}-${service.name}`)
-      : bindings.services?.[service.name]?.serviceId ?? this.sanitizeName(`${prefix}-${service.name}`);
+      ? this.workloadResourceName(environment, service.name, bindings.services?.[service.name]?.jobName)
+      : this.workloadResourceName(environment, service.name, bindings.services?.[service.name]?.serviceId);
 
     try {
       const token = await this.getAccessToken();
@@ -1195,6 +1554,17 @@ export class CloudRunAdapter implements
         }
 
         const currentJob = await this.getCloudRunJob(serviceName, token);
+        if (options.deferDeployment) {
+          const deferredProblem = this.deferredWorkloadProblem({
+            expectedExisting: Boolean(bindings.services?.[service.name]?.jobName),
+            observedExisting: Boolean(currentJob),
+            imageUri: this.primaryJobContainer(currentJob)?.image,
+            runtimeServiceAccountEmail: this.jobRuntimeIdentity(currentJob),
+          }, 'scheduled job');
+          if (deferredProblem) {
+            return this.deferredReceiptFailure('scheduled job environment update', deferredProblem);
+          }
+        }
         const vpcAccess = await this.resolveVpcAccess(
           environment,
           currentJob?.template?.template?.vpcAccess,
@@ -1220,8 +1590,7 @@ export class CloudRunAdapter implements
           env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars }),
           resources: currentContainer.resources,
           serviceAccount: currentJob?.template?.template?.serviceAccount
-            ?? currentJob?.template?.template?.serviceAccountName
-            ?? this.serviceAccountCreds?.client_email,
+            ?? currentJob?.template?.template?.serviceAccountName,
           existingVolumes: currentJob?.template?.template?.volumes,
           existingVolumeMounts: currentContainer.volumeMounts,
           cloudSqlConnectionNames: this.cloudSqlConnectionNamesFromEnv(runtimeVars),
@@ -1252,6 +1621,17 @@ export class CloudRunAdapter implements
 
       // Get current service
       const currentService = await this.getService(serviceName);
+      if (options.deferDeployment) {
+        const deferredProblem = this.deferredWorkloadProblem({
+          expectedExisting: Boolean(bindings.services?.[service.name]?.serviceId),
+          observedExisting: Boolean(currentService),
+          imageUri: this.primaryContainer(currentService)?.image,
+          runtimeServiceAccountEmail: this.serviceRuntimeIdentity(currentService),
+        }, 'service');
+        if (deferredProblem) {
+          return this.deferredReceiptFailure('service environment update', deferredProblem);
+        }
+      }
       if (!currentService) {
         return { success: false, message: `Service ${serviceName} not found` };
       }
@@ -1302,6 +1682,8 @@ export class CloudRunAdapter implements
         ...(currentContainer.ports ? { ports: currentContainer.ports } : {}),
         ...(currentContainer.command ? { command: currentContainer.command } : {}),
         ...(currentContainer.args ? { args: currentContainer.args } : {}),
+        ...(currentContainer.startupProbe ? { startupProbe: currentContainer.startupProbe } : {}),
+        ...(currentContainer.livenessProbe ? { livenessProbe: currentContainer.livenessProbe } : {}),
         ...(currentContainer.resources ? { resources: currentContainer.resources } : {}),
         ...(volumeMounts && volumeMounts.length > 0 ? { volumeMounts } : {}),
         env: this.mergeEnvVars(currentContainer.env, runtimeVars, { replaceManagedDatabaseVars }),
@@ -1339,7 +1721,12 @@ export class CloudRunAdapter implements
       }
 
       const operation = await response.json() as CloudRunOperation;
-      await this.waitForCloudRunOperation(token, operation, 'service env update');
+      await this.waitForCloudRunOperation(
+        token,
+        operation,
+        'service env update',
+        `projects/${projectId}/locations/${region}/services/${serviceName}`
+      );
       const updatedService = await this.waitForCloudRunServiceReady(serviceName, token);
       this.assertVpcAccess(updatedService, vpcAccess, `Cloud Run service ${serviceName}`);
       const updatedEnv = new Map(
@@ -1400,11 +1787,10 @@ export class CloudRunAdapter implements
       projectId?: string;
       services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
     };
-    const prefix = bindings.projectId || 'hypervibe';
     const isCron = serviceWorkloadKind(service) === 'cron';
     const serviceName = isCron
-      ? bindings.services?.[service.name]?.jobName ?? this.sanitizeName(`${prefix}-${service.name}`)
-      : bindings.services?.[service.name]?.serviceId ?? this.sanitizeName(`${prefix}-${service.name}`);
+      ? this.workloadResourceName(environment, service.name, bindings.services?.[service.name]?.jobName)
+      : this.workloadResourceName(environment, service.name, bindings.services?.[service.name]?.serviceId);
 
     try {
       const token = await this.getAccessToken();
@@ -1445,8 +1831,7 @@ export class CloudRunAdapter implements
           env: existingEnv.filter((entry) => typeof entry.name !== 'string' || !retired.has(entry.name)),
           resources: currentContainer.resources,
           serviceAccount: currentJob?.template?.template?.serviceAccount
-            ?? currentJob?.template?.template?.serviceAccountName
-            ?? this.serviceAccountCreds?.client_email,
+            ?? currentJob?.template?.template?.serviceAccountName,
           existingVolumes: currentJob?.template?.template?.volumes,
           existingVolumeMounts: currentContainer.volumeMounts,
           cloudSqlConnectionNames: this.cloudSqlConnectionNamesFromEnvVars(currentContainer.env),
@@ -1520,6 +1905,8 @@ export class CloudRunAdapter implements
         ...(currentContainer.ports ? { ports: currentContainer.ports } : {}),
         ...(currentContainer.command ? { command: currentContainer.command } : {}),
         ...(currentContainer.args ? { args: currentContainer.args } : {}),
+        ...(currentContainer.startupProbe ? { startupProbe: currentContainer.startupProbe } : {}),
+        ...(currentContainer.livenessProbe ? { livenessProbe: currentContainer.livenessProbe } : {}),
         ...(currentContainer.resources ? { resources: currentContainer.resources } : {}),
         ...(currentContainer.volumeMounts ? { volumeMounts: currentContainer.volumeMounts } : {}),
         env: existingEnv.filter((entry) => typeof entry.name !== 'string' || !retired.has(entry.name)),
@@ -1549,7 +1936,12 @@ export class CloudRunAdapter implements
         throw new Error(`Cloud Run API error: ${response.status} ${text}`);
       }
       const operation = await response.json() as CloudRunOperation;
-      await this.waitForCloudRunOperation(token, operation, 'service env removal');
+      await this.waitForCloudRunOperation(
+        token,
+        operation,
+        'service env removal',
+        `projects/${projectId}/locations/${region}/services/${serviceName}`
+      );
       const updatedService = await this.waitForCloudRunServiceReady(serviceName, token);
       this.assertVpcAccess(updatedService, vpcAccess, `Cloud Run service ${serviceName}`);
       const remainingKeys = new Set(
@@ -1714,11 +2106,14 @@ export class CloudRunAdapter implements
 
     const bindings = environment.platformBindings as {
       projectId?: string;
-      services?: Record<string, { serviceId?: string; imageUri?: string }>;
+      services?: Record<string, { serviceId?: string; jobName?: string; imageUri?: string }>;
     };
-    const prefix = bindings.projectId || 'hypervibe';
-    const serviceName = bindings.services?.[service.name]?.serviceId
-      ?? this.sanitizeName(`${prefix}-${service.name}`);
+    const serviceBinding = bindings.services?.[service.name];
+    const serviceName = this.workloadResourceName(
+      environment,
+      service.name,
+      serviceBinding?.serviceId ?? serviceBinding?.jobName
+    );
     const sourceService = await this.getService(serviceName);
     const sourceContainer = this.primaryContainer(sourceService);
     const imageUri = sourceContainer?.image ?? bindings.services?.[service.name]?.imageUri;
@@ -1742,19 +2137,12 @@ export class CloudRunAdapter implements
 
     try {
       const token = await this.getAccessToken();
-      const { projectId, region } = this.credentials;
       const vpcAccess = await this.resolveVpcAccess(
         environment,
         this.serviceVpcAccess(sourceService),
         token
       );
-      const jobBaseName = serviceName.length > 49 ? serviceName.slice(0, 49).replace(/-+$/g, '') : serviceName;
-      const jobName = this.sanitizeName(`${jobBaseName}-migration`);
-      const headers = {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      };
-      const jobsBaseUrl = `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs`;
+      const jobName = this.migrationJobName(serviceName);
       const jobSpec = this.cloudRunJobSpec({
         imageUri,
         command,
@@ -1762,8 +2150,7 @@ export class CloudRunAdapter implements
         resources: sourceContainer?.resources,
         serviceAccount: sourceService?.template?.serviceAccount
           ?? sourceService?.template?.serviceAccountName
-          ?? sourceService?.spec?.template?.spec?.serviceAccountName
-          ?? this.serviceAccountCreds?.client_email,
+          ?? sourceService?.spec?.template?.spec?.serviceAccountName,
         existingVolumes: this.serviceVolumes(sourceService),
         existingVolumeMounts: sourceContainer?.volumeMounts,
         cloudSqlConnectionNames: this.cloudSqlConnectionNamesFromEnvVars(sourceContainer?.env),
@@ -1776,25 +2163,15 @@ export class CloudRunAdapter implements
         jobSpec,
         description: 'environment task',
       });
+      this.assertReleaseJobConfiguration(readyJob, jobName, jobSpec);
       this.assertVpcAccess(
         readyJob,
         vpcAccess,
         `Cloud Run job ${jobName}`
       );
 
-      const runResponse = await fetch(`${jobsBaseUrl}/${jobName}:run`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({}),
-      });
-
-      if (!runResponse.ok) {
-        const text = await runResponse.text();
-        throw new Error(`Cloud Run Jobs run error: ${runResponse.status} ${text}`);
-      }
-
-      const operation = await runResponse.json() as { name?: string };
-      const execution = await this.waitForCloudRunJobExecution(jobName, token);
+      const run = await this.executeCloudRunJob(jobName, token);
+      const { operation, execution } = run;
       const status = execution ? this.executionStatus(execution) : 'failed';
       const jobId = execution?.name ?? operation.name ?? jobName;
       if (status !== 'completed') {
@@ -2230,7 +2607,12 @@ export class CloudRunAdapter implements
     const bindings = environment.platformBindings as {
       projectId?: string;
       environmentId?: string;
-      services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
+      services?: Record<string, {
+        serviceId?: string;
+        jobName?: string;
+        schedulerJobName?: string;
+        resourceType?: string;
+      }>;
     };
     const observedAt = new Date().toISOString();
 
@@ -2252,7 +2634,7 @@ export class CloudRunAdapter implements
     }
 
     const token = await this.getAccessToken();
-    const prefix = bindings.projectId;
+    const prefix = this.environmentResourcePrefix(environment);
     const environmentLabel = this.labelValue(environment.name);
     const serviceBindings = bindings.services ?? {};
     const warnings: string[] = [];
@@ -2302,6 +2684,7 @@ export class CloudRunAdapter implements
       const readiness = this.cloudRunServiceReadiness(liveService);
       const startCommand = this.containerStartCommand(container);
       const healthCheckPath = container?.startupProbe?.httpGet?.path ?? container?.livenessProbe?.httpGet?.path;
+      const releaseCommandHash = liveService.annotations?.[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION];
       const cacheNetwork = this.normalizedVpcAccess(this.serviceVpcAccess(liveService));
       let publicAccess: boolean | undefined;
       try {
@@ -2334,6 +2717,7 @@ export class CloudRunAdapter implements
           : {}),
         config: {
           ...(startCommand ? { startCommand } : {}),
+          ...(releaseCommandHash ? { releaseCommandHash } : {}),
           ...(healthCheckPath ? { healthCheckPath } : {}),
           ...(publicAccess === undefined ? {} : { public: publicAccess }),
           ...(cacheNetwork ? { cacheNetwork } : {}),
@@ -2369,7 +2753,10 @@ export class CloudRunAdapter implements
         continue;
       }
 
-      const schedulerJobName = this.sanitizeName(`${externalId}-schedule`);
+      const schedulerJobName = this.schedulerResourceName(
+        externalId,
+        bindingKey ? serviceBindings[bindingKey]?.schedulerJobName : undefined
+      );
       let schedulerJob: CloudSchedulerJob | null = null;
       try {
         schedulerJob = await this.getCloudSchedulerJob(schedulerJobName, token);
@@ -2449,18 +2836,16 @@ export class CloudRunAdapter implements
       typeof binding.schedulerJobName === 'string' ? binding.schedulerJobName : undefined,
     ].filter((value): value is string => Boolean(value))));
     const deterministicNames = new Map<string, { name: string; resourceType: 'service' | 'scheduledJob' | 'taskJob' }>();
-    const deterministicPrefixes = new Set([
-      this.credentials.projectId,
-      ...(request.project && request.environment
-        ? [this.sanitizeName(`${request.project.name}-${request.environment.name}`)]
-        : []),
-    ]);
-    for (const serviceName of request.serviceNames ?? []) {
-      for (const prefix of deterministicPrefixes) {
-        const providerName = this.sanitizeName(`${prefix}-${serviceName}`);
+    if (request.environment) {
+      const boundProjectId = typeof request.binding?.projectId === 'string'
+        ? request.binding.projectId
+        : this.credentials.projectId;
+      const prefix = this.environmentResourcePrefix(request.environment, boundProjectId);
+      for (const serviceName of request.serviceNames ?? []) {
+        const providerName = this.stableResourceName(`${prefix}-${serviceName}`);
         deterministicNames.set(providerName, { name: serviceName, resourceType: 'service' });
-        deterministicNames.set(this.sanitizeName(`${providerName}-schedule`), { name: serviceName, resourceType: 'scheduledJob' });
-        deterministicNames.set(this.sanitizeName(`${providerName}-migration`), { name: `${serviceName}-migration`, resourceType: 'taskJob' });
+        deterministicNames.set(this.schedulerResourceName(providerName), { name: serviceName, resourceType: 'scheduledJob' });
+        deterministicNames.set(this.migrationJobName(providerName), { name: `${serviceName}-migration`, resourceType: 'taskJob' });
       }
     }
     const [liveServices, liveJobs] = await Promise.all([
@@ -2494,7 +2879,11 @@ export class CloudRunAdapter implements
     for (const liveJob of liveJobs) {
       const jobName = this.lastPathSegment(liveJob.name);
       if (!jobName) continue;
-      const schedulerJobName = this.sanitizeName(`${jobName}-schedule`);
+      const boundJob = Object.values(serviceBindings).find((binding) => binding.jobName === jobName);
+      const schedulerJobName = this.schedulerResourceName(
+        jobName,
+        typeof boundJob?.schedulerJobName === 'string' ? boundJob.schedulerJobName : undefined
+      );
       let schedulerJob: CloudSchedulerJob | null = null;
       try {
         schedulerJob = await this.getCloudSchedulerJob(schedulerJobName, token);
@@ -2742,7 +3131,7 @@ export class CloudRunAdapter implements
     }
     if (workloadKind === 'cron') {
       const schedulerJobName = binding.schedulerJobName
-        ?? this.sanitizeName(`${binding.jobName ?? binding.serviceId ?? serviceId}-schedule`);
+        ?? this.schedulerResourceName(binding.jobName ?? binding.serviceId ?? serviceId);
       const scheduler = await this.getCloudSchedulerJob(schedulerJobName, token);
       if (!scheduler) {
         return { serviceId, workloadKind, wasRunning: false, state: 'unknown', reason: 'maintenance_scheduler_missing' };
@@ -3477,31 +3866,178 @@ export class CloudRunAdapter implements
     return 'running';
   }
 
+  private async executeCloudRunJob(
+    jobName: string,
+    token: string
+  ): Promise<{ operation: CloudRunOperation; execution: CloudRunExecution | null }> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const { projectId, region } = this.credentials;
+    const response = await fetch(
+      `https://run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/${jobName}:run`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      }
+    );
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Cloud Run Jobs run error: ${response.status} ${text}`);
+    }
+
+    const operation = await response.json() as CloudRunOperation;
+    const execution = await this.waitForCloudRunJobExecution(operation, jobName, token);
+    return { operation, execution };
+  }
+
   private async waitForCloudRunJobExecution(
+    operation: CloudRunOperation,
     jobName: string,
     token: string,
     timeoutMs = 10 * 60 * 1000
   ): Promise<CloudRunExecution | null> {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     const deadline = Date.now() + timeoutMs;
-    let latest: CloudRunExecution | null = null;
-    while (Date.now() < deadline) {
-      const executions = await this.listCloudRunJobExecutions(jobName, token, 5);
-      latest = executions[0] ?? latest;
-      if (latest) {
-        const status = this.executionStatus(latest);
-        if (status === 'completed' || status === 'failed') {
-          return latest;
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+    let current = operation;
+    const { projectId, region } = this.credentials;
+    const operationPrefix = `projects/${projectId}/locations/${region}/operations/`;
+    const executionPrefix = `projects/${projectId}/locations/${region}/jobs/${jobName}/executions/`;
+    if (!operation.name?.startsWith(operationPrefix) || operation.name.length <= operationPrefix.length) {
+      throw new Error('Cloud Run Jobs run response did not include a trackable operation identity.');
     }
-    return latest;
+    const operationName = operation.name;
+
+    while (Date.now() < deadline) {
+      if (current.name !== operationName) {
+        throw new Error('Cloud Run job execution status returned a different operation identity.');
+      }
+      if (current.done) {
+        if (current.error) {
+          throw new Error(
+            `Cloud Run job execution operation failed: ${current.error.status ?? current.error.code ?? 'unknown'} ${current.error.message ?? ''}`.trim()
+          );
+        }
+        if (!current.response) {
+          throw new Error('Cloud Run job execution operation completed without returning its exact execution.');
+        }
+
+        let execution = current.response;
+        if (!execution.name?.startsWith(executionPrefix) || execution.name.length <= executionPrefix.length) {
+          throw new Error(`Cloud Run job execution operation returned a different execution identity for ${jobName}.`);
+        }
+        const exactExecutionName = execution.name;
+        while (Date.now() < deadline) {
+          const status = this.executionStatus(execution);
+          if (status === 'completed' || status === 'failed') return execution;
+          if (!execution.name) {
+            throw new Error('Cloud Run job execution response did not include an execution name.');
+          }
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          const response = await fetch(`https://run.googleapis.com/v2/${execution.name}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Cloud Run execution status check failed: ${response.status} ${text}`);
+          }
+          execution = await response.json() as CloudRunExecution;
+          if (execution.name !== exactExecutionName) {
+            throw new Error(`Cloud Run execution lookup returned a different execution identity for ${jobName}.`);
+          }
+        }
+        return null;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const response = await fetch(`https://run.googleapis.com/v2/${operationName}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Cloud Run job execution operation status check failed: ${response.status} ${text}`);
+      }
+      current = await response.json() as CloudRunOperation;
+    }
+
+    return null;
   }
 
   private lastPathSegment(value?: string): string | undefined {
     if (!value) return undefined;
     const parts = value.split('/').filter(Boolean);
     return parts[parts.length - 1];
+  }
+
+  private stableResourceName(value: string): string {
+    const normalized = value
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    if (!normalized) throw new Error('Cloud Run resources require a name');
+    if (normalized.length <= 63) return normalized;
+
+    const suffix = `-${hashEnvValue(normalized).slice(0, 10)}`;
+    return `${normalized.slice(0, 63 - suffix.length).replace(/-+$/g, '')}${suffix}`;
+  }
+
+  private environmentResourcePrefix(
+    environment: Pick<Environment, 'name'>,
+    providerProjectId?: string
+  ): string {
+    return this.stableResourceName(
+      `${providerProjectId?.trim() || this.credentials?.projectId || 'hypervibe'}-${environment.name}`
+    );
+  }
+
+  private workloadResourceName(
+    environment: Environment,
+    logicalName: string,
+    boundId?: string
+  ): string {
+    if (boundId) return boundId;
+    const bindings = environment.platformBindings as { projectId?: string };
+    const prefix = this.environmentResourcePrefix(environment, bindings.projectId);
+    return this.stableResourceName(`${prefix}-${logicalName}`);
+  }
+
+  private schedulerResourceName(jobName: string, boundId?: string): string {
+    if (boundId) return boundId;
+    const normalized = jobName
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    const suffix = '-schedule';
+    if (`${normalized}${suffix}`.length <= 63) return `${normalized}${suffix}`;
+
+    const hashSuffix = `-${hashEnvValue(normalized).slice(0, 10)}${suffix}`;
+    return `${normalized.slice(0, 63 - hashSuffix.length).replace(/-+$/g, '')}${hashSuffix}`;
+  }
+
+  private migrationJobName(serviceName: string): string {
+    return cloudRunMigrationJobName(serviceName);
+  }
+
+  private assertReleaseJobConfiguration(
+    job: CloudRunJob,
+    jobName: string,
+    jobSpec: Record<string, unknown>
+  ): void {
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const mismatch = cloudRunReleaseJobConfigurationMismatch(
+      job,
+      `projects/${this.credentials.projectId}/locations/${this.credentials.region}/jobs/${jobName}`,
+      jobSpec
+    );
+    if (mismatch) {
+      throw new Error(
+        `Cloud Run release job ${jobName} did not converge to the exact candidate ${mismatch}; refusing to execute it.`
+      );
+    }
   }
 
   private isArtifactRepositoryName(name: string): boolean {
@@ -3562,12 +4098,15 @@ export class CloudRunAdapter implements
     throw new Error('Artifact Registry location inventory did not converge');
   }
 
-  private async getArtifactRepository(name: string): Promise<ArtifactRepository | null> {
+  private async getArtifactRepository(
+    name: string,
+    accessToken?: string
+  ): Promise<ArtifactRepository | null> {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     if (!this.isArtifactRepositoryName(name)) {
       throw new Error(`Artifact Registry repository id must match projects/${this.credentials.projectId}/locations/${this.credentials.region}/repositories/{repository}.`);
     }
-    const token = await this.getAccessToken();
+    const token = accessToken ?? await this.getAccessToken();
     const response = await fetch(`https://artifactregistry.googleapis.com/v1/${name}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -3577,6 +4116,22 @@ export class CloudRunAdapter implements
       throw new Error(`Artifact Registry repository lookup failed: ${response.status} ${body}`);
     }
     return await response.json() as ArtifactRepository;
+  }
+
+  private assertArtifactRepository(
+    repository: ArtifactRepository,
+    expectedName: string
+  ): void {
+    if (repository?.name !== expectedName) {
+      throw new Error(
+        `Artifact Registry returned a different repository identity; expected ${expectedName}.`
+      );
+    }
+    if (repository.format !== 'DOCKER') {
+      throw new Error(
+        `Artifact Registry repository ${expectedName} did not prove DOCKER format.`
+      );
+    }
   }
 
   private inspectedArtifactRepository(repository: ArtifactRepository): Record<string, unknown> {
@@ -3603,19 +4158,37 @@ export class CloudRunAdapter implements
   private async waitForArtifactRegistryOperation(
     token: string,
     operation: CloudRunOperation,
-    description: string
+    description: string,
+    expectedResponseName?: string
   ): Promise<void> {
-    if (!operation.name || !operation.name.includes('/operations/')) return;
+    if (!this.credentials) throw new Error('Not connected. Call connect() first.');
+    const operationPrefix = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/operations/`;
+    if (
+      !operation.name?.startsWith(operationPrefix)
+      || operation.name.length <= operationPrefix.length
+      || operation.name.slice(operationPrefix.length).includes('/')
+    ) {
+      throw new Error(`Artifact Registry ${description} response did not include an exact operation identity.`);
+    }
+    const operationName = operation.name;
     let current = operation;
     for (let attempt = 0; attempt < 120; attempt += 1) {
+      if (current.name !== operationName) {
+        throw new Error(`Artifact Registry ${description} status returned a different operation identity.`);
+      }
       if (current.done) {
         if (current.error) {
           throw new Error(`Artifact Registry ${description} failed: ${current.error.status ?? current.error.code ?? 'unknown'} ${current.error.message ?? ''}`.trim());
         }
+        if (expectedResponseName && current.response !== undefined) {
+          if (current.response?.name !== expectedResponseName) {
+            throw new Error(`Artifact Registry ${description} returned a different repository identity.`);
+          }
+        }
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      const response = await fetch(`https://artifactregistry.googleapis.com/v1/${current.name}`, {
+      await this.delay(Number(process.env.HYPERVIBE_GCP_WAIT_DELAY_MS ?? 1000));
+      const response = await fetch(`https://artifactregistry.googleapis.com/v1/${operationName}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
@@ -3876,6 +4449,72 @@ export class CloudRunAdapter implements
     return `projects/${projectId}/locations/${region}/services/${serviceName}`;
   }
 
+  private async buildHoldingImageForService(
+    service: Service,
+    environment: Environment,
+    envVars: Record<string, string>
+  ): Promise<CloudBuildResult> {
+    if (!this.credentials) {
+      return { success: false, error: 'Not connected. Call connect() first.' };
+    }
+
+    try {
+      const token = await this.getAccessToken();
+      const { projectId, region } = this.credentials;
+      const repository = this.sanitizeName(envVars['HYPERVIBE_ARTIFACT_REPOSITORY']?.trim() || 'hypervibe');
+      const imageName = this.sanitizeName(`${environment.name}-${service.name}-bootstrap`);
+      const imageUri = `${region}-docker.pkg.dev/${projectId}/${repository}/${imageName}:holding-v1`;
+
+      await this.ensureArtifactRepository(repository, token);
+      const dockerfile = [
+        'FROM node:24-slim',
+        'ENV PORT=8080',
+        'EXPOSE 8080',
+        'CMD ["node", "-e", "require(\'http\').createServer((_request,response)=>{response.statusCode=503;response.end(\'Deployment pending\');}).listen(process.env.PORT||8080)"]',
+        '',
+      ].join('\n');
+      const dockerfileBase64 = Buffer.from(dockerfile, 'utf8').toString('base64');
+      const buildRequest = {
+        steps: [{
+          name: 'gcr.io/cloud-builders/docker',
+          entrypoint: 'bash',
+          args: [
+            '-lc',
+            [
+              'set -euo pipefail',
+              `printf '%s' '${dockerfileBase64}' | base64 --decode > Dockerfile.hypervibe-bootstrap`,
+              `docker build --pull -t ${JSON.stringify(imageUri)} -f Dockerfile.hypervibe-bootstrap .`,
+            ].join('\n'),
+          ],
+        }],
+        images: [imageUri],
+        timeout: '1200s',
+      };
+      const response = await fetch(`https://cloudbuild.googleapis.com/v1/projects/${projectId}/builds`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(buildRequest),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Cloud Build holding-image submission failed: ${response.status} ${text}`);
+      }
+      const build = await response.json() as CloudBuildStatus | CloudBuildOperation;
+      const result = await this.waitForCloudBuild(token, build, imageUri);
+      return {
+        success: true,
+        imageUri: result.imageUri,
+        buildId: result.id,
+        logsUrl: result.logsUrl,
+      };
+    } catch (error) {
+      return { success: false, error: this.formatError(error) };
+    }
+  }
+
   private async buildImageForService(
     service: Service,
     environment: Environment,
@@ -3892,11 +4531,17 @@ export class CloudRunAdapter implements
         error: 'Cloud Run builds are automatic, but this project has no gitRemoteUrl. Set the project gitRemoteUrl so Cloud Build can build from source.',
       };
     }
+    if (envVars['HYPERVIBE_GITHUB_TOKEN']?.trim()) {
+      return {
+        success: false,
+        error: 'A GitHub credential cannot be embedded in Cloud Build metadata. Use the managed-CI deployment path for private repositories and private packages.',
+      };
+    }
 
     try {
       const token = await this.getAccessToken();
       const { projectId, region } = this.credentials;
-      const repository = this.sanitizeName(envVars['HYPERVIBE_ARTIFACT_REPOSITORY']?.trim() || 'infraprint');
+      const repository = this.sanitizeName(envVars['HYPERVIBE_ARTIFACT_REPOSITORY']?.trim() || 'hypervibe');
       const imageName = this.sanitizeName(`${environment.name}-${service.name}`);
       const revision = envVars['HYPERVIBE_SOURCE_REVISION']?.trim() || 'main';
       const tag = this.sanitizeName(
@@ -3911,14 +4556,14 @@ export class CloudRunAdapter implements
         sourceRepoUrl,
         revision,
         imageUri,
-        githubToken: envVars['HYPERVIBE_GITHUB_TOKEN']?.trim(),
       });
 
       return {
         success: true,
-        imageUri,
+        imageUri: build.imageUri,
         buildId: build.id,
         logsUrl: build.logsUrl,
+        resolvedCommitSha: build.resolvedCommitSha,
       };
     } catch (error) {
       return {
@@ -3935,11 +4580,16 @@ export class CloudRunAdapter implements
 
     const { projectId, region } = this.credentials;
     const baseUrl = `https://artifactregistry.googleapis.com/v1/projects/${projectId}/locations/${region}/repositories`;
+    const repositoryName = `projects/${projectId}/locations/${region}/repositories/${repository}`;
     const existing = await fetch(`${baseUrl}/${repository}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
 
     if (existing.ok) {
+      this.assertArtifactRepository(
+        await existing.json() as ArtifactRepository,
+        repositoryName
+      );
       return;
     }
 
@@ -3956,7 +4606,7 @@ export class CloudRunAdapter implements
       },
       body: JSON.stringify({
         format: 'DOCKER',
-        description: 'Container images built by Infraprint',
+        description: 'Container images built by Hypervibe',
       }),
     });
 
@@ -3964,6 +4614,27 @@ export class CloudRunAdapter implements
       const text = await created.text();
       throw new Error(`Artifact Registry repository creation failed: ${created.status} ${text}`);
     }
+
+    const operation = await created.json() as CloudRunOperation;
+    await this.waitForArtifactRegistryOperation(
+      token,
+      operation,
+      'repository create',
+      repositoryName
+    );
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const ready = await this.getArtifactRepository(repositoryName, token);
+      if (ready) {
+        this.assertArtifactRepository(ready, repositoryName);
+        return;
+      }
+      if (attempt < 119) {
+        await this.delay(Number(process.env.HYPERVIBE_GCP_WAIT_DELAY_MS ?? 1000));
+      }
+    }
+    throw new Error(
+      `Artifact Registry repository ${repositoryName} remained absent after its create operation completed.`
+    );
   }
 
   private async submitCloudBuild(params: {
@@ -3972,8 +4643,12 @@ export class CloudRunAdapter implements
     sourceRepoUrl: string;
     revision: string;
     imageUri: string;
-    githubToken?: string;
-  }): Promise<{ id?: string; logsUrl?: string }> {
+  }): Promise<{
+    id?: string;
+    logsUrl?: string;
+    imageUri: string;
+    resolvedCommitSha?: string;
+  }> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
@@ -3988,7 +4663,7 @@ export class CloudRunAdapter implements
       body: JSON.stringify({
         source: {
           gitSource: {
-            url: this.cloudBuildGitSourceUrl(params.sourceRepoUrl, params.githubToken),
+            url: params.sourceRepoUrl,
             revision: params.revision,
           },
         },
@@ -4008,13 +4683,19 @@ export class CloudRunAdapter implements
     }
 
     const build = await response.json() as CloudBuildStatus | CloudBuildOperation;
-    return this.waitForCloudBuild(params.token, build);
+    return this.waitForCloudBuild(params.token, build, params.imageUri);
   }
 
   private async waitForCloudBuild(
     token: string,
-    buildOrOperation: CloudBuildStatus | CloudBuildOperation
-  ): Promise<{ id?: string; logsUrl?: string }> {
+    buildOrOperation: CloudBuildStatus | CloudBuildOperation,
+    submittedImageUri: string
+  ): Promise<{
+    id?: string;
+    logsUrl?: string;
+    imageUri: string;
+    resolvedCommitSha?: string;
+  }> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
     }
@@ -4062,7 +4743,16 @@ export class CloudRunAdapter implements
 
       const status = (current.status ?? '').toUpperCase();
       if (status === 'SUCCESS') {
-        return { id: current.id, logsUrl: current.logsUrl ?? current.logUrl };
+        const imageUri = this.cloudBuildDigestImageUri(current, submittedImageUri);
+        const resolvedCommitSha = current.sourceProvenance?.resolvedRepoSource?.commitSha;
+        return {
+          id: current.id,
+          logsUrl: current.logsUrl ?? current.logUrl,
+          imageUri,
+          ...(/^[0-9a-f]{40}$/i.test(resolvedCommitSha ?? '')
+            ? { resolvedCommitSha: resolvedCommitSha!.toLowerCase() }
+            : {}),
+        };
       }
       if (['FAILURE', 'INTERNAL_ERROR', 'TIMEOUT', 'CANCELLED', 'EXPIRED'].includes(status)) {
         throw new Error(this.cloudBuildFailureMessage(current, status));
@@ -4119,22 +4809,23 @@ export class CloudRunAdapter implements
     ].join('\n');
   }
 
-  private cloudBuildGitSourceUrl(sourceRepoUrl: string, githubToken?: string): string {
-    if (!githubToken) {
-      return sourceRepoUrl;
+  private cloudBuildDigestImageUri(
+    build: CloudBuildStatus,
+    submittedImageUri: string
+  ): string {
+    const builtImage = build.results?.images?.find((image) => image.name === submittedImageUri);
+    const digest = builtImage?.digest?.toLowerCase();
+    if (!digest || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+      throw new Error(
+        'Cloud Build succeeded without an exact image digest for the submitted image. Refusing to deploy a mutable tag.'
+      );
     }
-
-    try {
-      const url = new URL(sourceRepoUrl);
-      if (url.hostname.toLowerCase() !== 'github.com') {
-        return sourceRepoUrl;
-      }
-      url.username = 'x-access-token';
-      url.password = githubToken;
-      return url.toString();
-    } catch {
-      return sourceRepoUrl;
-    }
+    const lastSlash = submittedImageUri.lastIndexOf('/');
+    const lastColon = submittedImageUri.lastIndexOf(':');
+    const repository = lastColon > lastSlash
+      ? submittedImageUri.slice(0, lastColon)
+      : submittedImageUri.split('@')[0];
+    return `${repository}@${digest}`;
   }
 
   private cloudBuildFailureMessage(build: CloudBuildStatus, status: string): string {
@@ -4284,32 +4975,107 @@ export class CloudRunAdapter implements
   private async currentImageForDeferredDeployment(
     service: Service,
     environment: Environment
-  ): Promise<{ expectedExisting: boolean; imageUri?: string }> {
+  ): Promise<DeferredWorkloadEvidence> {
     const bindings = environment.platformBindings as {
       projectId?: string;
       services?: Record<string, { serviceId?: string; jobName?: string; resourceType?: string }>;
     };
     const serviceBinding = bindings.services?.[service.name];
-    const prefix = bindings.projectId || 'hypervibe';
     if (serviceWorkloadKind(service) === 'cron') {
       const expectedExisting = Boolean(serviceBinding?.jobName);
-      const jobName = serviceBinding?.jobName ?? this.sanitizeName(`${prefix}-${service.name}`);
+      const jobName = this.workloadResourceName(environment, service.name, serviceBinding?.jobName);
       const token = await this.getAccessToken();
       const job = await this.getCloudRunJob(jobName, token);
       const imageUri = this.primaryJobContainer(job)?.image;
       return {
         expectedExisting,
+        observedExisting: Boolean(job),
         ...(imageUri ? { imageUri } : {}),
+        ...(this.jobRuntimeIdentity(job)
+          ? { runtimeServiceAccountEmail: this.jobRuntimeIdentity(job) }
+          : {}),
       };
     }
 
     const expectedExisting = Boolean(serviceBinding?.serviceId);
-    const serviceName = serviceBinding?.serviceId ?? this.sanitizeName(`${prefix}-${service.name}`);
+    const serviceName = this.workloadResourceName(environment, service.name, serviceBinding?.serviceId);
     const current = await this.getService(serviceName);
     const imageUri = this.primaryContainer(current)?.image;
     return {
       expectedExisting,
+      observedExisting: Boolean(current),
       ...(imageUri ? { imageUri } : {}),
+      ...(this.serviceRuntimeIdentity(current)
+        ? { runtimeServiceAccountEmail: this.serviceRuntimeIdentity(current) }
+        : {}),
+    };
+  }
+
+  private deferredWorkloadProblem(
+    evidence: DeferredWorkloadEvidence,
+    resource: 'service' | 'scheduled job',
+    expectedImageUri?: string
+  ): DeferredWorkloadProblem | undefined {
+    if (!evidence.expectedExisting && evidence.observedExisting) {
+      return {
+        phase: 'adoption_required',
+        error: `An unbound same-name Cloud Run ${resource} already exists; explicit adoption with hv_import is required before Hypervibe can mutate it.`,
+      };
+    }
+    if (evidence.expectedExisting && !evidence.observedExisting) {
+      return {
+        phase: 'binding_missing',
+        error: `The bound Cloud Run ${resource} is no longer observable; re-run hv_plan before mutation.`,
+      };
+    }
+    if (!evidence.observedExisting) return undefined;
+    if (!evidence.imageUri || !this.isImmutableContainerImage(evidence.imageUri)) {
+      return {
+        phase: 'image_evidence',
+        error: `The provider-observed Cloud Run ${resource} image must be an immutable repo@sha256 digest before a deferred revision can be created.`,
+      };
+    }
+    if (expectedImageUri && evidence.imageUri !== expectedImageUri) {
+      return {
+        phase: 'stale_provider_state',
+        error: `The provider-observed Cloud Run ${resource} image changed during deferred reconciliation; re-run hv_plan before mutation.`,
+      };
+    }
+    const expectedRuntimeIdentity = this.credentials?.runtimeServiceAccountEmail?.trim();
+    if (!expectedRuntimeIdentity || evidence.runtimeServiceAccountEmail !== expectedRuntimeIdentity) {
+      return {
+        phase: 'runtime_identity_evidence',
+        error: `The Cloud Run ${resource} does not use the exact runtime service account from the verified connection; refusing to create a deferred revision.`,
+      };
+    }
+    return undefined;
+  }
+
+  private deferredDeployFailure(
+    service: Service,
+    problem: DeferredWorkloadProblem
+  ): DeployResult {
+    return {
+      serviceId: service.id,
+      status: 'failed',
+      receipt: {
+        success: false,
+        message: `Cloud Run deferred configuration is blocked for ${service.name}`,
+        error: problem.error,
+        data: { provider: this.name, phase: problem.phase },
+      },
+    };
+  }
+
+  private deferredReceiptFailure(
+    operation: string,
+    problem: DeferredWorkloadProblem
+  ): Receipt {
+    return {
+      success: false,
+      message: `Cloud Run deferred ${operation} is blocked`,
+      error: problem.error,
+      data: { provider: this.name, phase: problem.phase },
     };
   }
 
@@ -4317,8 +5083,33 @@ export class CloudRunAdapter implements
     return service?.template?.containers?.[0] ?? service?.spec?.template?.spec?.containers?.[0];
   }
 
+  private isImmutableContainerImage(imageUri: string): boolean {
+    return /^[^@\s]+@sha256:[0-9a-f]{64}$/i.test(imageUri);
+  }
+
+  private serviceRuntimeIdentity(service: CloudRunService | null): string | undefined {
+    return service?.template?.serviceAccount
+      ?? service?.template?.serviceAccountName
+      ?? service?.spec?.template?.spec?.serviceAccountName;
+  }
+
+  private requiredRuntimeServiceAccountEmail(resource: string): string {
+    const email = this.credentials?.runtimeServiceAccountEmail?.trim();
+    if (!email) {
+      throw new Error(
+        `Cloud Run runtimeServiceAccountEmail is required to create ${resource}; refusing to run application code as the deploy credential.`
+      );
+    }
+    return email;
+  }
+
   private primaryJobContainer(job: CloudRunJob | null): CloudRunContainer | undefined {
     return job?.template?.template?.containers?.[0];
+  }
+
+  private jobRuntimeIdentity(job: CloudRunJob | null): string | undefined {
+    return job?.template?.template?.serviceAccount
+      ?? job?.template?.template?.serviceAccountName;
   }
 
   private serviceVolumes(service: CloudRunService | null): Array<Record<string, unknown>> | undefined {
@@ -4481,12 +5272,15 @@ export class CloudRunAdapter implements
       : params.replaceManagedDatabaseVars
         ? this.removeCloudSqlVolumeMounts(params.existingVolumeMounts)
         : params.existingVolumeMounts;
+    const resources = params.resources
+      ? Object.fromEntries(Object.entries(params.resources).filter(([key]) => key !== 'cpuIdle'))
+      : undefined;
     const container = {
       image: params.imageUri,
       command: ['/bin/sh'],
       args: ['-lc', params.command],
       env: params.env,
-      ...(params.resources ? { resources: params.resources } : {}),
+      ...(resources && Object.keys(resources).length > 0 ? { resources } : {}),
       ...(volumeMounts && volumeMounts.length > 0 ? { volumeMounts } : {}),
     };
     const volumes = cloudSql
@@ -4516,6 +5310,7 @@ export class CloudRunAdapter implements
     jobName: string;
     jobSpec: Record<string, unknown>;
     description: string;
+    bindingAuthority?: 'bound' | 'unbound';
   }): Promise<{ created: boolean; job: CloudRunJob }> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -4535,6 +5330,30 @@ export class CloudRunAdapter implements
       const text = (await existingJob.text()).slice(0, 500);
       throw new Error(`Cloud Run job observation failed: ${existingJob.status}${text ? ` ${text}` : ''}`);
     }
+    const liveJob = creatingJob ? null : await existingJob.json() as CloudRunJob;
+    if (params.bindingAuthority === 'unbound' && liveJob) {
+      throw new CloudRunReleaseJobAdoptionRequiredError(
+        `An unbound same-name Cloud Run release job ${params.jobName} already exists; explicit adoption is required before Hypervibe can mutate it.`
+      );
+    }
+    const expectedJobName = `projects/${projectId}/locations/${region}/jobs/${params.jobName}`;
+    if (params.bindingAuthority && liveJob && liveJob.name !== expectedJobName) {
+      throw new Error(`Cloud Run ${params.description} lookup returned a different resource identity.`);
+    }
+    const runtimeServiceAccountEmail = liveJob
+      ? liveJob.template?.template?.serviceAccount ?? liveJob.template?.template?.serviceAccountName
+      : this.requiredRuntimeServiceAccountEmail(params.description);
+    if (!runtimeServiceAccountEmail) {
+      throw new Error(
+        `Cloud Run job ${params.jobName} did not expose its runtime service account; refusing to change its identity.`
+      );
+    }
+    const candidateTask = (params.jobSpec.template as { template?: Record<string, unknown> } | undefined)?.template;
+    if (!candidateTask) {
+      throw new Error(`Cloud Run ${params.description} candidate did not include a task template.`);
+    }
+    candidateTask.serviceAccount = runtimeServiceAccountEmail;
+    delete candidateTask.serviceAccountName;
     const upsertResponse = !creatingJob
       ? await fetch(`${jobsBaseUrl}/${params.jobName}`, {
           method: 'PATCH',
@@ -4553,8 +5372,22 @@ export class CloudRunAdapter implements
     }
 
     const operation = await upsertResponse.json() as CloudRunOperation;
-    await this.waitForCloudRunOperation(params.token, operation, `${params.description} ${creatingJob ? 'create' : 'update'}`);
+    await this.waitForCloudRunOperation(
+      params.token,
+      operation,
+      `${params.description} ${creatingJob ? 'create' : 'update'}`,
+      `projects/${projectId}/locations/${region}/jobs/${params.jobName}`
+    );
     const job = await this.waitForCloudRunJobReady(params.jobName, params.token);
+    const jobResourceName = `projects/${projectId}/locations/${region}/jobs/${params.jobName}`;
+    if (job.name !== jobResourceName) {
+      throw new Error(`Cloud Run ${params.description} became ready with a different resource identity.`);
+    }
+    const readyRuntimeServiceAccountEmail = job.template?.template?.serviceAccount
+      ?? job.template?.template?.serviceAccountName;
+    if (readyRuntimeServiceAccountEmail !== runtimeServiceAccountEmail) {
+      throw new Error(`Cloud Run ${params.description} became ready without the expected runtime service account.`);
+    }
 
     return { created: creatingJob, job };
   }
@@ -4592,6 +5425,7 @@ export class CloudRunAdapter implements
     jobName: string;
     schedule: string;
     timeZone: string;
+    runtimeServiceAccountEmail: string;
   }): Promise<{ created: boolean }> {
     if (!this.credentials) {
       throw new Error('Not connected. Call connect() first.');
@@ -4611,14 +5445,10 @@ export class CloudRunAdapter implements
         httpMethod: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: btoa('{}'),
-        ...(this.serviceAccountCreds?.client_email
-          ? {
-              oauthToken: {
-                serviceAccountEmail: this.serviceAccountCreds.client_email,
-                scope: 'https://www.googleapis.com/auth/cloud-platform',
-              },
-            }
-          : {}),
+        oauthToken: {
+          serviceAccountEmail: params.runtimeServiceAccountEmail,
+          scope: 'https://www.googleapis.com/auth/cloud-platform',
+        },
       },
     };
     return this.upsertCloudSchedulerJobOnce({
@@ -4707,7 +5537,11 @@ export class CloudRunAdapter implements
     return this.verifyCloudRunResourceDeleted(serviceUrl, headers, `Cloud Run service ${serviceName}`);
   }
 
-  private async deleteCloudRunJobIfExists(jobName: string, token: string): Promise<string | undefined> {
+  private async deleteCloudRunJobIfExists(
+    jobName: string,
+    token: string,
+    expectedCreatedIdentity?: { uid?: string; etag?: string }
+  ): Promise<string | undefined> {
     if (!this.credentials) {
       return undefined;
     }
@@ -4724,7 +5558,23 @@ export class CloudRunAdapter implements
       return `Could not verify whether Cloud Run job ${jobName} exists: ${existing.status} ${text}`;
     }
 
-    const deleted = await fetch(jobUrl, { method: 'DELETE', headers });
+    let deleteUrl = jobUrl;
+    if (expectedCreatedIdentity) {
+      const observed = await existing.json() as CloudRunJob;
+      const expectedName = `projects/${projectId}/locations/${region}/jobs/${jobName}`;
+      if (
+        !expectedCreatedIdentity.uid
+        || !expectedCreatedIdentity.etag
+        || observed.name !== expectedName
+        || observed.uid !== expectedCreatedIdentity.uid
+        || observed.etag !== expectedCreatedIdentity.etag
+      ) {
+        return `Skipped Cloud Run job cleanup for ${jobName}: the exact newly-created resource identity could not be verified`;
+      }
+      deleteUrl = `${jobUrl}?etag=${encodeURIComponent(expectedCreatedIdentity.etag)}`;
+    }
+
+    const deleted = await fetch(deleteUrl, { method: 'DELETE', headers });
     if (deleted.status === 404) {
       return undefined;
     }
@@ -4805,11 +5655,27 @@ export class CloudRunAdapter implements
     return 'done' in response || 'metadata' in response || 'response' in response || 'error' in response;
   }
 
-  private async waitForCloudRunServiceReady(serviceName: string, token: string): Promise<CloudRunService | null> {
+  private async waitForCloudRunServiceReady(
+    serviceName: string,
+    token: string,
+    expectation?: DirectCloudRunServiceExpectation
+  ): Promise<CloudRunService | null> {
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const resourceName = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/services/${serviceName}`;
     for (let attempt = 0; attempt < 120; attempt++) {
       const service = await this.getCloudRunService(serviceName, token);
       const readiness = this.cloudRunServiceReadiness(service);
       if (readiness.ready) {
+        if (service?.name !== resourceName) {
+          throw new Error(
+            `Cloud Run service ${serviceName} became ready with a different resource identity: ${service?.name ?? 'missing'}.`
+          );
+        }
+        if (expectation) {
+          this.assertDirectCloudRunServiceEvidence(service, expectation);
+        }
         return service;
       }
       if (readiness.error) {
@@ -4820,6 +5686,59 @@ export class CloudRunAdapter implements
     }
 
     throw new Error(`Cloud Run service ${serviceName} was not ready before timeout`);
+  }
+
+  private assertDirectCloudRunServiceEvidence(
+    service: CloudRunService,
+    expectation: DirectCloudRunServiceExpectation
+  ): void {
+    if (service.name !== expectation.resourceName) {
+      throw new Error(
+        `Cloud Run service deployment returned a different resource identity: ${service.name || 'missing'}.`
+      );
+    }
+    if (!this.isImmutableContainerImage(expectation.imageUri)) {
+      throw new Error('Cloud Run service deployment expected image is not an immutable image digest.');
+    }
+    const imageUri = this.primaryContainer(service)?.image;
+    if (imageUri !== expectation.imageUri) {
+      throw new Error(
+        `Cloud Run service became ready without the expected immutable image digest; observed ${imageUri ?? 'missing'}.`
+      );
+    }
+    const runtimeServiceAccountEmail = service.template?.serviceAccount
+      ?? service.template?.serviceAccountName
+      ?? service.spec?.template?.spec?.serviceAccountName;
+    if (runtimeServiceAccountEmail !== expectation.runtimeServiceAccountEmail) {
+      throw new Error(
+        `Cloud Run service became ready without the expected runtime service account; observed ${runtimeServiceAccountEmail ?? 'missing'}.`
+      );
+    }
+    const releaseCommandHash = service.annotations?.[CLOUD_RUN_RELEASE_COMMAND_HASH_ANNOTATION];
+    if (releaseCommandHash !== expectation.releaseCommandHash) {
+      throw new Error('Cloud Run service became ready without the expected release-command annotation.');
+    }
+    const sourceCommitSha = service.annotations?.[CLOUD_RUN_SOURCE_COMMIT_ANNOTATION];
+    if (sourceCommitSha !== expectation.sourceCommitSha) {
+      throw new Error('Cloud Run service became ready without the expected source-commit annotation.');
+    }
+    const container = this.primaryContainer(service);
+    const startCommand = this.containerStartCommand(container) ?? null;
+    if (startCommand !== expectation.startCommand) {
+      throw new Error(
+        `Cloud Run service became ready without the expected start command; observed ${startCommand ?? 'none'}.`
+      );
+    }
+    const startupHealthCheckPath = container?.startupProbe?.httpGet?.path ?? null;
+    const livenessHealthCheckPath = container?.livenessProbe?.httpGet?.path ?? null;
+    if (
+      startupHealthCheckPath !== expectation.healthCheckPath
+      || livenessHealthCheckPath !== null
+    ) {
+      throw new Error(
+        `Cloud Run service became ready without the expected health probe; observed ${startupHealthCheckPath ?? livenessHealthCheckPath ?? 'none'}.`
+      );
+    }
   }
 
   private async getCloudRunService(serviceName: string, token: string): Promise<CloudRunService | null> {
@@ -4874,25 +5793,40 @@ export class CloudRunAdapter implements
   private async waitForCloudRunOperation(
     token: string,
     operation: CloudRunOperation,
-    description: string
+    description: string,
+    expectedResponseName?: string
   ): Promise<void> {
-    if (!operation.name || !operation.name.includes('/operations/')) {
-      return;
+    if (!this.credentials) {
+      throw new Error('Not connected. Call connect() first.');
     }
+    const operationPrefix = `projects/${this.credentials.projectId}/locations/${this.credentials.region}/operations/`;
+    if (!operation.name || !operation.name.startsWith(operationPrefix) || operation.name.length <= operationPrefix.length) {
+      throw new Error(`Cloud Run ${description} response did not include a trackable operation identity.`);
+    }
+    const operationName = operation.name;
 
     let current = operation;
     for (let attempt = 0; attempt < 60; attempt++) {
+      if (current.name !== operationName) {
+        throw new Error(`Cloud Run ${description} operation status returned a different operation identity.`);
+      }
       if (current.done) {
         if (current.error) {
           throw new Error(
             `Cloud Run ${description} operation failed: ${current.error.status ?? current.error.code ?? 'unknown'} ${current.error.message ?? ''}`.trim()
           );
         }
+        if (expectedResponseName && !current.response?.name) {
+          throw new Error(`Cloud Run ${description} operation completed without a resource identity.`);
+        }
+        if (expectedResponseName && current.response?.name !== expectedResponseName) {
+          throw new Error(`Cloud Run ${description} operation returned a different resource identity.`);
+        }
         return;
       }
 
       await new Promise((resolve) => setTimeout(resolve, 1000));
-      const response = await fetch(`https://run.googleapis.com/v2/${current.name}`, {
+      const response = await fetch(`https://run.googleapis.com/v2/${operationName}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
@@ -5284,6 +6218,9 @@ providerRegistry.register({
     category: 'deployment',
     credentialsSchema: CloudRunCredentialsSchema,
     setupHelpUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    credentials: {
+      agentManagedKeys: ['runtimeServiceAccountEmail'],
+    },
     maturity: {
       lifecycle: {
         hosting: { status: 'ready-for-live' },

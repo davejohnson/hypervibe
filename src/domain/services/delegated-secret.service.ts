@@ -9,6 +9,7 @@ import type {
   ProjectSecretSpec,
   ProjectSpec,
 } from '../spec/spec.schema.js';
+import { githubActionsCanonicalEnvironment } from '../spec/devops-selection.js';
 
 export const DELEGATED_SECRET_OPERATION = 'delegatedSecretSync';
 
@@ -108,17 +109,11 @@ export function delegatedSecretsForEnvironment(
     .filter((entry): entry is [string, DelegatedSecretSpec] => entry[1].ownership === 'delegated');
 }
 
-function githubCanonicalEnvironment(spec: ProjectSpec): string | undefined {
-  if (!spec.github || spec.github.enabled === false) return undefined;
-  return spec.github.canonicalEnvironment
-    ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0]);
-}
-
 export function delegatedSecretInputsForEnvironment(
   spec: ProjectSpec,
   environmentName: string
 ): Array<[string, DelegatedSecretSpec]> {
-  const canonical = githubCanonicalEnvironment(spec);
+  const canonical = githubActionsCanonicalEnvironment(spec);
   return Object.entries(spec.secrets)
     .filter((entry): entry is [string, DelegatedSecretSpec] => entry[1].ownership === 'delegated')
     .filter(([, secret]) =>
@@ -134,7 +129,7 @@ export function delegatedGitHubSecretsForEnvironment(
   spec: ProjectSpec,
   environmentName: string
 ): Array<[string, DelegatedSecretSpec]> {
-  if (githubCanonicalEnvironment(spec) !== environmentName) return [];
+  if (githubActionsCanonicalEnvironment(spec) !== environmentName) return [];
   return Object.entries(spec.secrets)
     .filter((entry): entry is [string, DelegatedSecretSpec] => entry[1].ownership === 'delegated')
     .filter(([, secret]) => secret.githubActions?.repository || secret.githubActions?.environments.length)

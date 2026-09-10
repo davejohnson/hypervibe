@@ -1,3 +1,4 @@
+import path from 'path';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../../adapters/db/repositories/service.repository.js';
 import { ComponentRepository } from '../../adapters/db/repositories/component.repository.js';
@@ -23,6 +24,7 @@ import {
   detectGitRemoteUrl,
   normalizeGitRemoteIdentity,
   parseGitHubRepoFromRemote,
+  resolveGitHeadCommitSha,
 } from '../../lib/git-remote.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { resolveGitDeploySource } from '../services/deploy-source.js';
@@ -85,6 +87,7 @@ import {
 import {
   GITHUB_INFRASTRUCTURE_OPERATION,
   githubInfrastructureConnectionBlock,
+  shouldPlanGitHubDelegatedSecrets,
   shouldPlanGitHubInfrastructure,
   planGitHubInfrastructure,
 } from '../services/github-infrastructure.service.js';
@@ -148,7 +151,9 @@ export const HOSTING_ENVIRONMENT_ENSURE_OPERATION = 'hostingEnvironmentEnsure';
 function providerRequiredCredentialKeys(provider: string): string[] {
   const metadata = providerRegistry.getMetadata(provider);
   return metadata
-    ? credentialFieldsFromSchema(metadata.credentialsSchema)
+    ? credentialFieldsFromSchema(metadata.credentialsSchema, {
+      exclude: metadata.credentials?.agentManagedKeys,
+    })
       ?.filter((field) => field.required)
       .map((field) => field.name) ?? []
     : [];
@@ -1095,9 +1100,9 @@ export class PlanService {
     const previousCacheProvider = previousCache?.provider;
     const previousResource = local.bindings?.previousResource;
     const previousResourceProvider = previousResource?.provider;
-    if ((!previousProvider || previousProvider === environmentSpec.hosting.provider) && !previousDatabaseProvider && !previousCacheProvider && !previousResourceProvider) {
+    if (!previousProvider && !previousDatabaseProvider && !previousCacheProvider && !previousResourceProvider) {
       return {
-        error: `Environment "${environmentName}" has no abandoned hosting provider retained for cleanup and no retained database, cache, or provider-resource target.`,
+        error: `Environment "${environmentName}" has no abandoned hosting provider retained for cleanup, no earlier same-provider hosting scope, and no retained database, cache, or provider-resource target.`,
       };
     }
     if (previousProvider && boundHostingProvider && boundHostingProvider !== environmentSpec.hosting.provider) {
@@ -1114,7 +1119,7 @@ export class PlanService {
     );
     const actions: PlanAction[] = [];
     const cleanupWarnings: string[] = [];
-    if (previousProvider && previousHosting && previousProvider !== environmentSpec.hosting.provider) {
+    if (previousProvider && previousHosting) {
       const teardownBoundary = providerRegistry.getMetadata(previousProvider)
         ?.lifecycle?.hosting?.teardownBoundary;
       if (!teardownBoundary) {
@@ -1602,7 +1607,10 @@ export class PlanService {
           error: `scope="retained-cleanup" requires a declared environment; spec has no environment "${environmentName}".`,
         };
       }
-      if (shouldPlanGitHubInfrastructure(specResult.spec, environmentName)) {
+      if (
+        shouldPlanGitHubInfrastructure(specResult.spec, environmentName)
+        || shouldPlanGitHubDelegatedSecrets(specResult.spec, environmentName)
+      ) {
         return this.planRepositoryInfrastructure(project, environmentName, specResult, options);
       }
       const available = Object.keys(specResult.spec.environments);
@@ -1612,6 +1620,25 @@ export class PlanService {
     }
     if (scope === 'retained-cleanup') {
       return this.planRetainedHostingCleanup(project, environmentName, specResult, environmentSpec);
+    }
+    const sourceCommitSha = environmentSpec.deploy?.strategy === 'branch'
+      && environmentSpec.deploy.trigger !== 'native'
+      && specResult.source?.kind === 'repo'
+      ? resolveGitHeadCommitSha(
+        path.dirname(path.dirname(specResult.source.path)),
+        specResult.source.path
+      ) ?? undefined
+      : undefined;
+    if (
+      environmentSpec.hosting.provider === 'cloudrun'
+      && environmentSpec.deploy?.strategy === 'branch'
+      && environmentSpec.deploy.trigger !== 'native'
+      && specResult.source?.kind === 'repo'
+      && !sourceCommitSha
+    ) {
+      return {
+        error: `Cannot resolve the exact git commit containing ${specResult.source.path}. Hypervibe will not plan a first Cloud Run release from only a mutable branch name.`,
+      };
     }
     const serviceFilter = options?.serviceFilter?.length ? options.serviceFilter : undefined;
     if (serviceFilter) {
@@ -2490,7 +2517,7 @@ export class PlanService {
     const appliedSpecHashDependsOn = actions
       .filter((action) => action.type !== 'noop' && action.id !== managedCiSeedAction?.id)
       .map((action) => action.id);
-    const ciConfigurationPending = ciDeploy.actions.some((action) => (
+    const ciConfigurationPending = ciDeploy.deferred || ciDeploy.actions.some((action) => (
       action.type !== 'noop' && action.metadata?.operation === CI_CONFIGURATION_SYNC_OPERATION
     ));
     const appliedSpecHash = ciConfigurationPending
@@ -2516,6 +2543,7 @@ export class PlanService {
       : appliedSpecHashDependsOn;
     const managedSeedRelease = managedCiSeedAction
       && resolveDevOpsSelection(specResult.spec)?.ci?.provider === 'github-actions'
+      && !ciConfigurationPending
       ? await planGitHubActionsRelease({
         project: projectForPlan,
         environmentName,
@@ -2749,6 +2777,7 @@ export class PlanService {
       scope: 'full',
       environmentName,
       specRevision: specResult.revision,
+      ...(sourceCommitSha ? { sourceCommitSha } : {}),
       observedFingerprint: observed ? fingerprintObservedState(observed) : null,
       ...(dataMigration.pending && sourceEnvironment
         ? { lockEnvironmentIds: [sourceEnvironment.id] }

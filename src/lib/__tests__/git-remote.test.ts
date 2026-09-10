@@ -4,7 +4,18 @@ import {
   normalizeGitRemoteIdentity,
   parseGitHubRepoFromRemote,
   parseRepositoryPathFromRemote,
+  resolveGitHeadCommitSha,
 } from '../git-remote.js';
+
+describe('resolveGitHeadCommitSha', () => {
+  it('returns the full immutable commit for a repository checkout', () => {
+    expect(resolveGitHeadCommitSha(process.cwd())).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it('returns null outside a repository', () => {
+    expect(resolveGitHeadCommitSha('/private/tmp')).toBeNull();
+  });
+});
 
 describe('normalizeGitRemoteIdentity', () => {
   it('matches equivalent URL and SSH remotes without assuming GitHub', () => {

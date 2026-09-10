@@ -16,6 +16,7 @@ import {
   resolveBranchDeployTargets,
   type BranchDeployWorkflow,
 } from './github-ops.service.js';
+import { missingManagedCiReleaseBindings } from './managed-ci-targets.js';
 import {
   IOS_RELEASE_REQUIRED_SECRETS,
   MATCH_SIGNING_REQUIRED_SECRETS,
@@ -127,7 +128,7 @@ export function providerSecretsForGitHubActions(
   options: { githubLogin?: string; githubRepo?: string } = {}
 ): ProviderSecret[] {
   const secrets: ProviderSecret[] = [];
-  const connection = connectionRepo.findBestVerifiedMatch(provider);
+  const connection = connectionRepo.findBestVerifiedMatch(provider, options.githubRepo);
   const ci = providerRegistry.getMetadata(provider)?.orchestration?.ci;
 
   if (connection) {
@@ -268,7 +269,7 @@ export async function planGitHubActionsDeploy(params: {
   dependsOn?: string[];
   /** Service create/replace actions will change provider ids before CI sync runs. */
   bindingsWillChange?: boolean;
-}): Promise<{ action?: PlanAction; warnings: string[] }> {
+}): Promise<{ action?: PlanAction; warnings: string[]; deferred?: boolean; error?: string }> {
   const { project, environmentName, environmentSpec, environment } = params;
   const warnings: string[] = [];
   if (!environmentUsesGitHubActionsDeploy(environmentSpec)) {
@@ -295,6 +296,26 @@ export async function planGitHubActionsDeploy(params: {
   if (!target) {
     warnings.push(`No GitHub Actions deploy target found for environment "${environmentName}".`);
     return { warnings };
+  }
+  const missingReleaseBindings = missingManagedCiReleaseBindings(target);
+  if (
+    environmentSpec.hosting.provider === 'cloudrun'
+    &&
+    params.bindingsWillChange
+    && missingReleaseBindings.length > 0
+    && !missingReleaseBindings.includes('invalid-or-duplicate-binding')
+  ) {
+    warnings.push(
+      `Managed CI workflow for ${environmentName} is deferred until the planned hosting bindings exist. `
+      + 'Apply this plan, then re-run hv_plan so Hypervibe can compile the workflow against the exact provider scope and resource identities.'
+    );
+    return { warnings, deferred: true };
+  }
+  if (missingReleaseBindings.includes('invalid-or-duplicate-binding')) {
+    return {
+      warnings,
+      error: `Managed CI workflow for ${environmentName} cannot be compiled because its current provider bindings are malformed, duplicated, or outside the exact desired service set. Re-run hv_status and repair the hosting bindings before planning CI.`,
+    };
   }
 
   const workflow = buildBranchDeployWorkflow(

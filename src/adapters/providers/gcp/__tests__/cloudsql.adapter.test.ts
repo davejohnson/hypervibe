@@ -280,6 +280,7 @@ describe('CloudSqlAdapter', () => {
   });
 
   it('carries an explicit provision region into every durable Cloud SQL connection identity', async () => {
+    const insecureRandom = vi.spyOn(Math, 'random').mockReturnValue(0);
     const adapter = await connectedAdapter();
     let instanceReads = 0;
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -336,6 +337,7 @@ describe('CloudSqlAdapter', () => {
       connectionName: 'gcp-project:europe-west1:production-postgres',
       providerScope: { projectId: 'gcp-project', region: 'europe-west1' },
     });
+    expect(insecureRandom).not.toHaveBeenCalled();
     expect(instanceReads).toBe(2);
   });
 

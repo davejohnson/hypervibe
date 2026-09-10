@@ -144,14 +144,16 @@ function enumOptions(schema: z.ZodTypeAny): string[] | undefined {
  * clients can fall back to credentialsRef for those providers.
  */
 export function credentialFieldsFromSchema(
-  schema: z.ZodTypeAny
+  schema: z.ZodTypeAny,
+  options: { exclude?: readonly string[] } = {}
 ): CredentialFieldDescriptor[] | undefined {
   const objectSchema = unwrapSchema(schema);
   if (!(objectSchema instanceof z.ZodObject)) {
     return undefined;
   }
 
-  return Object.entries(objectSchema.shape).map(([name, rawField]) => {
+  const excluded = new Set(options.exclude ?? []);
+  return Object.entries(objectSchema.shape).filter(([name]) => !excluded.has(name)).map(([name, rawField]) => {
     const field = rawField as z.ZodTypeAny;
     const unwrapped = unwrapSchema(field);
     const options = enumOptions(unwrapped);

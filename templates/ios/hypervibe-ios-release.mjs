@@ -366,12 +366,18 @@ async function submitBetaReview(config, build) {
 }
 
 export function buildReleaseManifest(config, serverEvidence, app, build, releasedAt) {
+  const resources = serverEvidence?.target?.resources;
+  const services = Array.isArray(resources)
+    ? resources.map((resource) => resource?.logicalName)
+    : [];
   if (
-    serverEvidence?.version !== 2
+    serverEvidence?.version !== 3
     || serverEvidence.environment !== config.environment
-    || serverEvidence.server?.repository !== config.repository
-    || serverEvidence.server?.sha !== config.releaseSha
-    || !Array.isArray(serverEvidence.services)
+    || serverEvidence.source?.repository !== config.repository
+    || serverEvidence.source?.sha !== config.releaseSha
+    || services.length === 0
+    || services.some((service) => typeof service !== "string" || !service)
+    || new Set(services).size !== services.length
   ) {
     throw new Error("Server release evidence no longer matches the gated mobile release");
   }
@@ -382,8 +388,8 @@ export function buildReleaseManifest(config, serverEvidence, app, build, release
       repository: config.repository,
       sha: config.releaseSha,
     },
-    server: serverEvidence.server,
-    services: serverEvidence.services,
+    server: serverEvidence.source,
+    services,
     app: {
       bundleId: config.bundleId,
       appId: app.id,
