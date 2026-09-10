@@ -340,6 +340,37 @@ describe('Redis cache plan contract', () => {
     ]);
   });
 
+  it('matches a legacy flattened cache binding using the exact environment scope', () => {
+    const legacy = component();
+    legacy.bindings = { provider: 'railway', projectId: 'railway-project' };
+    const snapshot = local([legacy]);
+    snapshot.bindings = {
+      provider: 'railway',
+      projectId: 'railway-project',
+      environmentId: 'railway-environment',
+    };
+    const result = planCache({
+      environmentSpec: spec(),
+      observed: observed({
+        caches: [{
+          provider: 'railway',
+          engine: 'redis',
+          externalId: 'redis-1',
+          providerScope: {
+            projectId: 'railway-project',
+            environmentId: 'railway-environment',
+          },
+          status: 'running',
+        }],
+      }),
+      local: snapshot,
+    });
+
+    expect(result.actions).toEqual([
+      expect.objectContaining({ id: 'cache:railway', type: 'noop', verified: true }),
+    ]);
+  });
+
   it('retries exact reconciliation after an acknowledged cache update was not verified', () => {
     const retained = component();
     retained.bindings = { ...retained.bindings, reconciliationIncomplete: true };

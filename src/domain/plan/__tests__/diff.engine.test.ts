@@ -1514,6 +1514,66 @@ describe('diffEnvironment — reconciliation safety', () => {
     expect(result.actions.some((action) => action.resource.kind === 'database' && action.type === 'create')).toBe(false);
   });
 
+  it('matches a legacy flattened database binding using the exact environment scope', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({
+        databases: [{
+          provider: 'railway',
+          engine: 'postgres',
+          externalId: 'db-1',
+          providerScope: { projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
+          status: 'running',
+        }],
+      }),
+      local: local({
+        components: [localComponent({
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          resourceKind: 'service',
+        })],
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'database:railway')).toMatchObject({
+      type: 'noop',
+      verified: true,
+    });
+    expect(result.unmanaged).not.toContainEqual(expect.objectContaining({ kind: 'database' }));
+  });
+
+  it('does not supplement a legacy database binding from a different environment scope', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({
+        databases: [{
+          provider: 'railway',
+          engine: 'postgres',
+          externalId: 'db-1',
+          providerScope: { projectId: 'rail-proj-1', environmentId: 'rail-env-1' },
+          status: 'running',
+        }],
+      }),
+      local: local({
+        components: [localComponent({ provider: 'railway', projectId: 'rail-proj-1' })],
+        bindings: {
+          provider: 'railway',
+          projectId: 'rail-proj-1',
+          environmentId: 'other-environment',
+          services: { web: { serviceId: 'svc-1' } },
+        },
+      }),
+    });
+
+    expect(result.actions.find((action) => action.id === 'database:railway')).toMatchObject({
+      type: 'update',
+      metadata: { blockedReason: 'database_binding_identity_mismatch' },
+    });
+    expect(result.actions.some((action) => action.resource.kind === 'database' && action.type === 'noop')).toBe(false);
+  });
+
   it('resolves the durable service id before reporting same-name extras as unmanaged', () => {
     const duplicate = observedWeb({ externalId: 'svc-duplicate' });
     const result = diffEnvironment({

@@ -9,7 +9,10 @@ import {
   DOMAIN_ADOPT_OPERATION,
   DOMAIN_DETACH_OPERATION,
 } from '../services/domain-attach-policy.js';
-import { bindingIdentityFingerprint } from '../services/binding-identity.js';
+import {
+  bindingIdentityFingerprint,
+  providerIdentityScopeMatches,
+} from '../services/binding-identity.js';
 import { parseUnresolvedDatabaseMutation } from '../ports/database.port.js';
 import { parseHostingServiceCreateRecovery } from '../ports/hosting.port.js';
 
@@ -852,11 +855,6 @@ export function diffEnvironment(input: {
   const localDbExternalId = localDb?.externalId
     ?? (typeof localDbBindings?.instanceId === 'string' ? localDbBindings.instanceId : undefined)
     ?? (typeof localDbBindings?.serviceId === 'string' ? localDbBindings.serviceId : undefined);
-  const localDbScope = localDbBindings?.providerScope
-    && typeof localDbBindings.providerScope === 'object'
-    && !Array.isArray(localDbBindings.providerScope)
-    ? localDbBindings.providerScope as Record<string, unknown>
-    : undefined;
   const destroyProviderScope = (value: unknown): Record<string, string> | null => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const entries = Object.entries(value);
@@ -865,33 +863,16 @@ export function diffEnvironment(input: {
     }
     return Object.fromEntries(entries) as Record<string, string>;
   };
-  const localDbDestroyScope = destroyProviderScope(localDbBindings?.providerScope);
+  const persistedLocalDbDestroyScope = destroyProviderScope(localDbBindings?.providerScope);
   const previousDbDestroyScope = destroyProviderScope(previousDbBindings?.providerScope);
   const databaseMatchesLocalBinding = (database: NonNullable<ObservedState['databases']>[number]): boolean => {
     if (!localDbExternalId || database.externalId !== localDbExternalId) return false;
     if (localDbProvider && database.provider !== localDbProvider) return false;
-    const localScopeEntries = Object.entries(localDbScope ?? {});
-    const liveScopeEntries = Object.entries(database.providerScope ?? {});
-
-    // Scope is part of a durable provider identity. If persisted state knows a
-    // scope, an unscoped or partially scoped observation cannot prove that the
-    // matching bare id belongs to this environment.
-    if (localScopeEntries.length > 0) {
-      if (liveScopeEntries.length !== localScopeEntries.length) return false;
-      return localScopeEntries.every(([key, value]) => (
-        typeof value === 'string'
-        && value.length > 0
-        && database.providerScope?.[key] === value
-      ));
-    }
-    if (liveScopeEntries.length === 0) return true;
-
-    // Scoped provider ids are identities only together with their provider
-    // scope. Read legacy flattened scope fields when present, but never accept
-    // an unscoped id as proof that a scoped live datastore is the same one.
-    return liveScopeEntries.every(([key, value]) => {
-      const localValue = localDbScope?.[key] ?? localDbBindings?.[key];
-      return typeof localValue === 'string' && localValue === value;
+    return providerIdentityScopeMatches({
+      componentBindings: localDbBindings,
+      environmentBindings: local.bindings as Record<string, unknown> | undefined,
+      provider: localDbProvider,
+      liveScope: database.providerScope,
     });
   };
   const boundObservedDatabases = localDb
@@ -902,6 +883,10 @@ export function diffEnvironment(input: {
     : !localDb && observedDatabases.length === 1
       ? observedDatabases[0]
       : undefined;
+  // Once a legacy identity has been proven against a complete live
+  // observation, retain that exact scope for safe cleanup planning too.
+  const localDbDestroyScope = destroyProviderScope(observedDb?.providerScope)
+    ?? persistedLocalDbDestroyScope;
   const databaseAmbiguous = boundObservedDatabases.length > 1
     || (!observedDb && observedDatabases.length > 1);
   const databaseIdentityMismatch = Boolean(
