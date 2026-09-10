@@ -390,7 +390,25 @@ describe('Railway exact service-instance inspection', () => {
         id: 'instance-1',
         serviceId: 'railway-db-service',
         environmentId: 'railway-production',
+        deletedAt: null,
         source: { image: 17 },
+      },
+    }],
+    ['missing deletion marker', {
+      serviceInstance: {
+        id: 'instance-1',
+        serviceId: 'railway-db-service',
+        environmentId: 'railway-production',
+        source: { image: 'postgres:17' },
+      },
+    }],
+    ['malformed deletion marker', {
+      serviceInstance: {
+        id: 'instance-1',
+        serviceId: 'railway-db-service',
+        environmentId: 'railway-production',
+        deletedAt: 'not-a-timestamp',
+        source: { image: 'postgres:17' },
       },
     }],
   ])('treats %s as unknown rather than absence', async (_label, response) => {
@@ -411,6 +429,7 @@ describe('Railway exact service-instance inspection', () => {
         id: 'instance-1',
         serviceId: 'railway-db-service',
         environmentId: 'railway-production',
+        deletedAt: null,
         source: { image: 'postgres:17' },
       },
     }));

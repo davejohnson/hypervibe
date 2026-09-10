@@ -9,6 +9,7 @@ function serviceEnvironmentInstance(serviceId: string, environmentId: string) {
       id: `instance-${serviceId}-${environmentId}`,
       serviceId,
       environmentId,
+      deletedAt: null,
     },
   };
 }

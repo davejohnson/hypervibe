@@ -47,6 +47,7 @@ function fakeClient(overrides: Record<string, (variables: Record<string, unknown
             id: `instance-${String(variables.serviceId)}`,
             serviceId: variables.serviceId,
             environmentId: variables.environmentId,
+            deletedAt: null,
           },
     }),
     GetServiceInstanceInventory: (variables) => ({
