@@ -22,7 +22,7 @@ import { PlanService } from '../plan.service.js';
 
 const FRIEND_KEY = 'sk-ant-api03-plan-secret';
 
-function observed(): ObservedState {
+function observed(serviceOverrides: Partial<ObservedState['services'][number]> = {}): ObservedState {
   return {
     provider: 'railway',
     observedAt: new Date().toISOString(),
@@ -39,6 +39,7 @@ function observed(): ObservedState {
       envVarKeys: [],
       envVarHashes: {},
       status: 'running',
+      ...serviceOverrides,
     }],
     databases: [{
       provider: 'railway',
@@ -198,7 +199,7 @@ describe('PlanService delegated secret inputs', () => {
     });
   });
 
-  it('injects the resolved value at apply and records only its accepted hash', async () => {
+  it('injects the resolved value to recover a failed service and records only its accepted hash', async () => {
     process.env.FRIEND_ANTHROPIC_API_KEY = FRIEND_KEY;
     const connection = new ConnectionRepository().create({
       provider: 'railway',
@@ -233,7 +234,7 @@ describe('PlanService delegated secret inputs', () => {
         message: 'exists',
         data: { projectId: 'rail-project', environmentId: 'rail-environment' },
       }),
-      observe: vi.fn().mockResolvedValue(observed()),
+      observe: vi.fn().mockResolvedValue(observed({ status: 'failed' })),
       setEnvVars,
       deploy,
     };
@@ -251,6 +252,12 @@ describe('PlanService delegated secret inputs', () => {
     });
     expect(planned).not.toHaveProperty('error');
     const plan = planned as Exclude<typeof planned, { error: string }>;
+    expect(plan.actions.find((action) => action.id === 'service:web')).toMatchObject({
+      type: 'update',
+      metadata: { observedStatus: 'failed' },
+    });
+    expect(plan.actions.find((action) => action.id === 'service:web')?.metadata)
+      .not.toHaveProperty('blockedReason');
     const currentSpec = new SpecStore().get(project)!;
     const outcome = await executePlanApply(createToolContext(), {
       project,

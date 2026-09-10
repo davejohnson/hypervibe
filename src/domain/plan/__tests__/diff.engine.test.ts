@@ -1363,11 +1363,11 @@ describe('diffEnvironment — reconciliation safety', () => {
       .toContain('database:railway');
   });
 
-  it.each(['failed', 'unknown'] as const)('does not report a %s service as in sync', (status) => {
+  it('re-converges an exactly bound failed service instead of blocking its repair', () => {
     const result = diffEnvironment({
       spec: spec(),
       envName: 'production',
-      observed: observed({ services: [observedWeb({ status })] }),
+      observed: observed({ services: [observedWeb({ status: 'failed' })] }),
       local: local(),
     });
 
@@ -1375,8 +1375,31 @@ describe('diffEnvironment — reconciliation safety', () => {
       type: 'update',
       verified: true,
       metadata: {
-        blockedReason: `service_status_${status}`,
-        observedStatus: status,
+        observedStatus: 'failed',
+        externalId: 'svc-1',
+      },
+    });
+    expect(result.actions.find((action) => action.id === 'service:web')?.metadata)
+      .not.toHaveProperty('blockedReason');
+    expect(result.warnings).toContainEqual(expect.stringContaining(
+      're-converge the exact bound service configuration'
+    ));
+  });
+
+  it('keeps an unknown service status blocked', () => {
+    const result = diffEnvironment({
+      spec: spec(),
+      envName: 'production',
+      observed: observed({ services: [observedWeb({ status: 'unknown' })] }),
+      local: local(),
+    });
+
+    expect(result.actions.find((action) => action.id === 'service:web')).toMatchObject({
+      type: 'update',
+      verified: true,
+      metadata: {
+        blockedReason: 'service_status_unknown',
+        observedStatus: 'unknown',
       },
     });
   });
