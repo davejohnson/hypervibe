@@ -456,23 +456,30 @@ export function diffEnvironment(input: {
         continue;
       }
 
-      if (live.status === 'failed' || live.status === 'unknown') {
+      if (live.status === 'unknown') {
         actions.push({
           id,
           type: 'update',
           resource,
           verified: true,
-          reason: `Service "${name}" live status is ${live.status}; refusing to report configuration convergence`,
+          reason: `Service "${name}" live status is unknown; refusing to report configuration convergence`,
           metadata: {
-            blockedReason: `service_status_${live.status}`,
+            blockedReason: 'service_status_unknown',
             observedStatus: live.status,
             externalId: live.externalId,
           },
         });
         warnings.push(
-          `Service "${name}" is ${live.status}; diagnose its deployment before applying further service mutations.`
+          `Service "${name}" status is unknown; diagnose its deployment before applying further service mutations.`
         );
         continue;
+      }
+
+      const failedDeployment = live.status === 'failed';
+      if (failedDeployment) {
+        warnings.push(
+          `Service "${name}" failed; Hypervibe will re-converge the exact bound service configuration, but runtime health remains failed until a later deployment succeeds.`
+        );
       }
 
       // Only cron-ness is structural for providers that model scheduled jobs
@@ -534,8 +541,11 @@ export function diffEnvironment(input: {
       const sourceIssue = spec.deploy?.strategy === 'branch' && expectedSource
         ? diffDeploySource(expectedSource, live)
         : undefined;
-      if (noCode || sourceIssue || diff.length > 0) {
+      if (failedDeployment || noCode || sourceIssue || diff.length > 0) {
         const reasons: string[] = [];
+        if (failedDeployment) {
+          reasons.push(`Service "${name}" latest deployment failed; re-converge its reviewed configuration before retrying deployment`);
+        }
         if (noCode) {
           reasons.push(spec.deploy?.strategy === 'branch'
             ? `Service "${name}" has no image deployed yet — expected until the first CI deploy succeeds (push to the deploy branch or hv_ci_trigger)`
@@ -554,6 +564,9 @@ export function diffEnvironment(input: {
           verified: !runtimeDrift,
           reason: reasons.join('; '),
           ...(diff.length > 0 ? { diff } : {}),
+          ...(failedDeployment
+            ? { metadata: { observedStatus: live.status, externalId: live.externalId } }
+            : {}),
         });
       } else {
         actions.push({ id, type: 'noop', resource, verified: true, reason: 'In sync' });
