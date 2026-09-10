@@ -54,7 +54,7 @@ describe('github tools', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('generates a shared Railway image for distinct web, worker and cron commands', () => {
+  it('generates a shared Railway image for distinct web, worker and cron commands', async () => {
     const project = new ProjectRepository().create({ name: 'multi-service', defaultPlatform: 'railway' });
     const spec = projectSpecSchema.parse({
       version: 1,
@@ -72,8 +72,34 @@ describe('github tools', () => {
         },
       },
     });
+    new EnvironmentRepository().create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'railway', projectId: 'rail-project', environmentId: 'rail-staging',
+        services: {
+          web: { serviceId: 'rail-web', workloadKind: 'web' },
+          worker: { serviceId: 'rail-worker', workloadKind: 'worker' },
+          cron: { serviceId: 'rail-cron', workloadKind: 'cron' },
+        },
+      },
+    });
     const { targets, migration } = resolveReviewedBranchDeployTargets(project, spec);
+    expect(targets[0]!.releaseTarget!.resources).toContainEqual({
+      logicalName: 'cron', workloadKind: 'cron', providerResourceType: 'service', providerResourceId: 'rail-cron',
+    });
     const workflow = buildBranchDeployWorkflow('railway', targets[0]!, migration);
+    const validationStep = workflow.content.split('      - name: Verify reviewed release target\n')[1]!
+      .split('        with:')[0]!;
+    const releaseEnv = Object.fromEntries([...validationStep.matchAll(/^          (HYPERVIBE_\w+): (.+)$/gm)]
+      .map(([, key, value]) => [key!, value!.startsWith('"') ? JSON.parse(value!) : value!]));
+    const validate = new AsyncFunction('require', 'process', extractGitHubScript(workflow.content, 'Verify reviewed release target'));
+    await expect(validate(() => ({ createHash }), { env: releaseEnv })).resolves.toBeUndefined();
+    const incomplete = { ...releaseEnv, HYPERVIBE_RELEASE_RESOURCES: JSON.stringify(
+      targets[0]!.releaseTarget!.resources.filter((resource) => resource.logicalName !== 'cron')
+    ) };
+    await expect(validate(() => ({ createHash }), { env: incomplete })).rejects.toThrow('exact desired service set');
+
     expect(workflow.content).toContain('FROM node:24-slim');
     expect(workflow.content).toContain('CMD ["sh", "-lc", "npm start"]');
     expect(workflow.content).not.toContain('requires an explicit service startCommand');
