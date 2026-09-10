@@ -3,7 +3,7 @@ import path from 'path';
 import { z } from 'zod';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
-import { findRepoRoot, repoSpecEnabled } from './repo-spec-file.js';
+import { findRepoRoot, readRepoSpecFile, repositoryMatchesProjectIdentity, repoSpecEnabled } from './repo-spec-file.js';
 import { withStorageInstanceScopes } from '../services/storage-instance-identity.js';
 import { primaryWorkspaceDirectory } from '../../lib/workspace-context.js';
 
@@ -195,6 +195,14 @@ export function writeRepoBindingsForEnvironment(project: Project, environment: E
   }
   const root = findRepoRoot(startDir);
   if (!root) {
+    return null;
+  }
+
+  const spec = readRepoSpecFile(root)?.spec;
+  if (spec && spec.project !== project.name) return null;
+  const expectedRemote = project.gitRemoteUrl ?? spec?.gitRemoteUrl;
+  if ((!spec || expectedRemote)
+    && !repositoryMatchesProjectIdentity(root, project.name, expectedRemote)) {
     return null;
   }
 

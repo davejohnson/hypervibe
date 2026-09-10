@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { execFileSync } from 'node:child_process';
 import os from 'os';
 import path from 'path';
 import type { Environment } from '../../entities/environment.entity.js';
@@ -11,6 +12,58 @@ import {
 } from '../repo-bindings-file.js';
 
 describe('repo bindings delegated metadata', () => {
+  it.each([
+    ['unrelated remote', 'https://github.com/other/app.git', undefined, false],
+    ['missing remote', undefined, undefined, false],
+    ['matching normalized remote', 'git@github.com:owner/app.git', undefined, true],
+    ['matching spec with wrong remote', 'https://github.com/other/app.git', 'app', false],
+    ['matching spec without readable remote', undefined, 'app', false],
+    ['different spec with matching remote', 'https://github.com/owner/app.git', 'other', false],
+  ])('checks checkout ownership before creating or deleting bindings: %s', (_label, remote, specProject, permitted) => {
+    const parent = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-bindings-identity-'));
+    // Matching basenames must never override a known repository remote.
+    const root = path.join(parent, 'app');
+    execFileSync('git', ['init', '-q', root]);
+    if (remote) execFileSync('git', ['-C', root, 'remote', 'add', 'origin', remote]);
+    const dir = path.join(root, '.hypervibe');
+    if (specProject) {
+      mkdirSync(dir);
+      writeFileSync(path.join(dir, 'spec.json'), JSON.stringify({
+        version: 1, project: specProject, environments: {},
+      }));
+    }
+    const now = new Date();
+    const project: Project = {
+      id: 'project', name: 'app', gitRemoteUrl: 'https://github.com/owner/app.git',
+      defaultPlatform: 'railway', policies: {}, createdAt: now, updatedAt: now,
+    };
+    const environment: Environment = {
+      id: 'environment', projectId: project.id, name: 'production',
+      platformBindings: { provider: 'railway', projectId: 'bound-project' },
+      createdAt: now, updatedAt: now,
+    };
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const file = path.join(dir, 'bindings.json');
+      expect(writeRepoBindingsForEnvironment(project, environment, root)).toBe(permitted ? file : null);
+      expect(existsSync(file)).toBe(permitted);
+      mkdirSync(dir, { recursive: true });
+      const original = JSON.stringify({
+        version: 1, project: project.name,
+        environments: { production: { platformBindings: environment.platformBindings } },
+      });
+      writeFileSync(file, original);
+      expect(writeRepoBindingsForEnvironment(project, { ...environment, platformBindings: {} }, root)).toBeNull();
+      expect(existsSync(file)).toBe(!permitted);
+      if (!permitted) expect(readFileSync(file, 'utf8')).toBe(original);
+    } finally {
+      if (oldDisable === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it('distinguishes a missing bindings file from corrupt or cross-project state', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-bindings-read-safety-'));
     mkdirSync(path.join(root, '.git'));
@@ -69,6 +122,11 @@ describe('repo bindings delegated metadata', () => {
       createdAt: now,
       updatedAt: now,
     };
+
+    mkdirSync(path.join(root, '.hypervibe'), { recursive: true });
+    writeFileSync(path.join(root, '.hypervibe', 'spec.json'), JSON.stringify({
+      version: 1, project: project.name, environments: {},
+    }));
 
     try {
       process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
@@ -198,6 +256,11 @@ describe('repo bindings delegated metadata', () => {
       updatedAt: now,
     };
 
+    mkdirSync(path.join(root, '.hypervibe'), { recursive: true });
+    writeFileSync(path.join(root, '.hypervibe', 'spec.json'), JSON.stringify({
+      version: 1, project: project.name, environments: {},
+    }));
+
     try {
       process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
       const file = writeRepoBindingsForEnvironment(project, environment, root);
@@ -267,6 +330,11 @@ describe('repo bindings delegated metadata', () => {
       createdAt: now,
       updatedAt: now,
     };
+
+    mkdirSync(path.join(root, '.hypervibe'), { recursive: true });
+    writeFileSync(path.join(root, '.hypervibe', 'spec.json'), JSON.stringify({
+      version: 1, project: project.name, environments: {},
+    }));
 
     try {
       process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';

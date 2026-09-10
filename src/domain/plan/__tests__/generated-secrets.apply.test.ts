@@ -9,7 +9,7 @@ import { EnvironmentRepository } from '../../../adapters/db/repositories/environ
 import { ServiceRepository } from '../../../adapters/db/repositories/service.repository.js';
 import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
-import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import { getSecretStore, SecretStore } from '../../../adapters/secrets/secret-store.js';
 import type { Environment } from '../../entities/environment.entity.js';
 import type { Service } from '../../entities/service.entity.js';
 import type { ObservedState } from '../../ports/observe.port.js';
@@ -260,6 +260,29 @@ describe('generated secret plan/apply integration', () => {
       .slice(fromIndex)
       .filter(([, , vars]) => typeof vars[SECRET_KEY] === 'string');
   }
+
+  it('preserves pre-immutable generated-secret provenance after reopening the installation', async () => {
+    const { setEnvVars } = installAdapter();
+    const initial = await plan();
+    expect(await apply(initial.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
+    const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
+    const accepted = parseDelegatedSecretBindings(environment);
+    expect(accepted).toHaveLength(1);
+    // This is the persisted 0.1.24 shape, before immutable-policy metadata.
+    expect(accepted[0]).not.toHaveProperty('replacementPolicy');
+    expect(accepted[0]).not.toHaveProperty('conflictsWith');
+    const expected = deriveHypervibeSecretValues(new SpecStore().get(project)!.spec, 'production');
+    SqliteAdapter.resetInstance();
+    SecretStore.resetInstance();
+    initializeDatabase(path.join(tempDir, 'hypervibe.db'));
+    expect(parseDelegatedSecretBindings(new EnvironmentRepository().findById(environment.id)!)).toEqual(accepted);
+    expect(deriveHypervibeSecretValues(new SpecStore().get(project)!.spec, 'production')).toEqual(expected);
+    setEnvVars.mockClear();
+    const reopened = await plan();
+    expect(reopened.actions.find((action) => action.id === `secret:${SECRET_KEY}`)).toMatchObject({ type: 'noop' });
+    expect(await apply(reopened.planRunId)).toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(setEnvVars).not.toHaveBeenCalled();
+  });
 
   it('installs one generated value on every service and persists only accepted provenance', async () => {
     const { setEnvVars } = installAdapter();
@@ -838,6 +861,7 @@ describe('generated secret plan/apply integration', () => {
     const bindingsFile = path.join(hypervibeDir, 'bindings.json');
     fs.mkdirSync(path.join(repoDir, '.git'), { recursive: true });
     fs.mkdirSync(hypervibeDir, { recursive: true });
+    fs.writeFileSync(path.join(hypervibeDir, 'spec.json'), JSON.stringify(new SpecStore().get(project)!.spec));
     const oldDisableRepoSpec = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
     process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
 

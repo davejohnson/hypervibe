@@ -45,16 +45,18 @@ describe('spec bootstrap env vars', () => {
     });
   });
 
-  it('does not give service bootstrap authority to provision a declared database', () => {
+  it('does not give service bootstrap authority over a declared database or domain', () => {
     const params = specToBootstrapParams('database-app', 'staging', {
       hosting: { provider: 'railway' },
       services: { web: { workloadKind: 'web' } },
       database: { provider: 'railway', engine: 'postgres' },
+      domain: 'app.example.com',
       email: { enabled: false },
       envVars: {},
     });
 
     expect(params).not.toHaveProperty('databaseProvider');
+    expect(params).not.toHaveProperty('domain');
   });
 
   it('merges deploy env files below spec envVars and explicit overrides above both', () => {
@@ -104,7 +106,6 @@ describe('service action bootstrap authority', () => {
         worker: { workloadKind: 'worker' },
         cleanup: { workloadKind: 'cron', cronSchedule: '0 * * * *' },
       },
-      domain: 'example.com',
       envVarsByService: {
         web: { BUCKET: 'web' },
         worker: { BUCKET: 'worker' },
@@ -117,7 +118,7 @@ describe('service action bootstrap authority', () => {
       serviceConfig: { worker: { workloadKind: 'worker' } },
       envVarsByService: { worker: { BUCKET: 'worker' } },
     });
-    expect(scoped.domain).toBeUndefined();
+    expect(scoped).not.toHaveProperty('domain');
     expect(scoped.crons).toBeUndefined();
   });
 });
