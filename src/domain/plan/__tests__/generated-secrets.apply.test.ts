@@ -924,7 +924,10 @@ describe('generated secret plan/apply integration', () => {
         const exported = JSON.parse(fs.readFileSync(bindingsFile, 'utf8')) as {
           environments: Record<string, { platformBindings: Record<string, unknown> }>;
         };
-        expect(exported.environments.production.platformBindings.delegatedEnvBindings).toEqual([
+        expect(exported.environments.production.platformBindings.delegatedEnvBindings).toBeUndefined();
+        expect(parseDelegatedSecretBindings(
+          new EnvironmentRepository().findByProjectAndName(project.id, 'production')!
+        )).toEqual([
           expect.objectContaining({ name: SECRET_KEY, source: 'hypervibe-generated' }),
         ]);
       });

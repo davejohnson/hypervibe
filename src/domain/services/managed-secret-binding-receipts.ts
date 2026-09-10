@@ -17,11 +17,11 @@ function nonEmptyString(record: Record<string, unknown>, key: string): string | 
 }
 
 /**
- * A repository-exported binding can legitimately name an apply run that does
- * not exist on this machine. When the run does exist locally, however, its
- * exact action receipt is the acceptance boundary. SQLite is written before
- * the sanitized repository export, so a failed export can leave provisional
- * binding metadata behind even though the action itself failed.
+ * Managed-secret bindings are local-only because their accepted-value hashes
+ * are secret verifiers. When the named run exists locally, its exact action
+ * receipt is the acceptance boundary. SQLite is written before the sanitized
+ * repository export, so a failed export can leave provisional binding metadata
+ * behind even though the action itself failed.
  */
 export function withReceiptValidatedManagedSecretBindings<
   T extends Pick<Environment, 'id' | 'projectId' | 'platformBindings'>,

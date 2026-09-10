@@ -154,6 +154,14 @@ describe('repo bindings delegated metadata', () => {
         openAIActionsSecretName: 'OPENAI_API_KEY',
         openAIActionsSecretHash: 'local-hash',
         openAIActionsSecretSyncedAt: '2026-08-20T00:00:00.000Z',
+        delegatedActionsBindings: [{
+          name: 'DEPLOY_PIN',
+          target: 'repository',
+          principal: 'github:alice',
+          valueHash: 'local-delegated-hash',
+          actionId: 'secret:github:repository:DEPLOY_PIN',
+          syncedAt: '2026-08-20T00:00:00.000Z',
+        }],
       },
       localOnlyProvider: { resourceId: 'preserved-top-level' },
     }, {
@@ -166,6 +174,14 @@ describe('repo bindings delegated metadata', () => {
         openAIActionsSecretName: 'OPENAI_API_KEY',
         openAIActionsSecretHash: 'local-hash',
         openAIActionsSecretSyncedAt: '2026-08-20T00:00:00.000Z',
+        delegatedActionsBindings: [{
+          name: 'DEPLOY_PIN',
+          target: 'repository',
+          principal: 'github:alice',
+          valueHash: 'local-delegated-hash',
+          actionId: 'secret:github:repository:DEPLOY_PIN',
+          syncedAt: '2026-08-20T00:00:00.000Z',
+        }],
       },
       localOnlyProvider: { resourceId: 'preserved-top-level' },
     });
@@ -201,7 +217,7 @@ describe('repo bindings delegated metadata', () => {
     });
   });
 
-  it('persists accepted hashes and principals without persisting secret values', () => {
+  it('keeps delegated secret verifiers in local state instead of the repository export', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-delegated-bindings-'));
     mkdirSync(path.join(root, '.git'));
     const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
@@ -221,6 +237,17 @@ describe('repo bindings delegated metadata', () => {
       platformBindings: {
         provider: 'railway',
         apiToken: 'must-never-be-written',
+        github: {
+          repositoryId: 'github-repository',
+          delegatedActionsBindings: [{
+            name: 'DEPLOY_PIN',
+            target: 'repository',
+            principal: 'github:alice',
+            valueHash: 'github-verifier-must-stay-local',
+            actionId: 'secret:github:repository:DEPLOY_PIN',
+            syncedAt: now.toISOString(),
+          }],
+        },
         storageProviders: {
           railway: { projectId: 'railway-project', environmentId: 'railway-production' },
         },
@@ -234,13 +261,13 @@ describe('repo bindings delegated metadata', () => {
           },
         },
         delegatedEnvBindings: [{
-          name: 'ANTHROPIC_API_KEY',
+          name: 'DEFAULT_DOOR_CODE',
           principal: 'github:alice',
-          valueHash: 'sha256-only',
+          valueHash: 'runtime-verifier-must-stay-local',
           source: 'delegated-plan-input',
           syncedAt: now.toISOString(),
           applyRunId: 'apply-1',
-          actionId: 'secret:ANTHROPIC_API_KEY',
+          actionId: 'secret:DEFAULT_DOOR_CODE',
         }],
         runtimeRollouts: [{
           service: 'worker',
@@ -249,7 +276,7 @@ describe('repo bindings delegated metadata', () => {
           baselineDeployment: { state: 'present', id: 'deployment-before-config' },
           requiredAt: now.toISOString(),
           applyRunId: 'apply-1',
-          actionIds: ['secret:ANTHROPIC_API_KEY'],
+          actionIds: ['secret:DEFAULT_DOOR_CODE'],
         }],
       },
       createdAt: now,
@@ -269,26 +296,24 @@ describe('repo bindings delegated metadata', () => {
       const document = JSON.parse(serialized);
 
       expect(serialized).not.toContain('must-never-be-written');
+      expect(serialized).not.toContain('runtime-verifier-must-stay-local');
+      expect(serialized).not.toContain('github-verifier-must-stay-local');
       expect(document.environments.production.platformBindings.apiToken).toBeUndefined();
+      expect(document.environments.production.platformBindings.github).toEqual({
+        repositoryId: 'github-repository',
+      });
       expect(document.environments.production.platformBindings.storage.documents).toMatchObject({
         provider: 'railway',
         externalId: 'bucket-documents',
         instanceScope: { projectId: 'railway-project', environmentId: 'railway-production' },
       });
-      expect(document.environments.production.platformBindings.delegatedEnvBindings).toEqual([
-        expect.objectContaining({
-          name: 'ANTHROPIC_API_KEY',
-          principal: 'github:alice',
-          valueHash: 'sha256-only',
-          applyRunId: 'apply-1',
-        }),
-      ]);
+      expect(document.environments.production.platformBindings.delegatedEnvBindings).toBeUndefined();
       expect(document.environments.production.platformBindings.runtimeRollouts).toEqual([
         expect.objectContaining({
           service: 'worker',
           provider: 'railway',
           baselineDeployment: { state: 'present', id: 'deployment-before-config' },
-          actionIds: ['secret:ANTHROPIC_API_KEY'],
+          actionIds: ['secret:DEFAULT_DOOR_CODE'],
         }),
       ]);
     } finally {
@@ -297,6 +322,44 @@ describe('repo bindings delegated metadata', () => {
       } else {
         process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
       }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores delegated secret verifiers from legacy repository bindings', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'hypervibe-legacy-secret-bindings-'));
+    mkdirSync(path.join(root, '.git'));
+    mkdirSync(path.join(root, '.hypervibe'));
+    const file = path.join(root, '.hypervibe', 'bindings.json');
+    const oldDisable = process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      project: 'safe-app',
+      environments: {
+        production: {
+          platformBindings: {
+            provider: 'railway',
+            delegatedEnvBindings: [{ valueHash: 'legacy-runtime-verifier' }],
+            github: {
+              repositoryId: 'github-repository',
+              delegatedActionsBindings: [{ valueHash: 'legacy-actions-verifier' }],
+            },
+          },
+        },
+      },
+    }), 'utf8');
+
+    try {
+      process.env.HYPERVIBE_DISABLE_REPO_SPEC = '0';
+      const document = readRepoBindingsFile('safe-app', root)?.document;
+      expect(document?.environments.production.platformBindings).toEqual({
+        provider: 'railway',
+        github: { repositoryId: 'github-repository' },
+      });
+    } finally {
+      if (oldDisable === undefined) delete process.env.HYPERVIBE_DISABLE_REPO_SPEC;
+      else process.env.HYPERVIBE_DISABLE_REPO_SPEC = oldDisable;
       rmSync(root, { recursive: true, force: true });
     }
   });

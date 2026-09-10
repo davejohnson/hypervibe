@@ -25,6 +25,10 @@ export interface RepoBindingsFile {
 const HYPERVIBE_DIR = '.hypervibe';
 const BINDINGS_FILE = 'bindings.json';
 const SENSITIVE_KEY_PATTERN = /(^|_)?(secret|token|password|connectionstring|connectionurl|databaseurl|databaseprivateurl|privateurl|privatekey|apikey)($|_)?/i;
+const LOCAL_ONLY_BINDING_KEYS = new Set([
+  'delegatedEnvBindings',
+  'delegatedActionsBindings',
+]);
 const repoBindingsFileSchema = z.object({
   version: z.literal(1),
   project: z.string().trim().min(1),
@@ -44,6 +48,11 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function repoOmittedBindingKey(key: string): boolean {
+  return LOCAL_ONLY_BINDING_KEYS.has(key)
+    || SENSITIVE_KEY_PATTERN.test(key.replace(/[^a-z0-9]/gi, ''));
+}
+
 function mergeSanitizedBindingObject(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
@@ -51,7 +60,7 @@ function mergeSanitizedBindingObject(
   const merged: Record<string, unknown> = { ...repoBindings };
   for (const [key, existingValue] of Object.entries(existing)) {
     if (!(key in repoBindings)) {
-      if (SENSITIVE_KEY_PATTERN.test(key.replace(/[^a-z0-9]/gi, ''))) {
+      if (repoOmittedBindingKey(key)) {
         merged[key] = existingValue;
       }
       continue;
@@ -97,7 +106,7 @@ function sanitize(value: unknown): unknown {
 
   const sanitized: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(record)) {
-    if (SENSITIVE_KEY_PATTERN.test(key.replace(/[^a-z0-9]/gi, ''))) {
+    if (repoOmittedBindingKey(key)) {
       continue;
     }
     const sanitizedChild = sanitize(child);
