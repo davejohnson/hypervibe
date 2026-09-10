@@ -61,6 +61,29 @@ describe('public release configuration', () => {
     expect(releaseScript).toContain("const releaseWorkflow = 'release.yml';");
   });
 
+  it('supports an explicit npm-only release without starting macOS publication', () => {
+    const workflow = readFileSync(
+      new URL('../../.github/workflows/release.yml', import.meta.url),
+      'utf8'
+    );
+    const releaseScript = readFileSync(
+      new URL('../../scripts/release.mjs', import.meta.url),
+      'utf8'
+    );
+
+    expect(releaseScript).toContain("'--npm-only'");
+    expect(releaseScript).toContain("`Release-Mode: ${releaseMode}`");
+    expect(workflow).toContain('git cat-file tag "$GITHUB_REF_NAME"');
+    expect(workflow).toContain("grep -Fxq 'Release-Mode: npm-only'");
+    expect(workflow).toContain(
+      "if: ${{ needs['release-mode'].outputs.npm_only != 'true' }}"
+    );
+    expect(workflow).toContain("needs['release-mode'].outputs.npm_only != 'true'");
+    expect(workflow).toContain(
+      "needs['build-macos'].result == 'skipped' && needs['release-mode'].outputs.npm_only == 'true'"
+    );
+  });
+
   it('does not declare or bind a long-lived npm publishing token', () => {
     const spec = JSON.parse(
       readFileSync(new URL('../../.hypervibe/spec.json', import.meta.url), 'utf8')

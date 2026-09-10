@@ -16,16 +16,18 @@ function usage() {
   console.log(`Usage: npm run release -- [patch|minor|major|X.Y.Z] [options]
 
 Build, validate, commit, tag, and publish a Hypervibe release from main.
-The tag publishes the npm package plus Apple Silicon and Intel DMGs.
+The default mode publishes the npm package plus Apple Silicon and Intel DMGs.
 
 Options:
   --dry-run   Validate git state and print the release plan without changing files
+  --npm-only  Publish the npm package without macOS installers or a GitHub release
   --no-wait   Push the release without waiting for the GitHub publish workflow
   --help      Show this help
 
 Examples:
   npm run release -- patch
   npm run release -- 0.2.0
+  npm run release -- patch --npm-only
   npm run release -- minor --dry-run`);
 }
 
@@ -134,7 +136,7 @@ async function main() {
     return;
   }
 
-  const knownFlags = new Set(['--dry-run', '--no-wait']);
+  const knownFlags = new Set(['--dry-run', '--npm-only', '--no-wait']);
   const unknownFlags = rawArgs.filter((arg) => arg.startsWith('--') && !knownFlags.has(arg));
   if (unknownFlags.length > 0) {
     throw new Error(`Unknown option: ${unknownFlags.join(', ')}`);
@@ -147,6 +149,7 @@ async function main() {
 
   const requestedVersion = requestedVersions[0] ?? 'patch';
   const dryRun = rawArgs.includes('--dry-run');
+  const npmOnly = rawArgs.includes('--npm-only');
   const waitForWorkflow = !rawArgs.includes('--no-wait');
 
   run('git', ['--version'], { capture: true });
@@ -178,6 +181,7 @@ async function main() {
   const currentVersion = packageJson.version;
   const nextVersion = resolveNextVersion(currentVersion, requestedVersion);
   const tag = `v${nextVersion}`;
+  const releaseMode = npmOnly ? 'npm-only' : 'full';
   const existingTag = run('git', ['show-ref', '--verify', '--quiet', `refs/tags/${tag}`], {
     capture: true,
     allowFailure: true,
@@ -186,7 +190,12 @@ async function main() {
     throw new Error(`Tag ${tag} already exists.`);
   }
 
-  console.log(`\nHypervibe release plan\n  version: ${currentVersion} -> ${nextVersion}\n  tag:     ${tag}\n`);
+  console.log(
+    `\nHypervibe release plan\n` +
+    `  version: ${currentVersion} -> ${nextVersion}\n` +
+    `  tag:     ${tag}\n` +
+    `  mode:    ${releaseMode}\n`
+  );
   if (dryRun) {
     console.log('Dry run complete; no files, commits, tags, or remote refs were changed.');
     return;
@@ -216,9 +225,16 @@ async function main() {
 
     run('git', ['add', '--', 'package.json', 'package-lock.json']);
     run('git', ['diff', '--cached', '--check']);
-    run('git', ['commit', '-m', `Release Hypervibe ${nextVersion}`]);
+    const commitMessage = npmOnly
+      ? `Release Hypervibe ${nextVersion} (npm only)`
+      : `Release Hypervibe ${nextVersion}`;
+    run('git', ['commit', '-m', commitMessage]);
     releaseCommitted = output('git', ['rev-parse', 'HEAD']) !== startingHead;
-    run('git', ['tag', '-a', tag, '-m', `Hypervibe ${nextVersion}`]);
+    run('git', [
+      'tag', '-a', tag,
+      '-m', `Hypervibe ${nextVersion}`,
+      '-m', `Release-Mode: ${releaseMode}`,
+    ]);
   } catch (error) {
     if (!releaseCommitted && output('git', ['rev-parse', 'HEAD']) === startingHead) {
       run('git', ['restore', '--staged', '--', 'package.json', 'package-lock.json'], { allowFailure: true });

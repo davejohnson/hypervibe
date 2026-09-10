@@ -12,6 +12,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-mode:
+    name: Resolve release mode
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      npm_only: ${{ steps.mode.outputs.npm_only }}
+
+    steps:
+      - name: Checkout repository and tag metadata
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Read release mode from the annotated tag
+        id: mode
+        shell: bash
+        run: |
+          tag_message="$(git cat-file tag "$GITHUB_REF_NAME")"
+          if grep -Fxq 'Release-Mode: npm-only' <<<"$tag_message"; then
+            echo 'npm_only=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'npm_only=false' >> "$GITHUB_OUTPUT"
+          fi
+
   validate-package:
     name: Validate npm package
     runs-on: ubuntu-latest
@@ -53,6 +78,8 @@ jobs:
 
   build-macos:
     name: Build macOS (${{ matrix.arch }})
+    needs: release-mode
+    if: ${{ needs['release-mode'].outputs.npm_only != 'true' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -139,7 +166,17 @@ jobs:
 
   publish-package:
     name: Publish public npm package
-    needs: [validate-package, build-macos]
+    needs: [release-mode, validate-package, build-macos]
+    if: >-
+      ${{
+        always() &&
+        needs['release-mode'].result == 'success' &&
+        needs['validate-package'].result == 'success' &&
+        (
+          needs['build-macos'].result == 'success' ||
+          (needs['build-macos'].result == 'skipped' && needs['release-mode'].outputs.npm_only == 'true')
+        )
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -174,7 +211,14 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [publish-package, build-macos]
+    needs: [release-mode, publish-package, build-macos]
+    if: >-
+      ${{
+        always() &&
+        needs['release-mode'].outputs.npm_only != 'true' &&
+        needs['publish-package'].result == 'success' &&
+        needs['build-macos'].result == 'success'
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

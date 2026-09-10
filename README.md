@@ -1619,6 +1619,17 @@ public [GitHub Release](https://github.com/davejohnson/hypervibe/releases). By
 default the command watches that workflow through `gh` and fails if any
 package, installer, or release job fails.
 
+When only the npm package is needed, use `--npm-only`:
+
+```bash
+npm run release -- patch --npm-only
+```
+
+The release remains a fully validated, provenance-backed tagged npm release,
+but the annotated tag records `Release-Mode: npm-only`. The workflow then skips
+both macOS builds and does not create a GitHub Release or publish installer
+assets. Full npm-plus-macOS publication remains the default.
+
 Preview the next version and git operations without changing anything:
 
 ```bash
