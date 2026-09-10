@@ -52,3 +52,5 @@ Core rules for coding agents:
 - On macOS, configure every parent write descriptor used for child-process IPC with `F_SETNOSIGPIPE` before handing it to an async transport. An immediately exiting child must surface an ordinary write/process error instead of terminating the host; keep immediate-exit and crash coverage in the release-gated companion tests.
 - Release macOS advisory instance locks explicitly with `flock(LOCK_UN)` before closing their descriptor. Keep release-and-immediate-reacquisition coverage in the release-gated companion tests; descriptor close alone is not a sufficiently deterministic handoff across runner architectures.
 - After creating a pull request, always provide its URL and explicitly offer to open it in the user's browser. Open it only after the user accepts.
+
+- A shared container image default is distinct from each workload's runtime command. Preserve explicit web/worker/cron commands when selecting a generated image default; test the real spec-to-workflow path with different workload commands and execute the emitted Dockerfile-generation shell. Never require workers to use the web command just to build a shared image.

@@ -103,12 +103,16 @@ export function resolveReviewedBranchDeployTargets(project: Project, spec: Proje
       .map(([name]) => name);
     const runtimeServices = Object.values(environment.services)
       .filter((service) => service.workloadKind !== 'cron');
-    const explicitContainerCommands = runtimeServices
+    const webServices = runtimeServices.filter((service) => service.workloadKind === 'web');
+    // The shared image defaults to the web command; workers retain their service overrides.
+    const containerServices = webServices.length > 0 ? webServices : runtimeServices;
+    const explicitContainerCommands = containerServices
       .map((service) => service.startCommand?.trim())
       .filter((command): command is string => Boolean(command));
     const containerCommands = [...new Set(explicitContainerCommands)];
-    const containerStartCommand = runtimeServices.length > 0
-      && explicitContainerCommands.length === runtimeServices.length
+    const containerStartCommand = containerServices.length > 0
+      && runtimeServices.every((service) => Boolean(service.startCommand?.trim()))
+      && explicitContainerCommands.length === containerServices.length
       && containerCommands.length === 1
       ? containerCommands[0]
       : undefined;

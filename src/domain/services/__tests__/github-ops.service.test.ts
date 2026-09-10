@@ -2,12 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { execFileSync } from 'node:child_process';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { resolveBranchDeployTargets, buildBranchDeployWorkflow } from '../github-ops.service.js';
+import { resolveReviewedBranchDeployTargets } from '../managed-ci-targets.js';
+import { projectSpecSchema } from '../../spec/spec.schema.js';
 import { SpecStore } from '../../spec/spec.store.js';
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
@@ -45,6 +48,85 @@ describe('github tools', () => {
     vi.restoreAllMocks();
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('generates a shared Railway image for distinct web, worker and cron commands', () => {
+    const project = new ProjectRepository().create({ name: 'multi-service', defaultPlatform: 'railway' });
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      runtime: { kind: 'node', version: '24', installCommand: 'npm ci --omit=dev' },
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          services: {
+            worker: { workloadKind: 'worker', startCommand: 'npm run worker' },
+            web: { workloadKind: 'web', startCommand: 'npm start', public: true },
+            cron: { workloadKind: 'cron', startCommand: 'npm run cron', cronSchedule: '0 8 * * *' },
+          },
+        },
+      },
+    });
+    const { targets, migration } = resolveReviewedBranchDeployTargets(project, spec);
+    const workflow = buildBranchDeployWorkflow('railway', targets[0]!, migration);
+    expect(workflow.content).toContain('FROM node:24-slim');
+    expect(workflow.content).toContain('CMD ["sh", "-lc", "npm start"]');
+    expect(workflow.content).not.toContain('requires an explicit service startCommand');
+    // Execute the emitted shell branch without Docker or provider access.
+    fs.writeFileSync(path.join(tempDir, 'package.json'), '{}');
+    const step = workflow.content.split('      - name: Resolve Dockerfile\n')[1]!
+      .split('      - uses: docker/setup-buildx-action')[0]!;
+    const script = step.split('        run: |\n')[1]!
+      .split('\n').map((line) => line.replace(/^          /, '')).join('\n');
+    execFileSync('sh', ['-eu', '-c', script], {
+      cwd: tempDir,
+      env: { ...process.env, GITHUB_OUTPUT: path.join(tempDir, 'outputs') },
+    });
+    const dockerfile = fs.readFileSync(path.join(tempDir, 'Dockerfile.hypervibe'), 'utf8');
+    expect(dockerfile).toContain('FROM node:24-slim');
+    expect(dockerfile).toContain('CMD ["sh", "-lc", "npm start"]');
+    expect(spec.environments.staging!.services.worker!.startCommand).toBe('npm run worker');
+    expect(spec.environments.staging!.services.cron!.startCommand).toBe('npm run cron');
+  });
+
+  it.each([
+    ['missing worker command', {
+      web: { workloadKind: 'web', startCommand: 'npm start' },
+      worker: { workloadKind: 'worker' },
+    }, undefined],
+    ['missing web command', {
+      web: { workloadKind: 'web' },
+      worker: { workloadKind: 'worker', startCommand: 'npm run worker' },
+    }, undefined],
+    ['conflicting web commands', {
+      web: { workloadKind: 'web', startCommand: 'npm start' },
+      api: { workloadKind: 'web', startCommand: 'npm run api' },
+    }, undefined],
+    ['common worker commands', {
+      first: { workloadKind: 'worker', startCommand: ' npm run worker ' },
+      second: { workloadKind: 'worker', startCommand: 'npm run worker' },
+    }, 'npm run worker'],
+    ['conflicting worker commands', {
+      first: { workloadKind: 'worker', startCommand: 'npm run first' },
+      second: { workloadKind: 'worker', startCommand: 'npm run second' },
+    }, undefined],
+  ])('preserves explicit command requirements for %s', (_name, services, expected) => {
+    const project = new ProjectRepository().create({ name: 'command-selection', defaultPlatform: 'railway' });
+    const spec = projectSpecSchema.parse({
+      version: 1,
+      project: project.name,
+      runtime: { kind: 'node', version: '24', installCommand: 'npm ci' },
+      environments: {
+        staging: {
+          hosting: { provider: 'railway' },
+          deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+          services,
+        },
+      },
+    });
+    const { targets } = resolveReviewedBranchDeployTargets(project, spec);
+    expect(targets[0]!.containerStartCommand).toBe(expected);
   });
 
   it('builds only the production branch-deploy workflow using desired deploy state', () => {
