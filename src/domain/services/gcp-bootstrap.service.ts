@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import {
@@ -142,7 +143,7 @@ const defaultDependencies: GcpBootstrapDependencies = {
 export async function runGcpBootstrap(
   params: {
     project: Project;
-    gcpProjectId: string;
+    gcpProjectId?: string;
     scope?: string;
     billingAccountName?: string;
     confirm?: boolean;
@@ -151,8 +152,10 @@ export async function runGcpBootstrap(
 ): Promise<GcpBootstrapResult> {
   const mode = params.confirm === true ? 'confirm' : 'preview';
   const dependencies = { ...defaultDependencies, ...dependencyOverrides };
-  const projectId = resolveGcpProjectId(params.gcpProjectId);
   const scope = resolveExactRepositoryScope(params.scope, params.project.gitRemoteUrl);
+  const projectId = params.gcpProjectId === undefined && mode === 'preview' && scope.success
+    ? defaultGcpProjectId(params.project, scope.value)
+    : resolveGcpProjectId(params.gcpProjectId);
   const progress = initialProgress();
 
   if (!projectId.success) {
@@ -826,8 +829,30 @@ function assertActiveServiceAccount(
   }
 }
 
+function defaultGcpProjectId(project: Project, scope: string): ReturnType<typeof resolveGcpProjectId> {
+  const connections = BOOTSTRAP_PROVIDERS
+    .map((provider) => connectionRepo.findByProviderAndScope(provider, scope))
+    .filter((connection) => connection !== null);
+  if (connections.length > 0) {
+    try {
+      const ids = new Set(connections.map((connection) => {
+        if (connection.status !== 'verified') throw new Error();
+        const credentials = getSecretStore().decryptObject<{ projectId?: string }>(connection.credentialsEncrypted);
+        const id = resolveGcpProjectId(credentials.projectId);
+        if (!id.success) throw new Error();
+        return id.value;
+      }));
+      if (ids.size === 1) return resolveGcpProjectId([...ids][0]);
+    } catch { /* Existing unreadable access is not an empty project. */ }
+    return { success: false, error: 'The repository GCP connections are unverified, unreadable, or identify different projects. Verify them or pass the exact intended gcpProjectId; no new project name was selected.' };
+  }
+  const name = project.name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 17) || 'app';
+  const suffix = createHash('sha256').update(scope.toLowerCase()).digest('hex').slice(0, 8);
+  return resolveGcpProjectId(`hv-${name}-${suffix}`);
+}
+
 function resolveGcpProjectId(
-  value: string
+  value?: string
 ): { success: true; value: string } | { success: false; error: string } {
   const normalized = value?.trim();
   if (!normalized || !GCP_PROJECT_ID_PATTERN.test(normalized)) {

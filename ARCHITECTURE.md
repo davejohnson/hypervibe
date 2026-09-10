@@ -619,8 +619,11 @@ package-manager runtime coupling can fail independently of Google credentials.
 
 The opinionated GCP `hv_connections action="bootstrap"` flow is a narrow
 account-and-credential prerequisite exception, not an imperative application
-lifecycle path. It requires an explicit Hypervibe project, exact GCP project
-ID, exact repository scope, and `adminAuth="default"`. Preview is read-only and
+lifecycle path. It requires an explicit Hypervibe project, exact repository
+scope, and `adminAuth="default"`. When its GCP project ID is omitted, preview
+reuses verified repository-scoped connections or derives a stable project name;
+unreadable or conflicting scoped connections block that default. Confirmation
+requires the exact GCP project ID returned by preview. Preview is read-only and
 lists the open billing accounts visible to that Google identity. Confirmation
 requires the user-selected exact billing account, and may create the GCP
 project, link billing, create the fixed repository deploy identity and its

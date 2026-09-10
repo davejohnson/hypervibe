@@ -165,14 +165,16 @@ you never copy a generated key:
 
 ```bash
 hypervibe connections --provider cloudrun --action bootstrap \
-  --project my-app --gcp-project-id my-gcp-project --admin-auth default
-# Review the setup preview and openBillingAccounts, then choose one exact name:
+  --project my-app --admin-auth default
+# Use target.projectId from the preview and approve one exact billing account:
 hypervibe connections --provider cloudrun --action bootstrap \
-  --project my-app --gcp-project-id my-gcp-project --admin-auth default \
+  --project my-app --gcp-project-id PROJECT_ID_FROM_PREVIEW --admin-auth default \
   --billing-account-name billingAccounts/AAAAAA-BBBBBB-CCCCCC --confirm
 ```
 
-The preview is read-only. The confirmed call can create a project, link
+The read-only preview chooses a stable project name or reuses verified access
+for this repository. Pass `--gcp-project-id` to preserve an explicit choice.
+The confirmed call can create a project, link
 billing, and create credentials, so Hypervibe always stops for the exact
 billing-account choice first. Staging and production remain separate
 desired-state environments; deploy staging first and promote its verified

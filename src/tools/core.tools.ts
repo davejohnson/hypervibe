@@ -528,6 +528,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               required: true,
               nextCommand: 'hv_spec',
               requiredSpecFields: ['project', 'environments'],
+              suggestedEnvironments: ['production', 'staging'],
+              guidance: 'For a new web app, derive production and isolated staging from the application name and repository evidence. Choose routine names without asking; preserve explicit user choices. Review consequential actions through hv_plan before applying.',
               ...(repositoryRuntime.runtime
                 ? { suggestedRuntime: repositoryRuntime.runtime }
                 : {}),
