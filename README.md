@@ -157,6 +157,27 @@ You: "Connect those providers using my local credential references"
 Claude: Validates each reference locally and stores the verified connections securely.
 ```
 
+For a first GCP deploy, Hypervibe can create or reuse the project, link the
+billing account you explicitly choose, create the repository-scoped deploy
+identity, prepare Cloud Run and Cloud SQL, and save both verified connections.
+It uses your current Google Application Default Credentials only for setup;
+you never copy a generated key:
+
+```bash
+hypervibe connections --provider cloudrun --action bootstrap \
+  --project my-app --gcp-project-id my-gcp-project --admin-auth default
+# Review the setup preview and openBillingAccounts, then choose one exact name:
+hypervibe connections --provider cloudrun --action bootstrap \
+  --project my-app --gcp-project-id my-gcp-project --admin-auth default \
+  --billing-account-name billingAccounts/AAAAAA-BBBBBB-CCCCCC --confirm
+```
+
+The preview is read-only. The confirmed call can create a project, link
+billing, and create credentials, so Hypervibe always stops for the exact
+billing-account choice first. Staging and production remain separate
+desired-state environments; deploy staging first and promote its verified
+release to production explicitly.
+
 ### 5. Deploy
 
 ```

@@ -21,6 +21,7 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { providerRegistry } from '../registry/provider.registry.js';
 import { InfraTransaction, type InfraTransactionRollbackResult } from './infra.transaction.js';
 import { snapshotEnvironmentBindings } from './local-state.transaction.js';
+import { prepareHostingBindingTransition } from './hosting-binding-transition.js';
 
 export interface DeployOptions {
   project: Project;
@@ -34,6 +35,8 @@ export interface DeployOptions {
    * code. Used when CI will deploy the exact commit after hv_apply succeeds.
    */
   deferProviderDeployment?: boolean;
+  /** Exact code revision authorized by the persisted plan for deferred bootstrap. */
+  expectedSourceCommitSha?: string;
   /** Project creation is a separate reviewed plan action during hv_apply. */
   ensureProject?: boolean;
   /** The hosting adapter to use for deployment (can be IProviderAdapter or IHostingAdapter) */
@@ -379,25 +382,31 @@ export class DeployOrchestrator {
           // Update environment bindings if we got a project ID
           // Use platform-agnostic keys that work with any hosting provider
           if (receipt.success && receipt.data?.projectId) {
-            const currentEnvironment = this.envRepo.findById(options.environment.id) ?? options.environment;
-            const currentBindings = currentEnvironment.platformBindings as Partial<HostingBindings>;
-            const nextProjectId = receipt.data.projectId as string;
-            const projectChanged = Boolean(currentBindings.projectId && currentBindings.projectId !== nextProjectId);
-            const bindings: Partial<HostingBindings> = {
-              provider: options.adapter.name,
-              projectId: nextProjectId,
-            };
-
-            // Also store environment ID if provided
-            if (receipt.data.environmentId) {
-              bindings.environmentId = receipt.data.environmentId as string;
+            const rawProviderBindings = receipt.data.providerBindings;
+            if (rawProviderBindings !== undefined && (
+              !rawProviderBindings
+              || typeof rawProviderBindings !== 'object'
+              || Array.isArray(rawProviderBindings)
+            )) {
+              throw new Error(`${options.adapter.name} returned malformed provider-owned project bindings.`);
             }
-            // If provider project was recreated/switched, drop stale service/environment bindings.
-            if (projectChanged || receipt.data?.created === true) {
-              bindings.services = undefined;
-              if (!receipt.data.environmentId) {
-                bindings.environmentId = undefined;
-              }
+            const providerBindings = (rawProviderBindings ?? {}) as Record<string, unknown>;
+            const currentEnvironment = this.envRepo.findById(options.environment.id) ?? options.environment;
+            const nextProjectId = receipt.data.projectId as string;
+            const transition = prepareHostingBindingTransition({
+              current: currentEnvironment.platformBindings,
+              target: {
+                provider: options.adapter.name,
+                projectId: nextProjectId,
+                ...(typeof receipt.data.environmentId === 'string'
+                  ? { environmentId: receipt.data.environmentId }
+                  : {}),
+                providerBindings,
+                created: receipt.data.created === true,
+              },
+            });
+            if (!transition.ok) {
+              throw new Error(transition.error);
             }
 
             snapshotEnvironmentBindings({
@@ -406,7 +415,7 @@ export class DeployOrchestrator {
               environmentId: options.environment.id,
               label: 'environment_bindings_ensure_project',
             });
-            this.envRepo.updatePlatformBindings(options.environment.id, bindings);
+            this.envRepo.updatePlatformBindings(options.environment.id, transition.patch);
             const refreshed = this.envRepo.findById(options.environment.id);
             if (refreshed) {
               options.environment = refreshed;
@@ -547,7 +556,12 @@ export class DeployOrchestrator {
               service,
               environment,
               serviceEnvVars,
-              { deferDeployment: true }
+              {
+                deferDeployment: true,
+                ...(options.expectedSourceCommitSha
+                  ? { expectedSourceCommitSha: options.expectedSourceCommitSha }
+                  : {}),
+              }
             )
             : await options.adapter.deploy(service, environment, serviceEnvVars);
 
@@ -586,7 +600,7 @@ export class DeployOrchestrator {
             if (typeof deployData.imageUri === 'string') {
               services[service.name].imageUri = deployData.imageUri;
             }
-            for (const key of ['resourceType', 'jobName', 'schedulerJobName'] as const) {
+            for (const key of ['resourceType', 'jobName', 'schedulerJobName', 'releaseJobName'] as const) {
               if (typeof deployData[key] === 'string') {
                 services[service.name][key] = deployData[key];
               }

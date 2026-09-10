@@ -27,6 +27,7 @@ async function applyInfra(args: {
   serviceConfig?: Record<string, Record<string, unknown>>;
   envVars?: Record<string, string>;
   deploy?: Record<string, unknown>;
+  expectedSourceCommitSha?: string;
   confirm?: boolean;
 }): Promise<JsonObj> {
   // Replicates the legacy infra_apply handler: resolve desired state from
@@ -53,6 +54,7 @@ async function applyInfra(args: {
     serviceConfig: desired.serviceConfig,
     envVars: desired.envVars,
     deploy: desired.deploy,
+    expectedSourceCommitSha: args.expectedSourceCommitSha,
   });
   if (!executed.success && executed.summary.error) {
     return { success: false, error: executed.summary.error, summary: executed.summary } as JsonObj;
@@ -409,8 +411,9 @@ describe('infra_apply multi-service convergence', () => {
       gitRemoteUrl: 'git@github.com:davejohnson/ci-pending-project.git',
     });
 
+    const expectedSourceCommitSha = 'a'.repeat(40);
     const deploy = vi.fn<IHostingAdapter['deploy']>(async (service, _environment, _envVars, options) => {
-      expect(options).toEqual({ deferDeployment: true });
+      expect(options).toEqual({ deferDeployment: true, expectedSourceCommitSha });
       return {
         serviceId: `provider-${service.name}`,
         externalId: `provider-${service.name}`,
@@ -478,6 +481,7 @@ describe('infra_apply multi-service convergence', () => {
         trigger: 'ci',
         branches: { production: 'main' },
       },
+      expectedSourceCommitSha,
     });
 
     expect(result.success).toBe(true);
@@ -820,7 +824,7 @@ describe('infra_apply multi-service convergence', () => {
     expect(payload.summary).toMatchObject({
       action: 'cloud_prepare',
       provider: 'cloudrun',
-      requiredVersion: 'gcp-cloudrun-v1',
+      requiredVersion: 'gcp-cloudrun-v2',
     });
     expect(hostingAdapterSpy).not.toHaveBeenCalled();
   });

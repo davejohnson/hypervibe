@@ -2,6 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import '../../../application/devops-providers.js';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { ComponentRepository } from '../../../adapters/db/repositories/component.repository.js';
@@ -32,6 +33,7 @@ import {
   GITHUB_INFRASTRUCTURE_PR_BODY_MARKER,
   GITHUB_INFRASTRUCTURE_PR_TITLE,
   GITHUB_OPENAI_SECRET_ACTION_ID,
+  githubInfrastructureConnectionBlock,
   planGitHubInfrastructure,
 } from '../github-infrastructure.service.js';
 
@@ -528,6 +530,138 @@ describe('GitHub infrastructure plan/apply', () => {
     expect(environment.platformBindings.github).toMatchObject({
       delegatedActionsBindings: [expect.objectContaining({ name: 'CI_TOKEN', target: 'repository' })],
     });
+  });
+
+  it('plans and applies canonical DevOps Actions secrets without legacy GitHub infrastructure', async () => {
+    process.env.REPOSITORY_CI_TOKEN = 'canonical-secret-value';
+    const storedProject = new ProjectRepository().create({
+      name: 'canonical-actions-secret',
+      defaultPlatform: 'railway',
+    });
+    const declared = projectSpecSchema.parse({
+      version: 1,
+      project: storedProject.name,
+      devops: {
+        code: { provider: 'github', scope: REPOSITORY },
+        ci: { provider: 'github-actions' },
+        canonicalEnvironment: 'repository',
+      },
+      secrets: {
+        CI_TOKEN: {
+          principal: 'github:owner',
+          githubActions: { repository: true },
+        },
+      },
+      environments: {},
+    });
+    const stored = new SpecStore().replace(storedProject, declared);
+    let repositorySecrets: string[] = [];
+    vi.spyOn(GitHubAdapter.prototype, 'listRepositorySecrets')
+      .mockImplementation(async () => repositorySecrets);
+    const set = vi.spyOn(GitHubAdapter.prototype, 'setRepositorySecret')
+      .mockImplementation(async (_owner, _repo, name) => {
+        repositorySecrets = [...new Set([...repositorySecrets, name])];
+      });
+
+    const result = await new PlanService().plan(storedProject, 'repository', {
+      secretRefs: { CI_TOKEN: 'env:REPOSITORY_CI_TOKEN' },
+    });
+    expect(result).not.toHaveProperty('error');
+    const planned = result as Exclude<typeof result, { error: string }>;
+
+    const secretAction = planned.actions.find((action) => action.id === 'secret:github:repository:CI_TOKEN');
+    expect(secretAction).toMatchObject({
+      id: 'secret:github:repository:CI_TOKEN',
+      type: 'update',
+      metadata: { operation: 'githubDelegatedSecretSync', repository: REPOSITORY },
+    });
+    expect(planned.actions.find((action) => action.id === GITHUB_INFRASTRUCTURE_ACTION_ID)).toBeUndefined();
+
+    const applied = await executePlanApply(createToolContext(), {
+      project: storedProject,
+      spec: stored.spec,
+      specRevision: stored.revision,
+      planId: planned.planRunId,
+      confirmActions: [],
+    });
+
+    expect(applied).toMatchObject({
+      kind: 'executed',
+      result: {
+        success: true,
+        receipts: expect.arrayContaining([
+          expect.objectContaining({
+            actionId: 'secret:github:repository:CI_TOKEN',
+            status: 'succeeded',
+          }),
+        ]),
+      },
+    });
+    expect(set).toHaveBeenCalledWith('owner', 'example', 'CI_TOKEN', 'canonical-secret-value');
+    expect(JSON.stringify(applied)).not.toContain('canonical-secret-value');
+  });
+
+  it('scopes a missing GitHub connection block to canonical DevOps secret actions', async () => {
+    const missingRepository = 'owner/unconnected';
+    const storedProject = new ProjectRepository().create({
+      name: 'canonical-actions-unconnected',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: `https://github.com/${missingRepository}.git`,
+    });
+    new EnvironmentRepository().create({ projectId: storedProject.id, name: 'production' });
+    const declared = projectSpecSchema.parse({
+      version: 1,
+      project: storedProject.name,
+      gitRemoteUrl: storedProject.gitRemoteUrl,
+      devops: {
+        code: { provider: 'github', scope: missingRepository },
+        ci: { provider: 'github-actions' },
+      },
+      secrets: {
+        CI_TOKEN: {
+          principal: 'github:owner',
+          githubActions: { repository: true },
+        },
+      },
+      environments: {
+        production: { hosting: { provider: 'railway' }, services: {} },
+      },
+    });
+
+    const planned = await planGitHubInfrastructure({
+      project: storedProject,
+      spec: declared,
+      environmentName: 'production',
+      suppliedSecretValues: { CI_TOKEN: 'unavailable-secret-value' },
+    });
+    expect(planned.actions).toContainEqual(expect.objectContaining({
+      id: 'secret:github:repository:CI_TOKEN',
+      type: 'update',
+      metadata: expect.objectContaining({ blockedReason: 'github_connection_unavailable' }),
+    }));
+    expect(githubInfrastructureConnectionBlock({
+      project: storedProject,
+      spec: declared,
+      environmentName: 'production',
+    })).toMatchObject({
+      provider: 'github',
+      policy: 'action-scoped-if-independent-actions',
+      actionIds: ['secret:github:repository:CI_TOKEN'],
+    });
+
+    const applied = await applyGitHubDelegatedSecret({
+      project: storedProject,
+      spec: declared,
+      environmentName: 'production',
+      action: planned.actions[0],
+      value: 'unavailable-secret-value',
+    });
+    expect(applied).toMatchObject({
+      success: false,
+      status: 'blocked',
+      message: 'GitHub connection is unavailable',
+    });
+    expect(JSON.stringify(applied)).not.toContain('unavailable-secret-value');
   });
 
   it('creates a deterministic infrastructure branch and returns a pending PR receipt', async () => {

@@ -23,6 +23,10 @@ function usesManagedCi(spec: ProjectSpec): boolean {
 function legacyGitHubNeedsActions(spec: ProjectSpec): boolean {
   const github = spec.github;
   return usesManagedCi(spec)
+    || Object.values(spec.secrets).some((secret) => (
+      secret.ownership === 'delegated'
+      && Boolean(secret.githubActions?.repository || secret.githubActions?.environments.length)
+    ))
     || Boolean(github && (
       Object.keys(github.actions).length > 0
       || Object.keys(github.externalWorkflows).length > 0
@@ -60,6 +64,35 @@ export function resolveDevOpsSelection(spec: ProjectSpec): DevOpsSelection | nul
       : {}),
     source: 'legacy-github',
   };
+}
+
+/**
+ * Resolve GitHub Actions as the explicit code-host/CI authority for repository
+ * secret destinations. Canonical DevOps state must select both halves; legacy
+ * state remains opt-in through its enabled top-level GitHub block.
+ */
+export function resolveGitHubActionsSelection(spec: ProjectSpec): DevOpsSelection | null {
+  const selection = resolveDevOpsSelection(spec);
+  if (
+    !selection
+    || selection.code.provider !== 'github'
+    || selection.ci?.provider !== 'github-actions'
+    || (selection.source === 'legacy-github' && (!spec.github || spec.github.enabled === false))
+  ) {
+    return null;
+  }
+  return selection;
+}
+
+export function githubActionsCanonicalEnvironment(spec: ProjectSpec): string | undefined {
+  const selection = spec.devops
+    ? resolveGitHubActionsSelection(spec)
+    : null;
+  if (spec.devops && !selection) return undefined;
+  if (!spec.devops && (!spec.github || spec.github.enabled === false)) return undefined;
+  return (selection?.canonicalEnvironment ?? spec.github?.canonicalEnvironment)
+    ?? (spec.environments.production ? 'production' : Object.keys(spec.environments).sort()[0])
+    ?? 'repository';
 }
 
 export function devOpsScopeMatchesRemote(spec: ProjectSpec): boolean {

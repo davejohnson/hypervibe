@@ -23,19 +23,20 @@ function serviceDeleteMetadata(input: {
   provider?: string;
   projectId?: string;
   environmentId?: string;
+  providerScope?: Record<string, string>;
   serviceName?: string;
   scope?: 'environment' | 'project';
   operation?: 'hostingServiceDestroy' | 'taskServiceCleanup' | 'previousHostingDestroy';
 }): Record<string, unknown> {
   const deleteScope = input.scope;
-  const providerScope = input.projectId && deleteScope
+  const providerScope = input.providerScope ?? (input.projectId && deleteScope
     ? {
         projectId: input.projectId,
         ...(deleteScope === 'environment' && input.environmentId
           ? { environmentId: input.environmentId }
           : {}),
       }
-    : undefined;
+    : undefined);
   const bindingIdentity = input.provider && providerScope && input.serviceName
     ? {
         provider: input.provider,
@@ -74,18 +75,21 @@ export function diffRetainedHostingCleanup(input: {
   const { envName, currentProvider, previousHosting } = input;
   const actions: PlanAction[] = [];
   const warnings: string[] = [];
-  if (!previousHosting?.provider || previousHosting.provider === currentProvider) {
+  if (!previousHosting?.provider) {
     return { actions, warnings };
   }
 
   const previousServices = Object.entries(previousHosting.services ?? {});
+  const retainedProviderScope = previousHosting.providerScope;
+  const retainedProjectId = retainedProviderScope?.projectId ?? previousHosting.projectId;
+  const retainedEnvironmentId = retainedProviderScope?.environmentId ?? previousHosting.environmentId;
   const cleanupBoundary = input.teardownBoundary ?? 'services';
   if (previousServices.length === 0 && cleanupBoundary === 'services') {
     return { actions, warnings };
   }
 
   warnings.push(
-    `${previousServices.length} service binding(s) are still running on ${previousHosting.provider}, with the ${cleanupBoundary} cleanup boundary retained from before the switch to ${currentProvider} — they may keep billing until destroyed. Confirm the previous-provider destroy actions when the ${currentProvider} deployment is verified.`
+    `${previousServices.length} service binding(s) are still running on ${previousHosting.provider} in an earlier scope, with its ${cleanupBoundary} cleanup boundary preserved before rebinding to ${currentProvider} — they may keep billing until destroyed. Confirm the retained-scope destroy actions when the current deployment is verified.`
   );
   const serviceDestroyIds: string[] = [];
   if (cleanupBoundary !== 'environment') {
@@ -98,7 +102,7 @@ export function diffRetainedHostingCleanup(input: {
         type: 'destroy',
         resource: { kind: 'service', name, provider: previousHosting.provider },
         verified: false,
-        reason: `Service "${name}" is still running on ${previousHosting.provider} (abandoned by the switch to ${currentProvider}). Confirm to delete it there.`,
+        reason: `Service "${name}" is retained on an earlier ${previousHosting.provider} scope. Confirm to delete that exact old binding.`,
         requiresConfirm: true,
         metadata: {
           operation: 'previousHostingDestroy',
@@ -107,9 +111,12 @@ export function diffRetainedHostingCleanup(input: {
           ...(serviceId ? { serviceId } : {}),
           ...(serviceId ? serviceDeleteMetadata({
             serviceId,
-            projectId: previousHosting.projectId,
+            projectId: retainedProjectId,
+            environmentId: retainedEnvironmentId,
+            providerScope: retainedProviderScope,
             scope: 'project',
           }) : {}),
+          ...(retainedProviderScope ? { retainedProviderScope } : {}),
         },
       });
     }
@@ -126,8 +133,9 @@ export function diffRetainedHostingCleanup(input: {
         operation: 'previousHostingDestroy',
         previousProvider: previousHosting.provider,
         cleanupBoundary,
-        ...(previousHosting.projectId ? { projectId: previousHosting.projectId } : {}),
-        ...(previousHosting.environmentId ? { environmentId: previousHosting.environmentId } : {}),
+        ...(retainedProjectId ? { projectId: retainedProjectId } : {}),
+        ...(retainedEnvironmentId ? { environmentId: retainedEnvironmentId } : {}),
+        ...(retainedProviderScope ? { retainedProviderScope } : {}),
       },
     });
   } else if (cleanupBoundary === 'project') {
@@ -143,7 +151,8 @@ export function diffRetainedHostingCleanup(input: {
         operation: 'previousHostingDestroy',
         previousProvider: previousHosting.provider,
         cleanupBoundary,
-        ...(previousHosting.projectId ? { projectId: previousHosting.projectId } : {}),
+        ...(retainedProjectId ? { projectId: retainedProjectId } : {}),
+        ...(retainedProviderScope ? { retainedProviderScope } : {}),
       },
     });
   }
@@ -1675,7 +1684,6 @@ function diffServiceConfig(
   // Only fields the spec sets are managed; unset spec fields are ignored.
   const fields: Array<[keyof ServiceSpec & keyof ObservedService['config'], string]> = [
     ['startCommand', 'startCommand'],
-    ['releaseCommand', 'releaseCommand'],
     ['healthCheckPath', 'healthCheckPath'],
     ['cronSchedule', 'cronSchedule'],
     ['public', 'public'],
@@ -1686,6 +1694,19 @@ function diffServiceConfig(
     const actual = live.config[key];
     if (actual !== wanted) {
       diff.push({ field, from: actual === undefined ? undefined : String(actual), to: String(wanted) });
+    }
+  }
+
+  if (spec.releaseCommand !== undefined) {
+    const liveReleaseCommandMatches = live.config.releaseCommand === spec.releaseCommand
+      || live.config.releaseCommandHash === hashEnvValue(spec.releaseCommand.trim());
+    if (!liveReleaseCommandMatches) {
+      diff.push({
+        field: 'releaseCommand',
+        from: live.config.releaseCommand
+          ?? (live.config.releaseCommandHash ? 'configured command' : undefined),
+        to: spec.releaseCommand,
+      });
     }
   }
 

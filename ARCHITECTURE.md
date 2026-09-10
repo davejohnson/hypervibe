@@ -616,17 +616,46 @@ permissions, the official Cloud CLI installation path when `gcloud` is absent,
 caveats, and the complete safe retry call. Do not recommend a third-party
 package-manager wrapper when Google provides a first-party installer or archive;
 package-manager runtime coupling can fail independently of Google credentials.
-Cloud Run authentication is compatible with GCS and Memorystore and is reused
-through provider registry metadata; operators must not create redundant Google
-service-account keys for those capabilities. GCS, Memorystore, and Pub/Sub
+
+The opinionated GCP `hv_connections action="bootstrap"` flow is a narrow
+account-and-credential prerequisite exception, not an imperative application
+lifecycle path. It requires an explicit Hypervibe project, exact GCP project
+ID, exact repository scope, and `adminAuth="default"`. Preview is read-only and
+lists the open billing accounts visible to that Google identity. Confirmation
+requires the user-selected exact billing account, and may create the GCP
+project, link billing, create the fixed repository deploy identity and its
+one-time key, create a distinct keyless least-privilege runtime identity,
+prepare base Cloud Run/Cloud SQL access, verify both provider
+connections, and store them atomically. Generated key material never crosses
+the output boundary and is deleted on any pre-persistence failure. This flow
+must not create workloads, databases, domains, runtime secrets, or environments;
+all application infrastructure and separate staging/production lifecycle
+changes remain in spec, plan, and apply.
+
+The deploy identity remains control-plane-only; Cloud Run services, release
+jobs, and scheduled jobs use the distinct runtime identity. Base runtime access
+contains only Cloud SQL client and Secret Manager secret-access roles. Queue
+preparation grants publisher/subscriber to that runtime identity while keeping
+queue lifecycle administration on the deploy identity. Neither principal may
+silently replace the other. When a distinct runtime identity exists, the deploy
+identity receives Service Account User only on that exact runtime service
+account, never at project scope; preparation records the runtime account's
+immutable numeric identity and the scoped grant as `gcp-cloudrun-v2` evidence.
+The project-scoped grant remains compatible only for explicit legacy
+preparation without a runtime identity.
+
+Cloud Run authentication is compatible with GCS and Memorystore and its
+connection is reused through provider registry metadata; operators must not
+create redundant Google service-account keys for those capabilities. GCS, Memorystore, and Pub/Sub
 preparation are explicit independent capabilities. A capability preparation
 must reconcile only its selected APIs and roles; it must not repair base Cloud
 Run permissions or grant another capability's role. Base Cloud Run preparation
 remains a separate provider-only prepare call. Successive preparations preserve
 other previously reviewed capability evidence. Explicit queue-role removal is a standalone,
-removal-only operation; it affects only the connected deploy service-account
-member, including that member's conditional bindings, and never disables the
-Pub/Sub API, grants other access, or edits another principal.
+removal-only operation; it removes the reviewed lifecycle role from the deploy
+identity and the reviewed use roles from the runtime identity, including those
+members' conditional bindings. It never disables the Pub/Sub API, grants other
+access, or edits another principal.
 
 When adding or changing token guidance, include all of these details:
 

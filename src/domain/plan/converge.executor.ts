@@ -145,6 +145,8 @@ export const planRunDocumentSchema = z.object({
   scope: z.enum(['full', 'retained-cleanup']).optional(),
   environmentName: z.string().min(1),
   specRevision: z.number().int().nonnegative(),
+  /** Immutable application revision reviewed with this deployment plan. */
+  sourceCommitSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   observedFingerprint: z.string().nullable(),
   integrationFingerprints: z.record(z.string()).optional(),
   lockEnvironmentIds: z.array(z.string().min(1)).optional(),

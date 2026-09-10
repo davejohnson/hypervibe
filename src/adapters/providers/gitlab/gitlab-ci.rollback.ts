@@ -30,6 +30,7 @@ type ReleaseEvidence = {
   jobId: string;
   pipelineId: string;
   createdAt: string;
+  imageUri?: string;
 };
 
 type GitLabRollbackObservation = {
@@ -47,6 +48,18 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => [key, canonical(entry)]));
+}
+
+function same(left: unknown, right: unknown): boolean {
+  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 
 function safeSlug(value: string): string {
@@ -90,20 +103,53 @@ async function evidenceFor(params: {
     throw new Error(`GitLab job ${params.job.id} emitted malformed Hypervibe release evidence`);
   }
   const evidence = asRecord(value);
+  const expected = params.observation.releaseEvidence;
+  const evidenceServices = Array.isArray(evidence?.services)
+    ? [...evidence.services].sort()
+    : null;
+  const evidenceResources = Array.isArray(evidence?.providerResources)
+    ? [...evidence.providerResources].sort()
+    : null;
+  const ci = asRecord(evidence?.ci);
+  const imageUri = typeof evidence?.imageUri === 'string'
+    ? evidence.imageUri.trim().toLowerCase()
+    : '';
+  const deployments = Array.isArray(evidence?.deployments) ? evidence.deployments : [];
+  const deployedResources = expected.providerResources.length > 0
+    ? deployments.map((entry) => {
+        const deployment = asRecord(entry);
+        return typeof deployment?.kind === 'string' && typeof deployment.name === 'string'
+          ? `${deployment.kind}:${deployment.name}`
+          : '';
+      }).sort()
+    : [];
+  const immutableDeploymentsMatch = !expected.requiresImmutableImage || deployments.every((entry) => {
+    const deployment = asRecord(entry);
+    return deployment?.imageUri === imageUri
+      && deployment.imageDigest === imageUri.split('@')[1];
+  });
   if (
-    evidence?.version !== 1
+    evidence?.version !== 2
     || evidence.provider !== params.observation.hostingProvider
-    || (
-      evidence.repository !== params.observation.repository.canonicalScope
-      && evidence.repository !== params.observation.repository.path
-    )
+    || evidence.repository !== params.observation.repository.canonicalScope
     || evidence.environment !== params.environmentName
     || typeof evidence.sha !== 'string'
     || !FULL_SHA.test(evidence.sha)
     || evidence.sha.toLowerCase() !== params.run.sha.toLowerCase()
     || evidence.programFingerprint !== params.observation.programHash
+    || evidence.deploymentContractFingerprint !== expected.deploymentContractFingerprint
+    || !same(evidenceServices, expected.services)
+    || !same(evidence?.providerIdentity, expected.providerIdentity)
+    || !same(evidenceResources, expected.providerResources)
+    || ci?.projectId !== params.observation.repository.nativeId
+    || ci?.pipelineId !== params.run.id
+    || ci?.jobId !== params.job.id
+    || deployments.length === 0
+    || (expected.providerResources.length > 0 && !same(deployedResources, expected.providerResources))
+    || (expected.requiresImmutableImage && !/^[^\s@]+@sha256:[0-9a-f]{64}$/.test(imageUri))
+    || !immutableDeploymentsMatch
   ) {
-    throw new Error(`GitLab job ${params.job.id} release evidence does not match the exact managed repository, environment, SHA, provider, and program`);
+    throw new Error(`GitLab job ${params.job.id} release evidence does not match the exact managed repository, environment, services, provider identity, SHA, program, and CI execution`);
   }
   return {
     sha: evidence.sha.toLowerCase(),
@@ -111,6 +157,7 @@ async function evidenceFor(params: {
     jobId: params.job.id,
     pipelineId: params.run.id,
     createdAt: params.job.completedAt ?? params.run.updatedAt ?? params.run.createdAt ?? '',
+    ...(expected.requiresImmutableImage ? { imageUri } : {}),
   };
 }
 
@@ -222,6 +269,7 @@ function sameObservation(left: GitLabRollbackObservation, right: GitLabRollbackO
     && left.targetRelease.artifactId === right.targetRelease.artifactId
     && left.targetRelease.jobId === right.targetRelease.jobId
     && left.targetRelease.pipelineId === right.targetRelease.pipelineId
+    && left.targetRelease.imageUri === right.targetRelease.imageUri
     && left.rollbackRef === right.rollbackRef;
 }
 
@@ -250,6 +298,7 @@ export async function executeGitLabCiRollback(params: {
       targetArtifactId: planned.targetRelease.artifactId,
       targetJobId: planned.targetRelease.jobId,
       targetPipelineId: planned.targetRelease.pipelineId,
+      ...(planned.targetRelease.imageUri ? { targetImageUri: planned.targetRelease.imageUri } : {}),
       observedLatestPipelineId: planned.latestPipelineId,
     },
   };
@@ -272,6 +321,7 @@ export async function executeGitLabCiRollback(params: {
       targetArtifactId: planned.targetRelease.artifactId,
       targetJobId: planned.targetRelease.jobId,
       targetPipelineId: planned.targetRelease.pipelineId,
+      ...(planned.targetRelease.imageUri ? { targetImageUri: planned.targetRelease.imageUri } : {}),
       observedLatestPipelineId: planned.latestPipelineId,
       programHash: planned.program.programHash,
       selection: planned.selection,
@@ -307,6 +357,7 @@ export async function executeGitLabCiRollback(params: {
       || action.metadata?.targetArtifactId !== planned.targetRelease.artifactId
       || action.metadata?.targetJobId !== planned.targetRelease.jobId
       || action.metadata?.targetPipelineId !== planned.targetRelease.pipelineId
+      || action.metadata?.targetImageUri !== planned.targetRelease.imageUri
       || action.metadata?.observedLatestPipelineId !== planned.latestPipelineId
       || (!isRef && (
         action.metadata?.definition !== planned.program.rootPath
@@ -376,6 +427,7 @@ export async function executeGitLabCiRollback(params: {
         rollbackRef: planned.rollbackRef,
         sourceArtifactId: planned.targetRelease.artifactId,
         sourcePipelineId: planned.targetRelease.pipelineId,
+        ...(planned.targetRelease.imageUri ? { targetImageUri: planned.targetRelease.imageUri } : {}),
         planId: planRun.id,
       },
     });

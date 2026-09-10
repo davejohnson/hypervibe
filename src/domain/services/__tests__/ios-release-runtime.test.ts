@@ -82,10 +82,10 @@ describe('managed iOS release runtime', () => {
   it('builds mobile evidence only from matching server evidence', () => {
     const config = runtime.parseReleaseConfig(validEnvironment, '/repo') as unknown as Record<string, unknown>;
     const evidence = {
-      version: 2,
+      version: 3,
       environment: 'production',
-      server: { repository: 'owner/repo', sha: 'a'.repeat(40) },
-      services: ['web'],
+      source: { repository: 'owner/repo', sha: 'a'.repeat(40) },
+      target: { resources: [{ logicalName: 'web' }] },
     };
     const manifest = runtime.buildReleaseManifest(
       config,
@@ -108,7 +108,7 @@ describe('managed iOS release runtime', () => {
 
     expect(() => runtime.buildReleaseManifest(
       config,
-      { ...evidence, server: { ...evidence.server, sha: 'b'.repeat(40) } },
+      { ...evidence, source: { ...evidence.source, sha: 'b'.repeat(40) } },
       { id: 'app-1' },
       { id: 'build-1' },
       '2026-07-30T00:00:00.000Z'

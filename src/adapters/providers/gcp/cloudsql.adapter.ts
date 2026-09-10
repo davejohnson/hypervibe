@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { randomUUID } from 'crypto';
+import { randomInt, randomUUID } from 'crypto';
 import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -1792,7 +1792,7 @@ export class CloudSqlAdapter implements IDatabaseAdapter, IObservableDatabase, I
     const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&*+-=?';
     let password = '';
     for (let i = 0; i < 32; i++) {
-      password += chars.charAt(Math.floor(Math.random() * chars.length));
+      password += chars.charAt(randomInt(chars.length));
     }
     return password;
   }

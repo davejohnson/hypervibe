@@ -33,7 +33,7 @@ export async function planManagedCiDeploy(params: {
   environment: Environment | null;
   dependsOn?: string[];
   bindingsWillChange?: boolean;
-}): Promise<{ actions: PlanAction[]; warnings: string[]; error?: string }> {
+}): Promise<{ actions: PlanAction[]; warnings: string[]; error?: string; deferred?: boolean }> {
   const selection = resolveDevOpsSelection(params.spec);
   if (!selection?.ci) {
     return hasRetainedCiBinding(params.environment)
@@ -49,7 +49,12 @@ export async function planManagedCiDeploy(params: {
   // desired state. It can be deleted when legacy specs are migrated.
   if (selection.source === 'legacy-github') {
     const result = await planGitHubActionsDeploy(params);
-    return { actions: result.action ? [result.action] : [], warnings: result.warnings };
+    return {
+      actions: result.action ? [result.action] : [],
+      warnings: result.warnings,
+      ...(result.error ? { error: result.error } : {}),
+      ...(result.deferred ? { deferred: true } : {}),
+    };
   }
 
   const registration = devOpsProviderRegistry.ciProvider(selection.ci.provider);
@@ -64,7 +69,12 @@ export async function planManagedCiDeploy(params: {
     };
   }
   const result = await registration.lifecycle.planDeploy(params);
-  return { actions: actions(result), warnings: result.warnings, ...(result.error ? { error: result.error } : {}) };
+  return {
+    actions: actions(result),
+    warnings: result.warnings,
+    ...(result.error ? { error: result.error } : {}),
+    ...(result.deferred ? { deferred: true } : {}),
+  };
 }
 
 export async function planManagedCiAppliedSpecHash(params: {

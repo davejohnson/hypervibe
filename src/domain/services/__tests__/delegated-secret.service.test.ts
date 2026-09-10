@@ -8,6 +8,8 @@ import { EnvironmentRepository } from '../../../adapters/db/repositories/environ
 import { hashEnvValue, type ObservedState } from '../../ports/observe.port.js';
 import { projectSpecSchema } from '../../spec/spec.schema.js';
 import {
+  delegatedGitHubSecretsForEnvironment,
+  delegatedSecretInputsForEnvironment,
   parseDelegatedSecretBindings,
   planDelegatedSecrets,
   recordDelegatedSecretBindings,
@@ -100,6 +102,44 @@ describe('delegated-secret.service', () => {
   afterEach(() => {
     SqliteAdapter.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('routes canonical GitHub Actions inputs through the selected DevOps environment and fallback', () => {
+    const canonical = projectSpecSchema.parse({
+      version: 1,
+      project: 'canonical-actions-secrets',
+      devops: {
+        code: { provider: 'github', scope: 'owner/canonical-actions-secrets' },
+        ci: { provider: 'github-actions' },
+        canonicalEnvironment: 'staging',
+      },
+      secrets: {
+        NODE_AUTH_TOKEN: {
+          principal: 'github:owner',
+          githubActions: { repository: true },
+        },
+      },
+      environments: {
+        staging: { hosting: { provider: 'railway' }, services: {} },
+        production: { hosting: { provider: 'railway' }, services: {} },
+      },
+    });
+
+    expect(delegatedSecretInputsForEnvironment(canonical, 'staging').map(([name]) => name))
+      .toEqual(['NODE_AUTH_TOKEN']);
+    expect(delegatedGitHubSecretsForEnvironment(canonical, 'staging').map(([name]) => name))
+      .toEqual(['NODE_AUTH_TOKEN']);
+    expect(delegatedGitHubSecretsForEnvironment(canonical, 'production')).toEqual([]);
+
+    const fallback = projectSpecSchema.parse({
+      ...canonical,
+      devops: {
+        code: { provider: 'github', scope: 'owner/canonical-actions-secrets' },
+        ci: { provider: 'github-actions' },
+      },
+    });
+    expect(delegatedGitHubSecretsForEnvironment(fallback, 'production').map(([name]) => name))
+      .toEqual(['NODE_AUTH_TOKEN']);
   });
 
   it('plans a first-time missing random secret without user input or confirmation', () => {

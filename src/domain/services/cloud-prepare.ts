@@ -16,14 +16,18 @@ export interface CloudPreparationRecord {
   preparedAt: string;
   gcpProjectId?: string;
   deployServiceAccountEmail?: string;
+  runtimeServiceAccountEmail?: string;
+  runtimeServiceAccountUniqueId?: string;
   requiredApis: string[];
   requiredRoles: string[];
+  runtimeRequiredRoles?: string[];
+  runtimeServiceAccountAccessRoles?: string[];
 }
 
 export const CLOUD_PREPARE_PROFILES: Record<CloudPrepareProvider, CloudPrepareProfile> = {
   cloudrun: {
     provider: 'cloudrun',
-    version: 'gcp-cloudrun-v1',
+    version: 'gcp-cloudrun-v2',
     label: 'GCP Cloud Run + Cloud SQL',
     requiredApis: [
       'serviceusage.googleapis.com',
@@ -77,10 +81,30 @@ export function getCloudPreparation(
     preparedAt,
     gcpProjectId: typeof record.gcpProjectId === 'string' ? record.gcpProjectId : undefined,
     deployServiceAccountEmail: typeof record.deployServiceAccountEmail === 'string' ? record.deployServiceAccountEmail : undefined,
+    runtimeServiceAccountEmail: typeof record.runtimeServiceAccountEmail === 'string' ? record.runtimeServiceAccountEmail : undefined,
+    runtimeServiceAccountUniqueId: typeof record.runtimeServiceAccountUniqueId === 'string'
+      ? record.runtimeServiceAccountUniqueId
+      : undefined,
     requiredApis,
     requiredRoles,
+    runtimeRequiredRoles: asStringArray(record.runtimeRequiredRoles),
+    runtimeServiceAccountAccessRoles: asStringArray(record.runtimeServiceAccountAccessRoles),
   };
 }
+
+export const CLOUD_RUN_RUNTIME_BASE_ROLES = [
+  'roles/cloudsql.client',
+  'roles/secretmanager.secretAccessor',
+] as const;
+
+export const CLOUD_RUN_RUNTIME_QUEUE_ROLES = [
+  'roles/pubsub.publisher',
+  'roles/pubsub.subscriber',
+] as const;
+
+export const CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES = [
+  'roles/iam.serviceAccountUser',
+] as const;
 
 export function isCloudPrepared(
   project: Pick<Project, 'policies'> | null | undefined,
@@ -91,10 +115,28 @@ export function isCloudPrepared(
   if (!profile) return true;
   const record = getCloudPreparation(project, profile.provider);
   if (!record || record.version !== profile.version) return false;
+  const projectRoles = new Set(record.requiredRoles);
+  const runtimeRoles = new Set(record.runtimeRequiredRoles ?? []);
+  const runtimeServiceAccountAccessRoles = new Set(
+    record.runtimeServiceAccountAccessRoles ?? []
+  );
+  const runtimeBaseRoles = new Set<string>(CLOUD_RUN_RUNTIME_BASE_ROLES);
+  const exactRuntimeAccessRoles = new Set<string>(
+    CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES
+  );
 
   return (
     profile.requiredApis.every((api) => record.requiredApis.includes(api))
-    && profile.requiredRoles.every((role) => record.requiredRoles.includes(role))
+    && (!record.runtimeServiceAccountEmail
+      || (typeof record.runtimeServiceAccountUniqueId === 'string'
+        && /^[1-9][0-9]*$/.test(record.runtimeServiceAccountUniqueId)
+        && !projectRoles.has('roles/iam.serviceAccountUser')))
+    && profile.requiredRoles.every((role) => {
+      if (!record.runtimeServiceAccountEmail) return projectRoles.has(role);
+      if (runtimeBaseRoles.has(role)) return runtimeRoles.has(role);
+      if (exactRuntimeAccessRoles.has(role)) return runtimeServiceAccountAccessRoles.has(role);
+      return projectRoles.has(role);
+    })
   );
 }
 
@@ -150,6 +192,8 @@ export function isCloudPreparedForQueues(
   return (
     QUEUE_PREPARE_ADDON.requiredApis.every((api) => record.requiredApis.includes(api))
     && QUEUE_PREPARE_ADDON.requiredRoles.every((role) => record.requiredRoles.includes(role))
+    && (!record.runtimeServiceAccountEmail
+      || CLOUD_RUN_RUNTIME_QUEUE_ROLES.every((role) => (record.runtimeRequiredRoles ?? []).includes(role)))
   );
 }
 

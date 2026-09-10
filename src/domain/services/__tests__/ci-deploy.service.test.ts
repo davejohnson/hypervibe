@@ -26,6 +26,7 @@ import {
   planGitHubActionsAppliedSpecHash,
   planGitHubActionsDeploy,
   planGitHubActionsRelease,
+  providerSecretsForGitHubActions,
   requiredProviderSecretNamesForGitHubActions,
 } from '../ci-deploy.service.js';
 import { environmentDeploymentContractHash } from '../deployment-contract.service.js';
@@ -155,6 +156,52 @@ describe('ci-deploy.service', () => {
 
     it('returns no secrets for unknown providers', () => {
       expect(requiredProviderSecretNamesForGitHubActions('vercel')).toEqual([]);
+    });
+  });
+
+  describe('providerSecretsForGitHubActions', () => {
+    it('uses only the exact repository-scoped cloud connection ahead of global fallback', () => {
+      const connectionRepo = new ConnectionRepository();
+      const secretStore = getSecretStore();
+      const add = (scope: string | undefined, projectId: string) => {
+        const connection = connectionRepo.create({
+          provider: 'cloudrun',
+          scope,
+          credentialsEncrypted: secretStore.encryptObject({
+            credentials: `credentials-for-${projectId}`,
+            projectId,
+          }),
+        });
+        connectionRepo.updateStatus(connection.id, 'verified');
+      };
+      add(undefined, 'global-project');
+      add('davejohnson/other-app', 'other-project');
+      add('davejohnson/billforge', 'billforge-project');
+
+      expect(providerSecretsForGitHubActions('cloudrun', {
+        githubRepo: 'davejohnson/billforge',
+      })).toEqual([
+        { name: 'GCP_SERVICE_ACCOUNT_JSON', value: 'credentials-for-billforge-project' },
+        { name: 'GCP_PROJECT_ID', value: 'billforge-project' },
+      ]);
+    });
+
+    it('does not use credentials scoped to a different repository', () => {
+      const connectionRepo = new ConnectionRepository();
+      const secretStore = getSecretStore();
+      const connection = connectionRepo.create({
+        provider: 'cloudrun',
+        scope: 'davejohnson/other-app',
+        credentialsEncrypted: secretStore.encryptObject({
+          credentials: 'other-credentials',
+          projectId: 'other-project',
+        }),
+      });
+      connectionRepo.updateStatus(connection.id, 'verified');
+
+      expect(providerSecretsForGitHubActions('cloudrun', {
+        githubRepo: 'davejohnson/billforge',
+      })).toEqual([]);
     });
   });
 
@@ -439,6 +486,70 @@ describe('ci-deploy.service', () => {
         verified: true,
         reason: 'Service bindings will change during apply; regenerate the GitHub Actions deploy workflow after service convergence',
         dependsOn: ['service:worker'],
+      });
+    });
+
+    it('defers an unbound Cloud Run workflow until planned hosting bindings converge, then compiles it exactly', async () => {
+      const projectRepo = new ProjectRepository();
+      const envRepo = new EnvironmentRepository();
+      const project = projectRepo.create({
+        name: 'cloud-app',
+        defaultPlatform: 'cloudrun',
+        gitRemoteUrl: 'https://github.com/davejohnson/cloud-app',
+      });
+      const environmentSpec = environmentSpecSchema.parse({
+        hosting: { provider: 'cloudrun', region: 'us-west1' },
+        services: { web: { workloadKind: 'web' } },
+        deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' },
+      });
+      const environment = envRepo.create({
+        projectId: project.id,
+        name: 'staging',
+        platformBindings: { provider: 'cloudrun' },
+      });
+      new SpecStore().replace(project, {
+        version: 1,
+        project: project.name,
+        environments: { staging: environmentSpec },
+      });
+
+      const deferred = await planGitHubActionsDeploy({
+        project: projectRepo.findById(project.id)!,
+        environmentName: 'staging',
+        environmentSpec,
+        environment: envRepo.findById(environment.id),
+        bindingsWillChange: true,
+        dependsOn: ['service:web'],
+      });
+
+      expect(deferred.deferred).toBe(true);
+      expect(deferred.action).toBeUndefined();
+      expect(deferred.warnings.join(' ')).toContain('Apply this plan, then re-run hv_plan');
+
+      envRepo.updatePlatformBindings(environment.id, {
+        provider: 'cloudrun',
+        projectId: 'cloud-app-staging',
+        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+        services: {
+          web: {
+            serviceId: 'cloud-app-staging-web',
+            workloadKind: 'web',
+            resourceType: 'service',
+          },
+        },
+      });
+      const converged = await planGitHubActionsDeploy({
+        project: projectRepo.findById(project.id)!,
+        environmentName: 'staging',
+        environmentSpec,
+        environment: envRepo.findById(environment.id),
+      });
+
+      expect(converged.deferred).toBeUndefined();
+      expect(converged.error).toBeUndefined();
+      expect(converged.action?.metadata?.workflow).toMatchObject({
+        contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        requiredVariables: [],
       });
     });
 

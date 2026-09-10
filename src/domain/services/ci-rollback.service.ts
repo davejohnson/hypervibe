@@ -179,12 +179,34 @@ async function observeManagedCiRollback(params: {
       error: `${params.environment.name} is not configured for a Hypervibe-managed GitHub Actions deploy.`,
     };
   }
-  const workflow = buildBranchDeployWorkflow(
-    environmentSpec.hosting.provider,
-    target,
-    targets.migration,
-    environmentSpec.ios
-  );
+  let workflow;
+  try {
+    workflow = buildBranchDeployWorkflow(
+      environmentSpec.hosting.provider,
+      target,
+      targets.migration,
+      environmentSpec.ios
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('does not expose a verifiable immutable artifact')) {
+      return {
+        ok: false,
+        reason: 'unsupported',
+        provider: environmentSpec.hosting.provider,
+        error: message,
+      };
+    }
+    throw error;
+  }
+  if (!workflow.supportsImmutableRollback) {
+    return {
+      ok: false,
+      reason: 'unsupported',
+      provider: environmentSpec.hosting.provider,
+      error: `Managed rollback is unavailable because ${environmentSpec.hosting.provider} does not expose a verifiable immutable deployment artifact.`,
+    };
+  }
   const adapterResult = getGitHubAdapter(repository);
   if ('error' in adapterResult) {
     return { ok: false, reason: 'no_adapter', error: adapterResult.error, provider: 'github' };

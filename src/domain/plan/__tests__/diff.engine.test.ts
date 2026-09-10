@@ -2565,6 +2565,34 @@ describe('diffEnvironment — abandoned provider teardown', () => {
     expect(result.actions.some((a) => a.metadata?.operation === 'previousHostingDestroy')).toBe(false);
   });
 
+  it('emits cleanup for an earlier scope of the current provider', () => {
+    const result = diffEnvironment({
+      spec: spec({ hosting: { provider: 'cloudrun' } }),
+      envName: 'production',
+      observed: observed({ provider: 'cloudrun', services: [] }),
+      previousHostingTeardownBoundary: 'services',
+      local: local({
+        bindings: {
+          provider: 'cloudrun',
+          projectId: 'logical-production',
+          services: { web: { serviceId: 'new-web' } },
+          previousHosting: {
+            provider: 'cloudrun',
+            projectId: 'logical-production',
+            providerScope: { projectId: 'gcp-project', region: 'us-east1' },
+            services: { web: { serviceId: 'old-web' } },
+          },
+        },
+      }),
+    });
+
+    expect(result.actions).toContainEqual(expect.objectContaining({
+      id: 'service:web:previous-destroy',
+      resource: { kind: 'service', name: 'web', provider: 'cloudrun' },
+      requiresConfirm: true,
+    }));
+  });
+
   it('uses one environment-boundary destroy for an abandoned shared-project provider', () => {
     const result = diffEnvironment({
       spec: spec({ hosting: { provider: 'cloudrun' } }),
@@ -2655,6 +2683,24 @@ describe('diffEnvironment — release-command migrations', () => {
   it('is a noop when the live service already runs the release command', () => {
     const live = observedWeb({
       config: { startCommand: 'npm start', healthCheckPath: '/health', public: true, releaseCommand: 'npm run db:setup' },
+    });
+    const result = diffEnvironment({
+      spec: spec({ migrations: { mode: 'releaseCommand', command: 'npm run db:setup' } }),
+      envName: 'production',
+      observed: observed({ services: [live] }),
+      local: local(),
+    });
+    expect(result.actions.find((a) => a.id === 'service:web')!.type).toBe('noop');
+  });
+
+  it('is a noop when the provider exposes only the matching release command hash', () => {
+    const live = observedWeb({
+      config: {
+        startCommand: 'npm start',
+        healthCheckPath: '/health',
+        public: true,
+        releaseCommandHash: hashEnvValue('npm run db:setup'),
+      },
     });
     const result = diffEnvironment({
       spec: spec({ migrations: { mode: 'releaseCommand', command: 'npm run db:setup' } }),

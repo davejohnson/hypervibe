@@ -264,6 +264,56 @@ export class ConnectionRepository {
     return this.create(input);
   }
 
+  /**
+   * Atomically stores a batch whose credentials have already been verified
+   * against every provider. This intentionally bypasses the ordinary pending
+   * state only for the orchestration boundary that completed those probes.
+   */
+  upsertVerifiedBatch(inputs: readonly CreateConnectionInput[]): Connection[] {
+    const db = getDb();
+    const normalized = inputs.map((input) => ({
+      ...input,
+      scope: normalizeConnectionScope(input.scope),
+    }));
+    const identities = normalized.map((input) => `${input.provider}\u0000${input.scope ?? ''}`);
+    if (new Set(identities).size !== identities.length) {
+      throw new Error('Verified connection batch contains duplicate provider and scope identities.');
+    }
+
+    return db.transaction(() => {
+      const now = new Date().toISOString();
+      return normalized.map((input) => {
+        const existing = this.findByProviderAndScope(input.provider, input.scope);
+        if (existing) {
+          db.prepare(`
+            UPDATE connections
+            SET credentials_encrypted = ?, status = 'verified', last_verified_at = ?, updated_at = ?
+            WHERE id = ?
+          `).run(input.credentialsEncrypted, now, now, existing.id);
+          return this.findById(existing.id)!;
+        }
+
+        const id = randomUUID();
+        db.prepare(`
+          INSERT INTO connections (
+            id, provider, scope, credentials_encrypted, status,
+            last_verified_at, created_at, updated_at
+          )
+          VALUES (?, ?, ?, ?, 'verified', ?, ?, ?)
+        `).run(
+          id,
+          input.provider,
+          input.scope,
+          input.credentialsEncrypted,
+          now,
+          now,
+          now
+        );
+        return this.findById(id)!;
+      });
+    }).immediate();
+  }
+
   delete(id: string): boolean {
     const db = getDb();
     const result = db.prepare('DELETE FROM connections WHERE id = ?').run(id);

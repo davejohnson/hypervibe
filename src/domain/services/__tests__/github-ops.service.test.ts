@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { createHash } from 'crypto';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import '../../../adapters/providers/railway/railway.adapter.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
@@ -9,6 +10,9 @@ import { ProjectRepository } from '../../../adapters/db/repositories/project.rep
 import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { resolveBranchDeployTargets, buildBranchDeployWorkflow } from '../github-ops.service.js';
 import { SpecStore } from '../../spec/spec.store.js';
+import { managedCiReleaseTarget } from '../managed-ci-targets.js';
+import { cloudRunContainerBuildStartCommand } from '../../../adapters/providers/gcp/cloudrun-ci.release-runtime.js';
+import type { BranchDeployTarget } from '../../ports/ci-deploy.port.js';
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
   ...args: string[]
@@ -85,7 +89,6 @@ describe('github tools', () => {
         kind: 'production',
         branch: 'release',
         autoDeployOnPush: false,
-        promoteFromEnvironment: 'staging',
         serviceNames: [],
         providerProjectId: undefined,
         providerEnvironmentId: undefined,
@@ -134,6 +137,7 @@ describe('github tools', () => {
     expect(workflow.content).toContain('actions: read');
     expect(workflow.content).toContain('environment: production');
     expect(workflow.content).toContain('ref: ${{ steps.deploy.outputs.sha }}');
+    expect(workflow.content).toContain('persist-credentials: false');
     expect(workflow.content).toContain('name: "Deployment safety gate: verify Hypervibe reconciliation"');
     expect(workflow.content).toContain('HYPERVIBE_APPLIED_SPEC_HASH: ${{ vars.HYPERVIBE_APPLIED_SPEC_HASH }}');
     expect(workflow.content).toContain('HYPERVIBE_DEPLOY_SHA: ${{ steps.deploy.outputs.sha }}');
@@ -160,7 +164,7 @@ describe('github tools', () => {
     expect(workflow.content).toContain('password: ${{ secrets.GITHUB_TOKEN }}');
     expect(workflow.content).toContain('Verify Railway image pull credentials');
     expect(workflow.content).toContain('username: ${{ secrets.IMAGE_REGISTRY_USERNAME }}');
-    expect(workflow.content).toContain('docker buildx imagetools inspect "${{ steps.release_image.outputs.image_uri }}"');
+    expect(workflow.content).toContain("docker buildx imagetools inspect \"${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}\"");
     expect(workflow.content).toContain('serviceInstanceUpdate');
     expect(workflow.content).toContain('IMAGE_REGISTRY_USERNAME: ${{ secrets.IMAGE_REGISTRY_USERNAME }}');
     expect(workflow.content).toContain('IMAGE_REGISTRY_TOKEN: ${{ secrets.IMAGE_REGISTRY_TOKEN }}');
@@ -186,8 +190,63 @@ describe('github tools', () => {
     expect(workflow.content).toContain('retention-days: 90');
   });
 
+  it('uses a real bound staging environment as legacy cross-provider promotion evidence', () => {
+    const projectRepo = new ProjectRepository();
+    const envRepo = new EnvironmentRepository();
+    const project = projectRepo.create({
+      name: 'legacy-cross-provider',
+      defaultPlatform: 'railway',
+      gitRemoteUrl: 'https://github.com/davejohnson/legacy-cross-provider',
+      policies: {
+        desiredState: {
+          services: ['web'],
+          deploy: {
+            strategy: 'branch',
+            branches: { staging: 'main', production: 'main' },
+          },
+        },
+      },
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'staging',
+      platformBindings: {
+        provider: 'cloudrun',
+        projectId: 'gcp-project',
+        services: { web: { serviceId: 'staging-web' } },
+      },
+    });
+    envRepo.create({
+      projectId: project.id,
+      name: 'production',
+      platformBindings: {
+        provider: 'railway',
+        projectId: 'rail-project',
+        environmentId: 'rail-production',
+        services: { web: { serviceId: 'production-web' } },
+      },
+    });
+
+    const { targets } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
+    const staging = targets.find((target) => target.environmentName === 'staging')!;
+    const production = targets.find((target) => target.environmentName === 'production')!;
+
+    expect(staging.programFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(production).toMatchObject({
+      promoteFromEnvironment: 'staging',
+      promoteFromProvider: 'cloudrun',
+      promoteFromServiceNames: ['web'],
+      promoteFromProgramFingerprint: staging.programFingerprint,
+    });
+
+    const workflow = buildBranchDeployWorkflow('railway', production, { includeStep: false });
+    expect(workflow.content).toContain(
+      'HYPERVIBE_PROMOTE_FROM_WORKFLOW: ".github/workflows/deploy-cloudrun-staging.yml"'
+    );
+  });
+
   it('restores a verified Railway image digest without rebuilding the target SHA', () => {
-    const target = {
+    const target: BranchDeployTarget = {
       environmentName: 'production',
       kind: 'production' as const,
       branch: 'main',
@@ -216,19 +275,20 @@ describe('github tools', () => {
 
     expect(content).toContain('name: Download rollback release evidence');
     expect(content).toContain('id: rollback_evidence');
-    expect(content).toContain("evidence.server.imageUri");
+    expect(content).toContain('evidence.target.resources');
     expect(checkoutStep).toContain("if: steps.deploy.outputs.operation != 'rollback'");
+    expect(checkoutStep).toContain('persist-credentials: false');
     expect(buildStep).toContain("if: steps.deploy.outputs.operation != 'rollback'");
     expect(content).toContain(
-      "IMAGE_URI: ${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.release_image.outputs.image_uri }}"
+      "IMAGE_URI: ${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}"
     );
-    expect(content).toContain('imageUri: process.env.HYPERVIBE_RELEASE_IMAGE_URI');
+    expect(content).toContain('imageUri: imageUri || null');
   });
 
   it('resolves the exact rollback image from downloaded release evidence', async () => {
     const targetSha = '0123456789abcdef0123456789abcdef01234567';
     const imageUri = `ghcr.io/dave/app@sha256:${'a'.repeat(64)}`;
-    const target = {
+    const target: BranchDeployTarget = {
       environmentName: 'production',
       kind: 'production' as const,
       branch: 'main',
@@ -238,38 +298,78 @@ describe('github tools', () => {
       providerEnvironmentId: 'rail-env',
       providerServiceIds: ['rail-web'],
       providerJobNames: [],
+      programFingerprint: 'c'.repeat(64),
     };
+    const releaseTarget = managedCiReleaseTarget({
+      provider: 'railway',
+      environmentName: 'production',
+      scope: { providerProjectId: 'rail-project', providerEnvironmentId: 'rail-env' },
+      resources: [{
+        logicalName: 'web',
+        workloadKind: 'web',
+        providerResourceType: 'service',
+        providerResourceId: 'rail-web',
+      }],
+    });
+    target.releaseTarget = releaseTarget;
     const content = buildBranchDeployWorkflow('railway', target, { includeStep: false }).content;
     const script = extractGitHubScript(content, 'Resolve immutable rollback image');
     const evidencePath = path.join(tempDir, 'hypervibe-server-release.json');
-    fs.writeFileSync(evidencePath, JSON.stringify({
-      version: 2,
+    const evidence = {
+      version: 3,
+      provider: 'railway',
       environment: 'production',
-      server: { repository: 'dave/app', sha: targetSha, imageUri },
-      services: ['web'],
-    }));
+      source: { repository: 'dave/app', sha: targetSha },
+      target: {
+        scope: releaseTarget.scope,
+        bindingsFingerprint: releaseTarget.bindingsFingerprint,
+        resources: releaseTarget.resources.map((resource) => ({ ...resource, imageUri })),
+      },
+      programFingerprint: 'c'.repeat(64),
+      verifiedAt: '2026-09-10T12:00:00.000Z',
+    };
     const core = { setOutput: vi.fn(), info: vi.fn() };
     const execute = new AsyncFunction('require', 'process', 'core', script);
 
-    await expect(execute(
-      (moduleName: string) => {
-        if (moduleName === 'fs') return { readFileSync: fs.readFileSync };
-        throw new Error(`Unexpected module request: ${moduleName}`);
-      },
-      {
-        env: {
-          HYPERVIBE_RELEASE_EVIDENCE_PATH: evidencePath,
-          HYPERVIBE_ENVIRONMENT: 'production',
-          HYPERVIBE_ROLLBACK_SHA: targetSha,
-          HYPERVIBE_SERVICES: JSON.stringify(['web']),
-          GITHUB_REPOSITORY: 'dave/app',
+    const validate = (candidate: unknown) => {
+      fs.writeFileSync(evidencePath, JSON.stringify(candidate));
+      return execute(
+        (moduleName: string) => {
+          if (moduleName === 'fs') return { readFileSync: fs.readFileSync };
+          if (moduleName === 'crypto') return { createHash };
+          throw new Error(`Unexpected module request: ${moduleName}`);
         },
-      },
-      core
-    )).resolves.toBeUndefined();
+        {
+          env: {
+            HYPERVIBE_RELEASE_EVIDENCE_PATH: evidencePath,
+            HYPERVIBE_ROLLBACK_PROVIDER: 'railway',
+            HYPERVIBE_ROLLBACK_ENVIRONMENT: 'production',
+            HYPERVIBE_ROLLBACK_SHA: targetSha,
+            HYPERVIBE_ROLLBACK_SERVICES: JSON.stringify(['web']),
+            HYPERVIBE_ROLLBACK_TARGET_SCOPE: JSON.stringify(releaseTarget.scope),
+            HYPERVIBE_ROLLBACK_RESOURCES: JSON.stringify(releaseTarget.resources),
+            HYPERVIBE_ROLLBACK_BINDINGS_FINGERPRINT: releaseTarget.bindingsFingerprint,
+            HYPERVIBE_ROLLBACK_PROGRAM_FINGERPRINT: 'c'.repeat(64),
+            GITHUB_REPOSITORY: 'dave/app',
+          },
+        },
+        core
+      );
+    };
+
+    await expect(validate(evidence)).resolves.toBeUndefined();
 
     expect(core.setOutput).toHaveBeenCalledWith('image_uri', imageUri);
     expect(core.info).toHaveBeenCalledWith(`Resolved immutable rollback image ${imageUri}`);
+
+    await expect(validate({
+      ...evidence,
+      target: { ...evidence.target, resources: [] },
+    })).rejects.toThrow(/Rollback release evidence/);
+    await expect(validate({
+      ...evidence,
+      target: { ...evidence.target, bindingsFingerprint: 'f'.repeat(64) },
+    })).rejects.toThrow(/Rollback release evidence/);
   });
 
   it('retries transient Railway reads without replaying deploy mutations', async () => {
@@ -505,11 +605,17 @@ describe('github tools', () => {
     const stagingWorkflow = buildBranchDeployWorkflow('railway', targets[0], { includeStep: false });
     expect(stagingWorkflow.content).toContain('push:');
     expect(stagingWorkflow.content).toContain('branches: [main]');
+    expect(stagingWorkflow.content).toContain(
+      "if: github.event_name != 'push' || vars.HYPERVIBE_APPLIED_SPEC_HASH != ''"
+    );
     expect(stagingWorkflow.content).toContain('workflow_dispatch:');
     expect(stagingWorkflow.content).toContain('commit_sha:');
 
     const productionWorkflow = buildBranchDeployWorkflow('railway', targets[1], { includeStep: false });
     expect(productionWorkflow.content).not.toContain('  push:\n    branches:');
+    expect(productionWorkflow.content).not.toContain(
+      "if: github.event_name != 'push' || vars.HYPERVIBE_APPLIED_SPEC_HASH != ''"
+    );
     expect(productionWorkflow.content).toContain('workflow_dispatch:');
     expect(productionWorkflow.content).toContain('commit_sha:');
     expect(productionWorkflow.content).toContain('ref: ${{ steps.deploy.outputs.sha }}');
@@ -614,18 +720,25 @@ describe('github tools', () => {
     const cloudRunWorkflow = buildBranchDeployWorkflow('cloudrun', {
       ...baseTarget,
       providerServiceIds: ['cloudrun-web'],
+      providerScope: { projectId: 'gcp-project', region: 'us-west1' },
       providerRegion: 'us-west1',
     }, { includeStep: false });
     expect(cloudRunWorkflow.requiredSecrets).toEqual(['GCP_SERVICE_ACCOUNT_JSON', 'GCP_PROJECT_ID']);
     expect(cloudRunWorkflow.requiredVariables).toEqual([]);
     expect(cloudRunWorkflow.content).toContain('GCP_REGION: "us-west1"');
+    expect(cloudRunWorkflow.content).toContain('GCP_BOUND_PROJECT_ID: "gcp-project"');
+    expect(cloudRunWorkflow.content).toContain('process.env.GCP_PROJECT_ID !== process.env.GCP_BOUND_PROJECT_ID');
     expect(cloudRunWorkflow.content).not.toContain('secrets.GCP_REGION');
     expect(cloudRunWorkflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'cloudrun-web'");
     expect(cloudRunWorkflow.content).toContain("CLOUDRUN_JOB_NAMES: ''");
     expect(cloudRunWorkflow.content).toContain('https://run.googleapis.com/v2/projects/');
     expect(cloudRunWorkflow.content).toContain('docker/build-push-action@v6');
+    expect(cloudRunWorkflow.content).toContain(
+      'Artifact Registry repository is not bound; run Hypervibe plan and apply before CI deployment'
+    );
+    expect(cloudRunWorkflow.content).not.toContain("base + '?repositoryId='");
     expect(cloudRunWorkflow.content).toContain('await waitOperation(operation, \'service \' + serviceName + \' deployment\')');
-    expect(cloudRunWorkflow.content).toContain('await waitReady(url, serviceName, \'service\')');
+    expect(cloudRunWorkflow.content).toContain("await waitReady(url, serviceName, 'service', process.env.IMAGE_URI, runtimeResource)");
 
     const railwayWorkflow = buildBranchDeployWorkflow('railway', {
       ...baseTarget,
@@ -643,9 +756,10 @@ describe('github tools', () => {
 
     expect(() => buildBranchDeployWorkflow('cloudrun', {
       ...baseTarget,
+      providerScope: { projectId: 'gcp-project' },
       providerEnvironmentId: 'not-a-region',
       providerServiceIds: ['cloudrun-web'],
-    }, { includeStep: false })).toThrow('has no bound provider region');
+    }, { includeStep: false })).toThrow('has no bound provider project or region');
   });
 
   it('separates Cloud Run service and scheduled job deploy targets', () => {
@@ -661,23 +775,31 @@ describe('github tools', () => {
       name: 'production',
       platformBindings: {
         provider: 'cloudrun',
-        projectId: 'gcp-project',
+        projectId: 'cloudapp-production',
+        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         services: {
-          web: { serviceId: 'gcp-project-web' },
-          daily: { serviceId: 'gcp-project-daily-schedule', jobName: 'gcp-project-daily', resourceType: 'scheduledJob' },
+          web: {
+            serviceId: 'cloudapp-production-web',
+            releaseJobName: 'cloudapp-production-web-migration',
+          },
+          worker: { serviceId: 'cloudapp-production-worker' },
+          daily: { serviceId: 'cloudapp-production-daily-schedule', jobName: 'cloudapp-production-daily', resourceType: 'scheduledJob' },
         },
       },
     });
     new SpecStore().replace(project, {
       version: 1,
       project: project.name,
+      runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
       environments: {
         production: {
           hosting: { provider: 'cloudrun', region: 'us-west1' },
           services: {
-            web: { workloadKind: 'web' },
+            web: { workloadKind: 'web', startCommand: 'npm run web', healthCheckPath: '/healthz' },
+            worker: { workloadKind: 'worker', startCommand: 'npm run worker', healthCheckPath: '/ready' },
             daily: { workloadKind: 'cron', cronSchedule: '0 8 * * *', startCommand: 'npm run daily' },
           },
+          migrations: { mode: 'releaseCommand', command: 'npm run db:migrate' },
           deploy: { strategy: 'branch', branch: 'main' },
         },
       },
@@ -685,22 +807,90 @@ describe('github tools', () => {
 
     const { targets } = resolveBranchDeployTargets(projectRepo.findById(project.id)!);
     expect(targets[0]).toMatchObject({
-      providerServiceIds: ['gcp-project-web'],
-      providerJobNames: ['gcp-project-daily'],
+      providerServiceIds: ['cloudapp-production-web', 'cloudapp-production-worker'],
+      providerJobNames: ['cloudapp-production-daily'],
+      providerScope: { projectId: 'gcp-project', region: 'us-west1' },
+      releaseCommands: [{
+        serviceName: 'web',
+        providerServiceId: 'cloudapp-production-web',
+        jobName: 'cloudapp-production-web-migration',
+        command: 'npm run db:migrate',
+      }],
       needsServiceNames: true,
       needsJobNames: true,
       providerRegion: 'us-west1',
+      runtime: { kind: 'node', version: '22', installCommand: 'npm ci' },
+      containerStartCommand: undefined,
+      runtimeResources: [
+        {
+          logicalName: 'daily',
+          workloadKind: 'cron',
+          providerResourceType: 'job',
+          providerResourceId: 'cloudapp-production-daily',
+          startCommand: 'npm run daily',
+          healthCheckPath: null,
+        },
+        {
+          logicalName: 'web',
+          workloadKind: 'web',
+          providerResourceType: 'service',
+          providerResourceId: 'cloudapp-production-web',
+          startCommand: 'npm run web',
+          healthCheckPath: '/healthz',
+        },
+        {
+          logicalName: 'worker',
+          workloadKind: 'worker',
+          providerResourceType: 'service',
+          providerResourceId: 'cloudapp-production-worker',
+          startCommand: 'npm run worker',
+          healthCheckPath: '/ready',
+        },
+      ],
     });
+    expect(cloudRunContainerBuildStartCommand(targets[0])).toContain('Hypervibe applies the runtime command');
 
     const workflow = buildBranchDeployWorkflow('cloudrun', targets[0], { includeStep: false });
     expect(workflow.requiredVariables).toEqual([]);
     expect(workflow.content).toContain('GCP_REGION: "us-west1"');
-    expect(workflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'gcp-project-web'");
-    expect(workflow.content).toContain("CLOUDRUN_JOB_NAMES: 'gcp-project-daily'");
+    expect(workflow.content).toContain('GCP_BOUND_PROJECT_ID: "gcp-project"');
+    expect(workflow.content).toContain("process.env.GCP_ARTIFACT_REPOSITORY || 'hypervibe'");
+    expect(workflow.content).not.toContain("process.env.GCP_ARTIFACT_REPOSITORY || 'infraprint'");
+    expect(workflow.content).toContain("CLOUDRUN_SERVICE_NAMES: 'cloudapp-production-web,cloudapp-production-worker'");
+    expect(workflow.content).toContain("CLOUDRUN_JOB_NAMES: 'cloudapp-production-daily'");
+    expect(workflow.content).toContain('CLOUDRUN_RELEASE_COMMANDS_B64:');
+    expect(workflow.content).toContain('CLOUDRUN_RUNTIME_RESOURCES_B64:');
+    expect(workflow.content).toContain('cloudRunContainerWithRuntime');
+    expect(workflow.content.match(/Resolve Dockerfile[\s\S]{0,1200}/)?.[0]).toContain(
+      'Hypervibe applies the runtime command during Cloud Run release.'
+    );
+    expect(workflow.content).toContain('await runCloudRunReleaseCommands({');
+    expect(workflow.content.indexOf('await runCloudRunReleaseCommands({')).toBeLessThan(
+      workflow.content.indexOf('for (const serviceName of serviceNames)')
+    );
+    expect(workflow.content).toContain(
+      "IMAGE_URI: ${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}"
+    );
+    expect(workflow.content).toContain('id: release_image');
+    expect(workflow.content).toContain("id: image\n        if: steps.deploy.outputs.operation != 'rollback'");
+    expect(workflow.content).toContain("id: gcp\n        if: steps.deploy.outputs.operation != 'rollback'");
+    expect(workflow.content).toContain("id: build\n        if: steps.deploy.outputs.operation != 'rollback'");
+    expect(workflow.content).toContain("if (process.env.DEPLOY_OPERATION !== 'rollback') {\n              await runCloudRunReleaseCommands({");
+    expect(workflow.content).toContain('version: 3,');
+    expect(workflow.content).toContain('HYPERVIBE_RELEASE_IMAGE_URI: ${{ steps.deploy.outputs.operation ==');
+    expect(workflow.content).toContain('Download rollback release evidence');
+    expect(workflow.content.match(/^\s+HYPERVIBE_SOURCE_ARTIFACT_ID:/gm)).toHaveLength(1);
+    expect(() => new AsyncFunction(
+      'require',
+      'process',
+      'core',
+      'fetch',
+      extractGitHubScript(workflow.content, 'Deploy image to Cloud Run')
+    )).not.toThrow();
     expect(workflow.content).toContain('/jobs/\' + encodeURIComponent(jobName)');
     expect(workflow.content).toContain('await waitOperation(operation, \'job \' + jobName + \' deployment\')');
-    expect(workflow.content).toContain('await waitReady(url, jobName, \'job\')');
-    expect(workflow.content).not.toContain("CLOUDRUN_SERVICE_NAMES: 'gcp-project-web,gcp-project-daily-schedule'");
+    expect(workflow.content).toContain("await waitReady(url, jobName, 'job', process.env.IMAGE_URI, runtimeResource)");
+    expect(workflow.content).not.toContain("CLOUDRUN_SERVICE_NAMES: 'cloudapp-production-web,cloudapp-production-daily-schedule'");
   });
 
   it('generates from an explicit runtime and never invents Node for custom apps', () => {
@@ -712,6 +902,7 @@ describe('github tools', () => {
       serviceNames: ['web'],
       providerProjectId: undefined,
       providerEnvironmentId: 'env-1',
+      providerScope: { projectId: 'gcp-project', region: 'us-central1' },
       providerRegion: 'us-central1',
       providerServiceIds: ['srv-1'],
       containerStartCommand: 'npm run serve',
@@ -832,8 +1023,8 @@ describe('github tools', () => {
     expect(releaseWorkflow).toContain(
       'fs.readFileSync(process.env.HYPERVIBE_SERVER_EVIDENCE_PATH,"utf8")'
     );
-    expect(releaseWorkflow).toContain('evidence.version!==2');
-    expect(releaseWorkflow).not.toContain('evidence.version!==1');
+    expect(releaseWorkflow).toContain('evidence.version!==3');
+    expect(releaseWorkflow).not.toContain('evidence.version!==2');
     expect(releaseWorkflow).toContain('server evidence repository/SHA mismatch');
     expect(releaseWorkflow).toContain('concurrency:');
     expect(releaseWorkflow).toContain('group: hypervibe-deploy-development');

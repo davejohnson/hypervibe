@@ -20,7 +20,7 @@ import { deriveHypervibeSecretValues } from '../domain/services/hypervibe-secret
 import { withReceiptValidatedManagedSecretBindings } from '../domain/services/managed-secret-binding-receipts.js';
 import { runtimeRolloutRequirements } from '../domain/services/runtime-rollout.service.js';
 import { planManagedCiDeploy } from '../domain/services/managed-ci.service.js';
-import { resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
+import { githubActionsCanonicalEnvironment, resolveDevOpsSelection } from '../domain/spec/devops-selection.js';
 import { devOpsProviderRegistry } from '../domain/registry/devops.registry.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { CommandContext } from '../application/context.js';
@@ -40,7 +40,6 @@ import {
 } from '../application/apply-plan.js';
 import { cloudflareScopeHintsForDomain } from '../domain/services/domain-scope.js';
 import {
-  githubCanonicalEnvironment,
   githubSpecNeedsOpenAI,
   planGitHubInfrastructure,
   shouldPlanGitHubInfrastructure,
@@ -293,7 +292,7 @@ function commandEnvironment(spec: ProjectSpec, requested: string | undefined): s
   const explicit = requested?.trim();
   if (explicit) return explicit;
   return Object.keys(spec.environments).length === 0
-    ? githubCanonicalEnvironment(spec) ?? 'staging'
+    ? githubActionsCanonicalEnvironment(spec) ?? 'staging'
     : 'staging';
 }
 

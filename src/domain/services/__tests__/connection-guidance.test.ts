@@ -528,8 +528,10 @@ describe('credentialFieldsFromSchema', () => {
     };
 
     for (const [provider, fields] of Object.entries(expected)) {
-      const schema = providerRegistry.get(provider)!.metadata.credentialsSchema;
-      expect(credentialFieldsFromSchema(schema)?.map(({ name }) => name), provider).toEqual(fields);
+      const metadata = providerRegistry.get(provider)!.metadata;
+      expect(credentialFieldsFromSchema(metadata.credentialsSchema, {
+        exclude: metadata.credentials?.agentManagedKeys,
+      })?.map(({ name }) => name), provider).toEqual(fields);
     }
   });
 

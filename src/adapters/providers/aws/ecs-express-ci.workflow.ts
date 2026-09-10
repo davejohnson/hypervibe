@@ -17,6 +17,9 @@ export const ECS_EXPRESS_CI_REQUIRED_SECRETS = [
 export function buildEcsExpressGitHubActionsSteps(
   target: BranchDeployTarget
 ): BranchDeployStepResult {
+  const buildCondition = target.promoteFromEnvironment
+    ? "steps.deploy.outputs.operation != 'rollback' && !steps.promotion_release.outputs.image_uri"
+    : "steps.deploy.outputs.operation != 'rollback'";
   const serviceArns = Array.from(new Set(
     target.providerServiceIds.map((value) => value.trim()).filter(Boolean)
   ));
@@ -36,6 +39,7 @@ export function buildEcsExpressGitHubActionsSteps(
     displayName: 'AWS ECS Express Mode',
     requiredSecrets: [...ECS_EXPRESS_CI_REQUIRED_SECRETS],
     requiredVariables,
+    releaseImageUri: "${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}",
     permissions: `    permissions:
       actions: read
       contents: read
@@ -50,6 +54,7 @@ export function buildEcsExpressGitHubActionsSteps(
         uses: actions/github-script@v9
         env:
           AWS_ECS_CLUSTER_ARN: ${clusterArn}
+          DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
             const value = (process.env.AWS_ECS_CLUSTER_ARN || '').trim();
@@ -66,7 +71,7 @@ export function buildEcsExpressGitHubActionsSteps(
             core.setOutput(
               'image',
               account + '.dkr.ecr.' + region + '.amazonaws.com/hypervibe/'
-                + cluster.toLowerCase() + ':' + process.env.GITHUB_SHA.toLowerCase()
+                + cluster.toLowerCase() + ':' + process.env.DEPLOY_SHA.toLowerCase()
             );
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v5
@@ -75,10 +80,13 @@ export function buildEcsExpressGitHubActionsSteps(
           aws-secret-access-key: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: \${{ steps.aws_target.outputs.region }}
       - name: Authenticate to Hypervibe-managed ECR
+        if: ${buildCondition}
         uses: aws-actions/amazon-ecr-login@v2
-${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
+${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-action@v3
+        if: ${buildCondition}
       - name: Publish exact-SHA AWS image
         id: aws_publish
+        if: ${buildCondition}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -88,6 +96,21 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           platforms: linux/amd64
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
+      - name: Resolve immutable AWS image
+        id: release_image
+        if: ${buildCondition}
+        uses: actions/github-script@v9
+        env:
+          IMAGE_TAG: \${{ steps.aws_target.outputs.image }}
+          IMAGE_DIGEST: \${{ steps.aws_publish.outputs.digest }}
+        with:
+          script: |
+            const tag = (process.env.IMAGE_TAG || '').trim().toLowerCase();
+            const digest = (process.env.IMAGE_DIGEST || '').trim().toLowerCase();
+            if (!tag || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+              throw new Error('AWS image publication did not return an immutable digest');
+            }
+            core.setOutput('image_uri', tag.replace(/:[^/:]+$/, '') + '@' + digest);
       - name: Install pinned ECS SDK
         run: npm install --no-save --ignore-scripts ${HYPERVIBE_MANAGED_NPM_PACKAGES.awsEcs}
       - name: Release exact digest to bound ECS Express services
@@ -95,9 +118,8 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
         env:
           AWS_ECS_CLUSTER_ARN: ${clusterArn}
           AWS_ECS_EXPRESS_SERVICE_ARNS_JSON: ${serviceArnsValue}
-          IMAGE_URI: \${{ steps.aws_target.outputs.image }}
-          IMAGE_DIGEST: \${{ steps.aws_publish.outputs.digest }}
-          DEPLOY_SHA: \${{ github.sha }}
+          IMAGE_URI: \${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}
+          DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
             const {
@@ -125,15 +147,16 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
                 throw new Error('ECS Express service ARN is outside the bound cluster: ' + arn);
               }
             }
-            const digest = (process.env.IMAGE_DIGEST || '').trim().toLowerCase();
+            const exactImage = (process.env.IMAGE_URI || '').trim().toLowerCase();
+            const digest = exactImage.split('@')[1] || '';
             const sha = (process.env.DEPLOY_SHA || '').trim().toLowerCase();
-            if (!/^sha256:[0-9a-f]{64}$/.test(digest)) {
-              throw new Error('AWS image publication did not return a digest');
+            if (!/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(exactImage)
+                || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+              throw new Error('AWS release image is not an immutable digest');
             }
             if (!/^[0-9a-f]{40}$/.test(sha)) {
               throw new Error('DEPLOY_SHA must be a full Git SHA');
             }
-            const exactImage = process.env.IMAGE_URI.replace(/:[^/:]+$/, '') + '@' + digest;
             const client = new ECSClient({ region });
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             const currentConfig = (service) => {

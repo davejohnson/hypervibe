@@ -8,6 +8,7 @@ describe('parseHostingBindings', () => {
         provider: 'railway',
         projectId: 'proj-123',
         environmentId: 'env-456',
+        providerScope: { projectId: 'gcp-project', region: 'us-west1' },
         ci: { workflows: { production: { path: '.github/workflows/deploy.yml' } } },
         services: {
           web: {
@@ -28,6 +29,7 @@ describe('parseHostingBindings', () => {
 
     expect(bindings.provider).toBe('railway');
     expect(bindings.projectId).toBe('proj-123');
+    expect(bindings.providerScope).toEqual({ projectId: 'gcp-project', region: 'us-west1' });
     expect(bindings.services?.web?.serviceId).toBe('svc-1');
     expect(bindings.services?.web?.source?.branch).toBe('main');
     expect(bindings.services?.nightly?.schedulerJobName).toBe('nightly-job');
@@ -46,6 +48,7 @@ describe('parseHostingBindings', () => {
     ['provider', { provider: 42 }],
     ['project ID', { projectId: {} }],
     ['environment ID', { environmentId: '' }],
+    ['provider scope', { providerScope: { projectId: '   ' } }],
     ['services map', { services: 'nope' }],
     ['service ID', { services: { web: { serviceId: '' } } }],
     ['service recovery map', { serviceCreateRecovery: [] }],

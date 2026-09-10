@@ -57,6 +57,7 @@ import {
   applyGitHubNativeSetting,
   applyGitHubOpenAISecret,
   resolveGitHubInfrastructureRepository,
+  shouldPlanGitHubDelegatedSecrets,
   shouldPlanGitHubInfrastructure,
 } from '../domain/services/github-infrastructure.service.js';
 import {
@@ -140,6 +141,7 @@ import { bindingIdentityFingerprint } from '../domain/services/binding-identity.
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import { findActiveDatastoreBindingConflict } from './active-datastore-binding.js';
 import { findLocalProviderBoundaryUse } from './local-provider-boundary.js';
+import { prepareHostingBindingTransition } from '../domain/services/hosting-binding-transition.js';
 
 /**
  * The shared plan-apply pipeline: connection gating, TOCTOU re-observe,
@@ -368,7 +370,9 @@ function requiredCredentialKeys(block: ConnectionBlock): string[] {
   if (block.requiredCredentialKeys) return block.requiredCredentialKeys;
   const metadata = providerRegistry.getMetadata(block.provider);
   return metadata
-    ? credentialFieldsFromSchema(metadata.credentialsSchema)
+    ? credentialFieldsFromSchema(metadata.credentialsSchema, {
+      exclude: metadata.credentials?.agentManagedKeys,
+    })
       ?.filter((field) => field.required)
       .map((field) => field.name) ?? []
     : [];
@@ -523,7 +527,6 @@ export function splitActionScopedConnectionBlocks(
     entry.policy === 'action-scoped-if-independent-actions'
     && (entry.actionIds?.some((id) => actions.some((action) => action.id === id && action.type !== 'noop')) ?? hasIndependentPendingAction)
   );
-  const actionScopedProviders = new Set(actionScopedBlocked.map((entry) => entry.provider));
   const ciCredentialBlocks = actions.flatMap((action) => {
     const missing = Array.isArray(action.metadata?.missingProviderSecrets)
       ? action.metadata.missingProviderSecrets.filter((value): value is string => typeof value === 'string')
@@ -543,7 +546,7 @@ export function splitActionScopedConnectionBlocks(
     }];
   });
   return {
-    hardBlocked: blocked.filter((entry) => !actionScopedProviders.has(entry.provider)),
+    hardBlocked: blocked.filter((entry) => entry.policy !== 'action-scoped-if-independent-actions'),
     actionScopedBlocked: [...actionScopedBlocked, ...ciCredentialBlocks],
   };
 }
@@ -796,7 +799,9 @@ export async function executePlanApply(ctx: CommandContext, params: {
           || capability === 'code.repository.destroy'
           || capability === 'code.repository.binding.remove';
       });
-    return shouldPlanGitHubInfrastructure(spec, envName) || repositoryLifecycleOnly
+    return shouldPlanGitHubInfrastructure(spec, envName)
+      || shouldPlanGitHubDelegatedSecrets(spec, envName)
+      || repositoryLifecycleOnly
       ? executeRepositoryPlanApply(ctx, {
           project,
           spec,
@@ -951,6 +956,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
   const confirmedActionIds = new Set(params.confirmActions);
   const buildDeployBootstrapParams = async () => {
     let bootstrapParams = specToBootstrapParams(applyProject.name, envName, envSpec, spec.runtime);
+    if (loaded.document.sourceCommitSha) {
+      bootstrapParams = {
+        ...bootstrapParams,
+        expectedSourceCommitSha: loaded.document.sourceCommitSha,
+      };
+    }
     bootstrapParams = applyEnvFileVarsToBootstrapParams(bootstrapParams, envFileEnvVars);
     bootstrapParams = applyOverridesToBootstrapParams(bootstrapParams, {
       envVars: overrideEnvVars,
@@ -2027,6 +2038,7 @@ function localServiceBindingUse(params: {
   ctx: CommandContext;
   provider: string;
   projectId: string;
+  providerScope?: Record<string, unknown>;
   serviceId: string;
   exclude?: { environmentId: string; source: 'current' | 'previous'; serviceName: string };
 }): { environment: Environment; state: 'bound' | 'unknown' } | null {
@@ -2067,6 +2079,13 @@ function localServiceBindingUse(params: {
               return { environment, state: 'unknown' };
             }
             if (boundId === params.serviceId) {
+              if (params.providerScope) {
+                const candidateScope = asRecord(candidate.bindings?.providerScope);
+                if (!candidateScope) return { environment, state: 'unknown' };
+                if (sortedRecordJson(candidateScope) !== sortedRecordJson(params.providerScope)) {
+                  continue;
+                }
+              }
               return {
                 environment,
                 state: projectId === params.projectId ? 'bound' : 'unknown',
@@ -2091,6 +2110,12 @@ function localServiceBindingUse(params: {
           return { environment, state: 'unknown' };
         }
         if (recovery.serviceId === params.serviceId) {
+          if (
+            params.providerScope
+            && sortedRecordJson(recovery.providerScope) !== sortedRecordJson(params.providerScope)
+          ) {
+            continue;
+          }
           return {
             environment,
             state: recovery.providerScope.projectId === params.projectId ? 'bound' : 'unknown',
@@ -2130,46 +2155,20 @@ async function ensureHostingProject(
   }
 
   const currentBindings = parseHostingBindings(environment);
-  const rawBindings = environment.platformBindings as Record<string, unknown>;
   if (currentBindings.provider && currentBindings.provider !== provider) {
-    const retainedPreviousHosting = asRecord(rawBindings.previousHosting);
-    if (stringField(retainedPreviousHosting, 'provider')) {
-      return {
-        success: false,
-        status: 'blocked',
-        message: 'A prior hosting-provider migration still requires cleanup',
-        error: `Cannot switch hosting from ${currentBindings.provider} to ${provider} while cleanup from ${stringField(retainedPreviousHosting, 'provider')} is still retained. Re-run hv_plan after resolving that teardown.`,
-      };
-    }
-    const cleanupBoundary = providerRegistry.getMetadata(currentBindings.provider)
-      ?.lifecycle?.hosting?.teardownBoundary;
-    if (!cleanupBoundary) {
-      return {
-        success: false,
-        status: 'blocked',
-        message: 'The abandoned hosting provider has no safe teardown contract',
-        error: `${currentBindings.provider} does not declare whether cleanup owns services, an environment, or a project. Hypervibe will not discard or reinterpret its bindings.`,
-      };
-    }
-    const hasRetainedCleanupIdentity = Object.keys(currentBindings.services ?? {}).length > 0
-      || (cleanupBoundary === 'environment' && Boolean(currentBindings.projectId && currentBindings.environmentId))
-      || (cleanupBoundary === 'project' && Boolean(currentBindings.projectId));
-    ctx.repos.environments.updatePlatformBindings(environment.id, {
-      ...(!rawBindings.previousHosting && hasRetainedCleanupIdentity
-        ? {
-            previousHosting: {
-              provider: currentBindings.provider,
-              ...(currentBindings.projectId ? { projectId: currentBindings.projectId } : {}),
-              ...(currentBindings.environmentId ? { environmentId: currentBindings.environmentId } : {}),
-              services: currentBindings.services ?? {},
-            },
-          }
-        : {}),
-      provider,
-      projectId: undefined,
-      environmentId: undefined,
-      services: {},
+    const transition = prepareHostingBindingTransition({
+      current: environment.platformBindings,
+      target: { provider },
     });
+    if (!transition.ok) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: 'The current hosting scope cannot be safely retained for cleanup',
+        error: transition.error,
+      };
+    }
+    ctx.repos.environments.updatePlatformBindings(environment.id, transition.patch);
     environment = ctx.repos.environments.findById(environment.id) ?? environment;
   }
 
@@ -2203,25 +2202,18 @@ async function ensureHostingProject(
     ctx.repos.environments.findById(environment.id) ?? environment
   );
   const projectId = stringField(asRecord(receipt.data), 'projectId') ?? refreshedBindings.projectId;
-  const environmentId = stringField(asRecord(receipt.data), 'environmentId') ?? refreshedBindings.environmentId;
-  const providerBindings = asRecord(asRecord(receipt.data)?.providerBindings) ?? {};
-  const reservedProviderBindingKeys = [
-    'provider',
-    'projectId',
-    'environmentId',
-    'services',
-    'previousHosting',
-  ];
-  const reservedProviderBinding = reservedProviderBindingKeys.find((key) => key in providerBindings);
-  if (reservedProviderBinding) {
+  const environmentId = stringField(asRecord(receipt.data), 'environmentId');
+  const rawProviderBindings = asRecord(receipt.data)?.providerBindings;
+  if (rawProviderBindings !== undefined && !asRecord(rawProviderBindings)) {
     return {
       success: false,
       status: 'blocked',
       message: `${provider} returned an invalid provider binding`,
-      error: `Provider-owned project binding data cannot replace reserved hosting key ${reservedProviderBinding}.`,
+      error: 'Provider-owned project binding data must be an object.',
       data: receipt.data,
     };
   }
+  const providerBindings = asRecord(rawProviderBindings) ?? {};
   if (!projectId) {
     return {
       success: false,
@@ -2230,20 +2222,34 @@ async function ensureHostingProject(
       data: receipt.data,
     };
   }
-  ctx.repos.environments.updatePlatformBindings(environment.id, {
-    ...providerBindings,
-    provider,
-    projectId,
-    ...(environmentId ? { environmentId } : {}),
-    ...(receipt.data?.created === true ? { services: {} } : {}),
+  const transition = prepareHostingBindingTransition({
+    current: (ctx.repos.environments.findById(environment.id) ?? environment).platformBindings,
+    target: {
+      provider,
+      projectId,
+      ...(environmentId ? { environmentId } : {}),
+      providerBindings,
+      created: receipt.data?.created === true,
+    },
   });
+  if (!transition.ok) {
+    return {
+      success: false,
+      status: 'blocked',
+      message: 'The current hosting scope cannot be safely retained for cleanup',
+      error: transition.error,
+      data: receipt.data,
+    };
+  }
+  const updated = ctx.repos.environments.updatePlatformBindings(environment.id, transition.patch);
+  const updatedBindings = parseHostingBindings(updated ?? environment);
   return {
     success: true,
     message: receipt.message,
     data: {
       provider,
       projectId,
-      ...(environmentId ? { environmentId } : {}),
+      ...(updatedBindings.environmentId ? { environmentId: updatedBindings.environmentId } : {}),
       created: receipt.data?.created === true,
       ...(Object.keys(providerBindings).length > 0 ? { providerBindings } : {}),
     },
@@ -2869,6 +2875,12 @@ async function destroyPreviousHostingService(
   const target = serviceDeleteTarget(action);
   const cleanupBoundary = stringField(asRecord(action.metadata), 'cleanupBoundary');
   const reviewedServiceId = stringField(asRecord(action.metadata), 'serviceId');
+  const retainedProviderScope = asRecord(previousHosting?.providerScope);
+  const plannedRetainedProviderScope = asRecord(action.metadata?.retainedProviderScope);
+  const retainedProjectId = stringField(retainedProviderScope, 'projectId')
+    ?? stringField(previousHosting, 'projectId');
+  const retainedEnvironmentId = stringField(retainedProviderScope, 'environmentId')
+    ?? stringField(previousHosting, 'environmentId');
   if (
     !previousHosting
     || stringField(previousHosting, 'provider') !== action.resource.provider
@@ -2878,9 +2890,12 @@ async function destroyPreviousHostingService(
     || !target
     || target.scope.scope !== providerServiceDeleteScope(action.resource.provider)
     || target.serviceId !== serviceId
-    || target.scope.projectId !== stringField(previousHosting, 'projectId')
+    || target.scope.projectId !== retainedProjectId
     || (target.scope.scope === 'environment'
-      && target.scope.environmentId !== stringField(previousHosting, 'environmentId'))
+      && target.scope.environmentId !== retainedEnvironmentId)
+    || Boolean(retainedProviderScope) !== Boolean(plannedRetainedProviderScope)
+    || (retainedProviderScope && plannedRetainedProviderScope
+      && sortedRecordJson(retainedProviderScope) !== sortedRecordJson(plannedRetainedProviderScope))
   ) {
     return {
       success: false,
@@ -2894,7 +2909,15 @@ async function destroyPreviousHostingService(
   if (!adapterResult.success || !adapterResult.adapter) {
     return { success: false, message: `${action.resource.provider} adapter unavailable`, error: adapterResult.error };
   }
-  const adapter = adapterResult.adapter as { name: string; deleteService?: (serviceId: string, scope: HostingServiceDeleteScope, options: HostingServiceDeleteOptions) => Promise<{ success: boolean; error?: string; message?: string }> };
+  const adapter = adapterResult.adapter as {
+    name: string;
+    configureTarget?: (target: { region?: string }) => void | Promise<void>;
+    deleteService?: (
+      serviceId: string,
+      scope: HostingServiceDeleteScope,
+      options: HostingServiceDeleteOptions
+    ) => Promise<{ success: boolean; error?: string; message?: string }>;
+  };
   if (typeof adapter.deleteService !== 'function') {
     return {
       success: false,
@@ -2903,10 +2926,31 @@ async function destroyPreviousHostingService(
     };
   }
 
+  const activeBindings = asRecord(environment.platformBindings);
+  const activeProviderScope = asRecord(activeBindings?.providerScope);
+  if (stringField(activeBindings, 'provider') === action.resource.provider && retainedProviderScope) {
+    const retainedScopeProject = stringField(retainedProviderScope, 'projectId');
+    const activeScopeProject = stringField(activeProviderScope, 'projectId');
+    if (!retainedScopeProject || !activeScopeProject || retainedScopeProject !== activeScopeProject) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: 'The retained hosting service is in a different provider project',
+        error: 'Hypervibe will not use the active same-provider connection to delete a service in an unverified earlier project scope.',
+      };
+    }
+  }
+  const retainedRegion = stringField(retainedProviderScope, 'region')
+    ?? stringField(retainedProviderScope, 'location');
+  if (retainedRegion) {
+    await adapter.configureTarget?.({ region: retainedRegion });
+  }
+
   const sharedBinding = localServiceBindingUse({
     ctx,
     provider: action.resource.provider,
     projectId: target.scope.projectId,
+    ...(retainedProviderScope ? { providerScope: retainedProviderScope } : {}),
     serviceId: target.serviceId,
     exclude: {
       environmentId: environment.id,
@@ -2963,8 +3007,12 @@ async function destroyPreviousHostingBoundary(
   const previousHosting = asRecord((environment.platformBindings as Record<string, unknown>).previousHosting);
   const metadata = asRecord(action.metadata);
   const retainedProvider = stringField(previousHosting, 'provider');
-  const retainedProjectId = stringField(previousHosting, 'projectId');
-  const retainedEnvironmentId = stringField(previousHosting, 'environmentId');
+  const retainedProviderScope = asRecord(previousHosting?.providerScope);
+  const plannedRetainedProviderScope = asRecord(metadata?.retainedProviderScope);
+  const retainedProjectId = stringField(retainedProviderScope, 'projectId')
+    ?? stringField(previousHosting, 'projectId');
+  const retainedEnvironmentId = stringField(retainedProviderScope, 'environmentId')
+    ?? stringField(previousHosting, 'environmentId');
   if (
     retainedProvider !== action.resource.provider
     || !retainedProjectId
@@ -2973,6 +3021,9 @@ async function destroyPreviousHostingBoundary(
     || stringField(metadata, 'cleanupBoundary') !== boundary
     || stringField(metadata, 'projectId') !== retainedProjectId
     || (boundary === 'environment' && stringField(metadata, 'environmentId') !== retainedEnvironmentId)
+    || Boolean(retainedProviderScope) !== Boolean(plannedRetainedProviderScope)
+    || (retainedProviderScope && plannedRetainedProviderScope
+      && sortedRecordJson(retainedProviderScope) !== sortedRecordJson(plannedRetainedProviderScope))
   ) {
     return {
       success: false,
@@ -3023,12 +3074,30 @@ async function destroyPreviousHostingBoundary(
     return { success: false, message: `${action.resource.provider} adapter unavailable`, error: adapterResult.error };
   }
   const adapter = adapterResult.adapter as {
+    configureTarget?: (target: { region?: string }) => void | Promise<void>;
     deleteProject?: (projectId: string) => Promise<{ success: boolean; error?: string }>;
     deleteEnvironment?: (
       projectId: string,
       environmentId: string
     ) => Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }>;
   };
+  const activeBindings = asRecord(environment.platformBindings);
+  const activeProviderScope = asRecord(activeBindings?.providerScope);
+  if (stringField(activeBindings, 'provider') === retainedProvider && retainedProviderScope) {
+    const retainedScopeProject = stringField(retainedProviderScope, 'projectId');
+    const activeScopeProject = stringField(activeProviderScope, 'projectId');
+    if (!retainedScopeProject || !activeScopeProject || retainedScopeProject !== activeScopeProject) {
+      return {
+        success: false,
+        status: 'blocked',
+        message: `The retained hosting ${boundary} is in a different provider project`,
+        error: 'Hypervibe will not use the active same-provider connection to delete an unverified earlier project scope.',
+      };
+    }
+  }
+  const retainedRegion = stringField(retainedProviderScope, 'region')
+    ?? stringField(retainedProviderScope, 'location');
+  if (retainedRegion) await adapter.configureTarget?.({ region: retainedRegion });
   const deleted = boundary === 'environment'
     ? typeof adapter.deleteEnvironment === 'function'
       ? await adapter.deleteEnvironment(retainedProjectId, retainedEnvironmentId!)

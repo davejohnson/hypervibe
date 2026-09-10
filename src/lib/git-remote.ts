@@ -1,4 +1,5 @@
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
+import path from 'path';
 
 /**
  * Detect the git remote URL of the current working directory.
@@ -11,6 +12,43 @@ export function detectGitRemoteUrl(startDir = process.cwd()): string | null {
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the exact commit checked out in a repository. Branch names are
+ * mutable, so deployment plans persist this full SHA as their code boundary.
+ */
+export function resolveGitHeadCommitSha(
+  startDir = process.cwd(),
+  requiredCommittedFile?: string
+): string | null {
+  try {
+    if (requiredCommittedFile) {
+      const relativePath = path.relative(startDir, path.resolve(requiredCommittedFile));
+      if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+        return null;
+      }
+      execFileSync('git', ['ls-files', '--error-unmatch', '--', relativePath], {
+        cwd: startDir,
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      execFileSync('git', ['diff', '--quiet', 'HEAD', '--', relativePath], {
+        cwd: startDir,
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    }
+    const sha = execSync('git rev-parse --verify HEAD', {
+      cwd: startDir,
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim().toLowerCase();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
   } catch {
     return null;
   }

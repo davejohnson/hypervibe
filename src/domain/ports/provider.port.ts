@@ -17,6 +17,9 @@ export interface DeploymentMutationOptions {
    * against the currently deployed image.
    */
   deferDeployment?: boolean;
+
+  /** Exact commit authorized for a provider-built first managed-CI release. */
+  expectedSourceCommitSha?: string;
 }
 
 /** Exact provider context authorized for deleting one hosting service. */

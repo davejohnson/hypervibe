@@ -23,6 +23,9 @@ export function azureRegistryName(resourceGroupId: string): string {
 export function buildAzureContainerAppsGitHubActionsSteps(
   target: BranchDeployTarget
 ): BranchDeployStepResult {
+  const buildCondition = target.promoteFromEnvironment
+    ? "steps.deploy.outputs.operation != 'rollback' && !steps.promotion_release.outputs.image_uri"
+    : "steps.deploy.outputs.operation != 'rollback'";
   const projectId = target.providerProjectId?.trim();
   const serviceIds = Array.from(new Set(
     target.providerServiceIds.map((value) => value.trim()).filter(Boolean)
@@ -36,6 +39,7 @@ export function buildAzureContainerAppsGitHubActionsSteps(
   return {
     displayName: 'Azure Container Apps',
     requiredSecrets: [...AZURE_CONTAINER_APPS_CI_REQUIRED_SECRETS],
+    releaseImageUri: "${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}",
     requiredVariables: [
       ...(projectId ? [] : ['AZURE_RESOURCE_GROUP_ID']),
       ...(serviceIds.length > 0 ? [] : ['AZURE_CONTAINER_APP_IDS_JSON']),
@@ -56,6 +60,7 @@ export function buildAzureContainerAppsGitHubActionsSteps(
           AZURE_SUBSCRIPTION_ID: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_RESOURCE_GROUP_ID: ${projectValue}
           AZURE_REGISTRY_SERVER: ${registry ? yamlSingleQuoted(registry) : "''"}
+          DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
             const id = (process.env.AZURE_RESOURCE_GROUP_ID || '').trim();
@@ -75,17 +80,20 @@ export function buildAzureContainerAppsGitHubActionsSteps(
             core.setOutput(
               'image',
               registry + '/hypervibe/' + process.env.GITHUB_REPOSITORY.toLowerCase()
-                + ':' + process.env.GITHUB_SHA.toLowerCase()
+                + ':' + process.env.DEPLOY_SHA.toLowerCase()
             );
       - name: Authenticate to Hypervibe-managed ACR
+        if: ${buildCondition}
         uses: docker/login-action@v3
         with:
           registry: \${{ steps.azure_target.outputs.registry }}
           username: \${{ secrets.AZURE_CLIENT_ID }}
           password: \${{ secrets.AZURE_CLIENT_SECRET }}
-${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
+${buildDockerfileStep(target, buildCondition)}      - uses: docker/setup-buildx-action@v3
+        if: ${buildCondition}
       - name: Publish exact-SHA Azure image
         id: azure_publish
+        if: ${buildCondition}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -95,6 +103,21 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           platforms: linux/amd64
           secrets: |
             npm_token=\${{ secrets.NODE_AUTH_TOKEN }}
+      - name: Resolve immutable Azure image
+        id: release_image
+        if: ${buildCondition}
+        uses: actions/github-script@v9
+        env:
+          IMAGE_TAG: \${{ steps.azure_target.outputs.image }}
+          IMAGE_DIGEST: \${{ steps.azure_publish.outputs.digest }}
+        with:
+          script: |
+            const tag = (process.env.IMAGE_TAG || '').trim().toLowerCase();
+            const digest = (process.env.IMAGE_DIGEST || '').trim().toLowerCase();
+            if (!tag || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+              throw new Error('Azure image publication did not return an immutable digest');
+            }
+            core.setOutput('image_uri', tag.replace(/:[^/:]+$/, '') + '@' + digest);
       - name: Release exact digest to bound Azure Container Apps
         uses: actions/github-script@v9
         env:
@@ -104,9 +127,8 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
           AZURE_CLIENT_SECRET: \${{ secrets.AZURE_CLIENT_SECRET }}
           AZURE_RESOURCE_GROUP_ID: ${projectValue}
           AZURE_CONTAINER_APP_IDS_JSON: ${serviceIdsValue}
-          IMAGE_URI: \${{ steps.azure_target.outputs.image }}
-          IMAGE_DIGEST: \${{ steps.azure_publish.outputs.digest }}
-          DEPLOY_SHA: \${{ github.sha }}
+          IMAGE_URI: \${{ steps.deploy.outputs.operation == 'rollback' && steps.rollback_evidence.outputs.image_uri || steps.promotion_release.outputs.image_uri || steps.release_image.outputs.image_uri }}
+          DEPLOY_SHA: \${{ steps.deploy.outputs.sha }}
         with:
           script: |
             const management = 'https://management.azure.com';
@@ -163,11 +185,14 @@ ${buildDockerfileStep(target)}      - uses: docker/setup-buildx-action@v3
                 groupId + '/providers/microsoft.app/containerapps/'
               )) throw new Error('Container App is outside the bound resource group: ' + appId);
             }
-            const digest = (process.env.IMAGE_DIGEST || '').trim().toLowerCase();
+            const exactImage = (process.env.IMAGE_URI || '').trim().toLowerCase();
+            const digest = exactImage.split('@')[1] || '';
             const sha = (process.env.DEPLOY_SHA || '').trim().toLowerCase();
-            if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error('Azure image publication returned no digest');
+            if (!/^[^\\s@]+@sha256:[0-9a-f]{64}$/.test(exactImage)
+                || !/^sha256:[0-9a-f]{64}$/.test(digest)) {
+              throw new Error('Azure release image is not an immutable digest');
+            }
             if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('DEPLOY_SHA must be a full Git SHA');
-            const exactImage = process.env.IMAGE_URI.replace(/:[^/:]+$/, '') + '@' + digest;
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             for (const appId of appIds) {
               const app = await request('GET', appId);

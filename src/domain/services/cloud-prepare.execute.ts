@@ -2,11 +2,15 @@ import { ConnectionRepository } from '../../adapters/db/repositories/connection.
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
+import { GcpBootstrapClient } from '../../adapters/providers/gcp/gcp-bootstrap.client.js';
 import { GoogleAuth } from 'google-auth-library';
 import type { Project } from '../entities/project.entity.js';
 import { getProjectScopeHints } from './project-scope.js';
 import {
   GCS_PREPARE_ADDONS,
+  CLOUD_RUN_RUNTIME_BASE_ROLES,
+  CLOUD_RUN_RUNTIME_QUEUE_ROLES,
+  CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES,
   getCloudPrepareProfile,
   getCloudPreparation,
   MEMORYSTORE_PREPARE_ADDONS,
@@ -33,22 +37,20 @@ const REQUIRED_ADMIN_ROLES = [
   'roles/serviceusage.serviceUsageAdmin',
   'roles/resourcemanager.projectIamAdmin',
 ] as const;
+const REQUIRED_SERVICE_ACCOUNT_POLICY_PERMISSIONS = [
+  'iam.serviceAccounts.get',
+  'iam.serviceAccounts.getIamPolicy',
+  'iam.serviceAccounts.setIamPolicy',
+] as const;
+const REQUIRED_SERVICE_ACCOUNT_POLICY_ROLES = [
+  'roles/iam.serviceAccountAdmin',
+] as const;
 
 interface ServiceAccountCredentials {
   type?: string;
   project_id?: string;
   private_key?: string;
   client_email?: string;
-}
-
-interface ServiceUsageOperation {
-  name?: string;
-  done?: boolean;
-  error?: {
-    code?: number;
-    status?: string;
-    message?: string;
-  };
 }
 
 interface IamBinding {
@@ -69,10 +71,15 @@ interface CloudPreparePlan {
   version: string;
   gcpProjectId: string;
   deployServiceAccountEmail: string;
+  runtimeServiceAccountEmail?: string;
   enableApis: string[];
   grantRoles: string[];
   revokeRoles: string[];
   member: string;
+  runtimeMember?: string;
+  runtimeGrantRoles: string[];
+  runtimeRevokeRoles: string[];
+  runtimeServiceAccountGrantRoles: string[];
   gcsAccess?: GcsPrepareAccess;
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
@@ -89,6 +96,7 @@ export async function runCloudPrepare(params: {
   provider: string;
   gcpProjectId?: string;
   deployServiceAccountEmail?: string;
+  runtimeServiceAccountEmail?: string;
   adminCredentialsJson?: string;
   adminAccessToken?: string;
   adminAuth?: 'default';
@@ -104,6 +112,7 @@ export async function runCloudPrepare(params: {
     provider,
     gcpProjectId,
     deployServiceAccountEmail,
+    runtimeServiceAccountEmail,
     adminCredentialsJson,
     adminAccessToken,
     adminAuth,
@@ -123,12 +132,16 @@ export async function runCloudPrepare(params: {
     project,
     gcpProjectId,
     deployServiceAccountEmail,
+    runtimeServiceAccountEmail,
   });
   if (!resolved.success) {
     return { success: false, error: resolved.error };
   }
 
   const member = `serviceAccount:${resolved.deployServiceAccountEmail}`;
+  const runtimeMember = resolved.runtimeServiceAccountEmail
+    ? `serviceAccount:${resolved.runtimeServiceAccountEmail}`
+    : undefined;
   const gcsAddon = gcsAccess ? GCS_PREPARE_ADDONS[gcsAccess] : undefined;
   const memorystoreAddon = memorystoreAccess
     ? MEMORYSTORE_PREPARE_ADDONS[memorystoreAccess]
@@ -145,28 +158,74 @@ export async function runCloudPrepare(params: {
     ...(gcsAddon?.requiredApis ?? []),
     ...(memorystoreAddon?.requiredApis ?? []),
   ]));
+  const runtimeBaseRoles = new Set<string>(CLOUD_RUN_RUNTIME_BASE_ROLES);
+  const runtimeServiceAccountAccessRoles = new Set<string>(
+    CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES
+  );
   const requiredRoles = Array.from(new Set([
-    ...(basePreparation ? profile.requiredRoles : []),
+    ...(basePreparation
+      ? resolved.runtimeServiceAccountEmail
+        ? profile.requiredRoles.filter((role) => (
+            !runtimeBaseRoles.has(role) && !runtimeServiceAccountAccessRoles.has(role)
+          ))
+        : profile.requiredRoles
+      : []),
     ...(queueAddon?.requiredRoles ?? []),
     ...(gcsAddon?.requiredRoles ?? []),
     ...(memorystoreAddon?.requiredRoles ?? []),
   ]));
-  const revokeRoles: string[] = queueAccess === 'remove'
-    ? [...QUEUE_PREPARE_ADDON.requiredRoles]
+  const revokeRoles: string[] = Array.from(new Set<string>([
+    ...(queueAccess === 'remove' ? QUEUE_PREPARE_ADDON.requiredRoles : []),
+    ...(basePreparation && resolved.runtimeServiceAccountEmail
+      ? CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES
+      : []),
+  ]));
+  const runtimeGrantRoles = resolved.runtimeServiceAccountEmail
+    ? Array.from(new Set([
+      ...(basePreparation ? CLOUD_RUN_RUNTIME_BASE_ROLES : []),
+      ...(queueAccess === 'lifecycle' ? CLOUD_RUN_RUNTIME_QUEUE_ROLES : []),
+    ]))
     : [];
-  const requiredAdminPermissions = removalOnly
-    ? REQUIRED_ADMIN_PERMISSIONS.filter((permission) => permission !== 'serviceusage.services.enable')
-    : [...REQUIRED_ADMIN_PERMISSIONS];
+  const runtimeRevokeRoles: string[] = resolved.runtimeServiceAccountEmail && queueAccess === 'remove'
+    ? [...CLOUD_RUN_RUNTIME_QUEUE_ROLES]
+    : [];
+  const runtimeServiceAccountGrantRoles = basePreparation
+    && resolved.runtimeServiceAccountEmail
+    ? [...CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES]
+    : [];
+  const requiredAdminPermissions = Array.from(new Set([
+    ...(removalOnly
+      ? REQUIRED_ADMIN_PERMISSIONS.filter((permission) => permission !== 'serviceusage.services.enable')
+      : REQUIRED_ADMIN_PERMISSIONS),
+    ...(runtimeServiceAccountGrantRoles.length > 0
+      ? REQUIRED_SERVICE_ACCOUNT_POLICY_PERMISSIONS
+      : []),
+  ]));
+  const requiredAdminRoles = Array.from(new Set([
+    ...(removalOnly
+      ? REQUIRED_ADMIN_ROLES.filter((role) => role !== 'roles/serviceusage.serviceUsageAdmin')
+      : REQUIRED_ADMIN_ROLES),
+    ...(runtimeServiceAccountGrantRoles.length > 0
+      ? REQUIRED_SERVICE_ACCOUNT_POLICY_ROLES
+      : []),
+  ]));
   const plan: CloudPreparePlan = {
     projectName: project.name,
     provider: profile.provider,
     version: profile.version,
     gcpProjectId: resolved.gcpProjectId,
     deployServiceAccountEmail: resolved.deployServiceAccountEmail,
+    ...(resolved.runtimeServiceAccountEmail
+      ? { runtimeServiceAccountEmail: resolved.runtimeServiceAccountEmail }
+      : {}),
     enableApis: requiredApis,
     grantRoles: requiredRoles,
     revokeRoles,
     member,
+    ...(runtimeMember ? { runtimeMember } : {}),
+    runtimeGrantRoles,
+    runtimeRevokeRoles,
+    runtimeServiceAccountGrantRoles,
     ...(gcsAccess ? { gcsAccess } : {}),
     ...(memorystoreAccess ? { memorystoreAccess } : {}),
     ...(queueAccess ? { queueAccess } : {}),
@@ -202,6 +261,16 @@ export async function runCloudPrepare(params: {
       projectId: resolved.gcpProjectId,
       services: requiredApis,
     });
+    const runtimeServiceAccountIamResult = resolved.runtimeServiceAccountEmail
+      && runtimeServiceAccountGrantRoles.length > 0
+      ? await reconcileServiceAccountIamRoles({
+          token,
+          projectId: resolved.gcpProjectId,
+          serviceAccountEmail: resolved.runtimeServiceAccountEmail,
+          member,
+          grantRoles: runtimeServiceAccountGrantRoles,
+        })
+      : undefined;
     const iamResult = await reconcileProjectIamRoles({
       token,
       projectId: resolved.gcpProjectId,
@@ -209,10 +278,24 @@ export async function runCloudPrepare(params: {
       grantRoles: requiredRoles,
       revokeRoles,
     });
+    const runtimeIamResult = runtimeMember
+      ? await reconcileProjectIamRoles({
+        token,
+        projectId: resolved.gcpProjectId,
+        member: runtimeMember,
+        grantRoles: runtimeGrantRoles,
+        revokeRoles: runtimeRevokeRoles,
+      })
+      : undefined;
     const previous = getCloudPreparation(project, profile.provider);
     const preservesPrevious = previous?.version === profile.version
       && previous.gcpProjectId === resolved.gcpProjectId
       && previous.deployServiceAccountEmail === resolved.deployServiceAccountEmail;
+    const preservesRuntime = preservesPrevious
+      && previous?.runtimeServiceAccountEmail === resolved.runtimeServiceAccountEmail
+      && (runtimeServiceAccountIamResult === undefined
+        || previous?.runtimeServiceAccountUniqueId
+          === runtimeServiceAccountIamResult.serviceAccountUniqueId);
     const recordedApis = Array.from(new Set([
       ...(preservesPrevious ? previous.requiredApis : []),
       ...requiredApis,
@@ -221,6 +304,17 @@ export async function runCloudPrepare(params: {
       ...(preservesPrevious ? previous.requiredRoles : []),
       ...requiredRoles,
     ])).filter((role) => !revokeRoles.includes(role));
+    const recordedRuntimeRoles = Array.from(new Set([
+      ...(preservesRuntime ? previous?.runtimeRequiredRoles ?? [] : []),
+      ...runtimeGrantRoles,
+    ])).filter((role) => !runtimeRevokeRoles.includes(role));
+    const recordedRuntimeServiceAccountAccessRoles = Array.from(new Set([
+      ...(preservesRuntime ? previous?.runtimeServiceAccountAccessRoles ?? [] : []),
+      ...(runtimeServiceAccountIamResult?.updatedRoles ?? []),
+      ...(runtimeServiceAccountIamResult?.existingRoles ?? []),
+    ]));
+    const runtimeServiceAccountUniqueId = runtimeServiceAccountIamResult?.serviceAccountUniqueId
+      ?? (preservesRuntime ? previous?.runtimeServiceAccountUniqueId : undefined);
     const updatedProject = removalOnly && !preservesPrevious
       ? project
       : projectRepo.update(project.id, {
@@ -230,8 +324,20 @@ export async function runCloudPrepare(params: {
           preparedAt: new Date().toISOString(),
           gcpProjectId: resolved.gcpProjectId,
           deployServiceAccountEmail: resolved.deployServiceAccountEmail,
+          ...(resolved.runtimeServiceAccountEmail
+            ? { runtimeServiceAccountEmail: resolved.runtimeServiceAccountEmail }
+            : {}),
           requiredApis: recordedApis,
           requiredRoles: recordedRoles,
+          ...(resolved.runtimeServiceAccountEmail
+            ? {
+                runtimeRequiredRoles: recordedRuntimeRoles,
+                ...(runtimeServiceAccountUniqueId
+                  ? { runtimeServiceAccountUniqueId }
+                  : {}),
+                runtimeServiceAccountAccessRoles: recordedRuntimeServiceAccountAccessRoles,
+              }
+            : {}),
         }),
       });
 
@@ -255,12 +361,29 @@ export async function runCloudPrepare(params: {
       version: profile.version,
       gcpProjectId: resolved.gcpProjectId,
       deployServiceAccountEmail: resolved.deployServiceAccountEmail,
+      ...(resolved.runtimeServiceAccountEmail
+        ? { runtimeServiceAccountEmail: resolved.runtimeServiceAccountEmail }
+        : {}),
       enabledApis,
       grantedRoles: iamResult.updatedRoles,
       existingRoles: iamResult.existingRoles,
+      ...(runtimeServiceAccountIamResult ? {
+        runtimeServiceAccountUniqueId:
+          runtimeServiceAccountIamResult.serviceAccountUniqueId,
+        grantedRuntimeServiceAccountRoles: runtimeServiceAccountIamResult.updatedRoles,
+        existingRuntimeServiceAccountRoles: runtimeServiceAccountIamResult.existingRoles,
+      } : {}),
+      ...(runtimeIamResult ? {
+        grantedRuntimeRoles: runtimeIamResult.updatedRoles,
+        existingRuntimeRoles: runtimeIamResult.existingRoles,
+      } : {}),
       ...(revokeRoles.length > 0 ? {
         revokedRoles: iamResult.removedRoles,
         alreadyAbsentRoles: iamResult.absentRoles,
+        ...(runtimeIamResult ? {
+          revokedRuntimeRoles: runtimeIamResult.removedRoles,
+          alreadyAbsentRuntimeRoles: runtimeIamResult.absentRoles,
+        } : {}),
       } : {}),
       preparation: updatedProject?.policies.cloudPreparation,
       nextSteps: [
@@ -299,13 +422,15 @@ export async function runCloudPrepare(params: {
         gcsAccess,
         memorystoreAccess,
         queueAccess,
-        requiresServiceEnablement: requiredApis.length > 0,
+        requiredAdminPermissions,
+        requiredAdminRoles,
+        runtimeServiceAccountEmail: resolved.runtimeServiceAccountEmail,
       }),
     };
   }
 }
 
-async function getDefaultAdminAccessToken(): Promise<string> {
+export async function getDefaultAdminAccessToken(): Promise<string> {
   const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
   const client = await auth.getClient();
   const result = await client.getAccessToken();
@@ -318,15 +443,18 @@ function resolveGcpBootstrapTarget(params: {
   project: Project;
   gcpProjectId?: string;
   deployServiceAccountEmail?: string;
-}): { success: true; gcpProjectId: string; deployServiceAccountEmail: string } | { success: false; error: string } {
+  runtimeServiceAccountEmail?: string;
+}): { success: true; gcpProjectId: string; deployServiceAccountEmail: string; runtimeServiceAccountEmail?: string } | { success: false; error: string } {
   const secretStore = getSecretStore();
   const cloudRunConnection = connectionRepo.findBestMatchFromHints('cloudrun', getProjectScopeHints(params.project));
   const cloudRunCreds = cloudRunConnection
-    ? secretStore.decryptObject<ServiceAccountCredentials & { projectId?: string; credentials?: string }>(cloudRunConnection.credentialsEncrypted)
+    ? secretStore.decryptObject<ServiceAccountCredentials & { projectId?: string; credentials?: string; runtimeServiceAccountEmail?: string }>(cloudRunConnection.credentialsEncrypted)
     : undefined;
   const nestedServiceAccount = parseOptionalServiceAccountJson(cloudRunCreds?.credentials);
   const gcpProjectId = params.gcpProjectId ?? cloudRunCreds?.projectId ?? cloudRunCreds?.project_id;
   const deployServiceAccountEmail = params.deployServiceAccountEmail ?? nestedServiceAccount?.client_email ?? cloudRunCreds?.client_email;
+  const runtimeServiceAccountEmail = params.runtimeServiceAccountEmail
+    ?? cloudRunCreds?.runtimeServiceAccountEmail;
 
   if (!gcpProjectId) {
     return {
@@ -340,10 +468,30 @@ function resolveGcpBootstrapTarget(params: {
       error: 'Could not resolve deploy service account email. Pass deployServiceAccountEmail or create a cloudrun connection first.',
     };
   }
+  const escapedProjectId = gcpProjectId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const identityPattern = new RegExp(
+    `^[a-z][a-z0-9-]{4,28}[a-z0-9]@${escapedProjectId}\\.iam\\.gserviceaccount\\.com$`
+  );
+  if (!identityPattern.test(deployServiceAccountEmail)) {
+    return {
+      success: false,
+      error: 'Deploy service account must be an exact identity in the selected GCP project.',
+    };
+  }
+  if (runtimeServiceAccountEmail) {
+    if (!identityPattern.test(runtimeServiceAccountEmail)
+      || runtimeServiceAccountEmail === deployServiceAccountEmail) {
+      return {
+        success: false,
+        error: 'Runtime service account must be a distinct exact identity in the selected GCP project.',
+      };
+    }
+  }
   return {
     success: true,
     gcpProjectId,
     deployServiceAccountEmail,
+    ...(runtimeServiceAccountEmail ? { runtimeServiceAccountEmail } : {}),
   };
 }
 
@@ -356,8 +504,11 @@ function describePrepareError(error: unknown, context: {
   if (context.adminAuth === 'default' && isMissingDefaultCredentialsError(message)) {
     return `Google Application Default Credentials are not configured for Hypervibe. The stored deploy connection authenticates as ${context.deployServiceAccountEmail}, but that service account cannot grant itself new project IAM roles. Run "gcloud auth application-default login" with a Google user that can administer project ${context.gcpProjectId}, then retry the same confirmed hv_connections preparation call.`;
   }
-  if (/serviceusage|services\.enable|enable .*api/i.test(message)) {
+  if (/service ?usage|service enablement|services\.enable|enable .*api/i.test(message)) {
     return `${message}. Use different admin credentials with permission to enable GCP services/APIs.`;
+  }
+  if (/runtime service account IAM policy/i.test(message)) {
+    return `${message}. Use an admin identity that can update access on the exact runtime service account.`;
   }
   if (/setIamPolicy|set iam policy|resourcemanager\.projects\.(?:getIamPolicy|setIamPolicy)|project IAM policy/i.test(message)) {
     return `${message}. Use different admin credentials with permission to update project IAM.`;
@@ -368,7 +519,7 @@ function describePrepareError(error: unknown, context: {
   return message;
 }
 
-function isMissingDefaultCredentialsError(message: string): boolean {
+export function isMissingDefaultCredentialsError(message: string): boolean {
   return /could not load (?:the )?default credentials|default credentials.*(?:not found|unavailable)|application default credentials did not return an access token/i.test(message);
 }
 
@@ -377,10 +528,13 @@ function classifyPrepareError(error: unknown, adminAuth?: 'default'): string {
   if (adminAuth === 'default' && isMissingDefaultCredentialsError(message)) {
     return 'missing_application_default_credentials';
   }
+  if (/runtime service account IAM policy/i.test(message)) {
+    return 'runtime_service_account_iam_failed';
+  }
   if (/setIamPolicy|set iam policy|resourcemanager\.projects\.(?:getIamPolicy|setIamPolicy)|project IAM policy/i.test(message)) {
     return 'project_iam_failed';
   }
-  if (/serviceusage|services\.enable|enable .*api/i.test(message)) {
+  if (/service ?usage|service enablement|services\.enable|enable .*api/i.test(message)) {
     return 'service_enablement_failed';
   }
   return 'provider_error';
@@ -407,6 +561,9 @@ function cloudPrepareAuditDetails(params: {
     version: params.plan.version,
     gcpProjectId: params.plan.gcpProjectId,
     deployServiceAccountEmail: params.plan.deployServiceAccountEmail,
+    ...(params.plan.runtimeServiceAccountEmail
+      ? { runtimeServiceAccountEmail: params.plan.runtimeServiceAccountEmail }
+      : {}),
     ...(params.plan.gcsAccess ? { gcsAccess: params.plan.gcsAccess } : {}),
     ...(params.plan.memorystoreAccess ? { memorystoreAccess: params.plan.memorystoreAccess } : {}),
     ...(params.plan.queueAccess ? { queueAccess: params.plan.queueAccess } : {}),
@@ -422,7 +579,9 @@ function cloudPrepareAdminCredentialSetup(params: {
   gcsAccess?: GcsPrepareAccess;
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
-  requiresServiceEnablement: boolean;
+  requiredAdminPermissions: string[];
+  requiredAdminRoles: string[];
+  runtimeServiceAccountEmail?: string;
 }): Record<string, unknown> {
   const retryCall = {
     project: params.projectName,
@@ -463,15 +622,18 @@ function cloudPrepareAdminCredentialSetup(params: {
     commands: ['gcloud auth application-default login'],
     optionalQuotaProjectCommand: `gcloud auth application-default set-quota-project ${params.gcpProjectId}`,
     requiredOAuthScopes: [GCP_CLOUD_PLATFORM_SCOPE],
-    requiredPermissions: params.requiresServiceEnablement
-      ? [...REQUIRED_ADMIN_PERMISSIONS]
-      : REQUIRED_ADMIN_PERMISSIONS.filter((permission) => permission !== 'serviceusage.services.enable'),
-    requiredRoles: params.requiresServiceEnablement
-      ? [...REQUIRED_ADMIN_ROLES]
-      : REQUIRED_ADMIN_ROLES.filter((role) => role !== 'roles/serviceusage.serviceUsageAdmin'),
+    requiredPermissions: params.requiredAdminPermissions,
+    requiredRoles: params.requiredAdminRoles,
     resourceScope: `projects/${params.gcpProjectId}`,
+    ...(params.runtimeServiceAccountEmail ? {
+      serviceAccountResourceScope:
+        `projects/${params.gcpProjectId}/serviceAccounts/${params.runtimeServiceAccountEmail}`,
+    } : {}),
     caveats: [
       'Application Default Credentials are separate from the account selected by gcloud auth login.',
+      ...(params.runtimeServiceAccountEmail
+        ? ['Grant roles/iam.serviceAccountAdmin only on serviceAccountResourceScope; it is not needed project-wide.']
+        : []),
       'Set the ADC quota project only if Google reports a missing or incorrect quota project.',
       'The local ADC file contains a refresh token; keep it private and revoke it with gcloud auth application-default revoke when it is no longer needed.',
       'Hypervibe uses this identity only for the confirmed preparation call and does not copy it into deployed workloads or store its token.',
@@ -516,36 +678,115 @@ async function enableRequiredApis(params: {
   projectId: string;
   services: string[];
 }): Promise<Array<{ service: string; status: 'enabled' | 'already_enabled' }>> {
+  const client = new GcpBootstrapClient({
+    accessToken: params.token,
+    fetch,
+    sleep: async (ms) => await new Promise((resolve) => setTimeout(resolve, ms)),
+    maxAttempts: 60,
+    delayMs: 2_000,
+  });
   const results: Array<{ service: string; status: 'enabled' | 'already_enabled' }> = [];
   for (const service of params.services) {
-    const response = await fetch(
-      `https://serviceusage.googleapis.com/v1/projects/${params.projectId}/services/${service}:enable`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${params.token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      }
-    );
-
-    if (!response.ok) {
-      const text = await response.text();
-      if (response.status === 400 && /already enabled|already been enabled/i.test(text)) {
-        results.push({ service, status: 'already_enabled' });
-        continue;
-      }
-      throw new Error(`Failed to enable ${service}: ${response.status} ${text}`);
-    }
-
-    const operation = await response.json() as ServiceUsageOperation;
-    if (operation.name) {
-      await waitForServiceUsageOperation(params.token, operation, `enable ${service}`);
-    }
-    results.push({ service, status: 'enabled' });
+    results.push({ service, status: await client.enableService(params.projectId, service) });
   }
   return results;
+}
+
+async function reconcileServiceAccountIamRoles(params: {
+  token: string;
+  projectId: string;
+  serviceAccountEmail: string;
+  member: string;
+  grantRoles: string[];
+}): Promise<{
+  serviceAccountUniqueId: string;
+  updatedRoles: string[];
+  existingRoles: string[];
+}> {
+  const suffix = `@${params.projectId}.iam.gserviceaccount.com`;
+  const accountId = params.serviceAccountEmail.endsWith(suffix)
+    ? params.serviceAccountEmail.slice(0, -suffix.length)
+    : '';
+  if (!accountId) {
+    throw new Error('GCP runtime service account IAM policy target is not an exact project identity.');
+  }
+  const client = new GcpBootstrapClient({
+    accessToken: params.token,
+    fetch,
+    sleep: async (ms) => await new Promise((resolve) => setTimeout(resolve, ms)),
+    maxAttempts: 5,
+    delayMs: 500,
+  });
+  const account = await client.getServiceAccount(params.projectId, accountId);
+  if (account === null
+    || account.email !== params.serviceAccountEmail
+    || account.disabled === true) {
+    throw new Error('GCP runtime service account IAM policy target could not be verified as active.');
+  }
+
+  const policy = await client.getServiceAccountIamPolicy(
+    params.projectId,
+    account.uniqueId
+  );
+  const bindings = policy.bindings.map((binding) => ({
+    ...binding,
+    members: [...binding.members],
+  }));
+  const updatedRoles: string[] = [];
+  const existingRoles: string[] = [];
+  for (const role of params.grantRoles) {
+    const matchingBindings = bindings.filter((binding) => (
+      binding.role === role && !binding.condition
+    ));
+    if (matchingBindings.length > 1) {
+      throw new Error('GCP runtime service account IAM policy has ambiguous role bindings.');
+    }
+    const existing = matchingBindings[0];
+    if (existing?.members.includes(params.member)) {
+      existingRoles.push(role);
+      continue;
+    }
+    if (existing) {
+      existing.members = Array.from(new Set([...existing.members, params.member]));
+    } else {
+      bindings.push({ role, members: [params.member] });
+    }
+    updatedRoles.push(role);
+  }
+
+  if (updatedRoles.length > 0) {
+    await client.setServiceAccountIamPolicy(params.projectId, account.uniqueId, {
+      ...policy,
+      bindings,
+    });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const observed = await client.getServiceAccountIamPolicy(
+        params.projectId,
+        account.uniqueId
+      );
+      if (params.grantRoles.every((role) => observed.bindings.some((binding) => (
+        binding.role === role
+        && !binding.condition
+        && binding.members.includes(params.member)
+      )))) {
+        return {
+          serviceAccountUniqueId: account.uniqueId,
+          updatedRoles,
+          existingRoles,
+        };
+      }
+      if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error(
+      'GCP runtime service account IAM policy update was acknowledged but did not converge.'
+    );
+  }
+
+  return {
+    serviceAccountUniqueId: account.uniqueId,
+    updatedRoles,
+    existingRoles,
+  };
 }
 
 async function reconcileProjectIamRoles(params: {
@@ -644,7 +885,7 @@ async function getProjectIamPolicy(token: string, projectId: string): Promise<Ia
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }),
   });
   if (!response.ok) {
     const text = await response.text();
@@ -654,51 +895,24 @@ async function getProjectIamPolicy(token: string, projectId: string): Promise<Ia
 }
 
 async function setProjectIamPolicy(token: string, projectId: string, policy: IamPolicy): Promise<void> {
+  if (!policy.etag?.trim()) {
+    throw new Error('GCP project IAM policy has no etag; refusing a concurrent-unsafe update.');
+  }
+  if ((policy.bindings ?? []).some((binding) => binding.condition) && policy.version !== 3) {
+    throw new Error('GCP project IAM policy contains conditions without version 3; refusing to rewrite it.');
+  }
   const response = await fetch(`https://cloudresourcemanager.googleapis.com/v1/projects/${projectId}:setIamPolicy`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ policy }),
+    body: JSON.stringify({ policy, updateMask: 'bindings,etag' }),
   });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`GCP project IAM policy update failed: ${response.status} ${text}`);
   }
-}
-
-async function waitForServiceUsageOperation(
-  token: string,
-  operation: ServiceUsageOperation,
-  description: string
-): Promise<void> {
-  if (!operation.name || !operation.name.includes('/')) {
-    return;
-  }
-
-  let current = operation;
-  for (let attempt = 0; attempt < 60; attempt++) {
-    if (current.done) {
-      if (current.error) {
-        throw new Error(
-          `Service Usage ${description} operation failed: ${current.error.status ?? current.error.code ?? 'unknown'} ${current.error.message ?? ''}`.trim()
-        );
-      }
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    const response = await fetch(`https://serviceusage.googleapis.com/v1/${operation.name}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Service Usage ${description} operation status check failed: ${response.status} ${text}`);
-    }
-    current = await response.json() as ServiceUsageOperation;
-  }
-
-  throw new Error(`Service Usage ${description} operation did not finish before timeout`);
 }
 
 async function getAccessTokenFromServiceAccount(credentials: ServiceAccountCredentials): Promise<string> {
